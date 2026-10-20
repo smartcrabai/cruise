@@ -395,6 +395,10 @@ fn cleanup_new_execution_workspace(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "session creation resolves defaults, flags, skips, and persisted state together"
+)]
 fn create_session_inner(
     manager: &SessionManager,
     request: NewSessionRequest,
@@ -461,6 +465,7 @@ fn create_session_inner(
     } else {
         request.skipped_steps
     };
+    crate::flags::validate_names(&config, &request.flags)?;
     let mut state = SessionState::new_draft(
         id.to_string(),
         base_dir,
@@ -475,6 +480,7 @@ fn create_session_inner(
     };
     state.repo = repo;
     state.skipped_steps = skipped_steps;
+    state.flags = request.flags;
     manager.create_with_config(&state, &config)?;
     let session_dir = manager.sessions_dir().join(id);
     state.attachments =
@@ -1149,6 +1155,8 @@ pub struct NewSessionRequest {
     pub attachments: Vec<PathBuf>,
     #[serde(default)]
     pub skipped_steps: Vec<String>,
+    #[serde(default)]
+    pub flags: crate::flags::FlagValues,
 }
 
 pub const DEFAULT_RATE_LIMIT_RETRIES: usize = 5;
@@ -1296,6 +1304,8 @@ pub struct NewSessionConfigDefaults {
     pub after_pr_steps: Vec<crate::workflow::SkippableStepNode>,
     pub default_skipped_steps: Vec<String>,
     pub resolved_config_key: String,
+    #[serde(default)]
+    pub flags: Vec<crate::flags::FlagChoice>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1332,6 +1342,8 @@ pub struct SessionSettingsRequest {
     pub skipped_steps: Vec<String>,
     #[serde(default)]
     pub current_step_update: CurrentStepUpdateDto,
+    #[serde(default)]
+    pub flags: Option<crate::flags::FlagValues>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2451,6 +2463,7 @@ impl CruiseApplication {
             after_pr_steps,
             default_skipped_steps,
             resolved_config_key: resolved_key,
+            flags: crate::flags::choices(&config),
         })
     }
 
@@ -2482,6 +2495,7 @@ impl CruiseApplication {
                 config_path: request.config_path,
                 skipped_steps: request.skipped_steps,
                 current_step_update,
+                flags: request.flags,
             },
         )
         .map(|(state, _)| state)
@@ -2520,6 +2534,7 @@ impl CruiseApplication {
                 config_path: None,
                 skipped_steps: state.skipped_steps,
                 current_step_update,
+                flags: None,
             },
         )
         .map(|(state, _)| state)
@@ -3318,6 +3333,7 @@ fn setup_run_blocking(
     }
     let config = manager.load_config(&state)?;
     crate::config::validate_config(&config)?;
+    crate::flags::require_complete(&config, &state.flags)?;
     let max_retries = max_retries_override
         .unwrap_or_else(|| crate::config::resolve_effective_max_retries(None, &config));
     crate::config::validate_group_retry_budget(&config, max_retries)?;
@@ -3332,7 +3348,12 @@ fn setup_run_blocking(
         state.current_step_is_node_id,
         state.execution_id.as_deref(),
     )?;
-    crate::graph::validation::validate_workflow(&compiled, &dag, &entry, &state.skipped_steps)?;
+    crate::graph::validation::validate_workflow(
+        &compiled,
+        &dag,
+        &entry,
+        &crate::flags::preflight_skips(&compiled, &state.flags, &state.skipped_steps),
+    )?;
     let workspace_mode = if state.exec {
         WorkspaceMode::CurrentBranch
     } else if state.repo.is_some() {
@@ -3390,6 +3411,7 @@ struct RunInputs {
     vars: crate::variable::VariableStore,
     tracker: crate::file_tracker::FileTracker,
     skipped_steps: Vec<String>,
+    flags: crate::flags::FlagValues,
 }
 
 fn prepare_run_inputs(manager: &SessionManager, setup: &mut RunSetup) -> Result<RunInputs> {
@@ -3406,6 +3428,7 @@ fn prepare_run_inputs(manager: &SessionManager, setup: &mut RunSetup) -> Result<
         vars,
         tracker,
         skipped_steps: setup.state.skipped_steps.clone(),
+        flags: setup.state.flags.clone(),
     })
 }
 
@@ -3541,6 +3564,7 @@ impl WorktreeRun<'_> {
                 setup.rate_limit_retries,
                 setup.max_retries,
                 &inputs.skipped_steps,
+                &inputs.flags,
                 Some(&self.claim.token),
                 self.option,
                 Some(on_log),
@@ -3593,6 +3617,7 @@ async fn execute_run(
             config_reloader: config_reloader.as_deref(),
             working_dir: Some(setup.workspace.path()),
             skipped_steps: &inputs.skipped_steps,
+            flags: &inputs.flags,
             on_step_log: Some(&on_log),
             on_step_start: &on_start,
         };
@@ -4138,6 +4163,7 @@ impl OptionHandler for RuntimeOptionHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn save_failure_hooks_are_resettable() {
@@ -4422,6 +4448,7 @@ mod tests {
                 allow_dirty_working_tree: false,
                 attachments: vec![],
                 skipped_steps: vec![],
+                flags: BTreeMap::default(),
             })
             .unwrap_or_else(|e| panic!("{e}"));
         let request: PlanRequest =
@@ -4465,6 +4492,7 @@ mod tests {
                 allow_dirty_working_tree: false,
                 attachments: vec![],
                 skipped_steps: vec![],
+                flags: BTreeMap::default(),
             })
             .unwrap_or_else(|e| panic!("{e}"));
         let no_op_sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
@@ -4555,6 +4583,7 @@ mod tests {
                 allow_dirty_working_tree: false,
                 attachments: vec![],
                 skipped_steps: vec![],
+                flags: BTreeMap::default(),
             })
             .unwrap_or_else(|e| panic!("{e}"));
         (app, session)
@@ -5004,6 +5033,7 @@ mod tests {
             allow_dirty_working_tree: false,
             attachments: vec![],
             skipped_steps: vec![],
+            flags: BTreeMap::default(),
         })
         .unwrap_or_else(|e| panic!("create model logging session: {e}"))
     }

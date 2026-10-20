@@ -174,11 +174,9 @@ pub(crate) async fn session_settings(
 }
 
 fn settings_html(state: &WebState, id: &str, open: bool) -> Result<String> {
-    let session = super::dto::session_dto(
-        &state.application,
-        state.application.reconcile_session(id)?,
-        false,
-    );
+    let session_state = state.application.reconcile_session(id)?;
+    let session_flags = session_state.flags.clone();
+    let session = super::dto::session_dto(&state.application, session_state, false);
     let defaults = state.application.new_session_config_defaults(
         std::path::Path::new(&session.base_dir),
         session.config_path.as_deref(),
@@ -186,11 +184,12 @@ fn settings_html(state: &WebState, id: &str, open: bool) -> Result<String> {
     );
     let (steps_vm, step_options) = match defaults {
         Ok(defaults) => {
-            let tree = super::pages::step_tree_vm(
+            let mut tree = super::pages::step_tree_vm(
                 &defaults.steps,
                 &defaults.after_pr_steps,
                 &session.skipped_steps,
             );
+            tree.flags = super::pages::flag_rows(&defaults.flags, &session_flags, false);
             let options = tree
                 .steps
                 .iter()
@@ -206,6 +205,7 @@ fn settings_html(state: &WebState, id: &str, open: bool) -> Result<String> {
             super::view::StepTreeVm {
                 steps: Vec::new(),
                 empty: true,
+                flags: Vec::new(),
             },
             Vec::new(),
         ),
@@ -404,6 +404,29 @@ fn skipped_steps(fields: &Fields) -> Vec<String> {
     ids.into_iter().filter(|id| !enabled.contains(id)).collect()
 }
 
+/// `flag.NAME` selects posted by the step tree. `None` when the form carried
+/// none. An empty value means "not chosen yet" and is omitted.
+fn flag_values(fields: &Fields) -> Option<crate::flags::FlagValues> {
+    let mut found = false;
+    let mut values = crate::flags::FlagValues::new();
+    for (key, value) in &fields.0 {
+        let Some(name) = key.strip_prefix("flag.") else {
+            continue;
+        };
+        found = true;
+        match value.as_str() {
+            "on" => {
+                values.insert(name.to_string(), true);
+            }
+            "off" => {
+                values.insert(name.to_string(), false);
+            }
+            _ => {}
+        }
+    }
+    found.then_some(values)
+}
+
 fn plan_request(fields: &Fields) -> PlanRequest {
     PlanRequest {
         grill: fields.flag("grill"),
@@ -452,6 +475,7 @@ fn new_session_request(fields: &Fields) -> NewSessionRequest {
         allow_dirty_working_tree: false,
         attachments,
         skipped_steps: skipped_steps(fields),
+        flags: flag_values(fields).unwrap_or_default(),
     }
 }
 
@@ -793,6 +817,7 @@ fn settings_request(fields: &Fields) -> SessionSettingsRequest {
         ),
         skipped_steps: skipped_steps(fields),
         current_step_update,
+        flags: flag_values(fields),
     }
 }
 

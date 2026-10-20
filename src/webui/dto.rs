@@ -371,7 +371,7 @@ pub(crate) fn dag_dto_for_session(
             &dag,
             session.current_step.as_deref(),
             session.current_step_is_node_id,
-            &session.skipped_steps,
+            &crate::flags::preflight_skips(&compiled, &session.flags, &session.skipped_steps),
         )
         .map_err(CruiseError::Other)
     })

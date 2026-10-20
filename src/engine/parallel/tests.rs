@@ -61,6 +61,7 @@ impl Fixture {
             config_reloader: None,
             working_dir: Some(self.root.path()),
             skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: Some(&|stream, line| {
                 self.logs
                     .lock()

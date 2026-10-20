@@ -357,6 +357,18 @@ pub(crate) struct StepRowVm {
 pub(crate) struct StepTreeVm {
     pub(crate) steps: Vec<StepRowVm>,
     pub(crate) empty: bool,
+    pub(crate) flags: Vec<FlagRowVm>,
+}
+
+/// One declared workflow flag as a required on/off select.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FlagRowVm {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) on: bool,
+    pub(crate) off: bool,
+    pub(crate) require: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

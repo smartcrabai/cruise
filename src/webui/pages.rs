@@ -300,7 +300,26 @@ pub(crate) fn step_tree_vm(
     StepTreeVm {
         empty: rows.is_empty(),
         steps: rows,
+        flags: Vec::new(),
     }
+}
+
+/// Required on/off selects for the declared flags, preselecting known values.
+pub(crate) fn flag_rows(
+    choices: &[crate::flags::FlagChoice],
+    values: &crate::flags::FlagValues,
+    require: bool,
+) -> Vec<super::view::FlagRowVm> {
+    choices
+        .iter()
+        .map(|choice| super::view::FlagRowVm {
+            name: choice.name.clone(),
+            description: choice.description.clone().unwrap_or_default(),
+            on: values.get(&choice.name) == Some(&true),
+            off: values.get(&choice.name) == Some(&false),
+            require,
+        })
+        .collect()
 }
 
 fn push_steps(
@@ -341,11 +360,14 @@ pub(crate) fn step_tree_html(
             } else {
                 skipped.to_vec()
             };
-            step_tree_vm(&defaults.steps, &defaults.after_pr_steps, &effective)
+            let mut vm = step_tree_vm(&defaults.steps, &defaults.after_pr_steps, &effective);
+            vm.flags = flag_rows(&defaults.flags, &crate::flags::FlagValues::new(), true);
+            vm
         }
         Err(_) => StepTreeVm {
             steps: Vec::new(),
             empty: true,
+            flags: Vec::new(),
         },
     };
     state.templates.render("step-tree", &vm)

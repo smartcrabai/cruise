@@ -145,7 +145,7 @@ The TUI requires an interactive TTY on macOS, Linux, or Windows. It is an intera
 The TUI has three views:
 
 - **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, or **Log** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The Graph tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
-- **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above it and the remaining questions below. The questions are the task, images, source (local Directory or GitHub repository), working directory or repository, workflow config, skipped steps, workspace mode, dirty-tree allowance (current-branch runs only), formal specification, and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and the built-in default. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
+- **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above it and the remaining questions below. The questions are the task, images, source (local Directory or GitHub repository), working directory or repository, workflow config, skipped steps, workflow flags (shown only when the config declares flags), workspace mode, dirty-tree allowance (current-branch runs only), formal specification, and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and the built-in default. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
 - **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Press `p` to edit the shared WebUI/TUI parallelism setting. Changes are saved to the app configuration and can be made while a batch is active; a new limit applies at the next scheduling point, without cancelling workers that are already running. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
 PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS, `explorer.exe` on Windows, or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `config` and `exec` operations remain available through their CLI commands rather than TUI screens.
@@ -232,6 +232,7 @@ Options:
       --no-force-exec          Ignore `force_exec: true` in the workflow config and plan as usual
       --repo <OWNER/REPO>      Repository (owner/repository, group/sub/project, or full URL; GitHub or GitLab) to clone into a temporary directory for planning and execution
       --image <PATH>           Attach an image file (png/jpg/jpeg/webp/gif) to the planning input; can be repeated
+      --flag <NAME=on|off>     Set a workflow flag explicitly (can be repeated; see Workflow flags)
 ```
 
 #### `cruise workflow generate`
@@ -294,6 +295,7 @@ Options:
       --repo <OWNER/REPO>          Repository (owner/repository, group/sub/project, or full URL; GitHub or GitLab) to clone into a temporary directory for planning and execution
       --rate-limit-retries <N>     Maximum number of retries per LLM call (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --image <PATH>               Attach an image file to the planning input; can be repeated
+      --flag <NAME=on|off>         Set a workflow flag explicitly (can be repeated; see Workflow flags)
 ```
 
 `cruise plan` creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` before invoking the LLM, so plan-phase edits never touch your working copy. The same worktree is reused by `cruise run` in Worktree mode, or cleaned up automatically when you pick Current-branch mode or cancel planning (`--repo` sessions drop it on approval and re-clone at run). Non-git directories plan in place with a warning, but `cruise run` still needs a git repository.
@@ -340,7 +342,10 @@ Options:
       --dry-run                    Print the workflow flow without executing it
       --cleanup-after-pr           Delete local worktree and branch after PR creation
       --no-cleanup-after-pr        Keep local worktree and branch after PR creation
+      --flag <NAME=on|off>         Set a workflow flag explicitly (can be repeated; conflicts with --all)
 ```
+
+**Workflow flags.** A workflow config can declare `flags:` and attach them to steps with `flag: <name>`. A flagged step runs only when its flag is `on` and is skipped when it is `off`. Flags have no default, so every declared flag must be set explicitly before a session runs. Set them with `--flag NAME=on|off` (repeatable) on `cruise`, `cruise plan`, `cruise run` and `cruise exec`, or answer the prompts the approve menu and `cruise run` show on an interactive terminal. A non-interactive run with an unset flag fails and lists the missing flags. An unknown flag name is rejected. `--flag` conflicts with `--all`. The TUI and WebUI New Session forms ask for each declared flag, the TUI Edit settings dialog accepts `flag:NAME=on|off` lines, and the WebUI session settings show a required on/off select per flag. See [Top-level structure](skills/cruise-config/references/top-level.md#flags).
 
 `--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the summary, that session is reported as `Failed` with the state path and error, and the batch still completes. `--all` and `[SESSION]` are mutually exclusive.
 
@@ -363,6 +368,7 @@ Options:
       --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (no flag default; falls back to the workflow config's top-level `max_retries`, else 3)
       --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
+      --flag <NAME=on|off>         Set a workflow flag explicitly (can be repeated; see Workflow flags)
 ```
 Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. A transient session is recorded while the workflow runs, then automatically removed when it reaches a terminal phase. Sessions paused for input (`Running`) or interrupted with Ctrl+C (`Suspended`) are kept and can be resumed with `cruise run <id>`; exec sessions are excluded from `cruise run` automatic selection and `cruise run --all`. Existing uncommitted changes are allowed; cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is still required.
 
@@ -371,7 +377,7 @@ When `force_exec: true` is set in the workflow config, the legacy positional for
 #### `cruise --plan`
 
 ```
-cruise --plan <INPUT|stdin> [--skip-planning] [--no-force-exec] [--repo <OWNER/REPO>] [--image <PATH>]...
+cruise --plan <INPUT|stdin> [--skip-planning] [--no-force-exec] [--repo <OWNER/REPO>] [--image <PATH>]... [--flag <NAME=on|off>]...
 ```
 
 Creates the session immediately, starts plan generation in a detached worker, and returns the new session ID. While the worker is still running, `cruise list` shows the session as `Planning`. If generation fails, the session remains in `AwaitingApproval` phase internally but `cruise list` shows `Plan Failed`, and approval stays disabled until planning succeeds.
@@ -467,7 +473,7 @@ On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cru
    - **Execute now** -- Skip approval and run immediately.
    - **Publish as Issue** -- Publish `plan.md` as a GitHub issue (or GitLab issue) and delete the local session.
 
-   After approving (or choosing "Execute now"), a **step skip selector** is shown if the workflow config defines more than zero steps. A multi-select prompt lists all steps (grouped steps appear as a parent with children); toggle any steps you want to skip for this run. The selection is persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected as the default for the next session using the same config. Cancelling the selector returns to the approve-plan menu without approving or executing the session.
+   After approving (or choosing "Execute now"), a **step skip selector** is shown if the workflow config defines more than zero steps. A multi-select prompt lists all steps (grouped steps appear as a parent with children); toggle any steps you want to skip for this run. The selection is persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected as the default for the next session using the same config. Cancelling the selector returns to the approve-plan menu without approving or executing the session. When the config declares `flags:`, an on/off prompt for each unset flag follows the skip selector.
 
 5. **`cruise run`** -- Without an ID, picks a pending session (Planned, Running, Failed, or Suspended; prompts when several qualify), reuses (or creates) the git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, executes the workflow steps, automatically creates a PR with `gh pr create` (`glab mr create` on GitLab), then runs any configured `after-pr` steps. If `gh pr create` fails, a `--repo` session becomes `Failed`; a plain worktree session logs a warning and completes without a PR, skipping `after-pr`.
 
@@ -634,6 +640,9 @@ env:                      # environment variables applied to all steps (optional
 #     command: npx
 #     args: ["-y", "@example/search"]
 
+flags:                    # workflow flags (optional; no default, see Workflow flags)
+  # run_review: {}
+
 groups:                   # step group definitions (optional)
   review:
     if:
@@ -648,6 +657,7 @@ groups:                   # step group definitions (optional)
 steps:
   step_name:
     # step configuration
+    # flag: run_review     # run only when the declared flag is on (optional)
 
 after-pr:                # optional: steps that run automatically after PR creation
   step_name:
@@ -992,8 +1002,8 @@ steps:
   block as one step.
 - Parallel blocks also work inside `groups`, `after-pr`, and called workflows.
   Children must be prompt/command steps; child `next`, `if`, `option`,
-  `instruction`, `plan`, `group`, `workflow_call`, nested `parallel`, and
-  `allow_commit: true` are rejected. Configure flow control on the parent and
+  `instruction`, `plan`, `group`, `workflow_call`, nested `parallel`, `flag`, and
+  `allow_commit: true` are rejected. Configure flow control on the parent (including `flag`) and
   perform commits in a subsequent sequential step.
 
 #### Step Timeout
@@ -1108,6 +1118,15 @@ steps:
     command: cargo fix
     skip: prev.success            # skip if the variable "prev.success" resolves to "true"
 ```
+
+#### Workflow flags
+
+Declare flags in top-level `flags:` and attach one to a step with `flag: <name>`. A flagged step runs only when its flag is `on` and is skipped when it is `off`.
+
+- **Targets:** a regular step, a group call site, a `workflow_call` call site (applied to every expanded step), a `parallel` parent, and steps under `after-pr`. Steps inside a group definition, a called workflow's own steps, and parallel children cannot use `flag:`.
+- **No default:** every declared flag must be set explicitly before a session runs.
+- **Resolution before the run:** set flags with `--flag NAME=on|off`, or answer the prompts shown on an interactive terminal. A non-interactive run with an unset flag fails and lists the missing flags.
+- **Union with skips:** flag-disabled steps are combined with the user-selected `skipped_steps`; a step is skipped if either applies.
 
 The `skip` field accepts a static boolean (`true`/`false`) or a variable reference string. When a variable reference is given, the step is skipped if that variable's current value is `"true"`.
 
@@ -1273,6 +1292,7 @@ steps:
 - A group call site cannot set `output_file` either; a dedicated error points you at the inner prompt step.
 - A group call site cannot set `computer_use`; set it on the inner prompt step instead.
 - A step inside a group definition cannot use `workflow_call:`; expand the called workflow at the top level instead.
+- A step inside a group definition cannot have a `flag:`; put the flag on the group call site instead.
 
 ### Workflow Composition (`workflow_call`)
 
@@ -1304,10 +1324,11 @@ GitHub workflows are fetched via `gh api` at config-load time. Relative paths in
 
 #### Call-site fields
 
-A `workflow_call` step is a pure delegation point. Only `skip`, `when`, and `next` may be set alongside `workflow_call`:
+A `workflow_call` step is a pure delegation point. Only `skip`, `when`, `next`, and `flag` may be set alongside `workflow_call`:
 
 - `skip` and `when` are applied to the **first** expanded step.
 - `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).
+- `flag` is applied to every expanded step. A called workflow's own steps cannot use `flag:`.
 
 All other step fields (`prompt`, `prompt_file`, `command`, `model`, `instruction`, `plan`, `option`, `if`, `timeout`, `env`, `output_file`, `group`, `parallel`, `computer_use`, `permission`) and `allow_commit: true` are rejected at validation time, and the error names every offending field. An explicit `allow_commit: false` is equivalent to omission.
 
@@ -1518,7 +1539,7 @@ Conditional cycles are allowed when a normal exit is possible. Execution preflig
 
 During `cruise run`, the config file is checked for changes between each step. If the file has been modified (detected via mtime), the updated config is reloaded automatically -- no restart required. This allows you to adjust prompts, add steps, or tweak settings while a session is running.
 
-> **Note:** Hot-reload only applies when the session was started from an external config file (not the built-in default). The current step must still exist in the new config for the reload to take effect.
+> **Note:** Hot-reload only applies when the session was started from an external config file (not the built-in default). The current step must still exist in the new config for the reload to take effect. A reloaded config that has unresolved flags (declared but not set for the session) is ignored.
 
 ## Rate Limit Retry
 

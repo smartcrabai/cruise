@@ -166,6 +166,25 @@ Free-form text shown alongside the file name in the CLI/WebUI config selectors. 
 description: Full TDD flow with review loop
 ```
 
+## `flags`
+
+Declares named on/off switches that gate steps. Names contain only ASCII letters, digits, `_` and `-`. Each entry may have a `description`, shown when cruise asks for the value. A flag has no default: every declared flag must be set before a session runs, with `--flag NAME=on|off` or an interactive prompt. Every declared flag must be referenced by at least one step, and a step cannot reference an undeclared flag.
+
+```yaml
+flags:
+  deploy:
+    description: Run the deploy steps
+
+steps:
+  build:
+    command: make build
+  deploy:
+    command: make deploy
+    flag: deploy        # skipped when deploy=off
+```
+
+A step with `flag:` runs only when the flag is `on`. See [steps.md](steps.md) for where `flag:` is allowed.
+
 ## `languages`
 
 `languages.pr` controls the language used for the auto-generated PR title and body, and `languages.plan` controls the language used for built-in planning prompts. The deprecated top-level `pr_language` and `plan_language` fields remain supported.

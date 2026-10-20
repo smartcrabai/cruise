@@ -83,6 +83,7 @@ pub enum Step {
     Repository,
     Config,
     SkippedSteps,
+    Flags,
     Workspace,
     DirtyTree,
     FormalSpec,
@@ -90,7 +91,7 @@ pub enum Step {
 }
 
 impl Step {
-    pub const ORDER: [Self; 11] = [
+    pub const ORDER: [Self; 12] = [
         Self::Task,
         Self::Attachments,
         Self::Source,
@@ -98,6 +99,7 @@ impl Step {
         Self::Repository,
         Self::Config,
         Self::SkippedSteps,
+        Self::Flags,
         Self::Workspace,
         Self::DirtyTree,
         Self::FormalSpec,
@@ -114,6 +116,7 @@ impl Step {
             Self::Repository => "Repository (GitHub or GitLab)",
             Self::Config => "Workflow config",
             Self::SkippedSteps => "Skipped steps",
+            Self::Flags => "Workflow flags",
             Self::Workspace => "Workspace",
             Self::DirtyTree => "Dirty working tree",
             Self::FormalSpec => "Formal specification",
@@ -202,6 +205,11 @@ pub struct NewSessionForm {
     pub launch: Launch,
     pub options: SessionOptions,
     pub skipped_explicit: bool,
+    /// Flags declared by the selected workflow config.
+    pub flag_choices: Vec<crate::flags::FlagChoice>,
+    /// Explicit on/off answers for the declared flags.
+    pub flag_values: crate::flags::FlagValues,
+    pub flag_cursor: usize,
     pub dirty: bool,
     pub last_change: Instant,
 }
@@ -245,8 +253,30 @@ impl NewSessionForm {
             launch: Launch::Planning,
             options: SessionOptions::default(),
             skipped_explicit: !draft.skipped_steps.is_empty(),
+            flag_choices: Vec::new(),
+            flag_values: crate::flags::FlagValues::new(),
+            flag_cursor: 0,
             dirty: false,
             last_change: Instant::now(),
+        }
+    }
+
+    /// Replace the declared flags, dropping answers for flags that are gone.
+    pub fn set_flag_choices(&mut self, choices: Vec<crate::flags::FlagChoice>) {
+        self.flag_values
+            .retain(|name, _| choices.iter().any(|choice| &choice.name == name));
+        self.flag_choices = choices;
+        if self.flag_cursor >= self.flag_choices.len() {
+            self.flag_cursor = 0;
+        }
+    }
+
+    /// Flip the flag under the cursor: unset and off become on, on becomes off.
+    pub fn toggle_flag(&mut self) {
+        if let Some(choice) = self.flag_choices.get(self.flag_cursor) {
+            let next = !self.flag_values.get(&choice.name).copied().unwrap_or(false);
+            self.flag_values.insert(choice.name.clone(), next);
+            self.mark_changed();
         }
     }
 
@@ -322,6 +352,7 @@ impl NewSessionForm {
             allow_dirty_working_tree: self.options.allow_dirty_working_tree,
             attachments: self.attachment_paths(),
             skipped_steps: self.selected_skipped_steps(),
+            flags: self.flag_values.clone(),
         }
     }
 
@@ -331,6 +362,7 @@ impl NewSessionForm {
         match step {
             Step::WorkingDirectory | Step::Workspace => self.source == SourceKind::Directory,
             Step::Repository => self.source == SourceKind::GitHub,
+            Step::Flags => !self.flag_choices.is_empty(),
             Step::DirtyTree => {
                 self.source == SourceKind::Directory
                     && self.workspace_mode == WorkspaceMode::CurrentBranch
@@ -483,6 +515,21 @@ impl NewSessionForm {
                     skipped.join(", ")
                 }
             }
+            Step::Flags => {
+                let parts: Vec<String> = self
+                    .flag_choices
+                    .iter()
+                    .map(|choice| {
+                        let state = match self.flag_values.get(&choice.name) {
+                            Some(true) => "on",
+                            Some(false) => "off",
+                            None => "unset",
+                        };
+                        format!("{}={state}", choice.name)
+                    })
+                    .collect();
+                parts.join(", ")
+            }
             Step::Workspace => match self.workspace_mode {
                 WorkspaceMode::Worktree => "worktree",
                 WorkspaceMode::CurrentBranch => "current branch",
@@ -569,6 +616,14 @@ impl NewSessionForm {
             }
             Step::Repository if self.repository.text().trim().is_empty() => {
                 Err("Select a GitHub repository before creating a session".to_string())
+            }
+            Step::Flags
+                if self
+                    .flag_choices
+                    .iter()
+                    .any(|choice| !self.flag_values.contains_key(&choice.name)) =>
+            {
+                Err("Set every workflow flag on or off (Space) before continuing".to_string())
             }
             _ => Ok(()),
         }

@@ -37,6 +37,14 @@ mod error;
 mod exec_cmd;
 mod executor;
 mod file_tracker;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "NO_FLAGS is part of the public library flags API but unused by the CLI binary"
+    )
+)]
+mod flags;
 mod forge;
 mod github_review;
 mod graph;
@@ -105,6 +113,7 @@ async fn run() -> error::Result<()> {
         skip_planning,
         repo,
         images,
+        flags,
     } = cli::parse_cli();
     match command {
         Some(cli::Commands::PlanWorker(args)) => plan_cmd::run_plan_worker(args).await,
@@ -143,6 +152,7 @@ async fn run() -> error::Result<()> {
                 repo.as_deref(),
                 &images,
                 no_force_exec,
+                &flags,
             ))
             .await
         }
@@ -150,7 +160,8 @@ async fn run() -> error::Result<()> {
             && !skip_planning
             && !no_force_exec
             && repo.is_none()
-            && images.is_empty() =>
+            && images.is_empty()
+            && flags.is_empty() =>
         {
             tui::run().await
         }
@@ -168,6 +179,7 @@ async fn run() -> error::Result<()> {
                 repo,
                 rate_limit_retries: cli::DEFAULT_RATE_LIMIT_RETRIES,
                 images,
+                flags,
             };
             Box::pin(plan_cmd::run(plan_args)).await
         }

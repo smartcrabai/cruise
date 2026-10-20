@@ -1,5 +1,7 @@
 //! Router and template contract tests.
 
+use std::collections::BTreeMap;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use futures::StreamExt as _;
@@ -61,6 +63,7 @@ fn create_session(harness: &Harness) -> SessionState {
         allow_dirty_working_tree: true,
         attachments: Vec::new(),
         skipped_steps: Vec::new(),
+        flags: BTreeMap::default(),
     });
     match result {
         Ok(session) => session,
@@ -282,6 +285,7 @@ fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
             allow_dirty_working_tree: false,
             attachments: Vec::new(),
             skipped_steps: vec!["write-test-first".to_string()],
+            flags: BTreeMap::default(),
         })
         .unwrap_or_else(|error| panic!("create repo session: {error}"));
     let persisted = harness
@@ -1069,4 +1073,34 @@ mod merge_pr {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(exists(&m));
     }
+}
+
+#[test]
+fn flag_select_is_required_only_when_requested() {
+    let harness = harness();
+    let render = |require: bool| {
+        let rows = super::pages::flag_rows(
+            &[crate::flags::FlagChoice {
+                name: "deploy".to_string(),
+                description: None,
+            }],
+            &crate::flags::FlagValues::new(),
+            require,
+        );
+        let vm = super::view::StepTreeVm {
+            steps: Vec::new(),
+            empty: true,
+            flags: rows,
+        };
+        match harness.state.templates.render("step-tree", &vm) {
+            Ok(html) => html,
+            Err(error) => panic!("{error}"),
+        }
+    };
+    let required = render(true);
+    assert!(required.contains("name=\"flag.deploy\""), "{required}");
+    assert!(required.contains("required"), "{required}");
+    let optional = render(false);
+    assert!(optional.contains("name=\"flag.deploy\""), "{optional}");
+    assert!(!optional.contains("required"), "{optional}");
 }

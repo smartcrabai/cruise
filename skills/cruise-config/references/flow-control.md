@@ -34,6 +34,10 @@ steps:
 
 With a variable reference, the step is skipped when the variable's current value is the string `"true"`.
 
+## `flag:` — run a step only when a flag is on
+
+Declare the flag in top-level `flags:`, then set `flag: <name>` on a step. The step runs only when the flag is `on` and is skipped when `off`. Flags have no default and must be resolved before a run (`--flag NAME=on|off` or an interactive prompt). Allowed on regular steps, group calls, `workflow_call` call sites (applied to every expanded step), parallel parents, and `after-pr` steps. Not allowed on steps inside a group definition, a callee's own steps, or parallel children. Flag-disabled steps are unioned with `skipped_steps`.
+
 ## `when: exists:` — skip unless a file matches
 
 A pre-execution condition: the step is skipped when **no** file matches the glob. Relative globs are evaluated against the workflow working directory; absolute globs are used as-is. Variable references inside the glob are resolved first.
