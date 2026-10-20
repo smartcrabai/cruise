@@ -46,6 +46,8 @@ pub struct ExecutionContext<'a> {
     /// Step names that the user selected to skip before execution.
     /// Applied in addition to YAML-configured `skip` conditions.
     pub skipped_steps: &'a [String],
+    /// Resolved workflow flag values.
+    pub flags: &'a crate::flags::FlagValues,
     /// Optional callback invoked for each streamed stdout/stderr line from prompt steps,
     /// plus engine-emitted progress lines on the `"info"` stream (step skips, edge
     /// transitions). First argument is `"stdout"`, `"stderr"`, or `"info"`; second is
@@ -340,7 +342,13 @@ pub async fn execute_steps_with_graph(
         if let Some(reloader) = ctx.config_reloader
             && let Some(new_workflow) = reloader()?
         {
-            if new_workflow.compiled.steps.contains_key(&current) {
+            let unresolved = crate::flags::missing_in_compiled(&new_workflow.compiled, ctx.flags);
+            if !unresolved.is_empty() {
+                crate::status_eprintln!(
+                    "config reload ignored: flags without a value: {}; continuing the existing graph",
+                    unresolved.join(", ")
+                );
+            } else if new_workflow.compiled.steps.contains_key(&current) {
                 if graph.state.pending.is_none() {
                     graph.state.runtime = capture_runtime(vars, tracker);
                 }
@@ -351,7 +359,11 @@ pub async fn execute_steps_with_graph(
                     &new_workflow.compiled,
                     &replacement,
                     &current,
-                    ctx.skipped_steps,
+                    &crate::flags::preflight_skips(
+                        &new_workflow.compiled,
+                        ctx.flags,
+                        ctx.skipped_steps,
+                    ),
                 )?;
                 *graph = replacement;
                 tracker.restore_snapshots(graph.state.runtime.file_snapshots.clone());
@@ -485,8 +497,9 @@ fn accept_transition(
                 .map(|((from, to), count)| (from.clone(), to.clone(), count.budgeted_traversals))
                 .collect();
             edges.sort_by_key(|edge| std::cmp::Reverse(edge.2));
-            let skipped_steps = ctx
-                .skipped_steps
+            let effective_skips =
+                crate::flags::preflight_skips(ctx.compiled, ctx.flags, ctx.skipped_steps);
+            let skipped_steps = effective_skips
                 .iter()
                 .filter(|step| {
                     step.as_str() == from
@@ -589,7 +602,10 @@ async fn step_loop_iteration(
         return Ok(outcome);
     }
 
-    let static_skip = should_skip(step_config.skip.as_ref(), vars)?
+    // Flags are evaluated first so a disabled chunk never touches `skip` variables or `when` globs.
+    let flag_skip = crate::flags::is_disabled(step_config.flag.as_deref(), ctx.flags)?;
+    let static_skip = flag_skip
+        || should_skip(step_config.skip.as_ref(), vars)?
         || ctx.skipped_steps.iter().any(|s| s == current_step);
     // Only evaluate glob I/O when the step is not already unconditionally skipped.
     let when_skip =
@@ -597,7 +613,12 @@ async fn step_loop_iteration(
 
     if static_skip || when_skip {
         state.counters.skipped += 1;
-        let skip_label = if when_skip {
+        let skip_label = if flag_skip {
+            format!(
+                "{current_step} (flag '{}' is off)",
+                step_config.flag.as_deref().unwrap_or_default()
+            )
+        } else if when_skip {
             format!("{current_step} (no files match when.exists)")
         } else {
             current_step.to_string()
@@ -1443,11 +1464,7 @@ fn print_env_vars(env: &HashMap<String, String>, indent: &str) {
     }
 }
 
-/// Print a dry-run summary of the workflow flow.
-pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
-    println!("{}", style("=== Dry Run: Workflow Flow ===").bold());
-    println!("command: {}", config.command.join(" "));
-
+fn print_dry_run_config(config: &WorkflowConfig) {
     if let Some(model) = config
         .model
         .as_ref()
@@ -1459,6 +1476,16 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
     if !config.env.is_empty() {
         println!("env:");
         print_env_vars(&config.env, "  ");
+    }
+
+    if !config.flags.is_empty() {
+        println!("\nflags:");
+        for (name, flag) in &config.flags {
+            match &flag.description {
+                Some(desc) => println!("  {}: {desc}", style(name).bold()),
+                None => println!("  {}", style(name).bold()),
+            }
+        }
     }
 
     if !config.groups.is_empty() {
@@ -1475,14 +1502,22 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
             if let Some(max) = g.max_retries {
                 print!(" (max_retries: {max})");
             }
-            if let Some(ref if_cond) = g.if_condition
-                && let Some(ref target) = if_cond.file_changed
+            if let Some(if_cond) = &g.if_condition
+                && let Some(target) = &if_cond.file_changed
             {
                 print!(" -> retry from: {}", style(target).green());
             }
             println!();
         }
     }
+}
+
+/// Print a dry-run summary of the workflow flow.
+pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
+    println!("{}", style("=== Dry Run: Workflow Flow ===").bold());
+    println!("command: {}", config.command.join(" "));
+
+    print_dry_run_config(config);
 
     println!("\nsteps:");
 
@@ -1531,6 +1566,9 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
             && let Some(ref glob) = w.exists
         {
             print!(" {}", style(format!("(when exists: {glob})")).yellow());
+        }
+        if let Some(flag) = &step.flag {
+            print!(" {}", style(format!("(flag: {flag})")).yellow());
         }
         if let Some(next) = &step.next {
             print!(" -> {}", style(next).green());
@@ -1613,6 +1651,7 @@ mod tests {
             config_reloader,
             working_dir: Some(tracker_root.as_path()),
             skipped_steps,
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
         execute_steps_with_dag(
@@ -1714,6 +1753,7 @@ mod tests {
             config_reloader: None,
             working_dir: Some(tracker_root.as_path()),
             skipped_steps: &skipped,
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
         execute_steps_with_dag(
@@ -1797,6 +1837,7 @@ mod tests {
             config_reloader: None,
             working_dir: Some(tracker_root.as_path()),
             skipped_steps: &skipped,
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: Some(&on_step_log),
         };
         execute_steps_with_dag(
@@ -1928,6 +1969,7 @@ steps:
             config_reloader: None,
             working_dir: Some(tmp.path()),
             skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
 
@@ -2013,6 +2055,7 @@ steps:
             config_reloader: None,
             working_dir: Some(tmp.path()),
             skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
         let phase1_result = execute_steps_with_dag(
@@ -2063,6 +2106,7 @@ steps:
             config_reloader: None,
             working_dir: Some(tmp.path()),
             skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
 
@@ -2688,6 +2732,24 @@ steps:
     }
 
     #[test]
+    fn test_dry_run_lists_flags_and_flagged_steps() {
+        let yaml = r"
+command: [claude, -p]
+flags:
+  deploy:
+    description: Run the deploy step
+steps:
+  ship:
+    command: echo ship
+    flag: deploy
+";
+        let config = make_config(yaml);
+        assert_eq!(config.flags.len(), 1);
+        assert_eq!(config.steps["ship"].flag.as_deref(), Some("deploy"));
+        print_dry_run(&config, None);
+    }
+
+    #[test]
     fn test_dry_run_with_from() {
         let yaml = r"
 command: [claude, -p]
@@ -3058,6 +3120,7 @@ steps:
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
         let result = execute_steps_with_dag(
@@ -4062,6 +4125,7 @@ steps:
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
         // When: execute_steps_with_dag runs; step2's on_node_start triggers cancellation
@@ -4949,6 +5013,7 @@ steps:
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
 
@@ -5002,6 +5067,7 @@ steps:
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
 
@@ -5078,6 +5144,7 @@ steps:
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
 
@@ -5138,6 +5205,7 @@ steps:
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
 
@@ -5194,6 +5262,7 @@ steps:
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
             on_step_log: None,
         };
 

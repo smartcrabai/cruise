@@ -177,6 +177,19 @@ pub struct WorkflowConfig {
     /// default backend, and `sdk: claude`). Rejected with a `command` backend.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub mcp_servers: McpServers,
+
+    /// Declared workflow flags (user-resolved on/off switches for step chunks).
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub flags: IndexMap<String, FlagConfig>,
+}
+
+/// A declared workflow flag. Intentionally has no default value.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct FlagConfig {
+    /// Human-readable description shown when asking for the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A command value that can be either a single string or a list of strings.
@@ -271,6 +284,10 @@ pub struct StepConfig {
 
     /// Skip condition: static bool or variable reference.
     pub skip: Option<SkipCondition>,
+
+    /// Workflow flag controlling whether this step runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<String>,
 
     /// Pre-execution condition: skip the step unless the workspace satisfies the rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -911,6 +928,7 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_sdk(config)?;
     validate_mcp_servers(config)?;
+    validate_flags(config)?;
     validate_computer_use(config)?;
     validate_permission(config)?;
     validate_output_file_usage(config)?;
@@ -921,6 +939,42 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_timeouts(config)?;
     validate_when(config)?;
     validate_retry(config)?;
+    Ok(())
+}
+
+/// Validate flag declarations and references from steps and after-pr steps.
+fn validate_flags(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+
+    for name in config.flags.keys() {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "invalid flag name '{name}'; names must be non-empty and contain only ASCII letters, digits, '_' or '-'"
+            )));
+        }
+    }
+    let mut used = std::collections::HashSet::new();
+    for (step_name, step) in config.steps.iter().chain(&config.after_pr) {
+        if let Some(flag) = step.flag.as_deref() {
+            if !config.flags.contains_key(flag) {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' references undeclared flag '{flag}'"
+                )));
+            }
+            used.insert(flag);
+        }
+    }
+    for name in config.flags.keys() {
+        if !used.contains(name.as_str()) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "flag '{name}' is declared but no step references it"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1182,7 +1236,7 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
         || step.output_file.is_some()
     {
         return Err(CruiseError::InvalidStepConfig(format!(
-            "parallel step '{name}' only supports parallel, env, skip, when, next, if, and timeout; computer_use and permission are only supported on prompt children"
+            "parallel step '{name}' only supports parallel, env, skip, flag, when, next, if, and timeout; computer_use and permission are only supported on prompt children"
         )));
     }
     for (child_name, child) in children {
@@ -1190,6 +1244,11 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
         if child_name.trim().is_empty() || child_name.contains('/') {
             return Err(CruiseError::InvalidStepConfig(format!(
                 "parallel child '{path}' must have a non-empty name without '/'"
+            )));
+        }
+        if child.flag.is_some() {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "parallel child '{path}' cannot have a 'flag'; put the flag on the parallel step instead"
             )));
         }
         let kinds = usize::from(child.prompt.is_some())
@@ -1682,6 +1741,11 @@ fn validate_group_inner_steps(
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "group step '{group_name}/{sub_name}' has an individual 'if' condition, \
                      which is not allowed inside group steps"
+                )));
+            }
+            if sub_step.flag.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "group step '{group_name}/{sub_name}' has a 'flag', which is not allowed inside group steps; put the flag on the group call instead"
                 )));
             }
         }
@@ -4242,6 +4306,7 @@ steps:
                 "steps",
                 "after-pr",
                 "mcp_servers",
+                "flags",
             ],
             "WorkflowConfig",
         );
@@ -4408,6 +4473,7 @@ steps:
                 "timeout",
                 "prompt_file",
                 "output_file",
+                "flag",
             ],
             "StepConfig",
         );

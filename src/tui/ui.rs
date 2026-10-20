@@ -756,6 +756,7 @@ fn step_question(step: Step) -> &'static str {
         Step::Repository => "Which repository? (owner/name, group/project, or URL)",
         Step::Config => "Which workflow config? (blank = auto-detect)",
         Step::SkippedSteps => "Skip any workflow steps?",
+        Step::Flags => "Turn each workflow flag on or off",
         Step::Workspace => "Where should cruise execute?",
         Step::DirtyTree => "Run on the current branch even with uncommitted changes?",
         Step::FormalSpec => "Include Quint and Alloy formal specifications in the plan?",
@@ -794,6 +795,7 @@ fn step_hint(app: &TuiApp) -> String {
             format!("Comma-separated step ids · Enter next · {BACK}")
         }
         Step::SkippedSteps => format!("↑↓ move · Space toggle · Enter next · {BACK}"),
+        Step::Flags => format!("↑↓ move · Space toggle on/off · Enter next · {BACK}"),
         Step::Launch => format!("↑↓ choose · Enter go · {BACK}"),
         Step::Source | Step::Workspace | Step::DirtyTree | Step::FormalSpec => {
             format!("↑↓ or Space choose · Enter next · {BACK}")
@@ -816,6 +818,7 @@ fn render_step_control(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Step::Repository => return render_step_editor(frame, app, area, &form.repository),
         Step::Config => return render_config_choices(frame, app, area),
         Step::SkippedSteps => return render_skip_choices(frame, app, area),
+        Step::Flags => return render_flag_choices(frame, app, area),
         Step::Source => two_way(
             "Directory",
             "Repository (cloned with gh or glab)",
@@ -898,6 +901,39 @@ fn render_config_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Paragraph::new(lines).scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)),
         choices_area,
     );
+}
+fn render_flag_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let form = &app.form;
+    let cursor = form.flag_cursor % form.flag_choices.len().max(1);
+    let lines = form
+        .flag_choices
+        .iter()
+        .enumerate()
+        .map(|(index, choice)| {
+            let (marker, style) = match form.flag_values.get(&choice.name) {
+                Some(true) => ("[on]    ", success(app)),
+                Some(false) => ("[off]   ", muted(app)),
+                None => ("[unset] ", warning(app)),
+            };
+            let mut spans = vec![
+                Span::styled(if index == cursor { "▸ " } else { "  " }, accent(app, true)),
+                Span::styled(marker, style),
+                Span::styled(
+                    choice.name.clone(),
+                    if index == cursor {
+                        selection(app)
+                    } else {
+                        Style::default()
+                    },
+                ),
+            ];
+            if let Some(description) = &choice.description {
+                spans.push(Span::styled(format!("  {description}"), muted(app)));
+            }
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 fn render_skip_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let choices = app.skip_choices();
@@ -2864,6 +2900,7 @@ mod tests {
                 after_pr_steps: Vec::new(),
                 default_skipped_steps: Vec::new(),
                 resolved_config_key: "test".to_string(),
+                flags: Vec::new(),
             });
             app.form.skipped.set_text("review");
             app.form.step = Step::SkippedSteps;

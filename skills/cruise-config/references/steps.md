@@ -5,7 +5,7 @@ from `prompt_file`), `command` (shell execution), `option` (interactive
 selection), or `parallel` (concurrent prompt/command children). A step that only
 holds `group:` (a group call) is the exception — see [groups.md](groups.md).
 A pure `workflow_call:` call site (optionally with `skip`,
-`when`, or `next`) is also accepted during config loading and expanded into
+`when`, `next`, or `flag`) is also accepted during config loading and expanded into
 executable steps, including under `after-pr`; it cannot be nested in a group.
 Every other step field on the call site is rejected: `model`, `prompt`,
 `prompt_file`, `instruction`, `plan`, `option`, `command`, `parallel`,
@@ -164,8 +164,8 @@ workflow < parent block < child. Children support `prompt`/`prompt_file` or
 `command`, plus `model`, `env`, `skip`, `when`, and `timeout`. Prompt children
 may also set `permission` and `output_file`, but names must be distinct within the block. Child names must
 be non-empty and contain no `/`. Child `next`, `if`, `option`, `instruction`,
-`plan`, `group`, `workflow_call`, nested `parallel`, and `allow_commit: true`
-are rejected. Parent fields: `parallel`, `env`, `skip`, `when`, `next`, `if`,
+`plan`, `group`, `workflow_call`, nested `parallel`, `flag`, and `allow_commit: true`
+are rejected. Parent fields: `parallel`, `env`, `skip`, `flag`, `when`, `next`, `if`,
 and `timeout`. An empty block (`parallel: {}`) is a validation error, and so is
 a child whose `command:` is an empty array.
 
@@ -227,6 +227,7 @@ steps:
 | `parallel` | object | Named prompt/command children run concurrently and join as one step |
 | `next` | string | Explicit next step name |
 | `skip` | bool \| string | Skip condition (see [flow-control.md](flow-control.md)) |
+| `flag` | string | Name of a flag declared in top-level `flags:`. The step runs only when the flag is `on` and is skipped when it is `off`. Allowed on a parallel parent, also allowed on a `workflow_call` call site, where it applies to every expanded step. Not allowed on parallel children, on steps inside a group definition, or on a callee's own steps (see [top-level.md](top-level.md#flags)) |
 | `when` | object | Pre-execution condition: `exists: <glob>` (see [flow-control.md](flow-control.md)) |
 | `if` | object | Conditional execution: `file-changed` / `no-file-changes` / `fail` (see [flow-control.md](flow-control.md)) |
 | `timeout` | string | Per-step timeout: `"30"` = seconds, `"5m"` = minutes, `"1h"` = hours; enforced for prompt, command, and parallel steps; option steps ignore it. Command arrays limit each command independently; a parallel parent limits the whole block, while a child timeout affects only that child (see [flow-control.md](flow-control.md)) |

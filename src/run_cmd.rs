@@ -231,6 +231,32 @@ fn stdin_is_terminal() -> bool {
     std::io::stdin().is_terminal()
 }
 
+/// Make sure every declared flag has an explicit value before anything runs.
+///
+/// Only an interactive single-session run may ask; batch and non-TTY runs stop.
+fn resolve_missing_flags(
+    config: &crate::config::WorkflowConfig,
+    session: &mut SessionState,
+    workspace_override: WorkspaceOverride,
+) -> Result<()> {
+    if crate::flags::missing(config, &session.flags).is_empty() {
+        return Ok(());
+    }
+    if workspace_override == WorkspaceOverride::RespectSession && stdin_is_terminal() {
+        let _guard = crate::option_handler::prompt_lock_guard();
+        let _blocked = crate::herdr::blocked("Set workflow flags");
+        crate::platform::reclaim_terminal_foreground();
+        if !crate::flags::prompt_missing(config, &mut session.flags, crate::flags::prompt_flag_cli)?
+        {
+            return Err(CruiseError::Other(
+                "workflow flag selection cancelled".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    crate::flags::require_complete(config, &session.flags)
+}
+
 fn prompt_workspace_mode() -> Result<WorkspaceMode> {
     #[cfg(test)]
     if let Some(mode) = test_workspace_mode_choice() {
@@ -413,6 +439,12 @@ async fn run_single(
     observer.on_phase(&session_id, RunPhase::Preparing);
     let config = manager.load_config(&session)?;
     validate_config(&config)?;
+    let cli_flags = crate::flags::from_cli(&args.flags)?;
+    crate::flags::validate_names(&config, &cli_flags)?;
+    session.flags.extend(cli_flags);
+    if !args.dry_run {
+        resolve_missing_flags(&config, &mut session, workspace_override)?;
+    }
     if !args.dry_run
         && !session.exec
         && (session.plan_error.is_some() || !session.has_usable_plan(&manager.sessions_dir()))
@@ -440,7 +472,7 @@ async fn run_single(
         &compiled,
         &dag,
         &start_node,
-        &session.skipped_steps,
+        &crate::flags::preflight_skips(&compiled, &session.flags, &session.skipped_steps),
     )?;
 
     if args.dry_run {
@@ -532,6 +564,7 @@ async fn run_single(
         session_id: session_id.clone(),
     };
     let skipped_steps = session.skipped_steps.clone();
+    let flag_values = session.flags.clone();
     let session_cell = Mutex::new(&mut session);
     let session_fingerprint = Mutex::new(initial_fingerprint);
     let logger_for_start = logger.clone();
@@ -568,6 +601,7 @@ async fn run_single(
         config_reloader: config_reloader.as_deref(),
         working_dir: Some(execution_workspace.path()),
         skipped_steps: &skipped_steps,
+        flags: &flag_values,
     };
     let exec_result = crate::retry::with_active_policy(retry_policy.clone(), async {
         let execution =
@@ -627,6 +661,7 @@ async fn run_single(
                                     args.rate_limit_retries,
                                     effective_max_retries,
                                     &skipped_steps,
+                                    &flag_values,
                                     Some(&cancel_token),
                                     &notifying_option_handler,
                                     Some(&on_step_log),
@@ -1318,6 +1353,7 @@ mod tests {
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
+            flags: vec![],
         }
     }
 
@@ -2253,6 +2289,7 @@ Previously, emojis were used as user icons."#;
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
+            flags: vec![],
         };
 
         // When: call run()
@@ -2297,6 +2334,7 @@ Previously, emojis were used as user icons."#;
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
+            flags: vec![],
         };
 
         // When: call run() with 0 planned sessions
@@ -3304,6 +3342,7 @@ steps:
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
+            flags: vec![],
         })
         .await;
         assert!(result.is_ok(), "expected run --all to succeed: {result:?}");
@@ -3384,6 +3423,7 @@ steps:
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
+            flags: vec![],
         });
         let mutate_fut = mutate_state_after_first_step(
             &manager,
@@ -4213,6 +4253,7 @@ steps:
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
+            flags: vec![],
         });
 
         let add_and_unblock_fut = async {
@@ -4400,6 +4441,7 @@ steps:
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
+            flags: vec![],
             parallelism,
         }
     }
@@ -4470,6 +4512,7 @@ steps:
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
+            flags: vec![],
             parallelism: Some(2),
         };
 

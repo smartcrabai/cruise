@@ -35,6 +35,10 @@ pub struct Cli {
     #[arg(long = "image", value_name = "PATH")]
     pub images: Vec<String>,
 
+    /// Set a workflow flag explicitly (NAME=on|off). Can be repeated.
+    #[arg(long = "flag", value_name = "NAME=on|off", value_parser = crate::flags::parse_assignment)]
+    pub flags: Vec<(String, bool)>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 
@@ -250,6 +254,10 @@ pub struct PlanArgs {
     /// dragged onto / pasted into the interactive prompt.
     #[arg(long = "image", value_name = "PATH")]
     pub images: Vec<String>,
+
+    /// Set a workflow flag explicitly (NAME=on|off). Can be repeated.
+    #[arg(long = "flag", value_name = "NAME=on|off", value_parser = crate::flags::parse_assignment)]
+    pub flags: Vec<(String, bool)>,
 }
 
 #[derive(Parser, Debug)]
@@ -321,6 +329,10 @@ pub struct RunArgs {
     /// Force-disable post-PR worktree+branch cleanup for this run.
     #[arg(long, conflicts_with = "cleanup_after_pr")]
     pub no_cleanup_after_pr: bool,
+
+    /// Set a workflow flag explicitly (NAME=on|off). Can be repeated.
+    #[arg(long = "flag", value_name = "NAME=on|off", value_parser = crate::flags::parse_assignment, conflicts_with = "all")]
+    pub flags: Vec<(String, bool)>,
 }
 impl RunArgs {
     /// Convert the CLI cleanup flags into an `Option<bool>` override.
@@ -385,6 +397,10 @@ pub struct ExecArgs {
     /// Print the workflow flow without executing it.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Set a workflow flag explicitly (NAME=on|off). Can be repeated.
+    #[arg(long = "flag", value_name = "NAME=on|off", value_parser = crate::flags::parse_assignment)]
+    pub flags: Vec<(String, bool)>,
 }
 
 #[derive(Parser, Debug)]

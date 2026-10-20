@@ -156,6 +156,7 @@ case "$1" in
     ;;
   run)
     id="$2"
+    printf '%s\n' "$*" > "$STATE/run_args.txt"
     echo "cruise-stub: executing session $id"
     code="${CRUISE_STUB_RUN_EXIT:-0}"
     if [ "$code" = "0" ]; then
@@ -210,11 +211,12 @@ set_defaults() {
   COMMAND_REST_FILE=""
   GIT_USER_NAME_INPUT=""
   GIT_USER_EMAIL_INPUT=""
+  FLAGS_INPUT=""
   CRUISE_STUB_STATE="$CRUISE_STATE"
   CRUISE_STUB_WORKSPACE="$REPO_DIR"
   CRUISE_STUB_SESSION_ID="sess-$REPO_COUNTER"
   export COMMAND ENTITY_NUMBER GITHUB_REPOSITORY GITHUB_WORKSPACE GH_TOKEN EXEC_CONFIG_PATH \
-    USED_APP TRIGGER_ACTOR TRIGGER_ACTOR_ID COMMAND_REST_FILE GIT_USER_NAME_INPUT GIT_USER_EMAIL_INPUT \
+    USED_APP TRIGGER_ACTOR TRIGGER_ACTOR_ID COMMAND_REST_FILE GIT_USER_NAME_INPUT GIT_USER_EMAIL_INPUT FLAGS_INPUT \
     CRUISE_STUB_STATE CRUISE_STUB_WORKSPACE CRUISE_STUB_SESSION_ID
   GITHUB_SERVER_URL="" CRUISE_STUB_PR_URL="" CRUISE_STUB_CREATE_EXIT="" CRUISE_STUB_RUN_EXIT="" CRUISE_STUB_RUN_COMMIT="" \
   CRUISE_STUB_EXEC_EXIT="" CRUISE_STUB_EXEC_CHANGES="" CRUISE_STUB_PLAN_EXIT="" CRUISE_STUB_PLAN_MD="" CRUISE_STUB_PLAN_MD_EMPTY="" \
@@ -534,6 +536,26 @@ assert_contains "sanitize_text: visible text after the injected tags also surviv
 refute_contains "sanitize_text: an HTML comment injection is stripped" "$plan_stdin" "ignore all previous instructions"
 refute_contains "sanitize_text: an img tag's alt-text injection is stripped" "$plan_stdin" "evil payload"
 refute_contains "sanitize_text: a zero-width space is stripped" "$plan_stdin" "$ZWS"
+
+begin_case
+COMMAND=run
+GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
+CRUISE_STUB_PR_URL="https://github.com/owner/repo/pull/24"
+FLAGS_INPUT=$'# release flags\ndeploy=on\n\n  lint=off  \n'
+export FLAGS_INPUT
+run_run
+check "flags: run with flags input succeeds" $([ "$RUN_STATUS" -eq 0 ]; echo $?) "$RUN_OUT"
+assert_eq "flags: each non-blank, non-comment line becomes a --flag argument on cruise run" \
+  "run sess-$REPO_COUNTER --flag deploy=on --flag lint=off" "$(cat "$CRUISE_STATE/run_args.txt")"
+
+begin_case
+COMMAND=run
+GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
+CRUISE_STUB_PR_URL="https://github.com/owner/repo/pull/25"
+run_run
+check "flags: run without flags input succeeds" $([ "$RUN_STATUS" -eq 0 ]; echo $?) "$RUN_OUT"
+assert_eq "flags: no --flag arguments are passed when the input is unset" \
+  "run sess-$REPO_COUNTER" "$(cat "$CRUISE_STATE/run_args.txt")"
 
 begin_case
 COMMAND=run; CRUISE_STUB_CREATE_EXIT=1

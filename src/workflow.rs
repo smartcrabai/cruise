@@ -344,6 +344,12 @@ fn expand_steps(
                          which is not allowed inside group steps"
                     )));
                 }
+                if sub_step.flag.is_some() {
+                    return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                        "group step '{group_name}/{sub_name}' has a 'flag', which is not allowed \
+                         inside group steps; put the flag on the group call instead"
+                    )));
+                }
 
                 let key = format!("{step_name}/{sub_name}");
                 if flat.contains_key(&key) {
@@ -352,7 +358,9 @@ fn expand_steps(
                     )));
                 }
                 step_to_invocation.insert(key.clone(), step_name.clone());
-                flat.insert(key, sub_step.clone());
+                let mut sub = sub_step.clone();
+                sub.flag.clone_from(&step.flag);
+                flat.insert(key, sub);
             }
 
             invocations.insert(

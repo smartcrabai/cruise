@@ -37,6 +37,18 @@ source "$SCRIPT_DIR/lib/plan.sh"
 GIT_USER_NAME_INPUT="${GIT_USER_NAME_INPUT:-}"
 GIT_USER_EMAIL_INPUT="${GIT_USER_EMAIL_INPUT:-}"
 USED_APP="${USED_APP:-false}"
+# flags input: one NAME=on|off per line -> `--flag NAME=on|off` on `cruise run`.
+FLAGS_INPUT="${FLAGS_INPUT:-}"
+flag_args=()
+while IFS= read -r flag_line || [ -n "$flag_line" ]; do
+  flag_line="${flag_line%$'\r'}"
+  flag_line="${flag_line#"${flag_line%%[![:space:]]*}"}"
+  flag_line="${flag_line%"${flag_line##*[![:space:]]}"}"
+  case "$flag_line" in
+    ''|'#'*) continue ;;
+  esac
+  flag_args+=(--flag "$flag_line")
+done <<< "$FLAGS_INPUT"
 TRIGGER_ACTOR="${TRIGGER_ACTOR:-}"
 TRIGGER_ACTOR_ID="${TRIGGER_ACTOR_ID:-}"
 
@@ -233,7 +245,7 @@ do_run() {
     emit_and_exit "$session_id" "" "" "" 1 "cruise failed to create a session from the resolved plan (see run logs)."
   fi
 
-  cruise run "$session_id" 2>&1 | tee -a "$LOG_FILE"
+  cruise run "$session_id" ${flag_args[@]+"${flag_args[@]}"} 2>&1 | tee -a "$LOG_FILE"
   local run_exit=$?
 
   local session_json pr_url

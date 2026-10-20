@@ -131,6 +131,9 @@ pub struct SessionState {
     /// Steps selected by the user to be skipped before execution.
     #[serde(default)]
     pub skipped_steps: Vec<String>,
+    /// Explicit workflow flag values chosen by the user.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub flags: std::collections::BTreeMap<String, bool>,
     /// PID of the process that is (or was) executing this session's workflow.
     #[serde(default)]
     pub runner_pid: Option<u32>,
@@ -243,6 +246,7 @@ impl SessionState {
             plan_conversation_home: None,
             plan_error: None,
             skipped_steps: vec![],
+            flags: std::collections::BTreeMap::new(),
             runner_pid: None,
             runner_started_at: None,
             repo: None,
