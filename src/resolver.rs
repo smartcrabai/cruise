@@ -443,7 +443,7 @@ fn to_absolute(path: PathBuf) -> PathBuf {
 
 /// Shorten `path` for interactive display:
 /// `./rel` under `cwd`, `~/rel` under `home`, absolute otherwise.
-fn shorten_display_path(
+pub(crate) fn shorten_display_path(
     path: &std::path::Path,
     cwd: &std::path::Path,
     home: Option<&std::path::Path>,
