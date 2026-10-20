@@ -221,7 +221,7 @@ fn status_parts(status: &RowStatus) -> (console::StyledObject<&'static str>, Str
     }
 }
 
-fn sanitize_terminal_text(text: &str) -> String {
+pub(crate) fn sanitize_terminal_text(text: &str) -> String {
     text.chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect()
