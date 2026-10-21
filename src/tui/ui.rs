@@ -1637,12 +1637,11 @@ mod tests {
     fn rendered_view_with_invalid_parallelism_config(width: u16, height: u16) -> String {
         let process_lock = lock_process();
         let config_home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
-        let config_path = config_home.path().join("cruise/config.json");
-        AppConfig {
-            run_all_parallelism: 0,
-        }
-        .save_to(&config_path)
-        .unwrap_or_else(|error| panic!("{error}"));
+        let config_dir = config_home.path().join("cruise");
+        std::fs::create_dir_all(&config_dir).unwrap_or_else(|error| panic!("{error}"));
+        let config_path = config_dir.join("config.json");
+        std::fs::write(&config_path, r#"{"runAllParallelism": 0}"#)
+            .unwrap_or_else(|error| panic!("{error}"));
         let env_guard = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
         rendered_lines_with_lock(
             width,
