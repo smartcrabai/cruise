@@ -87,6 +87,15 @@ precedence. `command` and `sdk` are replaced together when either is set;
 Other defaulted fields fill only values the workflow leaves unset, so explicit
 workflow values take precedence. Environment overrides are applied afterward.
 
+For an actual jcode prompt, the resolved `model` must identify a model. If it
+does not, Cruise stops before starting jcode and creates the user-level
+`$XDG_CONFIG_HOME/cruise/default.yaml` template when no file exists. The
+template contains `model: null`; replace it with an available
+`provider/model[:effort]` reference or bare model. Cruise never creates a
+project defaults file, and it does not auto-create this template during draft,
+dry-run, workflow discovery, or non-jcode execution. See [SDK backends](sdk.md)
+for model precedence and recovery details.
+
 ## `command` vs `sdk`
 
 There are three prompt-execution backends:

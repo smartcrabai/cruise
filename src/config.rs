@@ -66,7 +66,9 @@ pub struct WorkflowConfig {
     ///   starts the jcode API bridge using credentials from the user's jcode
     ///   home. `model` / `plan_model` / per-step `model` are `provider/model`
     ///   references in jcode's provider/model namespace, with an optional
-    ///   `:effort` suffix (unset lets jcode pick its configured default).
+    ///   `:effort` suffix. Every actual jcode prompt requires an effective
+    ///   Cruise model; an unset value is an error, not a fallback to jcode's
+    ///   configured default.
     /// - `"claude"` — drives the `claude` CLI in-process through
     ///   `claude-agent-sdk`. `model` / `plan_model` / per-step `model` are
     ///   plain `claude --model` names with an optional `:effort` suffix (unset
@@ -1613,7 +1615,8 @@ const REMOVED_SDKS: &[(&str, &str)] = &[
 ///
 /// - both `command` and `sdk` set -> ambiguous, rejected.
 /// - neither set -> accepted: prompts run on the default `jcode` backend (see
-///   [`crate::executor::Executor::new`]).
+///   [`crate::executor::Executor::new`]). Each actual jcode prompt must still
+///   resolve to an explicit Cruise model at execution time.
 /// - `sdk` set to a [`REMOVED_SDKS`] value -> rejected, naming the migration.
 /// - `sdk` set to any other value outside [`SUPPORTED_SDKS`] -> rejected.
 ///

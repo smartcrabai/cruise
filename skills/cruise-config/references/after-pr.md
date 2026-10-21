@@ -92,7 +92,7 @@ The existing **Merge PR** action in `cruise list`, the TUI, and the WebUI remain
 
 ## Constraints
 
-- **After-PR errors:** without native merge opt-in, non-`Interrupted` errors from ordinary `after-pr` steps are warnings and the workflow continues; cancellation and `github-review` failures remain fatal. When native merge is opted in, actual execution errors anywhere in the after-PR run, including before the native step, are fatal and suppress post-PR cleanup. A nonzero command exit status remains command-as-data under existing semantics; the native action independently rechecks current readiness instead of trusting command output.
+- **After-PR errors:** without native merge opt-in, errors from ordinary `after-pr` steps are warnings except cancellation, missing jcode models, and `github-review` failures, which propagate. With native merge opted in, actual execution errors anywhere in the after-PR run, including before the native step, are fatal and suppress post-PR cleanup. A nonzero command exit status remains command-as-data under existing semantics; the native action independently rechecks current readiness instead of trusting command output.
 - **`if.no-file-changes` is forbidden**: rejected for the same reason.
 - **`if.fail` is forbidden**: rejected for the same reason.
 

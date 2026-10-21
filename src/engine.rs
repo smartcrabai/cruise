@@ -1056,7 +1056,9 @@ async fn execute_step_kind(
                         skip_step_reason: None,
                     })
                 }
-                Err(e @ CruiseError::CommitGuardViolation(_)) => Err(e),
+                Err(
+                    e @ (CruiseError::CommitGuardViolation(_) | CruiseError::MissingJcodeModel(_)),
+                ) => Err(e),
                 Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
                 Err(e) if has_if_fail => {
                     crate::status_eprintln!(
@@ -1717,6 +1719,7 @@ mod tests {
     use crate::config::WorkflowConfig;
     use crate::file_tracker::FileTracker;
     use crate::option_handler::{NoOpOptionHandler, OptionHandler};
+    use crate::test_support::{EnvGuard, lock_process, set_fake_home};
     use crate::variable::VariableStore;
     use tempfile::TempDir;
 
@@ -1780,6 +1783,52 @@ mod tests {
             &|_cp, _dag| Ok(()),
         )
         .await
+    }
+
+    async fn execute_yaml_recording_started_steps(
+        yaml: &str,
+        working_dir: &std::path::Path,
+    ) -> (Result<ExecutionResult>, Vec<String>) {
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|error| panic!("{error}"));
+        let mut dag = crate::dag::build_dag(&compiled, 3).unwrap_or_else(|error| panic!("{error}"));
+        let start = dag.start.clone();
+        let mut vars = VariableStore::new("task".to_string());
+        let mut tracker = FileTracker::with_root(working_dir.to_path_buf());
+        let started = std::sync::Mutex::new(Vec::new());
+        let on_step_start = |name: &str| {
+            started
+                .lock()
+                .unwrap_or_else(|error| panic!("{error}"))
+                .push(name.to_string());
+            Ok(())
+        };
+        let ctx = ExecutionContext {
+            compiled: &compiled,
+            max_retries: 3,
+            rate_limit_retries: 0,
+            on_step_start: &on_step_start,
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: Some(working_dir),
+            skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
+            on_step_log: None,
+        };
+        let result = execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start,
+            &|_checkpoint, _dag| Ok(()),
+        )
+        .await;
+        let started = started
+            .into_inner()
+            .unwrap_or_else(|error| panic!("{error}"));
+        (result, started)
     }
 
     async fn run_config_with_retries(
@@ -4979,6 +5028,45 @@ steps:
             result.is_err(),
             "prompt error with if.fail should eventually fail via loop protection, got: {err_detail}"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_jcode_model_bypasses_if_fail_recovery_step() {
+        let _process = lock_process();
+        let home = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let mut guards = set_fake_home(home.path());
+        #[cfg(unix)]
+        {
+            let bin = home.path().join("bin");
+            guards.push(crate::test_support::install_exiting_jcode_stub(&bin));
+        }
+        guards.push(EnvGuard::set("JCODE_HOME", home.path().join("jcode-home")));
+        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
+            guards.push(EnvGuard::remove(key));
+        }
+        let yaml = r"
+sdk: jcode
+steps:
+  missing-model:
+    prompt: make a change
+    if:
+      fail: recover
+  recover:
+    command: echo recovery-ran
+";
+
+        let (result, started) = execute_yaml_recording_started_steps(yaml, home.path()).await;
+
+        assert!(
+            matches!(result, Err(CruiseError::MissingJcodeModel(_))),
+            "missing-model error must retain its type instead of taking if.fail: {result:?}"
+        );
+        assert_eq!(
+            started,
+            ["missing-model"],
+            "the recovery step must not execute"
+        );
+        assert!(home.path().join(".config/cruise/default.yaml").is_file());
     }
 
     #[tokio::test]

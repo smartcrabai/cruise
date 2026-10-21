@@ -138,7 +138,6 @@ pub fn merge(pr_url: &str, method: PrMergeMethod) -> Result<()> {
 /// state. Every invocation is appended to `gh.log`.
 #[cfg(all(test, unix))]
 pub(crate) mod fake_gh {
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
     pub(crate) struct FakeGh {
@@ -150,29 +149,8 @@ pub(crate) mod fake_gh {
             let dir = root.join("fake-gh");
             let bin = dir.join("bin");
             std::fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("{e}"));
-            let script = format!(
-                "#!/bin/sh\n\
-printf '%s\\n' \"$*\" >> '{d}/gh.log'\n\
-if [ \"$1 $2\" = 'pr view' ]; then\n\
-  if [ -f '{d}/view.exit' ] && [ \"$(cat '{d}/view.exit')\" != '0' ]; then echo 'view failed' >&2; exit \"$(cat '{d}/view.exit')\"; fi\n\
-  cat '{d}/view.out'\n\
-  exit 0\n\
-fi\n\
-if [ \"$1 $2\" = 'pr merge' ]; then\n\
-  if [ -f '{d}/merge.exit' ] && [ \"$(cat '{d}/merge.exit')\" != '0' ]; then echo 'merge failed' >&2; exit \"$(cat '{d}/merge.exit')\"; fi\n\
-  if [ -f '{d}/view_after.out' ]; then cp '{d}/view_after.out' '{d}/view.out'; fi\n\
-  exit 0\n\
-fi\n\
-exit 2\n",
-                d = dir.display()
-            );
-            let path = bin.join("gh");
-            std::fs::write(&path, script).unwrap_or_else(|e| panic!("{e}"));
-            let mut perms = std::fs::metadata(&path)
-                .unwrap_or_else(|e| panic!("{e}"))
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&path, perms).unwrap_or_else(|e| panic!("{e}"));
+            let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-gh");
+            std::os::unix::fs::symlink(fixture, bin.join("gh")).unwrap_or_else(|e| panic!("{e}"));
             Self { dir }
         }
 

@@ -16,6 +16,9 @@ pub enum CruiseError {
     #[error("invalid step config: {0}")]
     InvalidStepConfig(String),
 
+    #[error("{0}")]
+    MissingJcodeModel(String),
+
     #[error("undefined variable: {{{0}}}")]
     UndefinedVariable(String),
 

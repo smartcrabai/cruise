@@ -46,7 +46,7 @@
           }
         }
       ],
-      "description": "Default model to use for all steps. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
+      "description": "Default model to use for all steps. Each actual jcode prompt must resolve to a model from its step-level or workflow/default settings; a missing model is an execution error. Claude and command backends retain their existing no-model behavior. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
     },
     "plan_model": {
       "oneOf": [
@@ -60,7 +60,7 @@
           }
         }
       ],
-      "description": "Model to use for plan generation steps. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
+      "description": "Model to use for plan generation steps; falls back to `model`. A jcode planning prompt must resolve to a model. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
     },
     "interactive_planning": {
       "type": "boolean",

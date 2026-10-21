@@ -294,8 +294,9 @@ async fn create_pr_attempt(
     .await
 }
 
-/// Generate a PR title and body. Returns `Err(Interrupted)` on cancellation;
-/// all other failures return empty strings (best-effort PR description).
+/// Generate a PR title and body. Returns `Err(Interrupted)` on cancellation and
+/// propagates [`CruiseError::MissingJcodeModel`]; other failures return empty
+/// strings (best-effort PR description).
 async fn generate_pr_description(
     worktree_path: &Path,
     compiled: &CompiledWorkflow,
@@ -444,6 +445,7 @@ async fn generate_pr_via_sdk_tool(
             }
         }
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
+        Err(e @ CruiseError::MissingJcodeModel(_)) => Err(e),
         Err(e) => {
             crate::status_eprintln!("warning: PR description generation failed: {e}");
             Ok((String::new(), String::new()))
@@ -451,8 +453,9 @@ async fn generate_pr_via_sdk_tool(
     }
 }
 
-/// Run the after-PR workflow steps. Cancellation and GitHub review failures always propagate;
-/// other failures only warn unless native squash merge is opted in.
+/// Run the after-PR workflow steps. Cancellation, missing-model errors, and
+/// GitHub review failures always propagate; other errors only warn unless
+/// native squash merge is opted in.
 #[expect(clippy::too_many_arguments, reason = "mirrors the PR flow parameters")]
 async fn run_after_pr_steps(
     compiled: &CompiledWorkflow,
@@ -495,7 +498,9 @@ async fn run_after_pr_steps(
     };
     match execute_steps_with_graph(&ctx, vars, tracker, &mut dag, &|_cp, _dag| Ok(())).await {
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
-        Err(e @ CruiseError::GitHubReviewFailed { .. }) => Err(e),
+        Err(e @ (CruiseError::MissingJcodeModel(_) | CruiseError::GitHubReviewFailed { .. })) => {
+            Err(e)
+        }
         Err(e) if critical_merge_enabled => Err(e),
         Ok(_) | Err(CruiseError::StepPaused) => Ok(()),
         Err(e) => {
@@ -1865,5 +1870,161 @@ mod tests {
             !gh_log.exists(),
             "native merge must not contact the forge without merge opt-in"
         );
+    }
+
+    #[cfg(unix)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "This test exercises the complete PR metadata abort path."
+    )]
+    #[tokio::test]
+    async fn missing_jcode_model_for_pr_metadata_stops_before_pr_creation() {
+        let _process = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let mut guards = crate::test_support::set_fake_home(tmp.path());
+        #[cfg(unix)]
+        {
+            let bin = tmp.path().join("bin");
+            guards.push(crate::test_support::install_exiting_jcode_stub(&bin));
+            let gh_log = tmp.path().join("gh-invocations.log");
+            guards.push(crate::test_support::EnvGuard::set(
+                "CRUISE_TEST_GH_LOG",
+                &gh_log,
+            ));
+            crate::test_support::write_executable_script(
+                &bin.join("gh"),
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nprintf '%s\\n' \"$*\" >> \"$CRUISE_TEST_GH_LOG\"\nexit 1\n",
+            );
+        }
+        guards.push(crate::test_support::EnvGuard::set(
+            "JCODE_HOME",
+            tmp.path().join("jcode-home"),
+        ));
+        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
+            guards.push(crate::test_support::EnvGuard::remove(key));
+        }
+        let original_dir = tmp.path().join("original");
+        let worktree_path = tmp.path().join("worktree");
+        std::fs::create_dir_all(&original_dir).unwrap_or_else(|error| panic!("{error}"));
+        crate::test_support::init_git_repo(&original_dir);
+        crate::test_support::run_git_ok(
+            tmp.path(),
+            &[
+                "clone",
+                original_dir
+                    .to_str()
+                    .unwrap_or_else(|| panic!("non-UTF8 test path")),
+                worktree_path
+                    .to_str()
+                    .unwrap_or_else(|| panic!("non-UTF8 test path")),
+            ],
+        );
+        crate::test_support::run_git_ok(
+            &worktree_path,
+            &["config", "user.email", "test@example.com"],
+        );
+        crate::test_support::run_git_ok(&worktree_path, &["config", "user.name", "Test"]);
+        crate::test_support::run_git_ok(&worktree_path, &["checkout", "-b", "cruise/test"]);
+        let plan_path = worktree_path.join("plan.md");
+        std::fs::write(&plan_path, "# Plan\n- implement the change")
+            .unwrap_or_else(|error| panic!("{error}"));
+        crate::test_support::run_git_ok(&worktree_path, &["add", "plan.md"]);
+        crate::test_support::run_git_ok(&worktree_path, &["commit", "-m", "worktree change"]);
+        let mut compiled = minimal_compiled_workflow(Vec::new());
+        compiled.sdk = Some("jcode".to_string());
+        compiled.plan_model = Some("provider/planning-model".to_string());
+        let mut vars = VariableStore::new("PR metadata task".to_string());
+        vars.set_named_file(crate::session::PLAN_VAR, plan_path);
+        let ctx = worktree::WorktreeContext {
+            path: worktree_path,
+            branch: "cruise/test".to_string(),
+            original_dir,
+        };
+        let mut tracker = FileTracker::with_root(ctx.path.clone());
+        let mut session = SessionState::new(
+            "pr-missing-model".to_string(),
+            ctx.path.clone(),
+            crate::session_config::SessionConfigRef::inline_snapshot(),
+            "PR metadata task".to_string(),
+        );
+        let pr_created = std::sync::atomic::AtomicBool::new(false);
+        let on_pr_created = |_: &SessionState| {
+            pr_created.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        };
+
+        let result = handle_worktree_pr_with_persistence(
+            &ctx,
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            &mut session,
+            0,
+            0,
+            &[],
+            &crate::flags::NO_FLAGS,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+            None,
+            Some(&on_pr_created),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(CruiseError::MissingJcodeModel(_))),
+            "SDK metadata generation must preserve the missing-model error: {result:?}"
+        );
+        assert!(
+            !pr_created.load(std::sync::atomic::Ordering::SeqCst),
+            "PR creation must not be reached after metadata model validation fails"
+        );
+        #[cfg(unix)]
+        assert!(
+            !tmp.path().join("gh-invocations.log").exists(),
+            "PR metadata model validation must stop before invoking the gh create command"
+        );
+        assert!(tmp.path().join(".config/cruise/default.yaml").is_file());
+    }
+
+    #[tokio::test]
+    async fn missing_jcode_model_in_after_pr_steps_is_not_best_effort() {
+        let _process = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let mut guards = crate::test_support::set_fake_home(tmp.path());
+        #[cfg(unix)]
+        {
+            let bin = tmp.path().join("bin");
+            guards.push(crate::test_support::install_exiting_jcode_stub(&bin));
+        }
+        guards.push(crate::test_support::EnvGuard::set(
+            "JCODE_HOME",
+            tmp.path().join("jcode-home"),
+        ));
+        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
+            guards.push(crate::test_support::EnvGuard::remove(key));
+        }
+        let config = crate::config::WorkflowConfig::from_yaml(
+            "sdk: jcode\nsteps:\n  main:\n    command: echo done\nafter-pr:\n  final-check:\n    prompt: verify the change\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|error| panic!("{error}"));
+        let mut vars = VariableStore::new("after-pr task".to_string());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+
+        let result = run_after_pr_steps_for_test(
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            tmp.path(),
+            &crate::option_handler::NoOpOptionHandler,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(CruiseError::MissingJcodeModel(_))),
+            "after-pr must propagate a missing-model error instead of warning and succeeding: {result:?}"
+        );
+        assert!(tmp.path().join(".config/cruise/default.yaml").is_file());
     }
 }

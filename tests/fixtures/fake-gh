@@ -1,0 +1,14 @@
+#!/bin/sh
+d="${0%/*}/.."
+printf '%s\n' "$*" >> "$d/gh.log"
+if [ "$1 $2" = 'pr view' ]; then
+  if [ -f "$d/view.exit" ] && [ "$(cat "$d/view.exit")" != '0' ]; then echo 'view failed' >&2; exit "$(cat "$d/view.exit")"; fi
+  cat "$d/view.out"
+  exit 0
+fi
+if [ "$1 $2" = 'pr merge' ]; then
+  if [ -f "$d/merge.exit" ] && [ "$(cat "$d/merge.exit")" != '0' ]; then echo 'merge failed' >&2; exit "$(cat "$d/merge.exit")"; fi
+  if [ -f "$d/view_after.out" ]; then cp "$d/view_after.out" "$d/view.out"; fi
+  exit 0
+fi
+exit 2

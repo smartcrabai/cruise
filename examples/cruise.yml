@@ -45,10 +45,13 @@ jobs:
           fetch-depth: 0
 
       # The baseline setup: Anthropic (or add openai_api_key/both) via the
-      # dedicated inputs, no custom model or config -- see
+      # dedicated inputs. Set the CRUISE_MODEL repository variable to a
+      # model route available for the selected credentials, or configure
+      # model in your repository's workflow / .cruise/default.yaml. See
       # examples/cruise-kimi.yml and examples/cruise-openai-compatible.yml
       # for other providers, and examples/repo-cruise.yaml for a config you
       # can commit instead of relying on the action's generated default.
       - uses: smartcrabai/cruise@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: ${{ vars.CRUISE_MODEL }}

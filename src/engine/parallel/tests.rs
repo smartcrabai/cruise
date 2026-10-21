@@ -200,6 +200,48 @@ steps:
     assert!(!fixture.root.path().join("unexpected").exists());
 }
 
+#[tokio::test]
+async fn missing_jcode_model_is_fatal_for_parallel_blocks_with_or_without_if_fail() {
+    let _process = crate::test_support::lock_process();
+    let home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+    let mut guards = crate::test_support::set_fake_home(home.path());
+    #[cfg(unix)]
+    {
+        let bin = home.path().join("bin");
+        guards.push(crate::test_support::install_exiting_jcode_stub(&bin));
+    }
+    guards.push(crate::test_support::EnvGuard::set(
+        "JCODE_HOME",
+        home.path().join("jcode-home"),
+    ));
+    for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
+        guards.push(crate::test_support::EnvGuard::remove(key));
+    }
+
+    for parent_if_fail in ["", "    if:\n      fail: recover\n"] {
+        let yaml = format!(
+            "sdk: jcode\nsteps:\n  checks:\n    parallel:\n      missing-model:\n        prompt: inspect the change\n{parent_if_fail}  recover:\n    command: echo recovery-ran\n"
+        );
+        let mut fixture = Fixture::new(&yaml);
+
+        let result = fixture.run(None, None).await;
+
+        assert!(
+            matches!(result, Err(crate::error::CruiseError::MissingJcodeModel(_))),
+            "parallel missing-model errors must remain fatal (parent if.fail={parent_if_fail:?}): {result:?}"
+        );
+        assert_eq!(
+            *fixture
+                .starts
+                .lock()
+                .unwrap_or_else(|error| panic!("{error}")),
+            ["checks"],
+            "the if.fail recovery step must not run"
+        );
+    }
+    assert!(home.path().join(".config/cruise/default.yaml").is_file());
+}
+
 // Commands use POSIX shell syntax that cmd.exe cannot run.
 #[cfg(unix)]
 #[tokio::test]
