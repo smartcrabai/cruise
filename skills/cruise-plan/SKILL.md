@@ -5,9 +5,10 @@ description: Use when a coding agent should author an implementation plan itself
 
 cruise normally generates `plan.md` with its own LLM planning step. With `--skip-planning`, **you** are that planning step: your input is written directly to the session's `plan.md` after surrounding whitespace is trimmed (attachment references are included when `--image` is used), and no LLM-based planning call runs. In the foreground `cruise plan` form, a TTY still enters the Approve/Fix/Ask/Execute/Publish menu after that write; non-TTY input auto-approves to `Planned`. The session then stores an empty `input` with `input_as_plan: true`; `plan.md` holds the task text and `{input}` resolves to its current content.
 
-`force_exec: true` is evaluated only for a `Local` target. If no explicit opt-out is present, local planning runs the workflow directly in the current directory — no plan, worktree, or PR. `--repo <OWNER/REPO>` resolves to a `PlanTarget::Repo` session, so it follows the session planning path instead of the local `force_exec` shortcut. For foreground `cruise plan`, `--no-force-exec`, `--grill`, `--formal-spec`, or any attached image opts out of `force_exec`; the root `cruise --plan` form supports the `--no-force-exec` and `--image` opt-outs (it has no `--grill`/`--formal-spec` flags).
+`force_exec: true` is evaluated only for a `Local` target. If no explicit opt-out is present, local planning runs the workflow directly in the current directory — no plan, worktree, or PR. `--repo <OWNER/REPO>` resolves to a `PlanTarget::Repo` session, so it follows the session planning path instead of the local `force_exec` shortcut. For foreground `cruise plan`, `--no-force-exec`, `--grill`, or any attached image opts out of `force_exec`; the root `cruise --plan` form supports the `--no-force-exec` and `--image` opt-outs (it has no `--grill` flag).
 
-`--formal-spec` applies only to the initial LLM-generated plan: it injects the formal-specification prompt while resolving the initial planning template (`src/planning.rs:280-286`), while Fix/Ask follow-up turns use the normal context (`src/plan_cmd.rs:1114-1124`). Keep the Markdown plan primary and add both ` ```quint ` and ` ```alloy ` fenced blocks for each representable requirement, following the contract in `prompts/formal-spec.md:1-9`. The flag conflicts with `--skip-planning`, but can be combined with `--grill` or `--no-interactive-planning`; `--grill` and `--no-interactive-planning` conflict with each other, and `--grill` additionally requires an SDK backend, interactive planning, and a TTY.
+Formal specifications are workflow behavior, not an initial-plan mode: use `formal_methods=on` with `tdd` or `refactor`, or select `builtin:add-formal-specs` for the dedicated executable-specification workflow. All six built-ins (`tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, `security`) declare `after_pr` and `merge`, off when absent; `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. `-f after_pr` runs after-PR automation without merging; `-f merge` runs the same prelude and then the native synchronous squash merge once. Examples: `cruise plan -c builtin:tdd -f merge "task"` and `cruise plan -c builtin:tdd -f browser_e2e,app_e2e,merge "task"`. `research` remains read-only with `create_pr: false`, and `merge` does not override its no-PR behavior.
+
 
 ## Workflow
 
@@ -57,7 +58,7 @@ Rules:
 
 - **Non-empty content** (enforced) — empty or whitespace-only plans are rejected; input is trimmed.
 - **Start with a `#` heading** — cruise derives the session title from the first markdown heading of any level (no heading → falls back to the first content line, list markers stripped). Not enforced, but a missing heading yields a poor title.
-- **Testing Notes must stand alone.** The default workflow writes tests *from the plan, before any implementation* — spell out behavior and interfaces (names, signatures, error types), not "test the new function".
+- **Testing Notes must stand alone.** The built-in `tdd` workflow writes tests *from the plan, before any implementation* — spell out behavior and interfaces (names, signatures, error types), not "test the new function".
 
 ## Creating the session
 
@@ -87,7 +88,7 @@ cat plan.md | cruise plan --skip-planning            # plan on stdin
 cruise plan --skip-planning "$(cat plan.md)"         # or as the positional arg
 cruise plan --skip-planning -c path/to/cruise.yaml "$(cat plan.md)"   # explicit config
 cat plan.md | cruise plan --skip-planning --image ./screenshot.png    # repeatable attachment
-# Use -c __builtin__ to pin the embedded built-in default workflow.
+# Use -c builtin:tdd to pin the embedded test-first built-in workflow.
 ```
 
 When stdin is not a TTY (always true for an agent's shell), the approve menu is skipped and the session is **auto-approved to `Planned`** — `cruise run` will execute it with no human review. Only use this when the user explicitly wants unattended queuing. The root-level shorthand `cruise --skip-planning "<plan>"` behaves the same (legacy no-subcommand path). On a TTY, `cruise plan --skip-planning` writes `plan.md` and then still enters the Approve/Fix/Ask/Execute/Publish menu — only the background `cruise --plan … --skip-planning` form reaches `Planned` without any menu. Two caveats: approval in SDK mode invokes the configured agent once more through `generate_title` (falling back to the plan heading on failure), while background `cruise --plan … --skip-planning` derives the title without a model call; and the positional `"$(cat plan.md)"` form breaks if the plan starts with `-` (clap reads it as a flag), so prefer stdin.
@@ -131,7 +132,7 @@ Choose by where execution should happen: local session (`cruise run` on this mac
 
 ## Gotchas
 
-- **Workflow config is resolved and validated at session-creation time.** If resolution finds no config, the built-in default workflow (`builtin/default.yaml` in the source tree, embedded at build time) applies; if a found config is invalid, creation fails. Pass `-c <path>` (foreground form only) to pin a specific config, or `-c __builtin__` to pin the embedded default.
+- **Workflow config is resolved and validated at session-creation time.** If resolution finds no config, the built-in `tdd` workflow (`builtin/tdd.yaml` in the source tree, embedded at build time) applies; if a found config is invalid, creation fails. Pass `-c <path>` (foreground form only) to pin a specific config, `-c builtin:tdd` to pin the built-in by name, or `-c __builtin__` for the generic selector that selects `tdd`.
 - **A planning worktree is created even with `--skip-planning` for git sessions** (under `$XDG_DATA_HOME/cruise/worktrees/<id>/`) and is reused by `cruise run` for local sessions. For non-git directories, planning falls back to the base directory, but `cruise run` needs a git repository (worktree mode is the non-TTY default) and fails otherwise. For `--repo` sessions, approval removes the planning worktree and temporary clone, so `cruise run` re-clones the repository and creates a fresh execution worktree.
 - **One task = one session.** Don't pack multiple unrelated tasks into one plan; queue several sessions instead (`cruise --plan … --skip-planning` per task).
 - **Plan text is used verbatim** — no LLM cleans it up afterwards (only surrounding whitespace is trimmed; the GitHub Action additionally strips HTML comments, `<img>` tags, and invisible Unicode controls). Typos in file paths or step ordering go straight to the implementer.

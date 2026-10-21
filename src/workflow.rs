@@ -170,6 +170,8 @@ pub struct CompiledWorkflow {
     pub plan_language: String,
     /// MCP servers made available to every SDK prompt run.
     pub mcp_servers: crate::config::McpServers,
+    /// Whether successful worktree runs commit, push, and create a pull request.
+    pub create_pr: bool,
     /// Remove the local git worktree and its branch automatically after the PR
     /// is created. Defaults to `false` (non-destructive). Only applies to
     /// worktree-mode sessions that successfully created a PR.
@@ -205,6 +207,7 @@ impl CompiledWorkflow {
             pr_language: self.pr_language.clone(),
             plan_language: self.plan_language.clone(),
             mcp_servers: self.mcp_servers.clone(),
+            create_pr: self.create_pr,
             cleanup_after_pr: self.cleanup_after_pr,
             computer_use: self.computer_use,
             permission: self.permission,
@@ -230,6 +233,7 @@ impl CompiledWorkflow {
 /// membership style, contains empty groups, nested group calls, or
 /// individual `if` conditions inside group steps.
 pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
+    crate::config::validate_squash_merge(&config)?;
     crate::config::validate_output_file_usage(&config)?;
     crate::config::validate_parallel_steps(&config)?;
     let (steps, invocations, step_to_invocation) = expand_steps(&config.steps, &config.groups)?;
@@ -259,6 +263,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         pr_language,
         plan_language,
         mcp_servers: config.mcp_servers,
+        create_pr: config.create_pr,
         cleanup_after_pr,
         computer_use,
         permission,
@@ -511,7 +516,6 @@ steps:
         // Then: the compiled workflow carries the cleanup flag
         assert!(c.cleanup_after_pr);
     }
-
     #[test]
     fn test_after_pr_compiled_preserves_cleanup_after_pr() {
         // Given: a compiled workflow with cleanup enabled and after-pr steps

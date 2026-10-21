@@ -88,7 +88,7 @@ fn config_select() -> ConfigSelectVm {
             },
             ConfigOptionVm {
                 value: "__builtin__".to_string(),
-                label: "Built-in default".to_string(),
+                label: "Built-in tdd".to_string(),
                 selected: false,
             },
         ],
@@ -126,8 +126,6 @@ fn step_tree() -> StepTreeVm {
             name: "deploy".to_string(),
             description: "Deploy after merge".to_string(),
             on: false,
-            off: true,
-            require: true,
         }],
     }
 }
@@ -325,7 +323,6 @@ fn tab_fixtures() -> Vec<(&'static str, Value)> {
                 skip_planning: false,
                 grill: false,
                 no_interactive_planning: false,
-                formal_spec: false,
                 workspace_mode: "Worktree".to_string(),
                 config_select: RawHtml::new("<select></select>"),
                 steps: RawHtml::new("<ul></ul>"),

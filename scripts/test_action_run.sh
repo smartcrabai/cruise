@@ -118,6 +118,9 @@ GHEOF
 #                              (simulates cruise's real worktree commit, to prove the
 #                              prepare-commit-msg hook itself adds the trailer)
 #   CRUISE_STUB_PR_URL         pr_url recorded on a successful `run`
+#   CRUISE_STUB_PR_SKIPPED_REASON   reason recorded on the run session, when set
+#   CRUISE_STUB_RUN_PHASE           phase recorded on the run session (default Completed)
+#   CRUISE_STUB_HIDE_SESSION_AFTER_RUN "true" -> removes the session before post-run lookup
 #   CRUISE_STUB_EXEC_EXIT      exit code for `exec`
 #   CRUISE_STUB_EXEC_CHANGES   "true" -> `exec` writes a file into the workspace
 #   CRUISE_STUB_PLAN_EXIT      exit code for `plan`
@@ -167,6 +170,17 @@ case "$1" in
       if [ "${CRUISE_STUB_RUN_COMMIT:-false}" = "true" ]; then
         git -C "${CRUISE_STUB_WORKSPACE:?}" commit --allow-empty -q -m "cruise: implement session $id"
       fi
+    fi
+    if [ "$code" = "0" ] || [ -n "${CRUISE_STUB_PR_SKIPPED_REASON:-}" ]; then
+      tmp="$(mktemp)"
+      jq --arg id "$id" --arg phase "${CRUISE_STUB_RUN_PHASE:-Completed}" \
+        --arg reason "${CRUISE_STUB_PR_SKIPPED_REASON:-}" \
+        'map(if .id == $id then (.phase = $phase | if $reason == "" then del(.pr_skipped_reason) else .pr_skipped_reason = $reason end) else . end)' \
+        "$SESSIONS" > "$tmp" && mv "$tmp" "$SESSIONS"
+    fi
+    if [ "${CRUISE_STUB_HIDE_SESSION_AFTER_RUN:-false}" = "true" ]; then
+      tmp="$(mktemp)"
+      jq --arg id "$id" 'map(select(.id != $id))' "$SESSIONS" > "$tmp" && mv "$tmp" "$SESSIONS"
     fi
     exit "$code"
     ;;
@@ -219,10 +233,12 @@ set_defaults() {
     USED_APP TRIGGER_ACTOR TRIGGER_ACTOR_ID COMMAND_REST_FILE GIT_USER_NAME_INPUT GIT_USER_EMAIL_INPUT FLAGS_INPUT \
     CRUISE_STUB_STATE CRUISE_STUB_WORKSPACE CRUISE_STUB_SESSION_ID
   GITHUB_SERVER_URL="" CRUISE_STUB_PR_URL="" CRUISE_STUB_CREATE_EXIT="" CRUISE_STUB_RUN_EXIT="" CRUISE_STUB_RUN_COMMIT="" \
+  CRUISE_STUB_PR_SKIPPED_REASON="" CRUISE_STUB_RUN_PHASE="" CRUISE_STUB_HIDE_SESSION_AFTER_RUN="" \
   CRUISE_STUB_EXEC_EXIT="" CRUISE_STUB_EXEC_CHANGES="" CRUISE_STUB_PLAN_EXIT="" CRUISE_STUB_PLAN_MD="" CRUISE_STUB_PLAN_MD_EMPTY="" \
   GH_STUB_COMMENTS_JSON="" GH_STUB_COMMENTS_FAIL="" GH_STUB_ISSUE_TITLE="" GH_STUB_ISSUE_BODY="" \
   GH_STUB_POST_HTML_URL="" GH_STUB_PATCH_HTML_URL="" GH_STUB_LAST_BODY_FILE="" GH_STUB_LAST_PATCH_ENDPOINT_FILE=""
   export GITHUB_SERVER_URL CRUISE_STUB_PR_URL CRUISE_STUB_CREATE_EXIT CRUISE_STUB_RUN_EXIT CRUISE_STUB_RUN_COMMIT \
+    CRUISE_STUB_PR_SKIPPED_REASON CRUISE_STUB_RUN_PHASE CRUISE_STUB_HIDE_SESSION_AFTER_RUN \
     CRUISE_STUB_EXEC_EXIT CRUISE_STUB_EXEC_CHANGES CRUISE_STUB_PLAN_EXIT CRUISE_STUB_PLAN_MD CRUISE_STUB_PLAN_MD_EMPTY \
     GH_STUB_COMMENTS_JSON GH_STUB_COMMENTS_FAIL GH_STUB_ISSUE_TITLE GH_STUB_ISSUE_BODY \
     GH_STUB_POST_HTML_URL GH_STUB_PATCH_HTML_URL GH_STUB_LAST_BODY_FILE GH_STUB_LAST_PATCH_ENDPOINT_FILE
@@ -567,7 +583,7 @@ assert_contains "run: fail_reason names the create-session failure" "$(out fail_
 assert_fail_reason_hygiene "run/create-session-failure"
 
 begin_case
-COMMAND=run; CRUISE_STUB_RUN_EXIT=1
+COMMAND=run; CRUISE_STUB_RUN_EXIT=1; CRUISE_STUB_PR_SKIPPED_REASON=disabled
 GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
 run_run
 check "run: a failed cruise run step exits non-zero" $([ "$RUN_STATUS" -ne 0 ]; echo $?) "$RUN_OUT"
@@ -578,12 +594,55 @@ assert_fail_reason_hygiene "run/cruise-run-failure"
 begin_case
 COMMAND=run
 GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
-# CRUISE_STUB_PR_URL intentionally unset: cruise run succeeds but never records a PR.
+# No pr_skipped_reason is recorded: a successful local PR-create warning must remain a failure.
 run_run
 check "run: a successful run with no recorded pr_url is treated as a failure" $([ "$RUN_STATUS" -ne 0 ]; echo $?) "$RUN_OUT"
 assert_eq "run: pr_url output is empty when no PR was recorded" "" "$(out pr_url)"
 assert_contains "run: fail_reason explains the missing pull request" "$(out fail_reason)" "no pull request was created"
 assert_fail_reason_hygiene "run/no-pr-recorded"
+
+begin_case
+COMMAND=run; CRUISE_STUB_PR_SKIPPED_REASON=disabled
+GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
+run_run
+assert_status "run: a completed session with disabled PR creation succeeds" 0 "$RUN_STATUS" "$RUN_OUT"
+assert_eq "run: intentional disabled skip keeps the selected session id" "sess-$REPO_COUNTER" "$(out session_id)"
+assert_eq "run: intentional disabled skip emits no PR URL" "" "$(out pr_url)"
+assert_eq "run: intentional disabled skip emits no commit URL" "" "$(out commit_url)"
+assert_eq "run: intentional disabled skip emits no plan comment URL" "" "$(out plan_comment_url)"
+assert_eq "run: intentional disabled skip emits no failure reason" "" "$(out fail_reason)"
+
+begin_case
+COMMAND=run; CRUISE_STUB_PR_SKIPPED_REASON=no-commits
+GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
+run_run
+assert_status "run: a completed session with no commits succeeds" 0 "$RUN_STATUS" "$RUN_OUT"
+assert_eq "run: no-commits skip keeps the selected session id" "sess-$REPO_COUNTER" "$(out session_id)"
+assert_eq "run: no-commits skip emits no PR URL" "" "$(out pr_url)"
+assert_eq "run: no-commits skip emits no commit URL" "" "$(out commit_url)"
+assert_eq "run: no-commits skip emits no plan comment URL" "" "$(out plan_comment_url)"
+assert_eq "run: no-commits skip emits no failure reason" "" "$(out fail_reason)"
+
+begin_case
+COMMAND=run; CRUISE_STUB_PR_SKIPPED_REASON=unexpected
+GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
+run_run
+assert_status "run: an unknown PR skip reason remains a failure" 1 "$RUN_STATUS" "$RUN_OUT"
+check "run: an unknown PR skip reason leaves a failure reason" $([ -n "$(out fail_reason)" ]; echo $?) "$(out fail_reason)"
+
+begin_case
+COMMAND=run; CRUISE_STUB_RUN_PHASE=Running; CRUISE_STUB_PR_SKIPPED_REASON=no-commits
+GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
+run_run
+assert_status "run: a noncompleted session with a skip reason remains a failure" 1 "$RUN_STATUS" "$RUN_OUT"
+check "run: a noncompleted skip leaves a failure reason" $([ -n "$(out fail_reason)" ]; echo $?) "$(out fail_reason)"
+
+begin_case
+COMMAND=run; CRUISE_STUB_HIDE_SESSION_AFTER_RUN=true
+GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
+run_run
+assert_status "run: a missing selected session after a successful command remains a failure" 1 "$RUN_STATUS" "$RUN_OUT"
+check "run: a missing selected session leaves a failure reason" $([ -n "$(out fail_reason)" ]; echo $?) "$(out fail_reason)"
 
 begin_case
 COMMAND=run; GH_STUB_COMMENTS_FAIL=true

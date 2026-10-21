@@ -1,0 +1,235 @@
+description: Audit repository quality gates, complete meaningful tests and CI, then verify and repair failures
+flags:
+  after_pr:
+    description: Run pull-request or merge-request readiness, synchronization, and CI follow-up
+  merge:
+    description: Run after-PR follow-up and perform a host-managed squash merge
+
+steps:
+  read-and-plan:
+    prompt: |-
+      Audit this repository's test and quality-gate coverage before changing files. Treat {input} as the original request and an optional scope constraint: if it is empty, work across the repository; if it names a narrower change, keep code/test edits within that scope while still checking shared manifests, toolchains, scripts, and CI wiring that the scope depends on. Never ask the user to resolve discoverable details.
+
+      Approved plan reference: {plan}. Read the referenced plan only when it exists, is non-empty, approved, and relevant to this request; use its scope, constraints, and acceptance criteria to refine the original request. If no non-empty approved plan is available, including in exec mode, use the original request as the task scope and requirements; do not infer approval or claim that a plan was approved.
+
+      ## Read the real stack
+
+      Inspect the repository's manifests, lockfiles, toolchain pins, test helpers and suites, CI workflows, scripts, and entry points. Trace how a consumer reaches the behavior under test. Record concrete commands and versions from the repository; do not assume a familiar framework or introduce one before checking what is already there.
+
+      Identify every language, runtime, deployable component, and package from the actual repository manifests and lockfiles; do not assume any stack or component from this workflow's name or its host repository. Inspect each discovered component's source entry points, test helpers/suites, scripts, toolchain configuration, and native CI workflows. Record actual conventions and commands, then trace how consumers reach changed behavior. Preserve the repository's existing valid coverage rather than replacing it with an imagined stack.
+
+      Check the actual CI provider and its job graph, triggers, permissions, credentials, platform matrix, pinned tools, lockfile behavior, and failure propagation. Identify deployment/release jobs separately from safe test jobs and determine whether secret-free validation runs on pull requests, including external contributions where supported.
+
+      ## Behavior and coverage audit
+
+      Build a bounded, evidence-backed inventory of in-scope, consumer-visible production behaviors and real user journeys supported by the repository, the original request, and relevant approved-plan requirements. Trace each behavior from its actual production boundary (public API, CLI/API event, state transition, validation/error path, or other real entry point) to the owning component, source path and symbol. For each journey, identify the real entry point and applicable negative, permission, boundary, and recovery variants; include only variants the product actually supports and that matter to the scoped behavior.
+
+      Give each behavior/journey a stable `COV-###` ID and record its owning component, source path/symbol, production boundary or entry point, relevant variant, and evidence. Link existing tests by path and test symbol, with the specific assertion that proves the behavior; classify each row `Covered`, `Partial`, or `Missing` with a concrete rationale. For partial or missing coverage, state a priority and the smallest actionable test/assertion or test-infrastructure change. Assign stable `GAP-###` IDs to actionable test, formatter/linter/type-check, reproducibility, or CI gaps in the coverage matrix, linking them to relevant `COV` IDs where applicable. Preserve IDs through apply and verification; do not renumber them or treat an implementation disposition as proof of coverage.
+
+      Inventory only behavior supported by the requested scope and repository evidence; do not claim exhaustive enumeration, impose numeric coverage quotas, or create tests for incidental wording, defaults, or implementation details. Record exclusions and unreviewed areas with reasons and limits. Distinguish a genuinely inapplicable layer from an applicable but currently absent check, and a meaningful behavior gap from duplicate or incidental test coverage.
+
+      For each applicable package/component, retain the formatter, linter/static or type-check, unit, integration, and end-to-end coverage matrix. Record the current command, version/lockfile source, CI trigger/job, meaningful coverage, and evidence-backed gap, using the stable IDs above. Inspect success, error, validation, and realistic boundary behavior where supported; identify exact source symbols and consumer-visible assertions needed.
+
+      An E2E test must cross a real product boundary: for example, invoke the actual CLI executable, send a request through the actual HTTP/API entry point, or exercise the actual browser journey when browser interaction is the changed behavior. Select only boundaries present in the discovered product. Reuse existing end-to-end runners; use real browser automation only for a changed browser journey when a reproducible real-browser path is justified. If no mobile or native desktop application exists, do not invent one, fake a GUI, or require a browser merely to relabel component tests as E2E. Never use live external credentials or network services in tests.
+
+
+      ## CI/security audit
+
+      Identify the existing CI provider and retain it. Plan secret-free pull-request checks, including external contributions where the provider permits them; use explicit least-privilege permissions, avoid privileged triggers for untrusted code, and do not attach write-capable credentials or secrets to jobs that execute untrusted changes. Keep deploy/release jobs gated away from untrusted PR execution. Commands must fail on genuine failures: no ignored exit codes, weakened assertions, or `continue-on-error` disguising red checks.
+
+      Reproducibility is required. Respect each component's declared minimum supported versions and committed lockfiles. Use exact tool/runtime versions and locked/frozen installs where the ecosystem supports them; if a tool is floating or missing a pin, plan the smallest compatible pin and align local guidance and CI. Do not add a second test framework when the existing stack can cover the behavior. Pin new external CI actions/plugins to verified immutable versions, and never add a secret-dependent test path.
+
+      ## Required artifact
+
+      Save a compact but complete, evidence-backed implementation plan in this session artifact. It must include:
+      - The approved task scope, constraints, and acceptance criteria, preserving relevant refinements from a non-empty approved plan. If no non-empty approved plan is available, including in exec mode, state that and derive scope and criteria from the original request; do not infer approval.
+      - Repository/component inventory and current commands/versions.
+      - A coverage matrix with applicable versus inapplicable layers and evidence for each gap.
+      - The exact tests to add or complete, including important error/boundary assertions and real E2E entry points.
+      - The exact formatter/linter/typecheck/test commands and CI jobs/triggers/permissions to add or repair.
+      - The reproducibility/version/lockfile changes required and any genuine prerequisite that cannot be reached without secrets or unavailable hardware.
+
+      Do not change workspace files or run checks in this read-only phase. Do not call an applicable layer inapplicable merely because it is absent today.
+    output_file: test-ci-gap-plan.md
+    timeout: 30m
+  apply-tests-and-ci:
+    prompt: |-
+      Original request: {input}
+
+      Implement the complete test and CI work from this evidence-backed plan:
+
+      {file:test-ci-gap-plan.md}
+
+      ## Contract authority
+
+      1. The user's request and acceptance criteria.
+      2. Repository-owned requirements and documented consumer behavior.
+      3. Existing tests, after checking they represent those higher-authority contracts.
+      4. Current implementation details.
+
+      A failing test is evidence, not automatic authority. Never delete, skip, weaken, or rewrite a valid test to make the suite green. Correct a test only when an explicit higher-authority requirement proves it wrong, and cite that evidence.
+
+      ## Implementation
+
+      1. Recheck the plan's file and line evidence against the current workspace. Preserve unrelated user changes; never reset, stash, or revert them.
+      2. Add or complete only the missing applicable formatter/linter/static or type gates and meaningful unit, integration, and E2E tests. Cover consumer-observable success, errors, validation, and realistic boundaries. Prefer deterministic isolated fixtures and real CLI/API boundaries; mock only external systems at their adapter boundary. No source-text assertions, no mocks-only E2E, no live secrets/network, and no fake GUI.
+      3. Reuse the tooling, test helpers, and test boundaries discovered in each component. Add a separate browser automation framework only when a changed browser journey genuinely requires it and no existing real-browser runner can cover it; pin its runtime, browser, and dependencies and run the real browser in CI.
+      4. Configure the repository's existing CI provider to run all applicable checks on pull requests without secrets, including external contributions where supported. Keep deploy/release jobs separate and secret-gated. Set least-privilege permissions explicitly; do not run untrusted changes under privileged triggers. Make every relevant command's nonzero exit fail the job. Preserve existing verified platform-matrix and integration-script checks.
+      5. Pin exact compatible tool versions, honor declared minimum supported versions, use committed lockfiles and locked/frozen dependency installs where supported, and make installs reproducible. Pin formatting/lint tools and CI actions/plugins too. Do not claim reproducibility from a floating `stable`, `latest`, or semver range alone. Do not silently raise a supported minimum or replace existing tooling.
+      6. Implement the plan now; do not return a backlog, a scaffold, or a list of proposed tests. If evidence shows an enumerated gap is already fully covered, leave it unchanged and cite the specific existing test and CI job. If an applicable layer has a genuine unreachable prerequisite, complete all reachable work and state the exact blocker rather than substituting a mock or omitting it.
+
+      Do not run verification checks in this phase; the next phase owns the complete check-and-repair pass.
+
+      ## Required implementation report
+
+      Save a concise, evidence-backed implementation report in the session artifact `test-ci-implementation.md`. For every `COV` and `GAP` ID in the plan, and every additional ID addressed during implementation, record exactly one disposition: `applied`, `already-covered`, `rejected`, or `blocked`. Give the source/test/CI paths and symbols, specific assertions and relevant command or CI job evidence that support the disposition. For `applied`, identify changed test/CI files and the consumer-visible assertion or gate added/repaired; for `already-covered`, cite the existing adequate evidence; for `rejected`, cite the higher-authority reason; for `blocked`, name the exact unavailable prerequisite and reachable work completed. Do not treat rejection or blockage as successful coverage.
+
+      ### Implemented coverage
+      - Each applicable layer and the tests or existing coverage that satisfy it, linked to stable IDs and evidence.
+
+      ### CI and reproducibility
+      - Provider workflows/jobs/triggers/permissions changed and exact pinned tools/lockfile behavior, linked to relevant IDs and evidence.
+
+      ### Changed files
+      - File and purpose for every change.
+
+      ### Remaining blockers
+      - Exact missing prerequisite and reachable work completed, or `none`.
+    output_file: test-ci-implementation.md
+    timeout: 1h
+  verify-and-repair:
+    prompt: |-
+      Original request: {input}
+
+      Independently verify the applied test and CI work against the original request, the plan, the implementation report, and acceptance criteria; repair real defects until all reachable checks pass.
+
+      Plan:
+      {file:test-ci-gap-plan.md}
+
+      Implementation report:
+      {file:test-ci-implementation.md}
+
+      ## Contract authority
+
+      1. The user's request and acceptance criteria.
+      2. Repository-owned requirements and documented consumer behavior.
+      3. Existing tests, after checking they represent those higher-authority contracts.
+      4. Current implementation details.
+
+      A failing test is evidence, not automatic authority. Never delete, skip, weaken, or rewrite a valid test to make the suite green. Correct a test only when an explicit higher-authority requirement proves it wrong, and cite that evidence.
+
+      ## Required verification
+
+      1. Re-read the plan, implementation report, changed manifests/configuration/workflows, and current source and test code. Independently recheck every planned `COV` and `GAP` ID and every additional ID in the implementation report against the real scoped behavior, source boundary, test path/symbol, specific assertion, and relevant CI job/command. Do not trust reported dispositions: confirm each `already-covered` row is adequate, each `applied` change exists and proves the behavior, and each `rejected` or `blocked` row has a valid authority-based reason or exact prerequisite. Do not omit unresolved IDs.
+      2. Run the exact formatter, linter/static/type checks, unit tests, integration tests, and E2E checks recorded in the plan, including all existing checks that the changes affect. Use the committed lockfiles and pinned tool versions. Execute the changed surface end to end through the real CLI/API or, when browser behavior changed, the real browser path. Do not report a command as passed unless its process exited successfully; include exact command and result.
+      3. Run the exact component-specific checks recorded in the plan, using each ecosystem's existing reproducible install, type-generation, configuration, and test commands. Use only documented dummy configuration when a local check requires it; never overwrite or expose a developer's existing ignored secrets file, and remove any temporary file created by this verification.
+      4. If any check exposes a real defect, diagnose it against the authority order above, fix the source or test infrastructure without weakening valid assertions, then rerun the failed check and the complete affected verification set. Continue until green or until a precise external prerequisite blocks completion. Do not treat missing prerequisites as success, silently skip a layer, or substitute mocks/no-ops.
+      5. Inspect the final change set for unrelated edits, generated artifacts, leaked credentials, lockfile drift, skipped tests, or CI steps that can mask failures. Preserve all pre-existing user work.
+
+      ## Required verification artifact
+
+      Save a concise evidence report as the existing session artifact `test-ci-verification.md`. Include every required layer and exact command/status, actual end-to-end surface exercised, test/CI fixes made after failures, final result, and any exact blocked prerequisite with the reachable checks already completed. For each stable `COV` and `GAP` ID, record the independently verified disposition and refreshed `Covered`, `Partial`, or `Missing` status where applicable, evidence and rationale, including any remaining gap; cite the relevant executed check command and result, or state that it was not run and why. Reconcile all plan IDs and implementation-report IDs, and update the coverage inventory, exclusions, unreviewed areas, and limits based on what was actually verified. Clearly mark anything not run; do not claim unexercised verification.
+
+
+
+      ## Final output
+
+      ### Results
+      - Formatter/linter/typecheck
+      - Unit/integration/E2E
+      - CI safety and reproducibility
+
+      ### Repairs
+      - Real defects fixed and checks rerun, or `none` with evidence
+
+      ### Blockers
+      - Exact blocker and completed reachable work, or `none`
+
+      ### Artifacts
+      - Gap plan, implementation report, and verification report.
+    output_file: test-ci-verification.md
+    timeout: 1h
+after-pr:
+  pr-ready:
+    flag: [after_pr, merge]
+    command: |-
+      case "{pr.url}" in
+        */-/merge_requests/*) glab mr update {pr.number} --ready ;;
+        *) gh pr ready {pr.number} ;;
+      esac
+  sync-base:
+    flag: [after_pr, merge]
+    command: |-
+      cruise internal sync-base {pr.number} --url {pr.url}
+  resolve-conflict:
+    flag: [after_pr, merge]
+    skip: prev.success
+    allow_commit: true
+    permission: full
+    prompt: |-
+      Original request: {input}
+
+      Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
+
+      Task/report scope: use the test gap plan, implementation report, and current task changes:
+      {file:test-ci-gap-plan.md}
+      {file:test-ci-implementation.md}
+
+      A conflict occurred while synchronizing PR/MR #{pr.number} ({pr.url}) with its base branch. Resolve only this conflict within the approved test/CI scope, preserve unrelated work, then stage and commit the resolution. Do not push; the following step handles it. Never weaken or disable tests, scanners, assertions, or CI policy to get green. Do not create or merge a PR directly.
+  push-after-sync:
+    flag: [after_pr, merge]
+    command: git push
+  wait-ci:
+    flag: [after_pr, merge]
+    timeout: 10m
+    command: |-
+      case "{pr.url}" in
+        */-/merge_requests/*)
+          attempt=0
+          while [ "$attempt" -lt 30 ]; do
+            status=$(glab ci get --merge-request {pr.number} --output json | jq -r '.status')
+            case "$status" in
+              success) exit 0 ;;
+              running|pending|created|waiting_for_resource|preparing|scheduled) ;;
+              *)
+                log="$(git rev-parse --git-dir)/cruise-ci-traces.log"
+                : > "$log"
+                glab ci get --merge-request {pr.number} --status=failed --with-job-details --output json \
+                  | jq -r '.id as $p | (.jobs // [])[] | select(.status == "failed") | "\($p) \(.id)"' \
+                  | while read -r pid jid; do
+                      echo "=== job $jid (pipeline $pid) ===" >> "$log"
+                      glab ci trace "$jid" --pipeline-id "$pid" >> "$log" 2>&1 || true
+                    done
+                exit 1 ;;
+            esac
+            sleep 15
+            attempt=$((attempt + 1))
+          done
+          echo "CI remained pending after 30 polls." >&2
+          exit 1 ;;
+        *) gh pr checks {pr.number} --watch ;;
+      esac
+  fix-ci-error:
+    flag: [after_pr, merge]
+    skip: prev.success
+    allow_commit: true
+    permission: full
+    prompt: |-
+      Original request: {input}
+
+      Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
+
+      Task/report scope: use the test gap plan, implementation report, verification report, and current PR changes:
+      {file:test-ci-gap-plan.md}
+      {file:test-ci-implementation.md}
+      {file:test-ci-verification.md}
+
+      CI for PR/MR #{pr.number} ({pr.url}) failed. For GitLab, inspect `$(git rev-parse --git-dir)/cruise-ci-traces.log`; for GitHub, inspect `gh pr checks {pr.number}` and the failed run logs. Fix only a genuine failure within the approved test/CI scope, then stage, commit, and push the PR branch. Never weaken, remove, skip, or disable tests, scanners, assertions, required checks, or policy to make CI green. The agent must not create or merge a PR; the host-managed native step owns any explicitly opted-in squash merge.
+    if:
+      file-changed: sync-base
+    next: wait-ci
+  squash-merge:
+    flag: merge
+    squash-merge: true
+    timeout: 10m
+

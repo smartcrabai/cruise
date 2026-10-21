@@ -433,6 +433,59 @@ steps:
 }
 
 #[test]
+fn squash_merge_call_sites_are_rejected_before_step_side_effects() {
+    let cases = [
+        (
+            "main",
+            r"
+command: [cat]
+steps:
+  shared:
+    workflow_call: callee.yaml
+    squash-merge: true
+",
+        ),
+        (
+            "after-pr",
+            r"
+command: [cat]
+steps:
+  before:
+    command: touch main-side-effect
+after-pr:
+  shared:
+    workflow_call: callee.yaml
+    squash-merge: false
+",
+        ),
+    ];
+
+    for (location, yaml) in cases {
+        let fixture = Fixture::new(yaml);
+        fixture.write_file(
+            "callee.yaml",
+            "command: [cat]\nsteps:\n  child:\n    command: touch callee-side-effect\n",
+        );
+
+        let output = fixture.exec("input");
+        let text = terminal(&output);
+        assert!(
+            !output.status.success(),
+            "{location} workflow_call with squash-merge should fail: {text}"
+        );
+        assert!(text.contains("squash-merge"), "unexpected error: {text}");
+        assert!(
+            !fixture.repo.join("callee-side-effect").exists(),
+            "{location} callsite must be rejected before callee side effects"
+        );
+        assert!(
+            !fixture.repo.join("main-side-effect").exists(),
+            "{location} callsite must be rejected before workflow steps run"
+        );
+    }
+}
+
+#[test]
 fn parallel_prompt_children_accept_distinct_output_files() {
     let config = parse_config(
         r"

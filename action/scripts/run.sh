@@ -248,22 +248,26 @@ do_run() {
   cruise run "$session_id" ${flag_args[@]+"${flag_args[@]}"} 2>&1 | tee -a "$LOG_FILE"
   local run_exit=$?
 
-  local session_json pr_url
+  local session_json pr_url session_phase pr_skipped_reason
   session_json="$(cruise list --json 2>/dev/null | jq -c --arg id "$session_id" '.[] | select(.id==$id)')"
   pr_url="$(printf '%s' "$session_json" | jq -r '.pr_url // empty')"
+  session_phase="$(printf '%s' "$session_json" | jq -r '.phase // empty')"
+  pr_skipped_reason="$(printf '%s' "$session_json" | jq -r '.pr_skipped_reason // empty')"
 
   if [ "$run_exit" -ne 0 ]; then
     echo "cruise: run failed" | tee -a "$LOG_FILE"
     emit_and_exit "$session_id" "$pr_url" "" "" 1 "cruise run failed -- see the run logs for details."
   fi
 
-  # cruise treats `gh pr create` failure on local (non --repo) sessions as a
-  # warning only: it exits 0 and marks the session Completed with pr_url
-  # unset (src/worktree_pr.rs). An empty pr_url after a successful run
-  # therefore means the PR was NOT opened even though changes may already
-  # sit on a pushed branch. Surface that as a failure instead of reporting
-  # silent success.
+  # An empty pr_url is only successful when the selected session itself
+  # records a completed intentional skip. A missing session, absent/unknown
+  # reason, or stale phase still means PR creation was not confirmed.
   if [ -z "$pr_url" ]; then
+    if [ "$session_phase" = "Completed" ] &&
+      { [ "$pr_skipped_reason" = "disabled" ] || [ "$pr_skipped_reason" = "no-commits" ]; }; then
+      echo "cruise: completed without a pull request (intentional skip: $pr_skipped_reason)" | tee -a "$LOG_FILE"
+      emit_and_exit "$session_id" "" "" "" 0
+    fi
     echo "cruise: run completed but no pull request was recorded" | tee -a "$LOG_FILE"
     emit_and_exit "$session_id" "" "" "" 1 \
       "cruise completed but no pull request was created (changes may have been pushed to a branch without a PR). Check that the workflow grants \`pull-requests: write\` and that branch protection allows PR creation."

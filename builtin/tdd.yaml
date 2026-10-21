@@ -1,5 +1,17 @@
-description: Test-first implementation with a parallel analyze -> consolidate -> apply review loop
+description: Test-first implementation with parallel analyze -> consolidate -> apply review loop and optional formal and end-to-end verification
 cleanup_after_pr: true
+flags:
+  browser_e2e:
+    description: Run real browser end-to-end checks for applicable web applications
+  app_e2e:
+    description: Run native mobile and desktop application end-to-end checks where applicable
+  after_pr:
+    description: Run pull request readiness, synchronization, and CI follow-up steps
+  formal_methods:
+    description: Add and execute repository-grounded Quint, Alloy, and Gherkin specifications
+  merge:
+    description: Run after-PR follow-up and perform a host-managed squash merge
+
 groups:
   verify-review:
     if:
@@ -723,34 +735,90 @@ steps:
       - Command and result
     if:
       no-file-changes: failed
+  formal-methods:
+    flag: formal_methods
+    prompt: |-
+      Add executable formal specifications for the behavior required by {plan}, and connect every check to CI.
+
+      ## Grounding
+
+      Read {plan}, repository requirements, and the production paths that implement the affected behavior. Derive a small, meaningful model of real observable state transitions and invariants; do not invent requirements, duplicate implementation internals as the specification, or weaken an invariant to obtain a pass. Keep scope tied to this task.
+
+      ## Quint
+
+      Add a Quint model with explicit state and transitions corresponding to the production contract, plus meaningful safety invariants and executable tests. Pin a Quint version compatible with repository tooling. Run the pinned tool's actual commands, including `quint typecheck <model.qnt>`, `quint test <model.qnt>`, a seeded bounded simulation using `quint run --seed <integer> --max-samples <count> --max-steps <count> <model.qnt>`, and bounded verification with `quint verify --invariant <invariant> --max-steps <count> <model.qnt>`. Select and pin a compatible Apalache or TLC backend and required JDK when verification needs it. Simulation is not proof: report seed and bounds, and state the verification bound and backend.
+
+      ## Alloy
+
+      Add an Alloy model of the same task-relevant contract, at least one meaningful assertion and a satisfiable witness command so assertion success cannot be vacuous. Pin a released CLI artifact and checksum and the compatible JDK/runtime. Use the pinned CLI's actual documented command syntax and explicit command selection, such as `--command '*'`; configure expectations so assertions expect no counterexample (`--expect 0`) and a deliberately meaningful witness expects a result (`--expect 1`). Run all assertions and witness commands, inspect the CLI receipt, and fail on unexpected results. Check the pinned version's CLI help rather than relying on its default command.
+
+      ## Gherkin
+
+      Add task-grounded feature scenarios and concrete step definitions that exercise the real production entry points and assert observable outputs/state. Use the repository's existing BDD convention if present; otherwise add a stack-native executable runner and dependencies. Parser-only checks, dry runs, undefined or pending steps, and no-op or mock-only definitions do not count. The runner must fail on undefined or pending steps and assertion failures.
+
+      ## Execution and CI
+
+      Add all three specifications and their required runners to the repository's reproducible dependency/install setup and provider-native CI, with pinned compatible versions and no secret-dependent PR execution. Run every check from the repository and fix genuine source or specification defects using requirements as authority; never change an invariant or assertion merely to force green. Rerun affected checks after fixes. Report exact commands, tool/runtime versions, results, Alloy receipts, Quint bounds, CI files changed, actual defects fixed, and any concrete missing prerequisite. A missing runner or platform is a blocker, never a pass.
+  browser-e2e:
+    flag: browser_e2e
+    prompt: |-
+      Add and run real browser end-to-end coverage for applicable web behavior in {plan}.
+
+      Inspect repository manifests, existing browser tests, CI, and the actual web application and service entry points. If this repository contains a browser-facing application relevant to the task, add or extend deterministic browser scenarios that launch the real application, exercise the user-visible workflow through a real browser, and assert observable success and relevant failure or boundary behavior. Use existing browser tooling where available; otherwise select and pin a compatible browser runner and runtime that fit this stack. Do not substitute unit tests, DOM-only tests, mocks, screenshots without assertions, or a parser-only run for browser execution. Use isolated, reproducible test data and real production paths or repository-supported local services.
+
+      Run the browser suite and the checks needed to diagnose failures. Fix actual application defects exposed by the scenarios without weakening assertions, then rerun the affected browser checks. Wire the suite into existing provider-native CI when it can run reproducibly on a supported runner, and make failures fail CI without requiring secrets. Report the real browser and runtime, exact commands and results, assertions exercised, fixes made, and CI files changed.
+
+      If no relevant browser application exists, report it as not applicable with repository evidence and do not add a fake browser suite. If an applicable application exists but the required runtime cannot be provisioned, report the exact missing prerequisite and attempted reachable work as blocked; never claim the browser phase passed without actual browser execution.
+  app-e2e:
+    flag: app_e2e
+    prompt: |-
+      Add and run native end-to-end coverage for every applicable mobile and desktop application target in {plan}.
+
+      Inspect repository manifests, project targets, existing native tests, CI, and production app entry points. Inventory each real mobile and desktop target affected by the plan. For every applicable target, add or extend deterministic tests using that platform's native runner and a representative simulator, emulator, or supported desktop runtime. Launch the actual application and exercise the user-facing task behavior, asserting visible output or persisted state plus relevant failure or boundary behavior. Use real production paths and isolated reproducible data; a unit test, mock-only harness, web app, or another platform's runner is not a native app E2E pass.
+
+      Use the repository's established toolchain where available; otherwise pin compatible platform tooling and describe a reproducible setup. Run each applicable target's native E2E suite and checks needed to diagnose failures. Fix genuine application defects exposed without weakening assertions, then rerun affected checks. Wire each suite into provider-native CI on a compatible host when reproducible and available, without secrets; do not report another platform's run as coverage for a target.
+
+      Report the complete mobile/desktop target inventory, runner and device/runtime for each, exact commands and results, assertions, defects fixed, CI files changed, and concrete blockers. If no native app target exists, report not applicable with repository evidence. If a target exists but its simulator, emulator, OS, device, or host cannot be provisioned, report that target as blocked and never claim a pass.
   verify-review-pass:
     group: verify-review
 after-pr:
   pr-ready:
+    flag: [after_pr, merge]
     command: |-
       case "{pr.url}" in
         */-/merge_requests/*) glab mr update {pr.number} --ready ;;
         *) gh pr ready {pr.number} ;;
       esac
   sync-base:
+    flag: [after_pr, merge]
     command: |-
       cruise internal sync-base {pr.number} --url {pr.url}
   resolve-conflict:
+    flag: [after_pr, merge]
     skip: prev.success
     allow_commit: true
-    prompt: |
-      A conflict with the base branch occurred during `git merge`.
-      Check the unresolved files with `git status`, resolve all conflict
-      markers (<<<<<<<), then run `git add <files>` / `git commit`.
-      There is no need to push — the next step handles that.
+    permission: full
+    prompt: |-
+      Original request: {input}
+
+      Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
+
+      Task/report scope: use the approved plan and current task changes in the repository; do not rely on implicit prompt history.
+
+      A conflict occurred while synchronizing PR/MR #{pr.number} ({pr.url}) with its base branch. Resolve only this conflict within the approved task scope, preserve unrelated work, then stage and commit the resolution. Do not push; the following step handles it. Never weaken tests, scanners, assertions, checks, or policy to get green. Do not create or merge a PR directly.
+
   push-after-sync:
+    flag: [after_pr, merge]
     command: |-
       git push
   wait-ci:
+    flag: [after_pr, merge]
+    timeout: 10m
     command: |-
       case "{pr.url}" in
         */-/merge_requests/*)
-          while :; do
+          attempt=0
+          while [ "$attempt" -lt 30 ]; do
             status=$(glab ci get --merge-request {pr.number} --output json | jq -r '.status')
             case "$status" in
               success) exit 0 ;;
@@ -767,19 +835,29 @@ after-pr:
                 exit 1 ;;
             esac
             sleep 15
-          done ;;
+            attempt=$((attempt + 1))
+          done
+          echo "CI remained pending after 30 polls." >&2
+          exit 1 ;;
         *) gh pr checks {pr.number} --watch ;;
       esac
   fix-ci-error:
+    flag: [after_pr, merge]
     skip: prev.success
     allow_commit: true
-    prompt: |
-      The CI for PR/MR #{pr.number} ({pr.url}) is failing.
-      If the URL is a GitLab merge request (contains `/-/merge_requests/`), the failed job
-      traces were collected in the file `$(git rev-parse --git-dir)/cruise-ci-traces.log`. Read it and fix the cause.
-      Otherwise (GitHub), identify the failing check with `gh pr checks {pr.number}`,
-      check the detailed logs with `gh run view <run-id> --log-failed` or similar, and fix the cause.
-      After fixing it, update the PR branch with git add / commit / push.
+    permission: full
+    prompt: |-
+      Original request: {input}
+
+      Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
+
+      Task/report scope: use the approved plan and current task changes in the repository; do not rely on implicit prompt history.
+
+      CI for PR/MR #{pr.number} ({pr.url}) failed. For GitLab, inspect `$(git rev-parse --git-dir)/cruise-ci-traces.log`; for GitHub, inspect `gh pr checks {pr.number}` and the failed run logs. Fix only a genuine failure within the approved task scope, then stage, commit, and push the PR branch. Never weaken, remove, skip, or disable tests, scanners, assertions, required checks, or policy to make CI green. The agent must not create or merge a PR; the host-managed native step owns any explicitly opted-in squash merge.
     if:
       file-changed: sync-base
     next: wait-ci
+  squash-merge:
+    flag: merge
+    squash-merge: true
+    timeout: 10m

@@ -54,6 +54,14 @@ impl SessionPhase {
     }
 }
 
+/// Why a completed worktree session intentionally has no pull request.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrSkippedReason {
+    Disabled,
+    NoCommits,
+}
+
 /// Where a session should execute its workflow.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkspaceMode {
@@ -104,6 +112,9 @@ pub struct SessionState {
     /// PR URL created after workflow completion.
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// Deliberate reason a completed worktree session has no PR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_skipped_reason: Option<PrSkippedReason>,
     /// Forge (GitHub/GitLab) resolved when the session was created.
     #[serde(default)]
     pub forge: Option<crate::forge::ForgeKind>,
@@ -237,6 +248,7 @@ impl SessionState {
             target_branch: None,
             allow_dirty_working_tree: false,
             pr_url: None,
+            pr_skipped_reason: None,
             forge: None,
             updated_at: None,
             awaiting_input: false,
@@ -1874,8 +1886,8 @@ mod tests {
     }
 
     #[test]
-    fn test_session_state_backward_compat_missing_cleanup_override() {
-        // Given: an old-format state.json without cleanup_after_pr_override
+    fn test_session_state_backward_compat_missing_optional_fields() {
+        // Given: an old-format state.json without the optional PR fields
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let id = "20260306170001".to_string();
@@ -1899,8 +1911,9 @@ mod tests {
         // When: loaded
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: the override defaults to None so old sessions remain non-destructive
+        // Then: both optional fields default to None for old session files
         assert_eq!(loaded.cleanup_after_pr_override, None);
+        assert_eq!(loaded.pr_skipped_reason, None);
     }
 
     #[test]

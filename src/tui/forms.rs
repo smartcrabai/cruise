@@ -86,12 +86,21 @@ pub enum Step {
     Flags,
     Workspace,
     DirtyTree,
-    FormalSpec,
     Launch,
 }
 
 impl Step {
+<<<<<<< HEAD
     pub const ORDER: [Self; 12] = [
+||||||| 5b70c6b
+    pub const ORDER: [Self; 12] = [
+        Self::Task,
+        Self::Attachments,
+=======
+    pub const ORDER: [Self; 11] = [
+        Self::Task,
+        Self::Attachments,
+>>>>>>> origin/main
         Self::Source,
         Self::WorkingDirectory,
         Self::Repository,
@@ -102,7 +111,6 @@ impl Step {
         Self::Flags,
         Self::Workspace,
         Self::DirtyTree,
-        Self::FormalSpec,
         Self::Launch,
     ];
 
@@ -119,7 +127,6 @@ impl Step {
             Self::Flags => "Workflow flags",
             Self::Workspace => "Workspace",
             Self::DirtyTree => "Dirty working tree",
-            Self::FormalSpec => "Formal specification",
             Self::Launch => "Launch",
         }
     }
@@ -147,7 +154,7 @@ impl Step {
     pub fn is_choice(self) -> bool {
         matches!(
             self,
-            Self::Source | Self::Workspace | Self::DirtyTree | Self::FormalSpec | Self::Launch
+            Self::Source | Self::Workspace | Self::DirtyTree | Self::Launch
         )
     }
 }
@@ -207,7 +214,7 @@ pub struct NewSessionForm {
     pub skipped_explicit: bool,
     /// Flags declared by the selected workflow config.
     pub flag_choices: Vec<crate::flags::FlagChoice>,
-    /// Explicit on/off answers for the declared flags.
+    /// Explicit overrides; an absent flag is effectively off.
     pub flag_values: crate::flags::FlagValues,
     pub flag_cursor: usize,
     pub dirty: bool,
@@ -223,7 +230,6 @@ pub struct SessionOptions {
 #[derive(Default)]
 pub struct PlanningFlags {
     pub grill: bool,
-    pub formal_spec: bool,
     pub skip_planning: bool,
 }
 
@@ -271,7 +277,7 @@ impl NewSessionForm {
         }
     }
 
-    /// Flip the flag under the cursor: unset and off become on, on becomes off.
+    /// Flip the effective boolean value for the flag under the cursor.
     pub fn toggle_flag(&mut self) {
         if let Some(choice) = self.flag_choices.get(self.flag_cursor) {
             let next = !self.flag_values.get(&choice.name).copied().unwrap_or(false);
@@ -434,11 +440,6 @@ impl NewSessionForm {
                 self.options.allow_dirty_working_tree = !self.options.allow_dirty_working_tree;
                 self.mark_changed();
             }
-            Step::FormalSpec => {
-                self.options.planning.formal_spec = !self.options.planning.formal_spec;
-                self.options.planning.skip_planning &= !self.options.planning.formal_spec;
-                self.mark_changed();
-            }
             Step::Launch => {
                 let len = Launch::ALL.len().cast_signed();
                 let index = Launch::ALL
@@ -460,7 +461,6 @@ impl NewSessionForm {
         let planning = &mut self.options.planning;
         planning.grill = launch == Launch::Grill;
         planning.skip_planning = launch == Launch::InputPlan;
-        planning.formal_spec &= !planning.skip_planning;
     }
     pub fn input(&mut self, event: KeyEvent) {
         match self.step {
@@ -515,28 +515,25 @@ impl NewSessionForm {
                     skipped.join(", ")
                 }
             }
-            Step::Flags => {
-                let parts: Vec<String> = self
-                    .flag_choices
-                    .iter()
-                    .map(|choice| {
-                        let state = match self.flag_values.get(&choice.name) {
-                            Some(true) => "on",
-                            Some(false) => "off",
-                            None => "unset",
-                        };
-                        format!("{}={state}", choice.name)
-                    })
-                    .collect();
-                parts.join(", ")
-            }
+            Step::Flags => self
+                .flag_choices
+                .iter()
+                .map(|choice| {
+                    let state = if self.flag_values.get(&choice.name).copied().unwrap_or(false) {
+                        "on"
+                    } else {
+                        "off"
+                    };
+                    format!("{}={state}", choice.name)
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
             Step::Workspace => match self.workspace_mode {
                 WorkspaceMode::Worktree => "worktree",
                 WorkspaceMode::CurrentBranch => "current branch",
             }
             .to_string(),
             Step::DirtyTree => yes_no(self.options.allow_dirty_working_tree).to_string(),
-            Step::FormalSpec => yes_no(self.options.planning.formal_spec).to_string(),
             Step::Launch => self.launch.label().to_string(),
         }
     }
@@ -617,14 +614,6 @@ impl NewSessionForm {
             Step::Repository if self.repository.text().trim().is_empty() => {
                 Err("Select a GitHub repository before creating a session".to_string())
             }
-            Step::Flags
-                if self
-                    .flag_choices
-                    .iter()
-                    .any(|choice| !self.flag_values.contains_key(&choice.name)) =>
-            {
-                Err("Set every workflow flag on or off (Space) before continuing".to_string())
-            }
             _ => Ok(()),
         }
     }
@@ -632,9 +621,6 @@ impl NewSessionForm {
     pub fn validate(&self) -> Result<(), String> {
         if self.options.planning.grill && self.options.planning.skip_planning {
             return Err("Grill planning requires interactive LLM planning".to_string());
-        }
-        if self.options.planning.formal_spec && self.options.planning.skip_planning {
-            return Err("Formal specification requires LLM planning".to_string());
         }
         if self.source == SourceKind::GitHub && self.repository.text().trim().is_empty() {
             return Err("Select a GitHub repository before creating a session".to_string());
@@ -722,7 +708,6 @@ mod tests {
         form.skipped.set_text("build, test");
         form.options.allow_dirty_working_tree = true;
         form.options.planning.grill = true;
-        form.options.planning.formal_spec = true;
         form.options.planning.skip_planning = true;
         let last_change = form.last_change;
 
@@ -742,7 +727,6 @@ mod tests {
         assert_eq!(form.launch, Launch::SaveDraft);
         assert!(form.options.allow_dirty_working_tree);
         assert!(form.options.planning.grill);
-        assert!(form.options.planning.formal_spec);
         assert!(form.options.planning.skip_planning);
         assert!(form.skipped_explicit);
         assert_eq!(form.last_change, last_change);
@@ -871,7 +855,7 @@ mod tests {
                 source: crate::resolver::CandidateKind::Local(PathBuf::from("b.yaml")),
             },
             crate::resolver::ConfigCandidate {
-                label: "Built-in default".to_string(),
+                label: "Built-in tdd".to_string(),
                 source: crate::resolver::CandidateKind::Builtin,
             },
         ];
@@ -903,7 +887,7 @@ mod tests {
                 source: crate::resolver::CandidateKind::Local(PathBuf::from("second.yaml")),
             },
             crate::resolver::ConfigCandidate {
-                label: "Built-in default".to_string(),
+                label: "Built-in tdd".to_string(),
                 source: crate::resolver::CandidateKind::Builtin,
             },
         ];
@@ -952,7 +936,7 @@ mod tests {
                 source: crate::resolver::CandidateKind::Local(PathBuf::from("second.yaml")),
             },
             crate::resolver::ConfigCandidate {
-                label: "Built-in default".to_string(),
+                label: "Built-in tdd".to_string(),
                 source: crate::resolver::CandidateKind::Builtin,
             },
         ];
@@ -986,7 +970,7 @@ mod tests {
                 )),
             },
             crate::resolver::ConfigCandidate {
-                label: "Built-in default".to_string(),
+                label: "Built-in tdd".to_string(),
                 source: crate::resolver::CandidateKind::Builtin,
             },
         ];
@@ -1057,36 +1041,6 @@ mod tests {
     }
 
     #[test]
-    fn formal_spec_choice_can_be_enabled_and_disabled() {
-        let mut form = NewSessionForm::default();
-        form.step = Step::FormalSpec;
-
-        form.choose(1);
-        assert!(form.options.planning.formal_spec);
-        form.choose(-1);
-        assert!(!form.options.planning.formal_spec);
-    }
-
-    #[test]
-    fn formal_spec_clears_input_plan_mode() {
-        let mut form = NewSessionForm::default();
-        form.options.planning.skip_planning = true;
-        form.step = Step::FormalSpec;
-        form.choose(1);
-        assert!(form.options.planning.formal_spec);
-        assert!(!form.options.planning.skip_planning);
-    }
-
-    #[test]
-    fn validate_rejects_formal_spec_with_skip_planning_even_when_set_directly() {
-        let mut form = NewSessionForm::default();
-        form.options.planning.formal_spec = true;
-        form.options.planning.skip_planning = true;
-
-        assert!(form.validate().is_err());
-    }
-
-    #[test]
     fn directory_dialogue_asks_directory_questions_only() {
         let form = NewSessionForm::default();
         assert_eq!(
@@ -1099,7 +1053,6 @@ mod tests {
                 Step::Attachments,
                 Step::SkippedSteps,
                 Step::Workspace,
-                Step::FormalSpec,
                 Step::Launch,
             ]
         );
@@ -1131,7 +1084,55 @@ mod tests {
         assert!(form.advance());
         assert_eq!(form.step, Step::DirtyTree);
         assert!(form.advance());
-        assert_eq!(form.step, Step::FormalSpec);
+        assert_eq!(form.step, Step::Launch);
+    }
+    #[test]
+    fn workflow_flags_default_off_toggle_without_advancing_and_keep_saved_values() {
+        let choice = |name: &str| crate::flags::FlagChoice {
+            name: name.to_string(),
+            description: None,
+        };
+
+        let mut form = NewSessionForm {
+            step: Step::Flags,
+            ..NewSessionForm::default()
+        };
+        form.set_flag_choices(vec![choice("browser_e2e"), choice("app_e2e")]);
+        assert!(form.flag_values.is_empty());
+        assert!(form.request().flags.is_empty());
+        assert!(form.validate_step().is_ok());
+        assert!(form.advance());
+        assert_eq!(form.step, Step::Workspace);
+
+        form.step = Step::Flags;
+        form.toggle_flag();
+        assert_eq!(form.step, Step::Flags);
+        assert_eq!(form.flag_values.get("browser_e2e"), Some(&true));
+        assert!(!form.flag_values.contains_key("app_e2e"));
+
+        form.flag_cursor = 1;
+        form.toggle_flag();
+        assert_eq!(form.step, Step::Flags);
+        assert_eq!(form.flag_values.len(), 2);
+        assert_eq!(form.flag_values.get("browser_e2e"), Some(&true));
+        assert_eq!(form.flag_values.get("app_e2e"), Some(&true));
+
+        form.flag_cursor = 0;
+        form.toggle_flag();
+        assert_eq!(form.flag_values.get("browser_e2e"), Some(&false));
+        assert_eq!(form.flag_values.get("app_e2e"), Some(&true));
+        assert_eq!(
+            form.request().flags.get("browser_e2e"),
+            Some(&false),
+            "toggling an enabled flag off should keep its effective value off"
+        );
+
+        form.set_flag_choices(vec![choice("browser_e2e"), choice("app_e2e")]);
+        assert_eq!(form.flag_values.get("browser_e2e"), Some(&false));
+        assert_eq!(form.flag_values.get("app_e2e"), Some(&true));
+
+        assert!(form.advance());
+        assert_eq!(form.step, Step::Workspace);
     }
 
     #[test]
@@ -1171,8 +1172,6 @@ mod tests {
         assert_eq!(form.step, Step::Attachments);
         assert!(form.advance());
         assert_eq!(form.step, Step::SkippedSteps);
-        assert!(form.advance());
-        assert_eq!(form.step, Step::FormalSpec);
         assert!(form.advance());
         assert_eq!(form.step, Step::Launch);
         assert!(!form.advance(), "Launch is the last question");
@@ -1259,14 +1258,6 @@ mod tests {
         form.choose(2);
         assert_eq!(form.launch, Launch::InputPlan);
 
-        form.options.planning.formal_spec = true;
-        form.select_launch(Launch::InputPlan);
-        assert!(form.options.planning.skip_planning);
-        assert!(!form.options.planning.grill);
-        assert!(
-            !form.options.planning.formal_spec,
-            "input-as-plan cannot carry a formal specification"
-        );
         form.select_launch(Launch::Grill);
         assert!(form.options.planning.grill);
         assert!(!form.options.planning.skip_planning);
@@ -1312,7 +1303,6 @@ mod tests {
         form.skipped.set_text("build, test");
         assert_eq!(form.answer(Step::SkippedSteps), "build, test");
         assert_eq!(form.answer(Step::Workspace), "worktree");
-        assert_eq!(form.answer(Step::FormalSpec), "no");
         assert_eq!(form.answer(Step::Launch), "Start planning");
     }
 }

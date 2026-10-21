@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::cli::{DEFAULT_RATE_LIMIT_RETRIES, ListArgs};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
-use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
+use crate::session::{PrSkippedReason, SessionManager, SessionPhase, SessionState, WorkspaceMode};
 use crate::workflow::{list_skippable_after_pr_steps, list_skippable_steps};
 
 /// CLI-only DTO for JSON output. Stable machine-readable form of `SessionState`.
@@ -31,6 +31,7 @@ struct ListSessionJson {
     workspace_mode: WorkspaceMode,
     target_branch: Option<String>,
     pr_url: Option<String>,
+    pr_skipped_reason: Option<PrSkippedReason>,
     config_path: Option<String>,
     updated_at: Option<String>,
     awaiting_input: bool,
@@ -76,6 +77,7 @@ fn session_to_json_with_plan_availability(
         workspace_mode: session.workspace_mode,
         target_branch: session.target_branch,
         pr_url: session.pr_url,
+        pr_skipped_reason: session.pr_skipped_reason,
         config_path: session.config.selection_value(),
         updated_at: session.updated_at,
         awaiting_input: session.awaiting_input,
@@ -191,8 +193,9 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     {
                         eprintln!("warning: failed to refresh session title: {err}");
                     }
+                    let create_pr = manager.load_config(&session)?.create_pr;
                     session.approve();
-                    crate::repo_clone::cleanup_after_approval(&manager, &mut session);
+                    crate::repo_clone::cleanup_after_approval(&manager, &mut session, create_pr);
                     manager.save(&session)?;
                     eprintln!(
                         "{} Session {} approved. Run with: {}",
@@ -1756,6 +1759,21 @@ mod tests {
     }
 
     #[test]
+    fn test_session_to_json_exposes_exact_pr_skipped_reasons() {
+        let mut disabled = make_session("20260306143000", "task", SessionPhase::Completed);
+        disabled.pr_skipped_reason = Some(PrSkippedReason::Disabled);
+        let disabled_json = serde_json::to_value(session_to_json(disabled))
+            .unwrap_or_else(|e| panic!("serialization failed: {e}"));
+        assert_eq!(disabled_json["pr_skipped_reason"], "disabled");
+
+        let mut no_commits = make_session("20260306143001", "task", SessionPhase::Completed);
+        no_commits.pr_skipped_reason = Some(PrSkippedReason::NoCommits);
+        let no_commits_json = serde_json::to_value(session_to_json(no_commits))
+            .unwrap_or_else(|e| panic!("serialization failed: {e}"));
+        assert_eq!(no_commits_json["pr_skipped_reason"], "no-commits");
+    }
+
+    #[test]
     fn test_session_to_json_awaiting_approval_plan_error_is_preserved() {
         // Given: a session whose background planning failed before approval
         let mut session = make_session("20260306143000", "task", SessionPhase::AwaitingApproval);
@@ -1769,6 +1787,7 @@ mod tests {
         // Then: the durable planning error is exposed separately from run-phase failures
         assert_eq!(value["phase"], "AwaitingApproval");
         assert_eq!(value["phase_error"], serde_json::Value::Null);
+        assert_eq!(value["pr_skipped_reason"], serde_json::Value::Null);
         assert_eq!(value["plan_error"], "planner exited 1");
         assert_eq!(value["plan_available"], false);
     }
