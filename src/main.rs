@@ -49,6 +49,7 @@ mod forge;
 mod github_review;
 mod graph;
 mod herdr;
+mod install_identity;
 mod issue_publish;
 mod list_cmd;
 mod metadata;

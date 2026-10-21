@@ -63,6 +63,46 @@ pub fn lock_process() -> ProcessLock {
     }
     ProcessLock { _guard: guard }
 }
+#[cfg(test)]
+const ISOLATED_TEST_PROBE_ENV: &str = "CRUISE_TEST_PROBE";
+#[cfg(test)]
+const ISOLATED_TEST_PROBE_RAN: &str = "CRUISE_TEST_PROBE_RAN";
+
+/// Run one ignored test with a child-only PATH, requiring proof that its body ran.
+#[cfg(test)]
+pub(crate) fn run_isolated_test_with_path(test_name: &str, path: &Path) {
+    // Keep cooperative process-wide environment mutations out of the child's inherited env.
+    let _lock = lock_process();
+    let output = Command::new(std::env::current_exe().unwrap_or_else(|e| panic!("{e}")))
+        .args([
+            "--exact",
+            test_name,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(ISOLATED_TEST_PROBE_ENV, test_name)
+        .env("PATH", path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run isolated test {test_name}: {e}"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "isolated test {test_name} failed:\n{stdout}{stderr}"
+    );
+    assert!(
+        stdout.contains(&format!("{ISOLATED_TEST_PROBE_RAN}:{test_name}")),
+        "isolated test {test_name} did not run:\n{stdout}{stderr}"
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn report_isolated_test_probe() {
+    let test_name = std::env::var(ISOLATED_TEST_PROBE_ENV)
+        .unwrap_or_else(|e| panic!("isolated test probe was not invoked by its parent: {e}"));
+    println!("{ISOLATED_TEST_PROBE_RAN}:{test_name}");
+}
 
 /// Run a git command in the given directory, panicking if it fails.
 ///

@@ -5039,8 +5039,8 @@ mod tests {
             _tmp: TempDir,
             gh: FakeGh,
             manager: crate::session::SessionManager,
-            app: TuiApp,
             _path: EnvGuard,
+            app: TuiApp,
         }
 
         fn env(pr_url: Option<&str>, phase: SessionPhase) -> Env {
@@ -5071,14 +5071,13 @@ mod tests {
             let application = CruiseApplication::new(manager.clone());
             let (events, _) = tokio::sync::mpsc::unbounded_channel();
             let (logs, _) = tokio::sync::mpsc::channel(2);
-            let mut app = TuiApp::new_for_test_with_lock(application, events, logs, Some(lock));
-            app.sessions = vec![state];
+            let app = TuiApp::new_for_test_with_lock(application, events, logs, Some(lock));
             Env {
                 _tmp: tmp,
                 gh,
                 manager,
-                app,
                 _path: path,
+                app,
             }
         }
 

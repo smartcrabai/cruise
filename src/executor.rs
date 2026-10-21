@@ -650,7 +650,7 @@ mod tests {
 
     use crate::backend::effort::EffortLevel;
     use crate::backend::stream::LimitError;
-    use crate::test_support::{EnvGuard, lock_process, set_fake_home};
+    use crate::test_support::{EnvGuard, lock_process, prepend_to_path, set_fake_home};
 
     static EMPTY_MCP_SERVERS: LazyLock<crate::config::McpServers> =
         LazyLock::new(crate::config::McpServers::new);
@@ -1049,7 +1049,7 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions)
             .unwrap_or_else(|error| panic!("{error}"));
-        guards.push(EnvGuard::set("PATH", bin.as_os_str()));
+        guards.push(prepend_to_path(&bin));
         for key in [
             "JCODE_MODEL",
             "JCODE_HOME",
