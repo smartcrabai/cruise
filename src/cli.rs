@@ -69,6 +69,8 @@ pub enum Commands {
     Ssh(SshArgs),
     /// Serve the browser UI from this machine (pass `--open` to launch the default browser).
     Webui(WebuiArgs),
+    /// Update Cruise itself or inspect an in-progress update.
+    Update(UpdateArgs),
     /// List, eject, generate, and install workflows.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
@@ -190,6 +192,13 @@ pub struct WebuiArgs {
     /// re-read on every request (development: `--webui-dir webui`).
     #[arg(long, value_name = "DIR")]
     pub webui_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct UpdateArgs {
+    /// Display in-progress update transactions across installations without network access or changes.
+    #[arg(long)]
+    pub status: bool,
 }
 
 #[derive(Parser, Debug)]

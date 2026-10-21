@@ -77,8 +77,9 @@ assert_contains "Dockerfile declares ARG TARGETARCH" "Dockerfile" "ARG TARGETARC
 # gh CLI version pin
 assert_contains "Dockerfile declares ARG GH_VERSION" "Dockerfile" "ARG GH_VERSION"
 
-# Binary is staged per-arch via ARG TARGETARCH, not hardcoded target/ path
+# Launcher and runtime are staged per-arch via ARG TARGETARCH, not hardcoded target/ path
 assert_contains "Dockerfile copies binary via bin/\${TARGETARCH}/cruise" "Dockerfile" 'bin/${TARGETARCH}/cruise'
+assert_contains "Dockerfile copies runtime via bin/\${TARGETARCH}/cruise-runtime" "Dockerfile" 'bin/${TARGETARCH}/cruise-runtime'
 assert_not_contains "Dockerfile does not copy from target/ directly" "Dockerfile" "COPY target/"
 
 # Non-root runtime user
@@ -146,8 +147,9 @@ assert_contains "build-binary matrix includes arm64" "$WORKFLOW" "arm64"
 # Native ARM runner (no cross-compilation)
 assert_contains "build-binary uses ubuntu-24.04-arm runner for ARM" "$WORKFLOW" "ubuntu-24.04-arm"
 
-# Cargo build: bin cruise only
-assert_contains "cargo build uses --bin cruise flag" "$WORKFLOW" "--bin cruise"
+# Cargo build includes launcher and runtime bins
+assert_contains "cargo build includes --bin cruise" "$WORKFLOW" "--bin cruise"
+assert_contains "cargo build includes --bin cruise-runtime" "$WORKFLOW" "--bin cruise-runtime"
 assert_not_contains "cargo build does not use --workspace" "$WORKFLOW" "--workspace"
 
 # Artifact handoff between jobs

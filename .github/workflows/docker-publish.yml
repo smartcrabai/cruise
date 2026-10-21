@@ -28,17 +28,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: rustup update stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - name: Build cruise binary
-        run: cargo build --release --bin cruise --target ${{ matrix.target }}
-      - name: Stage binary for docker context
+      - name: Build launcher and runtime binaries
+        run: cargo build --release --bin cruise --bin cruise-runtime --target ${{ matrix.target }}
+      - name: Stage launcher and runtime binaries for docker context
         run: |
           mkdir -p bin/${{ matrix.arch }}
           cp target/${{ matrix.target }}/release/cruise bin/${{ matrix.arch }}/cruise
-          strip bin/${{ matrix.arch }}/cruise
+          cp target/${{ matrix.target }}/release/cruise-runtime bin/${{ matrix.arch }}/cruise-runtime
+          strip bin/${{ matrix.arch }}/cruise bin/${{ matrix.arch }}/cruise-runtime
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: cruise-bin-${{ matrix.arch }}
-          path: bin/${{ matrix.arch }}/cruise
+          path: bin/${{ matrix.arch }}/
           if-no-files-found: error
           retention-days: 7
 
@@ -62,7 +63,7 @@ jobs:
           name: cruise-bin-arm64
           path: bin/arm64
       - name: Make binaries executable
-        run: chmod +x bin/amd64/cruise bin/arm64/cruise
+        run: chmod +x bin/amd64/cruise bin/amd64/cruise-runtime bin/arm64/cruise bin/arm64/cruise-runtime
 
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4

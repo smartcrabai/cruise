@@ -17,6 +17,7 @@ RUN apt-get update && \
     chown -R bun:bun /work /home/bun/.cruise
 
 COPY --chown=bun:bun --chmod=755 bin/${TARGETARCH}/cruise /usr/local/bin/cruise
+COPY --chown=bun:bun --chmod=755 bin/${TARGETARCH}/cruise-runtime /usr/local/bin/cruise-runtime
 
 WORKDIR /work
 USER bun

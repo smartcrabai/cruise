@@ -282,8 +282,8 @@ assert_contains "resolve-config: a missing prompt file reports the path plus GIT
 # install.sh pipes `curl -fsSL "$url" | ENV... sh`. A stub `curl` prints a
 # locally-authored fake installer script to stdout (no network involved);
 # the real `/bin/sh` on PATH then executes that script, which records the
-# env vars it received and drops a fake `cruise` binary into
-# $CRUISE_UNMANAGED_INSTALL so the rest of install.sh's own PATH checks
+# env vars it received and drops fake `cruise` and `cruise-runtime` binaries
+# into $CRUISE_UNMANAGED_INSTALL so the rest of install.sh's own PATH checks
 # behave exactly as they would against a real install.
 
 export GITHUB_PATH="$TMP/github_path"
@@ -313,12 +313,32 @@ write_installer_with_version() { # $1=version string printed by `cruise --versio
 printf 'installer CRUISE_UNMANAGED_INSTALL=%s CRUISE_NO_MODIFY_PATH=%s CRUISE_DISABLE_UPDATE=%s CRUISE_PRINT_QUIET=%s\n' \\
   "\$CRUISE_UNMANAGED_INSTALL" "\$CRUISE_NO_MODIFY_PATH" "\$CRUISE_DISABLE_UPDATE" "\$CRUISE_PRINT_QUIET" >> "\$STUB_LOG"
 mkdir -p "\$CRUISE_UNMANAGED_INSTALL"
-cat > "\$CRUISE_UNMANAGED_INSTALL/cruise" <<'BIN'
+  cat > "\$CRUISE_UNMANAGED_INSTALL/cruise" <<'BIN'
 #!/bin/sh
 echo "cruise $1"
 BIN
-chmod +x "\$CRUISE_UNMANAGED_INSTALL/cruise"
+  chmod +x "\$CRUISE_UNMANAGED_INSTALL/cruise"
+  cat > "\$CRUISE_UNMANAGED_INSTALL/cruise-runtime" <<'BIN'
+#!/bin/sh
+echo "cruise-runtime $1"
+BIN
+  chmod +x "\$CRUISE_UNMANAGED_INSTALL/cruise-runtime"
 EOF
+}
+
+assert_installed_bundle() { # $1=assertion label, $2=install directory
+  local label="$1"
+  local directory="$2"
+  if [ -x "$directory/cruise" ]; then
+    pass "$label installs the cruise launcher"
+  else
+    fail "$label installs the cruise launcher" "missing executable: $directory/cruise"
+  fi
+  if [ -x "$directory/cruise-runtime" ]; then
+    pass "$label installs the cruise runtime"
+  else
+    fail "$label installs the cruise runtime" "missing executable: $directory/cruise-runtime"
+  fi
 }
 
 write_failing_installer() {
@@ -330,6 +350,11 @@ cat > "$CRUISE_UNMANAGED_INSTALL/cruise" <<'BIN'
 echo "cruise 0.2.0"
 BIN
 chmod +x "$CRUISE_UNMANAGED_INSTALL/cruise"
+cat > "$CRUISE_UNMANAGED_INSTALL/cruise-runtime" <<'BIN'
+#!/bin/sh
+echo "cruise-runtime"
+BIN
+chmod +x "$CRUISE_UNMANAGED_INSTALL/cruise-runtime"
 printf 'installer-invoked-then-failed\n' >> "$STUB_LOG"
 exit 1
 EOF
@@ -351,6 +376,7 @@ assert_contains "install: CRUISE_VERSION=latest passes CRUISE_UNMANAGED_INSTALL/
   "$(cat "$STUB_LOG")" "installer CRUISE_UNMANAGED_INSTALL=$IDIR/cruise-bin CRUISE_NO_MODIFY_PATH=1 CRUISE_DISABLE_UPDATE=1 CRUISE_PRINT_QUIET=1"
 assert_eq "install: CRUISE_VERSION=latest appends the install dir to GITHUB_PATH" \
   "$IDIR/cruise-bin" "$(cat "$GITHUB_PATH")"
+assert_installed_bundle "install: CRUISE_VERSION=latest" "$IDIR/cruise-bin"
 
 # --- Windows runner: PowerShell installer, platform, failure, version floor --
 stub powershell <<'SH'
@@ -363,6 +389,11 @@ cat > "$CRUISE_UNMANAGED_INSTALL/cruise" <<BIN
 echo "cruise ${FAKE_PS_VERSION:-0.2.0}"
 BIN
 chmod +x "$CRUISE_UNMANAGED_INSTALL/cruise"
+cat > "$CRUISE_UNMANAGED_INSTALL/cruise-runtime" <<'BIN'
+#!/bin/sh
+echo "cruise-runtime"
+BIN
+chmod +x "$CRUISE_UNMANAGED_INSTALL/cruise-runtime"
 [ "${FAKE_PS_FAIL:-0}" = "1" ] && exit 1
 exit 0
 SH
@@ -375,6 +406,7 @@ mkdir -p "$IDIR_WIN"
 status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_OS=Windows RUNNER_TEMP="$IDIR_WIN" CRUISE_VERSION=latest bash action/scripts/install.sh 2>&1)
 status=$?
 assert_status "install: a Windows runner succeeds via the PowerShell installer" 0 "$status" "$status_out"
+assert_installed_bundle "install: a Windows runner" "$IDIR_WIN/cruise-bin"
 assert_contains "install: a Windows runner fetches the .ps1 installer through powershell"   "$(cat "$STUB_LOG")" "releases/latest/download/cruise-installer.ps1"
 if grep -q '^curl ' "$STUB_LOG"; then
   fail "install: a Windows runner never pipes the shell installer through curl" "$(cat "$STUB_LOG")"
@@ -416,6 +448,7 @@ status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$IDIR2" bash action/scr
 status=$?
 assert_status "install: an unset CRUISE_VERSION defaults to the unversioned 'latest' URL" \
   0 "$status" "$status_out"
+assert_installed_bundle "install: an unset CRUISE_VERSION" "$IDIR2/cruise-bin"
 assert_contains "install: an unset CRUISE_VERSION calls curl against the 'latest' download URL" \
   "$(cat "$STUB_LOG")" "curl -fsSL https://github.com/smartcrabai/cruise/releases/latest/download/cruise-installer.sh"
 
@@ -432,6 +465,7 @@ assert_contains "install: a pinned CRUISE_VERSION (v0.2.0) is embedded in the ve
   "$(cat "$STUB_LOG")" "curl -fsSL https://github.com/smartcrabai/cruise/releases/download/v0.2.0/cruise-installer.sh"
 assert_eq "install: a pinned CRUISE_VERSION also appends the install dir to GITHUB_PATH" \
   "$IDIR3/cruise-bin" "$(cat "$GITHUB_PATH")"
+assert_installed_bundle "install: a pinned CRUISE_VERSION" "$IDIR3/cruise-bin"
 
 # --- cruise already on PATH: installer is skipped entirely -----------------
 new_case
@@ -556,6 +590,7 @@ mkdir -p "$IDIR_RC"
 status_out=$(PATH="$STUB_DIR:/usr/bin:/bin" RUNNER_TEMP="$IDIR_RC" CRUISE_VERSION=latest bash action/scripts/install.sh 2>&1)
 status=$?
 assert_status "install: a pre-release of the minimum version is accepted" 0 "$status" "$status_out"
+assert_installed_bundle "install: a pre-release of the minimum version" "$IDIR_RC/cruise-bin"
 
 # --- installer failure: the step must not silently continue ---------------
 new_case
