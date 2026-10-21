@@ -64,6 +64,59 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Sign the default `jcode` backend in to a provider / inspect what's configured | `jcode login <provider>` / `jcode auth status` (cruise has no login command of its own) |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
 
+### Updating Cruise
+
+For a supported managed install, check the current version, update, then check again:
+
+```sh
+cruise --version; cruise update; cruise --version
+```
+
+`cruise update` fetches the latest official stable release and is a no-op when that release is the same as or older than the installed version. Native updates support `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, and `x86_64-pc-windows-msvc`.
+
+| Installation | Update method |
+|---|---|
+| Shell or PowerShell installer at canonical `$CARGO_HOME/bin` | `cruise update` |
+| Source-built install at canonical `$CARGO_HOME/bin` | `cruise update` installs the official runtime; local source changes/build-time features are not preserved |
+| Homebrew | `brew upgrade smartcrabai/tap/cruise` |
+| GitHub Action, Docker, or another external install | Use its original distribution method |
+| `CRUISE_RUNTIME` override set | Unset it; run update from the managed launcher |
+
+Managed means the executable resolves into canonical `$CARGO_HOME/bin`, not that Cargo’s install ledger claims it. Updating adds a versioned `cruise-runtime-managed-…` runtime and `.json` sidecar, then switches `.cruise-runtime-active`; the fixed `cruise` (`cruise.exe` on Windows) launcher and older runtimes remain. The updater does not run Cargo or modify its install ledger. Homebrew, Action, Docker, and other external installs are not changed by this command. Published versions without the updater—including v0.2.16—cannot update themselves. An updater-capable build can select v0.2.16, but that published runtime cannot perform another native update. Bootstrap by installing an updater-enabled release with its platform installer, or rebuilding/installing that source version; use native updates only while the installed runtime includes the updater.
+
+The updater downloads over HTTPS and checks the release manifest’s SHA-256 against the payload. The checksum comes from the same release publisher; it is not an independent signature.
+
+`cruise update --status` prints recorded transactions for installations in sorted order and is read-only: no network, lock, or repair. Its transaction file is `$XDG_STATE_HOME/cruise/installations/<installation-id>/update-transaction.json` (default `~/.local/state/cruise/installations/<installation-id>/update-transaction.json`; on Windows, `%LOCALAPPDATA%\cruise\state\installations\<installation-id>\update-transaction.json` when `XDG_STATE_HOME` is unset). Status reports the recorded phase/error, not proof of the active runtime. A failed transaction keeps its error; rerun `cruise update` to reconcile an interruption. Failures before activation leave the previous selection, and a failed post-activation launcher probe restores it. If completion/cleanup warns after activation, the update is already applied; inspect status and retry rather than treating it as rolled back.
+
+Older versioned runtimes coexist in `$CARGO_HOME/bin` (Windows default `%USERPROFILE%\.cargo\bin`). To pin an installed version, run that exact sibling with `--version`, confirm its `.json` sidecar matches the current fixed launcher/runtime baseline, and set `.cruise-runtime-active` to its exact basename; do not delete runtime files. The baseline is the fixed launcher/runtime size-and-mtime stamp: a reinstall that changes it invalidates the overlay, while a same-size, same-mtime replacement is not detected. Legacy pointers or pinning an older launcher may still require manual retirement. Before retiring the pointer, confirm the fixed sibling itself runs:
+
+```sh
+# macOS / Linux
+bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+archive="$bin/.cruise-runtime-active.archive"
+retired="$bin/.cruise-runtime-active.retired"
+test ! -e "$archive" && test ! -e "$retired" &&
+  "$bin/cruise-runtime" --version &&
+  cp -n "$bin/.cruise-runtime-active" "$archive" &&
+  mv -n "$bin/.cruise-runtime-active" "$retired"
+```
+
+```powershell
+# Windows
+$bin = if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME 'bin' } else { Join-Path $HOME '.cargo\bin' }
+$runtime = Join-Path $bin 'cruise-runtime.exe'
+$pointer = Join-Path $bin '.cruise-runtime-active'
+$archive = "$pointer.archive"
+$retired = "$pointer.retired"
+if ((Test-Path -LiteralPath $archive) -or (Test-Path -LiteralPath $retired)) { throw 'Choose unused archive and retired paths.' }
+& $runtime --version
+if (-not $? -or $LASTEXITCODE -ne 0) { throw 'The fixed sibling runtime did not pass --version; pointer was not moved.' }
+Copy-Item -LiteralPath $pointer -Destination $archive -ErrorAction Stop
+Move-Item -LiteralPath $pointer -Destination $retired -ErrorAction Stop
+```
+
+Only move the pointer after the fixed sibling’s `--version` succeeds. Archive it first; never delete the runtime or sidecar. Use unused archive/retired names if needed.
+
 ### Remote execution with `cruise ssh`
 
 `cruise ssh <host> [-- <args>]` delegates the entire command to a `cruise` installed on the SSH host. Omit `-- <args>` to start the remote TUI when a PTY is available. `--cwd` and `--cruise-bin` are remote directory and executable paths, and all other arguments after `--` are parsed only by the remote cruise. Use the system OpenSSH configuration for aliases, ports, identity files, ssh-agent, and ProxyJump.
@@ -278,7 +331,7 @@ These process environment variables are read directly at runtime and are not wor
 | User workflow YAML configs (`workflows/*.yaml` / `*.yml`) | `$XDG_CONFIG_HOME/cruise/workflows/` → `~/.config/cruise/workflows/` |
 | App settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` → `~/.config/cruise/` |
 | Sessions + worktrees + `--repo` clones | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` (sessions with no filesystem config path, including `-c __builtin__`, keep a `sessions/<id>/config.yaml` snapshot; the execution graph is persisted as `sessions/<id>/dag.json`) |
-| State (`history.json`, `new_session_draft.json`) | `$XDG_STATE_HOME/cruise/` → `~/.local/state/cruise/` |
+| State (`history.json`, `new_session_draft.json`, per-installation `installations/<installation-id>/update-transaction.json`) | `$XDG_STATE_HOME/cruise/` → `~/.local/state/cruise/` |
 
 On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cruise` (config), `%LOCALAPPDATA%\cruise\data` (data) and `%LOCALAPPDATA%\cruise\state` (state); missing variables fall back to the `~/` defaults, and `~\` is expanded like `~/`.
 

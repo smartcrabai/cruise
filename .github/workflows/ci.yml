@@ -99,6 +99,9 @@ jobs:
       - name: Run tests
         run: cargo test --all-features
 
+      - name: Smoke native update with real A/B binaries
+        run: python3 scripts/test_update_smoke.py --build
+
   test-windows:
     runs-on: windows-latest
     timeout-minutes: 45
@@ -126,6 +129,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --all-features
+
+      - name: Smoke native update with real A/B binaries
+        run: python scripts/test_update_smoke.py --build
 
       - name: Test action config install script
         shell: bash
