@@ -1204,9 +1204,9 @@ mod tests {
         );
 
         form.step = Step::Flags;
-        assert_eq!(
-            form.validate_step(),
-            Err("Set every workflow flag on or off (Space) before continuing".to_string())
+        assert!(
+            form.validate_step().is_ok(),
+            "declared flags are optional and default to off"
         );
         form.toggle_flag();
         assert!(form.validate_step().is_ok());
