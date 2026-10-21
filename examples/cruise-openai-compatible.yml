@@ -45,7 +45,7 @@ jobs:
           # for the job (JCODE_HOME under $RUNNER_TEMP), written via
           # `jcode provider add` (see docs/github-actions.md#providers).
           # This example marks the generated profile as jcode's startup
-          # default and leaves model inputs empty.
+          # default. Cruise still needs its own explicit model reference below.
           providers: |
             {
               "my-gateway": {
@@ -54,5 +54,7 @@ jobs:
                 "default": true
               }
             }
+          # Cruise model references name both this profile and its model id.
+          model: my-gateway/my-custom-model
           provider_api_keys: |
             my-gateway=${{ secrets.MY_COMPATIBLE_ENDPOINT_KEY }}

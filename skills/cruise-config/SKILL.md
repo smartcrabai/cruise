@@ -35,6 +35,12 @@ In a non-interactive context (stdin/stdout is not a TTY), the highest-priority c
 
 `$XDG_CONFIG_HOME/cruise/default.yaml` (when `XDG_CONFIG_HOME` is unset, macOS/Linux use `~/.config/cruise/default.yaml`; Windows uses `%APPDATA%\cruise\default.yaml` when `APPDATA` is set, otherwise it falls back to `~/.config/cruise/default.yaml`) and `./.cruise/default.yaml` provide workflow defaults, with project defaults taking precedence over user defaults; explicit `-c` or `CRUISE_CONFIG` selection of either defaults file is rejected. Environment overrides are applied after workflow and defaults layers. `pre_steps` from defaults are command-only steps inserted at the start of `steps` as `pre/<name>`; user defaults are applied before project defaults, and a project `pre_steps` entry with the same name replaces the user entry. A `default.yaml` inside `workflows/` is an ordinary selectable workflow.
 
+Every actual jcode prompt must resolve to a Cruise model. If it does not,
+Cruise stops before starting jcode and creates the user-level `default.yaml`
+template only when no file exists. Replace its `model: null` with an available
+model reference; project defaults are never auto-created. Claude and external
+`command` backends retain their existing no-model behavior.
+
 ## Minimal config
 
 `steps` is required. `command` and `sdk` are mutually exclusive; the default `jcode` SDK backend is used only when neither remains set in the resolved workflow after applicable `default.yaml` layers are applied.

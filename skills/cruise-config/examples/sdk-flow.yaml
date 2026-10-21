@@ -4,8 +4,9 @@ sdk: jcode
 
 description: SDK-backed TDD flow
 
-# Optional model references use `provider/model[:effort]` or a bare model.
-# Replace this placeholder with a route available in your jcode setup.
+# Every actual jcode prompt needs an effective model. Set one here, in
+# applicable defaults, or through CRUISE_MODEL / CRUISE_PLAN_MODEL.
+# Use a route available in your jcode setup.
 # model: provider/model[:effort]
 
 steps:

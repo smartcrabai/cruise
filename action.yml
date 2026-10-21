@@ -85,10 +85,11 @@ inputs:
   model:
     description: >-
       Overrides CRUISE_MODEL (the model used for implementation steps), in
-      cruise's jcode model-reference format: "provider/model[:effort]" (e.g.
-      "claude/claude-opus-4-6:xhigh"), a bare model id
-      ("claude-sonnet-4-6"), or empty to use whatever provider/model the
-      pinned jcode home has configured as its default. `provider` is a jcode
+      cruise's jcode model-reference format: "provider/model[:effort]" or a
+      bare model id. Empty is allowed when the workflow or checkout
+      .cruise/default.yaml supplies the model. Every actual jcode prompt must
+      resolve to a Cruise model; the pinned jcode home's configured default
+      and JCODE_MODEL do not fill in a missing value. `provider` is a jcode
       provider id (`jcode provider list`); `effort` is one of
       low|medium|high|xhigh|max and is ignored by models without reasoning
       effort.

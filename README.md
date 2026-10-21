@@ -511,8 +511,10 @@ text names one, otherwise the failure class (`rate limit`, `server error`,
 reference the backend refused before sending anything).
 
 The complete model reference is retained, including its provider, path, and
-effort suffixes. When no model is configured, the notice identifies the
-backend instead, for example `Model: default model (jcode)`. Notices are sent
+effort suffixes. Claude and external command backends may still run without a
+Cruise model and identify the backend in notices. A jcode prompt with no
+effective Cruise model stops with a setup error instead of delegating selection
+to jcode, so it does not emit `Model: default model (jcode)`. Notices are sent
 to foreground CLI stderr when status output is enabled, the TUI's existing
 info log, and the session's `run.log`. Detached `cruise --plan` workers and
 the CLI's interactive `cruise run --all` dashboard suppress terminal notices,
@@ -604,6 +606,20 @@ The `description:` field of each config file is shown next to its filename in bo
 `$XDG_CONFIG_HOME/cruise/default.yaml` supplies user defaults. When `XDG_CONFIG_HOME` is unset, the path defaults to `~/.config/cruise/default.yaml` on macOS/Linux. On Windows, it is `%APPDATA%\cruise\default.yaml` when `APPDATA` is set; if `APPDATA` is missing, Cruise falls back to the home-directory path `~/.config/cruise/default.yaml`. `./.cruise/default.yaml` supplies project defaults. These files provide defaults for fields a workflow leaves unset. They are never selectable as workflows (`-c` and `CRUISE_CONFIG` pointing at them is an error). `default` is not a built-in workflow name, so `cruise workflow eject default` is rejected as an unknown built-in; `cruise workflow generate --name default` still refuses to write the reserved `./.cruise/default.yaml`. `<config_dir>/workflows/default.yaml` remains an ordinary workflow.
 
 Precedence, highest first: environment variables (`CRUISE_MODEL`, ...) > the workflow file > `./.cruise/default.yaml` > `~/.config/cruise/default.yaml` > built-in defaults.
+
+When an actual jcode prompt has no effective model, Cruise creates
+`$XDG_CONFIG_HOME/cruise/default.yaml` (or the platform's normal user config
+path) with `model: null` and stops before starting jcode. Edit that user-level
+file to set a real `provider/model[:effort]` reference or bare model. Existing
+files are never changed, and project `.cruise/default.yaml` is never generated.
+You can instead set `model` in the workflow or `CRUISE_MODEL` for a new session;
+planning calls may use `plan_model` / `CRUISE_PLAN_MODEL`. The file is not
+created for dry-runs, drafts, listings, command-only execution, or Claude.
+After updating settings, retry with the command that initiated the request: use
+`cruise run <SESSION>` for a failed run session, or re-run `cruise plan` or
+`cruise exec` for those requests. File-backed sessions reload defaults, but saved
+snapshot sessions do not reapply later defaults or environment changes; start a
+fresh snapshot session to use updated settings.
 
 - `env` and `mcp_servers` merge per key (higher layer wins).
 - `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
@@ -728,8 +744,8 @@ sdk: jcode        # Explicitly select jcode. If omitted, it is the fallback only
                   # when neither `command` nor `sdk` remains set in the resolved
                   # workflow after applicable `default.yaml` layers are applied.
 
-# Optional `model`/`plan_model` references use `provider/model[:effort]` or a bare model.
-# Replace these placeholders with routes available in your jcode setup.
+# Every actual jcode prompt needs an effective model. Use
+# `provider/model[:effort]` or a bare model available in your jcode setup.
 # model: provider/model[:effort]
 ```
 
@@ -739,11 +755,13 @@ At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the
 
 - `"provider/model[:effort]"` (e.g. `provider/model:xhigh`) -- `sdk: jcode` parses the provider and model separately; an empty side (`"/model"`, `"provider/"`) fails when the prompt runs. `sdk: claude` treats everything except the `:effort` suffix as the model name.
 - `"model"` (no `/`) -- no explicit provider is supplied.
-- Unset -- no explicit model is supplied.
+- Unset -- no explicit model is supplied. A jcode prompt fails with a setup
+  error if it still has no effective model; Claude and `command:` retain their
+  existing no-model behavior.
 
 #### `sdk: jcode` — the jcode SDK (default)
 
-`sdk: jcode` uses the official jcode Rust SDK and requires jcode v0.88.0 or newer. At launch, Cruise validates the SDK handshake and required capabilities (`sessions`, plus `session_tools` when custom tools are registered); it does not probe the CLI version. Upgrade jcode when a required capability is missing. The `model`, `plan_model`, and per-step `model` fields accept `provider/model[:effort]`, a bare `model`, or no value. The effort suffix is applied through the SDK.
+`sdk: jcode` uses the official jcode Rust SDK and requires jcode v0.88.0 or newer. At launch, Cruise validates the SDK handshake and required capabilities (`sessions`, plus `session_tools` when custom tools are registered); it does not probe the CLI version. Upgrade jcode when a required capability is missing. The `model`, `plan_model`, and per-step `model` fields accept `provider/model[:effort]` or a bare model. Every actual jcode prompt must resolve to a model: ordinary prompts use step `model` then workflow/default `model`; planning calls use `plan_model` then `model`. A configured jcode default, `JCODE_MODEL`, or resume session does not replace a missing Cruise model. Missing models create or preserve the user `default.yaml` template and stop that request. The effort suffix is applied through the SDK.
 
 ##### Computer use
 
@@ -843,10 +861,12 @@ The effective values are available to built-in templates as `{pr.language}` and 
 
 After plan approval, cruise generates a concise session title (up to 80 characters) shown in `cruise list` and the WebUI sidebar instead of the raw task input. The behavior depends on the backend:
 
-- **SDK mode (`sdk:` set, or neither `sdk:` nor `command:` remains set in the resolved workflow after applicable `default.yaml` layers are applied -- then the default `jcode` backend)** -- on the foreground `cruise plan` approval path, cruise makes a separate title-generation request using the plan step's model resolution (`plan_model` -> `model`, then the backend's own default). Approval from `cruise list`, the WebUI/TUI, and background planning derive the title from `plan.md` instead. If title generation fails, cruise extracts the title from `plan.md`.
+- **SDK mode (`sdk:` set, or neither `sdk:` nor `command:` remains set in the resolved workflow after applicable `default.yaml` layers are applied -- then the default `jcode` backend)** -- on the foreground `cruise plan` approval path, cruise makes a separate title-generation request using `plan_model` -> `model`. If that jcode call has no effective model, approval fails and is not saved. Other title-generation failures fall back to `plan.md` metadata. Approval from `cruise list`, the WebUI/TUI, and background planning derive the title from `plan.md` instead.
 - **Command mode (`command:` set)** -- no LLM is called for title generation. The title is derived automatically from the first heading or first non-empty line in the generated `plan.md`.
 
-No additional configuration is required.
+For jcode, configure an effective model through the workflow, applicable
+defaults, or `CRUISE_MODEL` / `CRUISE_PLAN_MODEL` as appropriate. Claude and
+command workflows retain their existing no-model behavior.
 
 ### Environment Variables
 
@@ -1018,10 +1038,10 @@ steps:
   or `next` on the parent; a retry reruns the entire block. Unhandled prompt or
   execution errors stop the workflow after siblings finish. Nonzero command
   exits and timeouts follow the ordinary step failure path.
-  Two child errors ignore that aggregation: a commit-guard violation is always
-  fatal and stops the workflow even when the parent has `if.fail`, while a child
-  timeout is never fatal on its own and always reports through `{prev.*}` and the
-  ordinary step failure path.
+  Two child errors ignore that aggregation: a commit-guard violation or a
+  missing-model error from a jcode prompt is always fatal and stops the workflow
+  even when the parent has `if.fail`, while a child timeout is never fatal on its
+  own and always reports through `{prev.*}` and the ordinary step failure path.
 - A child timeout affects only that child. A parent timeout cancels unfinished
   children and waits for them to stop before taking the failure path. Ctrl+C
   stops all children. Resume restarts the whole interrupted block, including
@@ -1114,7 +1134,7 @@ after-pr:
     output_file: review-report.json # optional iteration report in the session artifacts
 ```
 
-Each iteration waits for a review of the current head commit by a listed bot, fetches the unresolved threads started by those bots (all pages), and runs the prompt with the head OID and thread data appended. The prompt must answer with JSON only: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`. Only listed thread IDs are accepted, each at most once, with a non-empty `reply` or `resolve: true`, and only where `viewerCanReply` / `viewerCanResolve` allow it. Cruise itself posts the replies and resolves the threads through `gh api graphql` (requires an authenticated `gh`). Commits made by the prompt are pushed; uncommitted changes fail the step. The loop ends when no unresolved bot threads remain and fails when they remain after `max-iterations`, on timeout, or on any API or response error. Unlike other `after-pr` failures (warnings only), this failure marks the run `Failed`; rerunning resumes safely because replies carry an idempotency marker. The step is valid only directly in `after-pr`.
+Each iteration waits for a review of the current head commit by a listed bot, fetches the unresolved threads started by those bots (all pages), and runs the prompt with the head OID and thread data appended. The prompt must answer with JSON only: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`. Only listed thread IDs are accepted, each at most once, with a non-empty `reply` or `resolve: true`, and only where `viewerCanReply` / `viewerCanResolve` allow it. Cruise itself posts the replies and resolves the threads through `gh api graphql` (requires an authenticated `gh`). Commits made by the prompt are pushed; uncommitted changes fail the step. The loop ends when no unresolved bot threads remain and fails when they remain after `max-iterations`, on timeout, or on any API or response error. Unlike other `after-pr` errors, which are warning-only, this `github-review` failure marks the run `Failed`; cancellation and missing-model errors from jcode after-pr prompts also propagate, with missing-model errors failing the run/session. Rerunning resumes safely because replies carry an idempotency marker. The step is valid only directly in `after-pr`.
 
 ### Flow Control
 
@@ -1236,7 +1256,7 @@ Either path logs the declared reason so the decision stays visible in the run ou
 
 #### Failure handling (`if.fail`)
 
-`if.fail` decides what happens when a step fails. A failure means any of: a non-zero exit code from a command step, a prompt step error (including LLM transport errors), a `timeout`, or a `no-file-changes: failed` trigger.
+`if.fail` decides what happens when a recoverable step failure occurs: a non-zero exit code from a command step, a recoverable prompt error (including LLM transport errors), a `timeout`, or a `no-file-changes: failed` trigger. A missing-model error from a jcode prompt is not recoverable by `if.fail`; it bypasses the handler and aborts the workflow.
 
 Two forms are meaningful (other mappings such as `{}` or `{ retry: false }` parse and simply fall through):
 

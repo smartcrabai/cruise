@@ -259,6 +259,14 @@ When loading a workflow config, these process environment variables override the
 
 The boolean overrides (`CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`) accept only `true`, `false`, `1`, or `0` after trimming; any other non-empty value is an error. The string overrides above are applied only when their trimmed value is non-empty.
 
+Every actual jcode prompt needs an effective Cruise model. Ordinary prompts
+resolve step `model` then workflow/default `model`; planning uses
+`plan_model` then `model`. If a jcode call has no model, Cruise creates or
+preserves the user-level `default.yaml` template and stops before starting
+jcode. `JCODE_MODEL` and jcode's configured default do not fill the Cruise
+setting. File-backed sessions reload defaults; snapshot sessions do not, so
+recreate a snapshot session after changing its model configuration.
+
 These process environment variables are read directly at runtime and are not workflow-config overrides. `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` append a `Co-authored-by:` trailer when both are set; `CRUISE_DISABLE_NOTIFICATIONS=1` disables desktop notifications; `CRUISE_DISABLE_HERDR=1` disables herdr reporting. When `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_BIN_PATH` are set, the TUI and `cruise plan` / `cruise run` / `cruise exec` report lifecycle states to herdr.
 
 ## Runtime file layout (XDG)
@@ -277,7 +285,7 @@ On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cru
 ## Operational notes & gotchas
 
 - **Forge CLI requirements:** `gh` is required for GitHub PR creation, PR-backed `cruise clean`, and opted-in native workflow merge; use `glab` for GitLab repositories. Current-branch and `exec` do not create or merge a PR.
-- **`github-review` after-pr steps** run during `cruise run` after the PR is created. Unlike other after-pr steps, a failure marks the session `Failed`. They require `gh` to be authenticated.
+- **`github-review` after-pr steps** run during `cruise run` after the PR is created. Unlike warning-only after-pr errors, a `github-review` failure marks the session `Failed`; cancellation and missing-model errors from jcode after-pr prompts also fail the run. With native merge opted in, all actual after-pr execution errors are fatal. These steps require `gh` to be authenticated.
 - **`cruise clean` also removes terminal no-PR exec/current-branch sessions** without calling `gh`, plus Planned CurrentBranch sessions with no `current_step` when `plan.md` is missing or contains only whitespace; resumable sessions and ordinary planned sessions are retained.
 - **`--all`** runs Planned or Suspended sessions sequentially by default, regardless of `cruise config --set-parallelism` (that value governs the **WebUI and TUI**). If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` with the state path and error, and the batch still completes.
 - **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). Each session still runs in its own worktree; one failure does not stop the other workers, and Ctrl+C suspends active sessions and stops new scheduling. It never reads or changes the persisted `cruise config --set-parallelism` value (that value governs the **WebUI and TUI**).
