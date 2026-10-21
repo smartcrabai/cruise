@@ -31,6 +31,9 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        // Setup spawns real git and snapshots PATH for later child commands.
+        // Serialize that work with tests which temporarily change process PATH.
+        let _process_lock = crate::test_support::lock_process();
         let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("{error}"));

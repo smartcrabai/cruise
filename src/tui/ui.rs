@@ -1539,6 +1539,7 @@ mod tests {
             no_color,
             view,
             Some(crate::test_support::lock_process()),
+            None,
             configure,
         )
     }
@@ -1549,13 +1550,22 @@ mod tests {
         no_color: bool,
         view: View,
         process_lock: Option<crate::test_support::ProcessLock>,
+        env_guard: Option<EnvGuard>,
         configure: impl FnOnce(&mut TuiApp),
     ) -> Vec<String> {
-        rendered_buffer_with_lock(width, height, no_color, view, process_lock, configure)
-            .content
-            .chunks(usize::from(width))
-            .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect())
-            .collect()
+        rendered_buffer_with_lock(
+            width,
+            height,
+            no_color,
+            view,
+            process_lock,
+            env_guard,
+            configure,
+        )
+        .content
+        .chunks(usize::from(width))
+        .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect())
+        .collect()
     }
 
     fn rendered_buffer_with(
@@ -1571,8 +1581,15 @@ mod tests {
             no_color,
             view,
             Some(crate::test_support::lock_process()),
+            None,
             configure,
         )
+    }
+
+    struct TestAppWithEnvironment {
+        // Restore the environment before dropping the app's process lock.
+        _env_guard: Option<EnvGuard>,
+        app: TuiApp,
     }
 
     fn rendered_buffer_with_lock(
@@ -1581,6 +1598,7 @@ mod tests {
         no_color: bool,
         view: View,
         process_lock: Option<crate::test_support::ProcessLock>,
+        env_guard: Option<EnvGuard>,
         configure: impl FnOnce(&mut TuiApp),
     ) -> ratatui::buffer::Buffer {
         let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
@@ -1589,15 +1607,19 @@ mod tests {
         );
         let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
         let (log_tx, _) = tokio::sync::mpsc::channel(4);
-        let mut app = TuiApp::new_for_test_with_lock(application, event_tx, log_tx, process_lock);
+        let mut test_app = TestAppWithEnvironment {
+            _env_guard: env_guard,
+            app: TuiApp::new_for_test_with_lock(application, event_tx, log_tx, process_lock),
+        };
+        let app = &mut test_app.app;
         app.display.no_color = no_color;
         app.view = view;
-        configure(&mut app);
+        configure(app);
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal =
             ratatui::Terminal::new(backend).unwrap_or_else(|error| panic!("{error}"));
         terminal
-            .draw(|frame| draw(frame, &mut app))
+            .draw(|frame| draw(frame, &mut *app))
             .unwrap_or_else(|error| panic!("{error}"));
         terminal.backend().buffer().clone()
     }
@@ -1616,40 +1638,22 @@ mod tests {
         let process_lock = lock_process();
         let config_home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let config_path = config_home.path().join("cruise/config.json");
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent).unwrap_or_else(|error| panic!("{error}"));
+        AppConfig {
+            run_all_parallelism: 0,
         }
-        std::fs::write(&config_path, r#"{"runAllParallelism": 0}"#)
-            .unwrap_or_else(|error| panic!("{error}"));
-        let _xdg_config_home = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
-        let session_dir = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
-        let application = crate::application::CruiseApplication::new(
-            crate::session::SessionManager::new(session_dir.path().to_path_buf()),
-        );
-        let (events, _) = tokio::sync::mpsc::unbounded_channel();
-        let (logs_sender, _) = tokio::sync::mpsc::channel(4);
-        let mut app =
-            TuiApp::new_for_test_with_lock(application, events, logs_sender, Some(process_lock));
-        app.display.no_color = true;
-        app.view = View::RunAll;
-        let backend = ratatui::backend::TestBackend::new(width, height);
-        let mut terminal =
-            ratatui::Terminal::new(backend).unwrap_or_else(|error| panic!("{error}"));
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .unwrap_or_else(|error| panic!("{error}"));
-        terminal
-            .backend()
-            .buffer()
-            .content
-            .chunks(usize::from(width))
-            .map(|row| {
-                row.iter()
-                    .map(ratatui::buffer::Cell::symbol)
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        .save_to(&config_path)
+        .unwrap_or_else(|error| panic!("{error}"));
+        let env_guard = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+        rendered_lines_with_lock(
+            width,
+            height,
+            true,
+            View::RunAll,
+            Some(process_lock),
+            Some(env_guard),
+            |_| {},
+        )
+        .join("\n")
     }
 
     fn rendered_persisted_session(phase: SessionPhase, plan: Option<&str>) -> (String, DetailTab) {
@@ -2280,7 +2284,7 @@ mod tests {
         .unwrap_or_else(|error| panic!("{error}"));
         let _env_guard = crate::test_support::EnvGuard::set("CRUISE_CONFIG", &config_path);
 
-        let view = rendered_lines_with_lock(80, 24, true, View::NewSession, None, |app| {
+        let view = rendered_lines_with_lock(80, 24, true, View::NewSession, None, None, |app| {
             app.form.step = Step::Config;
             app.form
                 .working_dir
@@ -2694,11 +2698,18 @@ mod tests {
         }
         .save_to(&config_path)
         .unwrap_or_else(|error| panic!("failed to save test app config: {error}"));
-        let _xdg_config_home = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
-        let lines =
-            rendered_lines_with_lock(120, 24, true, View::RunAll, Some(process_lock), |app| {
+        let xdg_config_home = EnvGuard::set("XDG_CONFIG_HOME", config_home.path());
+        let lines = rendered_lines_with_lock(
+            120,
+            24,
+            true,
+            View::RunAll,
+            Some(process_lock),
+            Some(xdg_config_home),
+            |app| {
                 assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE,)));
-            });
+            },
+        );
         let confirmation_row = lines
             .iter()
             .position(|line| line.contains("Run all Planned"))
