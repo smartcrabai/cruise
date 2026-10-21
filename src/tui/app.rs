@@ -5941,7 +5941,7 @@ mod tests {
             "auto-detect must wait until the repository clone exists"
         );
         assert_eq!(app.skip_choices(), [] as [(String, Vec<String>); 0]);
-        assert!(app.form.flag_choices.first().is_none());
+        assert!(app.form.flag_choices.is_empty());
 
         let request = app.form.request();
         assert_eq!(
@@ -5964,7 +5964,7 @@ mod tests {
         );
         assert!(app.config_defaults.is_none());
         assert_eq!(app.skip_choices(), [] as [(String, Vec<String>); 0]);
-        assert!(app.form.flag_choices.first().is_none());
+        assert!(app.form.flag_choices.is_empty());
         assert_eq!(app.form.request().skipped_steps, [] as [String; 0]);
     }
 
