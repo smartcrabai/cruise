@@ -231,32 +231,6 @@ fn stdin_is_terminal() -> bool {
     std::io::stdin().is_terminal()
 }
 
-/// Make sure every declared flag has an explicit value before anything runs.
-///
-/// Only an interactive single-session run may ask; batch and non-TTY runs stop.
-fn resolve_missing_flags(
-    config: &crate::config::WorkflowConfig,
-    session: &mut SessionState,
-    workspace_override: WorkspaceOverride,
-) -> Result<()> {
-    if crate::flags::missing(config, &session.flags).is_empty() {
-        return Ok(());
-    }
-    if workspace_override == WorkspaceOverride::RespectSession && stdin_is_terminal() {
-        let _guard = crate::option_handler::prompt_lock_guard();
-        let _blocked = crate::herdr::blocked("Set workflow flags");
-        crate::platform::reclaim_terminal_foreground();
-        if !crate::flags::prompt_missing(config, &mut session.flags, crate::flags::prompt_flag_cli)?
-        {
-            return Err(CruiseError::Other(
-                "workflow flag selection cancelled".to_string(),
-            ));
-        }
-        return Ok(());
-    }
-    crate::flags::require_complete(config, &session.flags)
-}
-
 fn prompt_workspace_mode() -> Result<WorkspaceMode> {
     #[cfg(test)]
     if let Some(mode) = test_workspace_mode_choice() {
@@ -331,6 +305,7 @@ fn load_run_all_result_state(manager: &SessionManager, fallback: &SessionState) 
             let mut state = fallback.clone();
             state.phase =
                 SessionPhase::Failed(session_state_conflict_message(&state_path, &contents));
+            state.pr_skipped_reason = None;
             state.completed_at = Some(current_iso8601());
             state
         }
@@ -341,6 +316,7 @@ fn load_run_all_result_state(manager: &SessionManager, fallback: &SessionState) 
                 state_path.display(),
                 e.detailed_message()
             ));
+            state.pr_skipped_reason = None;
             state.completed_at = Some(current_iso8601());
             state
         }
@@ -423,7 +399,7 @@ async fn run_single(
     let session_id = args
         .session
         .map_or_else(|| select_pending_session(&manager), Ok)?;
-    let (mut session, initial_fingerprint) = manager.load_with_fingerprint(&session_id)?;
+    let (mut session, mut initial_fingerprint) = manager.load_with_fingerprint(&session_id)?;
 
     if !session.phase.is_runnable() {
         return Err(CruiseError::Other(format!(
@@ -431,6 +407,10 @@ async fn run_single(
             session_id,
             session.phase.label()
         )));
+    }
+    if !args.dry_run && session.pr_skipped_reason.take().is_some() {
+        initial_fingerprint =
+            save_session_state_with_conflict_resolution(&manager, &session, initial_fingerprint)?;
     }
 
     if cancel_token.is_cancelled() {
@@ -442,9 +422,6 @@ async fn run_single(
     let cli_flags = crate::flags::from_cli(&args.flags)?;
     crate::flags::validate_names(&config, &cli_flags)?;
     session.flags.extend(cli_flags);
-    if !args.dry_run {
-        resolve_missing_flags(&config, &mut session, workspace_override)?;
-    }
     if !args.dry_run
         && !session.exec
         && (session.plan_error.is_some() || !session.has_usable_plan(&manager.sessions_dir()))
@@ -456,9 +433,9 @@ async fn run_single(
     let effective_max_retries =
         crate::config::resolve_effective_max_retries(args.max_retries, &config);
     crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
-    let retry_policy = crate::retry::policy_for_config(config.retry.clone());
+    let mut retry_policy = crate::retry::policy_for_config(config.retry.clone());
 
-    let compiled = crate::workflow::compile(config.clone())?;
+    let mut compiled = crate::workflow::compile(config.clone())?;
     let mut dag = crate::graph::build_graph(&compiled, effective_max_retries)?;
     let start_node = crate::graph::persistence::prepare_resume(
         &mut dag,
@@ -485,8 +462,8 @@ async fn run_single(
         return Err(CruiseError::Interrupted);
     }
     let effective_workspace_mode = if session.repo.is_some() {
-        // Repo-backed sessions always execute in a worktree on a fresh clone so
-        // a PR is always created; current-branch (no-PR) mode is not available.
+        // Repo-backed sessions always execute in a worktree on a fresh clone;
+        // current-branch mode is not available for explicit repo sessions.
         WorkspaceMode::Worktree
     } else {
         match workspace_override {
@@ -515,7 +492,7 @@ async fn run_single(
         session.worktree_path = None;
         session.worktree_branch = None;
     }
-    if effective_workspace_mode == WorkspaceMode::Worktree {
+    if session.repo.is_some() {
         crate::forge::ensure_forge_available(crate::forge::session_forge(&session))?;
     }
     if cancel_token.is_cancelled() {
@@ -542,6 +519,7 @@ async fn run_single(
     log_execution_workspace(&execution_workspace);
     update_session_workspace(&mut session, &execution_workspace);
     session.set_runner_to_current_process();
+    session.pr_skipped_reason = None;
     session.phase = SessionPhase::Running;
     let initial_fingerprint =
         save_session_state_with_conflict_resolution(&manager, &session, initial_fingerprint)?;
@@ -591,39 +569,48 @@ async fn run_single(
     let on_step_log = |stream: &str, line: &str| {
         logger.write(&format!("[{stream}] {line}"));
     };
-    let ctx = crate::engine::ExecutionContext {
-        compiled: &compiled,
-        max_retries: effective_max_retries,
-        rate_limit_retries: args.rate_limit_retries,
-        on_step_start: &on_step_start,
-        on_step_log: Some(&on_step_log),
-        cancel_token: Some(&cancel_token),
-        option_handler: &notifying_option_handler,
-        config_reloader: config_reloader.as_deref(),
-        working_dir: Some(execution_workspace.path()),
-        skipped_steps: &skipped_steps,
-        flags: &flag_values,
+    let exec_result = {
+        let ctx = crate::engine::ExecutionContext {
+            compiled: &compiled,
+            max_retries: effective_max_retries,
+            rate_limit_retries: args.rate_limit_retries,
+            on_step_start: &on_step_start,
+            on_step_log: Some(&on_step_log),
+            cancel_token: Some(&cancel_token),
+            option_handler: &notifying_option_handler,
+            config_reloader: config_reloader.as_deref(),
+            working_dir: Some(execution_workspace.path()),
+            skipped_steps: &skipped_steps,
+            flags: &flag_values,
+        };
+        crate::retry::with_active_policy(retry_policy.clone(), async {
+            let execution =
+                execute_steps_with_graph(&ctx, &mut vars, &mut tracker, &mut dag, &on_node_start);
+            tokio::pin!(execution);
+            tokio::select! {
+                result = &mut execution => result,
+                _ = tokio::signal::ctrl_c() => {
+                    cancel_token.cancel();
+                    // Keep polling so every running child can stop and release
+                    // its workspace before this session becomes resumable.
+                    let _ = execution.await;
+                    Err(CruiseError::Interrupted)
+                },
+            }
+        })
+        .await
     };
-    let exec_result = crate::retry::with_active_policy(retry_policy.clone(), async {
-        let execution =
-            execute_steps_with_graph(&ctx, &mut vars, &mut tracker, &mut dag, &on_node_start);
-        tokio::pin!(execution);
-        tokio::select! {
-            result = &mut execution => result,
-            _ = tokio::signal::ctrl_c() => {
-                cancel_token.cancel();
-                // Keep polling so every running child can stop and release
-                // its workspace before this session becomes resumable.
-                let _ = execution.await;
-                Err(CruiseError::Interrupted)
-            },
-        }
-    })
-    .await;
 
     let exec_result = exec_result.and_then(|result| {
         crate::graph::persistence::save_graph(&dag, &manager.dag_path(&session_id))?;
         Ok(result)
+    });
+    let exec_result = exec_result.map(|mut result| {
+        if let Some(reloaded) = result.reloaded_workflow.take() {
+            compiled = reloaded.compiled;
+            retry_policy = reloaded.retry_policy;
+        }
+        result
     });
     let session = session_cell
         .into_inner()
@@ -635,16 +622,52 @@ async fn run_single(
                 "v completed -- run: {}, skipped: {}, failed: {}",
                 exec.run, exec.skipped, exec.failed
             ));
-            if session.exec && exec.failed > 0 {
-                Err(CruiseError::Other(format!(
-                    "workflow completed with {} failed step(s)",
-                    exec.failed
-                )))
+            if session.exec {
+                crate::worktree_pr::log_after_pr_skipped(
+                    &compiled,
+                    &flag_values,
+                    &skipped_steps,
+                    "exec sessions do not create pull requests",
+                );
+                if exec.failed > 0 {
+                    Err(CruiseError::Other(format!(
+                        "workflow completed with {} failed step(s)",
+                        exec.failed
+                    )))
+                } else {
+                    Ok(())
+                }
             } else {
                 match &execution_workspace {
-                    ExecutionWorkspace::CurrentBranch { .. } => Ok(()),
+                    ExecutionWorkspace::CurrentBranch { .. } => {
+                        crate::worktree_pr::log_after_pr_skipped(
+                            &compiled,
+                            &flag_values,
+                            &skipped_steps,
+                            "current-branch workspaces do not create pull requests",
+                        );
+                        Ok(())
+                    }
+                    ExecutionWorkspace::Worktree { .. } if !compiled.create_pr => {
+                        if cancel_token.is_cancelled() {
+                            Err(CruiseError::Interrupted)
+                        } else {
+                            session.pr_skipped_reason =
+                                Some(crate::session::PrSkippedReason::Disabled);
+                            crate::worktree_pr::log_after_pr_skipped(
+                                &compiled,
+                                &flag_values,
+                                &skipped_steps,
+                                "pull-request creation is disabled",
+                            );
+                            Ok(())
+                        }
+                    }
                     ExecutionWorkspace::Worktree { ctx, .. } => {
-                        observer.on_phase(&session_id, RunPhase::CreatingPr);
+                        let on_pr_processing = || {
+                            observer.on_phase(&session_id, RunPhase::CreatingPr);
+                            Ok(())
+                        };
                         let persist_pr = |snapshot: &SessionState| {
                             let fingerprint = manager.save_with_fingerprint(snapshot)?;
                             *lock_unpoisoned(&session_fingerprint) = fingerprint;
@@ -666,6 +689,7 @@ async fn run_single(
                                     Some(&cancel_token),
                                     &notifying_option_handler,
                                     Some(&on_step_log),
+                                    Some(&on_pr_processing),
                                     Some(&persist_pr),
                                 ),
                             ) => result,
@@ -694,6 +718,7 @@ async fn run_single(
         session.clear_pending_input();
         session.clear_runner();
         session.phase = SessionPhase::Suspended;
+        session.pr_skipped_reason = None;
         manager.save(session)?;
         return Err(CruiseError::Interrupted);
     }
@@ -710,7 +735,8 @@ async fn run_single(
     apply_run_result_to_session(session, &overall_result);
     // Repo-backed sessions: drop the temporary clone (and its worktree) once
     // the PR has been created.
-    if session.repo.is_some()
+    if compiled.create_pr
+        && session.repo.is_some()
         && matches!(session.phase, SessionPhase::Completed)
         && session.pr_url.is_some()
     {
@@ -726,7 +752,8 @@ async fn run_single(
     let effective_cleanup = cleanup_override
         .or(session.cleanup_after_pr_override)
         .unwrap_or(compiled.cleanup_after_pr);
-    if effective_cleanup
+    if compiled.create_pr
+        && effective_cleanup
         && session.repo.is_none()
         && matches!(session.phase, SessionPhase::Completed)
         && session.pr_url.is_some()
@@ -773,6 +800,9 @@ async fn run_single(
 /// - `Err(other)` -> `Failed`
 fn apply_run_result_to_session(session: &mut SessionState, result: &Result<()>) {
     session.clear_pending_input();
+    if result.is_err() {
+        session.pr_skipped_reason = None;
+    }
     match result {
         Ok(()) => {
             session.clear_runner();
@@ -1068,6 +1098,7 @@ mod tests {
         extract_last_path_segment, parse_pr_metadata, strip_code_block,
     };
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::Mutex;
@@ -1312,6 +1343,51 @@ mod tests {
         repo
     }
 
+    struct NoPrWorktreeFixture {
+        _process: ProcessStateGuard,
+        temp_dir: TempDir,
+        repo: PathBuf,
+        manager: SessionManager,
+        gh_log: PathBuf,
+    }
+
+    impl NoPrWorktreeFixture {
+        fn new() -> Self {
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let mut process = ProcessStateGuard::new(tmp.path());
+            let repo = create_repo_with_origin(&tmp);
+            process.set_current_dir(&repo);
+            process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "0");
+            let manager =
+                SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+            let bin_dir = tmp.path().join("bin");
+            fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
+            let gh_log = tmp.path().join("gh.log");
+            let gh = bin_dir.join("gh");
+            fs::write(
+                &gh,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 1\n",
+                    gh_log.display()
+                ),
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+            let mut permissions = fs::metadata(&gh)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&gh, permissions).unwrap_or_else(|e| panic!("{e:?}"));
+            process.prepend_path(&bin_dir);
+            Self {
+                _process: process,
+                temp_dir: tmp,
+                repo,
+                manager,
+                gh_log,
+            }
+        }
+    }
+
     fn make_current_branch_session(
         id: &str,
         repo: &Path,
@@ -1437,6 +1513,297 @@ steps:
             &events[2].1,
             crate::run_observer::RunPhase::Step(step) if step == "second"
         ));
+    }
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn cli_worktree_create_pr_false_completes_without_pr_side_effects() {
+        let fixture = NoPrWorktreeFixture::new();
+        let session_id = "20261020000001";
+        let mut session = SessionState::new(
+            session_id.to_string(),
+            fixture.repo.clone(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "report without PR".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        session.workspace_mode = WorkspaceMode::Worktree;
+        fixture
+            .manager
+            .create(&session)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &fixture.manager,
+            session_id,
+            r#"command: [cat]
+create_pr: false
+cleanup_after_pr: true
+steps:
+  report:
+    command: "printf report > local-report.txt"
+after-pr:
+  forbidden:
+    command: "touch after-pr-ran.txt"
+"#,
+        );
+        let artifacts = fixture
+            .manager
+            .sessions_dir()
+            .join(session_id)
+            .join("artifacts");
+        fs::create_dir_all(&artifacts).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(artifacts.join("report.md"), "retained report")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let result = run(run_args(session_id)).await;
+
+        assert!(
+            result.is_ok(),
+            "PR-disabled worktree run failed: {result:?}"
+        );
+        let saved = fixture
+            .manager
+            .load(session_id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(saved.phase, SessionPhase::Completed));
+        assert!(saved.pr_url.is_none());
+        assert_eq!(
+            saved.pr_skipped_reason,
+            Some(crate::session::PrSkippedReason::Disabled)
+        );
+        let worktree_path = saved
+            .worktree_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("completed session should retain its worktree path"));
+        assert!(worktree_path.is_dir(), "worktree must remain");
+        assert!(worktree_path.join("local-report.txt").is_file());
+        assert!(!worktree_path.join("after-pr-ran.txt").exists());
+        assert_eq!(
+            fs::read_to_string(artifacts.join("report.md")).unwrap_or_else(|e| panic!("{e:?}")),
+            "retained report"
+        );
+        assert!(
+            fixture.manager.run_log_path(session_id).is_file(),
+            "session log must remain"
+        );
+        assert_eq!(
+            git_stdout_ok(worktree_path, &["rev-parse", "HEAD"]),
+            git_stdout_ok(&fixture.repo, &["rev-parse", "HEAD"]),
+            "PR-disabled worktree changes must not be committed"
+        );
+        let refs = Command::new("git")
+            .args([
+                "--git-dir",
+                fixture
+                    .temp_dir
+                    .path()
+                    .join("origin.git")
+                    .to_str()
+                    .unwrap_or_else(|| panic!("path")),
+                "show-ref",
+            ])
+            .output()
+            .unwrap_or_else(|e| panic!("git show-ref failed to start: {e}"));
+        assert!(
+            refs.stdout.is_empty(),
+            "PR-disabled worktree changes must not be pushed"
+        );
+        assert!(
+            !fixture.gh_log.exists(),
+            "PR-disabled run must not invoke gh"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn cli_worktree_create_pr_false_completes_clean_no_commit_session() {
+        let fixture = NoPrWorktreeFixture::new();
+        let session_id = "20261020000004";
+        let mut session = SessionState::new(
+            session_id.to_string(),
+            fixture.repo.clone(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "complete clean worktree".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        session.workspace_mode = WorkspaceMode::Worktree;
+        fixture
+            .manager
+            .create(&session)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &fixture.manager,
+            session_id,
+            "command: [cat]\nsteps:\n  no_changes:\n    command: 'true'\nafter-pr:\n  forbidden:\n    command: \"touch clean-after-pr.txt\"\n",
+        );
+
+        let result = run(run_args(session_id)).await;
+
+        assert!(
+            result.is_ok(),
+            "clean no-commit default workflow should complete: {result:?}"
+        );
+        let saved = fixture
+            .manager
+            .load(session_id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(saved.phase, SessionPhase::Completed));
+        assert!(saved.pr_url.is_none());
+        assert_eq!(
+            saved.pr_skipped_reason,
+            Some(crate::session::PrSkippedReason::NoCommits)
+        );
+        let worktree = saved
+            .worktree_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("clean completion should retain its worktree"));
+        assert!(worktree.is_dir());
+        assert!(!worktree.join("clean-after-pr.txt").exists());
+        assert_eq!(
+            git_stdout_ok(worktree, &["rev-parse", "HEAD"]),
+            git_stdout_ok(&fixture.repo, &["rev-parse", "HEAD"])
+        );
+        assert!(
+            !fixture.gh_log.exists(),
+            "clean no-commit run must not invoke gh"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn cli_worktree_create_pr_false_keeps_failed_session_failed() {
+        let fixture = NoPrWorktreeFixture::new();
+        let session_id = "20261020000002";
+        let mut session = SessionState::new(
+            session_id.to_string(),
+            fixture.repo.clone(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "failing worktree run".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        session.pr_skipped_reason = Some(crate::session::PrSkippedReason::Disabled);
+        session.workspace_mode = WorkspaceMode::Worktree;
+        fixture
+            .manager
+            .create(&session)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &fixture.manager,
+            session_id,
+            "command: [cat]\ncreate_pr: false\nsteps:\n  fail:\n    command: 'true'\n    if:\n      no-file-changes: failed\n",
+        );
+
+        let result = run(run_args(session_id)).await;
+
+        assert!(result.is_err(), "failed workflow must remain failed");
+        let saved = fixture
+            .manager
+            .load(session_id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            matches!(saved.phase, SessionPhase::Failed(_)),
+            "PR suppression must not mark failed workflow as completed"
+        );
+        assert_eq!(saved.pr_skipped_reason, None);
+        assert!(
+            !fixture.gh_log.exists(),
+            "PR-disabled runs must not invoke gh"
+        );
+    }
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn cli_worktree_accepted_no_pr_reload_suppresses_pr_side_effects() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "0");
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e}")));
+        let session_id = "20261021000003";
+        let workflow_path = tmp.path().join("workflow.yaml");
+        let reload_script = tmp.path().join("reload-workflow.sh");
+        let marker = tmp.path().join("after-pr-ran");
+        let after_pr = format!("touch {}", marker.display());
+        let updated_yaml = format!(
+            "command: [cat]\ncreate_pr: false\ncleanup_after_pr: true\nsteps:\n  work:\n    command: \"printf changed > changed.txt\"\nafter-pr:\n  marker:\n    command: \"{after_pr}\"\n"
+        );
+        fs::write(
+            &reload_script,
+            format!(
+                "#!/bin/sh\ncat > '{}' <<'EOF'\n{}\nEOF\n",
+                workflow_path.display(),
+                updated_yaml
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut permissions = fs::metadata(&reload_script)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&reload_script, permissions).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            &workflow_path,
+            format!(
+                "command: [cat]\ncreate_pr: true\ncleanup_after_pr: true\nsteps:\n  switch:\n    command: \"sh {}\"\n  work:\n    command: \"printf changed > changed.txt\"\nafter-pr:\n  marker:\n    command: \"{after_pr}\"\n",
+                reload_script.display()
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut session = SessionState::new(
+            session_id.to_string(),
+            repo.clone(),
+            crate::session_config::SessionConfigRef::File {
+                path: workflow_path,
+            },
+            "accepted no-PR reload".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        session.workspace_mode = WorkspaceMode::Worktree;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(session.plan_path(&manager.sessions_dir()), "# Test plan\n")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let bin_dir = tmp.path().join("bin");
+        let gh_log = tmp.path().join("gh.log");
+        install_logging_gh(&bin_dir, &gh_log, "https://github.com/test/repo/pull/1");
+        process.prepend_path(&bin_dir);
+
+        let result = run(run_args(session_id)).await;
+
+        assert!(result.is_ok(), "accepted no-PR reload failed: {result:?}");
+        let saved = manager.load(session_id).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(saved.phase, SessionPhase::Completed));
+        assert!(saved.pr_url.is_none());
+        assert_eq!(
+            saved.pr_skipped_reason,
+            Some(crate::session::PrSkippedReason::Disabled)
+        );
+        let worktree = saved
+            .worktree_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("no-PR reload must retain the worktree"));
+        assert!(worktree.is_dir());
+        assert!(worktree.join("changed.txt").is_file());
+        assert!(!marker.exists(), "no-PR reload must not run after-pr");
+        assert_eq!(
+            git_stdout_ok(worktree, &["rev-parse", "HEAD"]),
+            git_stdout_ok(&repo, &["rev-parse", "HEAD"]),
+            "no-PR reload must not commit"
+        );
+        let refs = Command::new("git")
+            .args([
+                "--git-dir",
+                tmp.path()
+                    .join("origin.git")
+                    .to_str()
+                    .unwrap_or_else(|| panic!("path")),
+                "show-ref",
+            ])
+            .output()
+            .unwrap_or_else(|e| panic!("git show-ref failed: {e}"));
+        assert!(refs.stdout.is_empty(), "no-PR reload must not push");
+        assert!(!gh_log.exists(), "no-PR reload must not create a PR");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1922,6 +2289,164 @@ steps:
             existing_head
         );
         worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+    #[tokio::test]
+    async fn worktree_pr_handler_uses_existing_branch_commits_without_new_changes() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let f = setup_pr_test(
+            &tmp,
+            "20260307225903",
+            "https://github.com/owner/repo/pull/4",
+        );
+        run_git_ok(&f.ctx.path, &["add", "."]);
+        run_git_ok(&f.ctx.path, &["commit", "-m", "existing commit"]);
+        let existing_head = git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]);
+
+        let compiled = crate::workflow::compile(
+            crate::config::WorkflowConfig::from_yaml(
+                "command: [sh, -c, 'printf description']\nsteps:\n  main:\n    prompt: inspect\n",
+            )
+            .unwrap_or_else(|e| panic!("{e:?}")),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = tmp.path().join("plan.md");
+        fs::write(&plan_path, "# Plan\n").unwrap_or_else(|e| panic!("{e:?}"));
+        let mut vars = VariableStore::new("rerun without changes".to_string());
+        vars.set_named_file(PLAN_VAR, plan_path);
+        let mut tracker = FileTracker::with_root(f.ctx.path.clone());
+        let mut session = SessionState::new(
+            "20260307225903".to_string(),
+            f.repo.clone(),
+            crate::session_config::SessionConfigRef::File {
+                path: tmp.path().join("workflow.yaml"),
+            },
+            "rerun without changes".to_string(),
+        );
+        session.pr_skipped_reason = Some(crate::session::PrSkippedReason::Disabled);
+
+        let processing_calls = std::sync::atomic::AtomicUsize::new(0);
+        let on_pr_processing = || {
+            processing_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        };
+        let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+            &f.ctx,
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            &mut session,
+            0,
+            0,
+            &[],
+            &crate::flags::NO_FLAGS,
+            None,
+            &NoOpOptionHandler,
+            None,
+            Some(&on_pr_processing),
+            None,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "existing branch commit remains eligible: {result:?}"
+        );
+        assert_eq!(session.pr_url.as_deref(), Some(f.url.as_str()));
+        assert_eq!(session.pr_skipped_reason, None);
+        assert_eq!(
+            processing_calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "eligible branch commits should report PR processing"
+        );
+        assert_eq!(
+            git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]),
+            existing_head,
+            "no new diff must not create another commit"
+        );
+        assert!(
+            fs::read_to_string(&f.log_path)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .contains("pr create"),
+            "existing branch commits should still reach PR creation"
+        );
+        worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[tokio::test]
+    async fn worktree_pr_creation_failure_does_not_allow_empty_pr_completion() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let (repo, ctx) = create_worktree(&tmp, "20260307225904");
+        fs::write(ctx.path.join("change.txt"), "change").unwrap_or_else(|e| panic!("{e:?}"));
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let gh_log = tmp.path().join("gh.log");
+        let gh = bin_dir.join("gh");
+        fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' 'gh version test'\n  exit 0\nfi\nprintf '%s\\n' 'provider unavailable' >&2\nexit 1\n",
+                gh_log.display()
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut permissions = fs::metadata(&gh)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&gh, permissions).unwrap_or_else(|e| panic!("{e:?}"));
+        let _path = PathEnvGuard::prepend(&bin_dir);
+
+        let compiled = crate::workflow::compile(
+            crate::config::WorkflowConfig::from_yaml(
+                "command: [sh, -c, 'printf description']\nsteps:\n  main:\n    prompt: inspect\n",
+            )
+            .unwrap_or_else(|e| panic!("{e:?}")),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = tmp.path().join("plan.md");
+        fs::write(&plan_path, "# Plan\n").unwrap_or_else(|e| panic!("{e:?}"));
+        let mut vars = VariableStore::new("implement change".to_string());
+        vars.set_named_file(PLAN_VAR, plan_path);
+        let mut tracker = FileTracker::with_root(ctx.path.clone());
+        let mut session = SessionState::new(
+            "20260307225904".to_string(),
+            repo,
+            crate::session_config::SessionConfigRef::File {
+                path: tmp.path().join("workflow.yaml"),
+            },
+            "implement change".to_string(),
+        );
+        session.pr_skipped_reason = Some(crate::session::PrSkippedReason::Disabled);
+
+        let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+            &ctx,
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            &mut session,
+            0,
+            0,
+            &[],
+            &crate::flags::NO_FLAGS,
+            None,
+            &NoOpOptionHandler,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "local PR failures retain their existing behavior"
+        );
+        assert!(session.pr_url.is_none());
+        assert_eq!(session.pr_skipped_reason, None);
+        let calls = fs::read_to_string(&gh_log).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(calls.contains("pr create"), "{calls}");
+        assert!(calls.contains("pr view"), "{calls}");
     }
 
     struct PrTestFixture {

@@ -189,7 +189,7 @@ fn settings_html(state: &WebState, id: &str, open: bool) -> Result<String> {
                 &defaults.after_pr_steps,
                 &session.skipped_steps,
             );
-            tree.flags = super::pages::flag_rows(&defaults.flags, &session_flags, false);
+            tree.flags = super::pages::flag_rows(&defaults.flags, &session_flags);
             let options = tree
                 .steps
                 .iter()
@@ -404,8 +404,7 @@ fn skipped_steps(fields: &Fields) -> Vec<String> {
     ids.into_iter().filter(|id| !enabled.contains(id)).collect()
 }
 
-/// `flag.NAME` selects posted by the step tree. `None` when the form carried
-/// none. An empty value means "not chosen yet" and is omitted.
+/// `flag.NAME` selectors posted by the step tree. Empty values do not add map entries.
 fn flag_values(fields: &Fields) -> Option<crate::flags::FlagValues> {
     let mut found = false;
     let mut values = crate::flags::FlagValues::new();
@@ -430,7 +429,6 @@ fn flag_values(fields: &Fields) -> Option<crate::flags::FlagValues> {
 fn plan_request(fields: &Fields) -> PlanRequest {
     PlanRequest {
         grill: fields.flag("grill"),
-        formal_spec: fields.flag("formalSpec"),
         no_interactive_planning: fields.flag("noInteractivePlanning"),
         interactive: Interactive::new(true),
         ..PlanRequest::default()
@@ -1161,6 +1159,42 @@ mod tests {
         assert!(fields.flag("grill"));
         assert!(!fields.flag("missing"));
         assert_eq!(fields.opt("repo"), None);
+    }
+
+    #[test]
+    fn web_ui_flag_requests_preserve_partial_values_and_omissions() {
+        let fields = Fields::from(vec![
+            ("flag.browser_e2e".to_string(), "on".to_string()),
+            ("flag.app_e2e".to_string(), "off".to_string()),
+            ("flag.refactor".to_string(), String::new()),
+        ]);
+        let request = super::new_session_request(&fields);
+        assert_eq!(request.flags.get("browser_e2e"), Some(&true));
+        assert_eq!(request.flags.get("app_e2e"), Some(&false));
+        assert!(!request.flags.contains_key("refactor"));
+        assert!(!request.flags.contains_key("tdd"));
+
+        let partial_settings = super::settings_request(&fields);
+        assert_eq!(
+            partial_settings
+                .flags
+                .as_ref()
+                .and_then(|flags| flags.get("browser_e2e")),
+            Some(&true)
+        );
+        assert_eq!(
+            partial_settings
+                .flags
+                .as_ref()
+                .map(std::collections::BTreeMap::len),
+            Some(2)
+        );
+
+        let no_flags = super::new_session_request(&Fields::default());
+        assert!(no_flags.flags.is_empty());
+
+        let omitted_settings = super::settings_request(&Fields::default());
+        assert!(omitted_settings.flags.is_none());
     }
 
     #[test]

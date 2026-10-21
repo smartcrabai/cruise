@@ -16,14 +16,18 @@ cruise is a workflow orchestrator that drives coding agent CLIs like `claude -p`
 
 Config files are resolved in this priority order:
 
-1. `-c/--config <path>` flag (highest priority; never prompts). The special value `-c __builtin__` (or `builtin:default`) selects the built-in default workflow even when config files exist; `-c builtin:simple` / `builtin:review` select the other catalog workflows (`cruise workflow list`; copy one to edit with `cruise workflow eject <name> [--to user|project]`)
+1. `-c/--config <path>` flag (highest priority; never prompts). `-c __builtin__` and `-c builtin:tdd` select the built-in `tdd` workflow; `-c builtin:<name>` selects a named catalog workflow. The former selectors `builtin:default`, `builtin:simple`, and `builtin:review` are unsupported. Use `cruise workflow list` to see the catalog and `cruise workflow eject <name> [--to user|project]` to copy a built-in for editing.
 2. `CRUISE_CONFIG` environment variable (error if the file does not exist; never prompts)
 3. Current directory: `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`
 4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted), excluding the top-level `.cruise/default.yaml`
 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` (ASCII-sorted)
-6. Built-in default (`builtin/default.yaml` in the source tree, embedded at build time: test-first steps + verify-review group (parallel read-only analyzers → consolidate → apply) + after-PR automation; uses the fallback `jcode` backend only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied) — also explicitly selectable via `-c __builtin__`, the **Built-in default** entry at the end of the interactive selector, or the WebUI's **Built-in default** option
+6. Built-in `tdd` (`builtin/tdd.yaml` in the source tree, embedded at build time: test-first steps + verify-review group (parallel read-only analyzers → consolidate → apply) + after-PR automation; uses the fallback `jcode` backend only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied) — selected by `-c __builtin__` or `-c builtin:tdd`.
 
-In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, an interactive selector lists all found config files with a trailing **Built-in default** entry; with no config files found, the built-in default is adopted without prompting.
+The fixed built-in catalog and selector order is `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`. All six declare `after_pr` and `merge`, off when absent. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. `-f after_pr` enables the prelude without merge; `-f merge` runs the same prelude once and adds the final native synchronous squash merge. `research` stays read-only with `create_pr: false`, so merge never creates a PR or overrides its no-PR policy.
+
+`research` provides bounded read-only research with independent review and a cited report. `security` performs scoped, parallel security audits, triages findings, repairs confirmed safe defects, and independently verifies the results. `add-tests` inventories production behavior and real user-flow coverage before implementation and reports evidence-backed coverage/gap IDs; it does not impose numeric coverage quotas.
+
+In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, an interactive selector lists all found config files and the built-in workflows with `tdd` first; with no config files found, `tdd` is adopted without prompting.
 
 > `cruise workflow add owner/repo[/path][@ref]` installs a pinned, self-contained copy of a GitHub workflow into `~/.config/cruise/workflows/<name>.yaml` plus a `<name>.cruise-package.json` manifest. Hand-written YAMLs there are never touched by `update`/`remove`.
 
@@ -65,7 +69,7 @@ The full spec is split into the files below. Load only the sections you need.
 
 | Doc | Contents |
 |-----|----------|
-| [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, `force_exec`, hot-reload, rate-limit retry |
+| [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, workflow-only `create_pr`, `force_exec`, hot-reload, rate-limit retry |
 | [references/sdk.md](references/sdk.md) | SDK backends: jcode SDK (default, requires jcode CLI v0.88.0+) and claude-agent-sdk; model references, session tools, workflow-level MCP servers, and differences from command mode |
 | [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, `output_file`, command, option, parallel, `github-review` (after-pr only); child restrictions, `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{file:...}`, `{plan.language}`, `{pr.*}` |
@@ -90,7 +94,7 @@ After writing or editing a config, verify each of the following:
 5. **`group:` call sites**: is the group defined, and does the call-site step avoid mixing `prompt` / `prompt_file` / `command` / `if:`?
 6. **`if.no-file-changes`**: is the value either `retry` or `failed`? Make sure it isn't used inside `after-pr` or in a group-level `if:`.
 7. **`if.fail`**: is the value either an existing step name or a mapping? Only `{ retry: true }` retries the current step — `{}`, `{ retry: false }`, and mappings with unknown keys parse and simply fall through without retrying. Make sure it isn't used inside `after-pr` or in a group-level `if:`.
-8. **`after-pr`**: does it avoid `if.no-file-changes` and `if.fail`? A `github-review` step is valid only directly in `after-pr`, needs exactly one of `prompt` / `prompt_file`, a `timeout`, unique `bots`, and no `command` / `option` / `parallel` / `group` / `workflow_call`.
+8. **`after-pr`**: does it avoid `if.no-file-changes` and `if.fail`? A `github-review` step is valid only directly in `after-pr`, needs exactly one of `prompt` / `prompt_file`, a `timeout`, unique `bots`, and no `command` / `option` / `parallel` / `group` / `workflow_call`. If using native merge, is `squash-merge: true` the final direct step, gated exactly by `flag: merge`, with no incompatible fields? See [references/after-pr.md](references/after-pr.md#opt-in-native-synchronous-squash-merge).
 9. **`timeout`**: does every timeout string parse (`"30"`, `"5m"`, `"1h"` — positive, no other suffixes)?
 10. **`when.exists`**: is the glob non-empty and syntactically valid? (Globs containing `{...}` variables are only validated at runtime.)
 11. **YAML order**: steps execute in declaration order, except children within a `parallel` block run concurrently and join before the next step — does that match the intended flow?

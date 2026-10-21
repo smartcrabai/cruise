@@ -1,0 +1,168 @@
+description: Add executable, production-grounded Quint, Alloy, and Gherkin specifications with CI
+flags:
+  after_pr:
+    description: Run pull-request or merge-request readiness, synchronization, and CI follow-up
+  merge:
+    description: Run after-PR follow-up and perform a host-managed squash merge
+
+steps:
+  audit:
+    output_file: formal-specs/audit.md
+    prompt: |-
+      Add useful executable formal specifications to this repository: Quint, Alloy, and Gherkin scenarios whose step definitions exercise real production behavior, plus reproducible provider-native CI. The original request is: {input}
+      Approved plan reference: {plan}. Read the referenced plan only when it exists, is non-empty, approved, and relevant to this request; use its scope, constraints, and acceptance criteria to refine the original request. If no non-empty approved plan is available, including in exec mode, rely on the original request; never imply or invent approval.
+
+      Audit only; do not edit files or run checks in this step. Inspect the repository's authoritative requirements, public behavior, relevant production paths and callers, existing tests, dependency/toolchain manifests, lockfiles, and CI provider/workflows. Inspect the working tree first and preserve all pre-existing changes. Use source behavior and explicit contracts as evidence; do not invent product behavior or treat implementation alone as the requirement when it conflicts with a stronger contract.
+
+      Identify one cohesive, consumer-visible behavior/state machine with enough real requirements to model. Record stable requirement IDs and evidence for each requirement, the production entry point/state transition that implements it, and existing tests that cover it. Include relevant success, boundary, and rejected/invalid transitions where specified. If an apparent rule is ambiguous or unsupported by evidence, mark the uncertainty instead of formalizing an assumption as fact.
+
+      Determine the repository's language, test framework, supported runtime versions, package manager/lockfile conventions, actual CI provider, workflow triggers, test setup, and artifact conventions. Identify the established location and execution mechanism for integration/acceptance tests and CI checks. Choose Quint, Alloy CLI/JAR, JDK, and a compatible Gherkin runner/version only after checking official current documentation and compatibility with the repository's pinned toolchain. Do not assume a JavaScript application or add a second package-manager convention merely to host Gherkin.
+
+      Report: requirement IDs with source evidence; the selected production behavior and entrypoint; code-to-model state/transition mapping; CI/tooling conventions; concrete files likely needed; finite model scope/bound candidates; and any true prerequisite. Do not create prose-only specifications, propose a detached toy model, add a formal CLI mode/flag, or expand into unrelated product work. Never ask the user; continue from evidence available in the repository.
+      At the start of this report, explicitly record the approved task scope, constraints, and acceptance criteria, including relevant refinements from a non-empty approved plan. If no non-empty approved plan is available, including in exec mode, state that and derive them from the original request; do not infer approval.
+  model:
+    output_file: formal-specs/model.md
+    prompt: |-
+      Original request: {input}
+
+      <audit-report>
+      {file:formal-specs/audit.md}
+      </audit-report>
+
+      Using the audit and the original request, design the executable models and production-facing Gherkin scenarios before editing. Re-read any evidence needed. Keep the selected behavior and requirement IDs grounded in the strongest repository contracts, and preserve the exact condition/result semantics rather than adapting requirements to current code.
+
+      Define a small, finite state model for the selected behavior: state variables and their production counterparts, initial state, enabled transitions, observable outcomes, and each requirement's mapping to a property or scenario. State finite domains, scopes, transition depth, environmental assumptions, and any abstraction explicitly. Choose bounds that include the meaningful path and relevant boundary case; do not make a requirement disappear by choosing a smaller bound. Include a reachable, nontrivial positive behavior so successful checks cannot be vacuous.
+
+      Plan both equivalent Quint and Alloy models for every selected requirement that is representable in both. Quint must use valid state-machine definition modes, an explicit initial state, transitions, and named, meaningful explicit invariants; invariants must express falsifiable domain rules, not true/type/bound restatements. Include a bounded reachable behavior. State stuttering and fairness correctly if and only if a liveness property needs them. Alloy must encode corresponding state, initial/transition predicates, and a trace constraint tying temporal behavior to the same model; include assertions for required safety properties and meaningful witness commands. Annotate genuine notation limitations rather than silently omitting or weakening a representable requirement.
+
+      Plan Gherkin scenarios for the same important requirements, exercised through the repository's actual public API, service/handler, executable, or other genuine production entrypoint. Step definitions must call that behavior and assert its consumer-visible state/result/side effect. Use the existing integration-test isolation patterns, such as temporary resources, rather than a fake implementation. Identify the exact production call path and assertion for every step; parser-only scenarios, no-op definitions, unconditional success, and pending/undefined steps are not tests.
+
+      Select concrete pinned compatible tool/runtime versions using the official tool documentation and repository conventions. For Alloy, verify the chosen CLI's documented command-selection and expectation syntax; plan an explicit invocation selecting every intended command, positive SAT witness commands with expected count 1, and assertion/no-counterexample or intended UNSAT commands with expected count 0. For Quint, plan real typecheck, test, bounded run with explicit seed and sample/step limits, and bounded verify of the named invariants using the pinned supported backend. Do not invent a `quint lint` command. Do not edit files in this step.
+
+      Return the requirement-to-model-to-Gherkin matrix, state/transition design, justified scopes/bounds/assumptions, exact command forms to confirm against pinned tool help, test isolation, dependency pinning, and provider-native CI/artifact design. Every formal property must be independently meaningful and traceable to an evidenced requirement.
+  implement:
+    prompt: |-
+      Original request: {input}
+
+      <audit-report>
+      {file:formal-specs/audit.md}
+      </audit-report>
+
+      <model-design>
+      {file:formal-specs/model.md}
+      </model-design>
+
+      Implement the audited, modeled formal-specification change in this repository. Preserve pre-existing user changes and the repository's existing conventions. Re-read the audit/model evidence and relevant production paths before editing. Keep scope to executable Quint and Alloy models, real Gherkin features and step definitions, required pinned test tooling/lockfiles, provider-native CI, and only production fixes demonstrated necessary by verification. Do not add a dedicated formal runtime feature, CLI flag, extra workflow flag, after-PR action, or unrelated product change.
+
+      Create actual source files in the established test/spec locations, not Markdown fences or generated-only examples. Keep requirement IDs and concise semantic comments alongside the formal properties so a reviewer can trace them to the audited contract and implementation. Quint and Alloy must encode matching state, initial conditions, transitions, and property meaning with finite domains/scopes and documented bounds/assumptions. Quint must include named meaningful explicit invariants, valid executable syntax, and reachable behavior. Alloy must include the trace constraint, checks for the selected assertions, a meaningful satisfiable witness, and explicit expected outcomes: expect 1 for witness commands and expect 0 for assertion/no-counterexample or deliberately unsatisfiable commands. Set expectations on every intended Alloy command, and invoke the pinned CLI with explicit command selection for all intended checks/runs (for example `--command '*'` only after confirming that exact syntax in the selected version's help). A passing assertion-only run with no witness is insufficient.
+
+      Add Gherkin feature scenarios tied to the same requirement IDs and real step definitions integrated into the repository's actual test runner. Definitions must execute production entrypoints and make substantive assertions over returned state, output, persistence, or effects; do not copy the production logic into tests, mock away the behavior under test, leave undefined/pending steps, or use parser/dry-run mode as verification. Configure the runner's strict mode/options so undefined and pending steps fail CI. Run in deterministic isolation using repository conventions.
+
+      Pin compatible Quint, Alloy CLI/JAR (including checksum for a downloaded artifact), JDK, Gherkin runner, and any required language runtime/dependencies. Prefer existing toolchain/package-manager and lockfile conventions; document versions and checksums in executable setup/config, not a new narrative document. Use verified real command syntax from the pinned tool versions. Add or update the repository's actual provider-native CI workflow so pull-request/push checks install these exact tools reproducibly and run every formal and Gherkin check. Preserve the normal relevant production test/build check. Ensure failures fail the job and always retain useful check output: bounded Quint counterexample/traces, Alloy SAT/UNSAT/assertion results and logs, and Gherkin test reports/logs. Upload only relevant reports, never secrets; follow the provider's established artifact mechanism and failure/always semantics. Do not make checks depend on credentials or manual-only/scheduled-only execution.
+
+      Do not weaken, delete, skip, or shrink a failing requirement/check to obtain green results. Do not make production edits speculatively; verification diagnoses whether a counterexample is a true contract violation or a model/code mapping error.
+  verify-and-fix:
+    prompt: |-
+      Original request: {input}
+
+      <audit-report>
+      {file:formal-specs/audit.md}
+      </audit-report>
+
+      <model-design>
+      {file:formal-specs/model.md}
+      </model-design>
+
+      Verify the implemented formal specifications against the repository's actual contracts and production behavior. This step is not complete until every reachable local check has actually run, all observed failures have been diagnosed, all contract-confirmed source defects have been fixed, and the complete affected check set has been rerun successfully. Preserve unrelated working-tree changes. Never claim a command, result, CI run, or artifact exists unless you observed it.
+
+      First inspect the changed files, dependency locks, CI workflow, and pinned tool versions. Read the installed/pinned Quint and Alloy CLI help or official documentation and use the real syntax for those versions. Run the actual pinned Quint commands: `typecheck`, `test`, a seeded, explicitly bounded `run` with `--seed`, `--max-samples`, and `--max-steps`, and bounded `verify` for every named invariant with an explicit `--max-steps` and supported model-checking backend. Respect actual CLI option ordering from that version. Do not substitute simulation for verification, and do not run nonexistent `quint lint`.
+
+      Run the pinned Alloy CLI against the model with explicit selection of every intended command (confirm `--command '*'` with that CLI version). Confirm the log/receipt includes every command and the result matched its declared `expect`: SAT witness commands expect 1, UNSAT or assertion/no-counterexample commands expect 0. A CLI invocation that silently runs only its default command, an unchecked expectation, or omitted command is a failure. Run the Gherkin scenarios through the actual strict repository test runner, not a parser/dry-run; confirm every step is defined, non-pending, production-connected, and assertions execute. Run relevant existing production build/type-check/tests and CI configuration validation using the repository's real tooling. The provider-native CI job must be wired for normal relevant PR/push events, fail on any check failure, and retain the model/test reports and counterexample logs even when a job fails. Execute the local equivalent checks; do not claim remote CI ran if it was unavailable.
+
+      Diagnose every failing property, unexpected SAT/UNSAT outcome, Gherkin assertion, or production regression by comparing its concrete trace and the code path with the audited requirement evidence. If the implementation violates the actual contract, fix production code and add/retain a production-connected regression scenario. If the model is inaccurate, correct it only to match the actual requirement and source semantics, preserving the requirement strength. If a bound/assumption is wrong, justify and adjust it to cover the relevant behavior; never hide a counterexample by weakening/deleting an invariant, removing an assertion/witness, disabling strict mode, lowering a meaningful bound, or skipping a check. After any source, model, runner, dependency, or CI change, rerun the entire affected formal/Gherkin/production check set and inspect all results. Continue the diagnose-fix-rerun cycle until green; if an external prerequisite genuinely prevents a check, finish every reachable check and report exactly what was unavailable and why, without presenting the work as fully verified.
+
+      Finish with concise evidence: changed spec/test/CI files; requirement IDs covered and production paths exercised; Quint and Alloy bounds/assumptions; exact commands and observed results; any real defect fixed; CI artifact behavior; and any exact remaining blocker. Report no check as passed unless it was actually run.
+after-pr:
+  pr-ready:
+    flag: [after_pr, merge]
+    command: |-
+      case "{pr.url}" in
+        */-/merge_requests/*) glab mr update {pr.number} --ready ;;
+        *) gh pr ready {pr.number} ;;
+      esac
+  sync-base:
+    flag: [after_pr, merge]
+    command: |-
+      cruise internal sync-base {pr.number} --url {pr.url}
+  resolve-conflict:
+    flag: [after_pr, merge]
+    skip: prev.success
+    allow_commit: true
+    permission: full
+    prompt: |-
+      Original request: {input}
+
+      Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
+
+      Task/report scope: use the guaranteed formal audit and model design reports plus current task changes:
+      {file:formal-specs/audit.md}
+      {file:formal-specs/model.md}
+
+      A conflict occurred while synchronizing PR/MR #{pr.number} ({pr.url}) with its base branch. Resolve only conflicts within the audited formal-specification scope, preserve unrelated work, then stage and commit the resolution. Do not push; the following step handles it. Never weaken requirements, assertions, model bounds, Gherkin checks, scanners, CI gates, or other policy to get green. Do not create or merge a PR directly.
+
+  push-after-sync:
+    flag: [after_pr, merge]
+    command: git push
+  wait-ci:
+    flag: [after_pr, merge]
+    timeout: 10m
+    command: |-
+      case "{pr.url}" in
+        */-/merge_requests/*)
+          attempt=0
+          while [ "$attempt" -lt 30 ]; do
+            status=$(glab ci get --merge-request {pr.number} --output json | jq -r '.status')
+            case "$status" in
+              success) exit 0 ;;
+              running|pending|created|waiting_for_resource|preparing|scheduled) ;;
+              *)
+                log="$(git rev-parse --git-dir)/cruise-ci-traces.log"
+                : > "$log"
+                glab ci get --merge-request {pr.number} --status=failed --with-job-details --output json \
+                  | jq -r '.id as $p | (.jobs // [])[] | select(.status == "failed") | "\($p) \(.id)"' \
+                  | while read -r pid jid; do
+                      echo "=== job $jid (pipeline $pid) ===" >> "$log"
+                      glab ci trace "$jid" --pipeline-id "$pid" >> "$log" 2>&1 || true
+                    done
+                exit 1 ;;
+            esac
+            sleep 15
+            attempt=$((attempt + 1))
+          done
+          echo "CI remained pending after 30 polls." >&2
+          exit 1 ;;
+        *) gh pr checks {pr.number} --watch ;;
+      esac
+  fix-ci-error:
+    flag: [after_pr, merge]
+    skip: prev.success
+    allow_commit: true
+    permission: full
+    prompt: |-
+      Original request: {input}
+
+      Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
+
+      Task/report scope: use the guaranteed formal audit and model design reports plus current PR changes:
+      {file:formal-specs/audit.md}
+      {file:formal-specs/model.md}
+
+      CI for PR/MR #{pr.number} ({pr.url}) failed. For GitLab, inspect `$(git rev-parse --git-dir)/cruise-ci-traces.log`; for GitHub, inspect `gh pr checks {pr.number}` and the failed run logs. Fix only a genuine failure within the audited formal-specification scope, then stage, commit, and push the PR branch. Never weaken requirements, assertions, model bounds, Gherkin checks, scanners, CI gates, or other policy to make CI green. The agent must not create or merge a PR; the host-managed native step owns any explicitly opted-in squash merge.
+    if:
+      file-changed: sync-base
+    next: wait-ci
+  squash-merge:
+    flag: merge
+    squash-merge: true
+    timeout: 10m
+

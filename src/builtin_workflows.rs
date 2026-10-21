@@ -9,24 +9,39 @@ pub struct BuiltinWorkflow {
 }
 
 /// Name of the default built-in workflow.
-pub const DEFAULT_BUILTIN_NAME: &str = "default";
+pub const DEFAULT_BUILTIN_NAME: &str = "tdd";
 
 /// The fixed built-in catalog.
 pub static BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[
     BuiltinWorkflow {
         name: DEFAULT_BUILTIN_NAME,
-        description: "Plan, implement, verify, and open a pull request",
-        yaml: include_str!("../builtin/default.yaml"),
+        description: "Plan, implement test-first, verify, and open a pull request",
+        yaml: include_str!("../builtin/tdd.yaml"),
     },
     BuiltinWorkflow {
-        name: "simple",
-        description: "Implement, test, auto-fix failures, then commit",
-        yaml: include_str!("../builtin/simple.yaml"),
+        name: "refactor",
+        description: "Audit and improve code, tests, and structure, then verify",
+        yaml: include_str!("../builtin/refactor.yaml"),
     },
     BuiltinWorkflow {
-        name: "review",
-        description: "Review the changes and report findings without editing files",
-        yaml: include_str!("../builtin/review.yaml"),
+        name: "add-tests",
+        description: "Add meaningful tests, linting, and CI for the repository",
+        yaml: include_str!("../builtin/add-tests.yaml"),
+    },
+    BuiltinWorkflow {
+        name: "add-formal-specs",
+        description: "Add executable Quint, Alloy, and Gherkin specs with CI",
+        yaml: include_str!("../builtin/add-formal-specs.yaml"),
+    },
+    BuiltinWorkflow {
+        name: "research",
+        description: "Produce a source-backed research report without changing code",
+        yaml: include_str!("../builtin/research.yaml"),
+    },
+    BuiltinWorkflow {
+        name: "security",
+        description: "Audit security, fix confirmed findings, and verify regressions",
+        yaml: include_str!("../builtin/security.yaml"),
     },
 ];
 
@@ -44,7 +59,17 @@ mod tests {
     #[test]
     fn builtin_catalog_has_unique_names_descriptions_and_valid_yaml() {
         let names: Vec<&str> = BUILTIN_WORKFLOWS.iter().map(|w| w.name).collect();
-        assert_eq!(names, vec!["default", "simple", "review"]);
+        assert_eq!(
+            names,
+            vec![
+                "tdd",
+                "refactor",
+                "add-tests",
+                "add-formal-specs",
+                "research",
+                "security",
+            ]
+        );
         for w in BUILTIN_WORKFLOWS {
             assert!(
                 !w.description.trim().is_empty(),
@@ -58,13 +83,19 @@ mod tests {
     }
 
     #[test]
-    fn default_builtin_yaml_matches_legacy_constant() {
-        let default = find_builtin("default").unwrap_or_else(|| panic!("default missing"));
-        assert_eq!(default.yaml, BUILTIN_CONFIG_YAML);
+    fn tdd_builtin_yaml_matches_embedded_config() {
+        let tdd = find_builtin(DEFAULT_BUILTIN_NAME).unwrap_or_else(|| panic!("tdd missing"));
+        assert_eq!(tdd.yaml, BUILTIN_CONFIG_YAML);
     }
 
     #[test]
     fn find_builtin_returns_none_for_unknown_name() {
+        for removed_name in ["default", "simple", "review"] {
+            assert!(
+                find_builtin(removed_name).is_none(),
+                "removed built-in {removed_name} must not resolve"
+            );
+        }
         assert!(find_builtin("nope").is_none());
         assert!(find_builtin("../simple").is_none());
     }

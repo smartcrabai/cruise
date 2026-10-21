@@ -5,7 +5,7 @@
 use std::sync::Mutex;
 
 use cruise::cancellation::CancellationToken;
-use cruise::config::{WorkflowConfig, validate_config};
+use cruise::config::{StringOrVec, WorkflowConfig, validate_config};
 use cruise::engine::{ExecutionContext, ReloadedWorkflow, execute_steps_with_graph};
 use cruise::file_tracker::FileTracker;
 use cruise::flags::{self, FlagValues};
@@ -70,7 +70,11 @@ fn config_parses_flags_in_declaration_order_and_step_flag() {
     let names: Vec<&str> = config.flags.keys().map(String::as_str).collect();
     assert_eq!(names, ["e2e", "docs"]);
     assert_eq!(config.flags["e2e"].description.as_deref(), Some("Run E2E"));
-    assert_eq!(config.steps["test"].flag.as_deref(), Some("e2e"));
+    let flag = config.steps["test"].flag.as_ref().unwrap();
+    assert_eq!(flag.as_slice().len(), 1);
+    assert_eq!(flag.as_slice()[0], "e2e");
+    let serialized = serde_yaml::to_value(&config).unwrap();
+    assert_eq!(serialized["steps"]["test"]["flag"].as_str(), Some("e2e"));
     assert_eq!(config.steps["build"].flag, None);
     validate_config(&config).unwrap();
 }
@@ -113,6 +117,113 @@ fn validation_rejects_flag_names_with_invalid_characters() {
         "command: [echo]\nflags:\n  \"bad name\": {}\nsteps:\n  a:\n    flag: \"bad name\"\n    command: 'true'\n",
     );
     assert!(message.contains("bad name"), "{message}");
+}
+
+#[test]
+fn validation_accepts_all_declared_names_in_a_flag_list() {
+    let config = parse(
+        "command: [echo]\nflags:\n  e2e: {}\n  docs: {}\nsteps:\n  a:\n    flag: [e2e, docs]\n    command: 'true'\n",
+    );
+    validate_config(&config).unwrap();
+}
+
+#[test]
+fn validation_rejects_empty_malformed_and_unknown_flag_lists() {
+    for flag in ["[]", "[e2e, '']", "[e2e, true]", "[e2e, ghost]"] {
+        let yaml = format!(
+            "command: [echo]\nflags:\n  e2e: {{}}\nsteps:\n  a:\n    flag: {flag}\n    command: 'true'\n"
+        );
+        let message = invalid(&yaml);
+        assert!(!message.is_empty(), "{flag}");
+        if flag.contains("ghost") {
+            assert!(message.contains("ghost"), "{message}");
+        }
+    }
+}
+
+#[test]
+fn native_squash_merge_is_last_after_pr_only_and_keeps_its_phase() {
+    let config = parse(
+        "command: [echo]\nflags:\n  merge: {}\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n",
+    );
+    validate_config(&config).unwrap();
+    let skippable = cruise::workflow::list_skippable_after_pr_steps(&config).unwrap();
+    let ids: Vec<&str> = skippable.iter().map(|step| step.id.as_str()).collect();
+    assert_eq!(ids, ["merge"]);
+    let serialized = serde_yaml::to_value(&config).unwrap();
+    assert_eq!(
+        serialized["after-pr"]["merge"]["squash-merge"].as_bool(),
+        Some(true)
+    );
+
+    let compiled = compile(config).unwrap();
+    assert!(
+        !compiled
+            .steps
+            .values()
+            .any(|step| step.squash_merge.is_some())
+    );
+    assert_eq!(compiled.after_pr.len(), 1);
+    let after_pr = compiled.to_after_pr_compiled();
+    assert!(matches!(
+        cruise::step::StepKind::try_from(after_pr.steps["merge"].clone()),
+        Ok(cruise::step::StepKind::SquashMerge)
+    ));
+}
+
+#[test]
+fn native_squash_merge_rejects_wrong_phase_order_and_gates() {
+    let wrong_phase = "command: [echo]\nflags:\n  merge: {}\nsteps:\n  merge:\n    squash-merge: true\n    flag: merge\n";
+    assert!(invalid(wrong_phase).contains("after-pr"));
+
+    let not_last = "command: [echo]\nflags:\n  merge: {}\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n  later:\n    command: 'true'\n";
+    assert!(invalid(not_last).contains("last after-pr step"));
+
+    let no_merge_opt_in = "command: [echo]\nflags:\n  after_pr: {}\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  regular:\n    flag: after_pr\n    command: 'true'\n  merge:\n    squash-merge: true\n    flag: after_pr\n";
+    assert!(invalid(no_merge_opt_in).contains("merge' flag"));
+    let missing_declaration = parse(
+        "command: [echo]\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n",
+    );
+    assert!(compile(missing_declaration).is_err());
+
+    let extra_gate = "command: [echo]\nflags:\n  merge: {}\n  after_pr: {}\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  regular:\n    flag: after_pr\n    command: 'true'\n  merge:\n    squash-merge: true\n    flag: [merge, after_pr]\n";
+    assert!(invalid(extra_gate).contains("exactly the 'merge' flag"));
+}
+
+#[test]
+fn native_squash_merge_rejects_group_and_parallel_placement() {
+    let in_group = "flags:\n  merge: {}\ngroups:\n  g:\n    steps:\n      native:\n        squash-merge: true\n        flag: merge\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  use:\n    flag: merge\n    command: 'true'\n";
+    assert!(invalid(in_group).contains("squash-merge"));
+
+    let in_parallel = "flags:\n  merge: {}\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  fan:\n    parallel:\n      native:\n        squash-merge: true\n        flag: merge\n  use:\n    flag: merge\n    command: 'true'\n";
+    assert!(invalid(in_parallel).contains("squash-merge"));
+}
+
+#[test]
+fn native_squash_merge_rejects_executable_payloads_and_false_values() {
+    for field in [
+        "command: 'gh pr merge'",
+        "output_file: result.md",
+        "model: claude-opus",
+        "computer_use: true",
+        "permission: full",
+        "allow_commit: true",
+    ] {
+        let yaml = format!(
+            "command: [echo]\nflags:\n  merge: {{}}\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n    {field}\n"
+        );
+        let message = invalid(&yaml);
+        assert!(!message.is_empty(), "{field}: {message}");
+    }
+
+    let false_value = invalid(
+        "command: [echo]\nflags:\n  merge: {}\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  merge:\n    squash-merge: false\n    flag: merge\n",
+    );
+    assert!(false_value.contains("true"), "{false_value}");
+    let malformed = WorkflowConfig::from_yaml(
+        "command: [echo]\nflags:\n  merge: {}\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  merge:\n    squash-merge: 'true'\n    flag: merge\n",
+    );
+    assert!(malformed.is_err());
 }
 
 #[test]
@@ -185,6 +296,7 @@ fn group_call_flag_applies_to_every_expanded_substep() {
         "command: [echo]
 flags:
   e2e: {}
+  docs: {}
 groups:
   review:
     steps:
@@ -195,19 +307,25 @@ groups:
 steps:
   call:
     group: review
-    flag: e2e
+    flag: [e2e, docs]
   other:
     command: 'true'
 ",
     ))
     .unwrap();
     for (name, step) in &compiled.steps {
+        let actual = step.flag.as_ref().map(|flag| {
+            flag.as_slice()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        });
         let expected = if name.starts_with("call/") {
-            Some("e2e")
+            Some(vec!["e2e", "docs"])
         } else {
             None
         };
-        assert_eq!(step.flag.as_deref(), expected, "step {name}");
+        assert_eq!(actual, expected, "step {name}");
     }
     assert!(compiled.steps.keys().any(|n| n.starts_with("call/")));
 }
@@ -229,17 +347,16 @@ steps:
 after-pr:
   call:
     group: g
-    flag: e2e
+    flag: [e2e]
 ",
     ))
     .unwrap();
     assert!(!compiled.after_pr.is_empty());
-    assert!(
-        compiled
-            .after_pr
-            .values()
-            .all(|s| s.flag.as_deref() == Some("e2e"))
-    );
+    assert!(compiled.after_pr.values().all(|step| {
+        step.flag
+            .as_ref()
+            .is_some_and(|flag| flag.as_slice()[0] == "e2e")
+    }));
 }
 
 fn write(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
@@ -261,16 +378,31 @@ fn workflow_call_flag_reaches_all_expanded_steps_not_only_the_first() {
     let parent = write(
         dir.path(),
         "parent.yaml",
-        "command: [echo]\nflags:\n  docs: {}\nsteps:\n  before:\n    command: 'true'\n  shared:\n    workflow_call: ./callee.yaml\n    flag: docs\n  after:\n    command: 'true'\n",
+        "command: [echo]\nflags:\n  docs: {}\n  extra: {}\nsteps:\n  before:\n    command: 'true'\n  shared:\n    workflow_call: ./callee.yaml\n    flag: [docs, extra]\n  after:\n    command: 'true'\n",
     );
     let config = cruise::workflow_call::resolve_workflow_calls_from_path(parent).unwrap();
     let flagged: Vec<&str> = config
         .steps
         .iter()
-        .filter(|(_, s)| s.flag.as_deref() == Some("docs"))
-        .map(|(n, _)| n.as_str())
+        .filter(|(_, step)| {
+            step.flag
+                .as_ref()
+                .is_some_and(|flag| flag.as_slice().len() == 2)
+        })
+        .map(|(name, _)| name.as_str())
         .collect();
     assert_eq!(flagged, ["shared/one", "shared/two", "shared/three"]);
+    for name in &flagged {
+        let names: Vec<&str> = config.steps[*name]
+            .flag
+            .as_ref()
+            .unwrap()
+            .as_slice()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(names, ["docs", "extra"]);
+    }
     assert_eq!(config.steps["before"].flag, None);
     assert_eq!(config.steps["after"].flag, None);
 }
@@ -294,7 +426,8 @@ fn workflow_call_rejects_callee_steps_that_carry_a_flag() {
 // ------------------------------------------------------- flags module API
 
 #[test]
-fn parse_assignment_accepts_on_off_true_false_and_rejects_garbage() {
+fn parse_assignment_accepts_bare_enable_and_explicit_on_off_values() {
+    assert_eq!(flags::parse_assignment("e2e"), Ok(("e2e".into(), true)));
     assert_eq!(flags::parse_assignment("e2e=on"), Ok(("e2e".into(), true)));
     assert_eq!(
         flags::parse_assignment("e2e=off"),
@@ -302,7 +435,7 @@ fn parse_assignment_accepts_on_off_true_false_and_rejects_garbage() {
     );
     assert_eq!(flags::parse_assignment("a=true"), Ok(("a".into(), true)));
     assert_eq!(flags::parse_assignment("a=false"), Ok(("a".into(), false)));
-    for bad in ["e2e", "e2e=", "=on", "e2e=maybe", ""] {
+    for bad in ["", "=on", "e2e=", "e2e=maybe"] {
         assert!(flags::parse_assignment(bad).is_err(), "{bad:?}");
     }
 }
@@ -326,45 +459,18 @@ fn validate_names_rejects_undeclared_and_lists_declared_names() {
 }
 
 #[test]
-fn missing_reports_unset_flags_in_declaration_order_with_descriptions() {
-    let config = parse(TWO_FLAGS);
-    assert_eq!(
-        flags::missing(&config, &FlagValues::new()),
-        vec![("e2e", Some("Run E2E")), ("docs", None)]
-    );
-    assert_eq!(
-        flags::missing(&config, &values(&[("e2e", false)])),
-        vec![("docs", None)]
-    );
-    assert_eq!(
-        flags::missing(&config, &values(&[("e2e", false), ("docs", true)])),
-        []
-    );
-}
-
-#[test]
-fn require_complete_fails_until_every_flag_has_a_value() {
-    let config = parse(TWO_FLAGS);
-    let error = flags::require_complete(&config, &values(&[("e2e", true)]))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("docs"), "{error}");
-    flags::require_complete(&config, &values(&[("e2e", true), ("docs", false)])).unwrap();
-}
-
-#[test]
-fn require_complete_passes_for_configs_without_flags() {
-    let config = parse("command: [echo]\nsteps:\n  a:\n    command: 'true'\n");
-    flags::require_complete(&config, &FlagValues::new()).unwrap();
-}
-
-#[test]
-fn is_disabled_reflects_value_and_errors_when_value_is_absent() {
+fn is_disabled_uses_any_enabled_flag_from_a_list() {
     let v = values(&[("on", true), ("off", false)]);
-    assert!(!flags::is_disabled(None, &v).unwrap());
-    assert!(!flags::is_disabled(Some("on"), &v).unwrap());
-    assert!(flags::is_disabled(Some("off"), &v).unwrap());
-    assert!(flags::is_disabled(Some("unset"), &v).is_err());
+    let single_on = StringOrVec::from("on");
+    let single_off = StringOrVec::from("off");
+    let one_enabled = StringOrVec::Multiple(vec!["off".to_string(), "on".to_string()]);
+    let none_enabled = StringOrVec::Multiple(vec!["off".to_string(), "unset".to_string()]);
+
+    assert!(!flags::is_disabled(None, &v));
+    assert!(!flags::is_disabled(Some(&single_on), &v));
+    assert!(flags::is_disabled(Some(&single_off), &v));
+    assert!(flags::is_disabled(Some(&none_enabled), &v));
+    assert!(!flags::is_disabled(Some(&one_enabled), &v));
 }
 
 #[test]
@@ -379,42 +485,6 @@ fn choices_expose_declared_flags_in_order() {
 }
 
 #[test]
-fn prompt_missing_asks_only_unset_flags_and_stores_answers() {
-    let config = parse(TWO_FLAGS);
-    let mut current = values(&[("e2e", true)]);
-    let mut asked = Vec::new();
-    let done = flags::prompt_missing(&config, &mut current, |name, description| {
-        asked.push((name.to_string(), description.map(str::to_string)));
-        Ok(Some(false))
-    })
-    .unwrap();
-    assert!(done);
-    assert_eq!(asked, vec![("docs".to_string(), None)]);
-    assert_eq!(current, values(&[("e2e", true), ("docs", false)]));
-}
-
-#[test]
-fn prompt_missing_reports_cancellation_without_inventing_values() {
-    let config = parse(TWO_FLAGS);
-    let mut current = FlagValues::new();
-    let done = flags::prompt_missing(&config, &mut current, |_, _| Ok(None)).unwrap();
-    assert!(!done);
-    assert!(current.is_empty(), "cancel must not default any flag");
-}
-
-#[test]
-fn missing_in_compiled_lists_referenced_flags_without_values() {
-    let compiled = compile(parse(TWO_FLAGS)).unwrap();
-    let mut missing = flags::missing_in_compiled(&compiled, &values(&[("e2e", true)]));
-    missing.sort();
-    assert_eq!(missing, ["docs"]);
-    assert_eq!(
-        flags::missing_in_compiled(&compiled, &values(&[("e2e", true), ("docs", true)])),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
 fn preflight_skips_merges_user_skips_with_flag_off_steps_in_main_and_after_pr() {
     let compiled = compile(parse(
         "command: [echo]
@@ -425,7 +495,7 @@ steps:
   build:
     command: 'true'
   test:
-    flag: e2e
+    flag: [e2e, docs]
     command: 'true'
   lint:
     command: 'true'
@@ -434,23 +504,23 @@ after-pr:
     flag: docs
     command: 'true'
   notify:
-    flag: e2e
+    flag: [e2e, docs]
     command: 'true'
 ",
     ))
     .unwrap();
-    let mut skips = flags::preflight_skips(
-        &compiled,
-        &values(&[("e2e", true), ("docs", false)]),
-        &["lint".to_string()],
-    );
+    let mut skips =
+        flags::preflight_skips(&compiled, &values(&[("e2e", true)]), &["lint".to_string()]);
     skips.sort();
     assert_eq!(skips, ["lint", "publish"]);
 
-    let mut skips =
-        flags::preflight_skips(&compiled, &values(&[("e2e", false), ("docs", true)]), &[]);
+    let mut skips = flags::preflight_skips(&compiled, &values(&[("docs", true)]), &[]);
     skips.sort();
-    assert_eq!(skips, ["notify", "test"]);
+    assert_eq!(skips, Vec::<String>::new());
+
+    let mut skips = flags::preflight_skips(&compiled, &FlagValues::new(), &[]);
+    skips.sort();
+    assert_eq!(skips, ["notify", "publish", "test"]);
 }
 
 // ------------------------------------------------------- graph validation
@@ -463,6 +533,8 @@ fn flag_off_step_counts_as_always_skipped_in_preflight() {
     ))
     .unwrap();
     let graph = build_graph(&compiled, 3).unwrap();
+    let absent = flags::preflight_skips(&compiled, &FlagValues::new(), &[]);
+    validate_workflow(&compiled, &graph, &graph.start, &absent).unwrap();
     let on = flags::preflight_skips(&compiled, &values(&[("loop", true)]), &[]);
     assert!(validate_workflow(&compiled, &graph, &graph.start, &on).is_err());
     let off = flags::preflight_skips(&compiled, &values(&[("loop", false)]), &[]);
@@ -557,11 +629,14 @@ async fn engine_runs_flag_on_steps() {
 }
 
 #[tokio::test]
-async fn engine_errors_when_a_referenced_flag_has_no_value() {
+async fn engine_treats_absent_flag_values_as_off() {
     let dir = tempfile::tempdir().unwrap();
     let r = run(dir.path(), ENGINE_YAML, &FlagValues::new(), None).await;
-    assert!(r.result.is_err());
+    let result = r.result.unwrap();
+    assert_eq!((result.run, result.skipped), (2, 1));
+    assert!(dir.path().join("build.txt").exists());
     assert!(!dir.path().join("e2e.txt").exists());
+    assert!(dir.path().join("finish.txt").exists());
 }
 
 #[tokio::test]
@@ -614,11 +689,11 @@ steps:
 }
 
 #[tokio::test]
-async fn hot_reload_to_workflow_with_unresolved_flag_is_ignored() {
+async fn hot_reload_with_absent_new_flag_runs_with_it_disabled() {
     let dir = tempfile::tempdir().unwrap();
     let initial = "command: [echo]\nsteps:\n  a:\n    command: touch original.txt\n";
     let reloaded = compile(parse(
-        "command: [echo]\nflags:\n  new: {}\nsteps:\n  a:\n    flag: new\n    command: touch reloaded.txt\n",
+        "command: [echo]\nflags:\n  new: {}\nsteps:\n  a:\n    flag: new\n    command: touch reloaded.txt\n  b:\n    command: touch continued.txt\n",
     ))
     .unwrap();
     let reload_callback = move || {
@@ -635,8 +710,9 @@ async fn hot_reload_to_workflow_with_unresolved_flag_is_ignored() {
     )
     .await;
     r.result.unwrap();
-    assert!(dir.path().join("original.txt").exists());
+    assert!(!dir.path().join("original.txt").exists());
     assert!(!dir.path().join("reloaded.txt").exists());
+    assert!(dir.path().join("continued.txt").exists());
 }
 
 // ---------------------------------------------------------------- session

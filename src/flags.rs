@@ -1,4 +1,4 @@
-//! Workflow flags: user-resolved on/off switches for chunks of steps.
+//! Workflow flags: sparse on/off switches; absent values are off.
 
 use std::collections::BTreeMap;
 
@@ -8,10 +8,10 @@ use crate::config::WorkflowConfig;
 use crate::error::{CruiseError, Result};
 use crate::workflow::CompiledWorkflow;
 
-/// Resolved flag values keyed by flag name.
+/// Sparse flag values keyed by name; an absent value is off.
 pub type FlagValues = BTreeMap<String, bool>;
 
-/// Empty flag values for contexts that declare no flags.
+/// An empty sparse flag-value map.
 pub static NO_FLAGS: FlagValues = BTreeMap::new();
 
 /// A declared flag as presented to UIs.
@@ -22,15 +22,18 @@ pub struct FlagChoice {
     pub description: Option<String>,
 }
 
-/// Parse a `NAME=on|off|true|false` assignment.
+/// Parse a flag name as enabled, or a `NAME=on|off|true|false` assignment.
 ///
 /// # Errors
 ///
-/// Returns a message when the assignment is malformed.
+/// Returns a message when the assignment is malformed or the name is empty.
 pub fn parse_assignment(raw: &str) -> std::result::Result<(String, bool), String> {
-    let (name, value) = raw
-        .split_once('=')
-        .ok_or_else(|| format!("expected NAME=on|off, got '{raw}'"))?;
+    if raw.is_empty() {
+        return Err("missing flag name".to_string());
+    }
+    let Some((name, value)) = raw.split_once('=') else {
+        return Ok((raw.to_string(), true));
+    };
     if name.is_empty() {
         return Err(format!("missing flag name in '{raw}'"));
     }
@@ -85,68 +88,18 @@ pub fn validate_names(config: &WorkflowConfig, values: &FlagValues) -> Result<()
     Ok(())
 }
 
-/// Declared flags without a value, in declaration order.
+/// Whether a step carrying `flag` is disabled. Any enabled listed flag enables it.
 #[must_use]
-pub fn missing<'a>(
-    config: &'a WorkflowConfig,
-    values: &FlagValues,
-) -> Vec<(&'a str, Option<&'a str>)> {
-    config
-        .flags
-        .iter()
-        .filter(|(name, _)| !values.contains_key(name.as_str()))
-        .map(|(name, flag)| (name.as_str(), flag.description.as_deref()))
-        .collect()
+pub fn is_disabled(flag: Option<&crate::config::StringOrVec>, values: &FlagValues) -> bool {
+    flag.is_some_and(|flag| {
+        !flag
+            .as_slice()
+            .iter()
+            .any(|name| values.get(name).copied().unwrap_or(false))
+    })
 }
 
-/// Fail when any declared flag has no value.
-///
-/// # Errors
-///
-/// Returns an error listing the unresolved flags.
-pub fn require_complete(config: &WorkflowConfig, values: &FlagValues) -> Result<()> {
-    let unset = missing(config, values);
-    if unset.is_empty() {
-        return Ok(());
-    }
-    let names: Vec<&str> = unset.iter().map(|(name, _)| *name).collect();
-    Err(CruiseError::Other(format!(
-        "workflow flags must be set explicitly before running: {} (pass --flag NAME=on|off)",
-        names.join(", ")
-    )))
-}
-
-/// Whether a step carrying `flag` is disabled.
-///
-/// # Errors
-///
-/// Returns an error when the flag has no value.
-pub fn is_disabled(flag: Option<&str>, values: &FlagValues) -> Result<bool> {
-    let Some(flag) = flag else {
-        return Ok(false);
-    };
-    values
-        .get(flag)
-        .map(|on| !*on)
-        .ok_or_else(|| CruiseError::Other(format!("flag '{flag}' has no value")))
-}
-
-/// Flags referenced by a compiled workflow that have no value.
-#[must_use]
-pub fn missing_in_compiled(compiled: &CompiledWorkflow, values: &FlagValues) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for step in compiled.steps.values().chain(compiled.after_pr.values()) {
-        if let Some(flag) = step.flag.as_deref()
-            && !values.contains_key(flag)
-            && !out.iter().any(|n| n == flag)
-        {
-            out.push(flag.to_string());
-        }
-    }
-    out
-}
-
-/// User-skipped steps plus steps disabled by flags (main and after-pr).
+/// User-skipped steps plus steps disabled by flags (including absent values).
 #[must_use]
 pub fn preflight_skips(
     compiled: &CompiledWorkflow,
@@ -155,10 +108,7 @@ pub fn preflight_skips(
 ) -> Vec<String> {
     let mut out = user_skipped.to_vec();
     for (name, step) in compiled.steps.iter().chain(&compiled.after_pr) {
-        if let Some(flag) = step.flag.as_deref()
-            && values.get(flag) == Some(&false)
-            && !out.contains(name)
-        {
+        if is_disabled(step.flag.as_ref(), values) && !out.contains(name) {
             out.push(name.clone());
         }
     }
@@ -176,45 +126,4 @@ pub fn choices(config: &WorkflowConfig) -> Vec<FlagChoice> {
             description: flag.description.clone(),
         })
         .collect()
-}
-
-/// Ask for every missing flag. Returns false when the user cancels.
-///
-/// # Errors
-///
-/// Propagates errors from `ask`.
-pub fn prompt_missing(
-    config: &WorkflowConfig,
-    values: &mut FlagValues,
-    mut ask: impl FnMut(&str, Option<&str>) -> Result<Option<bool>>,
-) -> Result<bool> {
-    for (name, description) in missing(config, values) {
-        match ask(name, description)? {
-            Some(value) => {
-                values.insert(name.to_string(), value);
-            }
-            None => return Ok(false),
-        }
-    }
-    Ok(true)
-}
-
-/// Interactively ask for one flag with no default, forcing an explicit answer.
-///
-/// # Errors
-///
-/// Returns an error when the terminal prompt fails.
-pub fn prompt_flag_cli(name: &str, description: Option<&str>) -> Result<Option<bool>> {
-    let message = format!("Enable workflow flag '{name}'?");
-    let mut prompt = inquire::Confirm::new(&message);
-    if let Some(description) = description {
-        prompt = prompt.with_help_message(description);
-    }
-    match prompt.prompt() {
-        Ok(value) => Ok(Some(value)),
-        Err(
-            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
-        ) => Ok(None),
-        Err(error) => Err(CruiseError::Other(error.to_string())),
-    }
 }

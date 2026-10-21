@@ -18,6 +18,8 @@ pub enum StepKind {
     Parallel(indexmap::IndexMap<String, StepConfig>),
     /// Opt-in GitHub review bot loop (after-pr only).
     GitHubReview(GitHubReviewStep),
+    /// Workflow-owned squash merge action (after-pr only).
+    SquashMerge,
 }
 
 /// Parameters for a `github-review` step.
@@ -82,6 +84,10 @@ impl TryFrom<StepConfig> for StepKind {
         reason = "one flat dispatch over every step kind"
     )]
     fn try_from(config: StepConfig) -> Result<Self> {
+        if config.squash_merge.is_some() {
+            crate::config::validate_squash_merge_step("step", &config)?;
+            return Ok(StepKind::SquashMerge);
+        }
         crate::config::validate_parallel_step("parallel", &config)?;
         if let Some(output_file) = config.output_file.as_deref() {
             crate::artifacts::validate_name(output_file).map_err(|error| {
@@ -270,6 +276,33 @@ mod tests {
     }
 
     #[test]
+    fn squash_merge_converts_to_a_native_unit_step() {
+        let config = StepConfig {
+            squash_merge: Some(true),
+            flag: Some(StringOrVec::from("merge")),
+            ..Default::default()
+        };
+        assert!(matches!(
+            StepKind::try_from(config),
+            Ok(StepKind::SquashMerge)
+        ));
+    }
+
+    #[test]
+    fn squash_merge_rejects_command_payload() {
+        let config = StepConfig {
+            squash_merge: Some(true),
+            flag: Some(StringOrVec::from("merge")),
+            command: Some(StringOrVec::from("gh pr merge")),
+            ..Default::default()
+        };
+        assert!(matches!(
+            StepKind::try_from(config),
+            Err(CruiseError::InvalidStepConfig(_))
+        ));
+    }
+
+    #[test]
     fn test_prompt_step_conversion() {
         let config = make_prompt_step();
         let kind = StepKind::try_from(config).unwrap_or_else(|e| panic!("{e:?}"));
@@ -373,7 +406,8 @@ mod tests {
             StepKind::Prompt(_)
             | StepKind::Command(_)
             | StepKind::Parallel(_)
-            | StepKind::GitHubReview(_) => {
+            | StepKind::GitHubReview(_)
+            | StepKind::SquashMerge => {
                 panic!("Expected Option step")
             }
         }
@@ -404,7 +438,8 @@ mod tests {
             StepKind::Prompt(_)
             | StepKind::Command(_)
             | StepKind::Parallel(_)
-            | StepKind::GitHubReview(_) => {
+            | StepKind::GitHubReview(_)
+            | StepKind::SquashMerge => {
                 panic!("Expected Option step")
             }
         }
