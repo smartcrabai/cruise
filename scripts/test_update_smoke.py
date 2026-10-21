@@ -58,20 +58,6 @@ def file_stamp(path: Path) -> tuple[int, int, int, int, str]:
     info = path.stat()
     return (info.st_size, info.st_mtime_ns, info.st_mode, info.st_ino, sha256_file(path))
 
-def file_metadata(path: Path) -> str:
-    try:
-        info = path.stat()
-    except OSError as error:
-        return f"{path}: stat failed: {error}"
-    attributes = getattr(info, "st_file_attributes", None)
-    # FILE_ATTRIBUTE_READONLY is bit 0 on Windows.
-    read_only = None if attributes is None else bool(attributes & 0x1)
-    return (
-        f"{path}: mode={info.st_mode:#o}, size={info.st_size}, "
-        f"mtime_ns={info.st_mtime_ns}, file_attributes={attributes!r}, "
-        f"read_only={read_only}"
-    )
-
 
 def tree_snapshot(root: Path) -> dict[str, tuple[str, str | None, int, int, int, int]]:
     """Record path identity, contents, permissions, and timestamps."""
@@ -744,23 +730,19 @@ def smoke(args: argparse.Namespace) -> None:
                 fail("same-version update changed the installed files or transaction state")
             assert_version(happy.launcher, happy.env, args.next_version, "launcher after no-op")
 
-            # Simulate a fixed-pair reinstall with the same A runtime bytes but a
-            # fresh file identity/mtime; the overlay must fall back without deletion.
-            replacement = happy.bin / f".{runtime_name()}.reinstall"
-            shutil.copy2(runtime, replacement)
-            changed_mtime = max(time.time_ns(), happy.runtime.stat().st_mtime_ns + 5_000_000_000)
-            os.utime(replacement, ns=(changed_mtime, changed_mtime))
-            try:
-                os.replace(replacement, happy.runtime)
-            except OSError as error:
-                details = "\n".join(
-                    file_metadata(path)
-                    for path in (runtime, replacement, happy.runtime)
-                )
-                fail(
-                    f"fixed-pair reinstall could not replace {happy.runtime}: {error}\n"
-                    f"File metadata after the failed replacement:\n{details}"
-                )
+            # InstallBaseline uses size + mtime; changing mtime in place models a
+            # same-bytes reinstall without replacing a locked Windows PE.
+            before_reinstall = file_stamp(happy.runtime)
+            changed_mtime = max(time.time_ns(), before_reinstall[1] + 5_000_000_000)
+            os.utime(
+                happy.runtime,
+                ns=(happy.runtime.stat().st_atime_ns, changed_mtime),
+            )
+            after_reinstall = file_stamp(happy.runtime)
+            if after_reinstall[1] < before_reinstall[1] + 5_000_000_000:
+                fail("fixed-pair reinstall did not advance runtime mtime by at least five seconds")
+            if after_reinstall[0] != before_reinstall[0] or after_reinstall[4] != before_reinstall[4]:
+                fail("fixed-pair reinstall changed runtime size or bytes")
             assert_version(happy.launcher, happy.env, args.current_version, "launcher after fixed-pair reinstall")
             if not active_runtime.is_file() or file_stamp(active_runtime) != selected_stamp:
                 fail("fixed-pair fallback deleted or modified the retained overlay runtime")

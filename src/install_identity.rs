@@ -326,8 +326,9 @@ mod tests {
         install_baseline, metadata_path, resolve_runtime_with_inputs, runtime_name,
         valid_runtime_name,
     };
-    use std::fs;
+    use std::fs::{self, FileTimes, OpenOptions};
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     fn write_executable(path: &Path, contents: &[u8]) {
         fs::write(path, contents)
@@ -489,6 +490,58 @@ mod tests {
             resolve_runtime_with_inputs(&launcher, None, Some(&cargo_home))
                 .unwrap_or_else(|error| panic!("resolver failed: {error}")),
             bin.join(runtime_name())
+        );
+    }
+
+    #[test]
+    fn fixed_runtime_mtime_change_disables_old_overlay() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let (cargo_home, bin, launcher) = install(temp.path());
+        install_overlay(&bin, managed_name());
+
+        let fixed_runtime = bin.join(runtime_name());
+        let original_bytes = fs::read(&fixed_runtime)
+            .unwrap_or_else(|error| panic!("fixed runtime read failed: {error}"));
+        let original_metadata = fs::metadata(&fixed_runtime)
+            .unwrap_or_else(|error| panic!("fixed runtime metadata failed: {error}"));
+        let original_modified = original_metadata
+            .modified()
+            .unwrap_or_else(|error| panic!("fixed runtime mtime failed: {error}"));
+        let modified = std::time::SystemTime::now()
+            .max(original_modified)
+            .checked_add(Duration::from_secs(10))
+            .unwrap_or_else(|| panic!("fixed runtime mtime overflowed"));
+        OpenOptions::new()
+            .write(true)
+            .open(&fixed_runtime)
+            .and_then(|file| file.set_times(FileTimes::new().set_modified(modified)))
+            .unwrap_or_else(|error| panic!("fixed runtime mtime update failed: {error}"));
+
+        let updated_metadata = fs::metadata(&fixed_runtime)
+            .unwrap_or_else(|error| panic!("updated fixed runtime metadata failed: {error}"));
+        assert_eq!(updated_metadata.len(), original_metadata.len());
+        assert_ne!(
+            updated_metadata
+                .modified()
+                .unwrap_or_else(|error| { panic!("updated fixed runtime mtime failed: {error}") }),
+            original_modified
+        );
+        assert_eq!(
+            fs::read(&fixed_runtime)
+                .unwrap_or_else(|error| panic!("updated fixed runtime read failed: {error}")),
+            original_bytes
+        );
+
+        assert_eq!(
+            resolve_runtime_with_inputs(&launcher, None, Some(&cargo_home))
+                .unwrap_or_else(|error| panic!("resolver failed: {error}")),
+            fixed_runtime
+        );
+        assert!(bin.join(managed_name()).is_file());
+        assert_eq!(
+            fs::read_to_string(bin.join(ACTIVE_RUNTIME_FILE))
+                .unwrap_or_else(|error| panic!("pointer read failed: {error}")),
+            managed_name()
         );
     }
 
