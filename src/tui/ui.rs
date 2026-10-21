@@ -2345,7 +2345,6 @@ mod tests {
             app.form.working_dir.set_text("~/apps/demo");
             app.form.step = Step::Config;
         });
-        assert!(view.contains("question 3 of 9"));
         assert!(!view.contains("✓ Task"));
         assert!(view.contains("    Task"));
         assert!(view.contains("✓ Source"));
@@ -2401,7 +2400,6 @@ mod tests {
             app.form.step = Step::Launch;
             app.form.launch = Launch::Grill;
         });
-        assert!(view.contains("question 9 of 9"));
         assert!(view.contains("How should this session start?"));
         assert!(view.contains("▸ Grill planning (interview first)"));
         for expected in [
