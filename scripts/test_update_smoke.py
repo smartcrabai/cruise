@@ -58,6 +58,20 @@ def file_stamp(path: Path) -> tuple[int, int, int, int, str]:
     info = path.stat()
     return (info.st_size, info.st_mtime_ns, info.st_mode, info.st_ino, sha256_file(path))
 
+def file_metadata(path: Path) -> str:
+    try:
+        info = path.stat()
+    except OSError as error:
+        return f"{path}: stat failed: {error}"
+    attributes = getattr(info, "st_file_attributes", None)
+    # FILE_ATTRIBUTE_READONLY is bit 0 on Windows.
+    read_only = None if attributes is None else bool(attributes & 0x1)
+    return (
+        f"{path}: mode={info.st_mode:#o}, size={info.st_size}, "
+        f"mtime_ns={info.st_mtime_ns}, file_attributes={attributes!r}, "
+        f"read_only={read_only}"
+    )
+
 
 def tree_snapshot(root: Path) -> dict[str, tuple[str, str | None, int, int, int, int]]:
     """Record path identity, contents, permissions, and timestamps."""
@@ -736,7 +750,17 @@ def smoke(args: argparse.Namespace) -> None:
             shutil.copy2(runtime, replacement)
             changed_mtime = max(time.time_ns(), happy.runtime.stat().st_mtime_ns + 5_000_000_000)
             os.utime(replacement, ns=(changed_mtime, changed_mtime))
-            os.replace(replacement, happy.runtime)
+            try:
+                os.replace(replacement, happy.runtime)
+            except OSError as error:
+                details = "\n".join(
+                    file_metadata(path)
+                    for path in (runtime, replacement, happy.runtime)
+                )
+                fail(
+                    f"fixed-pair reinstall could not replace {happy.runtime}: {error}\n"
+                    f"File metadata after the failed replacement:\n{details}"
+                )
             assert_version(happy.launcher, happy.env, args.current_version, "launcher after fixed-pair reinstall")
             if not active_runtime.is_file() or file_stamp(active_runtime) != selected_stamp:
                 fail("fixed-pair fallback deleted or modified the retained overlay runtime")
