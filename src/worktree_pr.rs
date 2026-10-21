@@ -1350,14 +1350,17 @@ mod tests {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let empty_bin = tmp.path().join("empty_bin");
         std::fs::create_dir_all(&empty_bin).unwrap_or_else(|e| panic!("{e:?}"));
+        crate::test_support::run_isolated_test_with_path(
+            "worktree_pr::tests::test_ensure_gh_available_missing_path_child_probe",
+            &empty_bin,
+        );
+    }
 
-        let _lock = crate::test_support::lock_process();
-        let _path_guard = crate::test_support::EnvGuard::set("PATH", empty_bin.as_os_str());
-
-        // When
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "child process probe"]
+    fn test_ensure_gh_available_missing_path_child_probe() {
         let result = ensure_gh_available();
-
-        // Then
         let Err(result_err) = result else {
             panic!("expected Err when gh is absent");
         };
@@ -1366,6 +1369,7 @@ mod tests {
             err.to_lowercase().contains("gh"),
             "error should mention gh: {err}"
         );
+        crate::test_support::report_isolated_test_probe();
     }
 
     /// Given: a `gh` binary that exits non-zero for --version (broken install)
@@ -1390,14 +1394,17 @@ mod tests {
             perms.set_mode(0o755);
             fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
         }
+        crate::test_support::run_isolated_test_with_path(
+            "worktree_pr::tests::test_ensure_gh_available_nonzero_child_probe",
+            &bin_dir,
+        );
+    }
 
-        let _lock = crate::test_support::lock_process();
-        let _path_guard = crate::test_support::EnvGuard::set("PATH", bin_dir.as_os_str());
-
-        // When
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "child process probe"]
+    fn test_ensure_gh_available_nonzero_child_probe() {
         let result = ensure_gh_available();
-
-        // Then
         let Err(result_err) = result else {
             panic!("expected Err when gh exits non-zero");
         };
@@ -1406,6 +1413,7 @@ mod tests {
             err.to_lowercase().contains("gh"),
             "error should mention gh: {err}"
         );
+        crate::test_support::report_isolated_test_probe();
     }
 
     // -- generate_pr_description cancellation ---------------------------------

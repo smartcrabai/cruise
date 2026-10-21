@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn inspect_pr_fails_closed_on_spawn_exit_and_invalid_json() {
-        let (tmp, gh) = setup();
+        let (_tmp, gh) = setup();
         {
             let _path = path_with(&gh);
             gh.set("view.out", "not json");
@@ -282,11 +282,30 @@ mod tests {
             gh.set("view.exit", "1");
             assert!(matches!(inspect(URL), Err(CruiseError::Other(_))));
         }
+    }
+
+    #[test]
+    fn inspect_pr_fails_when_gh_is_missing_from_path() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
         let empty = tmp.path().join("empty-bin");
         std::fs::create_dir_all(&empty).unwrap_or_else(|e| panic!("{e}"));
-        let _lock = crate::test_support::lock_process();
-        let _path = crate::test_support::EnvGuard::set("PATH", empty.as_os_str());
-        assert!(matches!(inspect(URL), Err(CruiseError::Other(_))));
+        crate::test_support::run_isolated_test_with_path(
+            "pr_merge::tests::inspect_pr_missing_gh_child_probe",
+            &empty,
+        );
+    }
+
+    #[test]
+    #[ignore = "child process probe"]
+    fn inspect_pr_missing_gh_child_probe() {
+        let Err(CruiseError::Other(message)) = inspect(URL) else {
+            panic!("expected inspect to fail when gh is missing from PATH");
+        };
+        assert!(
+            message.contains("failed to run gh: No such file or directory"),
+            "expected the gh spawn failure, got: {message}"
+        );
+        crate::test_support::report_isolated_test_probe();
     }
 
     #[test]
