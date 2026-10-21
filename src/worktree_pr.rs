@@ -1966,6 +1966,7 @@ mod tests {
             None,
             &crate::option_handler::NoOpOptionHandler,
             None,
+            None,
             Some(&on_pr_created),
         )
         .await;
