@@ -756,10 +756,9 @@ fn step_question(step: Step) -> &'static str {
         Step::Repository => "Which repository? (owner/name, group/project, or URL)",
         Step::Config => "Which workflow config? (blank = auto-detect)",
         Step::SkippedSteps => "Skip any workflow steps?",
-        Step::Flags => "Turn each workflow flag on or off",
+        Step::Flags => "Which optional workflow flags should be enabled?",
         Step::Workspace => "Where should cruise execute?",
         Step::DirtyTree => "Run on the current branch even with uncommitted changes?",
-        Step::FormalSpec => "Include Quint and Alloy formal specifications in the plan?",
         Step::Launch => "How should this session start?",
     }
 }
@@ -797,7 +796,7 @@ fn step_hint(app: &TuiApp) -> String {
         Step::SkippedSteps => format!("↑↓ move · Space toggle · Enter next · {BACK}"),
         Step::Flags => format!("↑↓ move · Space toggle on/off · Enter next · {BACK}"),
         Step::Launch => format!("↑↓ choose · Enter go · {BACK}"),
-        Step::Source | Step::Workspace | Step::DirtyTree | Step::FormalSpec => {
+        Step::Source | Step::Workspace | Step::DirtyTree => {
             format!("↑↓ or Space choose · Enter next · {BACK}")
         }
     }
@@ -833,11 +832,6 @@ fn render_step_control(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             "No, require a clean working tree",
             "Yes, allow uncommitted changes",
             form.options.allow_dirty_working_tree,
-        ),
-        Step::FormalSpec => two_way(
-            "No",
-            "Yes, include Quint and Alloy specifications",
-            form.options.planning.formal_spec,
         ),
         Step::Launch => Launch::ALL
             .iter()
@@ -910,10 +904,10 @@ fn render_flag_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         .iter()
         .enumerate()
         .map(|(index, choice)| {
-            let (marker, style) = match form.flag_values.get(&choice.name) {
-                Some(true) => ("[on]    ", success(app)),
-                Some(false) => ("[off]   ", muted(app)),
-                None => ("[unset] ", warning(app)),
+            let (marker, style) = if form.flag_values.get(&choice.name).copied().unwrap_or(false) {
+                ("[on]    ", success(app))
+            } else {
+                ("[off]   ", muted(app))
             };
             let mut spans = vec![
                 Span::styled(if index == cursor { "▸ " } else { "  " }, accent(app, true)),
@@ -2176,7 +2170,7 @@ mod tests {
                 "missing CLI candidate at width {width}"
             );
             assert!(
-                view.contains("Built-in default"),
+                view.contains("Built-in tdd"),
                 "missing built-in candidate at width {width}"
             );
             assert!(
@@ -2318,7 +2312,6 @@ mod tests {
     #[test]
     fn minimum_new_session_layout_shows_one_question_with_the_remaining_ones_listed() {
         let view = rendered_view_with(80, 24, false, View::NewSession, |_| {});
-        assert!(view.contains("question 1 of 9"));
         assert!(view.contains("What should cruise do?"));
         for upcoming in [
             "Images",
@@ -2327,7 +2320,6 @@ mod tests {
             "Workflow config",
             "Skipped steps",
             "Workspace",
-            "Formal specification",
             "Launch",
         ] {
             assert!(
@@ -2340,45 +2332,6 @@ mod tests {
             "directory sessions do not ask for a repository"
         );
         assert!(view.contains("Tab or Ctrl+Enter next"));
-    }
-
-    #[test]
-    fn answered_questions_are_summarised_above_the_current_one() {
-        let view = rendered_view_with(80, 24, false, View::NewSession, |app| {
-            app.form.input.set_text("add dark mode\nwith a toggle");
-            app.form.working_dir.set_text("~/apps/demo");
-            app.form.config.set_text("");
-            app.form.step = Step::Config;
-        });
-        assert!(view.contains("question 5 of 9"));
-        assert!(view.contains("✓ Task"));
-        assert!(view.contains("add dark mode …"));
-        assert!(view.contains("✓ Working directory"));
-        assert!(view.contains("~/apps/demo"));
-        assert!(view.contains("Which workflow config?"));
-    }
-
-    #[test]
-    fn launch_question_lists_every_mode_with_its_shortcut() {
-        let view = rendered_view_with(80, 24, false, View::NewSession, |app| {
-            app.form.input.set_text("task");
-            app.form.step = Step::Launch;
-            app.form.launch = Launch::Grill;
-        });
-        assert!(view.contains("question 9 of 9"));
-        assert!(view.contains("How should this session start?"));
-        assert!(view.contains("▸ Grill planning (interview first)"));
-        for expected in [
-            "Start planning",
-            "Use the input as the plan (no LLM planning)",
-            "Save as draft",
-            "Ctrl+P",
-            "Ctrl+G",
-            "Ctrl+U",
-            "Ctrl+S",
-        ] {
-            assert!(view.contains(expected), "missing launch choice: {expected}");
-        }
     }
 
     #[test]

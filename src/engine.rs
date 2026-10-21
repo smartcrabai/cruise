@@ -19,11 +19,22 @@ use crate::workflow::CompiledWorkflow;
 mod parallel;
 
 /// Result of a completed `execute_steps` run.
-#[derive(Debug)]
 pub struct ExecutionResult {
     pub run: usize,
     pub skipped: usize,
     pub failed: usize,
+    pub reloaded_workflow: Option<ReloadedWorkflow>,
+}
+
+impl std::fmt::Debug for ExecutionResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecutionResult")
+            .field("run", &self.run)
+            .field("skipped", &self.skipped)
+            .field("failed", &self.failed)
+            .field("has_reloaded_workflow", &self.reloaded_workflow.is_some())
+            .finish()
+    }
 }
 
 /// Immutable context shared across the execution loop.
@@ -342,13 +353,7 @@ pub async fn execute_steps_with_graph(
         if let Some(reloader) = ctx.config_reloader
             && let Some(new_workflow) = reloader()?
         {
-            let unresolved = crate::flags::missing_in_compiled(&new_workflow.compiled, ctx.flags);
-            if !unresolved.is_empty() {
-                crate::status_eprintln!(
-                    "config reload ignored: flags without a value: {}; continuing the existing graph",
-                    unresolved.join(", ")
-                );
-            } else if new_workflow.compiled.steps.contains_key(&current) {
+            if new_workflow.compiled.steps.contains_key(&current) {
                 if graph.state.pending.is_none() {
                     graph.state.runtime = capture_runtime(vars, tracker);
                 }
@@ -460,6 +465,7 @@ pub async fn execute_steps_with_graph(
         run: c.run,
         skipped: c.skipped,
         failed: c.failed,
+        reloaded_workflow: reloaded,
     })
 }
 
@@ -603,7 +609,7 @@ async fn step_loop_iteration(
     }
 
     // Flags are evaluated first so a disabled chunk never touches `skip` variables or `when` globs.
-    let flag_skip = crate::flags::is_disabled(step_config.flag.as_deref(), ctx.flags)?;
+    let flag_skip = crate::flags::is_disabled(step_config.flag.as_ref(), ctx.flags);
     let static_skip = flag_skip
         || should_skip(step_config.skip.as_ref(), vars)?
         || ctx.skipped_steps.iter().any(|s| s == current_step);
@@ -614,10 +620,12 @@ async fn step_loop_iteration(
     if static_skip || when_skip {
         state.counters.skipped += 1;
         let skip_label = if flag_skip {
-            format!(
-                "{current_step} (flag '{}' is off)",
-                step_config.flag.as_deref().unwrap_or_default()
-            )
+            let flag = step_config
+                .flag
+                .as_ref()
+                .map(|flag| flag.as_slice().join(", "))
+                .unwrap_or_default();
+            format!("{current_step} (flag '{flag}' is off)")
         } else if when_skip {
             format!("{current_step} (no files match when.exists)")
         } else {
@@ -857,7 +865,7 @@ async fn step_loop_iteration(
 #[expect(clippy::too_many_arguments)]
 #[expect(
     clippy::too_many_lines,
-    reason = "three step-kind arms each with their own error-handling branches"
+    reason = "step-kind arms have distinct execution and error-handling branches"
 )]
 async fn execute_step_kind(
     ctx: &ExecutionContext<'_>,
@@ -899,6 +907,110 @@ async fn execute_step_kind(
                 allow_commit,
             )
             .await?;
+            log_step_result(step_start.elapsed(), true);
+            Ok(StepExecOutcome {
+                option_next: None,
+                failed: false,
+                skip_step_reason: None,
+            })
+        }
+        StepKind::SquashMerge => {
+            let step_config = ctx
+                .compiled
+                .steps
+                .get(current_step)
+                .ok_or_else(|| CruiseError::StepNotFound(current_step.to_string()))?;
+            let merge_gate = step_config.flag.as_ref().is_some_and(|flag| {
+                let names = flag.as_slice();
+                names.len() == 1 && names[0] == "merge"
+            });
+            if step_config.squash_merge != Some(true)
+                || !merge_gate
+                || !ctx.flags.get("merge").copied().unwrap_or(false)
+            {
+                return Err(CruiseError::SquashMergeFailed(
+                    "native squash merge requires its explicit merge flag opt-in".to_string(),
+                ));
+            }
+
+            let pr_url = vars
+                .get_variable(crate::worktree_pr::PR_URL_VAR)
+                .map_err(|error| {
+                    CruiseError::SquashMergeFailed(format!(
+                        "native squash merge requires a pull-request context: {error}"
+                    ))
+                })?;
+            let working_dir = ctx
+                .working_dir
+                .filter(|path| path.is_dir())
+                .ok_or_else(|| {
+                    CruiseError::SquashMergeFailed(
+                        "native squash merge requires the active worktree directory".to_string(),
+                    )
+                })?;
+            if ctx
+                .cancel_token
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(CruiseError::Interrupted);
+            }
+
+            let request = crate::pr_merge::automatic::AutoSquashRequest {
+                pr_url: &pr_url,
+                working_dir,
+                env: merged_env,
+                cancel_token: ctx.cancel_token,
+            };
+            let merge_result = if let Some(timeout) = timeout {
+                if let Ok(result) =
+                    tokio::time::timeout(timeout, crate::pr_merge::automatic::squash_merge(request))
+                        .await
+                {
+                    result
+                } else {
+                    if ctx
+                        .cancel_token
+                        .is_some_and(CancellationToken::is_cancelled)
+                    {
+                        return Err(CruiseError::Interrupted);
+                    }
+                    return Err(CruiseError::SquashMergeFailed(format!(
+                        "native squash merge timed out after {} seconds",
+                        timeout.as_secs()
+                    )));
+                }
+            } else {
+                crate::pr_merge::automatic::squash_merge(request).await
+            };
+            if ctx
+                .cancel_token
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(CruiseError::Interrupted);
+            }
+            match merge_result {
+                Ok(crate::pr_merge::automatic::AutoSquashOutcome::Merged) => {
+                    crate::status_eprintln!("{} squash merge confirmed", style("v").green().bold());
+                    if let Some(log) = ctx.on_step_log {
+                        log("info", "squash merge confirmed");
+                    }
+                }
+                Ok(crate::pr_merge::automatic::AutoSquashOutcome::AlreadyMerged) => {
+                    crate::status_eprintln!(
+                        "{} pull request was already merged",
+                        style("v").green().bold()
+                    );
+                    if let Some(log) = ctx.on_step_log {
+                        log("info", "pull request was already merged");
+                    }
+                }
+                Err(crate::pr_merge::automatic::AutoSquashError::Cancelled) => {
+                    return Err(CruiseError::Interrupted);
+                }
+                Err(error) => {
+                    return Err(CruiseError::SquashMergeFailed(error.to_string()));
+                }
+            }
             log_step_result(step_start.elapsed(), true);
             Ok(StepExecOutcome {
                 option_next: None,
@@ -1538,6 +1650,8 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
             "parallel"
         } else if step.github_review.is_some() {
             "github-review"
+        } else if step.squash_merge.is_some() {
+            "squash-merge"
         } else if step.prompt.is_some() || step.prompt_file.is_some() {
             "prompt"
         } else if step.command.is_some() && step.option.is_none() {
@@ -1570,7 +1684,10 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
             print!(" {}", style(format!("(when exists: {glob})")).yellow());
         }
         if let Some(flag) = &step.flag {
-            print!(" {}", style(format!("(flag: {flag})")).yellow());
+            print!(
+                " {}",
+                style(format!("(flag: {})", flag.as_slice().join(", "))).yellow()
+            );
         }
         if let Some(next) = &step.next {
             print!(" -> {}", style(next).green());
@@ -1784,6 +1901,7 @@ mod tests {
                 run: 0,
                 skipped: 0,
                 failed: 0,
+                reloaded_workflow: None,
             });
         }
         let mut dag =
@@ -2794,7 +2912,13 @@ steps:
 ";
         let config = make_config(yaml);
         assert_eq!(config.flags.len(), 1);
-        assert_eq!(config.steps["ship"].flag.as_deref(), Some("deploy"));
+        assert_eq!(
+            config.steps["ship"]
+                .flag
+                .as_ref()
+                .map(crate::config::StringOrVec::as_slice),
+            Some(&["deploy".to_string()][..])
+        );
         print_dry_run(&config, None);
     }
 
@@ -3956,29 +4080,51 @@ steps:
     }
 
     #[tokio::test]
-    async fn test_execute_steps_config_reloader_updates_compiled_when_changed() {
-        // Given: initial config with only step1, reloader returns step1+step2.
-        let original_yaml = "command: [echo]\nsteps:\n  step1:\n    command: echo original\n";
-        let updated_yaml = "command: [echo]\nsteps:\n  step1:\n    command: echo updated\n  step2:\n    command: echo extra\n";
-        let updated_config = make_config(updated_yaml);
-        let updated_compiled =
-            crate::workflow::compile(updated_config).unwrap_or_else(|e| panic!("{e:?}"));
-        let updated = std::sync::Arc::new(std::sync::Mutex::new(Some(updated_compiled)));
+    async fn test_execute_steps_config_reloader_returns_last_accepted_workflow() {
+        let original_yaml = "create_pr: false\ncommand: [echo]\nsteps:\n  step1:\n    command: echo original\n    next: step2\n  step2:\n    command: echo original extra\n";
+        let accepted_yaml = r"
+create_pr: true
+command: [echo]
+retry:
+  model_fallback: false
+steps:
+  step1:
+    command: echo updated
+    next: step2
+  step2:
+    command: echo extra
+after-pr:
+  accepted:
+    command: echo accepted
+";
+        let ignored_yaml =
+            "create_pr: false\ncommand: [echo]\nsteps:\n  unrelated:\n    command: echo ignored\n";
+        let accepted_config = make_config(accepted_yaml);
+        let accepted_retry_policy = crate::retry::policy_for_config(accepted_config.retry.clone());
+        let accepted_compiled =
+            crate::workflow::compile(accepted_config).unwrap_or_else(|e| panic!("{e:?}"));
+        let ignored_compiled =
+            crate::workflow::compile(make_config(ignored_yaml)).unwrap_or_else(|e| panic!("{e:?}"));
+        let reloads =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+                ReloadedWorkflow {
+                    compiled: accepted_compiled,
+                    retry_policy: accepted_retry_policy,
+                },
+                ReloadedWorkflow {
+                    compiled: ignored_compiled,
+                    retry_policy: None,
+                },
+            ])));
         let reloader = {
-            let updated = updated.clone();
+            let reloads = reloads.clone();
             move || -> Result<Option<ReloadedWorkflow>> {
-                // return the updated config only on the first call
-                Ok(updated
+                Ok(reloads
                     .lock()
                     .unwrap_or_else(|e| panic!("{e:?}"))
-                    .take()
-                    .map(|compiled| ReloadedWorkflow {
-                        compiled,
-                        retry_policy: None,
-                    }))
+                    .pop_front())
             }
         };
-        // When: reloader returns the updated config
         let result = run_config_inner(
             original_yaml,
             "",
@@ -3991,10 +4137,18 @@ steps:
             &NoOpOptionHandler,
             &[],
         )
-        .await;
-        // Then: completes successfully (steps executed with the updated config)
-        let result = result.unwrap_or_else(|e| panic!("expected Ok, got: {e:?}"));
+        .await
+        .unwrap_or_else(|e| panic!("expected Ok, got: {e:?}"));
         assert_eq!(result.run, 2);
+        let effective = result
+            .reloaded_workflow
+            .unwrap_or_else(|| panic!("accepted reload must be returned"));
+        assert!(
+            effective.compiled.create_pr,
+            "accepted reload must take precedence over a later ignored reload"
+        );
+        assert!(effective.compiled.after_pr.contains_key("accepted"));
+        assert!(effective.retry_policy.is_some());
     }
 
     #[tokio::test]
@@ -4034,11 +4188,11 @@ steps:
         )
         .await;
         // Then: retains the old config and completes successfully (step1 is executed)
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
-        assert_eq!(
-            result.unwrap_or_else(|e| panic!("{e:?}")).run,
-            1,
-            "step1 should have run with old config"
+        let result = result.unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(result.run, 1, "step1 should have run with old config");
+        assert!(
+            result.reloaded_workflow.is_none(),
+            "a reload removing the current step must be ignored"
         );
     }
 

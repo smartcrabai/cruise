@@ -81,6 +81,8 @@ pub enum CruiseError {
 
     #[error("interrupted by user (Ctrl+C)")]
     Interrupted,
+    #[error("automatic squash merge failed: {0}")]
+    SquashMergeFailed(String),
 
     #[error("commit guard violation: {0}")]
     CommitGuardViolation(String),

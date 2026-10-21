@@ -173,7 +173,6 @@ async fn run() -> error::Result<()> {
                 dry_run: false,
                 no_force_exec,
                 skip_planning,
-                formal_spec: false,
                 grill: false,
                 no_interactive_planning: false,
                 repo,

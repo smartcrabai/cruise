@@ -107,8 +107,8 @@ fn assert_missing_model_diagnostic(output: &Output, user_file: &Path) {
         "execution must stop before the prompt"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let diagnostic = stderr.to_ascii_lowercase();
-    let user_path = user_file.display().to_string();
+    let diagnostic = stderr.to_ascii_lowercase().replace('\\', "/");
+    let user_path = user_file.display().to_string().replace('\\', "/");
     for required in [
         "jcode",
         "model",
@@ -188,14 +188,15 @@ fn defaults_file_with_workflow_only_key_fails_with_path_and_key() {
 }
 
 #[test]
-fn workflow_eject_default_to_project_is_rejected() {
+fn workflow_eject_tdd_to_project_writes_named_workflow_file() {
     let home = TempDir::new().unwrap_or_else(|e| panic!("tempdir: {e}"));
     let project = TempDir::new().unwrap_or_else(|e| panic!("tempdir: {e}"));
     let output = cruise(home.path(), project.path())
-        .args(["workflow", "eject", "default", "--to", "project"])
+        .args(["workflow", "eject", "tdd", "--to", "project"])
         .output()
         .unwrap_or_else(|e| panic!("run cruise: {e}"));
-    assert!(!output.status.success(), "{}", text(&output));
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(project.path().join(".cruise/tdd.yaml").is_file());
     assert!(!project.path().join(".cruise/default.yaml").exists());
 }
 
@@ -588,7 +589,10 @@ fn configured_user_model_recovers_a_fresh_request_without_mutating_defaults() {
 
     let template = std::fs::read_to_string(&user_file).unwrap_or_else(|error| panic!("{error}"));
     let configured = template.replacen("model: null", "model: anthropic/recovery-test", 1);
-    assert_ne!(configured, template, "the generated model placeholder must be replaced");
+    assert_ne!(
+        configured, template,
+        "the generated model placeholder must be replaced"
+    );
     std::fs::write(&user_file, configured.as_bytes()).unwrap_or_else(|error| panic!("{error}"));
     let configured_bytes = std::fs::read(&user_file).unwrap_or_else(|error| panic!("{error}"));
 
@@ -625,4 +629,22 @@ fn configured_user_model_recovers_a_fresh_request_without_mutating_defaults() {
         configured_bytes,
         "a recovered request must leave the user defaults byte-for-byte unchanged"
     );
+}
+
+#[test]
+fn removed_builtin_names_are_rejected_by_cli() {
+    let home = TempDir::new().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    let project = TempDir::new().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    for name in ["default", "simple", "review"] {
+        let output = cruise(home.path(), project.path())
+            .args(["workflow", "eject", name, "--to", "user"])
+            .output()
+            .unwrap_or_else(|e| panic!("run cruise: {e}"));
+        let terminal = text(&output);
+        assert!(!output.status.success(), "{name} unexpectedly ejected");
+        assert!(
+            terminal.contains("unknown built-in workflow"),
+            "{name}: {terminal}"
+        );
+    }
 }

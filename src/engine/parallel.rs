@@ -207,7 +207,10 @@ async fn run_child(
                 )
                 .await?
             }
-            StepKind::Option(_) | StepKind::Parallel(_) | StepKind::GitHubReview(_) => {
+            StepKind::Option(_)
+            | StepKind::Parallel(_)
+            | StepKind::GitHubReview(_)
+            | StepKind::SquashMerge => {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "parallel child '{name}' must be a prompt or command step"
                 )));

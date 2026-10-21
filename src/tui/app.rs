@@ -2707,7 +2707,7 @@ impl TuiApp {
                 PendingCommand::Session(SessionAction::Ask),
             ),
             SessionAction::EditSettings => self.open_input(
-                "Config path (blank keeps current); skipped steps (one per line); flag:NAME=on|off",
+                "Config path (blank keeps current); skipped steps (one per line); flag:NAME[=on|off]",
                 PendingCommand::Session(SessionAction::EditSettings),
             ),
             SessionAction::EditCurrentStep => self.open_input(
@@ -3267,7 +3267,6 @@ impl TuiApp {
         };
         let plan_request = PlanRequest {
             grill: self.form.options.planning.grill,
-            formal_spec: self.form.options.planning.formal_spec,
             skip_planning: self.form.options.planning.skip_planning,
             no_interactive_planning: false,
             interactive: Interactive::new(true),
@@ -5208,7 +5207,6 @@ mod tests {
         app.form.launch = Launch::SaveDraft;
         app.form.options.allow_dirty_working_tree = true;
         app.form.options.planning.grill = true;
-        app.form.options.planning.formal_spec = true;
         app.form.options.planning.skip_planning = true;
         app.form.skipped_explicit = true;
         app.form.dirty = true;
@@ -5257,7 +5255,6 @@ mod tests {
         assert_eq!(app.form.launch, Launch::SaveDraft);
         assert!(app.form.options.allow_dirty_working_tree);
         assert!(app.form.options.planning.grill);
-        assert!(app.form.options.planning.formal_spec);
         assert!(app.form.options.planning.skip_planning);
         assert!(app.form.skipped_explicit);
         assert!(app.form.dirty);
@@ -5570,7 +5567,6 @@ mod tests {
         let mut app = app_for(application);
         populate_creation_form(&mut app);
         app.form.options.planning.grill = false;
-        app.form.options.planning.formal_spec = false;
         let state = stored_draft(&manager, "created task");
 
         app.apply_event(UiEvent::DraftCreated { result: Ok(state) });
@@ -5956,7 +5952,7 @@ mod tests {
         app.form.input.set_text("task");
         app.form.step = Step::Workspace;
         assert!(!app.handle_key(key(KeyCode::Enter)));
-        assert_eq!(app.form.step, Step::FormalSpec);
+        assert_eq!(app.form.step, Step::Launch);
         assert!(!app.handle_key(key(KeyCode::BackTab)));
         assert!(!app.handle_key(key(KeyCode::Down)));
         assert_eq!(app.form.workspace_mode, WorkspaceMode::CurrentBranch);
@@ -5965,15 +5961,15 @@ mod tests {
         assert!(!app.handle_key(key(KeyCode::Char(' '))));
         assert!(app.form.options.allow_dirty_working_tree);
         assert!(!app.handle_key(key(KeyCode::Enter)));
-        assert_eq!(app.form.step, Step::FormalSpec);
+        assert_eq!(app.form.step, Step::Launch);
     }
 
     #[test]
     fn planning_shortcuts_select_mode_and_submit_from_any_question() {
         let cases = [
-            ('p', Launch::Planning, (false, true, false)),
-            ('g', Launch::Grill, (true, true, false)),
-            ('u', Launch::InputPlan, (false, false, true)),
+            ('p', Launch::Planning, (false, false)),
+            ('g', Launch::Grill, (true, false)),
+            ('u', Launch::InputPlan, (false, true)),
         ];
         for (key, launch, expected) in cases {
             let mut app = app();
@@ -5981,16 +5977,12 @@ mod tests {
             app.form.step = Step::Config;
             let planning = &mut app.form.options.planning;
             planning.grill = true;
-            planning.formal_spec = true;
             planning.skip_planning = true;
 
             assert!(!app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL,)));
             assert_eq!(app.form.launch, launch);
             let planning = &app.form.options.planning;
-            assert_eq!(
-                (planning.grill, planning.formal_spec, planning.skip_planning),
-                expected
-            );
+            assert_eq!((planning.grill, planning.skip_planning), expected);
             assert!(matches!(
                 &app.modal,
                 Some(Modal::Error(message))
@@ -7003,46 +6995,6 @@ mod tests {
     fn empty_session_quit_is_immediate() {
         let mut app = app();
         assert!(app.handle_action(Action::Quit));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn new_session_passes_formal_spec_only_to_its_initial_plan_request() {
-        let _lock = crate::test_support::lock_process();
-        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
-        let home = temp.path().join("home");
-        std::fs::create_dir_all(&home).unwrap_or_else(|error| panic!("{error}"));
-        let _home = crate::test_support::set_fake_home(&home);
-        let config = temp.path().join("cruise.yaml");
-        std::fs::write(&config, "command: [cat]\nsteps:\n  s1:\n    prompt: plan\n")
-            .unwrap_or_else(|error| panic!("{error}"));
-
-        let application = CruiseApplication::new(crate::session::SessionManager::new(
-            temp.path().join("sessions"),
-        ));
-        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (logs_sender, _) = tokio::sync::mpsc::channel(2);
-        let mut app = TuiApp::new(application, events, logs_sender);
-        app.view = View::NewSession;
-        app.form.input.set_text("formal TUI task");
-        app.form
-            .working_dir
-            .set_text(&temp.path().to_string_lossy());
-        app.form.config.set_text(&config.to_string_lossy());
-        app.form.options.planning.formal_spec = true;
-
-        app.create_session();
-
-        let event = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
-            .await
-            .unwrap_or_else(|error| panic!("timed out waiting for session creation: {error}"))
-            .unwrap_or_else(|| panic!("session creation channel closed"));
-        let UiEvent::SessionCreated { result, plan } = event else {
-            panic!("expected SessionCreated event, got another event");
-        };
-        assert!(result.is_ok(), "session creation failed: {result:?}");
-        assert!(plan.formal_spec);
-        app.registry.shutdown().await;
     }
 
     fn take_one_notification(

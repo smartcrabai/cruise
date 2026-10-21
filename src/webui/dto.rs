@@ -125,7 +125,9 @@ pub struct DagDto {
 }
 
 pub(crate) fn step_kind(config: &crate::config::StepConfig) -> String {
-    if config.parallel.is_some() {
+    if config.squash_merge.is_some() {
+        "squash-merge".to_string()
+    } else if config.parallel.is_some() {
         "parallel".to_string()
     } else if config.prompt.is_some() {
         "prompt".to_string()
@@ -463,12 +465,32 @@ mod tests {
     }
 
     #[test]
+    fn graph_dto_labels_native_squash_merge_steps() {
+        let config = crate::config::WorkflowConfig::from_yaml(
+            "flags:\n  merge: {}\nsteps:\n  main:\n    command: 'true'\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n",
+        )
+        .unwrap_or_else(|error| panic!("valid native merge fixture: {error}"));
+        let compiled = crate::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("compiled fixture: {error}"))
+            .to_after_pr_compiled();
+        let graph = crate::graph::build_graph(&compiled, 3)
+            .unwrap_or_else(|error| panic!("fixed topology: {error}"));
+
+        let dto = build_dag_dto(&compiled, &graph, None, false, &[])
+            .unwrap_or_else(|error| panic!("graph DTO: {error}"));
+
+        assert_eq!(dto.steps.len(), 1);
+        assert_eq!(dto.steps[0].name, "merge");
+        assert_eq!(dto.steps[0].kind, "squash-merge");
+    }
+
+    #[test]
     fn session_dto_serializes_nullable_fields_and_camel_case() {
         let dto = SessionDto {
             id: "session-1".to_string(),
             phase: "Planned".to_string(),
             phase_error: None,
-            config_source: "config: (builtin default)".to_string(),
+            config_source: crate::resolver::ConfigSource::Builtin.display_string(),
             config_path: Some(BUILTIN_CONFIG_PATH.to_string()),
             base_dir: "/tmp/project".to_string(),
             repo: None,

@@ -1,6 +1,13 @@
 # `after-pr`: steps that run after PR creation
 
-Steps that run automatically after `cruise run` creates a pull request via `gh pr create` (or `glab mr create` for GitLab; detect it with a `case "{pr.url}" in */-/merge_requests/*)` branch and use `glab` instead of `gh`, as the builtin config does). The format is identical to top-level `steps:` — inline or file-backed prompt steps (`prompt` / `prompt_file`), command steps, option steps, parallel prompt/command blocks, `workflow_call` call sites, and group calls are all supported.
+Steps that run automatically after `cruise run` creates a pull request via `gh pr create` (or `glab mr create` for GitLab; detect it with a `case "{pr.url}" in */-/merge_requests/*)` branch and use `glab` instead of `gh`, as the builtin config does). The format is identical to top-level `steps:` — inline or file-backed prompt steps (`prompt` / `prompt_file`), command steps, option steps, parallel prompt/command blocks, `workflow_call` call sites, and group calls are all supported. Built-in `merge` opt-in also runs the configured after-PR prelude before its native final squash step.
+
+All six built-ins declare `after_pr` and `merge`, both off by default; `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. `-f after_pr` runs the after-PR prelude without merging. `-f merge` runs that same prelude once, then attempts the final native squash step. The implication does not add or change an `after_pr` entry in the saved sparse flag map.
+
+```sh
+cruise plan -c builtin:tdd -f merge "task"
+cruise plan -c builtin:tdd -f browser_e2e,app_e2e,merge "task"
+```
 
 ## Basics
 
@@ -57,21 +64,35 @@ after-pr:
 
 Rules: only directly in `after-pr` (not in `steps`, groups, or `parallel` children), exactly one of `prompt` / `prompt_file`, `timeout` required, `bots` unique, and no `command` / `option` / `parallel` / `group` / `workflow_call`.
 
-## Opt-in auto-merge
+## Opt-in native synchronous squash merge
 
-Cruise never merges automatically and the built-in `after-pr` has no merge step. To have GitHub auto-merge the PR once its requirements are met, write the command yourself:
+Every built-in has an explicit, default-off `merge` flag. The built-in after-PR prelude uses `flag: [after_pr, merge]` on its regular steps, so either flag runs it; the native final action is gated only by `merge`. `-f merge` therefore runs the prelude even when `after_pr` is off, and the prelude runs once. `-f after_pr` alone never merges. No PR is created or merged when the workflow has `create_pr: false` (including `research`), uses `exec`/current-branch mode, or has no commits eligible for PR creation; opted-in actions are skipped with a reason. The merge flag does not override read-only or no-PR policy.
+
+The native action is a direct final step in `after-pr`, never a prompt or command:
 
 ```yaml
+flags:
+  merge:
+    description: Run after-PR automation and synchronously squash-merge
+
 after-pr:
-  auto-merge:
-    command: "gh pr merge {pr.number} --auto --squash"
+  squash-merge:
+    squash-merge: true
+    flag: merge
+    timeout: 10m
 ```
 
-This runs only because you wrote it in your workflow. Because `after-pr` errors are downgraded to warnings (see below), a failing `gh pr merge --auto` (for example when auto-merge is disabled for the repository) will not fail the run. For a manual merge, use **Merge PR** in `cruise list`, the TUI, or the WebUI.
+`squash-merge: true` is valid only on the final direct step in `after-pr`, with exactly `flag: merge` (a single-name string or one-element list). It is forbidden in the main workflow, group definitions or calls, workflow calls, and parallel parents or children. Do not add `prompt`, `prompt_file`, `command`, `option`, `output_file`, `model`, `computer_use`, `permission`, or `allow_commit`; compatible common fields such as `env`, `timeout`, `skip`, and `when` may be used. The timeout bounds the synchronous operation.
+
+The native operation supports GitHub and GitLab and fails closed unless fresh provider state and local state are ready: the PR/MR must be open and non-draft, the worktree clean, local `HEAD` equal to the remote source head, applicable CI checks for that source head passed, required reviews and provider policy satisfied, and mergeability current. Pending, unknown, failed, or otherwise unfulfilled requirements reject the merge. The merge request includes an expected-head guard so a head race cannot merge a different revision. It requests squash synchronously; it does not enable auto-merge, bypass protections/admin rules, use a merge queue, or request source-branch deletion. GitHub uses its synchronous REST merge endpoint via `gh api`, not `gh pr merge`; queues that cannot preserve synchronous squash semantics are rejected. A same-head PR/MR already merged is idempotently accepted without another write.
+
+After the request, Cruise rechecks provider state and reports success only when the expected head is confirmed merged. A failed or unknown native merge outcome, or any fatal after-PR error, keeps the session and worktree and prevents `cleanup_after_pr` cleanup; inspect or resume it manually rather than assuming a merge. When `merge` is off, warning-only failures from ordinary after-PR steps do not by themselves prevent configured cleanup.
+
+The existing **Merge PR** action in `cruise list`, the TUI, and the WebUI remains a separate human-confirmed operation with its existing cleanup behavior and GitHub-only limitations. Native workflow merge is not a replacement or global default.
 
 ## Constraints
 
-- **Other errors are downgraded to warnings**: errors from `after-pr` steps are reported as warnings and the workflow continues (no fail-fast), except cancellation, missing jcode models, and `github-review` failures. `CruiseError::Interrupted` (for example, Ctrl+C) propagates and interrupts the after-PR phase. A missing-model error from a jcode after-PR prompt propagates and fails the run/session. A `github-review` failure (`CruiseError::GitHubReviewFailed`) propagates and marks the run `Failed`. The model fits side effects like pushing labels, posting notifications, etc.
+- **After-PR errors:** without native merge opt-in, errors from ordinary `after-pr` steps are warnings except cancellation, missing jcode models, and `github-review` failures, which propagate. With native merge opted in, actual execution errors anywhere in the after-PR run, including before the native step, are fatal and suppress post-PR cleanup. A nonzero command exit status remains command-as-data under existing semantics; the native action independently rechecks current readiness instead of trusting command output.
 - **`if.no-file-changes` is forbidden**: rejected for the same reason.
 - **`if.fail` is forbidden**: rejected for the same reason.
 
@@ -79,4 +100,5 @@ Regular transition rules (`next` / `skip` / `when.exists` / `if.file-changed`) w
 
 ## Related: `cleanup_after_pr`
 
-To automatically delete the local git worktree and branch after the PR is created, set `cleanup_after_pr: true` at the top level. This runs after all `after-pr` steps complete. See [top-level.md](top-level.md#cleanup_after_pr) for details.
+To automatically delete the local git worktree and branch after the PR has been created, set `cleanup_after_pr: true` at the top level. This runs after all after-PR steps complete. A fatal after-PR error or unconfirmed native merge outcome retains the session and worktree and prevents cleanup; warning-only failures from ordinary after-PR steps with native merge off do not by themselves prevent cleanup. See [top-level.md](top-level.md#cleanup_after_pr) for details.
+

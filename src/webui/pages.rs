@@ -304,11 +304,10 @@ pub(crate) fn step_tree_vm(
     }
 }
 
-/// Required on/off selects for the declared flags, preselecting known values.
+/// On/off selectors for declared flags; absent values select off.
 pub(crate) fn flag_rows(
     choices: &[crate::flags::FlagChoice],
     values: &crate::flags::FlagValues,
-    require: bool,
 ) -> Vec<super::view::FlagRowVm> {
     choices
         .iter()
@@ -316,8 +315,6 @@ pub(crate) fn flag_rows(
             name: choice.name.clone(),
             description: choice.description.clone().unwrap_or_default(),
             on: values.get(&choice.name) == Some(&true),
-            off: values.get(&choice.name) == Some(&false),
-            require,
         })
         .collect()
 }
@@ -361,7 +358,7 @@ pub(crate) fn step_tree_html(
                 skipped.to_vec()
             };
             let mut vm = step_tree_vm(&defaults.steps, &defaults.after_pr_steps, &effective);
-            vm.flags = flag_rows(&defaults.flags, &crate::flags::FlagValues::new(), true);
+            vm.flags = flag_rows(&defaults.flags, &crate::flags::FlagValues::new());
             vm
         }
         Err(_) => StepTreeVm {
@@ -435,7 +432,6 @@ pub(crate) fn new_session_html(state: &WebState) -> Result<String> {
             .unwrap_or_default(),
         skip_planning: false,
         grill: false,
-        formal_spec: false,
         no_interactive_planning: false,
         workspace_mode: "Worktree".to_string(),
         config_select: RawHtml::new(config_select_html(
