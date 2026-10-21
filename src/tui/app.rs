@@ -5770,7 +5770,8 @@ mod tests {
         assert_eq!(app.form.step, Step::Config);
         assert!(
             app.modal.is_none(),
-            "config defaults failed while entering Config"
+            "config defaults failed while entering Config: {:?}",
+            app.last_error
         );
 
         let expected_config = expected_config.to_string_lossy().into_owned();
@@ -5826,7 +5827,7 @@ mod tests {
         let second_config = second_dir.path().join("cruise.yaml");
         let write_config = |path: &std::path::Path, flag: &str, step: &str| {
             let yaml = format!(
-                "command: [echo]\nflags:\n  {flag}:\n    description: {flag}\nsteps:\n  {step}:\n    command: echo {step}\n"
+                "command: [echo]\nflags:\n  {flag}:\n    description: {flag}\nsteps:\n  {step}:\n    command: echo {step}\n    flag: {flag}\n"
             );
             std::fs::write(path, yaml).unwrap_or_else(|error| panic!("{error}"));
         };
