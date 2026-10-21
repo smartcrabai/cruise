@@ -5762,11 +5762,16 @@ mod tests {
         app.form.source = SourceKind::Directory;
         app.form.repository.set_text("");
         app.form.config.set_text("");
-        app.form.working_dir.set_text(&working_dir.to_string_lossy());
+        app.form
+            .working_dir
+            .set_text(&working_dir.to_string_lossy());
         app.form.step = Step::WorkingDirectory;
         assert!(!app.handle_key(key(KeyCode::Enter)));
         assert_eq!(app.form.step, Step::Config);
-        assert!(app.modal.is_none(), "config defaults failed while entering Config");
+        assert!(
+            app.modal.is_none(),
+            "config defaults failed while entering Config"
+        );
 
         let expected_config = expected_config.to_string_lossy().into_owned();
         assert!(

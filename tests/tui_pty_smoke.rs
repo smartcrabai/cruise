@@ -969,7 +969,10 @@ fn new_session_form_applies_workspace_options_with_ctrl_u() {
     tui.send(b"\t");
     tui.wait_for_output("Skip any workflow steps?", START_TIMEOUT);
     tui.send(b"\t");
-    tui.wait_for_output("Which optional workflow flags should be enabled?", START_TIMEOUT);
+    tui.wait_for_output(
+        "Which optional workflow flags should be enabled?",
+        START_TIMEOUT,
+    );
     tui.send(b"\t");
     tui.wait_for_output("Where should cruise execute?", START_TIMEOUT);
     tui.send(b" ");
