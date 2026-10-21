@@ -68,14 +68,15 @@ pub fn resolve_runtime(executable: &Path) -> io::Result<PathBuf> {
                 Err(error) => return Err(error),
             }
         }
-        InstallState::Homebrew | InstallState::External => {
-            executable.parent().ok_or_else(|| {
+        InstallState::Homebrew | InstallState::External => executable
+            .parent()
+            .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
                     "cannot determine Cruise install directory",
                 )
-            })?.to_path_buf()
-        }
+            })?
+            .to_path_buf(),
     };
 
     require_executable(install_dir.join(if cfg!(windows) {
@@ -130,7 +131,11 @@ mod tests {
         let cargo_home = temp.path().join("cargo");
         let bin = cargo_home.join("bin");
         fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("failed to create bin: {error}"));
-        let launcher = bin.join(if cfg!(windows) { "cruise.exe" } else { "cruise" });
+        let launcher = bin.join(if cfg!(windows) {
+            "cruise.exe"
+        } else {
+            "cruise"
+        });
         fs::write(&launcher, b"launcher")
             .unwrap_or_else(|error| panic!("failed to create launcher: {error}"));
         let canonical_bin = fs::canonicalize(&bin)

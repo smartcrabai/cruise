@@ -32,4 +32,3 @@ fn launch() -> io::Result<()> {
         .status()?;
     std::process::exit(status.code().unwrap_or(1));
 }
-

@@ -56,10 +56,7 @@ fn update_status_without_transactions_is_read_only() {
 #[test]
 fn update_status_lists_transactions_across_installations_without_changing_them() {
     let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
-    let installations = temp
-        .path()
-        .join("cruise")
-        .join("installations");
+    let installations = temp.path().join("cruise").join("installations");
     let alpha = installations.join("alpha").join("update-transaction.json");
     let beta = installations.join("beta").join("update-transaction.json");
     fs::create_dir_all(
@@ -140,8 +137,11 @@ fn update_status_skips_symlinked_installation_directories() {
         br#"{"phase":"staging"}"#,
     )
     .unwrap_or_else(|error| panic!("failed to write external transaction: {error}"));
-    symlink(&external_installation, installations.join("linked-installation"))
-        .unwrap_or_else(|error| panic!("failed to create installation symlink: {error}"));
+    symlink(
+        &external_installation,
+        installations.join("linked-installation"),
+    )
+    .unwrap_or_else(|error| panic!("failed to create installation symlink: {error}"));
 
     let output = run_status(temp.path());
 
