@@ -138,7 +138,6 @@ pub fn merge(pr_url: &str, method: PrMergeMethod) -> Result<()> {
 /// state. Every invocation is appended to `gh.log`.
 #[cfg(all(test, unix))]
 pub(crate) mod fake_gh {
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
     pub(crate) struct FakeGh {
@@ -167,12 +166,7 @@ exit 2\n",
                 d = dir.display()
             );
             let path = bin.join("gh");
-            std::fs::write(&path, script).unwrap_or_else(|e| panic!("{e}"));
-            let mut perms = std::fs::metadata(&path)
-                .unwrap_or_else(|e| panic!("{e}"))
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&path, perms).unwrap_or_else(|e| panic!("{e}"));
+            crate::test_support::write_executable_script(&path, &script);
             Self { dir }
         }
 
