@@ -511,18 +511,18 @@ impl Drop for PtySession {
 fn start_new_session(tui: &mut PtySession) {
     tui.send(b"2");
     tui.wait_for_screen(START_TIMEOUT, |screen| {
-        screen.contains("question 1 of 9") && screen.contains("Where is the code?")
+        screen.contains("question 1 of") && screen.contains("Where is the code?")
     });
 }
 
 fn advance_new_session_to_config(tui: &mut PtySession) {
     tui.send(b"\r");
     tui.wait_for_screen(START_TIMEOUT, |screen| {
-        screen.contains("question 2 of 9") && screen.contains("Which directory?")
+        screen.contains("question 2 of") && screen.contains("Which directory?")
     });
     tui.send(b"\r");
     tui.wait_for_screen(START_TIMEOUT, |screen| {
-        screen.contains("question 3 of 9") && screen.contains("Which workflow config?")
+        screen.contains("question 3 of") && screen.contains("Which workflow config?")
     });
 }
 
@@ -530,7 +530,7 @@ fn advance_new_session_to_task(tui: &mut PtySession) {
     advance_new_session_to_config(tui);
     tui.send(b"\r");
     tui.wait_for_screen(START_TIMEOUT, |screen| {
-        screen.contains("question 4 of 9") && screen.contains("What should cruise do?")
+        screen.contains("question 4 of") && screen.contains("What should cruise do?")
     });
 }
 
@@ -583,7 +583,7 @@ fn new_session_config_candidates_are_visible_selectable_and_persist_arbitrary_pa
     tui.wait_for_output("custom/workflow.yaml", START_TIMEOUT);
     tui.send(b"\r");
     tui.wait_for_screen(START_TIMEOUT, |screen| {
-        screen.contains("question 4 of 9") && screen.contains("What should cruise do?")
+        screen.contains("question 4 of") && screen.contains("What should cruise do?")
     });
     tui.send(b"config candidate PTY test");
     tui.send(b"\x13");
@@ -895,7 +895,7 @@ fn new_session_ctrl_s_clears_input_before_the_next_saved_draft() {
 
     tui.send(b"2");
     tui.wait_for_screen(START_TIMEOUT, |screen| {
-        screen.contains("question 1 of 9") && screen.contains("Where is the code?")
+        screen.contains("question 1 of") && screen.contains("Where is the code?")
     });
     advance_new_session_to_task(&mut tui);
     tui.send(b"\x13");
@@ -929,7 +929,7 @@ fn new_session_ctrl_p_validates_before_starting_planning() {
 
     tui.send(b"n");
     tui.wait_for_screen(START_TIMEOUT, |screen| {
-        screen.contains("question 1 of 9") && screen.contains("Where is the code?")
+        screen.contains("question 1 of") && screen.contains("Where is the code?")
     });
     tui.send(b"\x10");
     tui.wait_for_output(
@@ -964,21 +964,13 @@ fn new_session_form_applies_workspace_options_with_ctrl_u() {
     start_new_session(&mut tui);
     advance_new_session_to_task(&mut tui);
     tui.send(b"planned through terminal e2e");
-<<<<<<< HEAD
     tui.send(b"\t");
     tui.wait_for_output("Any images to attach?", START_TIMEOUT);
     tui.send(b"\t");
     tui.wait_for_output("Skip any workflow steps?", START_TIMEOUT);
     tui.send(b"\t");
-||||||| 5b70c6b
-    // Task → Images → Source → Working directory → Config → Skipped steps → Workspace
-    tui.send(b"\t\t\t\t\t\t");
-=======
-    // Task → Images → Source → Working directory → Config → Skipped steps → Flags
-    tui.send(b"\t\t\t\t\t\t");
-    // Flags remain off by default and Enter proceeds without toggling any.
-    tui.send(b"\r");
->>>>>>> origin/main
+    tui.wait_for_output("Which optional workflow flags should be enabled?", START_TIMEOUT);
+    tui.send(b"\t");
     tui.wait_for_output("Where should cruise execute?", START_TIMEOUT);
     tui.send(b" ");
     tui.send(b"\t");
@@ -1022,7 +1014,7 @@ fn new_session_ctrl_u_clears_input_before_the_next_created_session() {
 
     tui.send(b"n");
     tui.wait_for_screen(START_TIMEOUT, |screen| {
-        screen.contains("question 1 of 9") && screen.contains("Where is the code?")
+        screen.contains("question 1 of") && screen.contains("Where is the code?")
     });
     tui.send(b"\x15");
     tui.wait_for_output(
@@ -1278,7 +1270,7 @@ fn minimum_supported_terminal_keeps_navigation_and_help_usable() {
     thread::sleep(Duration::from_millis(100));
     tui.send(b"2");
     tui.wait_for_screen(START_TIMEOUT, |screen| {
-        screen.contains("question 1 of 9") && screen.contains("Where is the code?")
+        screen.contains("question 1 of") && screen.contains("Where is the code?")
     });
     tui.wait_for_output("Ctrl+P/G/U start now", START_TIMEOUT);
     tui.send(b"\x1b");

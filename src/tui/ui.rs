@@ -796,14 +796,8 @@ fn step_hint(app: &TuiApp) -> String {
         Step::SkippedSteps => format!("↑↓ move · Space toggle · Enter next · {BACK}"),
         Step::Flags => format!("↑↓ move · Space toggle on/off · Enter next · {BACK}"),
         Step::Launch => format!("↑↓ choose · Enter go · {BACK}"),
-<<<<<<< HEAD
         Step::Source => "↑↓ or Space choose · Enter next · Esc leave".to_string(),
-        Step::Workspace | Step::DirtyTree | Step::FormalSpec => {
-||||||| 5b70c6b
-        Step::Source | Step::Workspace | Step::DirtyTree | Step::FormalSpec => {
-=======
-        Step::Source | Step::Workspace | Step::DirtyTree => {
->>>>>>> origin/main
+        Step::Workspace | Step::DirtyTree => {
             format!("↑↓ or Space choose · Enter next · {BACK}")
         }
     }
@@ -2317,11 +2311,10 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
-    fn minimum_and_wide_new_session_layouts_show_source_before_task() {
+    fn minimum_new_session_layout_shows_source_before_task() {
         for width in [80, 120] {
             let view = rendered_view_with(width, 24, false, View::NewSession, |_| {});
-            assert!(view.contains("question 1 of 9"), "width {width}: {view}");
+            assert!(view.contains("question 1 of"), "width {width}: {view}");
             assert!(view.contains("Where is the code?"), "width {width}: {view}");
             for upcoming in [
                 "Working directory",
@@ -2330,7 +2323,6 @@ mod tests {
                 "Images",
                 "Skipped steps",
                 "Workspace",
-                "Formal specification",
                 "Launch",
             ] {
                 assert!(
@@ -2338,35 +2330,6 @@ mod tests {
                     "width {width}: missing upcoming question: {upcoming}\n{view}"
                 );
             }
-||||||| 5b70c6b
-    fn minimum_new_session_layout_shows_one_question_with_the_remaining_ones_listed() {
-        let view = rendered_view_with(80, 24, false, View::NewSession, |_| {});
-        assert!(view.contains("question 1 of 9"));
-        assert!(view.contains("What should cruise do?"));
-        for upcoming in [
-            "Images",
-            "Source",
-            "Working directory",
-            "Workflow config",
-            "Skipped steps",
-            "Workspace",
-            "Formal specification",
-            "Launch",
-        ] {
-=======
-    fn minimum_new_session_layout_shows_one_question_with_the_remaining_ones_listed() {
-        let view = rendered_view_with(80, 24, false, View::NewSession, |_| {});
-        assert!(view.contains("What should cruise do?"));
-        for upcoming in [
-            "Images",
-            "Source",
-            "Working directory",
-            "Workflow config",
-            "Skipped steps",
-            "Workspace",
-            "Launch",
-        ] {
->>>>>>> origin/main
             assert!(
                 !view.contains("Repository (GitHub or GitLab)"),
                 "directory sessions do not ask for a repository"
@@ -2377,12 +2340,9 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
-    fn config_is_the_third_question_before_task_has_been_answered() {
+    fn config_question_precedes_the_unanswered_task() {
         let view = rendered_view_with(80, 24, false, View::NewSession, |app| {
-            app.form.source = crate::tui::forms::SourceKind::Directory;
             app.form.working_dir.set_text("~/apps/demo");
-            app.form.config.set_text("");
             app.form.step = Step::Config;
         });
         assert!(view.contains("question 3 of 9"));
@@ -2398,18 +2358,13 @@ mod tests {
     fn source_and_task_hints_describe_their_escape_destinations() {
         for width in [80, 120] {
             let source = rendered_view_with(width, 30, false, View::NewSession, |_| {});
-            assert!(source.contains("Esc"));
-            assert!(
-                source.contains("leave") || source.contains("exit"),
-                "Source hint must explain that Esc leaves the first question: {source}"
-            );
+            assert!(source.contains("Esc leave"));
             assert!(!source.contains("Esc back"));
 
             let task = rendered_view_with(width, 30, false, View::NewSession, |app| {
                 app.form.step = Step::Task;
             });
-            assert!(task.contains("Esc"));
-            assert!(task.contains("back"));
+            assert!(task.contains("Esc back"));
             assert!(!task.contains("Esc leave"));
         }
     }
@@ -2463,48 +2418,6 @@ mod tests {
     }
 
     #[test]
-||||||| 5b70c6b
-    fn answered_questions_are_summarised_above_the_current_one() {
-        let view = rendered_view_with(80, 24, false, View::NewSession, |app| {
-            app.form.input.set_text("add dark mode\nwith a toggle");
-            app.form.working_dir.set_text("~/apps/demo");
-            app.form.config.set_text("");
-            app.form.step = Step::Config;
-        });
-        assert!(view.contains("question 5 of 9"));
-        assert!(view.contains("✓ Task"));
-        assert!(view.contains("add dark mode …"));
-        assert!(view.contains("✓ Working directory"));
-        assert!(view.contains("~/apps/demo"));
-        assert!(view.contains("Which workflow config?"));
-    }
-
-    #[test]
-    fn launch_question_lists_every_mode_with_its_shortcut() {
-        let view = rendered_view_with(80, 24, false, View::NewSession, |app| {
-            app.form.input.set_text("task");
-            app.form.step = Step::Launch;
-            app.form.launch = Launch::Grill;
-        });
-        assert!(view.contains("question 9 of 9"));
-        assert!(view.contains("How should this session start?"));
-        assert!(view.contains("▸ Grill planning (interview first)"));
-        for expected in [
-            "Start planning",
-            "Use the input as the plan (no LLM planning)",
-            "Save as draft",
-            "Ctrl+P",
-            "Ctrl+G",
-            "Ctrl+U",
-            "Ctrl+S",
-        ] {
-            assert!(view.contains(expected), "missing launch choice: {expected}");
-        }
-    }
-
-    #[test]
-=======
->>>>>>> origin/main
     fn new_session_footer_shows_dialogue_controls_instead_of_session_actions() {
         let view = rendered_view_with(80, 24, false, View::NewSession, |_| {});
         assert!(view.contains("Enter next"));

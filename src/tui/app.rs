@@ -5751,6 +5751,65 @@ mod tests {
         assert_eq!(app.form.repository.text(), "acme/a");
     }
 
+    fn select_config_for_working_directory(
+        app: &mut TuiApp,
+        working_dir: &std::path::Path,
+        expected_config: &std::path::Path,
+        expected_step: &str,
+        expected_flag: &str,
+        previous_config: Option<&std::path::Path>,
+    ) {
+        app.form.source = SourceKind::Directory;
+        app.form.repository.set_text("");
+        app.form.config.set_text("");
+        app.form.working_dir.set_text(&working_dir.to_string_lossy());
+        app.form.step = Step::WorkingDirectory;
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::Config);
+        assert!(app.modal.is_none(), "config defaults failed while entering Config");
+
+        let expected_config = expected_config.to_string_lossy().into_owned();
+        assert!(
+            app.config_sources
+                .iter()
+                .any(|source| source.selection_value() == expected_config),
+            "working-directory config candidate was not discovered: {expected_config}"
+        );
+        assert!(!app.handle_key(key(KeyCode::Down)));
+        assert_eq!(app.form.config.text(), expected_config);
+        assert_eq!(
+            app.config_defaults
+                .as_ref()
+                .map(|defaults| defaults.default_skipped_steps.clone()),
+            Some(vec![expected_step.to_string()])
+        );
+        assert_eq!(
+            app.form.selected_skipped_steps(),
+            vec![expected_step.to_string()]
+        );
+        assert!(
+            app.skip_choices()
+                .iter()
+                .any(|(label, _)| label == expected_step)
+        );
+        assert_eq!(
+            app.form
+                .flag_choices
+                .iter()
+                .map(|choice| choice.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![expected_flag]
+        );
+        if let Some(previous_config) = previous_config {
+            let previous_config = previous_config.to_string_lossy().into_owned();
+            assert!(
+                !app.config_sources
+                    .iter()
+                    .any(|source| source.selection_value() == previous_config)
+            );
+        }
+    }
+
     #[test]
     fn config_candidates_follow_the_working_directory_when_entering_config_step() {
         let _lock = crate::test_support::lock_process();
@@ -5760,29 +5819,26 @@ mod tests {
         let second_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let first_config = first_dir.path().join("cruise.yaml");
         let second_config = second_dir.path().join("cruise.yaml");
-        std::fs::write(
-            &first_config,
-            "command: [echo]\nflags:\n  first_flag:\n    description: first flag\nsteps:\n  first_step:\n    command: echo first_step\n",
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-        std::fs::write(
-            &second_config,
-            "command: [echo]\nflags:\n  second_flag:\n    description: second flag\nsteps:\n  second_step:\n    command: echo second_step\n",
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-        let history_entry = |working_dir: &std::path::Path,
-                             config_path: &std::path::Path,
-                             skipped_step: &str| {
-            crate::new_session_history::NewSessionHistoryEntry {
-                selected_at: String::new(),
-                input: String::new(),
-                requested_config_path: None,
-                working_dir: working_dir.to_string_lossy().into_owned(),
-                repo: None,
-                resolved_config_key: config_path.to_string_lossy().into_owned(),
-                skipped_steps: vec![skipped_step.to_string()],
-            }
+        let write_config = |path: &std::path::Path, flag: &str, step: &str| {
+            let yaml = format!(
+                "command: [echo]\nflags:\n  {flag}:\n    description: {flag}\nsteps:\n  {step}:\n    command: echo {step}\n"
+            );
+            std::fs::write(path, yaml).unwrap_or_else(|error| panic!("{error}"));
         };
+        write_config(&first_config, "first_flag", "first_step");
+        write_config(&second_config, "second_flag", "second_step");
+        let history_entry =
+            |working_dir: &std::path::Path, config_path: &std::path::Path, skipped_step: &str| {
+                crate::new_session_history::NewSessionHistoryEntry {
+                    selected_at: String::new(),
+                    input: String::new(),
+                    requested_config_path: None,
+                    working_dir: working_dir.to_string_lossy().into_owned(),
+                    repo: None,
+                    resolved_config_key: config_path.to_string_lossy().into_owned(),
+                    skipped_steps: vec![skipped_step.to_string()],
+                }
+            };
         crate::new_session_history::NewSessionHistory {
             entries: vec![
                 history_entry(first_dir.path(), &first_config, "first_step"),
@@ -5794,73 +5850,21 @@ mod tests {
 
         let mut app = app_without_lock();
         app.view = View::NewSession;
-        app.form.config.set_text("");
-        app.form
-            .working_dir
-            .set_text(&first_dir.path().to_string_lossy());
-        app.form.step = Step::WorkingDirectory;
-        assert!(!app.handle_key(key(KeyCode::Enter)));
-        assert_eq!(app.form.step, Step::Config);
-        assert!(!app.handle_key(key(KeyCode::Down)));
-        let first_config_value = first_config.to_string_lossy().into_owned();
-        assert_eq!(app.form.config.text(), first_config_value);
-        assert!(app.config_sources.iter().any(|source| {
-            source.selection_value() == first_config_value
-        }));
-        assert_eq!(
-            app.config_defaults
-                .as_ref()
-                .map(|defaults| defaults.default_skipped_steps.clone()),
-            Some(vec!["first_step".to_string()])
+        select_config_for_working_directory(
+            &mut app,
+            first_dir.path(),
+            &first_config,
+            "first_step",
+            "first_flag",
+            None,
         );
-        assert_eq!(app.form.selected_skipped_steps(), vec!["first_step"]);
-        assert!(app
-            .skip_choices()
-            .iter()
-            .any(|(label, _)| label == "first_step"));
-        assert_eq!(
-            app.form
-                .flag_choices
-                .iter()
-                .map(|choice| choice.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["first_flag"]
-        );
-
-        app.form.config.set_text("");
-        app.form
-            .working_dir
-            .set_text(&second_dir.path().to_string_lossy());
-        app.form.step = Step::WorkingDirectory;
-        assert!(!app.handle_key(key(KeyCode::Enter)));
-        assert_eq!(app.form.step, Step::Config);
-        assert!(!app.handle_key(key(KeyCode::Down)));
-        let second_config_value = second_config.to_string_lossy().into_owned();
-        assert_eq!(app.form.config.text(), second_config_value);
-        assert!(app.config_sources.iter().any(|source| {
-            source.selection_value() == second_config_value
-        }));
-        assert!(!app.config_sources.iter().any(|source| {
-            source.selection_value() == first_config_value
-        }));
-        assert_eq!(
-            app.config_defaults
-                .as_ref()
-                .map(|defaults| defaults.default_skipped_steps.clone()),
-            Some(vec!["second_step".to_string()])
-        );
-        assert_eq!(app.form.selected_skipped_steps(), vec!["second_step"]);
-        assert!(app
-            .skip_choices()
-            .iter()
-            .any(|(label, _)| label == "second_step"));
-        assert_eq!(
-            app.form
-                .flag_choices
-                .iter()
-                .map(|choice| choice.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["second_flag"]
+        select_config_for_working_directory(
+            &mut app,
+            second_dir.path(),
+            &second_config,
+            "second_step",
+            "second_flag",
+            Some(&first_config),
         );
     }
 
@@ -5932,7 +5936,7 @@ mod tests {
             "auto-detect must wait until the repository clone exists"
         );
         assert_eq!(app.skip_choices(), [] as [(String, Vec<String>); 0]);
-        assert!(app.form.flag_choices.is_empty());
+        assert!(app.form.flag_choices.first().is_none());
 
         let request = app.form.request();
         assert_eq!(
@@ -5955,7 +5959,7 @@ mod tests {
         );
         assert!(app.config_defaults.is_none());
         assert_eq!(app.skip_choices(), [] as [(String, Vec<String>); 0]);
-        assert!(app.form.flag_choices.is_empty());
+        assert!(app.form.flag_choices.first().is_none());
         assert_eq!(app.form.request().skipped_steps, [] as [String; 0]);
     }
 

@@ -90,17 +90,7 @@ pub enum Step {
 }
 
 impl Step {
-<<<<<<< HEAD
-    pub const ORDER: [Self; 12] = [
-||||||| 5b70c6b
-    pub const ORDER: [Self; 12] = [
-        Self::Task,
-        Self::Attachments,
-=======
     pub const ORDER: [Self; 11] = [
-        Self::Task,
-        Self::Attachments,
->>>>>>> origin/main
         Self::Source,
         Self::WorkingDirectory,
         Self::Repository,
@@ -1077,7 +1067,6 @@ mod tests {
                 Step::SkippedSteps,
                 Step::Workspace,
                 Step::DirtyTree,
-                Step::FormalSpec,
                 Step::Launch,
             ]
         );
@@ -1158,7 +1147,6 @@ mod tests {
                 Step::Task,
                 Step::Attachments,
                 Step::SkippedSteps,
-                Step::FormalSpec,
                 Step::Launch,
             ]
         );
@@ -1211,7 +1199,6 @@ mod tests {
                 Step::SkippedSteps,
                 Step::Flags,
                 Step::Workspace,
-                Step::FormalSpec,
                 Step::Launch,
             ]
         );
