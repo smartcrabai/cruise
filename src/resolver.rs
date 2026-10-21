@@ -23,7 +23,10 @@ impl ConfigSource {
     #[must_use]
     pub fn display_string(&self) -> String {
         match self {
-            Self::Builtin => "config: (builtin default)".to_string(),
+            Self::Builtin => format!(
+                "config: (builtin {})",
+                crate::builtin_workflows::DEFAULT_BUILTIN_NAME
+            ),
             Self::NamedBuiltin(name) => format!("config: (builtin {name})"),
             Self::Explicit(p) | Self::EnvVar(p) | Self::Local(p) | Self::UserDir(p) => {
                 format!("config: {}", p.display())
@@ -1170,48 +1173,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_collect_candidates_label_contains_kind_prefix() {
-        // Given: env var file exists
-        let env_file = tempfile::NamedTempFile::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let env_path = env_file
-            .path()
-            .to_str()
-            .unwrap_or_else(|| panic!("unexpected None"))
-            .to_string();
-        let tmp_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let fake_home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let _guard = DirGuard::new();
-        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
-
-        // When: candidates collected
-        let candidates =
-            collect_candidates(tmp_dir.path(), Some(env_path)).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: env candidate label contains "CRUISE_CONFIG" for disambiguation
-        let env_candidate = candidates
-            .iter()
-            .find(|c| matches!(c.source, CandidateKind::EnvVar(_)))
-            .unwrap_or_else(|| panic!("expected EnvVar candidate"));
-        assert!(
-            env_candidate.label.contains("CRUISE_CONFIG"),
-            "env label must include 'CRUISE_CONFIG', got: {}",
-            env_candidate.label
-        );
-
-        // And: builtin label indicates it is a default/builtin option
-        let builtin_candidate = candidates
-            .iter()
-            .find(|c| matches!(c.source, CandidateKind::Builtin))
-            .unwrap_or_else(|| panic!("expected Builtin candidate"));
-        let lower = builtin_candidate.label.to_lowercase();
-        assert!(
-            lower.contains("builtin") || lower.contains("default"),
-            "builtin label must indicate it is a default, got: {}",
-            builtin_candidate.label
-        );
-    }
-
     // ---- resolve_config_in_dir_with_interactive ----
 
     #[test]
@@ -1502,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_candidates_returns_cli_labels_and_paths_relative_to_requested_directory() {
+    fn test_collect_candidates_orders_sources_for_requested_directory() {
         // Given: every CLI candidate source exists under a directory that is not the process cwd.
         let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::write(repo_dir.path().join("env.yaml"), "").unwrap_or_else(|e| panic!("{e:?}"));
@@ -1529,24 +1490,31 @@ mod tests {
         let candidates = collect_candidates(repo_dir.path(), Some(env_path_string))
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: labels use the same CLI shortening and values retain absolute paths.
+        // Then: file-backed candidates precede the six built-ins.
         let labels = candidates
             .iter()
             .map(|candidate| candidate.label.as_str())
             .collect::<Vec<_>>();
         assert_eq!(
-            labels,
-            vec![
+            &labels[..5],
+            [
                 "CRUISE_CONFIG → ./env.yaml",
                 "./cruise.yaml",
                 "./.cruise/team.yml",
                 "~/.config/cruise/workflows/alpha.yaml",
                 "~/.config/cruise/workflows/zeta.yaml",
-                "Built-in default: Plan, implement, verify, and open a pull request",
-                "Built-in simple: Implement, test, auto-fix failures, then commit",
-                "Built-in review: Review the changes and report findings without editing files",
             ]
         );
+        for (label, name) in labels[5..].iter().zip([
+            "tdd",
+            "refactor",
+            "add-tests",
+            "add-formal-specs",
+            "research",
+            "security",
+        ]) {
+            assert!(label.starts_with(&format!("Built-in {name}:")), "{label}");
+        }
         assert!(matches!(
             &candidates[0].source,
             CandidateKind::EnvVar(path) if path == &env_path
@@ -1916,7 +1884,14 @@ mod tests {
             "command: [local]\nsteps:\n  s:\n    command: local",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
-        for name in ["simple", "review"] {
+        for name in [
+            "tdd",
+            "refactor",
+            "add-tests",
+            "add-formal-specs",
+            "research",
+            "security",
+        ] {
             let (yaml, source) =
                 resolve_config_in_dir(Some(&format!("builtin:{name}")), repo.path())
                     .unwrap_or_else(|e| panic!("{e:?}"));
@@ -1924,27 +1899,39 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} missing"))
                 .yaml;
             assert_eq!(yaml, expected);
-            assert!(source.path().is_none());
+            if name == crate::builtin_workflows::DEFAULT_BUILTIN_NAME {
+                assert!(matches!(source, ConfigSource::Builtin));
+            } else {
+                assert!(matches!(
+                    source,
+                    ConfigSource::NamedBuiltin(actual) if actual == name
+                ));
+            }
         }
     }
 
     #[test]
-    fn builtin_default_aliases_return_default_yaml() {
+    fn generic_builtin_selector_resolves_tdd() {
         let (_lock, _home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        for value in ["__builtin__", "builtin:default"] {
-            let (yaml, source) =
-                resolve_config_in_dir(Some(value), repo.path()).unwrap_or_else(|e| panic!("{e:?}"));
-            assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
-            assert!(source.path().is_none());
-        }
+        let (yaml, source) = resolve_config_in_dir(Some("__builtin__"), repo.path())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(yaml, crate::config::BUILTIN_CONFIG_YAML);
+        assert!(matches!(source, ConfigSource::Builtin));
     }
 
     #[test]
     fn unknown_builtin_name_is_other_error() {
         let (_lock, _home, _guards) = isolated_env();
         let repo = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        for value in ["builtin:nope", "builtin:../simple", "builtin:"] {
+        for value in [
+            "builtin:default",
+            "builtin:simple",
+            "builtin:review",
+            "builtin:nope",
+            "builtin:../simple",
+            "builtin:",
+        ] {
             assert!(
                 matches!(
                     resolve_config_in_dir(Some(value), repo.path()),
@@ -1966,9 +1953,23 @@ mod tests {
             .collect();
         assert_eq!(
             values,
-            vec!["__builtin__", "builtin:simple", "builtin:review"]
+            vec![
+                "__builtin__",
+                "builtin:refactor",
+                "builtin:add-tests",
+                "builtin:add-formal-specs",
+                "builtin:research",
+                "builtin:security",
+            ]
         );
-        for (candidate, name) in candidates.iter().zip(["default", "simple", "review"]) {
+        for (candidate, name) in candidates.iter().zip([
+            "tdd",
+            "refactor",
+            "add-tests",
+            "add-formal-specs",
+            "research",
+            "security",
+        ]) {
             let entry = crate::builtin_workflows::find_builtin(name)
                 .unwrap_or_else(|| panic!("{name} missing"));
             assert!(candidate.label().contains(name), "{}", candidate.label());
@@ -1998,11 +1999,18 @@ mod tests {
             .iter()
             .map(ConfigCandidate::selection_value)
             .collect();
-        assert_eq!(values.len(), 4);
+        assert_eq!(values.len(), 7);
         assert!(values[0].ends_with("cruise.yaml"));
         assert_eq!(
             &values[1..],
-            ["__builtin__", "builtin:simple", "builtin:review"]
+            [
+                "__builtin__",
+                "builtin:refactor",
+                "builtin:add-tests",
+                "builtin:add-formal-specs",
+                "builtin:research",
+                "builtin:security",
+            ]
         );
     }
 

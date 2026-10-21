@@ -36,7 +36,7 @@ With a variable reference, the step is skipped when the variable's current value
 
 ## `flag:` — run a step only when a flag is on
 
-Declare the flag in top-level `flags:`, then set `flag: <name>` on a step. The step runs only when the flag is `on` and is skipped when `off`. Flags have no default and must be resolved before a run (`--flag NAME=on|off` or an interactive prompt). Allowed on regular steps, group calls, `workflow_call` call sites (applied to every expanded step), parallel parents, and `after-pr` steps. Not allowed on steps inside a group definition, a callee's own steps, or parallel children. Flag-disabled steps are unioned with `skipped_steps`.
+Declare the flag in top-level `flags:`. For compatibility, `flag: name` remains valid; `flag: [name_a, name_b]` accepts a non-empty list and uses ANY/OR semantics, so the step runs when at least one named flag is on. Every referenced name must be declared, and an empty list is invalid. A declared flag is off when absent; enable with `--flag NAME`, a comma-separated list or repeated options, or explicit `NAME=on|off|true|false` values. CLI commands do not prompt for flags. Gates are allowed on regular steps (including `after-pr`), group and `workflow_call` call sites, and parallel parents; call-site gates apply to every expanded step. They are not allowed on steps inside a group definition, a callee's own steps, or parallel children. Flag-disabled steps are unioned with `skipped_steps`.
 
 ## `when: exists:` — skip unless a file matches
 

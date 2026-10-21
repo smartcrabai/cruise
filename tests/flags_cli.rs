@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! Entry-point contract for `cruise exec --flag NAME=on|off`.
+//! End-to-end contract for `cruise exec --flag`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -10,12 +10,19 @@ const WORKFLOW: &str = "command: [echo]
 flags:
   e2e:
     description: Run E2E
+  docs: {}
 steps:
   build:
     command: touch build.txt
   e2e-test:
     flag: e2e
     command: touch e2e.txt
+  docs-test:
+    flag: docs
+    command: touch docs.txt
+  any-test:
+    flag: [e2e, docs]
+    command: touch any.txt
 ";
 
 struct Fixture {
@@ -108,36 +115,101 @@ fn text(output: &Output) -> String {
 }
 
 #[test]
-fn exec_flag_off_skips_the_flagged_step() {
+fn exec_without_flags_runs_unflagged_steps_and_skips_flagged_side_effects() {
+    let f = Fixture::new();
+    let out = f.exec(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(f.repo.join("build.txt").exists());
+    assert!(!f.repo.join("e2e.txt").exists());
+    assert!(!f.repo.join("docs.txt").exists());
+    assert!(!f.repo.join("any.txt").exists());
+}
+
+#[test]
+fn exec_accepts_a_bare_flag_name() {
+    let f = Fixture::new();
+    let out = f.exec(&["--flag", "e2e"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(f.repo.join("e2e.txt").exists());
+    assert!(f.repo.join("any.txt").exists());
+    assert!(!f.repo.join("docs.txt").exists());
+}
+
+#[test]
+fn exec_enables_any_flag_list_member_without_enabling_others() {
+    let f = Fixture::new();
+    let out = f.exec(&["-f", "docs"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(f.repo.join("docs.txt").exists());
+    assert!(f.repo.join("any.txt").exists());
+    assert!(!f.repo.join("e2e.txt").exists());
+}
+
+#[test]
+fn exec_accepts_a_comma_separated_flag_list() {
+    let f = Fixture::new();
+    let out = f.exec(&["-f", "e2e,docs"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(f.repo.join("e2e.txt").exists());
+    assert!(f.repo.join("docs.txt").exists());
+    assert!(f.repo.join("any.txt").exists());
+}
+
+#[test]
+fn exec_accepts_repeated_flag_arguments() {
+    let f = Fixture::new();
+    let out = f.exec(&["--flag", "e2e", "-f", "docs"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(f.repo.join("e2e.txt").exists());
+    assert!(f.repo.join("docs.txt").exists());
+    assert!(f.repo.join("any.txt").exists());
+}
+
+#[test]
+fn exec_accepts_explicit_off_in_a_comma_separated_list() {
+    let f = Fixture::new();
+    let out = f.exec(&["-f", "e2e,docs=off"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(f.repo.join("e2e.txt").exists());
+    assert!(f.repo.join("any.txt").exists());
+    assert!(!f.repo.join("docs.txt").exists());
+}
+
+#[test]
+fn exec_explicit_off_skips_the_flagged_step() {
     let f = Fixture::new();
     let out = f.exec(&["--flag", "e2e=off"]);
     assert!(out.status.success(), "{}", text(&out));
     assert!(f.repo.join("build.txt").exists());
     assert!(!f.repo.join("e2e.txt").exists());
+    assert!(!f.repo.join("any.txt").exists());
 }
 
 #[test]
-fn exec_flag_on_runs_the_flagged_step() {
-    let f = Fixture::new();
-    let out = f.exec(&["--flag", "e2e=on"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(f.repo.join("e2e.txt").exists());
+fn exec_rejects_malformed_and_empty_flag_values() {
+    for invalid in ["e2e=maybe", "e2e=", "e2e,,docs", ",e2e", "e2e,", ""] {
+        let f = Fixture::new();
+        let out = f.exec(&["--flag", invalid]);
+        let message = text(&out);
+        assert!(!out.status.success(), "{invalid:?}: {message}");
+        assert!(!f.repo.join("build.txt").exists(), "{invalid:?}: {message}");
+    }
 }
 
 #[test]
-fn exec_without_a_value_for_a_declared_flag_fails_before_running_anything() {
+fn exec_rejects_duplicate_flag_names() {
     let f = Fixture::new();
-    let out = f.exec(&[]);
+    let out = f.exec(&["--flag", "e2e,e2e"]);
     let message = text(&out);
     assert!(!out.status.success(), "{message}");
-    assert!(message.contains("e2e"), "{message}");
-    assert!(!f.repo.join("build.txt").exists(), "nothing may run");
+    assert!(message.contains("more than once"), "{message}");
+    assert!(!f.repo.join("build.txt").exists());
 }
 
 #[test]
 fn exec_rejects_an_undeclared_flag_name() {
     let f = Fixture::new();
-    let out = f.exec(&["--flag", "e2e=on", "--flag", "ghost=on"]);
+    let out = f.exec(&["--flag", "e2e,ghost"]);
     let message = text(&out);
     assert!(!out.status.success(), "{message}");
     assert!(message.contains("ghost"), "{message}");

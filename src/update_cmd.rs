@@ -6,7 +6,7 @@ use crate::error::{CruiseError, Result};
 const INSTALLATIONS_DIR: &str = "installations";
 const TRANSACTION_FILE: &str = "update-transaction.json";
 
-pub(crate) fn run(args: UpdateArgs) -> Result<()> {
+pub(crate) fn run(args: &UpdateArgs) -> Result<()> {
     if args.status {
         return print_status();
     }

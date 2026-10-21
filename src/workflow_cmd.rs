@@ -107,12 +107,6 @@ fn render_list(
 ///
 /// Returns an error when the destination cannot be determined or ejecting fails.
 pub fn eject(name: &str, project: bool) -> Result<()> {
-    if project && name == "default" {
-        return Err(crate::error::CruiseError::Other(
-            "./.cruise/default.yaml is reserved for workflow defaults; choose another --name or use --user"
-                .to_string(),
-        ));
-    }
     let dir = if project {
         std::env::current_dir()?.join(".cruise")
     } else {
@@ -260,6 +254,13 @@ mod tests {
         assert!(lines.iter().any(|l| l == "Installed packages"));
         assert!(lines.iter().any(|l| l.contains("(none)")));
         assert!(lines.iter().any(|l| l.contains("cruise workflow add")));
+        for workflow in BUILTIN_WORKFLOWS {
+            assert!(
+                line_with(&lines, workflow.description).contains(workflow.name),
+                "{} missing from listing: {lines:?}",
+                workflow.name
+            );
+        }
     }
 
     #[test]
@@ -320,10 +321,10 @@ mod tests {
     fn render_list_shares_name_column_across_sections() {
         let long = "a-very-long-package-name";
         let lines = render(&[pkg(long, "main", FULL_SHA)]);
-        let simple = crate::builtin_workflows::find_builtin("simple")
-            .unwrap_or_else(|| panic!("simple missing"));
-        let col = line_with(&lines, simple.description)
-            .find(simple.description)
+        let refactor = crate::builtin_workflows::find_builtin("refactor")
+            .unwrap_or_else(|| panic!("refactor missing"));
+        let col = line_with(&lines, refactor.description)
+            .find(refactor.description)
             .unwrap_or(0);
         assert_eq!(col, 2 + long.len() + 2, "{lines:?}");
     }
@@ -355,23 +356,25 @@ mod tests {
     }
 
     #[test]
-    fn eject_builtin_copies_yaml_to_new_destination() {
+    fn eject_builtin_copies_each_catalog_workflow_to_new_destination() {
         let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let dest = tmp.path().join("missing").join("parent");
-        let path = eject_builtin("simple", &dest).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(path, dest.join("simple.yaml"));
-        let expected = crate::builtin_workflows::find_builtin("simple")
-            .unwrap_or_else(|| panic!("simple missing"))
-            .yaml;
-        assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), expected);
+        for workflow in BUILTIN_WORKFLOWS {
+            let dest = tmp.path().join(workflow.name);
+            let path = eject_builtin(workflow.name, &dest).unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(path, dest.join(format!("{}.yaml", workflow.name)));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap_or_default(),
+                workflow.yaml
+            );
+        }
     }
 
     #[test]
     fn eject_builtin_does_not_overwrite_existing_file() {
         let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let existing = tmp.path().join("review.yaml");
+        let existing = tmp.path().join("add-tests.yaml");
         std::fs::write(&existing, b"mine: true\n").unwrap_or_else(|e| panic!("{e:?}"));
-        let err = eject_builtin("review", tmp.path()).err();
+        let err = eject_builtin("add-tests", tmp.path()).err();
         match err {
             Some(CruiseError::IoError(e)) => {
                 assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
@@ -385,10 +388,17 @@ mod tests {
     }
 
     #[test]
-    fn eject_builtin_rejects_unknown_name_without_writing() {
+    fn eject_builtin_rejects_removed_names_and_other_unknown_names_without_writing() {
         let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let dest = tmp.path().join("out");
-        for name in ["nope", "../escape", "simple/../x"] {
+        for name in [
+            "default",
+            "simple",
+            "review",
+            "nope",
+            "../escape",
+            "simple/../x",
+        ] {
             assert!(matches!(
                 eject_builtin(name, &dest).err(),
                 Some(CruiseError::Other(_))
@@ -397,17 +407,5 @@ mod tests {
         assert!(!tmp.path().join("escape.yaml").exists());
         let entries = std::fs::read_dir(&dest).map_or(0, Iterator::count);
         assert_eq!(entries, 0);
-    }
-
-    #[test]
-    fn eject_default_to_project_is_rejected_without_writing() {
-        let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let prev = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
-        std::env::set_current_dir(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
-        let result = eject("default", true);
-        std::env::set_current_dir(prev).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(result.is_err());
-        assert!(!tmp.path().join(".cruise").join("default.yaml").exists());
     }
 }

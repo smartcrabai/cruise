@@ -74,13 +74,32 @@ fn defaults_file_with_workflow_only_key_fails_with_path_and_key() {
 }
 
 #[test]
-fn workflow_eject_default_to_project_is_rejected() {
+fn workflow_eject_tdd_to_project_writes_named_workflow_file() {
     let home = TempDir::new().unwrap_or_else(|e| panic!("tempdir: {e}"));
     let project = TempDir::new().unwrap_or_else(|e| panic!("tempdir: {e}"));
     let output = cruise(home.path(), project.path())
-        .args(["workflow", "eject", "default", "--to", "project"])
+        .args(["workflow", "eject", "tdd", "--to", "project"])
         .output()
         .unwrap_or_else(|e| panic!("run cruise: {e}"));
-    assert!(!output.status.success(), "{}", text(&output));
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(project.path().join(".cruise/tdd.yaml").is_file());
     assert!(!project.path().join(".cruise/default.yaml").exists());
+}
+
+#[test]
+fn removed_builtin_names_are_rejected_by_cli() {
+    let home = TempDir::new().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    let project = TempDir::new().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    for name in ["default", "simple", "review"] {
+        let output = cruise(home.path(), project.path())
+            .args(["workflow", "eject", name, "--to", "user"])
+            .output()
+            .unwrap_or_else(|e| panic!("run cruise: {e}"));
+        let terminal = text(&output);
+        assert!(!output.status.success(), "{name} unexpectedly ejected");
+        assert!(
+            terminal.contains("unknown built-in workflow"),
+            "{name}: {terminal}"
+        );
+    }
 }

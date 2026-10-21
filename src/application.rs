@@ -1216,15 +1216,9 @@ impl From<bool> for Interactive {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "planning modes are independent request flags exposed by the application API"
-)]
 pub struct PlanRequest {
     #[serde(default)]
     pub grill: bool,
-    #[serde(default)]
-    pub formal_spec: bool,
     #[serde(default)]
     pub skip_planning: bool,
     /// Disable SDK planning tools for this request, even when the workflow
@@ -1245,7 +1239,6 @@ impl Default for PlanRequest {
     fn default() -> Self {
         Self {
             grill: false,
-            formal_spec: false,
             skip_planning: false,
             no_interactive_planning: false,
             interactive: Interactive::default(),
@@ -1417,8 +1410,9 @@ fn commit_input_plan(
     plan_path: &std::path::Path,
     staged_plan_path: &std::path::Path,
     old_plan: Option<&[u8]>,
+    create_pr: bool,
 ) -> Result<()> {
-    crate::repo_clone::cleanup_after_approval_checked(manager, &mut state)?;
+    crate::repo_clone::cleanup_after_approval_checked(manager, &mut state, create_pr)?;
     std::fs::rename(staged_plan_path, plan_path)
         .map_err(|error| CruiseError::Other(format!("failed to commit generated plan: {error}")))?;
     if let Err(error) = manager.save(&state) {
@@ -1448,6 +1442,7 @@ fn use_input_as_plan_inner(
     mut state: SessionState,
     sink: &dyn ApplicationEventSink,
 ) -> Result<SessionState> {
+    let create_pr = manager.load_config(&state)?.create_pr;
     let before = state.clone();
     let plan_path = state.plan_path(&manager.sessions_dir());
     let staged_plan_path = manager
@@ -1488,6 +1483,7 @@ fn use_input_as_plan_inner(
             &plan_path_for_commit,
             &staged_path_for_commit,
             old_plan_for_commit.as_deref(),
+            create_pr,
         )
     });
     match committed {
@@ -1861,11 +1857,6 @@ async fn run_plan_prompt(
         rate_limit_retries: request.rate_limit_retries,
         working_dir: Some(&context.state.base_dir),
         grill: request.grill,
-        // Formal specifications are limited to Generate operations. CLI and
-        // official WebUI/TUI callers only set the flag for new-session planning,
-        // while direct API Generate callers may use it for any eligible phase.
-        // Replan, Fix, and Ask callers cannot opt in through this field.
-        formal_spec: request.formal_spec && operation == OperationKind::Generate,
         on_session_id: Some(&on_session_id),
         on_notice: Some(&on_notice),
         cancel_token: Some(&token),
@@ -2183,7 +2174,10 @@ impl CruiseApplication {
         let mut entries = crate::configs::list_configs_in(base_dir);
         entries.extend(crate::configs::list_user_configs());
         entries.push(crate::configs::ConfigEntry {
-            name: "Built-in default".to_string(),
+            name: format!(
+                "Built-in {}",
+                crate::builtin_workflows::DEFAULT_BUILTIN_NAME
+            ),
             path: crate::new_session_history::BUILTIN_CONFIG_KEY.to_string(),
             description: None,
         });
@@ -2602,8 +2596,9 @@ impl CruiseApplication {
                 "session has no usable plan to approve".to_string(),
             ));
         }
+        let create_pr = self.manager.load_config(&state)?.create_pr;
         state.approve();
-        crate::repo_clone::cleanup_after_approval_checked(&self.manager, &mut state)?;
+        crate::repo_clone::cleanup_after_approval_checked(&self.manager, &mut state, create_pr)?;
         self.manager.save(&state)?;
         Ok(state)
     }
@@ -3156,6 +3151,7 @@ impl CruiseApplication {
     ) -> Result<SessionState> {
         let mut state = self.manager.load(id)?;
         let message = error.to_string();
+        state.pr_skipped_reason = None;
         if matches!(&error, CruiseError::Interrupted) {
             state.phase = SessionPhase::Suspended;
             state.clear_pending_input();
@@ -3224,6 +3220,7 @@ impl CruiseApplication {
                 setup.repo_clone_created,
             );
             setup.state.phase = SessionPhase::Suspended;
+            setup.state.pr_skipped_reason = None;
             setup.state.clear_pending_input();
             setup.state.clear_runner();
             self.manager.save(&setup.state)?;
@@ -3335,7 +3332,6 @@ fn setup_run_blocking(
     }
     let config = manager.load_config(&state)?;
     crate::config::validate_config(&config)?;
-    crate::flags::require_complete(&config, &state.flags)?;
     let max_retries = max_retries_override
         .unwrap_or_else(|| crate::config::resolve_effective_max_retries(None, &config));
     crate::config::validate_group_retry_budget(&config, max_retries)?;
@@ -3363,7 +3359,7 @@ fn setup_run_blocking(
     } else {
         requested_mode.unwrap_or(state.workspace_mode)
     };
-    if workspace_mode == WorkspaceMode::Worktree {
+    if state.repo.is_some() {
         crate::forge::ensure_forge_available(crate::forge::session_forge(&state))?;
     }
     let (workspace, repo_clone_created) =
@@ -3423,6 +3419,7 @@ fn prepare_run_inputs(manager: &SessionManager, setup: &mut RunSetup) -> Result<
     vars.set_named_file(crate::session::PLAN_VAR, plan_path);
     vars.set_artifacts_root(setup.state.artifacts_path(&manager.sessions_dir()));
     let tracker = crate::file_tracker::FileTracker::with_root(setup.workspace.path().to_path_buf());
+    setup.state.pr_skipped_reason = None;
     setup.state.phase = SessionPhase::Running;
     setup.state.set_runner_to_current_process();
     manager.save(&setup.state)?;
@@ -3445,6 +3442,7 @@ fn emit_run_started(
         && let Err(error) = sink.send(ApplicationEvent::BatchSessionStarted { id: id.to_string() })
     {
         setup.state.phase = SessionPhase::Failed(error.to_string());
+        setup.state.pr_skipped_reason = None;
         setup.state.completed_at = Some(crate::session::current_iso8601());
         setup.state.clear_pending_input();
         let _ = manager.save(&setup.state);
@@ -3454,6 +3452,7 @@ fn emit_run_started(
         session_id: id.to_string(),
     }) {
         setup.state.phase = SessionPhase::Failed(error.to_string());
+        setup.state.pr_skipped_reason = None;
         setup.state.completed_at = Some(crate::session::current_iso8601());
         setup.state.clear_pending_input();
         let _ = manager.save(&setup.state);
@@ -3515,13 +3514,12 @@ async fn run_engine_steps(
              + Send
              + Sync
      ),
-) -> Result<()> {
+) -> Result<crate::engine::ExecutionResult> {
     crate::retry::with_active_policy(
         retry_policy.cloned(),
         crate::engine::execute_steps_with_graph(ctx, vars, tracker, dag, on_node_start),
     )
     .await
-    .map(|_| ())
 }
 
 struct WorktreeRun<'a> {
@@ -3539,10 +3537,27 @@ impl WorktreeRun<'_> {
         inputs: &mut RunInputs,
         on_log: &crate::step::command::StepLogCallback<'_>,
     ) -> Result<()> {
-        self.sink.send(ApplicationEvent::RunPhase {
-            session_id: setup.state.id.clone(),
-            phase: "Creating PR".to_string(),
-        })?;
+        if self.claim.token().is_cancelled() {
+            return Err(CruiseError::Interrupted);
+        }
+        if !setup.compiled.create_pr {
+            setup.state.pr_skipped_reason = Some(crate::session::PrSkippedReason::Disabled);
+            crate::worktree_pr::log_after_pr_skipped(
+                &setup.compiled,
+                &inputs.flags,
+                &inputs.skipped_steps,
+                "pull-request creation is disabled",
+            );
+            return Ok(());
+        }
+        let processing_sink = Arc::clone(self.sink);
+        let processing_session_id = setup.state.id.clone();
+        let on_pr_processing = move || {
+            processing_sink.send(ApplicationEvent::RunPhase {
+                session_id: processing_session_id.clone(),
+                phase: "Creating PR".to_string(),
+            })
+        };
         let pr_sink = Arc::clone(self.sink);
         let manager_for_pr = self.manager.clone();
         let persist_pr = move |snapshot: &SessionState| {
@@ -3570,6 +3585,7 @@ impl WorktreeRun<'_> {
                 Some(&self.claim.token),
                 self.option,
                 Some(on_log),
+                Some(&on_pr_processing),
                 Some(&persist_pr),
             ),
         )
@@ -3609,7 +3625,7 @@ async fn execute_run(
         setup.state.workflow_defaults_dir().map(Path::to_path_buf),
         setup.max_retries,
     );
-    let execution = {
+    let mut execution = {
         let ctx = crate::engine::ExecutionContext {
             compiled: &setup.compiled,
             max_retries: setup.max_retries,
@@ -3633,13 +3649,38 @@ async fn execute_run(
         )
         .await
     };
+    if let Ok(result) = &mut execution
+        && let Some(reloaded) = result.reloaded_workflow.take()
+    {
+        setup.compiled = reloaded.compiled;
+        setup.retry_policy = reloaded.retry_policy;
+    }
     if let Ok(saved) = manager.load(id) {
         setup.state = saved;
     }
+    if setup.state.exec {
+        crate::worktree_pr::log_after_pr_skipped(
+            &setup.compiled,
+            &inputs.flags,
+            &inputs.skipped_steps,
+            "exec sessions do not create pull requests",
+        );
+    } else if matches!(
+        &setup.workspace,
+        crate::workspace::ExecutionWorkspace::CurrentBranch { .. }
+    ) {
+        crate::worktree_pr::log_after_pr_skipped(
+            &setup.compiled,
+            &inputs.flags,
+            &inputs.skipped_steps,
+            "current-branch workspaces do not create pull requests",
+        );
+    }
     match execution {
         Err(error) => Err(error),
-        Ok(()) if claim.token().is_cancelled() => Err(CruiseError::Interrupted),
-        Ok(()) => {
+        Ok(_) if claim.token().is_cancelled() => Err(CruiseError::Interrupted),
+        Ok(_) if setup.state.exec => Ok(()),
+        Ok(_) => {
             let worktree = match &setup.workspace {
                 crate::workspace::ExecutionWorkspace::CurrentBranch { .. } => return Ok(()),
                 crate::workspace::ExecutionWorkspace::Worktree { ctx, .. } => ctx.clone(),
@@ -3663,6 +3704,7 @@ fn cancel_run(
     setup: &mut RunSetup,
 ) -> Result<SessionState> {
     setup.state.phase = SessionPhase::Suspended;
+    setup.state.pr_skipped_reason = None;
     setup.state.clear_pending_input();
     setup.state.clear_runner();
     manager.save(&setup.state)?;
@@ -3684,14 +3726,16 @@ fn complete_run(
     setup.state.completed_at = Some(crate::session::current_iso8601());
     setup.state.clear_runner();
     setup.state.current_step = None;
-    if setup.state.repo.is_some()
+    if setup.compiled.create_pr
+        && setup.state.repo.is_some()
         && setup.state.pr_url.is_some()
         && crate::repo_clone::cleanup_session_workspace(manager, &setup.state).is_ok()
     {
         setup.state.worktree_path = None;
         setup.state.worktree_branch = None;
     }
-    if let crate::workspace::ExecutionWorkspace::Worktree { ctx, .. } = &setup.workspace
+    if setup.compiled.create_pr
+        && let crate::workspace::ExecutionWorkspace::Worktree { ctx, .. } = &setup.workspace
         && setup.state.repo.is_none()
         && setup.state.pr_url.is_some()
         && setup
@@ -3706,15 +3750,21 @@ fn complete_run(
     let committed = runtime.commit_if_active(claim, || manager.save(&setup.state));
     match committed {
         Ok(true) => {
-            sink.send(ApplicationEvent::RunFinished {
+            if let Err(error) = sink.send(ApplicationEvent::RunFinished {
                 session_id: id.to_string(),
                 phase: setup.state.phase.label().to_string(),
-            })?;
+            }) {
+                if setup.state.pr_skipped_reason.take().is_some() {
+                    let _ = manager.save(&setup.state);
+                }
+                return Err(error);
+            }
             Ok(setup.state.clone())
         }
         Ok(false) => cancel_run(manager, id, sink, setup),
         Err(error) => {
             setup.state.phase = SessionPhase::Suspended;
+            setup.state.pr_skipped_reason = None;
             setup.state.clear_pending_input();
             setup.state.clear_runner();
             let _ = manager.save(&setup.state);
@@ -3735,6 +3785,7 @@ fn fail_run(
     error: CruiseError,
 ) -> Result<SessionState> {
     setup.state.phase = SessionPhase::Failed(error.to_string());
+    setup.state.pr_skipped_reason = None;
     setup.state.completed_at = Some(crate::session::current_iso8601());
     setup.state.clear_pending_input();
     setup.state.clear_runner();
@@ -3863,6 +3914,7 @@ where
                     .load(&id)
                     .unwrap_or_else(|_| scheduled.clone());
                 state.phase = SessionPhase::Suspended;
+                state.pr_skipped_reason = None;
                 state.clear_pending_input();
                 state.clear_runner();
                 let _ = worker_app.manager.save(&state);
@@ -3959,6 +4011,7 @@ async fn finish_batch_worker(
         Err(error) => app.manager.load(&id).unwrap_or_else(|_| {
             let mut fallback = scheduled.clone();
             fallback.phase = SessionPhase::Failed(error.to_string());
+            fallback.pr_skipped_reason = None;
             fallback.completed_at = Some(crate::session::current_iso8601());
             fallback.clear_runner();
             fallback
@@ -4166,6 +4219,8 @@ impl OptionHandler for RuntimeOptionHandler {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn save_failure_hooks_are_resettable() {
@@ -4417,157 +4472,6 @@ mod tests {
         assert_eq!(result, (true, true));
     }
 
-    #[test]
-    fn plan_request_formal_spec_defaults_to_false_and_roundtrips_camel_case() {
-        let request: PlanRequest = serde_json::from_str("{}").unwrap_or_else(|e| panic!("{e}"));
-        assert!(!request.formal_spec);
-
-        let request: PlanRequest =
-            serde_json::from_str(r#"{"formalSpec":true}"#).unwrap_or_else(|e| panic!("{e}"));
-        assert!(request.formal_spec);
-        let value = serde_json::to_value(request).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(value["formalSpec"], true);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn generate_passes_formal_spec_request_into_the_initial_prompt() {
-        let _lock = crate::test_support::lock_process();
-        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
-        let home = temp.path().join("home");
-        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
-        let _home = crate::test_support::set_fake_home(&home);
-        let manager = SessionManager::new(temp.path().join("sessions"));
-        let app = CruiseApplication::new(manager);
-        let session = app
-            .create_session(NewSessionRequest {
-                input: "formal planning task".to_string(),
-                base_dir: temp.path().to_path_buf(),
-                config_path: None,
-                config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
-                repo: None,
-                workspace_mode: WorkspaceMode::Worktree,
-                allow_dirty_working_tree: false,
-                attachments: vec![],
-                skipped_steps: vec![],
-                flags: BTreeMap::default(),
-            })
-            .unwrap_or_else(|e| panic!("{e}"));
-        let request: PlanRequest =
-            serde_json::from_str(r#"{"formalSpec":true}"#).unwrap_or_else(|e| panic!("{e}"));
-        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
-
-        app.generate(&session.id, request, sink)
-            .await
-            .unwrap_or_else(|e| panic!("formal planning should complete: {e}"));
-
-        let plan = app
-            .session_plan(&session.id)
-            .unwrap_or_else(|e| panic!("{e}"));
-        assert!(
-            plan.contains("Quint"),
-            "formal plan must include Quint guidance: {plan}"
-        );
-        assert!(
-            plan.contains("Alloy"),
-            "formal plan must include Alloy guidance: {plan}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn fix_and_ask_keep_formal_spec_disabled_by_default() {
-        let _lock = crate::test_support::lock_process();
-        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
-        let home = temp.path().join("home");
-        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
-        let _home = crate::test_support::set_fake_home(&home);
-        let app = CruiseApplication::new(SessionManager::new(temp.path().join("sessions")));
-        let session = app
-            .create_session(NewSessionRequest {
-                input: "lifecycle boundary task".to_string(),
-                base_dir: temp.path().to_path_buf(),
-                config_path: None,
-                config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
-                repo: None,
-                workspace_mode: WorkspaceMode::Worktree,
-                allow_dirty_working_tree: false,
-                attachments: vec![],
-                skipped_steps: vec![],
-                flags: BTreeMap::default(),
-            })
-            .unwrap_or_else(|e| panic!("{e}"));
-        let no_op_sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
-        app.generate(
-            &session.id,
-            PlanRequest {
-                skip_planning: true,
-                ..PlanRequest::default()
-            },
-            Arc::clone(&no_op_sink),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("initial plan should complete: {e}"));
-
-        let events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
-        let sink_events = Arc::clone(&events);
-        let sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event: ApplicationEvent| {
-            sink_events
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(event);
-            Ok(())
-        });
-        app.fix(
-            &session.id,
-            "adjust the plan".to_string(),
-            Arc::clone(&sink),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("fix should complete: {e}"));
-        let fixed_plan = app
-            .session_plan(&session.id)
-            .unwrap_or_else(|e| panic!("{e}"));
-        assert!(!fixed_plan.contains("Quint"));
-        assert!(!fixed_plan.contains("Alloy"));
-
-        events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        app.ask(&session.id, "what changed?".to_string(), sink)
-            .await
-            .unwrap_or_else(|e| panic!("ask should complete: {e}"));
-        let ask_output = events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .filter_map(|event| match event {
-                ApplicationEvent::PlanChunk { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        assert!(!ask_output.contains("Quint"));
-        assert!(!ask_output.contains("Alloy"));
-
-        app.replan(
-            &session.id,
-            PlanRequest {
-                formal_spec: true,
-                feedback: Some("replan without formal mode".to_string()),
-                ..PlanRequest::default()
-            },
-            Arc::clone(&no_op_sink),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("replan should complete: {e}"));
-        let replanned_plan = app
-            .session_plan(&session.id)
-            .unwrap_or_else(|e| panic!("{e}"));
-        assert!(!replanned_plan.contains("Quint"));
-        assert!(!replanned_plan.contains("Alloy"));
-    }
-
     #[cfg(unix)]
     fn skip_planning_app(
         temp: &tempfile::TempDir,
@@ -4628,6 +4532,252 @@ mod tests {
             app.session_plan(&session.id)
                 .unwrap_or_else(|e| panic!("{e}")),
             "skip planning original task"
+        );
+    }
+
+    #[cfg(unix)]
+    fn application_reload_test_repo(temp: &tempfile::TempDir) -> std::path::PathBuf {
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e}"));
+        crate::test_support::init_git_repo(&repo);
+        crate::test_support::run_git_ok(temp.path(), &["init", "--bare", "origin.git"]);
+        crate::test_support::run_git_ok(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                temp.path()
+                    .join("origin.git")
+                    .to_str()
+                    .unwrap_or_else(|| panic!("path")),
+            ],
+        );
+        repo
+    }
+
+    #[cfg(unix)]
+    fn install_application_test_gh(
+        temp: &tempfile::TempDir,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e}"));
+        let gh_log = temp.path().join("gh.log");
+        let gh = bin_dir.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'gh version test'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then echo 'https://github.com/test/repo/pull/1'; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{{\"state\":\"OPEN\"}}'; fi\n",
+                gh_log.display()
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let mut permissions = std::fs::metadata(&gh)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap_or_else(|e| panic!("{e}"));
+        (bin_dir, gh_log)
+    }
+
+    #[cfg(unix)]
+    fn setup_application_no_pr_reload(
+        temp: &tempfile::TempDir,
+        repo: &std::path::Path,
+        id: &str,
+    ) -> (CruiseApplication, SessionManager, std::path::PathBuf) {
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let workflow_path = temp.path().join("workflow.yaml");
+        let reload_script = temp.path().join("reload-workflow.sh");
+        let updated_config = r#"command: [cat]
+create_pr: false
+cleanup_after_pr: true
+steps:
+  report:
+    command: "printf report > local-report.txt; printf logged"
+after-pr:
+  forbidden:
+    command: "touch after-pr-ran.txt"
+"#;
+        let script = format!(
+            "#!/bin/sh\nprintf switched > switched.txt\ncat > '{}' <<'EOF'\n{}\nEOF\n",
+            workflow_path.display(),
+            updated_config
+        );
+        std::fs::write(&reload_script, script).unwrap_or_else(|e| panic!("{e}"));
+        let mut permissions = std::fs::metadata(&reload_script)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&reload_script, permissions).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            &workflow_path,
+            format!(
+                "command: [cat]\ncreate_pr: true\ncleanup_after_pr: true\nsteps:\n  switch:\n    command: \"sh {}\"\n  report:\n    command: \"printf report > local-report.txt; printf logged\"\nafter-pr:\n  forbidden:\n    command: \"touch after-pr-ran.txt\"\n",
+                reload_script.display()
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let mut state = SessionState::new(
+            id.to_string(),
+            repo.to_path_buf(),
+            crate::session_config::SessionConfigRef::File {
+                path: workflow_path,
+            },
+            "report without PR".to_string(),
+        );
+        state.phase = SessionPhase::Planned;
+        state.workspace_mode = WorkspaceMode::Worktree;
+        manager.create(&state).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(state.plan_path(&manager.sessions_dir()), "# Plan\n")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let artifacts = state.artifacts_path(&manager.sessions_dir());
+        std::fs::create_dir_all(&artifacts).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(artifacts.join("report.md"), "retained report")
+            .unwrap_or_else(|e| panic!("{e}"));
+        (app, manager, artifacts)
+    }
+
+    #[cfg(unix)]
+    fn application_test_git_head(dir: &std::path::Path) -> String {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git rev-parse failed to start: {e}"));
+        assert!(output.status.success(), "git rev-parse HEAD failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn application_worktree_accepted_no_pr_reload_suppresses_pr_side_effects() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(&home);
+        let repo = application_reload_test_repo(&temp);
+        let (bin_dir, gh_log) = install_application_test_gh(&temp);
+        let _path = crate::test_support::prepend_to_path(&bin_dir);
+        let id = "20261020000003";
+        let (app, manager, artifacts) = setup_application_no_pr_reload(&temp, &repo, id);
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
+
+        let result = app
+            .run_with_log_sink(id, RunRequest::default(), sink, None)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "accepted no-PR reload should complete: {result:?}"
+        );
+        let saved = manager.load(id).unwrap_or_else(|e| panic!("{e}"));
+        assert!(matches!(saved.phase, SessionPhase::Completed));
+        assert!(saved.pr_url.is_none());
+        assert_eq!(
+            saved.pr_skipped_reason,
+            Some(crate::session::PrSkippedReason::Disabled)
+        );
+        let worktree_path = saved
+            .worktree_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("completed session should retain its worktree path"));
+        assert!(worktree_path.is_dir());
+        assert!(worktree_path.join("local-report.txt").is_file());
+        assert!(!worktree_path.join("after-pr-ran.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(artifacts.join("report.md")).unwrap_or_else(|e| panic!("{e}")),
+            "retained report"
+        );
+        assert!(
+            std::fs::read_to_string(manager.run_log_path(id))
+                .unwrap_or_else(|e| panic!("{e}"))
+                .contains("logged")
+        );
+        assert_eq!(
+            application_test_git_head(worktree_path),
+            application_test_git_head(&repo),
+            "accepted no-PR reload must not commit"
+        );
+        let refs = std::process::Command::new("git")
+            .args([
+                "--git-dir",
+                temp.path()
+                    .join("origin.git")
+                    .to_str()
+                    .unwrap_or_else(|| panic!("path")),
+                "show-ref",
+            ])
+            .output()
+            .unwrap_or_else(|e| panic!("git show-ref failed to start: {e}"));
+        assert!(
+            refs.stdout.is_empty(),
+            "accepted no-PR reload must not push"
+        );
+        assert!(!gh_log.exists(), "accepted no-PR reload must not invoke gh");
+    }
+    #[test]
+    fn application_approve_no_pr_repo_persists_planned_phase_and_workspace() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(temp.path());
+        let _sdk = crate::test_support::EnvGuard::remove("CRUISE_SDK");
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let id = "20261021000004";
+        let clone_path = manager.clones_dir().join(id);
+        std::fs::create_dir_all(clone_path.join(".git")).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(clone_path.join("clone-marker"), "retained")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let worktree_path = manager.worktrees_dir().join(id);
+        std::fs::create_dir_all(&worktree_path).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(worktree_path.join("worktree-marker"), "retained")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let workflow_path = temp.path().join("workflow.yaml");
+        std::fs::write(
+            &workflow_path,
+            "command: [cat]\ncreate_pr: false\nsteps:\n  implement:\n    command: 'true'\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let mut session = SessionState::new(
+            id.to_string(),
+            clone_path.clone(),
+            crate::session_config::SessionConfigRef::File {
+                path: workflow_path,
+            },
+            "retain no-PR repository workspace".to_string(),
+        );
+        session.repo = Some("owner/repo".to_string());
+        let worktree_branch = format!("cruise/{id}-task");
+        session.worktree_path = Some(worktree_path.clone());
+        session.worktree_branch = Some(worktree_branch.clone());
+        manager.create(&session).unwrap_or_else(|e| panic!("{e}"));
+        let plan_path = session.plan_path(&manager.sessions_dir());
+        std::fs::write(&plan_path, "# Approved plan\n").unwrap_or_else(|e| panic!("{e}"));
+
+        let approved = app.approve(id).unwrap_or_else(|e| panic!("{e}"));
+        let saved = manager.load(id).unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(approved.phase, SessionPhase::Planned);
+        assert_eq!(saved.phase, SessionPhase::Planned);
+        for state in [&approved, &saved] {
+            assert_eq!(state.base_dir, clone_path);
+            assert_eq!(
+                state.worktree_path.as_deref(),
+                Some(worktree_path.as_path())
+            );
+            assert_eq!(
+                state.worktree_branch.as_deref(),
+                Some(worktree_branch.as_str())
+            );
+        }
+        assert!(clone_path.join("clone-marker").is_file());
+        assert!(worktree_path.join("worktree-marker").is_file());
+        assert_eq!(
+            std::fs::read_to_string(plan_path).unwrap_or_else(|e| panic!("{e}")),
+            "# Approved plan\n"
         );
     }
 

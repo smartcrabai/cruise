@@ -122,6 +122,12 @@ pub struct WorkflowConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub languages: Option<LanguagesConfig>,
 
+    /// Automatically commit, push, and create a pull request after a successful
+    /// worktree run. When false, the session completes without PR processing;
+    /// the worktree and its artifacts are retained. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub create_pr: bool,
+
     /// Remove the local git worktree and its branch automatically after the PR
     /// is created. Defaults to `false` (non-destructive). Only applies to
     /// worktree-mode sessions that successfully created a PR.
@@ -192,12 +198,35 @@ pub struct FlagConfig {
     pub description: Option<String>,
 }
 
-/// A command value that can be either a single string or a list of strings.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+/// A value represented by either one string or a list of strings.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum StringOrVec {
     Single(String),
     Multiple(Vec<String>),
+}
+
+impl StringOrVec {
+    /// Return the configured strings as a borrowed slice.
+    #[must_use]
+    pub fn as_slice(&self) -> &[String] {
+        match self {
+            Self::Single(value) => std::slice::from_ref(value),
+            Self::Multiple(values) => values,
+        }
+    }
+}
+
+impl From<String> for StringOrVec {
+    fn from(value: String) -> Self {
+        Self::Single(value)
+    }
+}
+
+impl From<&str> for StringOrVec {
+    fn from(value: &str) -> Self {
+        Self::Single(value.to_string())
+    }
 }
 
 /// A workflow-level model, accepted as either one model reference or an
@@ -285,9 +314,9 @@ pub struct StepConfig {
     /// Skip condition: static bool or variable reference.
     pub skip: Option<SkipCondition>,
 
-    /// Workflow flag controlling whether this step runs.
+    /// Whether this step runs when any listed workflow flag is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flag: Option<String>,
+    pub flag: Option<StringOrVec>,
 
     /// Pre-execution condition: skip the step unless the workspace satisfies the rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,6 +365,13 @@ pub struct StepConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub github_review: Option<GitHubReviewConfig>,
+    /// Native final after-PR squash merge action (workflow-owned; never an LLM step).
+    #[serde(
+        default,
+        rename = "squash-merge",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub squash_merge: Option<bool>,
 }
 
 /// Configuration of the `github-review` step.
@@ -737,9 +773,9 @@ impl WorkflowConfig {
 
 /// Built-in default workflow config YAML, embedded at compile time.
 ///
-/// Single source: `builtin/default.yaml`. Editing that file changes the
+/// Single source: `builtin/tdd.yaml`. Editing that file changes the
 /// built-in default shipped to users with no config file.
-pub const BUILTIN_CONFIG_YAML: &str = include_str!("../builtin/default.yaml");
+pub const BUILTIN_CONFIG_YAML: &str = include_str!("../builtin/tdd.yaml");
 
 impl WorkflowConfig {
     /// Apply environment variable overrides and locale-derived language defaults.
@@ -964,7 +1000,9 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_computer_use(config)?;
     validate_permission(config)?;
     validate_output_file_usage(config)?;
+    validate_squash_merge(config)?;
     validate_github_review(config)?;
+
     validate_parallel_steps(config)?;
     validate_groups(config)?;
     validate_if_conditions(config)?;
@@ -991,15 +1029,29 @@ fn validate_flags(config: &WorkflowConfig) -> crate::error::Result<()> {
     }
     let mut used = std::collections::HashSet::new();
     for (step_name, step) in config.steps.iter().chain(&config.after_pr) {
-        if let Some(flag) = step.flag.as_deref() {
-            if !config.flags.contains_key(flag) {
+        if let Some(flag) = &step.flag {
+            let names = flag.as_slice();
+            if names.is_empty() {
                 return Err(CruiseError::InvalidStepConfig(format!(
-                    "step '{step_name}' references undeclared flag '{flag}'"
+                    "step '{step_name}' has an empty flag list"
                 )));
             }
-            used.insert(flag);
+            for name in names {
+                if name.is_empty() {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "step '{step_name}' has an empty flag name"
+                    )));
+                }
+                if !config.flags.contains_key(name) {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "step '{step_name}' references undeclared flag '{name}'"
+                    )));
+                }
+                used.insert(name.as_str());
+            }
         }
     }
+
     for name in config.flags.keys() {
         if !used.contains(name.as_str()) {
             return Err(CruiseError::InvalidStepConfig(format!(
@@ -1141,6 +1193,8 @@ pub(crate) fn validate_output_file_usage(config: &WorkflowConfig) -> crate::erro
             Some("command")
         } else if step.option.is_some() {
             Some("option")
+        } else if step.squash_merge.is_some() {
+            Some("squash-merge")
         } else if step.prompt.is_some() || step.prompt_file.is_some() {
             None
         } else {
@@ -1220,6 +1274,108 @@ pub(crate) fn validate_github_review(config: &WorkflowConfig) -> crate::error::R
                 return Err(invalid(&format!("github-review bot '{bot}' is duplicated")));
             }
         }
+    }
+    Ok(())
+}
+/// Validate that squash-merge is a final, merge-opted-in after-pr action.
+pub(crate) fn validate_squash_merge(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+
+    let invalid_location = |name: &str| {
+        CruiseError::InvalidStepConfig(format!(
+            "step '{name}' uses squash-merge, which is only supported directly as the last after-pr step"
+        ))
+    };
+    let reject_parallel_children = |name: &str, step: &StepConfig| -> crate::error::Result<()> {
+        if let Some(children) = &step.parallel {
+            for (child_name, child) in children {
+                if child.squash_merge.is_some() {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "parallel child '{name}/{child_name}' cannot use squash-merge"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    };
+
+    for (name, step) in &config.steps {
+        if step.squash_merge.is_some() {
+            return Err(invalid_location(name));
+        }
+        reject_parallel_children(name, step)?;
+    }
+    for (group_name, group) in &config.groups {
+        for (step_name, step) in &group.steps {
+            let name = format!("{group_name}/{step_name}");
+            if step.squash_merge.is_some() {
+                return Err(invalid_location(&name));
+            }
+            reject_parallel_children(&name, step)?;
+        }
+    }
+
+    let last_after_pr = config.after_pr.keys().last().map(String::as_str);
+    for (name, step) in &config.after_pr {
+        reject_parallel_children(name, step)?;
+        if step.squash_merge.is_some() {
+            if last_after_pr != Some(name.as_str()) {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "after-pr step '{name}' uses squash-merge but is not the last after-pr step"
+                )));
+            }
+            validate_squash_merge_step(name, step)?;
+            if !config.flags.contains_key("merge") {
+                return Err(CruiseError::InvalidStepConfig(
+                    "squash-merge requires the declared workflow flag 'merge'".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate the fields supported by the native squash-merge action.
+pub(crate) fn validate_squash_merge_step(
+    name: &str,
+    step: &StepConfig,
+) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+
+    let invalid = |detail: &str| {
+        CruiseError::InvalidStepConfig(format!("step '{name}' squash-merge: {detail}"))
+    };
+    if step.squash_merge != Some(true) {
+        return Err(invalid("must be set to true"));
+    }
+    let merge_gate = step.flag.as_ref().is_some_and(|flag| {
+        let names = flag.as_slice();
+        names.len() == 1 && names[0] == "merge"
+    });
+    if !merge_gate {
+        return Err(invalid("requires exactly the 'merge' flag"));
+    }
+    if step.model.is_some()
+        || step.prompt.is_some()
+        || step.prompt_file.is_some()
+        || step.instruction.is_some()
+        || step.plan.is_some()
+        || step.option.is_some()
+        || step.command.is_some()
+        || step.parallel.is_some()
+        || step.next.is_some()
+        || step.if_condition.is_some()
+        || step.group.is_some()
+        || step.workflow_call.is_some()
+        || step.computer_use.is_some()
+        || step.permission.is_some()
+        || step.output_file.is_some()
+        || step.github_review.is_some()
+        || step.allow_commit
+    {
+        return Err(invalid(
+            "cannot be combined with prompt/SDK fields, command, option, output_file, permission, allow_commit, or control-flow fields",
+        ));
     }
     Ok(())
 }
@@ -2770,6 +2926,17 @@ steps:
         assert_eq!(config.effective_pr_language(), DEFAULT_PR_LANGUAGE);
         assert_eq!(config.effective_plan_language(), DEFAULT_PLAN_LANGUAGE);
     }
+    #[test]
+    fn test_create_pr_defaults_to_true_and_accepts_false() {
+        let default_config = WorkflowConfig::from_yaml("steps:\n  run:\n    command: 'true'\n")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(default_config.create_pr);
+
+        let no_pr_config =
+            WorkflowConfig::from_yaml("create_pr: false\nsteps:\n  run:\n    command: 'true'\n")
+                .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!no_pr_config.create_pr);
+    }
 
     #[test]
     fn test_cleanup_after_pr_field() {
@@ -2839,93 +3006,6 @@ steps:
 
         // Then: force_exec defaults to false
         assert!(!config.force_exec());
-    }
-
-    #[test]
-    fn builtin_after_pr_sync_base_uses_internal_cli_without_shell_syntax() {
-        let doc: serde_yaml::Value = serde_yaml::from_str(BUILTIN_CONFIG_YAML)
-            .unwrap_or_else(|e| panic!("built-in config YAML must parse: {e}"));
-        let command = doc["after-pr"]["sync-base"]["command"]
-            .as_str()
-            .unwrap_or_else(|| panic!("after-pr.sync-base must keep a command"));
-        assert!(
-            command.contains("internal sync-base {pr.number}"),
-            "sync-base must call the hidden CLI: {command}"
-        );
-        assert!(
-            !command.contains("$base"),
-            "sync-base must not rely on Bash variable expansion: {command}"
-        );
-        assert_eq!(
-            doc["after-pr"]["fix-ci-error"]["if"]["file-changed"],
-            "sync-base"
-        );
-    }
-
-    #[test]
-    fn test_builtin_config_yaml_parses_and_validates() {
-        // Given / When: the embedded built-in config YAML is parsed
-        let config = WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML)
-            .unwrap_or_else(|e| panic!("built-in config YAML must parse: {e}"));
-
-        // Then: it has the expected built-in defaults (source: builtin/default.yaml)
-        // The built-in workflow names no backend, so the default (`jcode`) runs
-        // it, and both model fields are left to that backend's own default.
-        assert_eq!(config.sdk, None);
-        assert_eq!(config.model, None);
-        assert_eq!(config.plan_model, None);
-        // Languages are left to the locale-derived defaults.
-        assert!(config.languages.is_none());
-        assert!(config.cleanup_after_pr());
-        // max_retries is unset so DEFAULT_MAX_RETRIES governs
-        assert_eq!(config.max_retries, None);
-        assert!(config.steps.contains_key("write-test-first"));
-        assert!(config.steps.contains_key("implement-after-tests"));
-        assert!(config.groups.contains_key("verify-review"));
-        // after-pr automation must not auto-merge: merging stays a human action
-        assert!(!config.after_pr.contains_key("merge"));
-
-        // And: the review group runs read-only analyzers in parallel, then
-        // consolidates their findings, then applies the worklist.
-        let review = config
-            .groups
-            .get("verify-review")
-            .unwrap_or_else(|| panic!("built-in config must define the 'verify-review' group"));
-        let order: Vec<&str> = review
-            .steps
-            .keys()
-            .map(std::string::String::as_str)
-            .collect();
-        assert_eq!(order, vec!["analyze", "consolidate", "apply"]);
-        let analyzers: Vec<&str> = review.steps["analyze"]
-            .parallel
-            .as_ref()
-            .unwrap_or_else(|| panic!("'analyze' must be a parallel step"))
-            .keys()
-            .map(std::string::String::as_str)
-            .collect();
-        assert_eq!(
-            analyzers,
-            vec![
-                "plan-implementation",
-                "wiring",
-                "simplify",
-                "review",
-                "docs"
-            ]
-        );
-
-        // And: any applied fix re-enters the loop at the analyzers.
-        assert_eq!(
-            review
-                .if_condition
-                .as_ref()
-                .and_then(|c| c.file_changed.as_deref()),
-            Some("verify-review-pass/analyze")
-        );
-
-        // And: it passes full config validation
-        validate_config(&config).unwrap_or_else(|e| panic!("built-in config invalid: {e}"));
     }
 
     #[test]
@@ -3221,103 +3301,6 @@ steps:
 "#;
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(config.steps.len(), 1);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_builtin_wait_ci_gitlab_statuses_and_traces() {
-        // Given: fake glab returning a configurable pipeline status
-        use std::os::unix::fs::PermissionsExt;
-
-        let _lock = crate::test_support::lock_process();
-        let config =
-            WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML).unwrap_or_else(|e| panic!("{e:?}"));
-        let Some(StringOrVec::Single(template)) = config
-            .after_pr
-            .get("wait-ci")
-            .and_then(|step| step.command.clone())
-        else {
-            panic!("wait-ci must be a single command");
-        };
-        let script = template
-            .replace("{pr.url}", "https://gitlab.com/g/p/-/merge_requests/7")
-            .replace("{pr.number}", "7");
-        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        crate::test_support::init_git_repo(tmp.path());
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("{e:?}"));
-        let glab = bin.join("glab");
-        std::fs::write(
-            &glab,
-            "#!/bin/sh\ncase \"$*\" in\n*\"ci trace\"*) echo \"TRACE-OUTPUT $*\";;\n*--with-job-details*) echo '{\"id\":99,\"status\":\"failed\",\"jobs\":[{\"id\":5,\"status\":\"failed\"},{\"id\":6,\"status\":\"success\"}]}';;\n*) echo \"{\\\"status\\\":\\\"$FAKE_STATUS\\\"}\";;\nesac\n",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        let mut perms = std::fs::metadata(&glab)
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&glab, perms).unwrap_or_else(|e| panic!("{e:?}"));
-        let path = format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        let run = |status: &str| {
-            std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&script)
-                .current_dir(tmp.path())
-                .env("PATH", &path)
-                .env("FAKE_STATUS", status)
-                .output()
-                .unwrap_or_else(|e| panic!("{e:?}"))
-        };
-
-        // Then: success exits 0
-        assert!(run("success").status.success());
-        // And: failed and other terminal statuses exit 1 with collected traces
-        for status in ["failed", "canceled", "skipped"] {
-            let out = run(status);
-            assert_eq!(out.status.code(), Some(1), "{status}");
-            let log = std::fs::read_to_string(tmp.path().join(".git/cruise-ci-traces.log"))
-                .unwrap_or_else(|e| panic!("{e:?}"));
-            assert!(
-                log.contains("TRACE-OUTPUT ci trace 5 --pipeline-id 99"),
-                "{log}"
-            );
-            assert!(!log.contains("trace 6"), "{log}");
-        }
-        // And: the fix prompt points at the collected traces
-        let prompt = config
-            .after_pr
-            .get("fix-ci-error")
-            .and_then(|step| step.prompt.clone())
-            .unwrap_or_default();
-        assert!(prompt.contains("cruise-ci-traces.log"));
-    }
-
-    #[test]
-    fn test_parse_cruise_yaml() {
-        let yaml = BUILTIN_CONFIG_YAML;
-        let config = WorkflowConfig::from_yaml(yaml)
-            .unwrap_or_else(|e| panic!("failed to parse cruise.yaml: {e:?}"));
-        assert_eq!(config.sdk, None);
-        assert_eq!(
-            config.command,
-            [] as [String; 0],
-            "command should be empty when no backend is named"
-        );
-        assert_eq!(config.model, None);
-        assert_eq!(config.plan_model, None);
-        assert_ne!(config.steps.len(), 0, "steps is empty");
-        assert!(
-            !config.steps.contains_key("mise-trust"),
-            "mise-trust is no longer a built-in step"
-        );
-        assert_eq!(
-            config.steps.keys().next().map(String::as_str),
-            Some("write-test-first")
-        );
     }
 
     #[test]

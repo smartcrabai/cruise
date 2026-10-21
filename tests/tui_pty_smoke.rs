@@ -546,10 +546,14 @@ fn new_session_config_candidates_are_visible_selectable_and_persist_arbitrary_pa
 
     tui.send(b"\x1b[B");
     tui.wait_for_output("▸ ./cruise.yaml", START_TIMEOUT);
-    // Local config -> user workflow -> three built-ins -> Auto-detect.
-    for _ in 0..5 {
+    // Local config -> user workflow -> six built-ins -> Auto-detect.
+    for _ in 0..6 {
         tui.send(b"\x1b[B");
     }
+    tui.wait_for_output("▸ Built-in research:", START_TIMEOUT);
+    tui.send(b"\x1b[B");
+    tui.wait_for_output("▸ Built-in security:", START_TIMEOUT);
+    tui.send(b"\x1b[B");
     tui.wait_for_output("▸ Auto-detect", START_TIMEOUT);
 
     tui.send(b"custom/workflow.yaml");
@@ -919,8 +923,10 @@ fn new_session_form_applies_workspace_options_with_ctrl_u() {
     tui.send(b"2");
     tui.wait_for_output("What should cruise do?", START_TIMEOUT);
     tui.send(b"planned through terminal e2e");
-    // Task → Images → Source → Working directory → Config → Skipped steps → Workspace
+    // Task → Images → Source → Working directory → Config → Skipped steps → Flags
     tui.send(b"\t\t\t\t\t\t");
+    // Flags remain off by default and Enter proceeds without toggling any.
+    tui.send(b"\r");
     tui.wait_for_output("Where should cruise execute?", START_TIMEOUT);
     tui.send(b" ");
     tui.send(b"\t");
@@ -1097,6 +1103,15 @@ fn suspended_session_can_be_resumed_through_the_pty() {
     });
     std::fs::write(&release_path, b"resume")
         .unwrap_or_else(|error| panic!("failed to release resumed command: {error}"));
+    // Suspension is persisted before the cancelled task has necessarily left the registry.
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Suspended")
+            && !screen.contains("working")
+            && fixture
+                .manager
+                .load(&id)
+                .is_ok_and(|state| state.phase == SessionPhase::Suspended)
+    });
     tui.send(b"a");
     tui.wait_for_output("Resume", START_TIMEOUT);
     tui.send(b"\r");

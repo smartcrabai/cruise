@@ -31,10 +31,8 @@ pub const ASK_PLAN_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/ask-plan
 /// time (via `ask_user`) until every design branch is resolved, then submits the
 /// plan. SDK-only — it relies on the interactive `ask_user` tool.
 pub const PLAN_GRILL_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/plan-grill-sdk.md");
-const FORMAL_SPEC_PROMPT: &str = include_str!("../prompts/formal-spec.md");
 
 const PLAN_LANGUAGE_VAR: &str = "plan.language";
-const PLAN_FORMAL_SPEC_VAR: &str = "plan.formal_spec";
 
 /// Template variable holding the ambiguity-handling guidance for the current
 /// planning turn. Resolved from [`PlanPromptCtx::interactive`] on every
@@ -81,11 +79,11 @@ pub fn setup_plan_vars(
     let mut vars = VariableStore::new(session_input);
     vars.set_named_file(crate::session::PLAN_VAR, plan_path);
     vars.set_named_value(PLAN_LANGUAGE_VAR, config.effective_plan_language());
-    // These turn-specific values are refreshed by `run_plan_prompt_template`.
-    // Initializing them here keeps every built-in initial template resolvable
-    // for callers that inspect it before executing a prompt.
+    // This turn-specific clarification value is refreshed by
+    // `run_plan_prompt_template`. Initializing it here keeps every built-in
+    // initial template resolvable for callers that inspect it before executing
+    // a prompt.
     vars.set_named_value(PLAN_CLARIFICATION_VAR, String::new());
-    vars.set_named_value(PLAN_FORMAL_SPEC_VAR, String::new());
     vars
 }
 
@@ -187,8 +185,6 @@ pub struct PlanPromptCtx<'a> {
     /// ([`PLAN_GRILL_PROMPT_TEMPLATE_SDK`]). SDK + interactive only; validated by
     /// the caller. Affects only the initial plan turn (not fix/ask).
     pub grill: bool,
-    /// Add the Quint and Alloy output contract to a Generate prompt.
-    pub formal_spec: bool,
     /// Called when an SDK backend reports its session identity.
     pub on_session_id: Option<&'a crate::executor::SessionIdCallback<'a>>,
     /// Additional destination for model and fallback notices, separate from
@@ -288,12 +284,6 @@ pub async fn run_plan_prompt_template(
         PLAN_CLARIFICATION_VAR,
         clarification_guidance(ctx.interactive).to_string(),
     );
-    let formal_spec = if ctx.formal_spec {
-        FORMAL_SPEC_PROMPT.replace("{plan.language}", &ctx.config.effective_plan_language())
-    } else {
-        String::new()
-    };
-    vars.set_named_value(PLAN_FORMAL_SPEC_VAR, formal_spec);
     let prompt = vars.resolve(template)?;
     let executor = ctx.executor();
     let model_or_mode = executor.plan_model_or_mode(
@@ -518,8 +508,6 @@ pub fn resolve_generated_plan_content(
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    use crate::test_support::lock_process;
 
     fn make_temp_dir() -> TempDir {
         TempDir::new().unwrap_or_else(|e| panic!("{e:?}"))
@@ -756,7 +744,6 @@ mod tests {
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
-            formal_spec: false,
             on_session_id: None,
             on_notice: None,
             cancel_token: None,
@@ -796,7 +783,6 @@ mod tests {
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
-            formal_spec: false,
             on_session_id: None,
             on_notice: None,
             cancel_token: Some(&token),
@@ -859,7 +845,6 @@ mod tests {
             rate_limit_retries: 0,
             working_dir: None,
             grill: false,
-            formal_spec: false,
             on_session_id: None,
             on_notice: None,
             cancel_token: Some(&token),
@@ -1044,160 +1029,5 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("submit_plan"), "got: {msg}");
         assert!(msg.contains("without persisting"), "got: {msg}");
-    }
-
-    fn formal_spec_ctx<'a>(
-        config: &'a WorkflowConfig,
-        plan_path: &'a Path,
-        formal_spec: bool,
-    ) -> PlanPromptCtx<'a> {
-        PlanPromptCtx {
-            formal_spec,
-            ..make_ctx_no_token(config, plan_path)
-        }
-    }
-
-    fn assert_formal_spec_guidance(prompt: &str) {
-        let lower = prompt.to_ascii_lowercase();
-        assert!(prompt.contains("Quint"), "formal prompt must mention Quint");
-        assert!(prompt.contains("Alloy"), "formal prompt must mention Alloy");
-        assert!(
-            lower.contains("valid") && lower.contains("syntax"),
-            "formal prompt must require valid syntax: {prompt}"
-        );
-        assert!(
-            lower.contains("comment"),
-            "formal prompt must require semantic comments: {prompt}"
-        );
-        assert!(
-            lower.contains("invariant") && lower.contains("transition"),
-            "formal prompt must describe invariants and transitions: {prompt}"
-        );
-        assert!(
-            lower.contains("reachable"),
-            "formal prompt must require reachable final states: {prompt}"
-        );
-        assert!(
-            lower.contains("preserv") && lower.contains("consisten"),
-            "formal prompt must require semantic preservation and internal consistency: {prompt}"
-        );
-    }
-
-    #[test]
-    fn formal_spec_off_keeps_all_initial_templates_free_of_formal_guidance() {
-        let config = config_with(None, None);
-        for template in [
-            PLAN_PROMPT_TEMPLATE,
-            PLAN_PROMPT_TEMPLATE_SDK,
-            PLAN_GRILL_PROMPT_TEMPLATE_SDK,
-        ] {
-            let vars = setup_plan_vars(
-                "ordinary task".to_string(),
-                PathBuf::from("plan.md"),
-                &config,
-            );
-            let resolved = vars
-                .resolve(template)
-                .unwrap_or_else(|e| panic!("template must resolve: {e:?}"));
-            let lower = resolved.to_ascii_lowercase();
-            assert!(!resolved.contains("{plan.formal_spec}"));
-            assert!(
-                !lower.contains("quint"),
-                "formal guidance leaked into OFF prompt"
-            );
-            assert!(
-                !lower.contains("alloy"),
-                "formal guidance leaked into OFF prompt"
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn formal_spec_on_adds_the_complete_contract_to_every_initial_template() {
-        let _guard = lock_process();
-        let config = config_with(None, Some("\"cat\""));
-        for template in [
-            PLAN_PROMPT_TEMPLATE,
-            PLAN_PROMPT_TEMPLATE_SDK,
-            PLAN_GRILL_PROMPT_TEMPLATE_SDK,
-        ] {
-            let tmp = make_temp_dir();
-            let plan_path = tmp.path().join("plan.md");
-            std::fs::write(&plan_path, "").unwrap_or_else(|e| panic!("{e:?}"));
-            let ctx = formal_spec_ctx(&config, &plan_path, true);
-            let mut vars = VariableStore::new("formal task".to_string());
-            let mut resume = None;
-
-            let result = run_plan_prompt_template(
-                &ctx,
-                &mut vars,
-                template,
-                "formal test",
-                None,
-                &mut resume,
-                false,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("expected formal prompt to run: {e:?}"));
-
-            assert!(!result.output.contains("{plan.formal_spec}"));
-            assert_formal_spec_guidance(&result.output);
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn run_plan_prompt_template_sets_formal_spec_var_before_command_execution() {
-        let _guard = lock_process();
-        let tmp = make_temp_dir();
-        let plan_path = tmp.path().join("plan.md");
-        std::fs::write(&plan_path, "").unwrap_or_else(|e| panic!("{e:?}"));
-        let config = config_with(None, Some("\"cat\""));
-        let ctx = formal_spec_ctx(&config, &plan_path, true);
-        let mut vars = VariableStore::new("formal task".to_string());
-        let mut resume = None;
-
-        let result = run_plan_prompt_template(
-            &ctx,
-            &mut vars,
-            "{plan.formal_spec}",
-            "formal test",
-            None,
-            &mut resume,
-            false,
-        )
-        .await
-        .unwrap_or_else(|e| panic!("expected formal variable to resolve: {e:?}"));
-
-        assert!(!result.output.contains("{plan.formal_spec}"));
-        assert_formal_spec_guidance(&result.output);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn run_plan_prompt_template_resolves_formal_spec_var_to_empty_when_disabled() {
-        let _guard = lock_process();
-        let tmp = make_temp_dir();
-        let plan_path = tmp.path().join("plan.md");
-        std::fs::write(&plan_path, "").unwrap_or_else(|e| panic!("{e:?}"));
-        let config = config_with(None, Some("\"cat\""));
-        let ctx = formal_spec_ctx(&config, &plan_path, false);
-        let mut vars = VariableStore::new("ordinary task".to_string());
-        let mut resume = None;
-
-        let result = run_plan_prompt_template(
-            &ctx,
-            &mut vars,
-            "before{plan.formal_spec}after",
-            "formal test",
-            None,
-            &mut resume,
-            false,
-        )
-        .await
-        .unwrap_or_else(|e| panic!("expected disabled formal variable to resolve: {e:?}"));
-
-        assert_eq!(result.output, "beforeafter");
     }
 }

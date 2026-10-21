@@ -2,15 +2,17 @@
 
 Each step primarily holds one of `prompt` (an inline LLM prompt, or a prompt loaded
 from `prompt_file`), `command` (shell execution), `option` (interactive
-selection), or `parallel` (concurrent prompt/command children). A step that only
-holds `group:` (a group call) is the exception — see [groups.md](groups.md).
+selection), `parallel` (concurrent prompt/command children), or native
+`squash-merge` (a synchronous squash action valid only as the final direct step
+in `after-pr`). A step that only holds `group:` (a group call) is the exception
+— see [groups.md](groups.md).
 A pure `workflow_call:` call site (optionally with `skip`,
 `when`, `next`, or `flag`) is also accepted during config loading and expanded into
 executable steps, including under `after-pr`; it cannot be nested in a group.
 Every other step field on the call site is rejected: `model`, `prompt`,
 `prompt_file`, `instruction`, `plan`, `option`, `command`, `parallel`,
-`group`, `if`, `timeout`, `env`, `allow_commit`, `computer_use`, `permission`, and
-`output_file`.
+`group`, `if`, `timeout`, `env`, `allow_commit`, `computer_use`, `permission`,
+`output_file`, and `squash-merge`.
 
 `parallel:` is a container step for concurrent prompt/command children (see below).
 `permission: read-only | edit | full` can be set on a `prompt` or `prompt_file`
@@ -164,10 +166,10 @@ workflow < parent block < child. Children support `prompt`/`prompt_file` or
 `command`, plus `model`, `env`, `skip`, `when`, and `timeout`. Prompt children
 may also set `permission` and `output_file`, but names must be distinct within the block. Child names must
 be non-empty and contain no `/`. Child `next`, `if`, `option`, `instruction`,
-`plan`, `group`, `workflow_call`, nested `parallel`, `flag`, and `allow_commit: true`
-are rejected. Parent fields: `parallel`, `env`, `skip`, `flag`, `when`, `next`, `if`,
-and `timeout`. An empty block (`parallel: {}`) is a validation error, and so is
-a child whose `command:` is an empty array.
+`plan`, `group`, `workflow_call`, nested `parallel`, `flag`, `squash-merge`,
+and `allow_commit: true` are rejected. Parent fields: `parallel`, `env`, `skip`,
+`flag`, `when`, `next`, `if`, and `timeout`. An empty block (`parallel: {}`)
+is a validation error, and so is a child whose `command:` is an empty array.
 
 After joining, `{prev.output}` contains a JSON object keyed by child name in
 declaration order. Entries have `output` (prompt output; `null` for commands),
@@ -227,7 +229,8 @@ steps:
 | `parallel` | object | Named prompt/command children run concurrently and join as one step |
 | `next` | string | Explicit next step name |
 | `skip` | bool \| string | Skip condition (see [flow-control.md](flow-control.md)) |
-| `flag` | string | Name of a flag declared in top-level `flags:`. The step runs only when the flag is `on` and is skipped when it is `off`. Allowed on a parallel parent, also allowed on a `workflow_call` call site, where it applies to every expanded step. Not allowed on parallel children, on steps inside a group definition, or on a callee's own steps (see [top-level.md](top-level.md#flags)) |
+| `flag` | string \| non-empty string array | Declared flag name, or a non-empty list using ANY/OR semantics (the step is enabled when any listed flag is on). String form remains compatible. Allowed on steps, group and `workflow_call` call sites, and parallel parents; call-site gates apply to expanded steps. Not allowed on parallel children, steps inside a group definition, or a callee's own steps (see [flow-control.md](flow-control.md) and [top-level.md](top-level.md#flags)) |
+| `squash-merge` | bool | Native synchronous squash merge; `true` is valid only as the final direct step in `after-pr` and must be gated exactly by `flag: merge`. See [after-pr.md](after-pr.md#opt-in-native-synchronous-squash-merge) |
 | `when` | object | Pre-execution condition: `exists: <glob>` (see [flow-control.md](flow-control.md)) |
 | `if` | object | Conditional execution: `file-changed` / `no-file-changes` / `fail` (see [flow-control.md](flow-control.md)) |
 | `timeout` | string | Per-step timeout: `"30"` = seconds, `"5m"` = minutes, `"1h"` = hours; enforced for prompt, command, and parallel steps; option steps ignore it. Command arrays limit each command independently; a parallel parent limits the whole block, while a child timeout affects only that child (see [flow-control.md](flow-control.md)) |

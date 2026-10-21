@@ -207,8 +207,9 @@ pub fn cleanup_session_workspace(manager: &SessionManager, session: &SessionStat
     Ok(())
 }
 
-/// Post-approval cleanup for repo-backed sessions: the temporary clone (and
-/// any planning worktree on top of it) is removed; execution re-clones later.
+/// Post-approval cleanup for repo-backed sessions whose workflow creates a PR.
+/// The temporary clone (and any planning worktree on top of it) is removed;
+/// execution re-clones later.
 ///
 /// Clears `worktree_path` on the session only after cleanup succeeds. The
 /// caller is responsible for persisting the session afterwards.
@@ -219,8 +220,9 @@ pub fn cleanup_session_workspace(manager: &SessionManager, session: &SessionStat
 pub fn cleanup_after_approval_checked(
     manager: &SessionManager,
     session: &mut SessionState,
+    create_pr: bool,
 ) -> Result<()> {
-    if session.repo.is_none() {
+    if !create_pr || session.repo.is_none() {
         return Ok(());
     }
     cleanup_session_workspace(manager, session)?;
@@ -228,9 +230,13 @@ pub fn cleanup_after_approval_checked(
     Ok(())
 }
 
-/// Best-effort compatibility wrapper for CLI callers.
-pub fn cleanup_after_approval(manager: &SessionManager, session: &mut SessionState) {
-    let _ = cleanup_after_approval_checked(manager, session);
+/// Best-effort wrapper for CLI callers.
+pub fn cleanup_after_approval(
+    manager: &SessionManager,
+    session: &mut SessionState,
+    create_pr: bool,
+) {
+    let _ = cleanup_after_approval_checked(manager, session, create_pr);
 }
 
 #[cfg(test)]
@@ -332,10 +338,40 @@ mod tests {
         let mut session = make_session("20260607100003", tmp.path());
         session.worktree_path = Some(tmp.path().join("wt"));
 
-        cleanup_after_approval(&manager, &mut session);
+        cleanup_after_approval(&manager, &mut session, true);
 
         // Non-repo sessions keep their planning worktree after approval.
         assert!(session.worktree_path.is_some());
+    }
+
+    #[test]
+    fn test_cleanup_after_approval_retains_repo_workspace_when_pr_disabled() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let mut session = make_session("20260607100005", tmp.path());
+        session.repo = Some("owner/repo".to_string());
+        session.worktree_branch = Some("cruise/20260607100005-task".to_string());
+        let clone_path = manager.clones_dir().join(&session.id);
+        let worktree_path = tmp.path().join("worktree");
+        std::fs::create_dir_all(&clone_path).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(clone_path.join("clone-marker"), "keep").unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::create_dir_all(&worktree_path).unwrap_or_else(|e| panic!("{e:?}"));
+        std::fs::write(worktree_path.join("worktree-marker"), "keep")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        session.base_dir = clone_path.clone();
+        session.worktree_path = Some(worktree_path.clone());
+        let original_base_dir = session.base_dir.clone();
+
+        cleanup_after_approval_checked(&manager, &mut session, false)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        assert!(clone_path.join("clone-marker").exists());
+        assert!(worktree_path.join("worktree-marker").exists());
+        assert_eq!(session.base_dir, original_base_dir);
+        assert_eq!(
+            session.worktree_path.as_deref(),
+            Some(worktree_path.as_path())
+        );
     }
 
     #[test]
@@ -348,7 +384,7 @@ mod tests {
         let clone_path = manager.clones_dir().join(&session.id);
         std::fs::create_dir_all(&clone_path).unwrap_or_else(|e| panic!("{e:?}"));
 
-        cleanup_after_approval(&manager, &mut session);
+        cleanup_after_approval(&manager, &mut session, true);
 
         assert!(!clone_path.exists());
         assert!(session.worktree_path.is_none());

@@ -127,7 +127,7 @@ async fn run() -> error::Result<()> {
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::Webui(args)) => webui::run(args).await,
-        Some(cli::Commands::Update(args)) => update_cmd::run(args),
+        Some(cli::Commands::Update(args)) => update_cmd::run(&args),
         Some(cli::Commands::Workflow(cli::WorkflowCommand::List)) => workflow_cmd::list(),
         Some(cli::Commands::Workflow(cli::WorkflowCommand::Eject(args))) => {
             workflow_cmd::eject(&args.name, args.to == cli::EjectDestination::Project)
@@ -175,7 +175,6 @@ async fn run() -> error::Result<()> {
                 dry_run: false,
                 no_force_exec,
                 skip_planning,
-                formal_spec: false,
                 grill: false,
                 no_interactive_planning: false,
                 repo,

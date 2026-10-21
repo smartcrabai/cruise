@@ -1,4 +1,5 @@
 //! Pull request status inspection and merge command construction.
+pub(crate) mod automatic;
 
 use crate::error::{CruiseError, Result};
 

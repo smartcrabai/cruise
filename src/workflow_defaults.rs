@@ -16,7 +16,7 @@ use crate::error::{CruiseError, Result};
 pub(crate) const DEFAULTS_FILE_NAME: &str = "default.yaml";
 
 /// Top-level keys that only make sense in a workflow.
-const WORKFLOW_ONLY_KEYS: [&str; 4] = ["description", "steps", "groups", "after-pr"];
+const WORKFLOW_ONLY_KEYS: [&str; 5] = ["description", "steps", "groups", "after-pr", "create_pr"];
 
 /// Path of the user defaults file (`<config_dir>/default.yaml`), when a config
 /// directory can be determined.
@@ -607,6 +607,7 @@ mod tests {
             ("description", "description: hi\n"),
             ("groups", "groups: {}\n"),
             ("after-pr", "after-pr: {}\n"),
+            ("create_pr", "create_pr: false\n"),
         ] {
             let env = env();
             write(&env.project_file, body);

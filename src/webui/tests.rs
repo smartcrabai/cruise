@@ -1069,33 +1069,3 @@ mod merge_pr {
         assert!(exists(&m));
     }
 }
-
-#[test]
-fn flag_select_is_required_only_when_requested() {
-    let harness = harness();
-    let render = |require: bool| {
-        let rows = super::pages::flag_rows(
-            &[crate::flags::FlagChoice {
-                name: "deploy".to_string(),
-                description: None,
-            }],
-            &crate::flags::FlagValues::new(),
-            require,
-        );
-        let vm = super::view::StepTreeVm {
-            steps: Vec::new(),
-            empty: true,
-            flags: rows,
-        };
-        match harness.state.templates.render("step-tree", &vm) {
-            Ok(html) => html,
-            Err(error) => panic!("{error}"),
-        }
-    };
-    let required = render(true);
-    assert!(required.contains("name=\"flag.deploy\""), "{required}");
-    assert!(required.contains("required"), "{required}");
-    let optional = render(false);
-    assert!(optional.contains("name=\"flag.deploy\""), "{optional}");
-    assert!(!optional.contains("required"), "{optional}");
-}
