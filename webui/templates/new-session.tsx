@@ -105,11 +105,6 @@ export default function NewSession(props) {
         {!props.noInteractivePlanning && <input type="checkbox" name="noInteractivePlanning" class="accent-blue-500" />}
         <span class="text-sm text-gray-700 dark:text-gray-300">Non-interactive planning (agent writes plan.md directly, no planning tools)</span>
       </label>
-      <label class="flex items-center gap-2 cursor-pointer">
-        {props.formalSpec && <input type="checkbox" name="formalSpec" checked class="accent-blue-500" />}
-        {!props.formalSpec && <input type="checkbox" name="formalSpec" class="accent-blue-500" />}
-        <span class="text-sm text-gray-700 dark:text-gray-300">Formal specification (Quint and Alloy, with semantic comments)</span>
-      </label>
 
       <label for="workspace-mode" class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Workspace</label>
       <select id="workspace-mode" name="workspaceMode" class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 focus:border-blue-500 outline-none">

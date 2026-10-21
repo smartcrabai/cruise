@@ -56,6 +56,7 @@ after-pr:                 # Optional: steps that run after PR creation (see refe
     # ...
 
 cleanup_after_pr: false   # Optional: delete local worktree and branch after PR creation (default: false)
+create_pr: true           # Optional, workflow-only: automatically commit/push and create a PR (default: true)
 force_exec: false         # Optional: execute direct plan entry points in place (default: false)
 
 ```
@@ -73,7 +74,7 @@ A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`,
 `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`,
 `force_exec`, `computer_use`, `permission`, `env`, `retry`, `mcp_servers`, and
 `pre_steps`. Unknown keys and workflow-only keys (`description`, `steps`,
-`groups`, and `after-pr`) are rejected.
+`groups`, `after-pr`, and `create_pr`) are rejected.
 
 `pre_steps` is a map from a name to a command step with `command` and optional
 `env`, `timeout`, `skip`, and `when` fields. Defaults insert these steps before
@@ -168,7 +169,7 @@ description: Full TDD flow with review loop
 
 ## `flags`
 
-Declares named on/off switches that gate steps. Names contain only ASCII letters, digits, `_` and `-`. Each entry may have a `description`, shown when cruise asks for the value. A flag has no default: every declared flag must be set before a session runs, with `--flag NAME=on|off` or an interactive prompt. Every declared flag must be referenced by at least one step, and a step cannot reference an undeclared flag.
+Declares named on/off switches that gate steps. Names contain only ASCII letters, digits, `_` and `-`. Each entry may have a `description` for interactive flag selectors. Every declared flag is off when absent. Enable one with `--flag NAME`, enable a comma-separated selection with `--flag NAME1,NAME2`, or repeat `--flag`; explicit `NAME=on|off|true|false` assignments set or clear individual values. Every declared flag must be referenced by at least one step, and a step cannot reference an undeclared flag. On a gate, `flag: name` remains the compatible single-name form; `flag: [name_a, name_b]` requires a non-empty list and enables the step if **any** listed flag is on.
 
 ```yaml
 flags:
@@ -183,7 +184,7 @@ steps:
     flag: deploy        # skipped when deploy=off
 ```
 
-A step with `flag:` runs only when the flag is `on`. See [steps.md](steps.md) for where `flag:` is allowed.
+`flag:` gates use the compatible single-name string or a non-empty list with ANY/OR semantics. A gate is permitted on a step, group or `workflow_call` call site, or parallel parent; a call-site gate is applied to every expanded step. It is not permitted on parallel children, group definitions' steps, or a callee's own steps. See [flow-control.md](flow-control.md) and [steps.md](steps.md).
 
 ## `languages`
 
@@ -210,7 +211,7 @@ plan_language: Japanese
 
 During `cruise run`, the config file's mtime is checked between steps and the file is reloaded automatically when changed.
 
-- Does not apply to sessions started from the built-in default.
+- Does not apply to sessions started from an embedded built-in workflow.
 - The current step must still exist in the new config.
 
 ## `cleanup_after_pr`
@@ -222,9 +223,36 @@ cleanup_after_pr: true   # remove worktree + branch once the PR is open
 ```
 
 - Has no effect in **current-branch mode** (no worktree exists to remove).
-- Has no effect for **`--repo` sessions** (the clone is always removed after PR creation regardless of this flag).
+- Has no effect for **`--repo` sessions** when PR creation occurs (the clone is removed after PR creation regardless of this flag).
 - For `--repo` sessions, post-PR clone/worktree cleanup errors are silently ignored and the removed-clone notice is printed unconditionally; only non-repo worktree cleanup errors are downgraded to warnings. The session is still marked `Completed`.
 - Override per-run with `--cleanup-after-pr` / `--no-cleanup-after-pr` CLI flags (takes precedence over config and session-level setting).
+
+## `create_pr`
+
+`create_pr` is a workflow-only boolean that defaults to `true`. Setting it to
+`false` skips Cruise's automatic commit, push, PR creation, `after-pr`, and
+PR-based cleanup, while retaining the normal session, artifacts, and worktree.
+It is useful for persistent no-PR workflows such as research; a local
+worktree does not need `gh`/`glab` when PR creation is disabled, but `--repo`
+still needs the appropriate forge CLI to access and clone the repository.
+When `after_pr` or `merge` was opted in but no PR can be created, Cruise skips
+those unavailable actions and prints the reason. `merge` never overrides
+`create_pr: false` or a read-only workflow such as `research`.
+
+```yaml
+create_pr: false
+```
+
+With PR creation enabled, a successful workflow that leaves no new branch
+commits completes without attempting PR creation. Existing branch commits
+remain eligible for a PR even if the current run made no edits. If no PR is
+created, opted-in after-PR actions are skipped with a reason and no merge is
+attempted. Explicit `if.no-file-changes: retry|failed` outcomes still apply;
+disabling PR creation does not suppress a configured no-file-change failure or
+retry.
+
+`create_pr` is rejected in user and project `default.yaml` files and is not a
+CLI option.
 
 
 See [after-pr.md](after-pr.md) for steps that run after PR creation.
@@ -240,10 +268,10 @@ force_exec: true
 ```
 
 Use `--no-force-exec`, `--repo`, `--grill`, or image attachments to keep normal
-planning. On the foreground `cruise plan` entry point, `--formal-spec` also keeps
-normal planning and adds formal specifications. `--skip-planning` and
-`--no-interactive-planning` do not disable direct execution. Background `--plan`
-runs foreground because no plan worker is needed.
+planning. `--skip-planning` and `--no-interactive-planning` do not disable direct execution. Background `--plan`
+runs foreground because no plan worker is needed. `force_exec` never creates a
+PR or merges; if `after_pr` or `merge` was opted in, unavailable after-PR
+actions are skipped with a reason.
 
 ## Rate-limit retry
 

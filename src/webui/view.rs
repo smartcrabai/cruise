@@ -233,7 +233,7 @@ pub(crate) struct ConfigGroupVm {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConfigSelectVm {
-    /// The two ungrouped sentinel options: Auto and Built-in default.
+    /// The two ungrouped sentinel options: Auto and Built-in tdd.
     pub(crate) sentinels: Vec<ConfigOptionVm>,
     pub(crate) groups: Vec<ConfigGroupVm>,
 }
@@ -276,7 +276,7 @@ impl ConfigSelectVm {
             ConfigOptionVm {
                 value: super::dto::BUILTIN_CONFIG_PATH.to_string(),
                 label: format!(
-                    "Built-in default \u{2014} {}",
+                    "Built-in tdd \u{2014} {}",
                     crate::builtin_workflows::BUILTIN_WORKFLOWS
                         .first()
                         .map_or("", |w| w.description)
@@ -360,15 +360,13 @@ pub(crate) struct StepTreeVm {
     pub(crate) flags: Vec<FlagRowVm>,
 }
 
-/// One declared workflow flag as a required on/off select.
+/// One declared workflow flag as an on/off selector, defaulting to off.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FlagRowVm {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) on: bool,
-    pub(crate) off: bool,
-    pub(crate) require: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -386,7 +384,6 @@ pub(crate) struct NewSessionVm {
     pub(crate) recent_working_dirs: Vec<String>,
     pub(crate) skip_planning: bool,
     pub(crate) grill: bool,
-    pub(crate) formal_spec: bool,
     pub(crate) no_interactive_planning: bool,
     pub(crate) workspace_mode: String,
     pub(crate) config_select: RawHtml,
@@ -740,7 +737,49 @@ pub(crate) fn session_row(
 
 #[cfg(test)]
 mod tests {
-    use super::{dir_label, format_local_time, truncate};
+    use super::{
+        ConfigEntryDto, ConfigEntrySource, ConfigSelectVm, dir_label, format_local_time, truncate,
+    };
+
+    #[test]
+    fn builtin_catalog_entries_are_selectable_in_config_menu() {
+        let entries: Vec<ConfigEntryDto> = crate::builtin_workflows::BUILTIN_WORKFLOWS
+            .iter()
+            .filter(|workflow| workflow.name != crate::builtin_workflows::DEFAULT_BUILTIN_NAME)
+            .map(|workflow| ConfigEntryDto {
+                path: format!("builtin:{}", workflow.name),
+                name: workflow.name.to_string(),
+                description: Some(workflow.description.to_string()),
+                source: Some(ConfigEntrySource::Builtin),
+            })
+            .collect();
+        let view = ConfigSelectVm::new(&entries, Some("builtin:research"), "");
+        let builtin_group = view
+            .groups
+            .iter()
+            .find(|group| group.label == "Built-in workflows")
+            .unwrap_or_else(|| panic!("built-in options missing"));
+        let values: Vec<&str> = builtin_group
+            .options
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect();
+        let expected: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+        assert_eq!(values, expected);
+
+        for name in ["research", "security"] {
+            let value = format!("builtin:{name}");
+            let selected_view = ConfigSelectVm::new(&entries, Some(&value), "");
+            let option = selected_view
+                .groups
+                .iter()
+                .flat_map(|group| &group.options)
+                .find(|option| option.selected)
+                .unwrap_or_else(|| panic!("{name} option not selected"));
+            assert_eq!(option.value, value);
+            assert!(option.label.contains(name));
+        }
+    }
 
     #[test]
     fn format_local_time_rejects_unparseable_input() {

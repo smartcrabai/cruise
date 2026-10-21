@@ -35,8 +35,8 @@ pub struct Cli {
     #[arg(long = "image", value_name = "PATH")]
     pub images: Vec<String>,
 
-    /// Set a workflow flag explicitly (NAME=on|off). Can be repeated.
-    #[arg(long = "flag", value_name = "NAME=on|off", value_parser = crate::flags::parse_assignment)]
+    /// Set workflow flags. Bare names enable; NAME=off disables. Can be repeated.
+    #[arg(long = "flag", short = 'f', value_name = "NAME[=on|off]", value_delimiter = ',', value_parser = crate::flags::parse_assignment)]
     pub flags: Vec<(String, bool)>,
 
     #[command(subcommand)]
@@ -214,11 +214,6 @@ pub struct PlanArgs {
     #[arg(long)]
     pub skip_planning: bool,
 
-    /// Add Quint and Alloy formal specifications to the initial implementation plan.
-    /// Conflicts with `--skip-planning`, which does not invoke an LLM.
-    #[arg(long, conflicts_with = "skip_planning")]
-    pub formal_spec: bool,
-
     /// Ignore `force_exec: true` in the workflow config and plan as usual.
     #[arg(long)]
     pub no_force_exec: bool,
@@ -255,8 +250,8 @@ pub struct PlanArgs {
     #[arg(long = "image", value_name = "PATH")]
     pub images: Vec<String>,
 
-    /// Set a workflow flag explicitly (NAME=on|off). Can be repeated.
-    #[arg(long = "flag", value_name = "NAME=on|off", value_parser = crate::flags::parse_assignment)]
+    /// Set workflow flags. Bare names enable; NAME=off disables. Can be repeated.
+    #[arg(long = "flag", short = 'f', value_name = "NAME[=on|off]", value_delimiter = ',', value_parser = crate::flags::parse_assignment)]
     pub flags: Vec<(String, bool)>,
 }
 
@@ -330,8 +325,8 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "cleanup_after_pr")]
     pub no_cleanup_after_pr: bool,
 
-    /// Set a workflow flag explicitly (NAME=on|off). Can be repeated.
-    #[arg(long = "flag", value_name = "NAME=on|off", value_parser = crate::flags::parse_assignment, conflicts_with = "all")]
+    /// Set workflow flags. Bare names enable; NAME=off disables. Can be repeated.
+    #[arg(long = "flag", short = 'f', value_name = "NAME[=on|off]", value_delimiter = ',', value_parser = crate::flags::parse_assignment, conflicts_with = "all")]
     pub flags: Vec<(String, bool)>,
 }
 impl RunArgs {
@@ -398,8 +393,8 @@ pub struct ExecArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Set a workflow flag explicitly (NAME=on|off). Can be repeated.
-    #[arg(long = "flag", value_name = "NAME=on|off", value_parser = crate::flags::parse_assignment)]
+    /// Set workflow flags. Bare names enable; NAME=off disables. Can be repeated.
+    #[arg(long = "flag", short = 'f', value_name = "NAME[=on|off]", value_delimiter = ',', value_parser = crate::flags::parse_assignment)]
     pub flags: Vec<(String, bool)>,
 }
 
@@ -1277,55 +1272,6 @@ mod tests {
             }
             _ => panic!("expected Run subcommand"),
         }
-    }
-
-    #[test]
-    fn formal_spec_defaults_to_off() {
-        let cli = Cli::parse_from(["cruise", "plan", "task"]);
-        match cli.command {
-            Some(Commands::Plan(args)) => assert!(!args.formal_spec),
-            _ => panic!("expected Plan subcommand"),
-        }
-    }
-
-    #[test]
-    fn formal_spec_flag_enables_formal_specification_mode() {
-        let cli = Cli::parse_from(["cruise", "plan", "--formal-spec", "task"]);
-        match cli.command {
-            Some(Commands::Plan(args)) => assert!(args.formal_spec),
-            _ => panic!("expected Plan subcommand"),
-        }
-    }
-
-    #[test]
-    fn formal_spec_conflicts_with_skip_planning() {
-        let result =
-            Cli::try_parse_from(["cruise", "plan", "--formal-spec", "--skip-planning", "task"]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn formal_spec_can_be_combined_with_grill() {
-        let result = Cli::try_parse_from(["cruise", "plan", "--formal-spec", "--grill", "task"]);
-        assert!(
-            result.is_ok(),
-            "formal spec and grill should compose: {result:?}"
-        );
-    }
-
-    #[test]
-    fn formal_spec_can_be_combined_with_no_interactive_planning() {
-        let result = Cli::try_parse_from([
-            "cruise",
-            "plan",
-            "--formal-spec",
-            "--no-interactive-planning",
-            "task",
-        ]);
-        assert!(
-            result.is_ok(),
-            "formal spec and non-interactive planning should compose: {result:?}"
-        );
     }
 
     #[test]

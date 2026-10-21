@@ -286,12 +286,12 @@ mod builtin_name_tests {
     #[test]
     fn builtin_snapshot_name_round_trips() {
         let named = SessionConfigRef::BuiltinSnapshot {
-            name: Some("simple".to_string()),
+            name: Some("refactor".to_string()),
         };
         let json = serde_json::to_value(&named).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
             json,
-            serde_json::json!({"kind": "builtin_snapshot", "name": "simple"})
+            serde_json::json!({"kind": "builtin_snapshot", "name": "refactor"})
         );
         let back: SessionConfigRef =
             serde_json::from_value(json).unwrap_or_else(|e| panic!("{e:?}"));
@@ -322,19 +322,33 @@ mod builtin_name_tests {
 
     #[test]
     fn named_builtin_snapshot_uses_builtin_selector_identity() {
-        let simple = SessionConfigRef::BuiltinSnapshot {
-            name: Some("simple".to_string()),
-        };
-        assert_eq!(simple.selection_value().as_deref(), Some("builtin:simple"));
-        assert_eq!(simple.stable_identity(None, "sid"), "builtin:simple");
-        assert!(simple.is_snapshot());
-        assert!(simple.live_path().is_none());
+        for workflow in crate::builtin_workflows::BUILTIN_WORKFLOWS
+            .iter()
+            .filter(|workflow| workflow.name != crate::builtin_workflows::DEFAULT_BUILTIN_NAME)
+        {
+            let named = SessionConfigRef::BuiltinSnapshot {
+                name: Some(workflow.name.to_string()),
+            };
+            let expected = format!("builtin:{}", workflow.name);
+            assert_eq!(named.selection_value().as_deref(), Some(expected.as_str()));
+            assert_eq!(named.stable_identity(None, "sid"), expected);
+            assert!(named.is_snapshot());
+            assert!(named.live_path().is_none());
+            let json = serde_json::to_value(&named).unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(
+                json,
+                serde_json::json!({"kind": "builtin_snapshot", "name": workflow.name})
+            );
+            let restored: SessionConfigRef =
+                serde_json::from_value(json).unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(restored, named);
+        }
     }
 
     #[test]
-    fn default_builtin_snapshot_keeps_legacy_identity() {
+    fn tdd_builtin_snapshot_keeps_legacy_identity() {
         let default = SessionConfigRef::BuiltinSnapshot {
-            name: Some("default".to_string()),
+            name: Some("tdd".to_string()),
         };
         assert_eq!(
             default.selection_value().as_deref(),
@@ -347,13 +361,13 @@ mod builtin_name_tests {
     }
 
     #[test]
-    fn new_default_builtin_session_records_default_name() {
+    fn new_default_builtin_session_records_tdd_name() {
         let reference = SessionConfigRef::from_source(&ConfigSource::Builtin, None)
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(
             reference,
             SessionConfigRef::BuiltinSnapshot {
-                name: Some("default".to_string())
+                name: Some("tdd".to_string())
             }
         );
     }

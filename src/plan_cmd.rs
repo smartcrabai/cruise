@@ -38,7 +38,6 @@ fn cli_plan_ctx<'a>(
     interactive: bool,
     rate_limit_retries: usize,
     grill: bool,
-    formal_spec: bool,
     cancel_token: Option<&'a CancellationToken>,
     on_session_id: Option<&'a crate::executor::SessionIdCallback<'a>>,
     on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
@@ -60,7 +59,6 @@ fn cli_plan_ctx<'a>(
         rate_limit_retries,
         working_dir,
         grill,
-        formal_spec,
         on_session_id,
         on_notice,
         cancel_token,
@@ -118,22 +116,11 @@ fn cli_plan_session_callback<'a>(
 }
 
 /// Returns the reason an explicit CLI request overrides `force_exec`, or `None`.
-#[expect(
-    clippy::fn_params_excessive_bools,
-    reason = "these independent CLI opt-out flags are the public planning contract"
-)]
-fn force_exec_opt_out(
-    no_force_exec: bool,
-    grill: bool,
-    formal_spec: bool,
-    has_images: bool,
-) -> Option<&'static str> {
+fn force_exec_opt_out(no_force_exec: bool, grill: bool, has_images: bool) -> Option<&'static str> {
     if no_force_exec {
         Some("--no-force-exec")
     } else if grill {
         Some("--grill")
-    } else if formal_spec {
-        Some("--formal-spec")
     } else if has_images {
         Some("image attachment")
     } else {
@@ -245,12 +232,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     if let PlanTarget::Local { config, .. } = &target
         && config.force_exec()
     {
-        match force_exec_opt_out(
-            args.no_force_exec,
-            args.grill,
-            args.formal_spec,
-            !images.is_empty(),
-        ) {
+        match force_exec_opt_out(args.no_force_exec, args.grill, !images.is_empty()) {
             Some(reason) => eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim()),
             None => {
                 return Box::pin(run_force_exec(
@@ -365,7 +347,6 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             interactive,
             args.rate_limit_retries,
             args.grill,
-            args.formal_spec,
             Some(&cancel_token),
             on_session_id.as_deref(),
             Some(&on_notice),
@@ -433,7 +414,7 @@ pub async fn launch_background_plan(
     if let PlanTarget::Local { config, .. } = &target
         && config.force_exec()
     {
-        match force_exec_opt_out(no_force_exec, false, false, !detected_images.is_empty()) {
+        match force_exec_opt_out(no_force_exec, false, !detected_images.is_empty()) {
             Some(reason) => {
                 eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim());
             }
@@ -464,7 +445,7 @@ pub async fn launch_background_plan(
             crate::planning::write_input_as_plan(&plan_path, &plan_content).and_then(|content| {
                 crate::metadata::refresh_session_title_from_plan(&mut session, &content);
                 session.mark_input_as_plan();
-                finalize_skip_planning_session(&manager, &mut session)
+                finalize_skip_planning_session(&manager, &mut session, config.create_pr)
             });
         if let Err(error) = skip_result {
             notify_plan_result(&session, &Err(CruiseError::Other(error.to_string())));
@@ -504,9 +485,10 @@ pub async fn launch_background_plan(
 fn finalize_skip_planning_session(
     manager: &SessionManager,
     session: &mut SessionState,
+    create_pr: bool,
 ) -> Result<()> {
     session.approve(); // AwaitingApproval -> Planned, clears plan_error
-    crate::repo_clone::cleanup_after_approval(manager, session);
+    crate::repo_clone::cleanup_after_approval(manager, session, create_pr);
     manager.save(session)
 }
 
@@ -635,7 +617,7 @@ async fn approve_with_title(
         crate::metadata::refresh_session_title_from_plan(session, plan_content);
     }
     session.approve();
-    crate::repo_clone::cleanup_after_approval(manager, session);
+    crate::repo_clone::cleanup_after_approval(manager, session, config.create_pr);
     manager.save(session)
 }
 
@@ -1012,7 +994,6 @@ async fn generate_plan_for_session(
         false,
         rate_limit_retries,
         false,
-        false,
         None,
         on_session_id.as_deref(),
         Some(&on_notice),
@@ -1220,7 +1201,6 @@ async fn run_approve_loop(
         !noninteractive,
         rate_limit_retries,
         false,
-        false,
         Some(&cancel_token),
         on_session_id.as_deref(),
         Some(&on_notice),
@@ -1283,13 +1263,6 @@ async fn run_approve_loop(
                     continue;
                 };
                 session.skipped_steps = skipped_steps;
-                if !crate::flags::prompt_missing(
-                    config,
-                    &mut session.flags,
-                    crate::flags::prompt_flag_cli,
-                )? {
-                    continue;
-                }
                 drop(review);
                 tokio::select! {
                     result = approve_with_title(session, manager, config, &plan_content, Some(&cancel_token)) => result?,
@@ -1471,7 +1444,6 @@ pub async fn replan_session(
             std::io::stdin().is_terminal(),
             rate_limit_retries,
             false,
-            false,
             None,
             on_session_id.as_deref(),
             Some(&on_notice),
@@ -1638,7 +1610,6 @@ pub async fn regenerate_plan_for_session(
             std::io::stdin().is_terminal(),
             rate_limit_retries,
             false,
-            false,
             None,
             on_session_id.as_deref(),
             Some(&on_notice),
@@ -1788,7 +1759,6 @@ mod tests {
             dry_run: false,
             no_force_exec,
             skip_planning,
-            formal_spec: false,
             grill: false,
             no_interactive_planning: false,
             repo: None,
@@ -1882,7 +1852,7 @@ mod tests {
     #[test]
     fn test_force_exec_opt_out_for_flag() {
         // Given: explicit opt-out
-        let reason = force_exec_opt_out(true, false, false, false);
+        let reason = force_exec_opt_out(true, false, false);
 
         // Then: force_exec is overridden
         assert_eq!(reason, Some("--no-force-exec"));
@@ -1891,7 +1861,7 @@ mod tests {
     #[test]
     fn test_force_exec_opt_out_for_grill() {
         // Given: explicit grill planning
-        let reason = force_exec_opt_out(false, true, false, false);
+        let reason = force_exec_opt_out(false, true, false);
 
         // Then: force_exec is overridden
         assert_eq!(reason, Some("--grill"));
@@ -1900,7 +1870,7 @@ mod tests {
     #[test]
     fn test_force_exec_opt_out_for_images() {
         // Given: an attached image
-        let reason = force_exec_opt_out(false, false, false, true);
+        let reason = force_exec_opt_out(false, false, true);
 
         // Then: force_exec is overridden
         assert_eq!(reason, Some("image attachment"));
@@ -1909,34 +1879,21 @@ mod tests {
     #[test]
     fn test_force_exec_opt_out_is_none_when_eligible() {
         // Given: no opt-out or incompatible planning request
-        let reason = force_exec_opt_out(false, false, false, false);
+        let reason = force_exec_opt_out(false, false, false);
 
         // Then: force_exec remains eligible
         assert_eq!(reason, None);
     }
 
     #[test]
-    fn test_force_exec_opt_out_for_formal_spec() {
-        // Given: explicit formal specification planning
-        let reason = force_exec_opt_out(false, false, true, false);
-
-        // Then: formal specification planning overrides force_exec
-        assert_eq!(reason, Some("--formal-spec"));
-    }
-
-    #[test]
     fn test_force_exec_opt_out_preserves_explicit_priority() {
         assert_eq!(
-            force_exec_opt_out(true, true, true, true),
+            force_exec_opt_out(true, true, true),
             Some("--no-force-exec")
         );
-        assert_eq!(force_exec_opt_out(false, true, true, true), Some("--grill"));
+        assert_eq!(force_exec_opt_out(false, true, true), Some("--grill"));
         assert_eq!(
-            force_exec_opt_out(false, false, true, true),
-            Some("--formal-spec")
-        );
-        assert_eq!(
-            force_exec_opt_out(false, false, false, true),
+            force_exec_opt_out(false, false, true),
             Some("image attachment")
         );
     }
@@ -2554,7 +2511,8 @@ steps:
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: finalize_skip_planning_session is called
-        finalize_skip_planning_session(&manager, &mut session).unwrap_or_else(|e| panic!("{e:?}"));
+        finalize_skip_planning_session(&manager, &mut session, true)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: phase transitions to Planned (not stuck at AwaitingApproval)
         assert_eq!(
@@ -2591,7 +2549,8 @@ steps:
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: finalize_skip_planning_session is called
-        finalize_skip_planning_session(&manager, &mut session).unwrap_or_else(|e| panic!("{e:?}"));
+        finalize_skip_planning_session(&manager, &mut session, true)
+            .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: phase is Planned and the temporary clone worktree_path is cleared
         assert_eq!(
@@ -2603,6 +2562,46 @@ steps:
         assert!(
             session.worktree_path.is_none(),
             "worktree_path should be cleared by cleanup_after_approval for repo session"
+        );
+    }
+    #[test]
+    fn test_finalize_skip_planning_session_retains_repo_workspace_when_pr_disabled() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join(".cruise"));
+        let id = "20260621100002";
+        let base_dir = manager.clones_dir().join(id);
+        let worktree_path = tmp.path().join("worktree");
+        fs::create_dir_all(&base_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(base_dir.join("clone-marker"), "keep").unwrap_or_else(|e| panic!("{e:?}"));
+        fs::create_dir_all(&worktree_path).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(worktree_path.join("worktree-marker"), "keep")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut session = SessionState::new(
+            id.to_string(),
+            base_dir.clone(),
+            crate::session_config::SessionConfigRef::File {
+                path: std::path::PathBuf::from("cruise.yaml"),
+            },
+            "implement the feature".to_string(),
+        );
+        session.repo = Some("owner/repo".to_string());
+        session.worktree_path = Some(worktree_path.clone());
+        session.worktree_branch = Some("cruise/20260621100002-task".to_string());
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+
+        finalize_skip_planning_session(&manager, &mut session, false)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let saved = manager
+            .load(id)
+            .unwrap_or_else(|e| panic!("failed to reload retained session: {e:?}"));
+        assert!(base_dir.join("clone-marker").exists());
+        assert!(worktree_path.join("worktree-marker").exists());
+        assert_eq!(session.phase, SessionPhase::Planned);
+        assert_eq!(saved.base_dir, base_dir);
+        assert_eq!(
+            saved.worktree_path.as_deref(),
+            Some(worktree_path.as_path())
         );
     }
     #[cfg(unix)]

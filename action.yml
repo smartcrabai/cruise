@@ -96,11 +96,11 @@ inputs:
     default: ""
   flags:
     description: >-
-      Workflow flag values for the `run` command, one `NAME=on|off` per line
-      (blank lines and lines starting with "#" are ignored). Each line is
-      passed to `cruise run` as `--flag NAME=on|off`. Required when the
-      workflow config declares flags, because a non-interactive run cannot
-      prompt for them. Has no effect on `exec`, `plan` or `fix`.
+      Workflow flag values for the `run` command (blank lines and lines starting
+      with "#" are ignored). Each remaining line is passed as one `--flag`
+      value: a bare `NAME`, comma-separated names, or explicit
+      `NAME=on|off|true|false` assignments. Flags absent from the input are off;
+      none are required. Has no effect on `exec`, `plan` or `fix`.
     required: false
     default: ""
   plan_model:

@@ -20,7 +20,7 @@ use crate::worktree;
 // --- Constants ----------------------------------------------------------------
 
 const PR_NUMBER_VAR: &str = "pr.number";
-const PR_URL_VAR: &str = "pr.url";
+pub(crate) const PR_URL_VAR: &str = "pr.url";
 const PR_LANGUAGE_VAR: &str = "pr.language";
 const COMMIT_COAUTHOR_NAME_ENV: &str = "CRUISE_COMMIT_COAUTHOR_NAME";
 const COMMIT_COAUTHOR_EMAIL_ENV: &str = "CRUISE_COMMIT_COAUTHOR_EMAIL";
@@ -83,9 +83,9 @@ fn report_commit_outcome(commit_outcome: CommitOutcome) {
 
 /// Verify that the `gh` CLI is available in `PATH`.
 ///
-/// Called as a preflight check before starting worktree-mode execution so
-/// that users get a clear, actionable error at run-start rather than only
-/// at PR-creation time (after the full workflow has already completed).
+/// Repo-backed sessions check this before cloning, where the CLI may be needed
+/// for repository access. Local worktrees check only after finding commits or
+/// changes that make PR processing necessary.
 ///
 /// # Errors
 ///
@@ -112,6 +112,32 @@ pub fn ensure_gh_available() -> Result<()> {
 /// Callback used to persist a session after a pull request is created.
 pub type PrCreatedCallback<'a> = dyn Fn(&SessionState) -> Result<()> + Send + Sync + 'a;
 
+/// Callback invoked once a worktree has commits or changes warranting PR work.
+pub type PrProcessingCallback<'a> = dyn Fn() -> Result<()> + Send + Sync + 'a;
+
+pub(crate) fn log_after_pr_skipped(
+    compiled: &CompiledWorkflow,
+    flags: &crate::flags::FlagValues,
+    skipped_steps: &[String],
+    reason: &str,
+) {
+    if compiled.after_pr.iter().any(|(name, step)| {
+        !skipped_steps.iter().any(|skipped| skipped == name)
+            && !crate::flags::is_disabled(step.flag.as_ref(), flags)
+    }) {
+        let message = format!("after-pr actions skipped: {reason}");
+        crate::status_eprintln!("{} {message}", style("!").yellow());
+    }
+}
+
+fn squash_merge_enabled(compiled: &CompiledWorkflow, flags: &crate::flags::FlagValues) -> bool {
+    flags.get("merge").copied().unwrap_or(false)
+        && compiled
+            .after_pr
+            .values()
+            .any(|step| step.squash_merge == Some(true))
+}
+
 /// Handle PR creation and after-PR steps, persisting the session immediately
 /// after a PR is created when `on_pr_created` is provided.
 ///
@@ -136,34 +162,52 @@ pub async fn handle_worktree_pr_with_persistence(
     cancel_token: Option<&CancellationToken>,
     option_handler: &dyn OptionHandler,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
+    on_pr_processing: Option<&PrProcessingCallback<'_>>,
     on_pr_created: Option<&PrCreatedCallback<'_>>,
 ) -> Result<()> {
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
     }
-    let (pr_title, pr_body) = generate_pr_description(
-        &ctx.path,
+    if !compiled.create_pr {
+        session.pr_skipped_reason = Some(crate::session::PrSkippedReason::Disabled);
+        log_after_pr_skipped(
+            compiled,
+            flags,
+            skipped_steps,
+            "pull-request creation is disabled",
+        );
+        return Ok(());
+    }
+    session.pr_skipped_reason = None;
+    let existing_commits = branch_commit_count(ctx, cancel_token).await?;
+    if existing_commits == 0 && !worktree_has_changes(ctx, cancel_token).await? {
+        session.pr_skipped_reason = Some(crate::session::PrSkippedReason::NoCommits);
+        log_after_pr_skipped(
+            compiled,
+            flags,
+            skipped_steps,
+            "the worktree has no commits or changes to open a pull request",
+        );
+        return Ok(());
+    }
+    // Repo-backed sessions need forge availability before execution to clone
+    // private repositories; local worktrees defer this until PR processing is
+    // actually needed.
+    if session.repo.is_none() {
+        crate::forge::ensure_forge_available(crate::forge::session_forge(session))?;
+    }
+    if let Some(on_pr_processing) = on_pr_processing {
+        on_pr_processing()?;
+    }
+
+    let pr_attempt = create_pr_attempt(
+        ctx,
         compiled,
         vars,
+        session,
         rate_limit_retries,
         cancel_token,
         on_step_log,
-    )
-    .await?;
-    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
-        return Err(CruiseError::Interrupted);
-    }
-
-    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
-        return Err(CruiseError::Interrupted);
-    }
-    let pr_attempt = attempt_pr_creation(
-        ctx,
-        crate::forge::session_forge(session),
-        session.input_or_title(),
-        &pr_title,
-        &pr_body,
-        cancel_token,
     )
     .await?;
     pr_attempt.report();
@@ -175,6 +219,7 @@ pub async fn handle_worktree_pr_with_persistence(
             }
             vars.set_named_value(PR_URL_VAR, url.clone());
             session.pr_url = Some(url);
+            session.pr_skipped_reason = None;
             if let Some(persist) = on_pr_created {
                 persist(session)?;
             }
@@ -197,10 +242,16 @@ pub async fn handle_worktree_pr_with_persistence(
             .await?;
             Ok(())
         }
-        PrAttemptOutcome::SkippedNoCommits => Err(CruiseError::Other(format!(
-            "cannot create PR for {}: branch has no commits beyond its base; make changes and rerun `cruise run`",
-            ctx.branch
-        ))),
+        PrAttemptOutcome::SkippedNoCommits => {
+            session.pr_skipped_reason = Some(crate::session::PrSkippedReason::NoCommits);
+            log_after_pr_skipped(
+                compiled,
+                flags,
+                skipped_steps,
+                "the worktree has no commits or changes to open a pull request",
+            );
+            Ok(())
+        }
         PrAttemptOutcome::CreateFailed { error, .. } => {
             if session.repo.is_some() {
                 return Err(CruiseError::Other(format!("PR creation failed: {error}")));
@@ -209,6 +260,38 @@ pub async fn handle_worktree_pr_with_persistence(
             Ok(())
         }
     }
+}
+
+async fn create_pr_attempt(
+    ctx: &worktree::WorktreeContext,
+    compiled: &CompiledWorkflow,
+    vars: &mut VariableStore,
+    session: &SessionState,
+    rate_limit_retries: usize,
+    cancel_token: Option<&CancellationToken>,
+    on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
+) -> Result<PrAttemptOutcome> {
+    let (pr_title, pr_body) = generate_pr_description(
+        &ctx.path,
+        compiled,
+        vars,
+        rate_limit_retries,
+        cancel_token,
+        on_step_log,
+    )
+    .await?;
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(CruiseError::Interrupted);
+    }
+    attempt_pr_creation(
+        ctx,
+        crate::forge::session_forge(session),
+        session.input_or_title(),
+        &pr_title,
+        &pr_body,
+        cancel_token,
+    )
+    .await
 }
 
 /// Generate a PR title and body. Returns `Err(Interrupted)` on cancellation;
@@ -368,8 +451,8 @@ async fn generate_pr_via_sdk_tool(
     }
 }
 
-/// Run the after-PR workflow steps. Returns `Err(Interrupted)` on cancellation and
-/// `Err(GitHubReviewFailed)` for the opt-in github-review step; other failures only warn.
+/// Run the after-PR workflow steps. Cancellation and GitHub review failures always propagate;
+/// other failures only warn unless native squash merge is opted in.
 #[expect(clippy::too_many_arguments, reason = "mirrors the PR flow parameters")]
 async fn run_after_pr_steps(
     compiled: &CompiledWorkflow,
@@ -387,6 +470,7 @@ async fn run_after_pr_steps(
     if compiled.after_pr.is_empty() {
         return Ok(());
     }
+    let critical_merge_enabled = squash_merge_enabled(compiled, flags);
     let after_compiled = compiled.to_after_pr_compiled();
     let mut dag = crate::graph::build_graph(&after_compiled, max_retries)?;
     crate::graph::validation::validate_execution_graph(
@@ -410,9 +494,10 @@ async fn run_after_pr_steps(
         on_step_log,
     };
     match execute_steps_with_graph(&ctx, vars, tracker, &mut dag, &|_cp, _dag| Ok(())).await {
-        Ok(_) | Err(CruiseError::StepPaused) => Ok(()),
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
         Err(e @ CruiseError::GitHubReviewFailed { .. }) => Err(e),
+        Err(e) if critical_merge_enabled => Err(e),
+        Ok(_) | Err(CruiseError::StepPaused) => Ok(()),
         Err(e) => {
             crate::status_eprintln!("warning: after-pr steps failed: {e}");
             Ok(())
@@ -569,6 +654,25 @@ async fn branch_commit_count(
             "failed to parse branch commit count from `{count}`: {e}"
         ))
     })
+}
+async fn worktree_has_changes(
+    ctx: &worktree::WorktreeContext,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<bool> {
+    let output = crate::step::command::run_process_output_cancelled(
+        "git",
+        &["status", "--porcelain", "--untracked-files=all"],
+        Some(&ctx.path),
+        cancel_token,
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(CruiseError::Other(format!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(!output.stdout.is_empty())
 }
 
 async fn git_stdout(
@@ -970,6 +1074,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     // --- sync_base_with -----------------------------------------------------
@@ -1270,7 +1376,6 @@ mod tests {
         // Install a gh that always exits 1 (broken install simulation)
         {
             use std::fs;
-            use std::os::unix::fs::PermissionsExt;
 
             let script_path = bin_dir.join("gh");
             fs::write(&script_path, "#!/bin/sh\nexit 1\n").unwrap_or_else(|e| panic!("{e:?}"));
@@ -1312,6 +1417,7 @@ mod tests {
             plan_language: "English".to_string(),
             pr_language: "English".to_string(),
             mcp_servers: IndexMap::new(),
+            create_pr: true,
             cleanup_after_pr: false,
             computer_use: false,
             permission: crate::config::PermissionMode::Full,
@@ -1466,16 +1572,19 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn pr_description_forwards_model_notice_to_step_log_before_no_commit_exit() {
+    async fn clean_worktree_without_branch_commits_completes_without_pr_processing() {
         let _lock = crate::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         crate::test_support::init_git_repo(tmp.path());
-        let plan_path = tmp.path().join("plan.md");
-        std::fs::write(&plan_path, "# Plan\n- keep the branch unchanged")
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_temp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = plan_temp.path().join("plan.md");
+        std::fs::write(&plan_path, "# Plan\n- no code changes").unwrap_or_else(|e| panic!("{e:?}"));
 
-        let mut compiled =
-            minimal_compiled_workflow(vec!["sh".to_string(), "-c".to_string(), "cat".to_string()]);
+        let mut compiled = minimal_compiled_workflow(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf description".to_string(),
+        ]);
         compiled.model = Some("provider/pr-description-model:free:xhigh".to_string());
         let mut vars = VariableStore::new("PR description logging task".to_string());
         vars.set_named_file(crate::session::PLAN_VAR, plan_path);
@@ -1493,6 +1602,25 @@ mod tests {
             },
             "PR description logging task".to_string(),
         );
+        let bin_dir = plan_temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let gh_log = plan_temp.path().join("gh.log");
+        let gh = bin_dir.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 1\n",
+                gh_log.display()
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut permissions = std::fs::metadata(&gh)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap_or_else(|e| panic!("{e:?}"));
+        let _path = crate::test_support::prepend_to_path(&bin_dir);
+
         let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let logs_sink = std::sync::Arc::clone(&logs);
         let on_step_log = move |stream: &str, line: &str| {
@@ -1501,7 +1629,11 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(format!("{stream}:{line}"));
         };
-
+        let processing_calls = std::sync::atomic::AtomicUsize::new(0);
+        let on_pr_processing = || {
+            processing_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        };
         let result = handle_worktree_pr_with_persistence(
             &ctx,
             &compiled,
@@ -1515,23 +1647,223 @@ mod tests {
             None,
             &crate::option_handler::NoOpOptionHandler,
             Some(&on_step_log),
+            Some(&on_pr_processing),
             None,
         )
         .await;
 
-        let error = result
-            .err()
-            .unwrap_or_else(|| panic!("an unchanged branch should stop before PR creation"));
-        assert!(
-            error.to_string().contains("no commits beyond its base"),
-            "unexpected no-commit result: {error}"
+        assert!(result.is_ok(), "clean worktree should complete: {result:?}");
+        assert!(session.pr_url.is_none());
+        assert_eq!(
+            session.pr_skipped_reason,
+            Some(crate::session::PrSkippedReason::NoCommits)
+        );
+        assert_eq!(
+            processing_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a clean branch should not enter PR processing"
         );
         assert!(
             logs.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .iter()
-                .any(|line| line == "info:Model: provider/pr-description-model:free:xhigh"),
-            "PR description model notice must use the existing step-log callback"
+                .is_empty()
+        );
+        assert!(
+            !gh_log.exists(),
+            "clean branch should not call the forge CLI"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_merge_opt_in_makes_prior_after_pr_errors_fatal_only_when_enabled() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut compiled = minimal_compiled_workflow(Vec::new());
+        compiled.after_pr.insert(
+            "before-merge".to_string(),
+            crate::config::StepConfig {
+                command: Some(crate::config::StringOrVec::Single("true".to_string())),
+                timeout: Some("invalid-timeout".to_string()),
+                ..Default::default()
+            },
+        );
+        compiled.after_pr.insert(
+            "squash-merge".to_string(),
+            crate::config::StepConfig {
+                flag: Some(crate::config::StringOrVec::Single("merge".to_string())),
+                squash_merge: Some(true),
+                ..Default::default()
+            },
+        );
+
+        let mut vars = VariableStore::new("test".to_string());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let no_merge = crate::flags::FlagValues::new();
+        let warned = run_after_pr_steps(
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            10,
+            0,
+            tmp.path(),
+            &[],
+            &no_merge,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+        )
+        .await;
+        assert!(
+            warned.is_ok(),
+            "legacy after-pr failures should remain warning-only without merge opt-in: {warned:?}"
+        );
+
+        let merge_enabled = [("merge".to_string(), true)].into();
+        let mut vars = VariableStore::new("test".to_string());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let fatal = run_after_pr_steps(
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            10,
+            0,
+            tmp.path(),
+            &[],
+            &merge_enabled,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(fatal, Err(CruiseError::InvalidStepConfig(_))),
+            "native merge opt-in must propagate preceding after-pr errors: {fatal:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_merge_requires_a_pr_context_before_calling_the_backend() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut compiled = minimal_compiled_workflow(Vec::new());
+        compiled.after_pr.insert(
+            "squash-merge".to_string(),
+            crate::config::StepConfig {
+                flag: Some(crate::config::StringOrVec::Single("merge".to_string())),
+                squash_merge: Some(true),
+                ..Default::default()
+            },
+        );
+        let mut vars = VariableStore::new("test".to_string());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let merge_enabled = [("merge".to_string(), true)].into();
+
+        let result = run_after_pr_steps(
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            10,
+            0,
+            tmp.path(),
+            &[],
+            &merge_enabled,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(CruiseError::SquashMergeFailed(_))),
+            "merge must fail closed when the PR context is missing: {result:?}"
+        );
+
+        let invalid_cwd = tmp.path().join("not-a-worktree-directory");
+        std::fs::write(&invalid_cwd, "not a directory").unwrap_or_else(|e| panic!("{e:?}"));
+        let mut vars = VariableStore::new("test".to_string());
+        vars.set_named_value(
+            PR_URL_VAR,
+            "https://github.com/owner/repo/pull/42".to_string(),
+        );
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let result = run_after_pr_steps(
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            10,
+            0,
+            &invalid_cwd,
+            &[],
+            &merge_enabled,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CruiseError::SquashMergeFailed(_))),
+            "merge must fail closed unless execution runs in a worktree directory: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_merge_without_flag_does_not_call_the_forge_cli() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        crate::test_support::init_git_repo(tmp.path());
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let gh_log = tmp.path().join("gh.log");
+        let gh = bin_dir.join("gh");
+        std::fs::write(
+            &gh,
+            format!("#!/bin/sh\nprintf called >> '{}'\n", gh_log.display()),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut permissions = std::fs::metadata(&gh)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap_or_else(|e| panic!("{e:?}"));
+        let _path = crate::test_support::prepend_to_path(&bin_dir);
+
+        let mut compiled = minimal_compiled_workflow(Vec::new());
+        compiled.after_pr.insert(
+            "squash-merge".to_string(),
+            crate::config::StepConfig {
+                flag: Some(crate::config::StringOrVec::Single("merge".to_string())),
+                squash_merge: Some(true),
+                ..Default::default()
+            },
+        );
+        let mut vars = VariableStore::new("test".to_string());
+        vars.set_named_value(
+            PR_URL_VAR,
+            "https://github.com/owner/repo/pull/42".to_string(),
+        );
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+
+        let result = run_after_pr_steps(
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            10,
+            0,
+            tmp.path(),
+            &[],
+            &crate::flags::NO_FLAGS,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "merge-off after-pr action should skip: {result:?}"
+        );
+        assert!(
+            !gh_log.exists(),
+            "native merge must not contact the forge without merge opt-in"
         );
     }
 }
