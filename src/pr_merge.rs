@@ -150,8 +150,7 @@ pub(crate) mod fake_gh {
             let bin = dir.join("bin");
             std::fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("{e}"));
             let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-gh");
-            std::os::unix::fs::symlink(fixture, bin.join("gh"))
-                .unwrap_or_else(|e| panic!("{e}"));
+            std::os::unix::fs::symlink(fixture, bin.join("gh")).unwrap_or_else(|e| panic!("{e}"));
             Self { dir }
         }
 
