@@ -320,7 +320,7 @@ mod tests {
                 ])),
             ),
             (r#"{"model":null,"plan_model":null}"#, None),
-            (r#"{}"#, None),
+            ("{}", None),
         ];
 
         for (index, (content, expected_model)) in cases.into_iter().enumerate() {
@@ -426,7 +426,6 @@ mod tests {
                 "plan-primary".to_string(),
                 "plan-fallback".to_string(),
             ])),
-            ..AppConfig::default()
         };
         // When: save then load
         original

@@ -9,7 +9,7 @@ use cruise::workflow_defaults::WorkflowDefaults;
 use tempfile::TempDir;
 
 struct ResolutionEnv {
-    _temp: TempDir,
+    temp: TempDir,
     _guards: Vec<EnvGuard>,
     _lock: ProcessLock,
 }
@@ -25,14 +25,14 @@ impl ResolutionEnv {
             EnvGuard::remove("CRUISE_PLAN_MODEL"),
         ];
         Self {
-            _temp: temp,
+            temp,
             _guards: guards,
             _lock: lock,
         }
     }
 
     fn write_app_config(&self, content: &str) {
-        let path = self._temp.path().join("config/cruise/config.json");
+        let path = self.temp.path().join("config/cruise/config.json");
         std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
             .unwrap_or_else(|error| panic!("create app config directory: {error}"));
         std::fs::write(path, content).unwrap_or_else(|error| panic!("write app config: {error}"));
