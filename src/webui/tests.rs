@@ -378,11 +378,11 @@ async fn run_all_provider_failure_reaches_connected_sse_client() {
     if let Err(error) = std::fs::create_dir_all(&config_dir) {
         panic!("create config dir: {error}");
     }
+    let _xdg = crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", config_home.as_os_str());
+    create_session(&harness);
     if let Err(error) = std::fs::write(config_dir.join("config.json"), "not-json") {
         panic!("write invalid config: {error}");
     }
-    let _xdg = crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", config_home.as_os_str());
-    create_session(&harness);
 
     let Ok(request) = Request::builder().uri("/webui/events").body(Body::empty()) else {
         panic!("SSE request");
