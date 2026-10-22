@@ -6907,6 +6907,7 @@ mod tests {
         let mut fixture = configured_app(1);
         AppConfig {
             run_all_parallelism: 4,
+            ..AppConfig::default()
         }
         .save_to(&fixture.config_path())
         .unwrap_or_else(|error| panic!("{error}"));
@@ -6923,6 +6924,7 @@ mod tests {
         replace_parallelism_input(&mut fixture.app, "7");
         AppConfig {
             run_all_parallelism: 2,
+            ..AppConfig::default()
         }
         .save_to(&fixture.config_path())
         .unwrap_or_else(|error| panic!("{error}"));

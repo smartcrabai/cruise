@@ -269,6 +269,7 @@ impl Fixture {
     fn save_parallelism(&self, parallelism: usize) {
         AppConfig {
             run_all_parallelism: parallelism,
+            ..AppConfig::default()
         }
         .save_to(&self.app_config_path())
         .unwrap_or_else(|error| panic!("failed to save PTY app config: {error}"));

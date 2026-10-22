@@ -85,6 +85,39 @@ fn install_jcode_marker(command: &mut Command, home: &Path, marker: &Path) {
 }
 
 #[cfg(unix)]
+fn write_app_config(home: &Path, contents: &str) {
+    let path = home.join("config/cruise/config.json");
+    std::fs::create_dir_all(path.parent().unwrap_or_else(|| panic!("app config parent")))
+        .unwrap_or_else(|error| panic!("create app config directory: {error}"));
+    std::fs::write(path, contents).unwrap_or_else(|error| panic!("write app config: {error}"));
+}
+
+#[cfg(unix)]
+fn install_model_recorder(command: &mut Command, home: &Path, marker: &Path) {
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("{error}"));
+    let executable = bin.join("model-recorder");
+    cruise::test_support::write_executable_script(
+        &executable,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"${{1-<unset>}}\" >> {}\ncat >/dev/null\nprintf '# Plan\\n\\n- complete\\n'\n",
+            sh_quote(marker)
+        ),
+    );
+    prepend_command_path(command, &bin);
+}
+
+#[cfg(unix)]
+fn write_model_workflow(project: &Path, model: Option<&str>) {
+    let model_line = model.map_or_else(String::new, |model| format!("model: {model}\n"));
+    let workflow = format!(
+        "command: [model-recorder, '{{model}}']\n{model_line}steps:\n  main-step:\n    prompt: perform the main task\n    next: step-override\n  step-override:\n    model: step/model\n    prompt: perform the step-specific task\n"
+    );
+    std::fs::write(project.join("workflow.yaml"), workflow)
+        .unwrap_or_else(|error| panic!("write model workflow: {error}"));
+}
+
+#[cfg(unix)]
 fn install_claude_marker(command: &mut Command, home: &Path, marker: &Path) {
     let bin = home.join("bin");
     std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("{error}"));
@@ -628,6 +661,140 @@ fn configured_user_model_recovers_a_fresh_request_without_mutating_defaults() {
         std::fs::read(&user_file).unwrap_or_else(|error| panic!("{error}")),
         configured_bytes,
         "a recovered request must leave the user defaults byte-for-byte unchanged"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn app_config_models_reach_exec_and_planning_with_existing_precedence() {
+    let home = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let project = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    cruise::test_support::init_git_repo(project.path());
+    let marker = home.path().join("selected-models");
+    write_model_workflow(project.path(), None);
+    write_app_config(
+        home.path(),
+        r#"{"model":["app/primary","app/fallback"],"plan_model":["plan/app-primary","plan/app-fallback"]}"#,
+    );
+
+    let run_exec = |env_model: Option<&str>| {
+        let mut command = cruise(home.path(), project.path());
+        install_model_recorder(&mut command, home.path(), &marker);
+        if let Some(model) = env_model {
+            command.env("CRUISE_MODEL", model);
+        }
+        command
+            .args(["exec", "--config", "workflow.yaml"])
+            .output()
+            .unwrap_or_else(|error| panic!("run model exec: {error}"))
+    };
+    let recorded_models = || {
+        std::fs::read_to_string(&marker)
+            .unwrap_or_else(|error| panic!("read selected models: {error}"))
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+
+    let app_list = run_exec(None);
+    assert!(app_list.status.success(), "{}", text(&app_list));
+    assert_eq!(recorded_models(), ["app/primary", "step/model"]);
+
+    write_app_config(home.path(), r#"{"model":"app/scalar"}"#);
+    std::fs::remove_file(&marker).unwrap_or_else(|error| panic!("clear model marker: {error}"));
+    let app_scalar = run_exec(None);
+    assert!(app_scalar.status.success(), "{}", text(&app_scalar));
+    assert_eq!(recorded_models(), ["app/scalar", "step/model"]);
+
+    let user_defaults = home.path().join("config/cruise/default.yaml");
+    std::fs::create_dir_all(
+        user_defaults
+            .parent()
+            .unwrap_or_else(|| panic!("user config parent")),
+    )
+    .unwrap_or_else(|error| panic!("create user config directory: {error}"));
+    std::fs::write(&user_defaults, "model: user/default\n")
+        .unwrap_or_else(|error| panic!("write user defaults: {error}"));
+    let project_defaults = project.path().join(".cruise/default.yaml");
+    std::fs::create_dir_all(
+        project_defaults
+            .parent()
+            .unwrap_or_else(|| panic!("project config parent")),
+    )
+    .unwrap_or_else(|error| panic!("create project config directory: {error}"));
+    std::fs::write(&project_defaults, "model: project/default\n")
+        .unwrap_or_else(|error| panic!("write project defaults: {error}"));
+    write_app_config(home.path(), r#"{"model":["app/primary","app/fallback"]}"#);
+    write_model_workflow(project.path(), None);
+    std::fs::remove_file(&marker).unwrap_or_else(|error| panic!("clear model marker: {error}"));
+    let project_default = run_exec(None);
+    assert!(
+        project_default.status.success(),
+        "{}",
+        text(&project_default)
+    );
+    assert_eq!(recorded_models(), ["project/default", "step/model"]);
+
+    write_model_workflow(project.path(), Some("workflow/model"));
+    std::fs::remove_file(&marker).unwrap_or_else(|error| panic!("clear model marker: {error}"));
+    let workflow_model = run_exec(None);
+    assert!(workflow_model.status.success(), "{}", text(&workflow_model));
+    assert_eq!(recorded_models(), ["workflow/model", "step/model"]);
+
+    std::fs::remove_file(&marker).unwrap_or_else(|error| panic!("clear model marker: {error}"));
+    let environment_model = run_exec(Some("env/model"));
+    assert!(
+        environment_model.status.success(),
+        "{}",
+        text(&environment_model)
+    );
+    assert_eq!(recorded_models(), ["env/model", "step/model"]);
+
+    write_app_config(
+        home.path(),
+        r#"{"model":"app/model","plan_model":["plan/app-primary","plan/app-fallback"]}"#,
+    );
+    write_model_workflow(project.path(), None);
+    std::fs::remove_file(&marker).unwrap_or_else(|error| panic!("clear model marker: {error}"));
+    let mut planning = cruise(home.path(), project.path());
+    install_model_recorder(&mut planning, home.path(), &marker);
+    let plan = planning
+        .args([
+            "plan",
+            "--no-interactive-planning",
+            "--config",
+            "workflow.yaml",
+            "create a plan",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|error| panic!("run model planning: {error}"));
+    assert!(plan.status.success(), "{}", text(&plan));
+    assert_eq!(recorded_models(), ["plan/app-primary"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn app_config_model_only_json_exec_selects_the_primary() {
+    let home = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let project = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    cruise::test_support::init_git_repo(project.path());
+    let marker = home.path().join("selected-model");
+    write_model_workflow(project.path(), None);
+    write_app_config(home.path(), r#"{"model":["app/primary","app/fallback"]}"#);
+
+    let mut command = cruise(home.path(), project.path());
+    install_model_recorder(&mut command, home.path(), &marker);
+    let output = command
+        .args(["exec", "--config", "workflow.yaml"])
+        .output()
+        .unwrap_or_else(|error| panic!("run model-only config exec: {error}"));
+
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        std::fs::read_to_string(marker)
+            .unwrap_or_else(|error| panic!("read selected model: {error}")),
+        "app/primary\nstep/model\n"
     );
 }
 

@@ -87,6 +87,16 @@ precedence. `command` and `sdk` are replaced together when either is set;
 Other defaulted fields fill only values the workflow leaves unset, so explicit
 workflow values take precedence. Environment overrides are applied afterward.
 
+`$XDG_CONFIG_HOME/cruise/config.json` may also set `model` and `plan_model`
+(alias `planModel`) as a string or an ordered primary-plus-fallback array.
+These model defaults have lower precedence than either `default.yaml` layer
+or the workflow; environment overrides still win, and step models override
+the effective ordinary model. SDK mode derives fallback chains from these
+arrays just as for workflow arrays; command mode uses only the first entry.
+If no layer sets `plan_model`, planning uses the effective `model`.
+File-backed sessions reload these settings; saved snapshots retain the
+models and fallback policy resolved when they were created.
+
 For an actual jcode prompt, the resolved `model` must identify a model. If it
 does not, Cruise stops before starting jcode and creates the user-level
 `$XDG_CONFIG_HOME/cruise/default.yaml` template when no file exists. The

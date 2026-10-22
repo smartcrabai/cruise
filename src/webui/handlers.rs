@@ -1134,11 +1134,9 @@ pub(crate) async fn save_settings(
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value >= 1)
             .ok_or_else(|| CruiseError::Other("Must be at least 1".to_string()))?;
-        state
-            .application
-            .save_app_config(&crate::app_config::AppConfig {
-                run_all_parallelism: parallelism,
-            })?;
+        let mut config = state.application.app_config()?;
+        config.run_all_parallelism = parallelism;
+        state.application.save_app_config(&config)?;
         Ok(html(partials::by_id("dialogs", "")))
     })
 }
