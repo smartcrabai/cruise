@@ -15,19 +15,33 @@ use crate::error::{CruiseError, Result};
 /// - Missing file -> returns [`AppConfig::default()`].
 /// - Invalid JSON or invalid field values -> returns a clear error (never silently clamped).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
     /// Maximum number of sessions the `WebUI` and TUI execute concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Defaults to `1` (preserves backward-compatible sequential behaviour).
     #[serde(alias = "run_all_parallelism")]
     pub run_all_parallelism: usize,
+
+    /// Default model reference or ordered primary-plus-fallback list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<crate::config::ModelSpec>,
+
+    /// Model reference or ordered primary-plus-fallback list for the built-in plan step.
+    #[serde(
+        rename = "plan_model",
+        alias = "planModel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub plan_model: Option<crate::config::ModelSpec>,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             run_all_parallelism: 1,
+            model: None,
+            plan_model: None,
         }
     }
 }
@@ -188,6 +202,7 @@ mod tests {
         // Given: minimum valid parallelism
         let config = AppConfig {
             run_all_parallelism: 1,
+            ..AppConfig::default()
         };
         // When/Then: no error
         assert!(config.validate().is_ok(), "parallelism=1 should be valid");
@@ -198,6 +213,7 @@ mod tests {
         // Given: large valid parallelism
         let config = AppConfig {
             run_all_parallelism: 64,
+            ..AppConfig::default()
         };
         // When/Then: no error
         assert!(config.validate().is_ok(), "parallelism=64 should be valid");
@@ -208,6 +224,7 @@ mod tests {
         // Given: parallelism of 0 -- explicitly invalid
         let config = AppConfig {
             run_all_parallelism: 0,
+            ..AppConfig::default()
         };
         // When: validate
         let result = config.validate();
@@ -277,16 +294,93 @@ mod tests {
     }
 
     #[test]
-    fn test_load_from_returns_error_for_empty_json_object() {
-        // Given: {} is valid JSON but missing required fields -- depends on serde defaults
-        // The expected behaviour is to fill in the default. An explicit {} should work.
+    fn test_load_from_defaults_missing_fields() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let config_path = write_config_file(tmp.path(), "{}");
-        // When: load_from -- {} has no run_all_parallelism; serde may use field default
-        // Then: should succeed (serde can apply field-level default) or error gracefully --
-        //       never panic. Either outcome is acceptable; we just verify no panic.
-        let _result = AppConfig::load_from(&config_path);
-        // (no assertion on Ok/Err; just verifying the call completes safely)
+
+        let config =
+            AppConfig::load_from(&config_path).unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+
+        assert_eq!(config, AppConfig::default());
+    }
+
+    #[test]
+    fn test_load_from_supports_scalar_array_null_and_absent_models() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let cases = [
+            (
+                r#"{"model":"primary"}"#,
+                Some(crate::config::ModelSpec::Single("primary".to_string())),
+            ),
+            (
+                r#"{"model":["primary","fallback"]}"#,
+                Some(crate::config::ModelSpec::Multiple(vec![
+                    "primary".to_string(),
+                    "fallback".to_string(),
+                ])),
+            ),
+            (r#"{"model":null,"plan_model":null}"#, None),
+            ("{}", None),
+        ];
+
+        for (index, (content, expected_model)) in cases.into_iter().enumerate() {
+            let path = tmp.path().join(format!("{index}.json"));
+            std::fs::write(&path, content).unwrap_or_else(|e| panic!("{e}"));
+            let config =
+                AppConfig::load_from(&path).unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+            assert_eq!(config.model, expected_model, "input: {content}");
+            assert_eq!(config.run_all_parallelism, 1, "input: {content}");
+        }
+    }
+
+    #[test]
+    fn test_load_from_supports_canonical_plan_model_and_camel_case_alias() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        for (index, (key, expected)) in [
+            (
+                "plan_model",
+                crate::config::ModelSpec::Multiple(vec![
+                    "primary".to_string(),
+                    "fallback".to_string(),
+                ]),
+            ),
+            (
+                "planModel",
+                crate::config::ModelSpec::Single("legacy".to_string()),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = tmp.path().join(format!("{index}.json"));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"{key}":{}}}"#,
+                    serde_json::to_string(&expected).unwrap_or_else(|e| panic!("{e}"))
+                ),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+            let config =
+                AppConfig::load_from(&path).unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
+            assert_eq!(config.plan_model, Some(expected));
+        }
+    }
+
+    #[test]
+    fn test_load_from_rejects_invalid_model_types() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        for (index, content) in [r#"{"model":42}"#, r#"{"plan_model":["valid",42]}"#]
+            .into_iter()
+            .enumerate()
+        {
+            let path = tmp.path().join(format!("{index}.json"));
+            std::fs::write(&path, content).unwrap_or_else(|e| panic!("{e}"));
+            assert!(
+                AppConfig::load_from(&path).is_err(),
+                "invalid model type should be rejected: {content}"
+            );
+        }
     }
 
     #[test]
@@ -318,20 +412,44 @@ mod tests {
     // -- AppConfig::save_to() + load_from() round-trip ------------------------
 
     #[test]
-    fn test_save_to_then_load_from_round_trips_parallelism() {
+    fn test_save_to_then_load_from_round_trips_models_and_parallelism() {
         // Given: a non-default AppConfig
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let path = tmp.path().join("config.json");
         let original = AppConfig {
             run_all_parallelism: 8,
+            model: Some(crate::config::ModelSpec::Multiple(vec![
+                "primary".to_string(),
+                "fallback".to_string(),
+            ])),
+            plan_model: Some(crate::config::ModelSpec::Multiple(vec![
+                "plan-primary".to_string(),
+                "plan-fallback".to_string(),
+            ])),
         };
         // When: save then load
         original
             .save_to(&path)
             .unwrap_or_else(|e| panic!("save failed: {e}"));
         let loaded = AppConfig::load_from(&path).unwrap_or_else(|e| panic!("load failed: {e}"));
-        // Then: round-trip preserves the value exactly
+        let saved: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&path).unwrap_or_else(|e| panic!("read failed: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("parse saved config failed: {e}"));
+        assert!(saved.get("plan_model").is_some());
+        assert!(saved.get("planModel").is_none());
         assert_eq!(loaded, original);
+
+        let mut updated = loaded;
+        updated.run_all_parallelism = 3;
+        updated
+            .save_to(&path)
+            .unwrap_or_else(|e| panic!("save updated config failed: {e}"));
+        let updated = AppConfig::load_from(&path)
+            .unwrap_or_else(|e| panic!("reload updated config failed: {e}"));
+        assert_eq!(updated.run_all_parallelism, 3);
+        assert_eq!(updated.model, original.model);
+        assert_eq!(updated.plan_model, original.plan_model);
     }
 
     #[test]
@@ -341,6 +459,7 @@ mod tests {
         let path = tmp.path().join("a").join("b").join("c").join("config.json");
         let config = AppConfig {
             run_all_parallelism: 2,
+            ..AppConfig::default()
         };
         // When: save_to
         config
@@ -357,12 +476,14 @@ mod tests {
         let path = tmp.path().join("config.json");
         AppConfig {
             run_all_parallelism: 3,
+            ..AppConfig::default()
         }
         .save_to(&path)
         .unwrap_or_else(|e| panic!("{e}"));
         // When: save a different value
         AppConfig {
             run_all_parallelism: 7,
+            ..AppConfig::default()
         }
         .save_to(&path)
         .unwrap_or_else(|e| panic!("{e}"));
@@ -378,8 +499,8 @@ mod tests {
         let path = tmp.path().join("config.json");
         let invalid = AppConfig {
             run_all_parallelism: 0,
+            ..AppConfig::default()
         };
-        // When: save_to
         let result = invalid.save_to(&path);
         // Then: returns an error; the file should not have been created (or is unusable)
         assert!(

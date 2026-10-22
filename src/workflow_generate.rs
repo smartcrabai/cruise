@@ -79,7 +79,7 @@ pub(crate) async fn generate_yaml(
 pub(crate) fn validate_generated_yaml(yaml: &str, base_dir: &Path) -> Result<()> {
     let config = WorkflowConfig::from_yaml(yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
-    let config = crate::workflow_call::resolve_workflow_calls_with_defaults(
+    let config = crate::workflow_call::resolve_workflow_calls_without_app_model_defaults(
         config,
         base_dir,
         &crate::workflow_defaults::WorkflowDefaults::default(),
@@ -283,6 +283,33 @@ mod tests {
     fn destination_path_accepts_alnum_dash_underscore() {
         let cwd = Path::new("/work/proj");
         assert!(destination_path("My-flow_2", false, cwd).is_ok());
+    }
+
+    #[test]
+    fn generated_workflow_resolution_ignores_app_model_defaults() {
+        let _lock = lock_process();
+        let home = TempDir::new().unwrap();
+        let _home = set_fake_home(home.path());
+        let _model = EnvGuard::remove("CRUISE_MODEL");
+        let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
+        let app_config_dir = home.path().join(".config/cruise");
+        fs::create_dir_all(&app_config_dir).unwrap();
+        fs::write(
+            app_config_dir.join("config.json"),
+            r#"{"model":"host/model","plan_model":["host/plan","host/plan-fallback"]}"#,
+        )
+        .unwrap();
+
+        let config = WorkflowConfig::from_yaml(VALID).unwrap();
+        let resolved = crate::workflow_call::resolve_workflow_calls_without_app_model_defaults(
+            config,
+            home.path(),
+            &crate::workflow_defaults::WorkflowDefaults::default(),
+        )
+        .unwrap();
+        assert_eq!(resolved.model, None);
+        assert_eq!(resolved.plan_model, None);
+        validate_generated_yaml(VALID, home.path()).unwrap();
     }
 
     #[test]

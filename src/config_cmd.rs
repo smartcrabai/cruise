@@ -12,14 +12,19 @@ use crate::{cli::ConfigArgs, error::Result};
 /// Returns an error if the config cannot be read or written, or if `N` is 0.
 pub fn run(args: &ConfigArgs) -> Result<()> {
     if let Some(parallelism) = args.set_parallelism {
-        let config = crate::app_config::AppConfig {
-            run_all_parallelism: parallelism,
-        };
+        let mut config = crate::app_config::AppConfig::load()?;
+        config.run_all_parallelism = parallelism;
         config.save()?;
         println!("run_all_parallelism = {parallelism}");
     } else {
         let config = crate::app_config::AppConfig::load()?;
         println!("run_all_parallelism = {}", config.run_all_parallelism);
+        if let Some(model) = config.model.as_ref() {
+            println!("model = {}", serde_json::to_string(model)?);
+        }
+        if let Some(model) = config.plan_model.as_ref() {
+            println!("plan_model = {}", serde_json::to_string(model)?);
+        }
     }
     Ok(())
 }

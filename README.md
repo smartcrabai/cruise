@@ -505,6 +505,18 @@ Options:
 
 Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI and TUI** execute in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
 
+`model` and `plan_model` in this JSON file provide optional global model defaults. Each accepts a string or an ordered array: the first entry is primary, the rest are SDK fallbacks. For example:
+
+```json
+{
+  "runAllParallelism": 3,
+  "model": ["openai/gpt-6-luna:max", "openai/gpt-6.1-sol:xhigh"],
+  "plan_model": ["openai/gpt-6.1-sol:xhigh", "openai/gpt-6-luna:max"]
+}
+```
+
+Workflow and `default.yaml` model settings override these defaults; environment overrides still win. If no layer sets `plan_model`, planning uses the effective `model`. SDK arrays use the existing [fallback behavior](#sdk-mode); command mode uses only the primary. `planModel` is accepted as an alias for `plan_model`. Missing parallelism defaults to `1`, so model-only JSON is valid. Updating parallelism through the CLI, WebUI, or TUI preserves both model settings.
+
 #### `cruise clean`
 
 ```
@@ -692,14 +704,14 @@ The `description:` field of each config file is shown next to its filename in bo
 
 `$XDG_CONFIG_HOME/cruise/default.yaml` supplies user defaults. When `XDG_CONFIG_HOME` is unset, the path defaults to `~/.config/cruise/default.yaml` on macOS/Linux. On Windows, it is `%APPDATA%\cruise\default.yaml` when `APPDATA` is set; if `APPDATA` is missing, Cruise falls back to the home-directory path `~/.config/cruise/default.yaml`. `./.cruise/default.yaml` supplies project defaults. These files provide defaults for fields a workflow leaves unset. They are never selectable as workflows (`-c` and `CRUISE_CONFIG` pointing at them is an error). `default` is not a built-in workflow name, so `cruise workflow eject default` is rejected as an unknown built-in; `cruise workflow generate --name default` still refuses to write the reserved `./.cruise/default.yaml`. `<config_dir>/workflows/default.yaml` remains an ordinary workflow.
 
-Precedence, highest first: environment variables (`CRUISE_MODEL`, ...) > the workflow file > `./.cruise/default.yaml` > `~/.config/cruise/default.yaml` > built-in defaults.
+Precedence, highest first: environment variables (`CRUISE_MODEL`, ...) > the workflow file > `./.cruise/default.yaml` > `~/.config/cruise/default.yaml` > `config.json` model defaults > built-in defaults. Step-level model overrides still take precedence for ordinary prompts.
 
 When an actual jcode prompt has no effective model, Cruise creates
 `$XDG_CONFIG_HOME/cruise/default.yaml` (or the platform's normal user config
 path) with `model: null` and stops before starting jcode. Edit that user-level
 file to set a real `provider/model[:effort]` reference or bare model. Existing
 files are never changed, and project `.cruise/default.yaml` is never generated.
-You can instead set `model` in the workflow or `CRUISE_MODEL` for a new session;
+You can instead set `model` in `config.json`, the workflow, or `CRUISE_MODEL` for a new session;
 planning calls may use `plan_model` / `CRUISE_PLAN_MODEL`. The file is not
 created for dry-runs, drafts, listings, command-only execution, or Claude.
 After updating settings, retry with the command that initiated the request: use

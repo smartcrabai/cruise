@@ -7,8 +7,10 @@
 //! resolving a config would overwrite it.
 
 use cruise::config::WorkflowConfig;
+use cruise::test_support::{EnvGuard, lock_process};
 use cruise::workflow_call::resolve_workflow_calls_with_defaults;
 use cruise::workflow_defaults::WorkflowDefaults;
+use tempfile::TempDir;
 
 const RETRY_YAML: &str = r#"
 sdk: jcode
@@ -46,6 +48,12 @@ fn resolve_ok(yaml: &str) {
 
 #[test]
 fn resolving_a_workflow_publishes_validates_and_clears_its_retry_policy() {
+    let _lock = lock_process();
+    let config_home = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let _config_home = EnvGuard::set("XDG_CONFIG_HOME", config_home.path().as_os_str());
+    let _model = EnvGuard::remove("CRUISE_MODEL");
+    let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
+
     resolve_ok(RETRY_YAML);
     assert!(
         cruise::retry::active_policy().is_some(),

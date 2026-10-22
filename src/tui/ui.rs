@@ -2694,6 +2694,7 @@ mod tests {
         let config_path = config_home.path().join("cruise/config.json");
         AppConfig {
             run_all_parallelism: 4,
+            ..AppConfig::default()
         }
         .save_to(&config_path)
         .unwrap_or_else(|error| panic!("failed to save test app config: {error}"));

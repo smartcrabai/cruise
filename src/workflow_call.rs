@@ -51,7 +51,7 @@ pub fn resolve_workflow_calls_from_path_with_defaults(
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
     let mut stack = CallStack::default();
     resolution.config = load_local_workflow(&path, &mut stack)?;
-    finish_resolved_config(resolution, defaults)
+    finish_resolved_config(resolution, defaults, true)
 }
 
 /// Resolve `workflow_call` steps and `prompt_file` fields in an already parsed
@@ -88,6 +88,35 @@ pub fn resolve_workflow_calls_with_defaults(
     finish_resolved_config(
         WorkflowConfigResolution::from_materialized(config),
         defaults,
+        true,
+    )
+}
+
+/// Resolve workflow calls for an explicit workflow artifact without loading
+/// machine-level app model defaults.
+///
+/// This applies the supplied [`WorkflowDefaults`] and normal environment
+/// overrides, but intentionally omits `AppConfig` model defaults. Use this when
+/// resolving a generated or otherwise self-contained workflow artifact; use
+/// [`resolve_workflow_calls_with_defaults`] for runtime workflow resolution.
+///
+/// # Errors
+///
+/// Returns an error when a referenced workflow or prompt file cannot be loaded,
+/// when call-site fields or defaults are invalid, when environment overrides
+/// fail, or when retry policy validation fails.
+pub fn resolve_workflow_calls_without_app_model_defaults(
+    config: WorkflowConfig,
+    base_dir: impl Into<PathBuf>,
+    defaults: &WorkflowDefaults,
+) -> Result<WorkflowConfig> {
+    let base_dir = base_dir.into();
+    let mut stack = CallStack::default();
+    let config = resolve_workflow_calls_inner(config, &base_dir, &mut stack)?;
+    finish_resolved_config(
+        WorkflowConfigResolution::from_materialized(config),
+        defaults,
+        false,
     )
 }
 
@@ -103,7 +132,7 @@ pub(crate) fn resolve_workflow_calls_from_yaml_with_defaults(
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
     let mut stack = CallStack::default();
     resolution.config = resolve_workflow_calls_inner(resolution.config, &base_dir, &mut stack)?;
-    finish_resolved_config(resolution, defaults)
+    finish_resolved_config(resolution, defaults, true)
 }
 
 /// Fetch a GitHub-hosted workflow and fully expand its `workflow_call` steps and
@@ -123,6 +152,7 @@ pub fn resolve_github_workflow_for_install(
 fn finish_resolved_config(
     mut resolution: WorkflowConfigResolution,
     defaults: &WorkflowDefaults,
+    apply_app_model_defaults: bool,
 ) -> Result<WorkflowConfig> {
     let config = &mut resolution.config;
     for warning in config.deprecated_language_warnings() {
@@ -130,6 +160,15 @@ fn finish_resolved_config(
     }
     defaults.apply_to(&mut resolution)?;
     let config = &mut resolution.config;
+    if apply_app_model_defaults {
+        let app_config = crate::app_config::AppConfig::load()?;
+        if config.model.is_none() {
+            config.model = app_config.model;
+        }
+        if config.plan_model.is_none() {
+            config.plan_model = app_config.plan_model;
+        }
+    }
     config.apply_env_overrides()?;
     // `PromptRun` carries no policy field, so the retry policy reaches the
     // executor ambiently. Validated first, so an unusable policy is rejected
