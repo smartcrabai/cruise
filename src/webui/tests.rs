@@ -40,8 +40,7 @@ fn harness() -> Harness {
         panic!("tempdir");
     };
     let config_home = dir.path().join("xdg-config");
-    let xdg_config =
-        crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", config_home.as_os_str());
+    let xdg_config = crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", config_home.as_os_str());
     let manager = SessionManager::new(dir.path().to_path_buf());
     let application = CruiseApplication::new(manager.clone());
     let Ok(state) = WebState::new(application, &repo_assets()) else {
