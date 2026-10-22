@@ -27,21 +27,29 @@ fn repo_assets() -> assets::Assets {
 }
 
 struct Harness {
+    _xdg_config: crate::test_support::EnvGuard,
+    _process_lock: crate::test_support::ProcessLock,
     state: WebState,
     dir: tempfile::TempDir,
     manager: SessionManager,
 }
 
 fn harness() -> Harness {
+    let process_lock = crate::test_support::lock_process();
     let Ok(dir) = tempfile::tempdir() else {
         panic!("tempdir");
     };
+    let config_home = dir.path().join("xdg-config");
+    let xdg_config =
+        crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", config_home.as_os_str());
     let manager = SessionManager::new(dir.path().to_path_buf());
     let application = CruiseApplication::new(manager.clone());
     let Ok(state) = WebState::new(application, &repo_assets()) else {
         panic!("web state");
     };
     Harness {
+        _xdg_config: xdg_config,
+        _process_lock: process_lock,
         state,
         dir,
         manager,
@@ -240,9 +248,8 @@ fn collect_step_ids(steps: impl IntoIterator<Item = String>) -> std::collections
 fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
     use crate::test_support::{EnvGuard, init_git_repo, prepend_to_path, write_executable_script};
 
-    let _lock = crate::test_support::lock_process();
-    let _forge = EnvGuard::remove("CRUISE_FORGE");
     let harness = harness();
+    let _forge = EnvGuard::remove("CRUISE_FORGE");
     let home = harness.dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap_or_else(|error| panic!("create fake home: {error}"));
     let _home = crate::test_support::set_fake_home(&home);
@@ -371,14 +378,12 @@ async fn unknown_session_is_404() {
 
 #[tokio::test]
 async fn run_all_provider_failure_reaches_connected_sse_client() {
-    let _process_lock = crate::test_support::lock_process();
     let harness = harness();
     let config_home = harness.dir.path().join("xdg-config");
     let config_dir = config_home.join("cruise");
     if let Err(error) = std::fs::create_dir_all(&config_dir) {
         panic!("create config dir: {error}");
     }
-    let _xdg = crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", config_home.as_os_str());
     create_session(&harness);
     if let Err(error) = std::fs::write(config_dir.join("config.json"), "not-json") {
         panic!("write invalid config: {error}");
@@ -897,15 +902,13 @@ mod merge_pr {
     const URL: &str = "https://github.com/owner/repo/pull/8";
 
     struct Merge {
-        harness: Harness,
-        session: SessionState,
-        gh: FakeGh,
         _path: crate::test_support::EnvGuard,
-        _lock: crate::test_support::ProcessLock,
+        gh: FakeGh,
+        session: SessionState,
+        harness: Harness,
     }
 
     fn merge_harness(phase: crate::session::SessionPhase, pr_url: Option<&str>) -> Merge {
-        let lock = crate::test_support::lock_process();
         let harness = harness();
         let gh = FakeGh::install(harness.dir.path());
         gh.set(
@@ -921,11 +924,10 @@ mod merge_pr {
             panic!("save session");
         };
         Merge {
-            harness,
-            session,
-            gh,
             _path: path,
-            _lock: lock,
+            gh,
+            session,
+            harness,
         }
     }
 

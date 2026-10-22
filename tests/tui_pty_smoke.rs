@@ -1164,7 +1164,16 @@ fn suspended_session_can_be_resumed_through_the_pty() {
                 .is_ok_and(|state| state.phase == SessionPhase::Suspended)
     });
     tui.send(b"a");
-    tui.wait_for_output("Resume", START_TIMEOUT);
+    // "Resume" is also shown in the detail pane; the palette's Cancel entry marks a live claim.
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Actions  ↑↓ Enter Esc")
+            && screen.contains("Resume")
+            && !screen.contains("Cancel")
+            && fixture
+                .manager
+                .load(&id)
+                .is_ok_and(|state| state.phase == SessionPhase::Suspended)
+    });
     tui.send(b"\r");
     tui.wait_for_screen(Duration::from_secs(15), |screen| {
         screen.contains("Completed")
