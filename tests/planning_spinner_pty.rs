@@ -2,6 +2,7 @@
 
 use std::fs::{self, File};
 use std::io::Write;
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::Mutex;
@@ -15,6 +16,10 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(20);
 const LOADER_FRAME_CHARS: [char; 4] = ['-', '/', '|', '\\'];
 
 static PTY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn nonzero_dimension(value: u16) -> NonZeroU16 {
+    NonZeroU16::new(value).unwrap_or_else(|| panic!("PTY dimension must be non-zero"))
+}
 
 struct Fixture {
     root: TempDir,
@@ -177,7 +182,7 @@ impl PtySession {
 
     fn screen(&self) -> String {
         let bytes = fs::read(&self.stdout_path).unwrap_or_default();
-        let mut parser = vt100::Parser::new(40, 160, 0);
+        let mut parser = vt100::Parser::new(nonzero_dimension(40), nonzero_dimension(160), 0);
         parser.process(&bytes);
         parser.screen().contents()
     }
@@ -440,7 +445,7 @@ fn cli_plan_renders_loader_during_silent_command_turn_and_clears_it() {
         status.success(),
         "cruise plan failed; raw transcript:\n{raw}"
     );
-    let mut parser = vt100::Parser::new(40, 160, 0);
+    let mut parser = vt100::Parser::new(nonzero_dimension(40), nonzero_dimension(160), 0);
     parser.process(raw.as_bytes());
     assert!(
         !parser.screen().contents().contains("Planning..."),
@@ -495,7 +500,7 @@ fn cli_list_generate_plan_reuses_planning_loader_and_clears_it() {
     // while `inquire` is between prompts.
     let (status, raw) = pty.cancel_until_exit();
     assert!(status.success(), "cruise list failed:\n{raw}");
-    let mut parser = vt100::Parser::new(40, 160, 0);
+    let mut parser = vt100::Parser::new(nonzero_dimension(40), nonzero_dimension(160), 0);
     parser.process(raw.as_bytes());
     assert!(
         !parser.screen().contents().contains("Planning..."),
@@ -609,7 +614,7 @@ fn cli_plan_clears_loader_when_backend_fails() {
         !status.success(),
         "failing plan unexpectedly succeeded:\n{raw}"
     );
-    let mut parser = vt100::Parser::new(40, 160, 0);
+    let mut parser = vt100::Parser::new(nonzero_dimension(40), nonzero_dimension(160), 0);
     parser.process(raw.as_bytes());
     assert!(
         !parser.screen().contents().contains("Planning..."),

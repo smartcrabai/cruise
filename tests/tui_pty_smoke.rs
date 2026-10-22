@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::Write;
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::thread;
@@ -13,6 +14,10 @@ use tempfile::TempDir;
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn nonzero_dimension(value: u16) -> NonZeroU16 {
+    NonZeroU16::new(value).unwrap_or_else(|| panic!("PTY dimension must be non-zero"))
+}
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -456,7 +461,11 @@ impl PtySession {
 
     fn screen(&self) -> String {
         let bytes = std::fs::read(&self.stdout_path).unwrap_or_default();
-        let mut parser = vt100::Parser::new(self.rows, self.columns, 0);
+        let mut parser = vt100::Parser::new(
+            nonzero_dimension(self.rows),
+            nonzero_dimension(self.columns),
+            0,
+        );
         parser.process(&bytes);
         parser.screen().contents()
     }
