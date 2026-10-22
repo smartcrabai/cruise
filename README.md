@@ -134,6 +134,8 @@ The default URL is `http://127.0.0.1:8484/`. Use these flags to customize it:
 
 The Graph tab loads Mermaid from jsDelivr and therefore needs network access; all other WebUI tabs work offline.
 
+TSX component imports are relative to the file containing the import. For example, `templates/components/session-row.tsx` imports its sibling badge as `./phase-badge`, not `./components/phase-badge`.
+
 ## Usage
 
 ```sh

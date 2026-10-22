@@ -1,4 +1,4 @@
-import PhaseBadge from "./components/phase-badge";
+import PhaseBadge from "./phase-badge";
 
 export default function SessionHeader(props) {
   return (

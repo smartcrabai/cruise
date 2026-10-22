@@ -5,7 +5,7 @@
 //! `--webui-dir` development loop instant and costs little for a single-user
 //! local UI.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use jsxrs::RenderConfig;
 use serde::Serialize;
@@ -58,9 +58,9 @@ impl Templates {
         Self { dir }
     }
 
-    fn config(&self, fragment: bool) -> RenderConfig {
+    fn config(&self, path: &Path, fragment: bool) -> RenderConfig {
         RenderConfig {
-            base_dir: Some(self.dir.clone()),
+            base_dir: Some(path.parent().unwrap_or(&self.dir).to_path_buf()),
             fragment,
             ..RenderConfig::default()
         }
@@ -75,7 +75,7 @@ impl Templates {
     pub(crate) fn render(&self, name: &str, props: &impl Serialize) -> Result<String> {
         let value = serde_json::to_value(props)?;
         let path = self.dir.join(format!("{name}.tsx"));
-        jsxrs::render_file(&path, &value, &self.config(true))
+        jsxrs::render_file(&path, &value, &self.config(&path, true))
             .map_err(|error| CruiseError::Other(format!("template {name}: {error}")))
     }
 
@@ -88,7 +88,7 @@ impl Templates {
     pub(crate) fn render_document(&self, props: &impl Serialize) -> Result<String> {
         let value = serde_json::to_value(props)?;
         let path = self.dir.join("layout.tsx");
-        jsxrs::render_file(&path, &value, &self.config(false))
+        jsxrs::render_file(&path, &value, &self.config(&path, false))
             .map_err(|error| CruiseError::Other(format!("template layout: {error}")))
     }
 }

@@ -185,6 +185,34 @@ fn templates_render_all_fixtures() {
     assert_eq!(on_disk, covered, "every template needs exactly one fixture");
 }
 
+#[test]
+fn sidebar_rows_and_direct_session_components_render_badge_contents() {
+    let harness = harness();
+    let fixtures = super::fixtures::all();
+    let render = |name: &str| {
+        let props = fixtures
+            .iter()
+            .find(|(fixture, _)| *fixture == name)
+            .map(|(_, props)| props.clone())
+            .unwrap_or_else(|| panic!("missing fixture for {name}"));
+        harness
+            .state
+            .templates
+            .render(name, &props)
+            .unwrap_or_else(|error| panic!("{error}"))
+    };
+
+    for name in ["sidebar-rows", "components/session-row"] {
+        let html = render(name);
+        assert!(html.contains("Awaiting Approval"), "{name}: {html}");
+        assert!(html.contains("Add a WebUI"), "{name}: {html}");
+    }
+
+    let header = render("components/session-header");
+    assert!(header.contains("Awaiting Approval"), "{header}");
+    assert!(header.contains("Add a WebUI"), "{header}");
+}
+
 #[tokio::test]
 async fn root_page_has_shell_contract() {
     let harness = harness();
