@@ -72,7 +72,7 @@ home = "0.5"
 include_dir = "0.7"
 indexmap = { version = "2.13.0", features = ["serde"] }
 inquire = "0.9"
-jcode-sdk = { git = "https://github.com/1jehuang/jcode", tag = "v0.98.1" }
+jcode-sdk = { git = "https://github.com/1jehuang/jcode", tag = "v0.99.0" }
 jsxrs = "0.1.6"
 pulldown-cmark = { version = "0.13", default-features = false, features = [
   "html",
@@ -129,7 +129,7 @@ windows-sys = { version = "0.61.2", features = [
 [dev-dependencies]
 portable-pty = "=0.9.0"
 tempfile = "=3.27.0"
-vt100 = "=0.17.0"
+vt100 = "=0.18.0"
 
 [profile.release]
 codegen-units = 1
