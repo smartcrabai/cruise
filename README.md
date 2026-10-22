@@ -655,6 +655,8 @@ cruise resolves the workflow config as follows:
    | `research` | Bounded, read-only investigation with source-backed evidence, independent review, and a cited report |
    | `security` | Scoped security inventory and parallel audits, triage, safe fixes for confirmed defects, and independent verification |
 
+   `refactor`, `add-tests`, `add-formal-specs`, and `security` set `force_exec: true` by default: local planning runs directly in the current directory without an outer plan/session, worktree, or automatic PR. Pass `--no-force-exec` to use the normal plan/session path instead.
+
    `cruise workflow list` prints the catalog. To customize a built-in, use `cruise workflow eject <name> [--to user|project]`, for example `cruise workflow eject tdd --to project`. Ejection accepts catalog names only and never overwrites an existing file.
 
    `refactor` starts from the repository's existing staged, unstaged, and untracked changes plus task-branch changes against a trustworthy base/merge-base when available. It limits changes to that diff and necessary callers/dependencies; with no diff, it scopes to the whole repository. Existing work is preserved and unrelated edits are not reset, stashed, or reverted.
