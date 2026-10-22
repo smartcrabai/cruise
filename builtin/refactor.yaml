@@ -1,4 +1,5 @@
 description: Behavior-preserving refactor, diff-first with whole-repository fallback
+force_exec: true
 max_retries: 20
 flags:
   browser_e2e:

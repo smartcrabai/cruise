@@ -38,8 +38,9 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | I already wrote the plan myself — skip the LLM planning | `cruise plan --skip-planning "<plan text>"` (or `cruise --plan "…" --skip-planning`) |
 | Interview me one question at a time, then write the plan | `cruise plan --grill "task"` (SDK backend (the default) + TTY) |
 | Add executable Quint, Alloy, and Gherkin specifications with CI | `cruise exec -c builtin:add-formal-specs "task"` |
+| Run `refactor`, `add-tests`, `add-formal-specs`, or `security` locally by default (`force_exec: true`) | For example, `cruise plan -c builtin:refactor "task"` runs directly without an outer plan/session, worktree, or automatic PR; add `--no-force-exec` for the normal plan/session path |
 | Research with a durable, read-only report | `cruise plan --skip-planning -c builtin:research "question"`; approve if prompted, then `cruise run <session-id>` |
-| Audit and safely repair confirmed security defects | `cruise plan -c builtin:security "audit request"`, then `cruise run <session-id>` |
+| Audit and safely repair confirmed security defects in a durable session | `cruise plan --no-force-exec -c builtin:security "audit request"`; approve if prompted, then `cruise run <session-id>` |
 | Disable SDK planning tools and have the agent write `plan.md` directly | `cruise plan --no-interactive-planning "task"` |
 | Attach planning images | `cruise plan --image screenshot.png "task"` (repeat `--image` as needed) |
 | Target a GitHub repo instead of a local directory | `cruise plan --repo owner/repo "task"` (also with `--plan`) |

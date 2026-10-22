@@ -1,4 +1,5 @@
 description: Audit repository quality gates, complete meaningful tests and CI, then verify and repair failures
+force_exec: true
 flags:
   after_pr:
     description: Run pull-request or merge-request readiness, synchronization, and CI follow-up
