@@ -301,7 +301,7 @@ Commands:
   run          Execute a planned session
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs
-  config       Show or update application-level configuration (`~/.config/cruise/config.json`)
+  config       Show or update application-level configuration (`config.json` or `config.yaml`)
   exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve the browser UI from this machine (pass `--open` to launch the default browser)
@@ -503,19 +503,23 @@ Options:
           Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
 ```
 
-Shows or updates application-level settings stored in `$XDG_CONFIG_HOME/cruise/config.json` (default: `~/.config/cruise/config.json`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI and TUI** execute in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
+Shows or updates application-level settings stored in `config.json` or `config.yaml` under `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI and TUI** execute in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
 
-`model` and `plan_model` in this JSON file provide optional global model defaults. Each accepts a string or an ordered array: the first entry is primary, the rest are SDK fallbacks. For example:
+If both files exist, `config.json` wins; otherwise an existing `config.yaml` is used. When neither exists, settings updates create `config.json`. The files are not merged, and an invalid selected file is an error rather than a reason to try the other format. Updates write back to the selected file in its format; YAML comments are not retained.
 
-```json
-{
-  "runAllParallelism": 3,
-  "model": ["openai/gpt-6-luna:max", "openai/gpt-6.1-sol:xhigh"],
-  "plan_model": ["openai/gpt-6.1-sol:xhigh", "openai/gpt-6-luna:max"]
-}
+`model` and `plan_model` in either format provide optional global model defaults. Each accepts a string or an ordered array: the first entry is primary, the rest are SDK fallbacks. Both formats use the same field names and aliases. For example, `config.yaml`:
+
+```yaml
+runAllParallelism: 3
+model:
+  - openai/gpt-6-luna:max
+  - openai/gpt-6.1-sol:xhigh
+plan_model:
+  - openai/gpt-6.1-sol:xhigh
+  - openai/gpt-6-luna:max
 ```
 
-Workflow and `default.yaml` model settings override these defaults; environment overrides still win. If no layer sets `plan_model`, planning uses the effective `model`. SDK arrays use the existing [fallback behavior](#sdk-mode); command mode uses only the primary. `planModel` is accepted as an alias for `plan_model`. Missing parallelism defaults to `1`, so model-only JSON is valid. Updating parallelism through the CLI, WebUI, or TUI preserves both model settings.
+Workflow and `default.yaml` model settings override these defaults; environment overrides still win. If no layer sets `plan_model`, planning uses the effective `model`. SDK arrays use the existing [fallback behavior](#sdk-mode); command mode uses only the primary. `planModel` is accepted as an alias for `plan_model`. Missing parallelism defaults to `1`, so model-only settings are valid. Updating parallelism through the CLI, WebUI, or TUI preserves both model settings.
 
 #### `cruise clean`
 
@@ -555,7 +559,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 | User workflow YAML configs (`workflows/*.yaml` / `*.yml`) | `$XDG_CONFIG_HOME/cruise/workflows/` (default: `~/.config/cruise/workflows/`) |
 | User workflow defaults | `$XDG_CONFIG_HOME/cruise/default.yaml` (default: `~/.config/cruise/default.yaml`) |
 | Project workflow defaults | `./.cruise/default.yaml` |
-| Application settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
+| Application settings (`config.json` or `config.yaml`) | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
 | Sessions, worktrees, and temporary `--repo` clones | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
 | State files (`history.json`, `new_session_draft.json`, per-installation `installations/<installation-id>/update-transaction.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
 
@@ -563,7 +567,7 @@ On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cru
 
 > **Migrating from `~/.cruise/`?** Earlier versions stored everything under `~/.cruise/`. Move `*.yaml`/`*.yml` into `~/.config/cruise/workflows/`, `config.json` into `~/.config/cruise/`, `sessions/` and `worktrees/` into `~/.local/share/cruise/`, and `history.json`/`new_session_draft.json` into `~/.local/state/cruise/`. Use `git worktree move` (or `git worktree repair`) when relocating worktree directories.
 >
-> **Workflow configs previously in `~/.config/cruise/*.yaml` / `*.yml`?** Automatic user-config discovery now looks for workflow YAMLs only in the `workflows/` subdirectory. Move them to `~/.config/cruise/workflows/`; cruise prints a warning if it finds YAML files left directly in `~/.config/cruise/`.
+> **Workflow configs previously in `~/.config/cruise/*.yaml` / `*.yml`?** Automatic user-config discovery now looks for workflow YAMLs only in the `workflows/` subdirectory. Move them to `~/.config/cruise/workflows/`; cruise prints a warning if it finds legacy workflow YAML files left directly in `~/.config/cruise/`. Application settings `config.yaml` and workflow defaults `default.yaml` stay in that directory and do not trigger the warning.
 
 ### Session Lifecycle
 
@@ -704,14 +708,14 @@ The `description:` field of each config file is shown next to its filename in bo
 
 `$XDG_CONFIG_HOME/cruise/default.yaml` supplies user defaults. When `XDG_CONFIG_HOME` is unset, the path defaults to `~/.config/cruise/default.yaml` on macOS/Linux. On Windows, it is `%APPDATA%\cruise\default.yaml` when `APPDATA` is set; if `APPDATA` is missing, Cruise falls back to the home-directory path `~/.config/cruise/default.yaml`. `./.cruise/default.yaml` supplies project defaults. These files provide defaults for fields a workflow leaves unset. They are never selectable as workflows (`-c` and `CRUISE_CONFIG` pointing at them is an error). `default` is not a built-in workflow name, so `cruise workflow eject default` is rejected as an unknown built-in; `cruise workflow generate --name default` still refuses to write the reserved `./.cruise/default.yaml`. `<config_dir>/workflows/default.yaml` remains an ordinary workflow.
 
-Precedence, highest first: environment variables (`CRUISE_MODEL`, ...) > the workflow file > `./.cruise/default.yaml` > `~/.config/cruise/default.yaml` > `config.json` model defaults > built-in defaults. Step-level model overrides still take precedence for ordinary prompts.
+Precedence, highest first: environment variables (`CRUISE_MODEL`, ...) > the workflow file > `./.cruise/default.yaml` > `~/.config/cruise/default.yaml` > application model defaults (`config.json` or `config.yaml`) > built-in defaults. Step-level model overrides still take precedence for ordinary prompts.
 
 When an actual jcode prompt has no effective model, Cruise creates
 `$XDG_CONFIG_HOME/cruise/default.yaml` (or the platform's normal user config
 path) with `model: null` and stops before starting jcode. Edit that user-level
 file to set a real `provider/model[:effort]` reference or bare model. Existing
 files are never changed, and project `.cruise/default.yaml` is never generated.
-You can instead set `model` in `config.json`, the workflow, or `CRUISE_MODEL` for a new session;
+You can instead set `model` in `config.json` or `config.yaml`, the workflow, or `CRUISE_MODEL` for a new session;
 planning calls may use `plan_model` / `CRUISE_PLAN_MODEL`. The file is not
 created for dry-runs, drafts, listings, command-only execution, or Claude.
 After updating settings, retry with the command that initiated the request: use
@@ -1739,7 +1743,7 @@ The compatibility filename `dag.json` and IPC name `get_session_dag` remain. Unv
 
 The WebUI, TUI, and CLI support running multiple sessions concurrently during `run --all`.
 
-- **WebUI/TUI**: the parallelism level is controlled by `run_all_parallelism` in `$XDG_CONFIG_HOME/cruise/config.json` (configurable via `cruise config --set-parallelism <N>`, default: `1`).
+- **WebUI/TUI**: the parallelism level is controlled by `run_all_parallelism` in the selected application settings file (`config.json` or `config.yaml` under `$XDG_CONFIG_HOME/cruise/`, configurable via `cruise config --set-parallelism <N>`, default: `1`).
 - **CLI**: pass `cruise run --all --parallelism <N>` for a one-run override (default: `1`, i.e. sequential). The persisted WebUI/TUI setting is neither read nor modified. In an interactive terminal, when `--dry-run` is not set, the CLI also shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 
 The batch scheduler:

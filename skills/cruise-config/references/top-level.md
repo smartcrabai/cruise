@@ -87,8 +87,12 @@ precedence. `command` and `sdk` are replaced together when either is set;
 Other defaulted fields fill only values the workflow leaves unset, so explicit
 workflow values take precedence. Environment overrides are applied afterward.
 
-`$XDG_CONFIG_HOME/cruise/config.json` may also set `model` and `plan_model`
-(alias `planModel`) as a string or an ordered primary-plus-fallback array.
+Application settings in `$XDG_CONFIG_HOME/cruise/config.json` or `config.yaml`
+may also set `model` and `plan_model` (alias `planModel`) as a string or an
+ordered primary-plus-fallback array. JSON takes precedence when both files
+exist; otherwise an existing YAML file is used. Settings updates preserve the
+selected format; when neither file exists, they create JSON. Invalid selected
+files fail rather than falling back to the other format.
 These model defaults have lower precedence than either `default.yaml` layer
 or the workflow; environment overrides still win, and step models override
 the effective ordinary model. SDK mode derives fallback chains from these

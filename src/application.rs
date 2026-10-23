@@ -4222,6 +4222,15 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    fn isolate_application_config(home: &std::path::Path) -> Vec<crate::test_support::EnvGuard> {
+        let mut guards = crate::test_support::set_fake_home(home);
+        guards.extend([
+            crate::test_support::EnvGuard::remove("CRUISE_MODEL"),
+            crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL"),
+        ]);
+        guards
+    }
+
     #[test]
     fn save_failure_hooks_are_resettable() {
         clear_app_config_save_failure();
@@ -4430,6 +4439,9 @@ mod tests {
 
     #[tokio::test]
     async fn planning_policy_scope_isolated_between_concurrent_sessions() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _app_config = isolate_application_config(temp.path());
         let with_fallback = crate::workflow_call::resolve_workflow_calls_with_defaults(
             crate::config::WorkflowConfig::from_yaml(
                 "model: [primary, fallback]\nsteps:\n  plan:\n    prompt: hi\n",
@@ -5211,6 +5223,7 @@ after-pr:
     async fn generate_delivers_model_notice_as_info_and_persists_the_same_text() {
         let _lock = crate::test_support::lock_process();
         let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _app_config = isolate_application_config(temp.path());
         let manager = SessionManager::new(temp.path().join("sessions"));
         let app = CruiseApplication::new(manager.clone());
         let session = create_model_logging_session(
@@ -5265,6 +5278,7 @@ after-pr:
         let _lock = crate::test_support::lock_process();
         let _quiet = crate::console_mode::quiet_guard();
         let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _app_config = isolate_application_config(temp.path());
         let manager = SessionManager::new(temp.path().join("sessions"));
         let app = CruiseApplication::new(manager.clone());
         let session = create_model_logging_session(
@@ -5308,6 +5322,7 @@ after-pr:
     async fn info_event_delivery_failure_is_reported_after_the_notice_is_saved() {
         let _lock = crate::test_support::lock_process();
         let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _app_config = isolate_application_config(temp.path());
         let manager = SessionManager::new(temp.path().join("sessions"));
         let app = CruiseApplication::new(manager.clone());
         let session = create_model_logging_session(
@@ -5352,6 +5367,7 @@ after-pr:
     async fn concurrent_plan_sessions_keep_model_info_in_their_own_logs_and_events() {
         let _lock = crate::test_support::lock_process();
         let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _app_config = isolate_application_config(temp.path());
         let manager = SessionManager::new(temp.path().join("sessions"));
         let app = CruiseApplication::new(manager.clone());
         let first = create_model_logging_session(
@@ -5435,6 +5451,7 @@ after-pr:
     async fn generate_fix_ask_and_replan_each_append_their_model_notice() {
         let _lock = crate::test_support::lock_process();
         let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _app_config = isolate_application_config(temp.path());
         let manager = SessionManager::new(temp.path().join("sessions"));
         let app = CruiseApplication::new(manager.clone());
         let session = create_model_logging_session(
