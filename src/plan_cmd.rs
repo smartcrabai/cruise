@@ -1770,28 +1770,92 @@ mod tests {
     }
 
     #[test]
-    fn test_create_planning_session_persists_builtin_config() {
+    fn builtin_snapshot_keeps_yaml_app_models_after_settings_change() {
         let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let manager = SessionManager::new(tmp.path().join("sessions"));
-        let yaml = crate::config::BUILTIN_CONFIG_YAML;
+        let process = ProcessStateGuard::new(tmp.path());
+        process.set_current_dir(tmp.path());
+        let _model = crate::test_support::EnvGuard::remove("CRUISE_MODEL");
+        let _plan_model = crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL");
 
+        let app_config_dir = tmp.path().join(".config").join("cruise");
+        fs::create_dir_all(&app_config_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let app_config_path = app_config_dir.join("config.yaml");
+        fs::write(
+            &app_config_path,
+            r"model:
+  - anthropic/original-primary
+  - openai/original-fallback
+plan_model:
+  - anthropic/original-plan
+  - openai/original-plan-fallback
+",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let manager = SessionManager::new(tmp.path().join("sessions"));
         let session = create_planning_session(
             &manager,
-            yaml,
+            crate::config::BUILTIN_CONFIG_YAML,
             &ConfigSource::Builtin,
             "use builtin".to_string(),
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
 
-        let config_path = manager.sessions_dir().join(&session.id).join("config.yaml");
-        let expected = crate::session_config::serialize_resolved_config(
-            &crate::resolver::load_config_from_source(yaml, &ConfigSource::Builtin)
-                .unwrap_or_else(|e| panic!("{e:?}")),
+        fs::write(
+            &app_config_path,
+            r"model:
+  - anthropic/updated-primary
+  - openai/updated-fallback
+plan_model:
+  - anthropic/updated-plan
+  - openai/updated-plan-fallback
+",
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
+
+        let saved_session = manager
+            .load(&session.id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(
+            &saved_session.config,
+            SessionConfigRef::BuiltinSnapshot { .. }
+        ));
+        let config = manager
+            .load_config(&saved_session)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
         assert_eq!(
-            std::fs::read_to_string(config_path).unwrap_or_else(|e| panic!("{e:?}")),
-            expected
+            config.model,
+            Some(crate::config::ModelSpec::Multiple(vec![
+                "anthropic/original-primary".to_string(),
+                "openai/original-fallback".to_string(),
+            ]))
+        );
+        assert_eq!(
+            config.plan_model,
+            Some(crate::config::ModelSpec::Multiple(vec![
+                "anthropic/original-plan".to_string(),
+                "openai/original-plan-fallback".to_string(),
+            ]))
+        );
+        let retry = config
+            .retry
+            .as_ref()
+            .unwrap_or_else(|| panic!("model lists should enable fallback policy"));
+        assert!(retry.model_fallback);
+        assert_eq!(
+            retry
+                .fallback_chains
+                .get("anthropic/original-primary")
+                .map(Vec::as_slice),
+            Some(["openai/original-fallback".to_string()].as_slice())
+        );
+        assert_eq!(
+            retry
+                .fallback_chains
+                .get("anthropic/original-plan")
+                .map(Vec::as_slice),
+            Some(["openai/original-plan-fallback".to_string()].as_slice())
         );
     }
 

@@ -45,7 +45,8 @@ pub fn list_configs_in(dir: &std::path::Path) -> Vec<ConfigEntry> {
     configs
 }
 
-fn yaml_paths_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+/// Returns top-level YAML files in `dir`, sorted by filename.
+pub(crate) fn yaml_paths_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return vec![];
     };
@@ -64,12 +65,16 @@ fn yaml_paths_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
-/// Return top-level `*.yaml` and `*.yml` files left in the legacy user config directory.
+/// Return top-level legacy workflow `*.yaml` and `*.yml` files, excluding the
+/// application config file `config.yaml`.
 ///
 /// The files are returned in filename order. Files in subdirectories are not included.
 #[must_use]
 pub fn legacy_user_config_files(config_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     yaml_paths_in(config_dir)
+        .into_iter()
+        .filter(|path| path.file_name() != Some(std::ffi::OsStr::new("config.yaml")))
+        .collect()
 }
 
 fn escape_warning_text(value: &str) -> String {
@@ -360,6 +365,54 @@ mod tests {
         assert!(
             entries.is_empty(),
             "legacy top-level yaml must not be listed, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn test_legacy_app_config_yaml_is_ignored_but_workflow_yaml_is_selectable() {
+        // Given: an app config and legacy workflows at the config root, plus a workflow
+        // named config.yaml in the workflows directory
+        let _lock = crate::test_support::lock_process();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let config_dir = tmp.path().join(".config").join("cruise");
+        let workflows_dir = config_dir.join(crate::paths::WORKFLOWS_DIR_NAME);
+        fs::create_dir_all(&workflows_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(config_dir.join("config.yaml"), "model: test\n")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(config_dir.join("config.yml"), "command: [local]")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(config_dir.join("legacy.yaml"), "command: [local]")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(workflows_dir.join("config.yaml"), "command: [local]")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+
+        // When: legacy discovery, warnings, and workflow listing run
+        let legacy = legacy_user_config_files(&config_dir);
+        let warning = legacy_warning_message(&config_dir)
+            .unwrap_or_else(|| panic!("expected a migration warning"));
+        let workflows = list_user_configs();
+
+        // Then: only root-level legacy workflow YAMLs are warned about; the explicit
+        // workflows/config.yaml remains selectable
+        assert_eq!(
+            legacy,
+            vec![
+                config_dir.join("config.yml"),
+                config_dir.join("legacy.yaml")
+            ]
+        );
+        assert!(warning.contains("config.yml"));
+        assert!(warning.contains("legacy.yaml"));
+        assert!(!warning.contains("config.yaml"));
+        assert_eq!(workflows.len(), 1);
+        assert_eq!(workflows[0].name, "config.yaml");
+        assert_eq!(
+            workflows[0].path,
+            workflows_dir
+                .join("config.yaml")
+                .to_string_lossy()
+                .into_owned()
         );
     }
 

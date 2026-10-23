@@ -7,13 +7,13 @@ use uuid::Uuid;
 
 use crate::error::{CruiseError, Result};
 
-/// Application-level configuration persisted at `~/.config/cruise/config.json`.
+/// Application-level configuration persisted as JSON or YAML in the Cruise config directory.
 ///
 /// This is distinct from per-workflow YAML configs (which live in `~/.config/cruise/workflows/`).
 ///
 /// ## Behaviour
-/// - Missing file -> returns [`AppConfig::default()`].
-/// - Invalid JSON or invalid field values -> returns a clear error (never silently clamped).
+/// - Missing files -> returns [`AppConfig::default()`]; new installations use `config.json`.
+/// - Invalid JSON or YAML or invalid field values -> returns a clear error (never silently clamped).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
@@ -36,6 +36,10 @@ pub struct AppConfig {
     pub plan_model: Option<crate::config::ModelSpec>,
 }
 
+fn is_yaml_config_path(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("yaml")
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -47,22 +51,44 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Return the canonical path to the app config file: `$XDG_CONFIG_HOME/cruise/config.json`
-    /// (defaulting to `$HOME/.config/cruise/config.json`).
+    /// Return the canonical app config path under `$XDG_CONFIG_HOME/cruise`
+    /// (defaulting to `$HOME/.config/cruise`).
+    ///
+    /// Existing `config.json` takes precedence over `config.yaml`; when neither exists,
+    /// returns the `config.json` path.
     ///
     /// # Errors
     ///
-    /// Returns an error if the home directory cannot be determined.
+    /// Returns an error if the config directory cannot be determined or candidate paths cannot
+    /// be inspected.
     pub fn config_path() -> Result<PathBuf> {
-        crate::paths::config_dir().map(|d| d.join("config.json"))
+        let config_dir = crate::paths::config_dir()?;
+        let json_path = config_dir.join("config.json");
+        let yaml_path = config_dir.join("config.yaml");
+        let exists = |path: &Path| {
+            path.try_exists().map_err(|error| {
+                CruiseError::Other(format!(
+                    "failed to check config file {}: {error}",
+                    path.display()
+                ))
+            })
+        };
+
+        if exists(&json_path)? {
+            Ok(json_path)
+        } else if exists(&yaml_path)? {
+            Ok(yaml_path)
+        } else {
+            Ok(json_path)
+        }
     }
 
     /// Load the app config using the canonical [`Self::config_path`].
     ///
     /// # Errors
     ///
-    /// - Returns an error if the home directory cannot be determined.
-    /// - Returns an error if the file exists but contains invalid JSON or invalid values.
+    /// Returns an error if the config directory cannot be determined, the selected file cannot
+    /// be read or parsed as JSON/YAML, or validation fails.
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
         Self::load_from(&path)
@@ -70,14 +96,14 @@ impl AppConfig {
 
     /// Load the app config from an explicit path (useful in tests and alternative config locations).
     ///
-    /// - File absent -> returns [`AppConfig::default()`].
-    /// - File present but invalid -> returns an error.
+    /// A `.yaml` extension selects YAML; all other paths retain JSON behavior. An absent file
+    /// returns [`AppConfig::default()`], while a present invalid file returns an error.
     ///
     /// # Errors
     ///
     /// Returns an error if the file exists but cannot be read or parsed, or if validation fails.
     pub fn load_from(path: &Path) -> Result<Self> {
-        let content = match std::fs::read_to_string(path) {
+        let content = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => {
@@ -87,9 +113,15 @@ impl AppConfig {
                 )));
             }
         };
-        let config: Self = serde_json::from_str(&content).map_err(|e| {
-            CruiseError::Other(format!("invalid config JSON in {}: {e}", path.display()))
-        })?;
+        let config: Self = if is_yaml_config_path(path) {
+            serde_yaml::from_str(&content).map_err(|e| {
+                CruiseError::Other(format!("invalid config YAML in {}: {e}", path.display()))
+            })?
+        } else {
+            serde_json::from_str(&content).map_err(|e| {
+                CruiseError::Other(format!("invalid config JSON in {}: {e}", path.display()))
+            })?
+        };
         config.validate()?;
         Ok(config)
     }
@@ -98,7 +130,7 @@ impl AppConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the home directory cannot be determined or the file cannot be written.
+    /// Returns an error if the config directory cannot be determined or the file cannot be written.
     pub fn save(&self) -> Result<()> {
         let path = Self::config_path()?;
         self.save_to(&path)
@@ -106,8 +138,8 @@ impl AppConfig {
 
     /// Persist the app config to an explicit path.
     ///
-    /// Creates parent directories as needed. The write uses a temp-file-then-rename pattern
-    /// for atomicity on platforms that support it.
+    /// A `.yaml` extension selects YAML; all other paths retain JSON behavior. Creates parent
+    /// directories as needed and writes through a temp file then rename for atomicity.
     ///
     /// # Errors
     ///
@@ -125,8 +157,13 @@ impl AppConfig {
         // Write to a uniquely named temp file in the same directory then rename for atomicity.
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let tmp_path = parent.join(format!(".config-{}.tmp", Uuid::new_v4().simple()));
-        let content = serde_json::to_string_pretty(self)
-            .map_err(|e| CruiseError::Other(format!("failed to serialize config: {e}")))?;
+        let content = if is_yaml_config_path(path) {
+            serde_yaml::to_string(self)
+                .map_err(|e| CruiseError::Other(format!("failed to serialize config YAML: {e}")))?
+        } else {
+            serde_json::to_string_pretty(self)
+                .map_err(|e| CruiseError::Other(format!("failed to serialize config: {e}")))?
+        };
         let mut tmp_created = false;
         let write_result = (|| -> std::io::Result<()> {
             let mut file = OpenOptions::new()
@@ -171,6 +208,7 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{EnvGuard, lock_process};
     use tempfile::TempDir;
 
     // -- Helpers --------------------------------------------------------------
@@ -246,22 +284,45 @@ mod tests {
     // -- AppConfig::config_path() ----------------------------------------------
 
     #[test]
-    fn test_config_path_ends_with_config_cruise_config_json() {
-        // When: the canonical config path is resolved
-        let path = AppConfig::config_path().unwrap_or_else(|e| panic!("expected Ok, got: {e}"));
-        // Then: path contains .config/cruise/config.json (OS-independent check)
-        let components: Vec<_> = path.components().collect();
-        let path_str = path.to_string_lossy();
-        assert!(
-            path_str.contains("config.json"),
-            "expected path to end with config.json, got: {path_str}"
+    fn test_config_path_prefers_json_then_yaml_and_defaults_to_json() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _xdg_config = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().as_os_str());
+        let config_dir = tmp.path().join("cruise");
+        let json_path = config_dir.join("config.json");
+        let yaml_path = config_dir.join("config.yaml");
+
+        // A new installation keeps the existing JSON default.
+        assert_eq!(
+            AppConfig::config_path().unwrap_or_else(|e| panic!("{e}")),
+            json_path
         );
-        assert!(
-            components
-                .windows(2)
-                .any(|w| w[0].as_os_str() == "cruise" && w[1].as_os_str() == "config.json"),
-            "expected cruise/config.json in path, got: {path_str}"
+
+        // YAML is selected only when JSON is absent.
+        std::fs::create_dir_all(&config_dir).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(&yaml_path, "runAllParallelism: 2\n").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            AppConfig::config_path().unwrap_or_else(|e| panic!("{e}")),
+            yaml_path
         );
+        assert_eq!(
+            AppConfig::load()
+                .unwrap_or_else(|e| panic!("{e}"))
+                .run_all_parallelism,
+            2
+        );
+
+        // JSON precedence is retained even if that file is invalid.
+        std::fs::write(&json_path, "invalid JSON").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            AppConfig::config_path().unwrap_or_else(|e| panic!("{e}")),
+            json_path
+        );
+        let Err(error) = AppConfig::load() else {
+            panic!("expected invalid JSON config to fail");
+        };
+        let error = error.to_string();
+        assert!(error.contains("invalid config JSON"), "{error}");
     }
 
     // -- AppConfig::load_from() ------------------------------------------------
@@ -450,6 +511,66 @@ mod tests {
         assert_eq!(updated.run_all_parallelism, 3);
         assert_eq!(updated.model, original.model);
         assert_eq!(updated.plan_model, original.plan_model);
+    }
+
+    #[test]
+    fn test_yaml_save_and_load_round_trip_model_shapes_and_parallelism() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let cases = [
+            (
+                "runAllParallelism: 8\nmodel: primary\nplan_model:\n  - plan-primary\n  - plan-fallback\n",
+                AppConfig {
+                    run_all_parallelism: 8,
+                    model: Some(crate::config::ModelSpec::Single("primary".to_string())),
+                    plan_model: Some(crate::config::ModelSpec::Multiple(vec![
+                        "plan-primary".to_string(),
+                        "plan-fallback".to_string(),
+                    ])),
+                },
+            ),
+            (
+                "run_all_parallelism: 4\nmodel:\n  - primary\n  - fallback\nplanModel: plan-primary\n",
+                AppConfig {
+                    run_all_parallelism: 4,
+                    model: Some(crate::config::ModelSpec::Multiple(vec![
+                        "primary".to_string(),
+                        "fallback".to_string(),
+                    ])),
+                    plan_model: Some(crate::config::ModelSpec::Single("plan-primary".to_string())),
+                },
+            ),
+        ];
+
+        for (index, (content, expected)) in cases.into_iter().enumerate() {
+            let path = tmp.path().join(format!("{index}.yaml"));
+            std::fs::write(&path, content).unwrap_or_else(|e| panic!("{e}"));
+            let loaded = AppConfig::load_from(&path).unwrap_or_else(|e| panic!("load failed: {e}"));
+            assert_eq!(loaded, expected);
+
+            loaded
+                .save_to(&path)
+                .unwrap_or_else(|e| panic!("save failed: {e}"));
+            assert_eq!(
+                AppConfig::load_from(&path).unwrap_or_else(|e| panic!("reload failed: {e}")),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_yaml_load_reports_invalid_yaml_and_path() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(&path, "runAllParallelism: [").unwrap_or_else(|e| panic!("{e}"));
+
+        let Err(error) = AppConfig::load_from(&path) else {
+            panic!("expected invalid YAML config to fail");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains(&format!("invalid config YAML in {}", path.display())),
+            "{error}"
+        );
     }
 
     #[test]

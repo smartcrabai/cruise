@@ -224,7 +224,7 @@ fn push_yaml_dir_candidates(
     home: Option<&std::path::Path>,
     kind: impl Fn(PathBuf) -> CandidateKind,
 ) {
-    for file in crate::configs::legacy_user_config_files(dir) {
+    for file in crate::configs::yaml_paths_in(dir) {
         let file = to_absolute(file);
         let label = shorten_display_path(&file, cwd, home);
         candidates.push(ConfigCandidate {
