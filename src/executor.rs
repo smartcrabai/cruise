@@ -451,6 +451,15 @@ impl AttemptFailure {
         }
     }
 
+    /// The original failure detail, shared with the final error.
+    fn message(&self) -> &str {
+        match self {
+            AttemptFailure::Limited { message, .. }
+            | AttemptFailure::Failed { message, .. }
+            | AttemptFailure::Unusable { message, .. } => message,
+        }
+    }
+
     /// The error to surface once the engine gives up.
     fn into_error(self) -> CruiseError {
         match self {
@@ -461,7 +470,6 @@ impl AttemptFailure {
         }
     }
 }
-
 /// Run one prompt on an SDK backend, retrying through
 /// [`crate::retry::FallbackEngine`].
 ///
@@ -556,8 +564,9 @@ async fn run_with_fallback(
             } => {
                 if let Some(cb) = req.on_notice {
                     cb(&format!(
-                        "Warning: Fallback: {} -> {to} ({detail}, attempt {attempt}/{of})",
-                        from.as_deref().unwrap_or("default model")
+                        "Warning: Fallback: {} -> {to} ({detail}, attempt {attempt}/{of})\n  Error: {}",
+                        from.as_deref().unwrap_or("default model"),
+                        failed.message(),
                     ));
                 }
                 model_reported = false;
@@ -1444,16 +1453,14 @@ mod tests {
         req.on_notice = Some(&on_notice);
 
         let policy = fast_policy(&[("test-smoke-400/primary", &["test-smoke-400/spare"])]);
+        let diagnostic = "jcode: provider error: API Error: 400 invalid_request: unsupported parameter\nrequest_id: req-test";
         let outcome = run_with_fallback(&req, "jcode", Some(policy), |model| {
             let model = model.unwrap_or_default();
             record(&models_sink, model);
             if model == "test-smoke-400/spare" {
                 Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
             } else {
-                Ok(canned(vec![StreamChunk::Error(
-                    "jcode: provider error: API Error: 400 invalid_request: unsupported parameter"
-                        .to_string(),
-                )]))
+                Ok(canned(vec![StreamChunk::Error(diagnostic.to_string())]))
             }
         })
         .await
@@ -1470,8 +1477,8 @@ mod tests {
             .find(|n| n.starts_with("Warning: Fallback:"))
             .unwrap_or_else(|| panic!("no fallback notice: {:?}", recorded(&notices)));
         assert!(
-            fallback.contains("test-smoke-400/primary -> test-smoke-400/spare (400,"),
-            "unexpected fallback notice: {fallback}"
+            fallback.contains(diagnostic),
+            "fallback notice lost the original multiline backend error: {fallback}"
         );
     }
 
@@ -1618,12 +1625,13 @@ mod tests {
             ]
         );
         let notices = recorded(&notices);
+        let fallback = notices
+            .iter()
+            .find(|notice| notice.starts_with("Warning: Fallback:"))
+            .unwrap_or_else(|| panic!("no fallback notice: {notices:?}"));
         assert!(
-            notices.iter().any(|n| {
-                n == "Warning: Fallback: test-executor-budget/primary -> test-executor-budget/spare \
-                         (429, attempt 2/3)"
-            }),
-            "got: {notices:?}"
+            fallback.contains("HTTP status 429 slow down"),
+            "fallback notice lost the original rate-limit detail: {fallback}"
         );
         assert_eq!(
             notices
@@ -1801,12 +1809,13 @@ mod tests {
             ]
         );
         let notices = recorded(&notices);
+        let fallback = notices
+            .iter()
+            .find(|notice| notice.starts_with("Warning: Fallback:"))
+            .unwrap_or_else(|| panic!("no fallback notice: {notices:?}"));
         assert!(
-            notices.iter().any(|n| {
-                n == "Warning: Fallback: test-executor-unusable/primary -> test-executor-unusable/spare \
-                         (unusable model, attempt 1/1)"
-            }),
-            "got: {notices:?}"
+            fallback.contains("invalid model reference"),
+            "fallback notice lost the original setup error: {fallback}"
         );
         assert!(
             !notices
