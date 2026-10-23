@@ -1,7 +1,7 @@
 # SDK-qualified model executable specifications
 
 These checks implement the task in the session plan dated 2026-10-23, titled
-“SDKを指定できるモデル候補リストの実装計画”. The authoritative requirements
+"Implementation plan for SDK-qualified model candidate lists". The authoritative requirements
 are plan sections 3.1 through 3.5 and completion conditions 1 through 5, checked
 against the current production paths rather than the older line numbers in the
 plan. `README.md` (SDK mode and model defaults), `NEVER.md`, and the existing
