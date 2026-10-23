@@ -28,7 +28,8 @@ impl Fixture {
     fn app_config(&self, extension: &str) -> PathBuf {
         self.root
             .path()
-            .join("config/cruise")
+            .join("config")
+            .join("cruise")
             .join(format!("config.{extension}"))
     }
 
