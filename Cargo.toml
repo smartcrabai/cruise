@@ -127,9 +127,15 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 
 [dev-dependencies]
+cucumber = "=0.23.0"
 portable-pty = "=0.9.0"
 tempfile = "=3.27.0"
 vt100 = "=0.18.1"
+
+[[test]]
+harness = false
+name = "checkpoint_bdd"
+path = "tests/checkpoint_bdd.rs"
 
 [profile.release]
 codegen-units = 1

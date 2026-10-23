@@ -28,6 +28,37 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
+  formal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install pinned Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22.22.0'
+          cache: npm
+          cache-dependency-path: tests/formal/package-lock.json
+
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.99.1 --profile minimal
+
+      - name: Formal models and checkpoint behavior
+        run: scripts/check_formal.sh
+
+      - name: Upload formal reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: formal-reports
+          path: target/formal-reports/
+          if-no-files-found: warn
+          retention-days: 14
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10

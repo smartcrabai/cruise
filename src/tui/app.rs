@@ -2591,8 +2591,16 @@ impl TuiApp {
             self.status = Some("No session selected".to_string());
             return;
         };
-        let mut actions = self.application.capabilities(state);
-        if matches!(&state.phase, crate::session::SessionPhase::AwaitingApproval) {
+        // A run claim can precede the cached phase update. Do not offer a
+        // duplicate run, resume, or mutation while that claim is live.
+        let running =
+            self.application.runtime().active_operation(&state.id) == Some(OperationKind::Run);
+        let mut actions = if running {
+            vec![SessionAction::Cancel]
+        } else {
+            self.application.capabilities(state)
+        };
+        if !running && matches!(&state.phase, crate::session::SessionPhase::AwaitingApproval) {
             for action in [SessionAction::EditSettings, SessionAction::Delete] {
                 if !actions.contains(&action) {
                     actions.push(action);
@@ -6727,6 +6735,84 @@ mod tests {
         assert!(app.prompts.active.is_none());
         assert!(app.modal.is_none());
         assert!(!app.modal_state.prompt_modal_pending);
+    }
+
+    #[test]
+    fn palette_live_run_overrides_stale_phase_and_cancels() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = crate::session::SessionManager::new(temp.path().join("data"));
+        let id = crate::session::SessionManager::new_session_id();
+        let state = sidebar_session(&id, SessionPhase::Planned);
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(state.plan_path(&manager.sessions_dir()), "# usable plan\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut app = app_for_manager(manager);
+
+        for (phase, expected) in [
+            (SessionPhase::Planned, SessionAction::RunWorktree),
+            (SessionPhase::Suspended, SessionAction::Resume),
+            (
+                SessionPhase::Failed("failure".to_string()),
+                SessionAction::Retry,
+            ),
+            (SessionPhase::Completed, SessionAction::ResetToPlanned),
+        ] {
+            app.sessions[0].phase = phase.clone();
+            let normal = app.application.capabilities(&app.sessions[0]);
+            assert!(normal.contains(&expected));
+            let claim = app
+                .application
+                .runtime()
+                .try_begin(&id, OperationKind::Run)
+                .unwrap_or_else(|error| panic!("{error}"));
+            let token = claim.token();
+
+            app.open_palette();
+            let Some(Modal::Palette { actions, selected }) = &app.modal else {
+                panic!("palette expected for {phase:?}");
+            };
+            assert_eq!(actions, &[SessionAction::Cancel]);
+            assert_eq!(*selected, 0);
+            assert!(!token.is_cancelled());
+            app.handle_action(Action::Enter);
+            assert!(token.is_cancelled(), "Enter must cancel the live run");
+            assert_eq!(app.sessions[0].phase, phase);
+            assert!(app.last_error.is_none());
+
+            drop(claim);
+            app.open_palette();
+            let Some(Modal::Palette { actions, selected }) = &app.modal else {
+                panic!("palette expected after claim release");
+            };
+            assert_eq!(actions, &normal);
+            assert_eq!(*selected, 0);
+        }
+
+        for operation in [
+            OperationKind::Generate,
+            OperationKind::Fix,
+            OperationKind::Replan,
+            OperationKind::Ask,
+        ] {
+            app.sessions[0].phase = SessionPhase::AwaitingInput;
+            app.sessions[0].awaiting_input = true;
+            let claim = app
+                .application
+                .runtime()
+                .try_begin(&id, operation)
+                .unwrap_or_else(|error| panic!("{error}"));
+            let expected = app.application.capabilities(&app.sessions[0]);
+            assert!(expected.contains(&SessionAction::Answer));
+            assert!(expected.contains(&SessionAction::Cancel));
+            app.open_palette();
+            let Some(Modal::Palette { actions, .. }) = &app.modal else {
+                panic!("palette expected for {operation:?}");
+            };
+            assert_eq!(actions, &expected);
+            drop(claim);
+        }
     }
 
     #[test]
