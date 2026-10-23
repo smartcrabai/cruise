@@ -40,7 +40,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: '22.22.0'
+          node-version: '24.22.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
@@ -78,7 +78,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: '22.22.0'
+          node-version: '24.22.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
