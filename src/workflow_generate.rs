@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::cli::{DEFAULT_RATE_LIMIT_RETRIES, WorkflowGenerateArgs};
-use crate::config::{ModelSpec, WorkflowConfig};
+use crate::config::WorkflowConfig;
 use crate::error::{CruiseError, Result};
 use crate::executor::{Executor, PromptRun};
 use crate::resolver::{load_config_from_source, resolve_config};
@@ -25,10 +25,7 @@ pub(crate) async fn generate_yaml(
     destination_parent: &Path,
 ) -> Result<String> {
     let executor = Executor::new(config.sdk.as_deref(), &config.command);
-    let model_or_mode = executor.plan_model_or_mode(
-        config.plan_model.as_ref().and_then(ModelSpec::primary),
-        config.model.as_ref().and_then(ModelSpec::primary),
-    );
+    let model = Executor::plan_model(config.plan_model.as_ref(), config.model.as_ref());
     let base_prompt = PROMPT_TEMPLATE
         .replace("{schema}", SCHEMA)
         .replace("{description}", description);
@@ -39,7 +36,7 @@ pub(crate) async fn generate_yaml(
         let outcome = executor
             .run(PromptRun {
                 prompt: &prompt,
-                model_or_mode: model_or_mode.as_deref(),
+                model: model.as_ref(),
                 max_retries: DEFAULT_RATE_LIMIT_RETRIES,
                 env: &config.env,
                 mcp_servers: &config.mcp_servers,
@@ -193,6 +190,94 @@ mod tests {
 
     const VALID: &str = "command: [cat]\nsteps:\n  build:\n    command: echo hi\n";
     const BROKEN: &str = "steps: [";
+
+    async fn mixed_sdk_yaml_generation(
+        repair: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = lock_process();
+        let tmp = TempDir::new()?;
+        let _home = set_fake_home(tmp.path());
+        let _path = crate::test_support::install_exiting_jcode_stub(tmp.path());
+        let _jcode_home = EnvGuard::set("JCODE_HOME", tmp.path().join("jcode-home"));
+        let _sdk = EnvGuard::remove("CRUISE_SDK");
+        let _model = EnvGuard::remove("CRUISE_MODEL");
+        let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
+        for (name, text) in [("valid", VALID), ("broken", BROKEN)] {
+            let frame = serde_json::json!({"type":"assistant","session_id":"mixed-yaml","message":{"role":"assistant","content":[{"type":"text","text":text}]}});
+            fs::write(tmp.path().join(name), format!("{frame}\n"))?;
+        }
+        let script = format!(
+            r#"#!/bin/sh
+case "$1" in --version) echo '2.0.0'; exit 0;; --cruise-exec-probe) exit 0;; esac
+d='{}'
+printf '%s\n' "$@" >> "$d/args"
+read -r input
+printf '%s\n' "$input" >> "$d/prompts"
+if [ '{}' = true ] && [ ! -f "$d/attempted" ]; then
+  touch "$d/attempted"
+  cat "$d/broken"
+else
+  cat "$d/valid"
+fi
+printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_id":"mixed-yaml"}}'
+"#,
+            tmp.path().display(),
+            repair
+        );
+        write_executable_script(&tmp.path().join("claude"), &script);
+        // Prove the stream fixture works before parsing the new mixed syntax.
+        let control = WorkflowConfig::from_yaml(
+            "sdk: claude\nmodel: mixed-yaml-model\nsteps:\n  build:\n    command: echo hi\n",
+        )?;
+        let control_output = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            generate_yaml(&control, "legacy SDK control", tmp.path()),
+        )
+        .await??;
+        assert_eq!(control_output.trim_end(), VALID.trim_end());
+        for name in ["args", "prompts", "attempted"] {
+            let path = tmp.path().join(name);
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
+        }
+        let config = WorkflowConfig::from_yaml(
+            "sdk: jcode\nplan_model: []\nmodel:\n  - sdk: claude\n    model: mixed-yaml-model\n  - unused/jcode\nsteps:\n  build:\n    command: echo hi\n",
+        )?;
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            generate_yaml(&config, "mixed SDK workflow", tmp.path()),
+        )
+        .await??;
+        assert_eq!(output.trim_end(), VALID.trim_end());
+        let args = fs::read_to_string(tmp.path().join("args"))?;
+        assert_eq!(
+            args.lines()
+                .filter(|line| *line == "mixed-yaml-model")
+                .count(),
+            if repair { 2 } else { 1 }
+        );
+        assert!(args.lines().any(|line| line == "--model"));
+        let prompts = fs::read_to_string(tmp.path().join("prompts"))?;
+        assert_eq!(prompts.lines().count(), if repair { 2 } else { 1 });
+        if repair {
+            assert!(prompts.contains("Previous attempt"));
+            assert!(prompts.contains(BROKEN));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mixed_sdk_generate_yaml_uses_first_claude_candidate_under_jcode()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        mixed_sdk_yaml_generation(false).await
+    }
+
+    #[tokio::test]
+    async fn mixed_sdk_generate_yaml_repair_preserves_first_claude_candidate()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        mixed_sdk_yaml_generation(true).await
+    }
 
     /// Build a command-backend config whose script records each prompt and
     /// replies with `outputs[n]` on turn n (the last output repeats).
@@ -416,7 +501,9 @@ mod tests {
     #[tokio::test]
     async fn generate_yaml_repairs_once_for_two_turns() {
         let tmp = TempDir::new().unwrap();
-        let cfg = fake_backend(tmp.path(), &[BROKEN, VALID]);
+        let mut cfg = fake_backend(tmp.path(), &[BROKEN, VALID]);
+        cfg.plan_model = Some(crate::config::ModelSpec::Multiple(Vec::new()));
+        cfg.model = Some(crate::config::ModelSpec::Single("command-primary".into()));
         generate_yaml(&cfg, "d", tmp.path()).await.unwrap();
         assert_eq!(turns(tmp.path()), 2);
     }

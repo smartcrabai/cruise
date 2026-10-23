@@ -53,6 +53,7 @@ mod install_identity;
 mod issue_publish;
 mod list_cmd;
 mod metadata;
+mod model_selection;
 mod multiline_input;
 pub mod new_session_draft;
 mod new_session_history;

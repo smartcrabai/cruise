@@ -161,8 +161,8 @@ pub struct CompiledWorkflow {
     /// instead of via `command`. Mutually exclusive with a non-empty `command`;
     /// with both unset, prompts run on the default `jcode` backend.
     pub sdk: Option<String>,
-    pub model: Option<String>,
-    pub plan_model: Option<String>,
+    pub model: Option<crate::config::ModelSpec>,
+    pub plan_model: Option<crate::config::ModelSpec>,
     pub env: HashMap<String, String>,
     /// Language to use for PR title/body generation.
     pub pr_language: String,
@@ -249,16 +249,8 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
     Ok(CompiledWorkflow {
         command: config.command,
         sdk: config.sdk,
-        model: config
-            .model
-            .as_ref()
-            .and_then(crate::config::ModelSpec::primary)
-            .map(str::to_string),
-        plan_model: config
-            .plan_model
-            .as_ref()
-            .and_then(crate::config::ModelSpec::primary)
-            .map(str::to_string),
+        model: config.model,
+        plan_model: config.plan_model,
         env: config.env,
         pr_language,
         plan_language,

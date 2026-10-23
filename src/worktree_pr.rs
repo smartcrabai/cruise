@@ -313,7 +313,7 @@ async fn generate_pr_description(
         Ok(p) => p,
     };
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
-    let model_or_mode = executor.step_model_or_mode(None, compiled.model.as_deref());
+    let model = compiled.model.as_ref();
     let spinner = crate::spinner::Spinner::start("Generating PR description...");
     let env = std::collections::HashMap::new();
 
@@ -322,7 +322,7 @@ async fn generate_pr_description(
             &executor,
             worktree_path,
             &pr_prompt,
-            model_or_mode.as_deref(),
+            model,
             rate_limit_retries,
             &env,
             &compiled.mcp_servers,
@@ -345,7 +345,7 @@ async fn generate_pr_description(
         match executor
             .run(crate::executor::PromptRun {
                 prompt: &pr_prompt,
-                model_or_mode: model_or_mode.as_deref(),
+                model,
                 max_retries: rate_limit_retries,
                 env: &env,
                 mcp_servers: &compiled.mcp_servers,
@@ -393,7 +393,7 @@ async fn generate_pr_via_sdk_tool(
     executor: &crate::executor::Executor,
     worktree_path: &Path,
     pr_prompt: &str,
-    model_or_mode: Option<&str>,
+    model: Option<&crate::config::ModelSpec>,
     rate_limit_retries: usize,
     env: &std::collections::HashMap<String, String>,
     mcp_servers: &crate::config::McpServers,
@@ -418,7 +418,7 @@ async fn generate_pr_via_sdk_tool(
     match executor
         .run(crate::executor::PromptRun {
             prompt: &prompt,
-            model_or_mode,
+            model,
             max_retries: rate_limit_retries,
             env,
             mcp_servers,
@@ -1083,6 +1083,93 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mixed_sdk_pr_description_uses_first_claude_candidate_under_jcode()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new()?;
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let _path = crate::test_support::install_exiting_jcode_stub(tmp.path());
+        let _jcode_home =
+            crate::test_support::EnvGuard::set("JCODE_HOME", tmp.path().join("jcode-home"));
+        let _sdk = crate::test_support::EnvGuard::remove("CRUISE_SDK");
+        let _model = crate::test_support::EnvGuard::remove("CRUISE_MODEL");
+        let _plan_model = crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL");
+        let script = format!(
+            r#"#!/bin/sh
+case "$1" in --version) echo '2.0.0'; exit 0;; --cruise-exec-probe) exit 0;; esac
+d='{}'
+printf '%s\n' "$@" > "$d/args"
+pwd > "$d/cwd"
+read -r input
+printf '%s\n' '{{"type":"control_request","request_id":"pr-request","request":{{"subtype":"mcp_message","server_name":"cruise","message":{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"submit_pr_metadata","arguments":{{"title":"Mixed SDK PR","body":"Metadata from the selected Claude candidate."}}}}}}}}}}'
+read -r response
+printf '%s\n' "$response" > "$d/response"
+printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_id":"mixed-pr"}}'
+"#,
+            tmp.path().display()
+        );
+        crate::test_support::write_executable_script(&tmp.path().join("claude"), &script);
+        // Exercise the same SDK tool fixture before parsing mixed candidates.
+        let control = crate::config::WorkflowConfig::from_yaml(
+            "sdk: claude\nmodel: mixed-pr-model\nsteps:\n  build:\n    command: echo hi\n",
+        )?;
+        let control_compiled = crate::workflow::compile(control)?;
+        let control_plan = tmp.path().join("control-plan.md");
+        std::fs::write(&control_plan, "# Legacy SDK control plan")?;
+        let mut control_vars = VariableStore::new("legacy SDK control".to_string());
+        control_vars.set_named_file(crate::session::PLAN_VAR, control_plan);
+        let control_metadata = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            generate_pr_description(
+                tmp.path(),
+                &control_compiled,
+                &mut control_vars,
+                0,
+                None,
+                None,
+            ),
+        )
+        .await??;
+        assert_eq!(
+            control_metadata,
+            (
+                "Mixed SDK PR".to_string(),
+                "Metadata from the selected Claude candidate.".to_string()
+            )
+        );
+        let config = crate::config::WorkflowConfig::from_yaml(
+            "sdk: jcode\nmodel:\n  - sdk: claude\n    model: mixed-pr-model\n  - unused/jcode\nsteps:\n  build:\n    command: echo hi\n",
+        )?;
+        let compiled = crate::workflow::compile(config)?;
+        let plan_path = tmp.path().join("plan.md");
+        std::fs::write(&plan_path, "# Mixed SDK plan")?;
+        let mut vars = VariableStore::new("implement mixed SDK feature".to_string());
+        vars.set_named_file(crate::session::PLAN_VAR, plan_path);
+        let metadata = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            generate_pr_description(tmp.path(), &compiled, &mut vars, 0, None, None),
+        )
+        .await??;
+        assert_eq!(
+            metadata,
+            (
+                "Mixed SDK PR".to_string(),
+                "Metadata from the selected Claude candidate.".to_string()
+            )
+        );
+        let args = std::fs::read_to_string(tmp.path().join("args"))?;
+        assert!(args.lines().any(|line| line == "--model"));
+        assert!(args.lines().any(|line| line == "mixed-pr-model"));
+        let cwd = std::fs::read_to_string(tmp.path().join("cwd"))?;
+        assert_eq!(
+            std::fs::canonicalize(cwd.trim())?,
+            std::fs::canonicalize(tmp.path())?
+        );
+        Ok(())
+    }
+
     // --- sync_base_with -----------------------------------------------------
 
     fn output(code: i32, stdout: &[u8]) -> std::process::Output {
@@ -1598,7 +1685,9 @@ mod tests {
             "-c".to_string(),
             "printf description".to_string(),
         ]);
-        compiled.model = Some("provider/pr-description-model:free:xhigh".to_string());
+        compiled.model = Some(crate::config::ModelSpec::Single(
+            "provider/pr-description-model:free:xhigh".to_string(),
+        ));
         let mut vars = VariableStore::new("PR description logging task".to_string());
         vars.set_named_file(crate::session::PLAN_VAR, plan_path);
         let ctx = worktree::WorktreeContext {
@@ -1940,7 +2029,9 @@ mod tests {
         crate::test_support::run_git_ok(&worktree_path, &["commit", "-m", "worktree change"]);
         let mut compiled = minimal_compiled_workflow(Vec::new());
         compiled.sdk = Some("jcode".to_string());
-        compiled.plan_model = Some("provider/planning-model".to_string());
+        compiled.plan_model = Some(crate::config::ModelSpec::Single(
+            "provider/planning-model".to_string(),
+        ));
         let mut vars = VariableStore::new("PR metadata task".to_string());
         vars.set_named_file(crate::session::PLAN_VAR, plan_path);
         let ctx = worktree::WorktreeContext {

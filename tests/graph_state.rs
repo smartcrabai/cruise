@@ -234,7 +234,7 @@ async fn repeated_resume_never_replenishes_accepted_retry_budget() {
     let mut resumed = build_graph(&compiled, 1).unwrap();
     resumed.restore(&saved).unwrap();
     let mut updated = compiled.clone();
-    updated.model = Some("reloaded-model".into());
+    updated.model = Some(cruise::config::ModelSpec::Single("reloaded-model".into()));
     let reload = || {
         Ok(Some(cruise::engine::ReloadedWorkflow {
             compiled: updated.clone(),

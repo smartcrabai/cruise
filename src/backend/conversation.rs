@@ -6,6 +6,79 @@ use std::path::Path;
 
 use crate::error::{CruiseError, Result};
 
+/// Keep every superseded checkpoint alive until the caller's request finishes.
+/// The final saved owner, not the last attempted backend, determines retention.
+pub(crate) struct DeferredCleanup {
+    manager: crate::session::SessionManager,
+    session_id: String,
+    superseded: std::sync::Mutex<Vec<crate::session::SessionState>>,
+}
+
+impl DeferredCleanup {
+    pub(crate) fn new(manager: crate::session::SessionManager, session_id: String) -> Self {
+        Self {
+            manager,
+            session_id,
+            superseded: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn defer(&self, state: &crate::session::SessionState) {
+        self.superseded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(state.clone());
+    }
+}
+
+impl Drop for DeferredCleanup {
+    fn drop(&mut self) {
+        let current = match self.manager.load(&self.session_id) {
+            Ok(state) => Some(state),
+            Err(CruiseError::SessionError(_)) => None,
+            // If final persistence cannot be read, retaining storage is safer.
+            Err(error) => {
+                eprintln!("warning: deferred conversation cleanup skipped: {error}");
+                return;
+            }
+        };
+        for previous in self
+            .superseded
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            let Some(id) = previous.plan_conversation_id.as_deref() else {
+                continue;
+            };
+            if current.as_ref().is_some_and(|state| {
+                state.plan_conversation_id.as_deref() == Some(id)
+                    && state
+                        .plan_conversation_backend
+                        .as_deref()
+                        .unwrap_or("jcode")
+                        == previous
+                            .plan_conversation_backend
+                            .as_deref()
+                            .unwrap_or("jcode")
+                    && state.plan_conversation_home == previous.plan_conversation_home
+            }) {
+                continue;
+            }
+            if let Err(error) = cleanup(
+                previous.plan_conversation_backend.as_deref(),
+                id,
+                previous.plan_conversation_home.as_deref(),
+                previous
+                    .worktree_path
+                    .as_deref()
+                    .or(Some(&previous.base_dir)),
+            ) {
+                eprintln!("warning: deferred conversation cleanup failed: {error}");
+            }
+        }
+    }
+}
+
 pub(crate) fn cleanup(
     backend: Option<&str>,
     session_id: &str,

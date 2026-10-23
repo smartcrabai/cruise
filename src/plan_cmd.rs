@@ -16,6 +16,7 @@ use crate::config::{WorkflowConfig, validate_config};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{HistoryScope, NewSessionHistory};
+use crate::planning::saved_plan_session as saved_plan_resume;
 use crate::planning::{
     PlanProgress, PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template,
     setup_plan_vars,
@@ -79,11 +80,6 @@ fn cli_plan_session_callback<'a>(
     config: &WorkflowConfig,
     working_dir: &Path,
 ) -> Option<Box<crate::executor::SessionIdCallback<'a>>> {
-    let backend = match config.sdk.as_deref().unwrap_or("jcode") {
-        "jcode" if config.command.is_empty() => "jcode",
-        "opencode" if config.command.is_empty() => "opencode",
-        _ => return None,
-    };
     if !crate::planning::sdk_plan_tools_enabled(config) {
         return None;
     }
@@ -92,10 +88,15 @@ fn cli_plan_session_callback<'a>(
         .config
         .stable_identity(session.repo.as_deref(), &session.id);
     let key = crate::planning::plan_conversation_key(config, &identity);
-    let home =
-        (backend == "jcode").then(|| crate::backend::jcode::resolve_source_home(Some(working_dir)));
+    let working_dir = working_dir.to_path_buf();
     let session_id = session.id.clone();
-    Some(Box::new(move |backend_id| {
+    let cleanup =
+        crate::backend::conversation::DeferredCleanup::new(manager.clone(), session_id.clone());
+    Some(Box::new(move |conversation| {
+        let backend = conversation.sdk.as_str();
+        let backend_id = conversation.id.as_str();
+        let home = (conversation.sdk == crate::model_selection::Sdk::Jcode)
+            .then(|| crate::backend::jcode::resolve_source_home(Some(&working_dir)));
         let mut state = manager.load(&session_id)?;
         if let Some(previous_id) = state.plan_conversation_id.as_deref()
             && (previous_id != backend_id
@@ -106,17 +107,12 @@ fn cli_plan_session_callback<'a>(
                     != backend
                 || state.plan_conversation_home != home)
         {
-            crate::backend::conversation::cleanup(
-                state.plan_conversation_backend.as_deref(),
-                previous_id,
-                state.plan_conversation_home.as_deref(),
-                state.worktree_path.as_deref().or(Some(&state.base_dir)),
-            )?;
+            cleanup.defer(&state);
         }
         state.plan_conversation_id = Some(backend_id.to_string());
         state.plan_conversation_key = Some(key.clone());
         state.plan_conversation_backend = Some(backend.to_string());
-        state.plan_conversation_home.clone_from(&home);
+        state.plan_conversation_home = home;
         manager.save(&state)
     }))
 }
@@ -151,22 +147,6 @@ fn finalize_plan_checkpoint(
     current.plan_conversation_backend = None;
     current.plan_conversation_home = None;
     manager.save(&current)
-}
-
-fn saved_plan_resume(session: &SessionState, config: &WorkflowConfig) -> Option<String> {
-    let identity = session
-        .config
-        .stable_identity(session.repo.as_deref(), &session.id);
-    let key = crate::planning::plan_conversation_key(config, &identity);
-    let backend = config.sdk.as_deref().unwrap_or("jcode");
-    (session.plan_conversation_key.as_deref() == Some(key.as_str())
-        && session
-            .plan_conversation_backend
-            .as_deref()
-            .unwrap_or("jcode")
-            == backend)
-        .then(|| session.plan_conversation_id.clone())
-        .flatten()
 }
 
 /// Returns the reason an explicit CLI request overrides `force_exec`, or `None`.
@@ -362,7 +342,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
 
     // SDK backends return a session id for plan / fix / ask turns so the turns
     // share one conversation; command mode always leaves this `None`.
-    let mut resume: Option<String> = None;
+    let mut resume: Option<crate::model_selection::SdkSessionId> = None;
     let interactive = !noninteractive;
 
     if args.skip_planning {
@@ -704,16 +684,8 @@ async fn generate_title_via_sdk(
     let tool = crate::sdk_tools::generate_title_tool(std::sync::Arc::clone(&title_store));
 
     let executor = crate::executor::Executor::new(config.sdk.as_deref(), &config.command);
-    let model_or_mode = executor.plan_model_or_mode(
-        config
-            .plan_model
-            .as_ref()
-            .and_then(crate::config::ModelSpec::primary),
-        config
-            .model
-            .as_ref()
-            .and_then(crate::config::ModelSpec::primary),
-    );
+    let model =
+        crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref());
     let prompt = format!(
         "Generate a concise session title (max 80 chars) for this task and plan. \
          Call the generate_title tool with your title.\n\n\
@@ -723,7 +695,7 @@ async fn generate_title_via_sdk(
     executor
         .run(crate::executor::PromptRun {
             prompt: &prompt,
-            model_or_mode: model_or_mode.as_deref(),
+            model,
             max_retries: 1,
             env: &env,
             mcp_servers: &config.mcp_servers,
@@ -1081,7 +1053,7 @@ async fn generate_plan_for_session(
 async fn generate_plan_markdown(
     ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,
-    resume: &mut Option<String>,
+    resume: &mut Option<crate::model_selection::SdkSessionId>,
 ) -> Result<String> {
     let prompt_result = crate::planning::run_plan_prompt_template(
         ctx,
@@ -1259,7 +1231,7 @@ async fn run_approve_loop(
     vars: &mut VariableStore,
     rate_limit_retries: usize,
     noninteractive: bool,
-    resume: &mut Option<String>,
+    resume: &mut Option<crate::model_selection::SdkSessionId>,
 ) -> Result<()> {
     let working_dir = session
         .worktree_path
@@ -1567,6 +1539,14 @@ pub async fn replan_session(
         Ok(())
     }
     .await;
+    if result.is_err()
+        && let Ok(checkpoint) = manager.load(&session.id)
+    {
+        session.plan_conversation_id = checkpoint.plan_conversation_id;
+        session.plan_conversation_key = checkpoint.plan_conversation_key;
+        session.plan_conversation_backend = checkpoint.plan_conversation_backend;
+        session.plan_conversation_home = checkpoint.plan_conversation_home;
+    }
     notify_plan_result(session, &result);
     result
 }
@@ -1575,7 +1555,7 @@ pub async fn replan_session(
 async fn run_fix_plan(
     ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,
-    resume: &mut Option<String>,
+    resume: &mut Option<crate::model_selection::SdkSessionId>,
 ) -> Result<()> {
     run_plan_prompt(
         ctx,
@@ -1592,7 +1572,7 @@ async fn run_fix_plan(
 async fn run_ask_plan(
     ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,
-    resume: &mut Option<String>,
+    resume: &mut Option<crate::model_selection::SdkSessionId>,
 ) -> Result<()> {
     run_plan_prompt(
         ctx,
@@ -1614,7 +1594,7 @@ async fn run_plan_prompt(
     vars: &mut VariableStore,
     template: &str,
     label: &str,
-    resume: &mut Option<String>,
+    resume: &mut Option<crate::model_selection::SdkSessionId>,
     register_plan_tools: bool,
 ) -> Result<()> {
     let result = crate::planning::run_plan_prompt_template(
@@ -1781,6 +1761,138 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mixed_sdk_title_generation_uses_claude_plan_candidate_under_jcode()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = lock_process();
+        let tmp = TempDir::new()?;
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let _path = crate::test_support::install_exiting_jcode_stub(tmp.path());
+        let _jcode_home =
+            crate::test_support::EnvGuard::set("JCODE_HOME", tmp.path().join("jcode-home"));
+        let _sdk = crate::test_support::EnvGuard::remove("CRUISE_SDK");
+        let _model = crate::test_support::EnvGuard::remove("CRUISE_MODEL");
+        let _plan_model = crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL");
+        let script = format!(
+            r#"#!/bin/sh
+case "$1" in --version) echo '2.0.0'; exit 0;; --cruise-exec-probe) exit 0;; esac
+d='{}'
+printf '%s\n' "$@" > "$d/args"
+read -r input
+printf '%s\n' '{{"type":"control_request","request_id":"title-request","request":{{"subtype":"mcp_message","server_name":"cruise","message":{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"generate_title","arguments":{{"title":"Mixed SDK title"}}}}}}}}}}'
+read -r response
+printf '%s\n' "$response" > "$d/response"
+printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_id":"mixed-title"}}'
+"#,
+            tmp.path().display()
+        );
+        crate::test_support::write_executable_script(&tmp.path().join("claude"), &script);
+        // A legacy config verifies the same tool fixture before mixed parsing.
+        let control = WorkflowConfig::from_yaml(
+            "sdk: claude\nplan_model: mixed-title-model\nsteps:\n  build:\n    command: echo hi\n",
+        )?;
+        let control_title = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            generate_title_via_sdk(&control, "task", "# Plan", None, None),
+        )
+        .await??;
+        assert_eq!(control_title, "Mixed SDK title");
+        let config = WorkflowConfig::from_yaml(
+            "sdk: jcode\nmodel: unused/execution\nplan_model:\n  - sdk: claude\n    model: mixed-title-model\n  - unused/planning\nsteps:\n  build:\n    command: echo hi\n",
+        )?;
+        let title = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            generate_title_via_sdk(&config, "task", "# Plan", None, None),
+        )
+        .await??;
+        assert_eq!(title, "Mixed SDK title");
+        let args = fs::read_to_string(tmp.path().join("args"))?;
+        assert!(args.lines().any(|line| line == "--model"));
+        assert!(args.lines().any(|line| line == "mixed-title-model"));
+        assert!(!args.contains("unused/execution"));
+        let empty_plan = WorkflowConfig::from_yaml(
+            "sdk: jcode\nplan_model: []\nmodel:\n  - sdk: claude\n    model: mixed-title-model\n  - unused/planning\nsteps:\n  build:\n    command: echo hi\n",
+        )?;
+        assert_eq!(
+            generate_title_via_sdk(&empty_plan, "task", "# Plan", None, None).await?,
+            "Mixed SDK title"
+        );
+        let mut session = make_session("20261023000005", tmp.path());
+        let identity = session
+            .config
+            .stable_identity(session.repo.as_deref(), &session.id);
+        session.plan_conversation_key = Some(crate::planning::plan_conversation_key(
+            &empty_plan,
+            &identity,
+        ));
+        session.plan_conversation_id = Some("saved-claude".into());
+        session.plan_conversation_backend = Some("claude".into());
+        assert_eq!(
+            saved_plan_resume(&session, &empty_plan)
+                .unwrap_or_else(|| panic!("saved Claude conversation must be resumable"))
+                .sdk,
+            crate::model_selection::Sdk::Claude
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_sdk_saved_plan_resume_rejects_ambiguous_legacy_owner()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = lock_process();
+        let tmp = TempDir::new()?;
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let config = WorkflowConfig::from_yaml(
+            "sdk: jcode\ninteractive_planning: true\nplan_model:\n  - inherited/jcode\n  - sdk: claude\n    model: legacy-claude\nsteps:\n  plan:\n    prompt: plan\n",
+        )?;
+        let mut session = make_session("20261023000003", tmp.path());
+        let identity = session
+            .config
+            .stable_identity(session.repo.as_deref(), &session.id);
+        session.plan_conversation_id = Some("legacy-ambiguous-id".to_string());
+        session.plan_conversation_key =
+            Some(crate::planning::plan_conversation_key(&config, &identity));
+        session.plan_conversation_backend = None;
+        session.plan_conversation_home = None;
+        assert_eq!(saved_plan_resume(&session, &config), None);
+        Ok(())
+    }
+
+    #[test]
+    fn saved_plan_resume_keeps_sdk_owned_by_explicit_fallback_chain()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = lock_process();
+        let tmp = TempDir::new()?;
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        for chain_key in [
+            "provider/main:high",
+            "provider/main",
+            "provider/*",
+            "default",
+        ] {
+            let config = WorkflowConfig::from_yaml(&format!(
+                "sdk: claude\nplan_model: [{{sdk: jcode, model: 'provider/main:high'}}]\nretry:\n  fallback_chains:\n    '{chain_key}': [claude-fallback]\nsteps:\n  plan:\n    prompt: plan\n"
+            ))?;
+            let mut session = make_session("20261023000004", tmp.path());
+            let identity = session
+                .config
+                .stable_identity(session.repo.as_deref(), &session.id);
+            session.plan_conversation_id = Some("explicit-claude-id".to_owned());
+            session.plan_conversation_backend = Some("claude".to_owned());
+            session.plan_conversation_key =
+                Some(crate::planning::plan_conversation_key(&config, &identity));
+            assert_eq!(
+                saved_plan_resume(&session, &config),
+                Some(crate::model_selection::SdkSessionId {
+                    sdk: crate::model_selection::Sdk::Claude,
+                    id: "explicit-claude-id".to_owned(),
+                })
+            );
+        }
+        Ok(())
+    }
+
     struct ProcessStateGuard {
         prev_dir: PathBuf,
         env_guards: Vec<crate::test_support::EnvGuard>,
@@ -1939,15 +2051,15 @@ plan_model:
         assert_eq!(
             config.model,
             Some(crate::config::ModelSpec::Multiple(vec![
-                "anthropic/original-primary".to_string(),
-                "openai/original-fallback".to_string(),
+                "anthropic/original-primary".into(),
+                "openai/original-fallback".into(),
             ]))
         );
         assert_eq!(
             config.plan_model,
             Some(crate::config::ModelSpec::Multiple(vec![
-                "anthropic/original-plan".to_string(),
-                "openai/original-plan-fallback".to_string(),
+                "anthropic/original-plan".into(),
+                "openai/original-plan-fallback".into(),
             ]))
         );
         let retry = config
@@ -1955,20 +2067,36 @@ plan_model:
             .as_ref()
             .unwrap_or_else(|| panic!("model lists should enable fallback policy"));
         assert!(retry.model_fallback);
-        assert_eq!(
-            retry
-                .fallback_chains
-                .get("anthropic/original-primary")
-                .map(Vec::as_slice),
-            Some(["openai/original-fallback".to_string()].as_slice())
-        );
-        assert_eq!(
-            retry
-                .fallback_chains
-                .get("anthropic/original-plan")
-                .map(Vec::as_slice),
-            Some(["openai/original-plan-fallback".to_string()].as_slice())
-        );
+        for (spec, primary, fallback) in [
+            (
+                config.model.as_ref(),
+                "anthropic/original-primary",
+                "openai/original-fallback",
+            ),
+            (
+                config.plan_model.as_ref(),
+                "anthropic/original-plan",
+                "openai/original-plan-fallback",
+            ),
+        ] {
+            let sdk = crate::model_selection::Sdk::Jcode;
+            let candidates = crate::model_selection::resolve_candidates(spec, sdk);
+            let mut engine = crate::retry::FallbackEngine::new_candidates(
+                crate::retry::ModelReferenceFormat::LegacyEffort,
+                crate::retry::policy_for_config(config.retry.clone()),
+                candidates[0].sdk,
+                sdk,
+                candidates[0].model.as_deref(),
+                &candidates[1..],
+                1,
+            );
+            assert_eq!((engine.sdk(), engine.model()), (sdk, Some(primary)));
+            assert!(matches!(
+                engine.next(crate::retry::Failure::Failed("HTTP 400 bad request"), false),
+                crate::retry::RetryAction::Switch { .. }
+            ));
+            assert_eq!((engine.sdk(), engine.model()), (sdk, Some(fallback)));
+        }
     }
 
     #[test]
@@ -2002,7 +2130,30 @@ plan_model:
 
         let callback = cli_plan_session_callback(&manager, &session, &config, &working_dir)
             .unwrap_or_else(|| panic!("expected a jcode plan callback"));
-        callback("jcode-session-id").unwrap_or_else(|error| panic!("{error:?}"));
+        callback(&crate::model_selection::SdkSessionId {
+            sdk: crate::model_selection::Sdk::Claude,
+            id: "claude-intermediate".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(
+            old_home.exists(),
+            "fallback must preserve the caller's resume storage"
+        );
+        callback(&crate::model_selection::SdkSessionId {
+            sdk: crate::model_selection::Sdk::Jcode,
+            id: "old-session-id".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(
+            fs::read_to_string(old_home.join(".cruise-session-id"))
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}")),
+            "old-session-id"
+        );
+        callback(&crate::model_selection::SdkSessionId {
+            sdk: crate::model_selection::Sdk::Jcode,
+            id: "jcode-session-id".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("{error:?}"));
 
         let stored = manager
             .load(&session.id)
@@ -2023,7 +2174,94 @@ plan_model:
             stored.plan_conversation_home.as_deref(),
             Some(source_home.as_path())
         );
-        assert!(!old_home.exists(), "replaced session home must be removed");
+        assert!(old_home.exists(), "cleanup waits for the entire request");
+        drop(callback);
+        assert!(
+            !old_home.exists(),
+            "terminal cleanup removes obsolete storage"
+        );
+    }
+
+    #[test]
+    fn cli_mixed_sdk_checkpoints_keep_caller_storage_until_terminal_outcome() {
+        use crate::model_selection::{Sdk, SdkSessionId};
+        let _lock = lock_process();
+        for outcome in ["success", "failure", "cancel"] {
+            let tmp = TempDir::new()
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            let source = tmp.path().join("jcode");
+            let _home = crate::test_support::EnvGuard::set("JCODE_HOME", &source);
+            let manager = SessionManager::new(tmp.path().join("data"));
+            let mut session = make_session("20261023000006", tmp.path());
+            let config = WorkflowConfig::from_yaml("sdk: jcode\nmodel: [provider/first, {sdk: claude, model: middle}, provider/last]\nsteps:\n  plan:\n    prompt: plan\n").unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            let identity = session
+                .config
+                .stable_identity(session.repo.as_deref(), &session.id);
+            session.plan_conversation_key =
+                Some(crate::planning::plan_conversation_key(&config, &identity));
+            session.plan_conversation_id = Some("original".into());
+            session.plan_conversation_backend = Some("jcode".into());
+            session.plan_conversation_home = Some(source.clone());
+            let home = source.join(".cruise-sdk-sessions/original");
+            fs::create_dir_all(&home)
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            fs::write(home.join(".cruise-session-id"), "original")
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            fs::write(home.join("history"), "caller history")
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            manager
+                .create(&session)
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            let caller = saved_plan_resume(&session, &config)
+                .unwrap_or_else(|| panic!("original caller conversation must be resumable"));
+            let callback = cli_plan_session_callback(&manager, &session, &config, tmp.path())
+                .unwrap_or_else(|| {
+                    panic!("interactive planning must register a checkpoint callback")
+                });
+            callback(&SdkSessionId {
+                sdk: Sdk::Claude,
+                id: "intermediate".into(),
+            })
+            .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            assert_eq!(
+                fs::read_to_string(home.join("history"))
+                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}")),
+                "caller history"
+            );
+            assert_eq!(caller.id, "original");
+            callback(&caller)
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            if outcome == "success" {
+                callback(&SdkSessionId {
+                    sdk: Sdk::Jcode,
+                    id: "replacement".into(),
+                })
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            } else {
+                let mut final_state = manager
+                    .load(&session.id)
+                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+                final_state.plan_error = (outcome == "failure").then(|| "failure".into());
+                manager
+                    .save(&final_state)
+                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            }
+            assert!(home.exists());
+            drop(callback);
+            assert_eq!(home.exists(), outcome != "success");
+            assert_eq!(
+                manager
+                    .load(&session.id)
+                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"))
+                    .plan_conversation_id
+                    .as_deref(),
+                Some(if outcome == "success" {
+                    "replacement"
+                } else {
+                    "original"
+                })
+            );
+        }
     }
 
     #[test]
@@ -2040,7 +2278,11 @@ plan_model:
         .unwrap_or_else(|error| panic!("{error}"));
         let callback = cli_plan_session_callback(&manager, &session, &config, tmp.path())
             .unwrap_or_else(|| panic!("expected OpenCode checkpoint callback"));
-        callback("ses_checkpoint").unwrap_or_else(|error| panic!("{error}"));
+        callback(&crate::model_selection::SdkSessionId {
+            sdk: crate::model_selection::Sdk::OpenCode,
+            id: "ses_checkpoint".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
         let saved = manager
             .load(&session.id)
             .unwrap_or_else(|error| panic!("{error}"));
@@ -2051,7 +2293,9 @@ plan_model:
         );
         assert_eq!(saved.plan_conversation_home, None);
         assert_eq!(
-            saved_plan_resume(&saved, &config).as_deref(),
+            saved_plan_resume(&saved, &config)
+                .as_ref()
+                .map(|session| session.id.as_str()),
             Some("ses_checkpoint")
         );
     }
@@ -2076,7 +2320,9 @@ plan_model:
         }
         session.plan_conversation_backend = Some("opencode".to_string());
         assert_eq!(
-            saved_plan_resume(&session, &config).as_deref(),
+            saved_plan_resume(&session, &config)
+                .as_ref()
+                .map(|session| session.id.as_str()),
             Some("ses_resume")
         );
         session.plan_conversation_key = Some("different-configuration".to_string());
@@ -2089,7 +2335,9 @@ plan_model:
             &identity,
         ));
         assert_eq!(
-            saved_plan_resume(&session, &legacy_config).as_deref(),
+            saved_plan_resume(&session, &legacy_config)
+                .as_ref()
+                .map(|session| session.id.as_str()),
             Some("ses_resume")
         );
     }

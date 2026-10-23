@@ -126,6 +126,107 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
 }
 
 #[test]
+fn config_show_and_parallelism_update_preserve_mixed_sdk_candidates_in_both_formats() {
+    let expected_model = serde_json::json!([
+        "openai/gpt-6.1-sol:medium",
+        {"sdk": "claude", "model": "claude-sonnet-5-5:medium"},
+        "openrouter/z-ai/glm-5.3-flash:high"
+    ]);
+    let expected_plan = serde_json::json!([
+        {"sdk": "claude", "model": "planning-primary:high"},
+        "openai/planning-fallback:medium"
+    ]);
+    for extension in ["json", "yaml"] {
+        let fixture = Fixture::new();
+        let input = serde_json::json!({
+            "run_all_parallelism": 3,
+            "model": expected_model,
+            "planModel": expected_plan
+        });
+        let contents = if extension == "yaml" {
+            serde_yaml::to_string(&input).unwrap_or_else(|error| panic!("YAML fixture: {error}"))
+        } else {
+            input.to_string()
+        };
+        let path = fixture.write_app_config(extension, &contents);
+
+        // Config output embeds JSON values. Compare those values, not incidental
+        // whitespace or object key ordering in the human-readable display.
+        let shown = fixture.run(&["config"]);
+        assert!(
+            shown.status.success(),
+            "{extension}: {}",
+            output_text(&shown)
+        );
+        for (field, expected) in [("model", &expected_model), ("plan_model", &expected_plan)] {
+            let prefix = format!("{field} = ");
+            let stdout = String::from_utf8_lossy(&shown.stdout);
+            let value = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap_or_else(|| panic!("missing {field} in {stdout}"));
+            let actual: serde_json::Value = serde_json::from_str(value)
+                .unwrap_or_else(|error| panic!("{field} display must be JSON: {error}"));
+            assert_eq!(&actual, expected, "{extension} {field}");
+        }
+
+        let updated = fixture.run(&["config", "--set-parallelism", "7"]);
+        assert!(updated.status.success(), "{}", output_text(&updated));
+        let saved = cruise::app_config::AppConfig::load_from(&path)
+            .unwrap_or_else(|error| panic!("reload {extension}: {error}"));
+        assert_eq!(saved.run_all_parallelism, 7);
+        assert_eq!(
+            serde_json::to_value(&saved.model)
+                .unwrap_or_else(|error| panic!("serialize model: {error}")),
+            expected_model
+        );
+        assert_eq!(
+            serde_json::to_value(&saved.plan_model)
+                .unwrap_or_else(|error| panic!("serialize plan_model: {error}")),
+            expected_plan
+        );
+        let other_extension = if extension == "yaml" { "json" } else { "yaml" };
+        assert!(!fixture.app_config(other_extension).exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn command_workflow_rejects_inherited_app_sdk_fallback_before_spawning() {
+    for field in ["model", "plan_model"] {
+        let fixture = Fixture::new();
+        cruise::test_support::init_git_repo(&fixture.project);
+        let mut app = serde_json::json!({});
+        app[field] = serde_json::json!([
+            "legacy-primary",
+            {"sdk": "claude", "model": "explicit-sdk-fallback"}
+        ]);
+        fixture.write_app_config("json", &app.to_string());
+        let marker = fixture.root.path().join("command-started");
+        let executable = fixture.root.path().join("command-recorder");
+        cruise::test_support::write_executable_script(
+            &executable,
+            &format!("#!/bin/sh\nprintf started > {}\n", shell_quote(&marker)),
+        );
+        let workflow = serde_json::json!({
+            "command": [executable.to_string_lossy()],
+            "steps": {"main": {"prompt": "must reject command and SDK candidate"}}
+        });
+        std::fs::write(fixture.project.join("workflow.yaml"), workflow.to_string())
+            .unwrap_or_else(|error| panic!("write workflow: {error}"));
+
+        let output = fixture.run(&["exec", "--config", "workflow.yaml"]);
+        assert!(!output.status.success(), "{}", output_text(&output));
+        let diagnostic = output_text(&output);
+        assert!(
+            diagnostic.contains("command") && diagnostic.to_ascii_lowercase().contains("sdk"),
+            "composed {field} collision must identify command and SDK: {diagnostic}"
+        );
+        assert!(!marker.exists(), "invalid composition spawned its command");
+    }
+}
+
+#[test]
 fn json_config_precedes_yaml_and_malformed_json_does_not_fall_back() {
     let fixture = Fixture::new();
     let json_path = fixture.write_app_config("json", r#"{"model":"json/model"}"#);

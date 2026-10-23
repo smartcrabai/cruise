@@ -151,6 +151,13 @@ path = "tests/opencode_bdd.rs"
 # Do not implicitly run an unavailable platform check in the Windows suite.
 test = false
 
+[[test]]
+harness = false
+name = "sdk_model_bdd"
+path = "tests/sdk_model_bdd.rs"
+# POSIX SDK subprocess fixtures, explicitly runnable with --test sdk_model_bdd.
+test = false
+
 [profile.release]
 codegen-units = 1
 lto = true

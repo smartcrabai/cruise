@@ -68,11 +68,13 @@ mod contracts {
         // This fixture invokes Executor::new(Some("opencode"), &[]).run(PromptRun),
         // with no output callback. A retry barrier must work even without visible text.
         w.outcome = Some(if w.case == "checkpoint-refused" {
-            let callback = |_: &str| -> cruise::error::Result<()> {
-                Err(cruise::error::CruiseError::Other(
-                    "checkpoint-refused".into(),
-                ))
-            };
+            let callback =
+                |session: &cruise::model_selection::SdkSessionId| -> cruise::error::Result<()> {
+                    assert_eq!(session.sdk, cruise::model_selection::Sdk::OpenCode);
+                    Err(cruise::error::CruiseError::Other(
+                        "checkpoint-refused".into(),
+                    ))
+                };
             fixture
                 .execute_with_checkpoint(Some(MODEL), 2, Some(&callback), None)
                 .await
