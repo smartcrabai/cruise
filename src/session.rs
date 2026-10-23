@@ -133,6 +133,9 @@ pub struct SessionState {
     /// Configuration/backend identity that produced `plan_conversation_id`.
     #[serde(default)]
     pub plan_conversation_key: Option<String>,
+    /// Backend that owns the retained conversation. Missing means legacy jcode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_conversation_backend: Option<String>,
     /// Absolute jcode source-home path for cleaning the saved conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_conversation_home: Option<PathBuf>,
@@ -255,6 +258,7 @@ impl SessionState {
             pending_ask_question: None,
             plan_conversation_id: None,
             plan_conversation_key: None,
+            plan_conversation_backend: None,
             plan_conversation_home: None,
             plan_error: None,
             skipped_steps: vec![],
@@ -401,20 +405,16 @@ impl SessionState {
         self.awaiting_input = false;
         self.pending_ask_question = None;
         if let Some(session_id) = self.plan_conversation_id.as_deref() {
-            let source_home = self.plan_conversation_home.as_deref().map_or_else(
-                || {
-                    crate::backend::jcode::resolve_source_home(
-                        self.worktree_path.as_deref().or(Some(&self.base_dir)),
-                    )
-                },
-                std::path::Path::to_path_buf,
-            );
-            crate::backend::jcode::cleanup_session_home_at(&source_home, session_id).map_err(
-                |error| CruiseError::Other(format!("could not clean jcode session home: {error}")),
+            crate::backend::conversation::cleanup(
+                self.plan_conversation_backend.as_deref(),
+                session_id,
+                self.plan_conversation_home.as_deref(),
+                self.worktree_path.as_deref().or(Some(&self.base_dir)),
             )?;
         }
         self.plan_conversation_id = None;
         self.plan_conversation_key = None;
+        self.plan_conversation_backend = None;
         self.plan_conversation_home = None;
         self.plan_error = None;
         self.mark_input_as_plan();
@@ -942,20 +942,14 @@ impl SessionManager {
         let session_dir = self.sessions_dir().join(id);
         if session_dir.exists() {
             if let Ok(state) = self.load(id)
-                && let Some(jcode_session_id) = state.plan_conversation_id.as_deref()
+                && let Some(conversation_id) = state.plan_conversation_id.as_deref()
             {
-                let source_home = state.plan_conversation_home.as_deref().map_or_else(
-                    || {
-                        crate::backend::jcode::resolve_source_home(
-                            state.worktree_path.as_deref().or(Some(&state.base_dir)),
-                        )
-                    },
-                    std::path::Path::to_path_buf,
-                );
-                crate::backend::jcode::cleanup_session_home_at(&source_home, jcode_session_id)
-                    .map_err(|error| {
-                        CruiseError::Other(format!("could not clean jcode session home: {error}"))
-                    })?;
+                crate::backend::conversation::cleanup(
+                    state.plan_conversation_backend.as_deref(),
+                    conversation_id,
+                    state.plan_conversation_home.as_deref(),
+                    state.worktree_path.as_deref().or(Some(&state.base_dir)),
+                )?;
             }
             std::fs::remove_dir_all(&session_dir)?;
         }
@@ -1743,6 +1737,45 @@ mod tests {
 
         let sessions = manager.list().unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(sessions, [] as [SessionState; 0]);
+    }
+
+    #[test]
+    fn legacy_plan_checkpoint_roundtrip_does_not_invent_backend_owner() {
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = SessionManager::new(tmp.path().join("data"));
+        for home in [None, Some(tmp.path().join("legacy-jcode"))] {
+            let state = SessionState::new(
+                "20261023000004".to_string(),
+                tmp.path().to_path_buf(),
+                crate::session_config::SessionConfigRef::inline_snapshot(),
+                "task".to_string(),
+            );
+            let mut value = serde_json::to_value(state).unwrap_or_else(|error| panic!("{error}"));
+            value
+                .as_object_mut()
+                .unwrap_or_else(|| panic!("state object"))
+                .remove("plan_conversation_backend");
+            value["plan_conversation_id"] = serde_json::json!("legacy-conversation");
+            value["plan_conversation_key"] = serde_json::json!("legacy-key");
+            value["plan_conversation_home"] = serde_json::json!(home);
+            let decoded: SessionState =
+                serde_json::from_value(value).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(decoded.plan_conversation_backend, None);
+            manager
+                .create(&decoded)
+                .unwrap_or_else(|error| panic!("{error}"));
+            let saved = manager
+                .load(&decoded.id)
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(
+                saved.plan_conversation_id.as_deref(),
+                Some("legacy-conversation")
+            );
+            assert_eq!(saved.plan_conversation_key.as_deref(), Some("legacy-key"));
+            assert_eq!(saved.plan_conversation_home, home);
+            let encoded = serde_json::to_value(saved).unwrap_or_else(|error| panic!("{error}"));
+            assert!(encoded.get("plan_conversation_backend").is_none());
+        }
     }
 
     #[test]

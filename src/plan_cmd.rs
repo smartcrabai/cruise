@@ -72,18 +72,19 @@ fn cli_notice_callback(
     let logger = crate::session::SessionLogger::new(manager.run_log_path(session_id));
     move |message: &str| logger.write(&format!("[info] {message}"))
 }
-// Persist retained Jcode plan homes with their Cruise session owner.
+// Persist retained plan conversations with their backend owner.
 fn cli_plan_session_callback<'a>(
     manager: &'a SessionManager,
     session: &SessionState,
     config: &WorkflowConfig,
     working_dir: &Path,
 ) -> Option<Box<crate::executor::SessionIdCallback<'a>>> {
-    if !matches!(
-        crate::executor::Executor::new(config.sdk.as_deref(), &config.command),
-        crate::executor::Executor::Jcode
-    ) || !crate::planning::sdk_plan_tools_enabled(config)
-    {
+    let backend = match config.sdk.as_deref().unwrap_or("jcode") {
+        "jcode" if config.command.is_empty() => "jcode",
+        "opencode" if config.command.is_empty() => "opencode",
+        _ => return None,
+    };
+    if !crate::planning::sdk_plan_tools_enabled(config) {
         return None;
     }
 
@@ -91,28 +92,81 @@ fn cli_plan_session_callback<'a>(
         .config
         .stable_identity(session.repo.as_deref(), &session.id);
     let key = crate::planning::plan_conversation_key(config, &identity);
-    let home = crate::backend::jcode::resolve_source_home(Some(working_dir));
+    let home =
+        (backend == "jcode").then(|| crate::backend::jcode::resolve_source_home(Some(working_dir)));
     let session_id = session.id.clone();
     Some(Box::new(move |backend_id| {
         let mut state = manager.load(&session_id)?;
         if let Some(previous_id) = state.plan_conversation_id.as_deref()
             && (previous_id != backend_id
-                || state.plan_conversation_home.as_deref() != Some(home.as_path()))
+                || state
+                    .plan_conversation_backend
+                    .as_deref()
+                    .unwrap_or("jcode")
+                    != backend
+                || state.plan_conversation_home != home)
         {
-            let previous_home = state.plan_conversation_home.clone().unwrap_or_else(|| {
-                crate::backend::jcode::resolve_source_home(
-                    state.worktree_path.as_deref().or(Some(&state.base_dir)),
-                )
-            });
-            crate::backend::jcode::cleanup_session_home_at(&previous_home, previous_id).map_err(
-                |error| CruiseError::Other(format!("could not clean jcode session home: {error}")),
+            crate::backend::conversation::cleanup(
+                state.plan_conversation_backend.as_deref(),
+                previous_id,
+                state.plan_conversation_home.as_deref(),
+                state.worktree_path.as_deref().or(Some(&state.base_dir)),
             )?;
         }
         state.plan_conversation_id = Some(backend_id.to_string());
         state.plan_conversation_key = Some(key.clone());
-        state.plan_conversation_home = Some(home.clone());
+        state.plan_conversation_backend = Some(backend.to_string());
+        state.plan_conversation_home.clone_from(&home);
         manager.save(&state)
     }))
+}
+
+fn finalize_plan_checkpoint(
+    manager: &SessionManager,
+    previous: &SessionState,
+    retained: bool,
+) -> Result<()> {
+    let mut current = manager.load(&previous.id)?;
+    if retained
+        || current.plan_conversation_id != previous.plan_conversation_id
+        || current.plan_conversation_key != previous.plan_conversation_key
+        || current.plan_conversation_backend != previous.plan_conversation_backend
+        || current.plan_conversation_home != previous.plan_conversation_home
+    {
+        return Ok(());
+    }
+    if let Some(id) = previous.plan_conversation_id.as_deref() {
+        crate::backend::conversation::cleanup(
+            previous.plan_conversation_backend.as_deref(),
+            id,
+            previous.plan_conversation_home.as_deref(),
+            previous
+                .worktree_path
+                .as_deref()
+                .or(Some(&previous.base_dir)),
+        )?;
+    }
+    current.plan_conversation_id = None;
+    current.plan_conversation_key = None;
+    current.plan_conversation_backend = None;
+    current.plan_conversation_home = None;
+    manager.save(&current)
+}
+
+fn saved_plan_resume(session: &SessionState, config: &WorkflowConfig) -> Option<String> {
+    let identity = session
+        .config
+        .stable_identity(session.repo.as_deref(), &session.id);
+    let key = crate::planning::plan_conversation_key(config, &identity);
+    let backend = config.sdk.as_deref().unwrap_or("jcode");
+    (session.plan_conversation_key.as_deref() == Some(key.as_str())
+        && session
+            .plan_conversation_backend
+            .as_deref()
+            .unwrap_or("jcode")
+            == backend)
+        .then(|| session.plan_conversation_id.clone())
+        .flatten()
 }
 
 /// Returns the reason an explicit CLI request overrides `force_exec`, or `None`.
@@ -351,12 +405,17 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             on_session_id.as_deref(),
             Some(&on_notice),
         );
-        let plan_result = tokio::select! {
-            result = generate_plan_markdown(&ctx, &mut vars, &mut resume) => result,
-            _ = tokio::signal::ctrl_c() => {
-                cancel_token.cancel();
-                Err(CruiseError::Interrupted)
-            },
+        let plan_result = {
+            let planning = generate_plan_markdown(&ctx, &mut vars, &mut resume);
+            tokio::pin!(planning);
+            tokio::select! {
+                result = &mut planning => result,
+                _ = tokio::signal::ctrl_c() => {
+                    cancel_token.cancel();
+                    let _ = planning.await;
+                    Err(CruiseError::Interrupted)
+                },
+            }
         };
         if let Err(e) = plan_result {
             if !matches!(&e, &CruiseError::Interrupted) {
@@ -487,6 +546,18 @@ fn finalize_skip_planning_session(
     session: &mut SessionState,
     create_pr: bool,
 ) -> Result<()> {
+    if let Some(conversation_id) = session.plan_conversation_id.as_deref() {
+        crate::backend::conversation::cleanup(
+            session.plan_conversation_backend.as_deref(),
+            conversation_id,
+            session.plan_conversation_home.as_deref(),
+            session.worktree_path.as_deref().or(Some(&session.base_dir)),
+        )?;
+    }
+    session.plan_conversation_id = None;
+    session.plan_conversation_key = None;
+    session.plan_conversation_backend = None;
+    session.plan_conversation_home = None;
     session.approve(); // AwaitingApproval -> Planned, clears plan_error
     crate::repo_clone::cleanup_after_approval(manager, session, create_pr);
     manager.save(session)
@@ -982,9 +1053,8 @@ async fn generate_plan_for_session(
         plan_path.clone(),
         &config,
     );
-    // Background worker: no interactive user, so the SDK agent proceeds on
-    // assumptions (no `ask_user`). `resume` is unused for a one-shot generation.
-    let mut resume: Option<String> = None;
+    // Resume a retained checkpoint when its configuration and owner still match.
+    let mut resume = saved_plan_resume(session, &config);
     let on_notice = cli_notice_callback(manager, &session.id);
     let working_dir = plan_working_dir(session);
     let on_session_id = cli_plan_session_callback(manager, session, &config, working_dir);
@@ -999,7 +1069,13 @@ async fn generate_plan_for_session(
         on_session_id.as_deref(),
         Some(&on_notice),
     );
-    generate_plan_markdown(&ctx, &mut vars, &mut resume).await
+    let markdown = generate_plan_markdown(&ctx, &mut vars, &mut resume).await?;
+    finalize_plan_checkpoint(
+        manager,
+        session,
+        on_session_id.is_some() && resume.is_some(),
+    )?;
+    Ok(markdown)
 }
 
 async fn generate_plan_markdown(
@@ -1265,18 +1341,34 @@ async fn run_approve_loop(
                 };
                 session.skipped_steps = skipped_steps;
                 drop(review);
-                tokio::select! {
-                    result = approve_with_title(session, manager, config, &plan_content, Some(&cancel_token)) => result?,
-                    _ = tokio::signal::ctrl_c() => {
-                        cancel_token.cancel();
-                        eprintln!("\nCancelled. Session {} discarded.", session.id);
-                        cleanup_discarded_session_workspace(manager, session);
-                        if let Err(del_err) = manager.delete(&session.id) {
-                            eprintln!("warning: failed to clean up session: {del_err}");
-                        }
-                        return Err(CruiseError::Interrupted);
-                    },
+                let mut approval_interrupted = false;
+                let approval_result = {
+                    let approval = approve_with_title(
+                        session,
+                        manager,
+                        config,
+                        &plan_content,
+                        Some(&cancel_token),
+                    );
+                    tokio::pin!(approval);
+                    tokio::select! {
+                        result = &mut approval => result,
+                        _ = tokio::signal::ctrl_c() => {
+                            cancel_token.cancel();
+                            approval_interrupted = true;
+                            let _ = approval.await;
+                            Err(CruiseError::Interrupted)
+                        },
+                    }
+                };
+                if approval_interrupted {
+                    eprintln!("\nCancelled. Session {} discarded.", session.id);
+                    cleanup_discarded_session_workspace(manager, session);
+                    if let Err(del_err) = manager.delete(&session.id) {
+                        eprintln!("warning: failed to clean up session: {del_err}");
+                    }
                 }
+                approval_result?;
                 if !execute_now {
                     eprintln!(
                         "\n{} Session {} created.",
@@ -1314,12 +1406,17 @@ async fn run_approve_loop(
                 };
                 vars.set_prev_input(Some(text));
                 drop(review);
-                let fix_result = tokio::select! {
-                    result = run_fix_plan(&ctx, vars, resume) => result,
-                    _ = tokio::signal::ctrl_c() => {
-                        cancel_token.cancel();
-                        Err(CruiseError::Interrupted)
-                    },
+                let fix_result = {
+                    let fixing = run_fix_plan(&ctx, vars, resume);
+                    tokio::pin!(fixing);
+                    tokio::select! {
+                        result = &mut fixing => result,
+                        _ = tokio::signal::ctrl_c() => {
+                            cancel_token.cancel();
+                            let _ = fixing.await;
+                            Err(CruiseError::Interrupted)
+                        },
+                    }
                 };
                 let _ = fix_result
                     .as_ref()
@@ -1343,12 +1440,17 @@ async fn run_approve_loop(
                 };
                 vars.set_prev_input(Some(text));
                 drop(review);
-                let ask_result = tokio::select! {
-                    result = run_ask_plan(&ctx, vars, resume) => result,
-                    _ = tokio::signal::ctrl_c() => {
-                        cancel_token.cancel();
-                        Err(CruiseError::Interrupted)
-                    },
+                let ask_result = {
+                    let asking = run_ask_plan(&ctx, vars, resume);
+                    tokio::pin!(asking);
+                    tokio::select! {
+                        result = &mut asking => result,
+                        _ = tokio::signal::ctrl_c() => {
+                            cancel_token.cancel();
+                            let _ = asking.await;
+                            Err(CruiseError::Interrupted)
+                        },
+                    }
                 };
                 let _ = ask_result
                     .as_ref()
@@ -1434,7 +1536,7 @@ pub async fn replan_session(
             .worktree_path
             .clone()
             .unwrap_or_else(|| session.base_dir.clone());
-        let mut resume: Option<String> = None;
+        let mut resume = saved_plan_resume(session, &config);
         let on_notice = cli_notice_callback(manager, &session.id);
         let on_session_id = cli_plan_session_callback(manager, session, &config, &working_dir);
         // Fix-plan reuses the standard template regardless of grill.
@@ -1450,10 +1552,15 @@ pub async fn replan_session(
             Some(&on_notice),
         );
         run_fix_plan(&ctx, &mut vars, &mut resume).await?;
+        let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
+        finalize_plan_checkpoint(
+            manager,
+            session,
+            on_session_id.is_some() && resume.is_some(),
+        )?;
         let session_id = session.id.clone();
         *session = manager.load(&session_id)?;
 
-        let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
         crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
         session.plan_error = None;
         manager.save(session)?;
@@ -1601,7 +1708,7 @@ pub async fn regenerate_plan_for_session(
         );
 
         let work_dir = plan_working_dir(session).to_path_buf();
-        let mut resume: Option<String> = None;
+        let mut resume = saved_plan_resume(session, &config);
         let on_notice = cli_notice_callback(manager, &session.id);
         let on_session_id = cli_plan_session_callback(manager, session, &config, &work_dir);
         let ctx = cli_plan_ctx(
@@ -1637,10 +1744,15 @@ pub async fn regenerate_plan_for_session(
                     eprintln!("warning: failed to persist plan error state: {save_err}");
                 }
             })?;
+        let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
+        finalize_plan_checkpoint(
+            manager,
+            session,
+            on_session_id.is_some() && resume.is_some(),
+        )?;
         let session_id = session.id.clone();
         *session = manager.load(&session_id)?;
 
-        let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
         crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
 
         session.plan_error = None;
@@ -1912,6 +2024,74 @@ plan_model:
             Some(source_home.as_path())
         );
         assert!(!old_home.exists(), "replaced session home must be removed");
+    }
+
+    #[test]
+    fn cli_opencode_checkpoint_records_owner_without_jcode_home() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let manager = SessionManager::new(tmp.path().join("data"));
+        let session = make_session("20261023000001", tmp.path());
+        manager
+            .create(&session)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let config = WorkflowConfig::from_yaml(
+            "sdk: opencode\ninteractive_planning: true\nsteps:\n  plan:\n    prompt: plan\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let callback = cli_plan_session_callback(&manager, &session, &config, tmp.path())
+            .unwrap_or_else(|| panic!("expected OpenCode checkpoint callback"));
+        callback("ses_checkpoint").unwrap_or_else(|error| panic!("{error}"));
+        let saved = manager
+            .load(&session.id)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(saved.plan_conversation_backend.as_deref(), Some("opencode"));
+        assert_eq!(
+            saved.plan_conversation_id.as_deref(),
+            Some("ses_checkpoint")
+        );
+        assert_eq!(saved.plan_conversation_home, None);
+        assert_eq!(
+            saved_plan_resume(&saved, &config).as_deref(),
+            Some("ses_checkpoint")
+        );
+    }
+
+    #[test]
+    fn saved_plan_resume_requires_matching_key_and_owner() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let mut session = make_session("20261023000002", tmp.path());
+        let config = WorkflowConfig::from_yaml(
+            "sdk: opencode\ninteractive_planning: true\nsteps:\n  plan:\n    prompt: plan\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let identity = session
+            .config
+            .stable_identity(session.repo.as_deref(), &session.id);
+        session.plan_conversation_id = Some("ses_resume".to_string());
+        session.plan_conversation_key =
+            Some(crate::planning::plan_conversation_key(&config, &identity));
+        for owner in [None, Some("jcode"), Some("unknown")] {
+            session.plan_conversation_backend = owner.map(str::to_string);
+            assert_eq!(saved_plan_resume(&session, &config), None);
+        }
+        session.plan_conversation_backend = Some("opencode".to_string());
+        assert_eq!(
+            saved_plan_resume(&session, &config).as_deref(),
+            Some("ses_resume")
+        );
+        session.plan_conversation_key = Some("different-configuration".to_string());
+        assert_eq!(saved_plan_resume(&session, &config), None);
+        let mut legacy_config = config;
+        legacy_config.sdk = Some("jcode".to_string());
+        session.plan_conversation_backend = None;
+        session.plan_conversation_key = Some(crate::planning::plan_conversation_key(
+            &legacy_config,
+            &identity,
+        ));
+        assert_eq!(
+            saved_plan_resume(&session, &legacy_config).as_deref(),
+            Some("ses_resume")
+        );
     }
 
     #[test]
@@ -2428,6 +2608,156 @@ steps:
         session.config = crate::session_config::SessionConfigRef::File { path: config_path };
         manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
         (manager, session)
+    }
+
+    fn seed_opencode_checkpoint(manager: &SessionManager, session: &mut SessionState) -> PathBuf {
+        use sha2::{Digest as _, Sha256};
+        use std::fmt::Write as _;
+        let id = "ses_previous_plan";
+        let mut key = String::with_capacity(64);
+        for byte in Sha256::digest(id.as_bytes()) {
+            write!(&mut key, "{byte:02x}").unwrap_or_else(|error| panic!("{error}"));
+        }
+        let root = crate::paths::data_dir()
+            .unwrap_or_else(|error| panic!("{error}"))
+            .join("opencode")
+            .join(key);
+        fs::create_dir_all(&root).unwrap_or_else(|error| panic!("{error}"));
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "owner":"cruise-opencode-v2", "id":id, "cwd":session.base_dir, "clean":true,
+            }))
+            .unwrap_or_else(|error| panic!("{error}")),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        fs::write(root.join("lock"), "").unwrap_or_else(|error| panic!("{error}"));
+        session.plan_conversation_id = Some(id.to_owned());
+        session.plan_conversation_key = Some("old-opencode-config".to_owned());
+        session.plan_conversation_backend = Some("opencode".to_owned());
+        session.plan_conversation_home = Some(session.base_dir.join("unrelated-jcode"));
+        manager
+            .save(session)
+            .unwrap_or_else(|error| panic!("{error}"));
+        root
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacement_plan_clears_only_previous_owned_checkpoint_after_success() {
+        let _guard = lock_process();
+        for regenerate in [false, true] {
+            for mode in ["command", "claude"] {
+                for success in [false, true] {
+                    let tmp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+                    let _home = crate::test_support::set_fake_home(tmp.path());
+                    let _data = crate::test_support::EnvGuard::set(
+                        "XDG_DATA_HOME",
+                        tmp.path().join("data"),
+                    );
+                    let (manager, mut session) =
+                        make_regenerate_success_fixture("20261023000200", &tmp);
+                    session.phase = SessionPhase::Planned;
+                    let old_root = seed_opencode_checkpoint(&manager, &mut session);
+                    let unrelated = old_root
+                        .parent()
+                        .unwrap_or_else(|| panic!("storage parent"))
+                        .join("unrelated");
+                    fs::create_dir_all(&unrelated).unwrap_or_else(|error| panic!("{error}"));
+                    let previous = manager
+                        .load(&session.id)
+                        .unwrap_or_else(|error| panic!("{error}"));
+                    let config_path = session.base_dir.join("cruise.yaml");
+                    let _path = crate::test_support::prepend_to_path(tmp.path());
+                    if mode == "command" {
+                        if !success {
+                            fs::write(&config_path, "command: [sh, -c, 'exit 7']\nsteps:\n  check:\n    prompt: check\n")
+                                .unwrap_or_else(|error| panic!("{error}"));
+                        }
+                    } else {
+                        crate::test_support::write_executable_script(
+                            &tmp.path().join("claude"),
+                            if success {
+                                "#!/bin/sh\nread -r _user_frame\nprintf '# Replacement Plan\\n\\nDo the thing.\\n' > \"$PLAN_FILE\"\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"claude-replacement\",\"result\":\"# Replacement Plan\\n\\nDo the thing.\"}'\n"
+                            } else {
+                                "#!/bin/sh\nexit 7\n"
+                            },
+                        );
+                        fs::write(&config_path, "sdk: claude\ninteractive_planning: false\nenv:\n  PLAN_FILE: '{plan}'\nsteps:\n  check:\n    prompt: check\n")
+                            .unwrap_or_else(|error| panic!("{error}"));
+                    }
+                    let result = if regenerate {
+                        regenerate_plan_for_session(&manager, &mut session, 0).await
+                    } else {
+                        replan_session(&manager, &mut session, "replace plan".to_owned(), 0).await
+                    };
+                    assert_eq!(
+                        result.is_ok(),
+                        success,
+                        "{mode} regenerate={regenerate}: {result:?}"
+                    );
+                    let current = manager
+                        .load(&session.id)
+                        .unwrap_or_else(|error| panic!("{error}"));
+                    if success {
+                        assert!(!old_root.exists());
+                        assert!(current.plan_conversation_id.is_none());
+                        assert!(current.plan_conversation_key.is_none());
+                        assert!(current.plan_conversation_backend.is_none());
+                        assert!(current.plan_conversation_home.is_none());
+                    } else {
+                        assert!(old_root.exists());
+                        assert_eq!(current.plan_conversation_id, previous.plan_conversation_id);
+                        assert_eq!(
+                            current.plan_conversation_key,
+                            previous.plan_conversation_key
+                        );
+                        assert_eq!(
+                            current.plan_conversation_backend,
+                            previous.plan_conversation_backend
+                        );
+                        assert_eq!(
+                            current.plan_conversation_home,
+                            previous.plan_conversation_home
+                        );
+                    }
+                    assert!(unrelated.is_dir());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint_finalization_retains_new_checkpoint_and_propagates_cleanup_errors() {
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let manager = SessionManager::new(tmp.path().join("sessions"));
+        let mut previous = make_session("20261023000201", tmp.path());
+        previous.plan_conversation_id = Some("old".to_owned());
+        previous.plan_conversation_backend = Some("unknown-owner".to_owned());
+        manager
+            .create(&previous)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(finalize_plan_checkpoint(&manager, &previous, false).is_err());
+        assert_eq!(
+            manager
+                .load(&previous.id)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .plan_conversation_id,
+            previous.plan_conversation_id
+        );
+        let mut current = previous.clone();
+        current.plan_conversation_id = Some("new-checkpoint".to_owned());
+        manager
+            .save(&current)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(finalize_plan_checkpoint(&manager, &previous, false).is_ok());
+        assert_eq!(
+            manager
+                .load(&previous.id)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .plan_conversation_id,
+            current.plan_conversation_id
+        );
     }
 
     #[cfg(unix)]

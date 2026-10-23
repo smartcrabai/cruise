@@ -14,11 +14,12 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 
 - [`gh` CLI](https://cli.github.com/) -- required for GitHub worktree sessions when automatic PR creation is enabled (the default), PR-backed cleanup, or an opted-in native workflow merge; `glab` for GitLab repositories. A local worktree workflow with `create_pr: false` does not need a forge CLI, but `--repo` still needs `gh`/`glab` to access and clone the repository.
 - [`glab` CLI](https://gitlab.com/gitlab-org/cli) -- required instead of `gh` for GitLab repositories (merge request creation, cleanup, issue publishing, and opted-in native synchronous squash merge). The forge is detected from the host (`github.com` / `gitlab.com`); set `CRUISE_FORGE=github|gitlab` for self-managed hosts (and `GITLAB_HOST` for `owner/repo`-style `--repo` locators). `--repo` accepts `owner/repo`, nested `group/sub/project` (with `CRUISE_FORGE=gitlab`), or a full URL. On GitLab, `{pr.number}` / `{pr.url}` refer to the merge request, and the "post an `@cruise run` comment" option when publishing issues is unavailable.
-- [`jcode` CLI](https://github.com/1jehuang/jcode) v0.88.0 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `jcode login <provider>` after installing. Not needed when every config you run uses `command:` or `sdk: claude`.
+- [`jcode` CLI](https://github.com/1jehuang/jcode) v0.88.0 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `jcode login <provider>` after installing. Not needed when every config you run uses `command:`, `sdk: claude`, or `sdk: opencode`.
 - [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required only by `sdk: claude`, which drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, unrelated to `jcode login`.
+- `opencode` CLI with the V2 API, required only by `sdk: opencode`. Cruise starts and stops it locally and uses your existing OpenCode provider configuration and authentication. V1 is not supported.
 - An OpenSSH client (`ssh`) on the local `PATH` for `cruise ssh`.
 - On Windows: [Git for Windows](https://gitforwindows.org/) (`git` on `PATH`). `command:` steps run through `cmd.exe /C`, so use cmd.exe syntax (or invoke `powershell -Command ...` / `bash -c ...` explicitly) rather than POSIX shell syntax. Desktop notifications are not sent on Windows, `cruise ssh` needs the Windows OpenSSH client, and herdr reporting is limited to what the herdr environment variables provide.
-- A compatible `cruise` version and its usual workflow prerequisites on the SSH destination, including any required `gh`, `jcode`, or `claude` CLI for the selected workflow. The remote host performs the workflow and owns its authentication, configuration, sessions, worktrees, and clones.
+- A compatible `cruise` version and its usual workflow prerequisites on the SSH destination, including any required `gh`, `jcode`, `claude`, or `opencode` CLI for the selected workflow. The remote host performs the workflow and owns its authentication, configuration, sessions, worktrees, and clones.
 
 ## Installation
 
@@ -844,7 +845,7 @@ steps:
 
 ### SDK Mode
 
-Instead of spawning an external CLI via `command`, prompt steps can be driven through an SDK backend by setting the top-level `sdk` field. `command` and `sdk` are mutually exclusive; the default `jcode` backend is used only when neither remains set in the resolved workflow after applicable `default.yaml` layers are applied. Two values are accepted: `jcode` and `claude`.
+Instead of spawning an external CLI via `command`, prompt steps can be driven through an SDK backend by setting the top-level `sdk` field. `command` and `sdk` are mutually exclusive; the default `jcode` backend is used only when neither remains set in the resolved workflow after applicable `default.yaml` layers are applied. Three values are accepted: `jcode`, `claude`, and `opencode`.
 
 ```yaml
 sdk: jcode        # Explicitly select jcode. If omitted, it is the fallback only
@@ -856,13 +857,14 @@ sdk: jcode        # Explicitly select jcode. If omitted, it is the fallback only
 # model: provider/model[:effort]
 ```
 
-In both SDK backends, `model` / `plan_model` / per-step `model` are **model references** with the same override precedence as command mode (step `model` > top-level `model` / `plan_model`). The optional `:effort` suffix selects a reasoning-effort tier (`low` / `medium` / `high` / `xhigh` / `max`, plus the aliases `minimal` / `min` / `med` and the numeric spellings `1`..`4`); `off` / `none` / `0` / `5` are also consumed but leave the effort unset, and any other `:` suffix (an OpenRouter `:free` variant, say) stays part of the model id. An effort a provider or model does not support is ignored.
+In all SDK backends, `model` / `plan_model` / per-step `model` are **model references** with the same override precedence as command mode (step `model` > top-level `model` / `plan_model`). For jcode and Claude, the optional `:effort` suffix selects a reasoning-effort tier (`low` / `medium` / `high` / `xhigh` / `max`, plus the aliases `minimal` / `min` / `med` and the numeric spellings `1`..`4`); `off` / `none` / `0` / `5` are also consumed but leave the effort unset, and any other `:` suffix (an OpenRouter `:free` variant, say) stays part of the model id. An effort a provider or model does not support is ignored.
 
 At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the first entry is the primary model and later entries form an implicit fallback chain. A model array with fallback entries enables model fallback automatically; an explicit `retry.fallback_chains` entry for the primary model takes precedence over the array tail. A 429 retries the current model while its retry budget and delay permit, then switches to the next usable fallback when one exists. A 5xx, an HTTP 4xx other than 429, 401, 403, 407, and 408, or a network failure switches immediately to a usable fallback when `--rate-limit-retries` is above zero and no visible text was streamed; such a 4xx is never resent to the same model, since an identical request would fail the same way. 401, 403, and 407 are authentication or permission failures no other model can answer, so they fail the step at once instead of walking the chain. A 408 is a transport timeout classified as a network failure, so it takes the same immediate-switch path as a 5xx: it moves to a usable fallback first, and is only resent to the same model when no usable fallback is left, visible text was already streamed, or `--rate-limit-retries` is `0`. A model skipped after a 429, a 5xx, or a network failure (a 408 included) is cooled down for 30 minutes in the current process, and so is one whose provider reported it as missing (`400 model_not_supported`, `404 model_not_found`), because there the model rather than the request is the defect; only a model left behind by a plain client-error switch is not cooled, since that status describes the request, not the model's health. In command mode, only the first entry is used and the historical same-model retry behavior remains unchanged.
 
 - `"provider/model[:effort]"` (e.g. `provider/model:xhigh`) -- `sdk: jcode` parses the provider and model separately; an empty side (`"/model"`, `"provider/"`) fails when the prompt runs. `sdk: claude` treats everything except the `:effort` suffix as the model name.
-- `"model"` (no `/`) -- no explicit provider is supplied.
-- Unset -- no explicit model is supplied. A jcode prompt fails with a setup
+- `"model"` (no `/`) for jcode/Claude -- no explicit provider is supplied. Configured OpenCode references require a provider.
+- `"provider/model#variant"` for `sdk: opencode`, with optional `#variant`. Model IDs retain embedded `/` and `:` characters. This is not the jcode/Claude `:effort` syntax.
+- Unset -- no explicit model is supplied. OpenCode uses its configured default. A jcode prompt fails with a setup
   error if it still has no effective model; Claude and `command:` retain their
   existing no-model behavior.
 
@@ -878,7 +880,7 @@ resumption.
 
 ##### Computer use
 
-Workflow-level `computer_use` defaults to `false`. Set it to `true` to allow prompt turns to use jcode's `macos_computer_use` desktop-control tool on macOS. A prompt step may set `computer_use: true` or `false` to override the workflow default. Built-in plan, fix-plan, and ask-plan turns follow the workflow value; title and PR-description generation always run with computer use off. The tool is macOS-only and the setting has no effect on Linux. Setting it to `true` with `sdk: claude` or `command:` is rejected during config validation.
+Workflow-level `computer_use` defaults to `false`. Set it to `true` to allow prompt turns to use jcode's `macos_computer_use` desktop-control tool on macOS. A prompt step may set `computer_use: true` or `false` to override the workflow default. Built-in plan, fix-plan, and ask-plan turns follow the workflow value; title and PR-description generation always run with computer use off. The tool is macOS-only and the setting has no effect on Linux. Setting it to `true` with `sdk: claude`, `sdk: opencode`, or `command:` is rejected during config validation.
 
 When computer use is off, Cruise adds `macos_computer_use` to `JCODE_DISABLED_TOOLS`, merging the first available list from workflow `env:`, the Cruise process environment, or `[tools].disabled` in the private copied `config.toml`. This reaches the private runtime's daemon, including swarm workers and subagents. When computer use is on, Cruise leaves `JCODE_DISABLED_TOOLS` unchanged and never removes a jcode-level disable to force-enable the tool. The user must grant macOS Accessibility and Screen Recording permissions.
 
@@ -924,11 +926,36 @@ interactive_planning: false   # tool-less, file-based planning
 
 `--grill` requires the interactive planning flow and is rejected when `interactive_planning` is off. The field has no effect in `command` mode, which is always file-based.
 
+#### `sdk: opencode` - the OpenCode V2 client
+
+Cruise includes a Rust client for the workflow-required OpenCode V2 API, not a Python/Node SDK dependency or a provider-specific LLM client. Install and authenticate the OpenCode CLI separately. Cruise owns a short-lived loopback `opencode serve --stdio` process and stops it after each attempt. It does not connect to an external server, install the CLI, authenticate for you, or fall back to V1.
+
+```yaml
+sdk: opencode
+model: "provider/model#variant" # Replace with a model in your OpenCode setup
+plan_model: "provider/planning-model"
+interactive_planning: true
+permission: full
+steps:
+  implement:
+    prompt: "{input}"
+```
+
+Use `provider/model` or `provider/model#variant` for workflow, planning, and step models. Model arrays use the existing failure-driven fallback policy. OpenCode forbids automatic retry or fallback after tool side effects, uncertain prompt acceptance, or unrecoverable event loss, even if no text was displayed. Omitted models are delegated to OpenCode's configured default. Workflow and step `env:` values reach prompt tools along with the inherited OS environment and commit guard. Existing OpenCode global/project configuration and authentication remain in use. Cruise keeps its own database, plugin, and resumable plan conversations in private XDG storage, not the project or the user's OpenCode database. It does not rewrite the user's configuration. Invalid `OPENCODE_CONFIG_CONTENT` is diagnosed rather than discarded.
+
+Cruise planning, questions, title generation, and PR metadata use the existing tools through a native V2 plugin, not an MCP server. `computer_use: true` is explicitly unsupported. `permission: edit` allows direct file edits but denies shell, subagents, and unknown execution tools. `read-only` denies mutation too, while preserving safe Cruise tools and the workspace snapshot check. Unknown MCP and Code Mode execution paths are denied in restricted modes. These are tool restrictions, not an OS sandbox.
+
+Workflow MCP entries support local `stdio` and remote Streamable HTTP (`type: http`). Legacy `type: sse` is rejected with a named-server diagnostic, never silently converted. No OAuth login is started during unattended runs. Workflow entries overlay OpenCode configuration without changing the source files.
+
+The protocol baseline is OpenCode commit `74f8d4860f49c563909e6b039b0cc8b454ebce72` (investigated October 23, 2026). OpenCode v2.1.3 was identified as the first real-CLI verification target, not a blanket compatibility guarantee. Runtime V2 capability checks and fixture tests do not by themselves establish real-model or plugin interoperability.
+
+See [the OpenCode workflow example](skills/cruise-config/examples/opencode-flow.yaml).
+
 #### MCP servers (`mcp_servers`)
 
-The optional top-level `mcp_servers` map makes MCP servers available to every SDK prompt run: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It works with `sdk: jcode`, with the default `jcode` backend only when neither `sdk` nor `command` remains set in the resolved workflow after applicable `default.yaml` layers are applied, and with `sdk: claude`. Per-step overrides are not supported. A called workflow's top-level `mcp_servers` is ignored; the caller's settings remain in force.
+The optional top-level `mcp_servers` map makes MCP servers available to every SDK prompt run: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It works with `sdk: jcode`, with the default `jcode` backend only when neither `sdk` nor `command` remains set in the resolved workflow after applicable `default.yaml` layers are applied, and with `sdk: claude` or `sdk: opencode`. Per-step overrides are not supported. A called workflow's top-level `mcp_servers` is ignored; the caller's settings remain in force.
 
-Entries use the Claude Code `mcpServers` server shape. Omit `type` or set `type: stdio` for a local server. HTTP and SSE transports are supported only with `sdk: claude`:
+Entries use the Claude Code `mcpServers` server shape. Omit `type` or set `type: stdio` for a local server. HTTP is supported with `sdk: claude` and `sdk: opencode`; legacy SSE is supported only with `sdk: claude` and is explicitly rejected by OpenCode V2:
 
 ```yaml
 sdk: claude
@@ -1052,7 +1079,7 @@ sessions retain artifacts for resume.
 
 An `instruction` is a message shown to the user immediately before a step runs, not a system prompt. If `{input}` is empty, the message is used as a multiline input prompt and the submitted text becomes `{input}`; otherwise it is displayed without being sent to the LLM.
 
-Prompt steps are commit-guarded by default. Set `allow_commit: true` only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and both SDK backends (`jcode` and `claude`), while command and option steps remain unaffected. Ref rejection is scoped to the repository the step runs in, identified by its git common dir: `HEAD` and `refs/heads/*` updates are rejected in every worktree of that repository, including the main checkout and any linked worktree. Commits in throwaway repositories created below the step (temporary repositories used by test suites, other clones, nested repositories) keep working, while commits in the guarded repository's own checkout or in any of its linked worktrees are still rejected. A detected movement fails the step and cruise may restore the original branch reference without resetting the index or worktree.
+Prompt steps are commit-guarded by default. Set `allow_commit: true` only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and all SDK backends (`jcode`, `claude`, and `opencode`), while command and option steps remain unaffected. Ref rejection is scoped to the repository the step runs in, identified by its git common dir: `HEAD` and `refs/heads/*` updates are rejected in every worktree of that repository, including the main checkout and any linked worktree. Commits in throwaway repositories created below the step (temporary repositories used by test suites, other clones, nested repositories) keep working, while commits in the guarded repository's own checkout or in any of its linked worktrees are still rejected. A detected movement fails the step and cruise may restore the original branch reference without resetting the index or worktree.
 
 When `allow_commit` is omitted or `false`, cruise also appends an instruction telling the agent to leave edits uncommitted, not move `HEAD` or local branch refs in the working repository or its linked worktrees, and not bypass the commit guard even if the task requests it. This notice supplements Git enforcement; `allow_commit: true` leaves the prompt unchanged.
 
@@ -1362,7 +1389,7 @@ steps:
 
 Not every no-change is a failure to route around -- sometimes the plan explicitly says a step should make no changes (e.g. "don't add tests here"), and an agent that reaches that conclusion again on every retry is giving the correct answer, not stalling. Two ways to tell cruise the no-change is deliberate; either one disables **both** actions (`failed` and `retry`) for that attempt:
 
-- **Output marker** -- a line in the step's raw output starting with `NO_CHANGES_INTENTIONAL: <reason>` (leading whitespace on the line is ignored). Works with every backend (`command:` and both `sdk:` modes) since it's plain text matching, no tool support required. The marker must anchor the start of a line -- a mid-line mention (quoted in passing, inside a code block, etc.) does not count.
+- **Output marker** -- a line in the step's raw output starting with `NO_CHANGES_INTENTIONAL: <reason>` (leading whitespace on the line is ignored). Works with every backend (`command:` and all three `sdk:` modes) since it's plain text matching, no tool support required. The marker must anchor the start of a line -- a mid-line mention (quoted in passing, inside a code block, etc.) does not count.
 - **Structured SDK response** -- SDK-mode agents can declare intentional no-changes through a schema-validated structured response on prompt steps with an `if.no-file-changes` condition. In classic `command:` mode, use the output marker.
 
 Either path logs the declared reason so the decision stays visible in the run output. Parallel children cannot make this declaration for their parent: child output markers remain inside the aggregate JSON, and children do not receive the structured response. A parent `if.no-file-changes` condition still evaluates file changes across the entire block.
@@ -1771,7 +1798,7 @@ The WebUI and TUI persist two pieces of state across sessions:
 
 ## GitHub Actions
 
-Mention `@cruise` on a GitHub Issue to drive cruise inside GitHub Actions. The action installs the `jcode` CLI and provisions its credentials, so cruise's default `sdk: jcode` backend works with no configuration; it no longer forces a backend, so a repository config that sets `command:` or `sdk: claude` still wins and has to bring its own CLI. There is no PR mode -- comments on pull requests are ignored.
+Mention `@cruise` on a GitHub Issue to drive cruise inside GitHub Actions. The action installs the `jcode` CLI and provisions its credentials, so cruise's default `sdk: jcode` backend works with no configuration; it no longer forces a backend, so a repository config that sets `command:`, `sdk: claude`, or `sdk: opencode` still wins and has to bring its own CLI. There is no PR mode -- comments on pull requests are ignored.
 
 **Quickstart:**
 

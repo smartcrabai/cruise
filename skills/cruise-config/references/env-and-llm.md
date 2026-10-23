@@ -27,6 +27,8 @@ Template variables (e.g. `{input}`) can be used inside `env:` values.
 
 **SDK mode**: top-level and per-step `env:` values are passed to SDK prompt execution. Command steps receive `env:` in their child process (see [sdk.md](sdk.md)).
 
+For `sdk: opencode`, workflow and step environment overrides are merged with the inherited OS environment before setting the V2 shell environment, preserving `PATH` and the commit guard. OpenCode's server authentication secret is not exposed to shell tools. Existing OpenCode configuration/authentication is retained; malformed JSONC in `OPENCODE_CONFIG_CONTENT` is an error, not silently discarded. No new `CRUISE_OPENCODE_*` connection setting is needed. `CRUISE_SDK=opencode` selects this backend through the normal override API.
+
 ## OpenAI priority processing with jcode
 
 For `sdk: jcode`, `JCODE_OPENAI_SERVICE_TIER` controls the OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Set it to `"priority"` or `"flex"` in workflow `env:` to opt in; step-level `env:` overrides workflow-level `env:` for that step.
@@ -49,7 +51,7 @@ then the first non-empty variable among `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LA
 
 After plan approval, cruise sets a concise session title of at most 80 characters for `cruise list` and the WebUI sidebar:
 
-- **SDK mode** (`sdk: jcode`, `sdk: claude`, or the default jcode backend) makes a separate title-generation request only on the foreground `cruise plan` approval path (interactive **Approve/Execute now** and non-TTY auto-approval), using `plan_model` then `model`. If jcode has no effective model, approval fails and is not saved. Other title-generation failures fall back to `plan.md` metadata: the first heading, or the first content line with list markers stripped.
+- **SDK mode** (`sdk: jcode`, `sdk: claude`, `sdk: opencode`, or the default jcode backend) makes a separate title-generation request only on the foreground `cruise plan` approval path (interactive **Approve/Execute now** and non-TTY auto-approval), using `plan_model` then `model`. If jcode has no effective model, approval fails and is not saved. Other title-generation failures fall back to `plan.md` metadata: the first heading, or the first content line with list markers stripped.
 - **Command mode** derives the title from the first heading or first non-empty line of `plan.md`; it makes no separate title-generation call.
 - `cruise list` **Approve**, WebUI/TUI approval, and background `cruise --plan` planning completion use the `plan.md` metadata fallback directly: first heading, else first content line with list markers stripped. Background `cruise --plan … --skip-planning` also derives the title directly from `plan.md` and makes no model call.
 

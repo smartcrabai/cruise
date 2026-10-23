@@ -33,7 +33,7 @@ group call sites cannot set it either (see [groups.md](groups.md)).
 ```yaml
 steps:
   planning:
-    model: claude-opus-4-5     # Optional: per-step model override (a "provider/model[:effort]" reference in SDK mode)
+    model: claude-opus-4-5     # Optional: per-step model override (jcode/Claude: "provider/model[:effort]"; OpenCode: "provider/model#variant")
     instruction: |             # Optional: message shown to the user before the step runs
       Describe the feature you want to build.
     prompt: |                  # Use either prompt or prompt_file
@@ -84,7 +84,7 @@ steps:
     prompt: "Fix the issue and commit the changes"
     allow_commit: true
 ```
-Omitting the field (or setting it to `false`) keeps the guard enabled; false values are omitted when configs are serialized. Setting it to `true` bypasses all commit-guard behavior for that prompt. This applies to prompt execution through classic `command:` prompts and `sdk: jcode` / `sdk: claude`. Command and option steps are unaffected. A guarded `HEAD` movement is reported as a commit-guard violation and the step fails, even when cruise can restore the original branch reference without touching the index or worktree. `allow_commit: true` is rejected on `group:` and `workflow_call:` call sites; configure the expanded prompt step instead.
+Omitting the field (or setting it to `false`) keeps the guard enabled; false values are omitted when configs are serialized. Setting it to `true` bypasses all commit-guard behavior for that prompt. This applies to prompt execution through classic `command:` prompts and `sdk: jcode` / `sdk: claude` / `sdk: opencode`. Command and option steps are unaffected. A guarded `HEAD` movement is reported as a commit-guard violation and the step fails, even when cruise can restore the original branch reference without touching the index or worktree. `allow_commit: true` is rejected on `group:` and `workflow_call:` call sites; configure the expanded prompt step instead.
 
 For a longer prompt, load the body from a file:
 

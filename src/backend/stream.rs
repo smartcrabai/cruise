@@ -42,6 +42,13 @@ pub enum StreamChunk {
     /// backend that only learns the id from its turn-completion event reports it
     /// after the text.
     Session(String),
+    /// A durable checkpoint acknowledged before the backend starts execution.
+    SessionReady {
+        id: String,
+        ready: std::sync::mpsc::Sender<bool>,
+    },
+    /// This attempt must not be replayed, even without visible output.
+    RetryBarrier,
     /// The provider reported a rate/usage limit.
     Limit(LimitError),
     /// Any other error (provider error, transport error, ...) -- stringified.
@@ -117,6 +124,7 @@ pub(crate) enum ChunkOutcome {
 pub(crate) struct Folded {
     pub(crate) outcome: ChunkOutcome,
     pub(crate) streamed: bool,
+    pub(crate) retry_barrier: bool,
 }
 
 /// Incrementally folds [`StreamChunk`]s into a [`ChunkOutcome`], surfacing text
@@ -124,6 +132,7 @@ pub(crate) struct Folded {
 pub(crate) struct ChunkReducer {
     buf: String,
     session: Option<String>,
+    retry_barrier: bool,
 }
 
 impl ChunkReducer {
@@ -131,7 +140,12 @@ impl ChunkReducer {
         Self {
             buf: String::new(),
             session: None,
+            retry_barrier: false,
         }
+    }
+
+    pub(crate) fn retry_barrier(&self) -> bool {
+        self.retry_barrier
     }
 
     /// Feed one chunk. Returns `Some(outcome)` when a terminal chunk arrives,
@@ -142,6 +156,15 @@ impl ChunkReducer {
         on_delta: &mut F,
     ) -> Option<ChunkOutcome> {
         match chunk {
+            StreamChunk::RetryBarrier => {
+                self.retry_barrier = true;
+                None
+            }
+            StreamChunk::SessionReady { id, ready } => {
+                self.session = Some(id);
+                let _ = ready.send(true);
+                None
+            }
             StreamChunk::Delta(d) => {
                 on_delta(&d);
                 self.buf.push_str(&d);
