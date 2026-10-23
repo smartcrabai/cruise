@@ -214,6 +214,11 @@ fn launch_client(
         config_toml.as_deref(),
         config.permission,
     );
+    // jcode rejects symlink auth homes; keep the short alias only for SDK sockets.
+    options.env.insert(
+        OsString::from(JCODE_HOME_ENV),
+        home.storage_home.as_os_str().to_os_string(),
+    );
     JcodeClient::launch(options).map_err(|error| {
         let hint = if matches!(
             &error.kind,

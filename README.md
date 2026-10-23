@@ -602,6 +602,7 @@ replacement model:
 
 ```text
 Warning: Fallback: provider/primary -> provider/fallback (503, attempt 1/5)
+  Error: API Error: 503 service temporarily unavailable
 Model: provider/fallback
 ```
 
@@ -610,6 +611,9 @@ status the provider returned (`503`, `429`, `400`, `404`, ...) when the failure
 text names one, otherwise the failure class (`rate limit`, `server error`,
 `client error`, `missing model`, `network error`, or `unusable model` for a
 reference the backend refused before sending anything).
+
+The original backend error message follows as `Error:`, with embedded newlines
+preserved, even when the replacement model succeeds.
 
 The complete model reference is retained, including its provider, path, and
 effort suffixes. Claude and external command backends may still run without a
@@ -865,6 +869,12 @@ At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the
 #### `sdk: jcode` — the jcode SDK (default)
 
 `sdk: jcode` uses the official jcode Rust SDK and requires jcode v0.88.0 or newer. At launch, Cruise validates the SDK handshake and required capabilities (`sessions`, plus `session_tools` when custom tools are registered); it does not probe the CLI version. Upgrade jcode when a required capability is missing. The `model`, `plan_model`, and per-step `model` fields accept `provider/model[:effort]` or a bare model. Every actual jcode prompt must resolve to a model: ordinary prompts use step `model` then workflow/default `model`; planning calls use `plan_model` then `model`. A configured jcode default, `JCODE_MODEL`, or resume session does not replace a missing Cruise model. Missing models create or preserve the user `default.yaml` template and stop that request. The effort suffix is applied through the SDK.
+
+Each SDK run uses a private session home with inherited login records and copied
+model catalogs. The runtime's `JCODE_HOME` points to the real session directory;
+on Unix, a short symlink alias is used only for SDK socket paths. This satisfies
+jcode's account-store safety checks without changing saved-session locations or
+resumption.
 
 ##### Computer use
 
