@@ -13,10 +13,10 @@
 //!
 //! - `command` — the model name substituted into the command line.
 //! - `sdk: jcode` — a `provider/model[:effort]` reference driven through
-//!   `jcode-sdk`; see [`run_jcode`] and [`crate::backend::jcode`].
+//!   `jcode-sdk`; see [`run_sdk`] and [`crate::backend::jcode`].
 //! - `sdk: claude` — a plain `claude --model` name with an optional `:effort`
 //!   suffix, driven in-process through `claude-agent-sdk` -- see
-//!   [`run_claude`] and [`crate::backend::claude`].
+//!   [`run_sdk`] and [`crate::backend::claude`].
 //! - `sdk: opencode` uses `provider/model#variant` references through the
 //!   built-in `OpenCode` V2 client, preserving colons in model IDs.
 
@@ -31,18 +31,21 @@ use crate::backend::jcode::{self, JcodeRunnerConfig, stream_agent as stream_jcod
 use crate::backend::stream::{ChunkOutcome, ChunkReducer, Folded, LineBuffer, StreamChunk};
 use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
+use crate::config::ModelSpec;
 use crate::error::{CruiseError, Result};
+use crate::model_selection::{Sdk, SdkSessionId, resolve_candidates};
 use crate::retry::{self, Failure, FallbackEngine, ModelReferenceFormat, RetryAction, RetryPolicy};
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt};
 
 /// Callback invoked when an SDK backend reports its session identifier.
-pub type SessionIdCallback<'a> = dyn Fn(&str) -> Result<()> + Send + Sync + 'a;
+pub type SessionIdCallback<'a> = dyn Fn(&SdkSessionId) -> Result<()> + Send + Sync + 'a;
+type StreamSessionIdCallback<'a> = dyn Fn(&str) -> Result<()> + Send + Sync + 'a;
 
 /// A single prompt execution request, backend-agnostic.
 ///
-/// Built by the caller and handed to [`Executor::run`]. `model_or_mode` carries
-/// the model reference the selected backend takes (compute it with
-/// [`Executor::step_model_or_mode`] / [`Executor::plan_model_or_mode`]).
+/// Built by the caller and handed to [`Executor::run`]. `model` retains the
+/// complete candidate list (select it with [`Executor::step_model`] or
+/// [`Executor::plan_model`]).
 /// `tools` and `resume` are honored by the SDK backends and ignored in command
 /// mode.
 pub struct PromptRun<'a> {
@@ -50,7 +53,7 @@ pub struct PromptRun<'a> {
     pub prompt: &'a str,
     /// Model name (command mode) or model reference (`sdk: jcode`,
     /// `sdk: claude`).
-    pub model_or_mode: Option<&'a str>,
+    pub model: Option<&'a ModelSpec>,
     /// Maximum retries per prompt. SDK fallback policies also use this budget
     /// for 4xx (except 429), 5xx and network failures and fallback switching.
     pub max_retries: usize,
@@ -77,7 +80,7 @@ pub struct PromptRun<'a> {
     /// can block waiting for user input.
     pub on_session_id: Option<&'a SessionIdCallback<'a>>,
     /// Prior session id to resume (SDK mode only).
-    pub resume: Option<String>,
+    pub resume: Option<SdkSessionId>,
     /// Allow jcode's macOS desktop-control tool for this turn. This is jcode
     /// backend only and is validated by [`crate::config::validate_computer_use`].
     pub computer_use: bool,
@@ -91,7 +94,45 @@ pub struct PromptRun<'a> {
 #[derive(Debug, Clone)]
 pub struct PromptOutcome {
     pub result: PromptResult,
-    pub session_id: Option<String>,
+    pub session_id: Option<SdkSessionId>,
+}
+
+fn resume_for(req: &PromptRun<'_>, sdk: Sdk) -> Option<String> {
+    req.resume
+        .as_ref()
+        .filter(|session| session.sdk == sdk)
+        .map(|session| session.id.clone())
+}
+
+fn transition_notice(from_sdk: Sdk, from: Option<&str>, to_sdk: Sdk, to: &str) -> String {
+    let from = from.unwrap_or("default model");
+    if from_sdk == to_sdk {
+        format!("{from} -> {to}")
+    } else {
+        format!("{from_sdk}:{from} -> {to_sdk}:{to}")
+    }
+}
+
+fn validate_candidate(req: &PromptRun<'_>, sdk: Sdk) -> Result<()> {
+    if req.computer_use && sdk == Sdk::Claude {
+        return Err(CruiseError::InvalidStepConfig("Claude Code's computer use is only available in interactive sessions and cannot be enabled by cruise".to_owned()));
+    }
+    if req.computer_use && sdk != Sdk::Jcode {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "computer_use requires the jcode backend and is not supported by {sdk}"
+        )));
+    }
+    if sdk == Sdk::Jcode
+        && req
+            .mcp_servers
+            .values()
+            .any(|server| server.transport() != crate::config::McpTransport::Stdio)
+    {
+        return Err(CruiseError::InvalidStepConfig(
+            "jcode MCP servers support only stdio transport, not HTTP or SSE".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Prompt-execution backend.
@@ -104,10 +145,10 @@ pub enum Executor {
     Command { command: Vec<String> },
     /// Drive `jcode` through the official Rust SDK (`sdk: jcode`) in an
     /// isolated runtime, exposing cruise's tools as session tools. See
-    /// [`run_jcode`].
+    /// [`run_sdk`].
     Jcode,
     /// Drive the `claude` CLI in-process through `claude-agent-sdk`
-    /// (`sdk: claude`). See [`run_claude`].
+    /// (`sdk: claude`). See [`run_sdk`].
     Claude,
     /// Drive a locally owned `OpenCode` V2 server through the embedded client.
     OpenCode,
@@ -122,6 +163,25 @@ pub enum Executor {
 }
 
 impl Executor {
+    fn sdk(&self) -> Sdk {
+        match self {
+            Self::Claude => Sdk::Claude,
+            Self::OpenCode => Sdk::OpenCode,
+            _ => Sdk::Jcode,
+        }
+    }
+
+    /// Select an ordinary step model without losing SDK-qualified fallbacks.
+    #[must_use]
+    pub fn step_model(&self, step: Option<&str>, global: Option<&ModelSpec>) -> Option<ModelSpec> {
+        crate::model_selection::step_model_spec(global, step, self.sdk())
+    }
+
+    /// Prefer planning candidates, falling back to the ordinary model list.
+    #[must_use]
+    pub fn plan_model(plan: Option<&ModelSpec>, global: Option<&ModelSpec>) -> Option<ModelSpec> {
+        crate::model_selection::planning_spec(plan, global).cloned()
+    }
     /// Build an executor from the workflow's backend selection.
     ///
     /// `sdk: jcode` -> [`Executor::Jcode`]; `sdk: claude` -> [`Executor::Claude`];
@@ -159,43 +219,6 @@ impl Executor {
         )
     }
 
-    /// Resolve the model reference for an ordinary prompt step: a per-step
-    /// value wins over the workflow default.
-    ///
-    /// Matched exhaustively even though every backend reads the same plain
-    /// reference, so adding a backend has to revisit this.
-    #[must_use]
-    pub fn step_model_or_mode(
-        &self,
-        step_model: Option<&str>,
-        global_model: Option<&str>,
-    ) -> Option<String> {
-        match self {
-            Executor::Command { .. }
-            | Executor::Jcode
-            | Executor::Claude
-            | Executor::OpenCode
-            | Executor::Unsupported { .. } => step_model.or(global_model).map(str::to_string),
-        }
-    }
-
-    /// Resolve the model reference for the built-in planning step: the
-    /// dedicated `plan_model` wins, falling back to the workflow `model`.
-    #[must_use]
-    pub fn plan_model_or_mode(
-        &self,
-        plan_model: Option<&str>,
-        global_model: Option<&str>,
-    ) -> Option<String> {
-        match self {
-            Executor::Command { .. }
-            | Executor::Jcode
-            | Executor::Claude
-            | Executor::OpenCode
-            | Executor::Unsupported { .. } => plan_model.or(global_model).map(str::to_string),
-        }
-    }
-
     /// Execute one prompt on the selected backend.
     ///
     /// # Errors
@@ -207,18 +230,31 @@ impl Executor {
     pub async fn run(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
         const GUARD: &str = "read-only";
 
-        if matches!(self, Executor::Jcode) {
+        if let Some(model) = req.model {
+            model.validate("model")?;
+            if matches!(self, Self::Command { .. }) && model.has_sdk_overrides() {
+                return Err(CruiseError::InvalidStepConfig(
+                    "`command` cannot be combined with SDK-qualified model candidates".to_owned(),
+                ));
+            }
+        }
+
+        if self.is_sdk() {
             if req
                 .cancel_token
                 .is_some_and(CancellationToken::is_cancelled)
             {
                 return Err(CruiseError::Interrupted);
             }
-            if let Ok((_, model, _)) = jcode::parse_model_ref(req.model_or_mode)
+            let candidates = resolve_candidates(req.model, self.sdk());
+            let primary = &candidates[0];
+            if primary.sdk == Sdk::Jcode
+                && let Ok((_, model, _)) = jcode::parse_model_ref(primary.model.as_deref())
                 && model.is_none()
             {
                 return Err(crate::workflow_defaults::missing_jcode_model_error());
             }
+            validate_candidate(&req, primary.sdk)?;
         }
 
         if req.permission != crate::config::PermissionMode::ReadOnly {
@@ -247,16 +283,7 @@ impl Executor {
                 ))
             }
             Executor::Command { command } => run_command(command, req).await,
-            Executor::Jcode => run_jcode(req).await,
-            Executor::Claude if req.computer_use => Err(CruiseError::InvalidStepConfig(
-                "Claude Code's computer use is only available in interactive sessions and cannot be enabled by cruise"
-                    .to_string(),
-            )),
-            Executor::Claude => run_claude(req).await,
-            Executor::OpenCode if req.computer_use => Err(CruiseError::InvalidStepConfig(
-                "computer_use requires the jcode backend and is not supported by OpenCode".to_string(),
-            )),
-            Executor::OpenCode => run_opencode(req).await,
+            Executor::Jcode | Executor::Claude | Executor::OpenCode => run_sdk(req, self.sdk()).await,
             Executor::Unsupported { sdk } => Err(crate::error::CruiseError::InvalidStepConfig(
                 format!("unsupported `sdk` value '{sdk}'"),
             )),
@@ -289,15 +316,16 @@ fn notify_model_notice(
 /// Command-backend execution: resolve the `{model}` placeholder then delegate to
 /// the existing [`run_prompt`].
 async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOutcome> {
-    let resolved = crate::engine::resolve_command_with_model(command, req.model_or_mode)?;
+    let model = req.model.and_then(ModelSpec::primary);
+    let resolved = crate::engine::resolve_command_with_model(command, model)?;
     let model_arg = if resolved.consumed_model_placeholder {
         None
     } else {
-        req.model_or_mode.map(str::to_string)
+        model.map(str::to_string)
     };
     let resolved_command = resolved.command;
 
-    notify_model_notice(req.on_notice, req.model_or_mode, "command");
+    notify_model_notice(req.on_notice, model, "command");
 
     let retry = |msg: &str| {
         if let Some(cb) = req.on_notice {
@@ -332,7 +360,7 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
 async fn stream_to_outcome(
     rx_std: std::sync::mpsc::Receiver<StreamChunk>,
     on_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
-    on_session_id: Option<&SessionIdCallback<'_>>,
+    on_session_id: Option<&StreamSessionIdCallback<'_>>,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<Folded> {
     // Bridge the blocking std channel to an async one so we can stream deltas
@@ -407,41 +435,9 @@ async fn stream_to_outcome(
     })
 }
 
-/// `Claude`-backend execution: drive the `claude` CLI in-process through
-/// `claude-agent-sdk` ([`crate::backend::claude`]).
-///
-/// Retryable failures go through [`run_with_fallback`], so a rate limit backs
-/// off on the same model — and a 4xx (except 429), 5xx or network failure moves
-/// on — unless the workflow's explicit `retry:` policy or model-array policy
-/// names no fallback model to switch to.
-///
-/// Retries deliberately start from `req.resume` (the caller's session), not the
-/// aborted attempt's session id: re-sending the same prompt into a
-/// partially-answered session would duplicate context.
-///
-/// `req.cancel_token` is forwarded to the backend thread, which stops reading
-/// the CLI's output and closes the transport when it fires — that is what
-/// terminates the `claude` child, since the SDK offers no interrupt.
-async fn run_claude(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    run_with_fallback(
-        &req,
-        "claude",
-        ModelReferenceFormat::LegacyEffort,
-        retry::active_policy(),
-        |model| {
-            Ok(stream_claude_agent(
-                build_claude_config(&req, model),
-                req.prompt.to_string(),
-            ))
-        },
-    )
-    .await
-}
-
 /// Build a [`ClaudeRunnerConfig`] straight from `req`. `model_ref` is the model
 /// this attempt runs on — the caller's plain `claude --model` name with an
-/// optional `:effort` suffix (see [`Executor::step_model_or_mode`] /
-/// [`Executor::plan_model_or_mode`]), or a fallback the retry policy switched
+/// optional `:effort` suffix, or a fallback the retry policy switched
 /// to. Unset leaves `--model` off so the CLI picks its own default.
 ///
 /// Built fresh per attempt because [`crate::backend::claude::stream_agent`]
@@ -452,7 +448,7 @@ fn build_claude_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> ClaudeRu
         model: (!model.is_empty()).then(|| model.to_string()),
         effort: suffix.and_then(effort_from_suffix),
         cwd: req.working_dir.map(Path::to_path_buf),
-        resume_session_id: req.resume.clone(),
+        resume_session_id: resume_for(req, Sdk::Claude),
         tools: req.tools.clone(),
         env: req.env.clone(),
         mcp_servers: req.mcp_servers.clone(),
@@ -462,7 +458,7 @@ fn build_claude_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> ClaudeRu
     }
 }
 
-/// How one attempt of [`run_with_fallback`] failed. Keeps the failure text
+/// How one attempt of [`run_sdk_with_fallback`] failed. Keeps the failure text
 /// owned, so the borrowed [`Failure`] handed to the engine can be taken after
 /// the attempt's outcome is destructured, and keeps the original error of a
 /// model reference the backend refused, to surface unchanged if no fallback
@@ -522,10 +518,7 @@ impl AttemptFailure {
 ///
 /// Under a policy, a 4xx other than 429 never re-sends the same request to the
 /// same model: it switches to the next fallback entry, or surfaces unchanged.
-#[expect(
-    clippy::too_many_lines,
-    reason = "Keep attempt completion and retry decisions in one lifecycle loop"
-)]
+#[cfg(test)]
 async fn run_with_fallback(
     req: &PromptRun<'_>,
     label: &str,
@@ -533,8 +526,46 @@ async fn run_with_fallback(
     policy: Option<Arc<RetryPolicy>>,
     mut start: impl FnMut(Option<&str>) -> Result<std::sync::mpsc::Receiver<StreamChunk>>,
 ) -> Result<PromptOutcome> {
+    run_sdk_with_fallback(
+        req,
+        Sdk::from_name(label).unwrap_or(Sdk::Jcode),
+        format,
+        policy,
+        |_, model| start(model),
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep attempt completion and retry decisions in one lifecycle loop"
+)]
+async fn run_sdk_with_fallback(
+    req: &PromptRun<'_>,
+    base_sdk: Sdk,
+    format: ModelReferenceFormat,
+    policy: Option<Arc<RetryPolicy>>,
+    mut start: impl FnMut(Sdk, Option<&str>) -> Result<std::sync::mpsc::Receiver<StreamChunk>>,
+) -> Result<PromptOutcome> {
     let on_delta = req.stream.and_then(|s| s.on_stdout);
-    let mut engine = FallbackEngine::new(format, policy, req.model_or_mode, req.max_retries);
+    let candidates = resolve_candidates(req.model, base_sdk);
+    let primary = &candidates[0];
+    let effective = retry::effective_candidates(policy.as_deref().map(|policy| policy.config()), &candidates, base_sdk);
+    for candidate in &effective {
+        validate_candidate(req, candidate.sdk)?;
+    }
+    let mut engine = FallbackEngine::new_candidates(
+        format,
+        policy,
+        primary.sdk,
+        base_sdk,
+        primary.model.as_deref(),
+        &candidates[1..],
+        req.max_retries,
+    );
+    for sdk in engine.candidate_sdks() {
+        validate_candidate(req, sdk)?;
+    }
     let mut model_reported = false;
     if engine.startup_blocked() {
         return Err(CruiseError::Other(
@@ -544,14 +575,18 @@ async fn run_with_fallback(
     if let Some((from, to)) = engine.take_startup_switch()
         && let Some(cb) = req.on_notice
     {
+        let transition = transition_notice(primary.sdk, Some(&from), engine.sdk(), &to);
         cb(&format!(
-            "Warning: Fallback: {from} -> {to} (still cooling down from an earlier failure)"
+            "Warning: Fallback: {transition} (still cooling down from an earlier failure)"
         ));
     }
 
     loop {
+        let sdk = engine.sdk();
+        let label = sdk.as_str();
+        validate_candidate(req, sdk)?;
         let model = engine.model().map(str::to_string);
-        let failed = match start(model.as_deref()) {
+        let failed = match start(sdk, model.as_deref()) {
             Err(error) => AttemptFailure::Unusable {
                 message: error.to_string(),
                 error,
@@ -561,8 +596,16 @@ async fn run_with_fallback(
                     notify_model_notice(req.on_notice, model.as_deref(), label);
                     model_reported = true;
                 }
+                let session_callback = |id: &str| {
+                    req.on_session_id.map_or(Ok(()), |callback| {
+                        callback(&SdkSessionId {
+                            sdk,
+                            id: id.to_owned(),
+                        })
+                    })
+                };
                 let folded =
-                    stream_to_outcome(rx_std, on_delta, req.on_session_id, req.cancel_token)
+                    stream_to_outcome(rx_std, on_delta, Some(&session_callback), req.cancel_token)
                         .await?;
                 let streamed = folded.streamed;
                 if folded.retry_barrier {
@@ -581,7 +624,7 @@ async fn run_with_fallback(
                                 output,
                                 stderr: String::new(),
                             },
-                            session_id: session,
+                            session_id: session.map(|id| SdkSessionId { sdk, id }),
                         });
                     }
                     ChunkOutcome::Closed { .. } => {
@@ -611,9 +654,9 @@ async fn run_with_fallback(
                 of,
             } => {
                 if let Some(cb) = req.on_notice {
+                    let transition = transition_notice(sdk, from.as_deref(), engine.sdk(), &to);
                     cb(&format!(
-                        "Warning: Fallback: {} -> {to} ({detail}, attempt {attempt}/{of})\n  Error: {}",
-                        from.as_deref().unwrap_or("default model"),
+                        "Warning: Fallback: {transition} ({detail}, attempt {attempt}/{of})\n  Error: {}",
                         failed.message(),
                     ));
                 }
@@ -646,46 +689,17 @@ async fn run_with_fallback(
     }
 }
 
-/// Run one prompt through the jcode SDK backend ([`crate::backend::jcode`]).
-///
-/// The SDK is synchronous; its backend worker owns a private runtime and
-/// dispatches custom session tools to the in-process handlers supplied by the
-/// caller. The runtime inherits this prompt's environment so workflow variables
-/// and commit-guard settings reach jcode's bash child.
-///
-/// Retryable failures go through [`run_with_fallback`], so a rate limit backs
-/// off on the same model — and a 4xx (except 429), 5xx or network failure moves
-/// on — unless the workflow's explicit `retry:` policy or model-array policy
-/// names no fallback model to switch to.
-///
-/// Retries deliberately start from `req.resume` (the caller's session), not the
-/// aborted attempt's session id: re-sending the same prompt into a
-/// partially-answered session would duplicate context.
-async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    run_with_fallback(
-        &req,
-        "jcode",
-        ModelReferenceFormat::LegacyEffort,
-        retry::active_policy(),
-        |model_ref| {
-            let config = build_jcode_config(&req, model_ref)?;
-            Ok(stream_jcode_agent(config, req.prompt.to_string()))
-        },
-    )
-    .await
-}
-
 /// Cancels the owned attempt when its caller drops the execution future. The
 /// worker remains responsible for stopping and reaping its process tree.
-struct OpenCodeAttemptGuard(CancellationToken);
+struct SdkAttemptGuard(CancellationToken);
 
-impl Drop for OpenCodeAttemptGuard {
+impl Drop for SdkAttemptGuard {
     fn drop(&mut self) {
         self.0.cancel();
     }
 }
 
-async fn run_opencode(req: PromptRun<'_>) -> Result<PromptOutcome> {
+async fn run_sdk(req: PromptRun<'_>, sdk: Sdk) -> Result<PromptOutcome> {
     use crate::backend::opencode::{OpenCodeRunnerConfig, stream_agent};
 
     let cancel = req
@@ -694,22 +708,34 @@ async fn run_opencode(req: PromptRun<'_>) -> Result<PromptOutcome> {
     if cancel.is_cancelled() {
         return Err(CruiseError::Interrupted);
     }
-    let _guard = OpenCodeAttemptGuard(cancel.clone());
+    let _guard = SdkAttemptGuard(cancel.clone());
     let req = PromptRun {
         cancel_token: Some(&cancel),
         ..req
     };
-    run_with_fallback(
+    run_sdk_with_fallback(
         &req,
-        "opencode",
-        ModelReferenceFormat::OpenCode,
+        sdk,
+        if sdk == Sdk::OpenCode {
+            ModelReferenceFormat::OpenCode
+        } else {
+            ModelReferenceFormat::LegacyEffort
+        },
         retry::active_policy(),
-        |model_ref| {
-            Ok(stream_agent(
+        |candidate_sdk, model_ref| match candidate_sdk {
+            Sdk::Jcode => Ok(stream_jcode_agent(
+                build_jcode_config(&req, model_ref)?,
+                req.prompt.to_string(),
+            )),
+            Sdk::Claude => Ok(stream_claude_agent(
+                build_claude_config(&req, model_ref),
+                req.prompt.to_string(),
+            )),
+            Sdk::OpenCode => Ok(stream_agent(
                 OpenCodeRunnerConfig {
                     model_ref: model_ref.map(str::to_string),
                     cwd: req.working_dir.map(Path::to_path_buf),
-                    resume_session_id: req.resume.clone(),
+                    resume_session_id: resume_for(&req, Sdk::OpenCode),
                     tools: req.tools.clone(),
                     env: req.env.clone(),
                     mcp_servers: req.mcp_servers.clone(),
@@ -728,7 +754,7 @@ async fn run_opencode(req: PromptRun<'_>) -> Result<PromptOutcome> {
                     computer_use: req.computer_use,
                 },
                 req.prompt.to_string(),
-            ))
+            )),
         },
     )
     .await
@@ -747,7 +773,7 @@ fn build_jcode_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> Result<Jc
         provider,
         effort,
         cwd: req.working_dir.map(Path::to_path_buf),
-        resume_session_id: req.resume.clone(),
+        resume_session_id: resume_for(req, Sdk::Jcode),
         tools: req.tools.clone(),
         env: req.env.clone(),
         mcp_servers: req.mcp_servers.clone(),
@@ -777,7 +803,164 @@ mod tests {
     static EMPTY_MCP_SERVERS: LazyLock<crate::config::McpServers> =
         LazyLock::new(crate::config::McpServers::new);
 
+    fn fixture_model(model: Option<&str>) -> Option<&'static ModelSpec> {
+        model.map(|model| &*Box::leak(Box::new(ModelSpec::Single(model.to_owned()))))
+    }
+
+    #[tokio::test]
+    async fn mixed_sdk_attempts_preserve_order_resume_and_checkpoint_owner() {
+        let model: ModelSpec = serde_yaml::from_str("[runtime/order-first:high, {sdk: claude, model: runtime/order-middle:medium}, runtime/order-last:low]").unwrap_or_else(|error| panic!("{error}"));
+        let env = HashMap::from([("SDK_ENV".to_owned(), "preserved".to_owned())]);
+        let checkpoints = Mutex::new(Vec::new());
+        let callback = |session: &SdkSessionId| {
+            checkpoints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(session.clone());
+            Ok(())
+        };
+        let mut req = base_req(&env);
+        req.model = Some(&model);
+        req.max_retries = 1;
+        req.resume = Some(SdkSessionId {
+            sdk: Sdk::Jcode,
+            id: "caller-session".to_owned(),
+        });
+        req.on_session_id = Some(&callback);
+        let mut attempts = Vec::new();
+        let outcome = run_sdk_with_fallback(
+            &req,
+            Sdk::Jcode,
+            ModelReferenceFormat::LegacyEffort,
+            Some(fast_policy(&[])),
+            |sdk, model| {
+                attempts.push((sdk, model.map(str::to_owned), resume_for(&req, sdk)));
+                let id = format!("attempt-{}", attempts.len());
+                let (ready, _rx) = std::sync::mpsc::channel();
+                let terminal = if attempts.len() < 3 {
+                    StreamChunk::Error("API Error: 404 model not found".to_owned())
+                } else {
+                    StreamChunk::Done(String::new())
+                };
+                Ok(canned(vec![
+                    StreamChunk::SessionReady { id, ready },
+                    terminal,
+                ]))
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            attempts,
+            vec![
+                (
+                    Sdk::Jcode,
+                    Some("runtime/order-first:high".to_owned()),
+                    Some("caller-session".to_owned())
+                ),
+                (
+                    Sdk::Claude,
+                    Some("runtime/order-middle:medium".to_owned()),
+                    None
+                ),
+                (
+                    Sdk::Jcode,
+                    Some("runtime/order-last:low".to_owned()),
+                    Some("caller-session".to_owned())
+                ),
+            ]
+        );
+        assert_eq!(
+            checkpoints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|id| id.sdk)
+                .collect::<Vec<_>>(),
+            [Sdk::Jcode, Sdk::Claude, Sdk::Jcode]
+        );
+        assert_eq!(outcome.session_id.map(|id| id.sdk), Some(Sdk::Jcode));
+    }
+
+    #[tokio::test]
+    async fn explicit_chain_preflight_ignores_overridden_incompatible_tail() {
+        for (sdk, model, computer_use, remote) in [
+            (Sdk::Jcode, "[preflight/main:high, {sdk: claude, model: unreachable}]", true, false),
+            (Sdk::Claude, "[preflight/main:high, {sdk: jcode, model: unreachable}]", false, true),
+            (Sdk::Claude, "['', {sdk: jcode, model: unreachable}]", false, true),
+        ] {
+            let model: ModelSpec = serde_yaml::from_str(model).unwrap();
+            let env = HashMap::new();
+            let mut req = base_req(&env);
+            req.model = Some(&model);
+            req.computer_use = computer_use;
+            let servers = serde_yaml::from_str("remote:\n  type: http\n  url: https://example.invalid/mcp\n").unwrap();
+            if remote { req.mcp_servers = &servers; }
+            for entries in [&[][..], &["preflight/safe"][..], &["preflight/main:low"][..], &["provider/*"][..]] {
+                let result = run_sdk_with_fallback(&req, sdk, ModelReferenceFormat::for_sdk(sdk), Some(fast_policy(&[("default", entries)])), |owner, _| {
+                    assert_eq!(owner, sdk);
+                    Ok(canned(vec![StreamChunk::Done("ok".into())]))
+                }).await;
+                assert!(result.is_ok(), "effective candidates must pass preflight: {result:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_capability_validation_checks_nonprimary_sdk_before_start() {
+        let model: ModelSpec = serde_yaml::from_str(
+            "[runtime/capability, {sdk: claude, model: runtime/capability-tail}]",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model = Some(&model);
+        req.computer_use = true;
+        let mut started = false;
+        let result = run_sdk_with_fallback(
+            &req,
+            Sdk::Jcode,
+            ModelReferenceFormat::LegacyEffort,
+            Some(fast_policy(&[])),
+            |_, _| {
+                started = true;
+                Ok(canned(vec![StreamChunk::Done(String::new())]))
+            },
+        )
+        .await;
+        assert!(!started);
+        assert!(result.is_err_and(|error| error.to_string().to_lowercase().contains("claude")));
+    }
+
     // -- Executor dispatch ----------------------------------------------------
+
+    #[tokio::test]
+    async fn direct_command_request_rejects_sdk_candidates_before_spawning() {
+        let env = HashMap::new();
+        let model: ModelSpec = serde_yaml::from_str("[legacy, {sdk: claude, model: fallback}]")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut req = base_req(&env);
+        req.model = Some(&model);
+        let result = Executor::Command {
+            command: vec!["must-not-start".to_owned()],
+        }
+        .run(req)
+        .await;
+        assert!(matches!(result, Err(CruiseError::InvalidStepConfig(_))));
+    }
+
+    #[tokio::test]
+    async fn direct_request_rejects_unknown_candidate_sdk_before_spawning() {
+        let env = HashMap::new();
+        let model: ModelSpec = serde_yaml::from_str("[{sdk: unknown, model: fallback}]")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut req = base_req(&env);
+        req.model = Some(&model);
+        assert!(matches!(
+            Executor::Jcode.run(req).await,
+            Err(CruiseError::InvalidStepConfig(_))
+        ));
+    }
 
     fn command_executor() -> Executor {
         Executor::Command {
@@ -791,6 +974,25 @@ mod tests {
 
     fn jcode_executor() -> Executor {
         Executor::Jcode
+    }
+
+    #[test]
+    fn normalized_step_overrides_match_capability_selection() {
+        for (sdk, global, step, expected_len) in [
+            (Sdk::Jcode, "[provider/main:high, fallback]", "provider/main:low", 2),
+            (Sdk::OpenCode, "[provider/main#slow, fallback]", "provider/main#fast", 2),
+            (Sdk::Jcode, "[provider/main:high, fallback]", "provider/other:low", 1),
+            (Sdk::Jcode, "[{sdk: claude, model: provider/main:high}, fallback]", "provider/main:low", 1),
+        ] {
+            let global: ModelSpec = serde_yaml::from_str(global).unwrap();
+            let executor = Executor::new(Some(sdk.as_str()), &[]);
+            let selected = executor.step_model(Some(step), Some(&global)).unwrap();
+            let execution = resolve_candidates(Some(&selected), sdk);
+            let capability = crate::model_selection::select_step_model(Some(&global), Some(step), sdk);
+            assert_eq!(execution, capability);
+            assert_eq!(execution.len(), expected_len);
+            assert_eq!(execution[0].model.as_deref(), Some(step));
+        }
     }
 
     #[test]
@@ -829,7 +1031,7 @@ mod tests {
         let result = e
             .run(PromptRun {
                 prompt: "hi",
-                model_or_mode: None,
+                model: None,
                 max_retries: 0,
                 env: &env,
                 mcp_servers: &EMPTY_MCP_SERVERS,
@@ -857,10 +1059,10 @@ mod tests {
     fn command_step_model_passes_through_model_name() {
         let e = command_executor();
         assert_eq!(
-            e.step_model_or_mode(Some("sonnet"), Some("opus")),
-            Some("sonnet".to_string())
+            e.step_model(Some("sonnet"), fixture_model(Some("opus"))),
+            Some(ModelSpec::Single("sonnet".to_string()))
         );
-        assert_eq!(e.step_model_or_mode(None, None), None);
+        assert_eq!(e.step_model(None, None), None);
     }
 
     #[test]
@@ -869,15 +1071,15 @@ mod tests {
         // `claude --model` name.
         let e = claude_executor();
         assert_eq!(
-            e.step_model_or_mode(Some("claude-sonnet-4-6:high"), Some("opus")),
-            Some("claude-sonnet-4-6:high".to_string())
+            e.step_model(Some("claude-sonnet-4-6:high"), fixture_model(Some("opus"))),
+            Some(ModelSpec::Single("claude-sonnet-4-6:high".to_string()))
         );
-        assert_eq!(e.step_model_or_mode(None, None), None);
+        assert_eq!(e.step_model(None, None), None);
         assert_eq!(
-            e.plan_model_or_mode(Some("claude-opus-4-6"), None),
-            Some("claude-opus-4-6".to_string())
+            Executor::plan_model(fixture_model(Some("claude-opus-4-6")), None),
+            Some(ModelSpec::Single("claude-opus-4-6".to_string()))
         );
-        assert_eq!(e.plan_model_or_mode(None, None), None);
+        assert_eq!(Executor::plan_model(None, None), None);
     }
 
     #[test]
@@ -893,21 +1095,27 @@ mod tests {
         // `provider/model[:effort]` reference in jcode's own namespace.
         let e = jcode_executor();
         assert_eq!(
-            e.step_model_or_mode(Some("claude/claude-opus-5:high"), Some("openai/gpt-5.6")),
-            Some("claude/claude-opus-5:high".to_string())
+            e.step_model(
+                Some("claude/claude-opus-5:high"),
+                fixture_model(Some("openai/gpt-5.6"))
+            ),
+            Some(ModelSpec::Single("claude/claude-opus-5:high".to_string()))
         );
-        assert_eq!(e.step_model_or_mode(None, None), None);
+        assert_eq!(e.step_model(None, None), None);
         assert_eq!(
-            e.plan_model_or_mode(Some("openai/gpt-5.6"), Some("claude/claude-opus-5")),
-            Some("openai/gpt-5.6".to_string())
+            Executor::plan_model(
+                fixture_model(Some("openai/gpt-5.6")),
+                fixture_model(Some("claude/claude-opus-5"))
+            ),
+            Some(ModelSpec::Single("openai/gpt-5.6".to_string()))
         );
-        assert_eq!(e.plan_model_or_mode(None, None), None);
+        assert_eq!(Executor::plan_model(None, None), None);
     }
 
     fn base_req(env: &HashMap<String, String>) -> PromptRun<'_> {
         PromptRun {
             prompt: "hi",
-            model_or_mode: None,
+            model: None,
             max_retries: 0,
             env,
             mcp_servers: &EMPTY_MCP_SERVERS,
@@ -962,8 +1170,8 @@ mod tests {
     fn build_claude_config_splits_effort_suffix_off_the_model() {
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("claude-sonnet-4-6:xhigh");
-        let config = build_claude_config(&req, req.model_or_mode);
+        req.model = fixture_model(Some("claude-sonnet-4-6:xhigh"));
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary));
         assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(config.effort, Some(EffortLevel::XHigh));
     }
@@ -972,7 +1180,7 @@ mod tests {
     fn build_claude_config_leaves_model_unset_so_the_cli_picks_its_default() {
         let env = HashMap::new();
         let req = base_req(&env);
-        let config = build_claude_config(&req, req.model_or_mode);
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary));
         assert_eq!(config.model, None);
         assert_eq!(config.effort, None);
     }
@@ -998,7 +1206,7 @@ mod tests {
         let dir = std::path::PathBuf::from("/tmp/cruise-claude-test");
         let req = PromptRun {
             prompt: "hi",
-            model_or_mode: Some("claude-opus-4-6"),
+            model: fixture_model(Some("claude-opus-4-6")),
             max_retries: 0,
             env: &env,
             mcp_servers: &mcp_servers,
@@ -1008,11 +1216,14 @@ mod tests {
             stream: None,
             tools: vec![tool],
             on_session_id: None,
-            resume: Some("sess-1".to_string()),
+            resume: Some(SdkSessionId {
+                sdk: Sdk::Claude,
+                id: "sess-1".to_string(),
+            }),
             computer_use: false,
             permission: crate::config::PermissionMode::Full,
         };
-        let config = build_claude_config(&req, req.model_or_mode);
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary));
         assert_eq!(config.cwd, Some(dir));
         assert_eq!(config.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(config.resume_session_id.as_deref(), Some("sess-1"));
@@ -1025,7 +1236,7 @@ mod tests {
     fn build_jcode_config_forwards_mcp_servers() {
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-provider/test-model");
+        req.model = fixture_model(Some("test-provider/test-model"));
         let mut mcp_servers = crate::config::McpServers::new();
         mcp_servers.insert(
             "local_tool".to_string(),
@@ -1036,8 +1247,8 @@ mod tests {
         );
         req.mcp_servers = &mcp_servers;
 
-        let config =
-            build_jcode_config(&req, req.model_or_mode).unwrap_or_else(|error| panic!("{error}"));
+        let config = build_jcode_config(&req, req.model.and_then(ModelSpec::primary))
+            .unwrap_or_else(|error| panic!("{error}"));
 
         assert_eq!(config.mcp_servers, mcp_servers);
         assert_eq!(config.provider.as_deref(), Some("test-provider"));
@@ -1093,7 +1304,10 @@ mod tests {
         }
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.resume = Some("existing-session-id".to_string());
+        req.resume = Some(SdkSessionId {
+            sdk: Sdk::Jcode,
+            id: "existing-session-id".to_string(),
+        });
 
         let result =
             crate::retry::with_active_policy(Some(fast_policy(&[])), jcode_executor().run(req))
@@ -1270,7 +1484,7 @@ mod tests {
     async fn retry_barrier_prevents_replay_without_an_output_sink() {
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("barrier/model:tag#precise");
+        req.model = fixture_model(Some("barrier/model:tag#precise"));
         req.max_retries = 3;
         let mut attempts = 0;
         let result = run_with_fallback(
@@ -1376,7 +1590,7 @@ mod tests {
         };
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("opencode-zen/muse-spark-1.3-contributor-free:xhigh");
+        req.model = fixture_model(Some("opencode-zen/muse-spark-1.3-contributor-free:xhigh"));
         req.on_notice = Some(&on_notice);
         req.stream = Some(&stream);
 
@@ -1387,7 +1601,7 @@ mod tests {
             ModelReferenceFormat::LegacyEffort,
             None,
             |model| {
-                assert_eq!(model, req.model_or_mode);
+                assert_eq!(model, req.model.and_then(ModelSpec::primary));
                 record(&start_events, "backend-start");
                 Ok(canned(vec![
                     StreamChunk::Session("session-1".to_string()),
@@ -1401,7 +1615,13 @@ mod tests {
 
         assert_eq!(outcome.result.output, "assistant result");
         assert_eq!(outcome.result.stderr, "");
-        assert_eq!(outcome.session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            outcome
+                .session_id
+                .as_ref()
+                .map(|session| session.id.as_str()),
+            Some("session-1")
+        );
         assert_eq!(
             recorded(&notices),
             ["Model: opencode-zen/muse-spark-1.3-contributor-free:xhigh"]
@@ -1465,7 +1685,7 @@ mod tests {
             let outcome = executor
                 .run(PromptRun {
                     prompt: "assistant output",
-                    model_or_mode: model,
+                    model: fixture_model(model),
                     max_retries: 0,
                     env: &env,
                     mcp_servers: &EMPTY_MCP_SERVERS,
@@ -1494,10 +1714,14 @@ mod tests {
     async fn resolved_step_and_plan_overrides_are_the_model_notice_source() {
         let executor = jcode_executor();
         let selected_models = [
-            executor
-                .step_model_or_mode(Some("step/provider/model:free:xhigh"), Some("global/model")),
-            executor
-                .plan_model_or_mode(Some("plan/provider/model:free:xhigh"), Some("global/model")),
+            executor.step_model(
+                Some("step/provider/model:free:xhigh"),
+                fixture_model(Some("global/model")),
+            ),
+            Executor::plan_model(
+                fixture_model(Some("plan/provider/model:free:xhigh")),
+                fixture_model(Some("global/model")),
+            ),
         ];
 
         for selected in selected_models {
@@ -1507,7 +1731,7 @@ mod tests {
             let on_notice = move |msg: &str| record(&notices_sink, msg);
             let env = HashMap::new();
             let mut req = base_req(&env);
-            req.model_or_mode = Some(selected.as_str());
+            req.model = Some(&selected);
             req.on_notice = Some(&on_notice);
 
             run_with_fallback(
@@ -1520,7 +1744,15 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("override run failed: {e}"));
 
-            assert_eq!(recorded(&notices), [format!("Model: {selected}")]);
+            assert_eq!(
+                recorded(&notices),
+                [format!(
+                    "Model: {}",
+                    selected
+                        .primary()
+                        .unwrap_or_else(|| panic!("selected model must be present"))
+                )]
+            );
         }
     }
 
@@ -1533,7 +1765,7 @@ mod tests {
         let on_notice = move |msg: &str| record(&notices_sink, msg);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-executor-same-retry/model");
+        req.model = fixture_model(Some("test-executor-same-retry/model"));
         req.max_retries = 1;
         req.on_notice = Some(&on_notice);
 
@@ -1593,7 +1825,7 @@ mod tests {
         let on_notice = move |msg: &str| record(&notices_sink, msg);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("opencode-zen/muse-spark-1.3-contributor-free:xhigh");
+        req.model = fixture_model(Some("opencode-zen/muse-spark-1.3-contributor-free:xhigh"));
         req.max_retries = 1;
         req.on_notice = Some(&on_notice);
 
@@ -1658,7 +1890,7 @@ mod tests {
         let on_notice = move |msg: &str| record(&notices_sink, msg);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-smoke-400/primary");
+        req.model = fixture_model(Some("test-smoke-400/primary"));
         req.max_retries = 2;
         req.on_notice = Some(&on_notice);
 
@@ -1705,7 +1937,7 @@ mod tests {
         let policy = fast_policy(&[(primary, &[spare])]);
         let env = HashMap::new();
         let mut first = base_req(&env);
-        first.model_or_mode = Some(primary);
+        first.model = fixture_model(Some(primary));
         first.max_retries = 1;
 
         run_with_fallback(
@@ -1730,7 +1962,7 @@ mod tests {
         let models = recorder();
         let models_sink = Arc::clone(&models);
         let mut second = base_req(&env);
-        second.model_or_mode = Some(primary);
+        second.model = fixture_model(Some(primary));
         second.on_notice = Some(&on_notice);
 
         run_with_fallback(
@@ -1778,7 +2010,7 @@ mod tests {
         for model in [primary, spare] {
             let env = HashMap::new();
             let mut cooling_run = base_req(&env);
-            cooling_run.model_or_mode = Some(model);
+            cooling_run.model = fixture_model(Some(model));
             let _ = run_with_fallback(
                 &cooling_run,
                 "jcode",
@@ -1794,7 +2026,7 @@ mod tests {
         let on_notice = move |msg: &str| record(&notices_sink, msg);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some(primary);
+        req.model = fixture_model(Some(primary));
         req.on_notice = Some(&on_notice);
 
         let Err(error) = run_with_fallback(
@@ -1827,7 +2059,7 @@ mod tests {
         let on_notice = move |msg: &str| record(&notices_sink, msg);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-executor-budget/primary");
+        req.model = fixture_model(Some("test-executor-budget/primary"));
         req.max_retries = 1;
         req.on_notice = Some(&on_notice);
 
@@ -1890,7 +2122,7 @@ mod tests {
         let models_sink = Arc::clone(&models);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-executor-zero/primary");
+        req.model = fixture_model(Some("test-executor-zero/primary"));
 
         let Err(error) = run_with_fallback(
             &req,
@@ -1927,7 +2159,7 @@ mod tests {
         };
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-executor-streamed/primary");
+        req.model = fixture_model(Some("test-executor-streamed/primary"));
         req.max_retries = 1;
         req.stream = Some(&stream);
 
@@ -1972,7 +2204,7 @@ mod tests {
         let models_sink = Arc::clone(&models);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-executor-no-sink/primary");
+        req.model = fixture_model(Some("test-executor-no-sink/primary"));
         req.max_retries = 1;
 
         let outcome = run_with_fallback(
@@ -2018,7 +2250,7 @@ mod tests {
         let on_notice = move |msg: &str| record(&notices_sink, msg);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-executor-unusable/primary");
+        req.model = fixture_model(Some("test-executor-unusable/primary"));
         req.on_notice = Some(&on_notice);
 
         let outcome = run_with_fallback(
@@ -2080,7 +2312,7 @@ mod tests {
         let started_sink = Arc::clone(&started);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-primary/model");
+        req.model = fixture_model(Some("test-primary/model"));
         req.max_retries = 1;
 
         let policy = fast_policy(&[("test-primary/model", &[":high", "test-next/model"])]);
@@ -2142,7 +2374,7 @@ mod tests {
         }
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("provider/");
+        req.model = fixture_model(Some("provider/"));
 
         let result = jcode_executor().run(req).await;
 
@@ -2160,7 +2392,7 @@ mod tests {
     async fn an_undispatchable_model_reference_without_a_chain_surfaces_its_error() {
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-executor-no-chain/primary");
+        req.model = fixture_model(Some("test-executor-no-chain/primary"));
 
         let Err(error) = run_with_fallback(
             &req,
@@ -2193,7 +2425,7 @@ mod tests {
         };
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-executor-cancel/primary");
+        req.model = fixture_model(Some("test-executor-cancel/primary"));
         req.on_notice = Some(&on_notice);
         req.cancel_token = Some(&token);
 
@@ -2229,7 +2461,7 @@ mod tests {
         let models_sink = Arc::clone(&models);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-executor-no-callback/primary");
+        req.model = fixture_model(Some("test-executor-no-callback/primary"));
         req.max_retries = 1;
 
         let outcome = run_with_fallback(
@@ -2270,7 +2502,7 @@ mod tests {
         let models_sink = Arc::clone(&models);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model_or_mode = Some("test-executor-closed/primary");
+        req.model = fixture_model(Some("test-executor-closed/primary"));
         req.max_retries = 3;
 
         let Err(error) = run_with_fallback(
@@ -2320,7 +2552,7 @@ mod tests {
         executor
             .run(PromptRun {
                 prompt: "go",
-                model_or_mode: None,
+                model: None,
                 max_retries: 0,
                 env: &env,
                 mcp_servers: &EMPTY_MCP_SERVERS,

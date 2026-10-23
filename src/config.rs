@@ -1,3 +1,4 @@
+use crate::model_selection::applicable_sdks;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -213,6 +214,44 @@ pub enum StringOrVec {
     Multiple(Vec<String>),
 }
 
+/// One model-list element, retaining its original serialized representation.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ModelEntry {
+    String(String),
+    SdkModel(SdkModel),
+}
+
+/// An explicit SDK override for a single candidate.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SdkModel {
+    pub sdk: String,
+    pub model: String,
+}
+
+impl ModelEntry {
+    #[must_use]
+    pub fn model(&self) -> &str {
+        match self {
+            Self::String(model) => model,
+            Self::SdkModel(entry) => &entry.model,
+        }
+    }
+}
+
+impl From<String> for ModelEntry {
+    fn from(model: String) -> Self {
+        Self::String(model)
+    }
+}
+
+impl From<&str> for ModelEntry {
+    fn from(model: &str) -> Self {
+        Self::String(model.to_owned())
+    }
+}
+
 impl StringOrVec {
     /// Return the configured strings as a borrowed slice.
     #[must_use]
@@ -244,7 +283,7 @@ pub enum ModelSpec {
     /// One model reference.
     Single(String),
     /// The first model is primary; later entries are fallbacks in order.
-    Multiple(Vec<String>),
+    Multiple(Vec<ModelEntry>),
 }
 
 impl ModelSpec {
@@ -253,17 +292,34 @@ impl ModelSpec {
     pub fn primary(&self) -> Option<&str> {
         match self {
             Self::Single(model) => Some(model),
-            Self::Multiple(models) => models.first().map(String::as_str),
+            Self::Multiple(models) => models.first().map(ModelEntry::model),
         }
     }
 
-    /// Return the model references after the primary, in fallback order.
-    #[must_use]
-    pub fn fallback_chain(&self) -> Vec<String> {
-        match self {
-            Self::Single(_) => Vec::new(),
-            Self::Multiple(models) => models.iter().skip(1).cloned().collect(),
+    /// Validate explicit SDK objects without tightening legacy string inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported SDKs or blank object model values.
+    pub fn validate(&self, field: &str) -> crate::error::Result<()> {
+        if let Self::Multiple(entries) = self {
+            for (index, entry) in entries.iter().enumerate() {
+                if let ModelEntry::SdkModel(entry) = entry {
+                    validate_sdk_name(&entry.sdk, &format!("{field}[{index}].sdk"))?;
+                    if entry.model.trim().is_empty() {
+                        return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                            "`{field}[{index}].model` must not be blank"
+                        )));
+                    }
+                }
+            }
         }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn has_sdk_overrides(&self) -> bool {
+        matches!(self, Self::Multiple(entries) if entries.iter().any(|entry| matches!(entry, ModelEntry::SdkModel(_))))
     }
 }
 
@@ -673,17 +729,13 @@ impl WorkflowConfig {
         serde_yaml::from_str(yaml)
     }
 
-    /// Derive fallback policy entries from workflow-level model arrays.
+    /// Enable fallback policy for workflow-level model arrays.
     ///
     /// Explicit chains remain authoritative. A model array with at least one
-    /// fallback creates the retry policy when necessary, adds only missing
-    /// model-specific entries, and enables model fallback.
+    /// fallback creates the retry policy when necessary and enables model
+    /// fallback. Implicit candidates stay attached to their originating request
+    /// instead of leaking into a model-name-keyed shared map.
     fn resolve_model_fallbacks(&mut self) {
-        let format = if self.sdk.as_deref() == Some("opencode") {
-            crate::retry::ModelReferenceFormat::OpenCode
-        } else {
-            crate::retry::ModelReferenceFormat::LegacyEffort
-        };
         let model_specs = [self.model.as_ref(), self.plan_model.as_ref()];
         if !model_specs.iter().any(|spec| {
             spec.as_ref()
@@ -699,31 +751,6 @@ impl WorkflowConfig {
             fallback_chains: HashMap::new(),
         });
         retry.model_fallback = true;
-        for spec in model_specs.into_iter().flatten() {
-            let Some(primary) = spec.primary() else {
-                continue;
-            };
-            let chain = spec.fallback_chain();
-            if chain.is_empty() {
-                continue;
-            }
-            // Use the same backend-specific base key as `chain_for`, while
-            // retaining raw-exact, base-exact, provider and default precedence.
-            let primary_key = format.split(primary).0;
-            let has_explicit_chain = retry.fallback_chains.contains_key(primary)
-                || retry.fallback_chains.contains_key(primary_key)
-                || primary_key.split_once('/').is_some_and(|(provider, _)| {
-                    retry
-                        .fallback_chains
-                        .contains_key(&format!("{provider}{}", crate::retry::WILDCARD_SUFFIX))
-                })
-                || retry
-                    .fallback_chains
-                    .contains_key(crate::retry::DEFAULT_CHAIN_KEY);
-            if !has_explicit_chain {
-                retry.fallback_chains.insert(primary_key.to_string(), chain);
-            }
-        }
     }
 
     /// Resolve the effective PR language.
@@ -1085,8 +1112,8 @@ fn validate_mcp_servers(config: &WorkflowConfig) -> crate::error::Result<()> {
         ));
     }
 
-    let uses_jcode = config.sdk.as_deref() == Some("jcode")
-        || (config.sdk.is_none() && config.command.is_empty());
+    let sdks = candidate_sdks(config);
+    let uses_jcode = sdks.contains(&crate::model_selection::Sdk::Jcode);
     for (name, server) in &config.mcp_servers {
         if name.is_empty()
             || !name
@@ -1152,16 +1179,16 @@ fn validate_mcp_servers(config: &WorkflowConfig) -> crate::error::Result<()> {
                         "`mcp_servers.{name}` with a remote transport cannot set `env`"
                     )));
                 }
-                if config.sdk.as_deref() == Some("opencode")
+                if sdks.contains(&crate::model_selection::Sdk::OpenCode)
                     && server.transport() == McpTransport::Sse
                 {
                     return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` uses type `sse`, which the OpenCode V2 backend does not support; use a stdio or Streamable HTTP (`type: http`) server, or `sdk: claude` for SSE"
+                        "`mcp_servers.{name}` uses type `sse`, which the OpenCode V2 backend does not support; use stdio (all SDKs) or Streamable HTTP (`type: http`, Claude/OpenCode only), or ensure every effective applicable candidate uses Claude for SSE. Changing the workflow SDK does not override SDK-qualified objects or authoritative retry-chain candidates"
                     )));
                 }
                 if uses_jcode {
                     return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` uses type `{}`, which the jcode backend does not support (stdio only); use a stdio server or `sdk: claude`",
+                        "`mcp_servers.{name}` uses type `{}`, which the jcode backend does not support (stdio only); every effective applicable candidate must support the transport: stdio supports all SDKs, HTTP requires Claude/OpenCode, and SSE requires Claude. Changing the workflow SDK does not override SDK-qualified objects or authoritative retry-chain candidates",
                         transport_name(server.transport())
                     )));
                 }
@@ -1644,27 +1671,48 @@ const REMOVED_SDKS: &[(&str, &str)] = &[
 /// a removed or otherwise unsupported value.
 pub fn validate_sdk(config: &WorkflowConfig) -> crate::error::Result<()> {
     use crate::error::CruiseError;
+    for (field, spec) in [
+        ("model", config.model.as_ref()),
+        ("plan_model", config.plan_model.as_ref()),
+    ] {
+        if let Some(spec) = spec {
+            spec.validate(field)?;
+            if !config.command.is_empty() && spec.has_sdk_overrides() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "`command` cannot be combined with SDK-qualified `{field}` candidates"
+                )));
+            }
+        }
+    }
     let has_command = !config.command.is_empty();
     match (has_command, config.sdk.as_deref()) {
         (true, Some(_)) => Err(CruiseError::InvalidStepConfig(
             "`sdk` and `command` are mutually exclusive; specify only one".to_string(),
         )),
         (_, None) => Ok(()),
-        (false, Some(sdk)) => {
-            if let Some((_, migration)) = REMOVED_SDKS.iter().find(|(name, _)| *name == sdk) {
-                return Err(CruiseError::InvalidStepConfig(format!(
-                    "`sdk: {sdk}` is no longer supported: {migration}"
-                )));
-            }
-            if !SUPPORTED_SDKS.contains(&sdk) {
-                return Err(CruiseError::InvalidStepConfig(format!(
-                    "unknown `sdk` value '{sdk}'; expected one of: {}",
-                    SUPPORTED_SDKS.join(", ")
-                )));
-            }
-            Ok(())
-        }
+        (false, Some(sdk)) => validate_sdk_name(sdk, "sdk"),
     }
+}
+
+/// Validate SDK names using the same compatibility and migration rules everywhere.
+///
+/// # Errors
+///
+/// Returns an error with migration guidance for removed or unsupported SDKs.
+pub fn validate_sdk_name(sdk: &str, field: &str) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+    if let Some((_, migration)) = REMOVED_SDKS.iter().find(|(name, _)| *name == sdk) {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "`{field}: {sdk}` is no longer supported: {migration}"
+        )));
+    }
+    if !SUPPORTED_SDKS.contains(&sdk) {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "unknown `{field}` value '{sdk}'; expected one of: {}",
+            SUPPORTED_SDKS.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 /// Validate that computer use is enabled only for prompt turns on the jcode backend.
@@ -1674,10 +1722,22 @@ pub fn validate_sdk(config: &WorkflowConfig) -> crate::error::Result<()> {
 /// Returns an error when computer use is requested for an unsupported backend
 /// or is configured on a non-prompt step.
 pub fn validate_computer_use(config: &WorkflowConfig) -> crate::error::Result<()> {
-    let executor = crate::executor::Executor::new(config.sdk.as_deref(), &config.command);
-    let is_jcode = matches!(executor, crate::executor::Executor::Jcode);
-
-    if !is_jcode && config.computer_use() {
+    use crate::model_selection::{Sdk, resolve_candidates, select_step_model};
+    let sdk = Sdk::from_name(config.sdk.as_deref().unwrap_or("jcode")).unwrap_or(Sdk::Jcode);
+    let is_jcode = config.command.is_empty();
+    if config.computer_use()
+        && (!is_jcode
+            || [
+                config.model.as_ref(),
+                crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref()),
+            ]
+            .into_iter()
+            .any(|spec| {
+                applicable_sdks(config, &resolve_candidates(spec, sdk), sdk)
+                    .iter()
+                    .any(|candidate| *candidate != Sdk::Jcode)
+            }))
+    {
         return Err(computer_use_backend_error(config, None));
     }
 
@@ -1687,14 +1747,32 @@ pub fn validate_computer_use(config: &WorkflowConfig) -> crate::error::Result<()
         .chain(&config.after_pr)
         .chain(config.groups.values().flat_map(|group| &group.steps))
     {
-        if !is_jcode && step.computer_use == Some(true) {
+        if step.computer_use.unwrap_or(config.computer_use())
+            && (!is_jcode
+                || applicable_sdks(
+                    config,
+                    &select_step_model(config.model.as_ref(), step.model.as_deref(), sdk),
+                    sdk,
+                )
+                .iter()
+                .any(|candidate| *candidate != Sdk::Jcode))
+        {
             return Err(computer_use_backend_error(config, Some(name)));
         }
         validate_computer_use_step(name, step)?;
         if let Some(children) = &step.parallel {
             for (child_name, child) in children {
                 let path = format!("{name}/{child_name}");
-                if !is_jcode && child.computer_use == Some(true) {
+                if child.computer_use.unwrap_or(config.computer_use())
+                    && (!is_jcode
+                        || applicable_sdks(
+                            config,
+                            &select_step_model(config.model.as_ref(), child.model.as_deref(), sdk),
+                            sdk,
+                        )
+                        .iter()
+                        .any(|candidate| *candidate != Sdk::Jcode))
+                {
                     return Err(computer_use_backend_error(config, Some(&path)));
                 }
                 validate_computer_use_step(&path, child)?;
@@ -1703,6 +1781,42 @@ pub fn validate_computer_use(config: &WorkflowConfig) -> crate::error::Result<()
     }
 
     Ok(())
+}
+
+fn candidate_sdks(
+    config: &WorkflowConfig,
+) -> std::collections::HashSet<crate::model_selection::Sdk> {
+    use crate::model_selection::{Sdk, resolve_candidates, select_step_model};
+    let sdk = Sdk::from_name(config.sdk.as_deref().unwrap_or("jcode")).unwrap_or(Sdk::Jcode);
+    let mut sdks: std::collections::HashSet<_> = [
+        config.model.as_ref(),
+        crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref()),
+    ]
+    .into_iter()
+    .flat_map(|spec| applicable_sdks(config, &resolve_candidates(spec, sdk), sdk))
+    .collect();
+    for (_, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        sdks.extend(applicable_sdks(
+            config,
+            &select_step_model(config.model.as_ref(), step.model.as_deref(), sdk),
+            sdk,
+        ));
+        if let Some(children) = &step.parallel {
+            for child in children.values() {
+                sdks.extend(applicable_sdks(
+                    config,
+                    &select_step_model(config.model.as_ref(), child.model.as_deref(), sdk),
+                    sdk,
+                ));
+            }
+        }
+    }
+    sdks
 }
 
 /// Validate permission modes: prompt-only, unsupported on the command backend
@@ -1787,15 +1901,15 @@ fn computer_use_backend_error(
     );
     if config.sdk.as_deref() == Some("claude") {
         crate::error::CruiseError::InvalidStepConfig(format!(
-            "{subject} is unsupported: Claude Code's computer use is only available in interactive sessions and cannot be enabled by cruise. Remove the computer_use key, or select `sdk: jcode` in the workflow with no `command:` setting"
+            "{subject} is unsupported: Claude Code's computer use is only available in interactive sessions and cannot be enabled by cruise. Remove the computer_use key or ensure every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, uses the jcode backend with no `command:` setting. Changing only the workflow SDK does not override SDK-qualified objects"
         ))
     } else if config.sdk.as_deref() == Some("opencode") {
         crate::error::CruiseError::InvalidStepConfig(format!(
-            "{subject} is unsupported: the OpenCode V2 backend does not support computer_use. Remove the computer_use key or set it to false, or select `sdk: jcode` with no `command:` setting"
+            "{subject} is unsupported: the OpenCode V2 backend does not support computer_use. Remove the computer_use key or set it to false, or ensure every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, uses the jcode backend with no `command:` setting. Changing only the workflow SDK does not override SDK-qualified objects"
         ))
     } else {
         crate::error::CruiseError::InvalidStepConfig(format!(
-            "{subject} is unsupported: computer use requires the jcode backend because a command CLI manages its own tools"
+            "{subject} is unsupported: computer use requires the jcode backend for every effective applicable model candidate, including SDK-qualified objects and authoritative retry-chain entries, with no command backend. Claude and OpenCode candidates cannot enable it. Changing only the workflow SDK does not override SDK-qualified objects"
         ))
     }
 }
@@ -4731,7 +4845,7 @@ steps:
     }
 
     #[test]
-    fn test_schema_workflow_models_accept_string_or_array_of_strings() {
+    fn test_schema_workflow_models_accept_string_or_array_of_entries() {
         let schema = load_schema();
         for field in ["model", "plan_model"] {
             let property = &schema["properties"][field];
@@ -4741,10 +4855,11 @@ steps:
                 .and_then(|variants| variants.iter().find(|variant| variant["type"] == "array"))
                 .unwrap_or_else(|| panic!("{field} must have an array variant"));
             assert_eq!(
-                array_variant["items"]["type"].as_str(),
-                Some("string"),
-                "{field} array items must be strings"
+                array_variant["items"]["$ref"].as_str(),
+                Some("#/$defs/ModelEntry"),
+                "{field} array items must share the mixed-entry definition"
             );
+            assert_oneof_types(&schema["$defs"]["ModelEntry"], &["string", "object"], field);
         }
     }
 
@@ -6209,6 +6324,15 @@ steps:
 ",
             "env",
         );
+    }
+
+    #[test]
+    fn empty_authoritative_chain_excludes_implicit_mcp_owners() {
+        let config = WorkflowConfig::from_yaml("sdk: claude\nmodel: [claude-main, {sdk: jcode, model: unreachable}]\nretry:\n  fallback_chains:\n    default: []\nmcp_servers:\n  remote:\n    type: http\n    url: https://example.invalid/mcp\nsteps:\n  answer:\n    prompt: answer\n").unwrap();
+        // Empty explicit chains remain invalid retry configuration, but they
+        // must not resurrect the implicit tail during capability collection.
+        assert!(validate_retry(&config).is_err());
+        validate_mcp_servers(&config).unwrap();
     }
 
     #[test]

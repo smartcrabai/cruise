@@ -208,13 +208,14 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
     let env = HashMap::new();
     let mcp = cruise::config::McpServers::new();
     let executor = Executor::new(Some("opencode"), &[]);
-    let on_session = |id: &str| {
-        *checkpoint.lock().unwrap_or_else(|e| panic!("{e}")) = Some(id.to_owned());
+    let on_session = |id: &cruise::model_selection::SdkSessionId| {
+        *checkpoint.lock().unwrap_or_else(|e| panic!("{e}")) = Some(id.id.clone());
         Ok(())
     };
+    let selection = cruise::config::ModelSpec::Single("local-smoke/smoke".to_owned());
     let request = |resume, cancel_token| PromptRun {
         prompt: "Run the local acceptance tools, then return LOCAL_V2_SMOKE_OK",
-        model_or_mode: Some("local-smoke/smoke"),
+        model: Some(&selection),
         max_retries: 0,
         env: &env,
         mcp_servers: &mcp,
@@ -253,10 +254,10 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
             .unwrap_or_else(|e| panic!("{e}"))
             .is_empty()
     );
-    let session = first
-        .session_id
-        .as_deref()
-        .unwrap_or_else(|| panic!("real session checkpoint missing"));
+    let session = first.session_id.as_ref().map_or_else(
+        || panic!("real session checkpoint missing"),
+        |session| session.id.as_str(),
+    );
     assert_eq!(
         checkpoint
             .lock()
@@ -292,12 +293,24 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
     ]);
     let second = tokio::time::timeout(
         Duration::from_secs(60),
-        executor.run(request(Some(session.to_owned()), None)),
+        executor.run(request(
+            Some(cruise::model_selection::SdkSessionId {
+                sdk: cruise::model_selection::Sdk::OpenCode,
+                id: session.to_owned(),
+            }),
+            None,
+        )),
     )
     .await
     .unwrap_or_else(|e| panic!("resume timeout: {e}"))
     .unwrap_or_else(|e| panic!("resume: {e}"));
-    assert_eq!(second.session_id.as_deref(), Some(session));
+    assert_eq!(
+        second
+            .session_id
+            .as_ref()
+            .map(|session| session.id.as_str()),
+        Some(session)
+    );
     assert_eq!(second.result.output.trim(), "LOCAL_V2_SMOKE_OK");
     assert!(
         planning
@@ -448,7 +461,13 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
     };
     let (cancelled, ()) = tokio::time::timeout(Duration::from_secs(45), async {
         tokio::join!(
-            executor.run(request(Some(session.to_owned()), Some(&token))),
+            executor.run(request(
+                Some(cruise::model_selection::SdkSessionId {
+                    sdk: cruise::model_selection::Sdk::OpenCode,
+                    id: session.to_owned()
+                }),
+                Some(&token)
+            )),
             cancel
         )
     })

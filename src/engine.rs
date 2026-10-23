@@ -1368,8 +1368,7 @@ pub(crate) async fn run_prompt_step(
     }
 
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
-    let model_or_mode =
-        executor.step_model_or_mode(step.model.as_deref(), compiled.model.as_deref());
+    let model_or_mode = executor.step_model(step.model.as_deref(), compiled.model.as_ref());
     let computer_use = step.computer_use.unwrap_or(compiled.computer_use);
 
     let commit_guard = if allow_commit {
@@ -1432,7 +1431,7 @@ pub(crate) async fn run_prompt_step(
         };
         let run_future = executor.run(crate::executor::PromptRun {
             prompt: &prompt,
-            model_or_mode: model_or_mode.as_deref(),
+            model: model_or_mode.as_ref(),
             max_retries: rate_limit_retries,
             env: prompt_env,
             mcp_servers: &compiled.mcp_servers,
@@ -1579,12 +1578,26 @@ fn print_env_vars(env: &HashMap<String, String>, indent: &str) {
 }
 
 fn print_dry_run_config(config: &WorkflowConfig) {
-    if let Some(model) = config
-        .model
-        .as_ref()
-        .and_then(crate::config::ModelSpec::primary)
-    {
-        println!("model: {model}");
+    for (field, spec) in [
+        ("model", config.model.as_ref()),
+        ("plan_model", config.plan_model.as_ref()),
+    ] {
+        let Some(spec) = spec else { continue };
+        match spec {
+            crate::config::ModelSpec::Single(model) => println!("{field}: {model}"),
+            crate::config::ModelSpec::Multiple(entries) => {
+                println!("{field}:");
+                for entry in entries {
+                    match entry {
+                        crate::config::ModelEntry::String(model) => println!("  - {model}"),
+                        crate::config::ModelEntry::SdkModel(entry) => {
+                            println!("  - sdk: {}", entry.sdk);
+                            println!("    model: {}", entry.model);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if !config.env.is_empty() {

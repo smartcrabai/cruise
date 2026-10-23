@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use cruise::config::{ModelSpec, WorkflowConfig};
+use cruise::config::WorkflowConfig;
 use cruise::retry::active_policy;
 use cruise::test_support::{EnvGuard, ProcessLock, lock_process};
 use cruise::workflow;
@@ -23,6 +23,7 @@ impl ResolutionEnv {
             EnvGuard::set("XDG_CONFIG_HOME", config_dir.as_os_str()),
             EnvGuard::remove("CRUISE_MODEL"),
             EnvGuard::remove("CRUISE_PLAN_MODEL"),
+            EnvGuard::remove("CRUISE_SDK"),
         ];
         Self {
             temp,
@@ -39,6 +40,166 @@ impl ResolutionEnv {
     }
 }
 
+fn model_value(value: &impl serde::Serialize) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or_else(|error| panic!("serialize model selection: {error}"))
+}
+
+#[test]
+fn empty_legacy_candidate_arrays_remain_accepted_in_workflow_and_app_formats() {
+    let _env = ResolutionEnv::new();
+    let config = resolve("model: []\nplan_model: []\nsteps:\n  main:\n    prompt: execute\n");
+    cruise::config::validate_config(&config)
+        .unwrap_or_else(|error| panic!("legacy empty arrays must remain valid: {error}"));
+    assert_eq!(model_value(&config.model), serde_json::json!([]));
+    assert_eq!(model_value(&config.plan_model), serde_json::json!([]));
+    let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    for extension in ["json", "yaml"] {
+        let path = temp.path().join(format!("config.{extension}"));
+        std::fs::write(&path, r#"{"model":[],"plan_model":[]}"#)
+            .unwrap_or_else(|error| panic!("write empty {extension} arrays: {error}"));
+        let app = cruise::app_config::AppConfig::load_from(&path)
+            .unwrap_or_else(|error| panic!("load legacy empty {extension} arrays: {error}"));
+        app.save_to(&path)
+            .unwrap_or_else(|error| panic!("save legacy empty {extension} arrays: {error}"));
+        let loaded = cruise::app_config::AppConfig::load_from(&path)
+            .unwrap_or_else(|error| panic!("reload empty {extension} arrays: {error}"));
+        assert_eq!(model_value(&loaded.model), serde_json::json!([]));
+        assert_eq!(model_value(&loaded.plan_model), serde_json::json!([]));
+    }
+}
+
+#[test]
+fn compile_and_after_pr_keep_distinct_exec_and_plan_candidate_lists() {
+    let _env = ResolutionEnv::new();
+    let model = serde_json::json!([
+        "shared/model:medium",
+        {"sdk": "claude", "model": "exec/fallback:high"},
+        "openrouter/z-ai/glm-5.3-flash:high"
+    ]);
+    let plan_model = serde_json::json!([
+        "shared/model:medium",
+        {"sdk": "claude", "model": "plan/fallback:high"}
+    ]);
+    let yaml = format!(
+        "model: {model}\nplan_model: {plan_model}\nsteps:\n  main:\n    prompt: execute\nafter_pr:\n  review:\n    prompt: review\n"
+    );
+    let compiled = workflow::compile(resolve(&yaml))
+        .unwrap_or_else(|error| panic!("compile mixed candidate lists: {error}"));
+    assert_eq!(model_value(&compiled.model), model);
+    assert_eq!(model_value(&compiled.plan_model), plan_model);
+
+    let after_pr = compiled.to_after_pr_compiled();
+    assert_eq!(model_value(&after_pr.model), model);
+    assert_eq!(model_value(&after_pr.plan_model), plan_model);
+}
+
+#[test]
+fn app_config_json_and_yaml_candidates_survive_runtime_resolution_and_compile() {
+    for extension in ["json", "yaml"] {
+        let env = ResolutionEnv::new();
+        let model = serde_json::json!([
+            "openai/gpt-6.1-sol:medium",
+            {"sdk": "claude", "model": "claude-sonnet-5-5:medium"},
+            "openrouter/z-ai/glm-5.3-flash:high"
+        ]);
+        let plan_model = serde_json::json!([
+            {"sdk": "claude", "model": "planning-primary:high"},
+            "planning/fallback:medium"
+        ]);
+        let path = env
+            .temp
+            .path()
+            .join(format!("config/cruise/config.{extension}"));
+        std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
+            .unwrap_or_else(|error| panic!("create config directory: {error}"));
+        let input = serde_json::json!({"model": model, "plan_model": plan_model});
+        // JSON is valid YAML too. Using the same document exercises both file
+        // loaders without making their candidate semantics diverge.
+        std::fs::write(path, input.to_string())
+            .unwrap_or_else(|error| panic!("write {extension}: {error}"));
+        let resolved = resolve("steps:\n  main:\n    prompt: execute\n");
+        let compiled = workflow::compile(resolved)
+            .unwrap_or_else(|error| panic!("compile {extension} candidates: {error}"));
+        assert_eq!(model_value(&compiled.model), model, "{extension}");
+        assert_eq!(model_value(&compiled.plan_model), plan_model, "{extension}");
+    }
+}
+
+#[test]
+fn mixed_candidates_follow_workflow_then_defaults_then_app_precedence() {
+    let env = ResolutionEnv::new();
+    let app_model = serde_json::json!([{"sdk": "claude", "model": "app-model"}]);
+    let app_plan = serde_json::json!([{"sdk": "claude", "model": "app-plan"}]);
+    env.write_app_config(
+        &serde_json::json!({"model": app_model, "plan_model": app_plan}).to_string(),
+    );
+    let defaults_dir = env.temp.path().join("project/.cruise");
+    std::fs::create_dir_all(&defaults_dir)
+        .unwrap_or_else(|error| panic!("create defaults directory: {error}"));
+    let default_model =
+        serde_json::json!(["default-primary", {"sdk": "claude", "model": "default-tail"}]);
+    std::fs::write(
+        defaults_dir.join("default.yaml"),
+        format!("model: {default_model}\n"),
+    )
+    .unwrap_or_else(|error| panic!("write defaults: {error}"));
+    let project = env.temp.path().join("project");
+    let defaults = WorkflowDefaults::load(Some(&project))
+        .unwrap_or_else(|error| panic!("load mixed defaults: {error}"));
+
+    let inherited = resolve_workflow_calls_with_defaults(
+        WorkflowConfig::from_yaml("steps:\n  main:\n    prompt: execute\n")
+            .unwrap_or_else(|error| panic!("parse workflow: {error}")),
+        &project,
+        &defaults,
+    )
+    .unwrap_or_else(|error| panic!("resolve defaults and app: {error}"));
+    assert_eq!(model_value(&inherited.model), default_model);
+    assert_eq!(model_value(&inherited.plan_model), app_plan);
+
+    let workflow_model =
+        serde_json::json!([{"sdk": "claude", "model": "workflow-primary"}, "workflow-tail"]);
+    let explicit = resolve_workflow_calls_with_defaults(
+        WorkflowConfig::from_yaml(&format!(
+            "model: {workflow_model}\nsteps:\n  main:\n    prompt: execute\n"
+        ))
+        .unwrap_or_else(|error| panic!("parse explicit workflow: {error}")),
+        &project,
+        &defaults,
+    )
+    .unwrap_or_else(|error| panic!("resolve explicit workflow: {error}"));
+    assert_eq!(model_value(&explicit.model), workflow_model);
+    assert_eq!(model_value(&explicit.plan_model), app_plan);
+}
+
+#[test]
+fn environment_model_overrides_replace_whole_mixed_lists_without_stale_fallbacks() {
+    let _env = ResolutionEnv::new();
+    let _model = EnvGuard::set("CRUISE_MODEL", "env/execution:high");
+    let _plan = EnvGuard::set("CRUISE_PLAN_MODEL", "env/planning:medium");
+    let resolved = resolve(
+        "model: [old/primary, {sdk: claude, model: old/fallback}]\nplan_model: [old/plan, {sdk: claude, model: old/plan-fallback}]\nsteps:\n  main:\n    prompt: execute\n",
+    );
+    assert_eq!(
+        model_value(&resolved.model),
+        serde_json::json!("env/execution:high")
+    );
+    assert_eq!(
+        model_value(&resolved.plan_model),
+        serde_json::json!("env/planning:medium")
+    );
+    let compiled = workflow::compile(resolved)
+        .unwrap_or_else(|error| panic!("compile environment overrides: {error}"));
+    assert_eq!(
+        model_value(&compiled.model),
+        serde_json::json!("env/execution:high")
+    );
+    assert_eq!(
+        model_value(&compiled.plan_model),
+        serde_json::json!("env/planning:medium")
+    );
+}
+
 fn resolve(yaml: &str) -> WorkflowConfig {
     let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
     resolve_workflow_calls_with_defaults(config, ".", &WorkflowDefaults::default())
@@ -46,7 +207,7 @@ fn resolve(yaml: &str) -> WorkflowConfig {
 }
 
 #[test]
-fn resolving_array_models_uses_primaries_and_builds_the_fallback_chain() {
+fn resolving_array_models_preserves_candidates_and_enables_fallback() {
     let _env = ResolutionEnv::new();
     let config = resolve(
         r"
@@ -65,8 +226,14 @@ fn resolving_array_models_uses_primaries_and_builds_the_fallback_chain() {
     );
 
     let compiled = workflow::compile(config.clone()).unwrap_or_else(|e| panic!("{e:?}"));
-    assert_eq!(compiled.model.as_deref(), Some("anthropic/primary"));
-    assert_eq!(compiled.plan_model.as_deref(), Some("anthropic/planning"));
+    assert_eq!(
+        model_value(&compiled.model),
+        serde_json::json!(["anthropic/primary", "openai/fallback", "google/last-resort"])
+    );
+    assert_eq!(
+        model_value(&compiled.plan_model),
+        serde_json::json!(["anthropic/planning", "openai/planning-fallback"])
+    );
 
     let retry = config
         .retry
@@ -75,26 +242,6 @@ fn resolving_array_models_uses_primaries_and_builds_the_fallback_chain() {
     assert!(
         retry.model_fallback,
         "array models must enable model fallback"
-    );
-    assert_eq!(
-        retry
-            .fallback_chains
-            .get("anthropic/primary")
-            .map(Vec::as_slice),
-        Some(
-            [
-                "openai/fallback".to_string(),
-                "google/last-resort".to_string(),
-            ]
-            .as_slice()
-        )
-    );
-    assert_eq!(
-        retry
-            .fallback_chains
-            .get("anthropic/planning")
-            .map(Vec::as_slice),
-        Some(["openai/planning-fallback".to_string()].as_slice())
     );
     assert!(
         active_policy().is_some(),
@@ -151,50 +298,23 @@ fn app_config_model_lists_build_primary_and_fallbacks_for_exec_and_planning() {
  ",
     );
 
-    assert_eq!(
-        config.model,
-        Some(ModelSpec::Multiple(vec![
-            "anthropic/app-primary".to_string(),
-            "openai/app-fallback".to_string(),
-            "google/app-last".to_string(),
-        ]))
-    );
-    assert_eq!(
-        config.plan_model,
-        Some(ModelSpec::Multiple(vec![
-            "google/plan-primary".to_string(),
-            "openai/plan-fallback".to_string(),
-        ]))
-    );
+    let expected_model = serde_json::json!([
+        "anthropic/app-primary",
+        "openai/app-fallback",
+        "google/app-last"
+    ]);
+    let expected_plan = serde_json::json!(["google/plan-primary", "openai/plan-fallback"]);
+    assert_eq!(model_value(&config.model), expected_model);
+    assert_eq!(model_value(&config.plan_model), expected_plan);
     let compiled = workflow::compile(config.clone()).unwrap_or_else(|error| panic!("{error:?}"));
-    assert_eq!(compiled.model.as_deref(), Some("anthropic/app-primary"));
-    assert_eq!(compiled.plan_model.as_deref(), Some("google/plan-primary"));
+    assert_eq!(model_value(&compiled.model), expected_model);
+    assert_eq!(model_value(&compiled.plan_model), expected_plan);
 
     let retry = config
         .retry
         .as_ref()
         .unwrap_or_else(|| panic!("app model lists must create a retry policy"));
     assert!(retry.model_fallback);
-    assert_eq!(
-        retry
-            .fallback_chains
-            .get("anthropic/app-primary")
-            .map(Vec::as_slice),
-        Some(
-            [
-                "openai/app-fallback".to_string(),
-                "google/app-last".to_string(),
-            ]
-            .as_slice()
-        )
-    );
-    assert_eq!(
-        retry
-            .fallback_chains
-            .get("google/plan-primary")
-            .map(Vec::as_slice),
-        Some(["openai/plan-fallback".to_string()].as_slice())
-    );
 }
 
 #[test]

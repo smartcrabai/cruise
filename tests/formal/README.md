@@ -1,5 +1,10 @@
 # Checkpoint contract verification
 
+For SDK-qualified model arrays, ordered cross-SDK fallback, resume ownership,
+and production-connected configuration/CLI Gherkin, see `SDK_MODELS.md` and run
+`bash scripts/check_sdk_model_specs.sh`. This suite has its own required native
+PR CI job and uses the same pinned formal toolchain and receipt validator.
+
 For the separate OpenCode V2 admission, retry and lifecycle specifications, see
 `OPENCODE.md` and run `bash scripts/check_opencode_specs.sh`. Both suites are
 required by the provider-native formal CI job. OpenCode execution evidence is

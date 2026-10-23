@@ -81,7 +81,9 @@ impl Fixture {
                 // fake fallback command that could make missing support look correct.
                 Executor::new(Some("opencode"), &[]).run(PromptRun {
                     prompt: "Do not contact a model: startup contract only",
-                    model_or_mode: Some("contract/model"),
+                    model: Some(&cruise::config::ModelSpec::Single(
+                        "contract/model".to_owned(),
+                    )),
                     max_retries: 0,
                     env: &env,
                     mcp_servers: &mcp,

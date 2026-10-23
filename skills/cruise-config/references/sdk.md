@@ -23,6 +23,20 @@ steps:
 
 ## Model fields are plain model references
 
+Workflow and app-config `model` and `plan_model` arrays may mix strings with strict `{sdk, model}` objects:
+
+```yaml
+model:
+  - openai/gpt-6.1-sol:medium
+  - sdk: claude
+    model: claude-sonnet-5-5:medium
+  - openrouter/z-ai/glm-5.3-flash:high
+```
+
+String entries always inherit the workflow's effective SDK, not the preceding object's SDK. Without `sdk` or `command`, that SDK is jcode. Objects select `jcode`, `claude`, or the existing `opencode` backend for that entry only. `openai/` and `openrouter/` remain model-provider prefixes. Each object requires both nonblank fields and rejects unknown keys. Standalone model objects and per-step SDK fields are not supported. The JSON equivalent uses the same array of strings and objects, and saving preserves their original forms.
+
+Any SDK object conflicts with `command`, including fallback and `plan_model` entries. String-only command arrays still use only the primary. `CRUISE_MODEL` and `CRUISE_PLAN_MODEL` replace whole lists, while `CRUISE_SDK` changes string inheritance without changing explicit objects. Explicit string-only `retry.fallback_chains` take precedence. Cooldown and candidate identity distinguish SDKs even for identical model names. Only the owning SDK receives the caller's saved resume ID. Another SDK starts without it, and returning to the original owner may reuse that original ID and its retained storage. Newly emitted IDs from failed attempts are not forwarded to subsequent attempts. All applicable candidates must support the request: computer use requires jcode, jcode accepts only stdio MCP, and OpenCode rejects SSE. A step model override does not inherit an unrelated global fallback list.
+
 In all SDK backends, `model` / `plan_model` / per-step `model` carry the same precedence as command mode (step `model` > top-level `model` / `plan_model`). Workflow-level `model` and `plan_model` may be arrays: the first entry is primary and the remaining entries are an implicit fallback chain. Arrays with fallback entries enable model fallback automatically; explicit `retry.fallback_chains` entries for a primary model take precedence. A 429 retries the current model while its retry budget and delay permit, while a 5xx, an HTTP 4xx other than 429, 401, 403, 407, and 408, or a network failure switches immediately to a usable fallback when `--rate-limit-retries` is above zero and no visible text was streamed. Such a 4xx is never resent to the same model — an identical request would fail identically — so it either switches or surfaces as-is; 401, 403, and 407 are auth or permission failures another model cannot fix and fail the step at once, and a 408 is treated as a network failure, so it switches to a usable fallback first exactly like a 5xx and is resent to the same model only when no usable fallback is left, visible text was already streamed, or `--rate-limit-retries` is `0`. Models skipped after a 429, a 5xx, or a network failure (a 408 included) are cooled down for 30 minutes in the current process, and so are models the provider named as missing (`400 model_not_supported`, `404 model_not_found`); only a model left behind by a plain client-error switch is not. Each scalar value is a model reference:
 
 | Form | Example | Behavior |
@@ -102,7 +116,7 @@ Command and option steps behave identically in both modes.
 
 ## MCP servers
 
-The optional top-level `mcp_servers` map configures servers for all SDK prompt runs: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It is not a per-step setting, and a `workflow_call` callee's top-level MCP settings are ignored. Stdio entries work with all three SDK backends and the default jcode backend. Streamable HTTP entries work with `sdk: claude` and `sdk: opencode`. Legacy SSE requires `sdk: claude`; OpenCode V2 explicitly rejects it and jcode supports stdio only.
+The optional top-level `mcp_servers` map configures servers for all SDK prompt runs: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It is not a per-step setting, and a `workflow_call` callee's top-level MCP settings are ignored. Every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, must support the transport: stdio supports all SDKs, Streamable HTTP requires Claude or OpenCode, and legacy SSE requires Claude. Changing the workflow SDK does not override SDK-qualified objects. MCP servers cannot be used with the command backend.
 
 ```yaml
 sdk: claude

@@ -1528,7 +1528,9 @@ struct PlanContext {
     staged_plan_path: PathBuf,
     old_plan: Option<Vec<u8>>,
     key: Option<String>,
-    resume: Option<String>,
+    resume: Option<crate::model_selection::SdkSessionId>,
+    retain_conversation: bool,
+    cleanup: Arc<crate::backend::conversation::DeferredCleanup>,
 }
 
 fn planning_operation_allowed(state: &SessionState, operation: OperationKind) -> bool {
@@ -1586,6 +1588,8 @@ fn start_plan_context(
         old_plan,
         key: None,
         resume: None,
+        retain_conversation: false,
+        cleanup: Arc::new(crate::backend::conversation::DeferredCleanup::new(manager.clone(), id.to_string())),
     })
 }
 
@@ -1695,18 +1699,8 @@ async fn prepare_plan(
         .config
         .stable_identity(context.state.repo.as_deref(), &context.state.id);
     let key = crate::planning::plan_conversation_key(&config, &identity);
-    context.resume = if context.state.plan_conversation_key.as_deref() == Some(key.as_str())
-        && context
-            .state
-            .plan_conversation_backend
-            .as_deref()
-            .unwrap_or("jcode")
-            == config.sdk.as_deref().unwrap_or("jcode")
-    {
-        context.state.plan_conversation_id.clone()
-    } else {
-        None
-    };
+    context.resume = crate::planning::saved_plan_session(&context.state, &config);
+    context.retain_conversation = crate::planning::sdk_plan_tools_enabled(&config);
     context.key = Some(key);
     // Only the backend checkpoint may associate a key with a conversation ID.
     // Saving a new key here would relabel an old ID if startup fails.
@@ -1773,11 +1767,16 @@ fn plan_checkpoint_callback(
     manager: SessionManager,
     id: String,
     key: String,
-    backend: Option<String>,
     source_home: Option<PathBuf>,
     token: CancellationToken,
-) -> impl Fn(&str) -> Result<()> + Send + Sync + 'static {
-    move |backend_id: &str| {
+    cleanup: Arc<crate::backend::conversation::DeferredCleanup>,
+) -> impl Fn(&crate::model_selection::SdkSessionId) -> Result<()> + Send + Sync + 'static {
+    move |conversation: &crate::model_selection::SdkSessionId| {
+        let backend_id = conversation.id.as_str();
+        let backend = Some(conversation.sdk.as_str().to_owned());
+        let source_home = (conversation.sdk == crate::model_selection::Sdk::Jcode)
+            .then(|| source_home.clone())
+            .flatten();
         if token.is_cancelled() {
             return Err(CruiseError::Interrupted);
         }
@@ -1791,17 +1790,12 @@ fn plan_checkpoint_callback(
                     != backend.as_deref().unwrap_or("jcode")
                 || state.plan_conversation_home != source_home)
         {
-            crate::backend::conversation::cleanup(
-                state.plan_conversation_backend.as_deref(),
-                previous_id,
-                state.plan_conversation_home.as_deref(),
-                state.worktree_path.as_deref().or(Some(&state.base_dir)),
-            )?;
+            cleanup.defer(&state);
         }
         state.plan_conversation_id = Some(backend_id.to_string());
-        state.plan_conversation_backend.clone_from(&backend);
+        state.plan_conversation_backend = backend;
         state.plan_conversation_key = Some(key.clone());
-        state.plan_conversation_home.clone_from(&source_home);
+        state.plan_conversation_home = source_home;
         manager.save(&state)
     }
 }
@@ -1860,18 +1854,16 @@ async fn run_plan_prompt(
         on_stderr: Some(&on_stderr),
     };
     let token = context.claim.token();
-    let jcode_source_home = matches!(
-        crate::executor::Executor::new(config.sdk.as_deref(), &config.command),
-        crate::executor::Executor::Jcode
-    )
-    .then(|| crate::backend::jcode::resolve_source_home(Some(&context.state.base_dir)));
+    let jcode_source_home = Some(crate::backend::jcode::resolve_source_home(Some(
+        &context.state.base_dir,
+    )));
     let on_session_id = plan_checkpoint_callback(
         manager.clone(),
         context.state.id.clone(),
         context.key.clone().unwrap_or_default(),
-        Some(config.sdk.as_deref().unwrap_or("jcode").to_string()),
         jcode_source_home,
         token.clone(),
+        Arc::clone(&context.cleanup),
     );
     let ctx = crate::planning::PlanPromptCtx {
         config,
@@ -1882,7 +1874,7 @@ async fn run_plan_prompt(
         rate_limit_retries: request.rate_limit_retries,
         working_dir: Some(&context.state.base_dir),
         grill: request.grill,
-        on_session_id: Some(&on_session_id),
+        on_session_id: context.retain_conversation.then_some(&on_session_id),
         on_notice: Some(&on_notice),
         cancel_token: Some(&token),
     };
@@ -2081,10 +2073,19 @@ fn finish_plan(
             SessionPhase::AwaitingApproval
         };
         let checkpoint = manager.load(&id)?;
-        let checkpoint_matches =
-            checkpoint.plan_conversation_key.as_deref() == context.key.as_deref();
+        let retained = context
+            .resume
+            .as_ref()
+            .filter(|_| context.retain_conversation);
+        let checkpoint_matches = context.retain_conversation
+            && checkpoint.plan_conversation_key.as_deref() == context.key.as_deref()
+            && retained.is_none_or(|conversation| {
+                checkpoint.plan_conversation_id.as_deref() == Some(conversation.id.as_str())
+                    && checkpoint.plan_conversation_backend.as_deref()
+                        == Some(conversation.sdk.as_str())
+            });
         if !checkpoint_matches
-            && context.resume.is_none()
+            && retained.is_none()
             && let Some(previous_id) = checkpoint.plan_conversation_id.as_deref()
         {
             crate::backend::conversation::cleanup(
@@ -2097,24 +2098,33 @@ fn finish_plan(
                     .or(Some(&checkpoint.base_dir)),
             )?;
         }
-        context.state.plan_conversation_id = context.resume.clone().or_else(|| {
-            if checkpoint_matches {
-                checkpoint.plan_conversation_id.clone()
+        context.state.plan_conversation_id =
+            retained.map(|session| session.id.clone()).or_else(|| {
+                if checkpoint_matches {
+                    checkpoint.plan_conversation_id
+                } else {
+                    None
+                }
+            });
+        context.state.plan_conversation_backend = retained
+            .map(|session| session.sdk.as_str().to_owned())
+            .or(if checkpoint_matches {
+                checkpoint.plan_conversation_backend
             } else {
                 None
-            }
-        });
-        context.state.plan_conversation_backend = if checkpoint_matches {
-            checkpoint.plan_conversation_backend
-        } else {
-            None
-        };
-        context.state.plan_conversation_home = if checkpoint_matches {
+            });
+        context.state.plan_conversation_home = if checkpoint_matches
+            && context.state.plan_conversation_backend.as_deref() == Some("jcode")
+        {
             checkpoint.plan_conversation_home
         } else {
             None
         };
-        context.state.plan_conversation_key = context.key.clone();
+        context.state.plan_conversation_key = if context.retain_conversation {
+            context.key.clone()
+        } else {
+            None
+        };
         context.state.clear_pending_input();
     }
     context.state.plan_error = None;
@@ -4276,6 +4286,46 @@ mod tests {
     }
 
     #[test]
+    fn mixed_sdk_checkpoints_defer_cleanup_until_terminal_restoration() {
+        use crate::model_selection::{Sdk, SdkSessionId};
+        for outcome in ["success", "failure", "cancel"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let manager = SessionManager::new(tmp.path().join("data"));
+            let source = tmp.path().join("jcode");
+            let home = source.join(".cruise-sdk-sessions/original");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join(".cruise-session-id"), "original").unwrap();
+            std::fs::write(home.join("history"), "original history").unwrap();
+            let obsolete = source.join(".cruise-sdk-sessions/obsolete");
+            std::fs::create_dir_all(&obsolete).unwrap();
+            std::fs::write(obsolete.join(".cruise-session-id"), "obsolete").unwrap();
+            let mut state = crate::test_support::make_session("20261023000004", tmp.path());
+            state.plan_conversation_id = Some("original".into());
+            state.plan_conversation_backend = Some("jcode".into());
+            state.plan_conversation_home = Some(source.clone());
+            manager.create(&state).unwrap();
+            let runtime = Arc::new(ApplicationRuntime::new(manager.clone()));
+            let sink = |_: ApplicationEvent| Ok(());
+            let mut context = start_plan_context(&manager, &runtime, &state.id, OperationKind::Generate, &sink).unwrap();
+            let checkpoint = plan_checkpoint_callback(manager.clone(), state.id.clone(), "key".into(), Some(source), context.claim.token(), Arc::clone(&context.cleanup));
+            checkpoint(&SdkSessionId { sdk: Sdk::Claude, id: "claude".into() }).unwrap();
+            assert_eq!(std::fs::read_to_string(home.join("history")).unwrap(), "original history");
+            checkpoint(&SdkSessionId { sdk: Sdk::Jcode, id: "obsolete".into() }).unwrap();
+            checkpoint(&SdkSessionId { sdk: Sdk::Jcode, id: "original".into() }).unwrap();
+            drop(checkpoint);
+            match outcome {
+                "failure" => { assert!(fail_plan(&manager, &state.id, OperationKind::Generate, &sink, &mut context, CruiseError::Other("failure".into())).is_err()); }
+                "cancel" => { context.claim.token().cancel(); assert!(cancel_plan(&manager, &state.id, &sink, &mut context).is_err()); }
+                _ => { preserve_plan_checkpoint(&manager, &mut context.state).unwrap(); manager.save(&context.state).unwrap(); }
+            }
+            assert!(obsolete.exists(), "cleanup follows final restoration");
+            drop(context);
+            assert!(home.exists(), "final saved conversation must survive");
+            assert!(!obsolete.exists(), "only obsolete storage is removed");
+        }
+    }
+
+    #[test]
     fn failed_and_cancelled_plans_preserve_opencode_checkpoint_owner() {
         for cancelled in [false, true] {
             let tmp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
@@ -4298,11 +4348,15 @@ mod tests {
                 manager.clone(),
                 state.id.clone(),
                 "checkpoint-key".to_string(),
-                Some("opencode".to_string()),
                 None,
                 context.claim.token(),
+                Arc::clone(&context.cleanup),
             );
-            checkpoint("ses_preserved").unwrap_or_else(|error| panic!("{error}"));
+            checkpoint(&crate::model_selection::SdkSessionId {
+                sdk: crate::model_selection::Sdk::OpenCode,
+                id: "ses_preserved".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
             let result = if cancelled {
                 context.claim.token().cancel();
                 cancel_plan(&manager, &state.id, &sink, &mut context)
