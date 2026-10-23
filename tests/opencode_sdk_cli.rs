@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 
-pub(crate) const ANSWER: &str = "V2 response: 日本語\n";
+pub(crate) const ANSWER: &str = "V2 response: \u{65e5}\u{672c}\u{8a9e}\n";
 pub(crate) const MODEL: &str = "fixture/team/model:2026#precise";
 
 #[derive(Clone, Copy)]
@@ -366,9 +366,14 @@ fn prompt_events(server: &Server, session: &str, inbox: &str) -> Vec<Value> {
         locked(server).pending = Some(inbox.to_owned());
         return vec![
             event("session.execution.started", session, json!({}), 1),
-            event("session.execution.failed", session, json!({"error":{
-                "type":"provider.api", "message":"context preparation failed", "status":503,
-            }}), 2),
+            event(
+                "session.execution.failed",
+                session,
+                json!({"error":{
+                    "type":"provider.api", "message":"context preparation failed", "status":503,
+                }}),
+                2,
+            ),
         ];
     }
     if let Scenario::ProviderFailure { status, .. } = server.scenario
@@ -436,45 +441,50 @@ fn session_route(
         return Json(json!({"data": []})).into_response();
     }
     if method == Method::DELETE && path.starts_with(&format!("{session_path}/inbox/")) {
-        if matches!(server.scenario, Scenario::UndeliveredFailure { settle: true }) {
-            let mut observations = locked(server);
-            if let Some(inbox) = observations.pending.take() {
-                observations.durable.push(event(
-                    "session.inbox.cancelled", &id, json!({"inboxID":inbox}), 3,
-                ));
-            }
-            return StatusCode::NO_CONTENT.into_response();
-        }
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return cancel_inbox_response(server, &id);
     }
     if method == Method::POST && path == format!("{session_path}/prompt") {
-        locked(server).checkpoint_at_prompt =
-            std::fs::read_to_string(server.root.join("checkpoint")).ok();
-        if matches!(server.scenario, Scenario::UncertainAcceptance) {
-            // The server has durably accepted the input but the HTTP response
-            // body is lost. A retry here would duplicate an external side effect.
-            let broken = futures::stream::once(async {
-                Err::<String, _>(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionReset,
-                    "accepted response lost",
-                ))
-            });
-            return (
-                [("content-type", "application/json")],
-                Body::from_stream(broken),
-            )
-                .into_response();
+        return prompt_response(server, &id, body);
+    }
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"_tag": "UnknownError", "message": "unsupported fixture endpoint"})),
+    )
+        .into_response()
+}
+
+fn prompt_response(server: &Server, id: &str, body: &Value) -> Response {
+    locked(server).checkpoint_at_prompt =
+        std::fs::read_to_string(server.root.join("checkpoint")).ok();
+    if matches!(server.scenario, Scenario::UncertainAcceptance) {
+        // The server has durably accepted the input but the HTTP response
+        // body is lost. A retry here would duplicate an external side effect.
+        let broken = futures::stream::once(async {
+            Err::<String, _>(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "accepted response lost",
+            ))
+        });
+        return (
+            [("content-type", "application/json")],
+            Body::from_stream(broken),
+        )
+            .into_response();
+    }
+    let inbox = body["id"].as_str().unwrap_or("msg_input");
+    let mut events = prompt_events(server, id, inbox);
+    let boundary = locked(server)
+        .durable
+        .last()
+        .and_then(|value| value["durable"]["seq"].as_u64())
+        .unwrap_or(0);
+    for value in &mut events {
+        if let Some(seq) = value["durable"]["seq"].as_u64() {
+            value["durable"]["seq"] = json!(seq + boundary);
         }
-        let inbox = body["id"].as_str().unwrap_or("msg_input");
-        let mut events = prompt_events(server, &id, inbox);
-        let boundary = locked(server).durable.last()
-            .and_then(|value| value["durable"]["seq"].as_u64()).unwrap_or(0);
-        for value in &mut events {
-            if let Some(seq) = value["durable"]["seq"].as_u64() {
-                value["durable"]["seq"] = json!(seq + boundary);
-            }
-        }
-        locked(server).durable.extend(events
+    }
+    locked(server).durable.extend(
+        events
             .iter()
             .filter(|value| {
                 value.get("durable").is_some()
@@ -484,53 +494,68 @@ fn session_route(
                             Some("session.text.ended" | "session.execution.succeeded")
                         ))
             })
-            .cloned());
-        send_non_answer_events(server, &id);
-        for value in &events {
-            if matches!(server.scenario, Scenario::RetainedRecovery { .. })
-                && server_prompt_count(server) > 1
-            {
-                continue;
-            }
-            let kind = value["type"].as_str().unwrap_or_default();
-            if matches!(server.scenario, Scenario::Malformed)
-                && kind == "session.execution.succeeded"
-            {
-                continue;
-            }
-            if matches!(
-                server.scenario,
-                Scenario::Recover | Scenario::LogUnavailable | Scenario::Pending
-            ) && matches!(kind, "session.text.ended" | "session.execution.succeeded")
-            {
-                continue;
-            }
-            let mut live = value.clone();
-            if matches!(server.scenario, Scenario::Recover) && kind == "session.text.delta" {
-                live["data"]["delta"] = json!("V2 response: 日");
-            }
-            let _ = server.events.send(Some(frame(&live)));
+            .cloned(),
+    );
+    send_non_answer_events(server, id);
+    for value in &events {
+        if matches!(server.scenario, Scenario::RetainedRecovery { .. })
+            && server_prompt_count(server) > 1
+        {
+            continue;
         }
-        if matches!(server.scenario, Scenario::Malformed) {
-            // Use a known mandatory event with invalid JSON, not an unknown event.
-            let _ = server.events.send(Some(
-                "data: {\"type\":\"session.execution.succeeded\",broken}\n\n".to_owned(),
+        let kind = value["type"].as_str().unwrap_or_default();
+        if matches!(server.scenario, Scenario::Malformed) && kind == "session.execution.succeeded" {
+            continue;
+        }
+        if matches!(
+            server.scenario,
+            Scenario::Recover | Scenario::LogUnavailable | Scenario::Pending
+        ) && matches!(kind, "session.text.ended" | "session.execution.succeeded")
+        {
+            continue;
+        }
+        let mut live = value.clone();
+        if matches!(server.scenario, Scenario::Recover) && kind == "session.text.delta" {
+            live["data"]["delta"] = json!("V2 response: \u{65e5}");
+        }
+        let _ = server.events.send(Some(frame(&live)));
+    }
+    if matches!(server.scenario, Scenario::Malformed) {
+        // Use a known mandatory event with invalid JSON, not an unknown event.
+        let _ = server.events.send(Some(
+            "data: {\"type\":\"session.execution.succeeded\",broken}\n\n".to_owned(),
+        ));
+    }
+    if !matches!(
+        server.scenario,
+        Scenario::Complete | Scenario::Pending | Scenario::UndeliveredFailure { .. }
+    ) {
+        let _ = server.events.send(None);
+    }
+    Json(json!({"data": {
+        "id": inbox, "sessionID": id, "time": {"created": 1_792_749_600_000_u64},
+        "type": "user", "payload": {"text": body["text"]}, "delivery": "queue",
+    }}))
+    .into_response()
+}
+
+fn cancel_inbox_response(server: &Server, id: &str) -> Response {
+    if matches!(
+        server.scenario,
+        Scenario::UndeliveredFailure { settle: true }
+    ) {
+        let mut observations = locked(server);
+        if let Some(inbox) = observations.pending.take() {
+            observations.durable.push(event(
+                "session.inbox.cancelled",
+                id,
+                json!({"inboxID":inbox}),
+                3,
             ));
         }
-        if !matches!(server.scenario, Scenario::Complete | Scenario::Pending | Scenario::UndeliveredFailure { .. }) {
-            let _ = server.events.send(None);
-        }
-        return Json(json!({"data": {
-            "id": inbox, "sessionID": id, "time": {"created": 1_792_749_600_000_u64},
-            "type": "user", "payload": {"text": body["text"]}, "delivery": "queue",
-        }}))
-        .into_response();
+        return StatusCode::NO_CONTENT.into_response();
     }
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({"_tag": "UnknownError", "message": "unsupported fixture endpoint"})),
-    )
-        .into_response()
+    StatusCode::SERVICE_UNAVAILABLE.into_response()
 }
 
 fn interrupt_response(server: &Server, id: &str) -> Response {
@@ -570,10 +595,13 @@ fn send_non_answer_events(server: &Server, id: &str) {
 }
 
 fn durable_response(server: &Server, id: &str, after: u64) -> Response {
-    if matches!(server.scenario, Scenario::BoundaryUnavailable) || (server_prompt_count(server) > 0 && matches!(
-        server.scenario,
-        Scenario::LogUnavailable | Scenario::UncertainAcceptance | Scenario::Malformed
-    )) {
+    if matches!(server.scenario, Scenario::BoundaryUnavailable)
+        || (server_prompt_count(server) > 0
+            && matches!(
+                server.scenario,
+                Scenario::LogUnavailable | Scenario::UncertainAcceptance | Scenario::Malformed
+            ))
+    {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     let observations = locked(server);
@@ -800,9 +828,9 @@ async fn started_failure_with_open_sse_settles_pending_input_before_safe_fallbac
         let fixture = Fixture::new(Scenario::UndeliveredFailure { settle }).await;
         let _guards = fixture.guards();
         let model = format!("fixture/pre-delivery-{settle}");
-        let result = tokio::time::timeout(
-            Duration::from_secs(8), fixture.execute(Some(&model), 2),
-        ).await.unwrap_or_else(|error| panic!("pre-delivery failure hung on open SSE: {error}"));
+        let result = tokio::time::timeout(Duration::from_secs(8), fixture.execute(Some(&model), 2))
+            .await
+            .unwrap_or_else(|error| panic!("pre-delivery failure hung on open SSE: {error}"));
         assert_eq!(result.is_ok(), settle, "{result:?}");
         assert_eq!(fixture.prompt_count(), if settle { 2 } else { 1 });
         assert_eq!(locked(&fixture.server).pending.is_none(), settle);
@@ -817,7 +845,6 @@ async fn started_failure_with_open_sse_settles_pending_input_before_safe_fallbac
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_sigint_drains_each_planning_future_before_return_or_discard() {
-    use tokio::io::AsyncWriteExt as _;
     let _lock = lock_process();
     for action in ["planning", "title", "fix", "ask"] {
         let fixture = Fixture::new(Scenario::Pending).await;
@@ -836,8 +863,14 @@ async fn cli_sigint_drains_each_planning_future_before_return_or_discard() {
         let transcript = fixture.root.path().join("pty.output");
         let shell = format!(
             "stty cols 160 rows 40; echo $$ > {}; exec {} plan --no-force-exec {} -c {} 'fixture plan'",
-            quote(&runtime_pid), quote(Path::new(env!("CARGO_BIN_EXE_cruise"))),
-            if action == "planning" { "" } else { "--skip-planning" }, quote(&config),
+            quote(&runtime_pid),
+            quote(Path::new(env!("CARGO_BIN_EXE_cruise"))),
+            if action == "planning" {
+                ""
+            } else {
+                "--skip-planning"
+            },
+            quote(&config),
         );
         let mut command = tokio::process::Command::new("script");
         #[cfg(target_os = "macos")]
@@ -845,11 +878,14 @@ async fn cli_sigint_drains_each_planning_future_before_return_or_discard() {
         #[cfg(target_os = "linux")]
         command.args(["-q", "-e", "-c", &shell, "/dev/null"]);
         for (name, _) in std::env::vars_os() {
-            if name.to_string_lossy().starts_with("CRUISE_") || name.to_string_lossy().starts_with("OPENCODE_") {
+            if name.to_string_lossy().starts_with("CRUISE_")
+                || name.to_string_lossy().starts_with("OPENCODE_")
+            {
                 command.env_remove(name);
             }
         }
-        command.current_dir(&fixture.server.repo)
+        command
+            .current_dir(&fixture.server.repo)
             .env("PATH", fixture.path())
             .env("HOME", fixture.root.path().join("home"))
             .env("XDG_CONFIG_HOME", fixture.root.path().join("config"))
@@ -858,66 +894,139 @@ async fn cli_sigint_drains_each_planning_future_before_return_or_discard() {
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
             .env("NO_COLOR", "1")
             .stdin(Stdio::piped())
-            .stdout(Stdio::from(std::fs::File::create(&transcript).unwrap_or_else(|error| panic!("{error}"))))
-            .stderr(Stdio::null()).kill_on_drop(true);
-        let mut child = command.spawn().unwrap_or_else(|error| panic!("PTY: {error}"));
+            .stdout(Stdio::from(
+                std::fs::File::create(&transcript).unwrap_or_else(|error| panic!("{error}")),
+            ))
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command
+            .spawn()
+            .unwrap_or_else(|error| panic!("PTY: {error}"));
         let mut input = child.stdin.take().unwrap_or_else(|| panic!("PTY stdin"));
-        let mut queries = [0; 3];
-        let mut selected = false;
-        let mut submitted = false;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-        loop {
-            let raw = std::fs::read_to_string(&transcript).unwrap_or_default();
-            for (index, (query, answer)) in [
-                ("\x1b[?u", "\x1b[?1u"), ("\x1b[c", "\x1b[?1;2c"), ("\x1b[6n", "\x1b[1;1R"),
-            ].into_iter().enumerate() {
-                let count = raw.matches(query).count();
-                while queries[index] < count {
-                    input.write_all(answer.as_bytes()).await.unwrap_or_else(|error| panic!("{error}"));
-                    queries[index] += 1;
-                }
+        drive_planning_prompt(&fixture, action, &transcript, &mut input).await;
+        assert_planning_interrupt(&fixture, action, &runtime_pid, &transcript, &mut child).await;
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn drive_planning_prompt(
+    fixture: &Fixture,
+    action: &str,
+    transcript: &Path,
+    input: &mut tokio::process::ChildStdin,
+) {
+    use tokio::io::AsyncWriteExt as _;
+    let mut queries = [0; 3];
+    let mut selected = false;
+    let mut submitted = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let raw = std::fs::read_to_string(transcript).unwrap_or_default();
+        for (index, (query, answer)) in [
+            ("\x1b[?u", "\x1b[?1u"),
+            ("\x1b[c", "\x1b[?1;2c"),
+            ("\x1b[6n", "\x1b[1;1R"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let count = raw.matches(query).count();
+            while queries[index] < count {
+                input
+                    .write_all(answer.as_bytes())
+                    .await
+                    .unwrap_or_else(|error| panic!("{error}"));
+                queries[index] += 1;
             }
-            if action != "planning" && !selected && raw.contains("Publish as Issue") {
-                let keys: &[u8] = match action {
-                    "title" => b"\r", "fix" => b"\x1b[B\r", _ => b"\x1b[B\x1b[B\r",
-                };
-                input.write_all(keys).await.unwrap_or_else(|error| panic!("{error}"));
-                selected = true;
-            }
-            if selected && !submitted && (
-                (action == "title" && raw.contains("Steps to skip"))
+        }
+        if action != "planning" && !selected && raw.contains("Publish as Issue") {
+            let keys: &[u8] = match action {
+                "title" => b"\r",
+                "fix" => b"\x1b[B\r",
+                _ => b"\x1b[B\x1b[B\r",
+            };
+            input
+                .write_all(keys)
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+            selected = true;
+        }
+        if selected
+            && !submitted
+            && ((action == "title" && raw.contains("Steps to skip"))
                 || (action == "fix" && raw.contains("Describe the changes needed:"))
-                || (action == "ask" && raw.contains("Your question:"))
-            ) {
-                // Allow the line editor to finish terminal capability negotiation.
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                input.write_all(if action == "title" { b"\r" } else { b"fixture follow-up\r" })
-                    .await.unwrap_or_else(|error| panic!("{error}"));
-                submitted = true;
-            }
-            if fixture.prompt_count() == 1 { break; }
-            assert!(tokio::time::Instant::now() < deadline, "{action} never reached prompt: {raw}");
-            tokio::time::sleep(Duration::from_millis(25)).await;
+                || (action == "ask" && raw.contains("Your question:")))
+        {
+            // Allow the line editor to finish terminal capability negotiation.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            input
+                .write_all(if action == "title" {
+                    b"\r"
+                } else {
+                    b"fixture follow-up\r"
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+            submitted = true;
         }
-        let pid: i32 = std::fs::read_to_string(&runtime_pid).unwrap_or_else(|error| panic!("{error}"))
-            .trim().parse().unwrap_or_else(|error| panic!("{error}"));
-        // SAFETY: this PID belongs to the still-running CLI created above.
-        assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
-        let status = tokio::time::timeout(Duration::from_secs(10), child.wait()).await
-            .unwrap_or_else(|error| panic!("{action} did not return: {error}"))
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert!(!status.success(), "{action} must report interruption");
-        let raw = std::fs::read_to_string(&transcript).unwrap_or_default();
-        assert!(fixture.root.path().join("shutdown.finished").is_file(), "{action} returned before shutdown: {raw}");
-        assert!(!raw.contains("conversation is active"), "{raw}");
-        fixture.assert_stopped();
-        fixture.assert_interrupted();
-        if matches!(action, "planning" | "title") {
-            let sessions = fixture.root.path().join("data/cruise/sessions");
-            assert!(!sessions.exists() || std::fs::read_dir(sessions).unwrap_or_else(|error| panic!("{error}")).next().is_none(), "discarded session retained");
-            let private = fixture.root.path().join("data/cruise/opencode");
-            assert!(!private.exists() || std::fs::read_dir(private).unwrap_or_else(|error| panic!("{error}")).next().is_none(), "discarded private storage retained");
+        if fixture.prompt_count() == 1 {
+            break;
         }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{action} never reached prompt: {raw}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn assert_planning_interrupt(
+    fixture: &Fixture,
+    action: &str,
+    runtime_pid: &Path,
+    transcript: &Path,
+    child: &mut tokio::process::Child,
+) {
+    let pid: i32 = std::fs::read_to_string(runtime_pid)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .trim()
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    // SAFETY: this PID belongs to the still-running CLI created above.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .unwrap_or_else(|error| panic!("{action} did not return: {error}"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(!status.success(), "{action} must report interruption");
+    let raw = std::fs::read_to_string(transcript).unwrap_or_default();
+    assert!(
+        fixture.root.path().join("shutdown.finished").is_file(),
+        "{action} returned before shutdown: {raw}"
+    );
+    assert!(!raw.contains("conversation is active"), "{raw}");
+    fixture.assert_stopped();
+    fixture.assert_interrupted();
+    if matches!(action, "planning" | "title") {
+        let sessions = fixture.root.path().join("data/cruise/sessions");
+        assert!(
+            !sessions.exists()
+                || std::fs::read_dir(sessions)
+                    .unwrap_or_else(|error| panic!("{error}"))
+                    .next()
+                    .is_none(),
+            "discarded session retained"
+        );
+        let private = fixture.root.path().join("data/cruise/opencode");
+        assert!(
+            !private.exists()
+                || std::fs::read_dir(private)
+                    .unwrap_or_else(|error| panic!("{error}"))
+                    .next()
+                    .is_none(),
+            "discarded private storage retained"
+        );
     }
 }
 
@@ -1192,27 +1301,37 @@ async fn resume_fixture(fixture: &Fixture, id: &str) -> cruise::error::Result<Pr
     resume_fixture_with_retries(fixture, id, 0).await
 }
 
-async fn resume_fixture_with_retries(fixture: &Fixture, id: &str, retries: usize) -> cruise::error::Result<PromptOutcome> {
+async fn resume_fixture_with_retries(
+    fixture: &Fixture,
+    id: &str,
+    retries: usize,
+) -> cruise::error::Result<PromptOutcome> {
     let env = HashMap::new();
     let mcp_servers = cruise::config::McpServers::new();
-    let config: RetryConfig = serde_yaml::from_str("base_delay_ms: 1\nmodel_fallback: true\nfallback_chains:\n  default: [fixture/fallback]\n")
-        .unwrap_or_else(|error| panic!("retry config: {error}"));
-    with_active_policy(policy_for_config(Some(config)), Executor::new(Some("opencode"), &[]).run(PromptRun {
-        prompt: "resume fixture",
-        model_or_mode: Some(MODEL),
-        max_retries: retries,
-        env: &env,
-        mcp_servers: &mcp_servers,
-        on_notice: None,
-        cancel_token: None,
-        working_dir: Some(&fixture.server.repo),
-        stream: None,
-        tools: vec![],
-        on_session_id: None,
-        resume: Some(id.to_owned()),
-        computer_use: false,
-        permission: PermissionMode::Full,
-    })).await
+    let config: RetryConfig = serde_yaml::from_str(
+        "base_delay_ms: 1\nmodel_fallback: true\nfallback_chains:\n  default: [fixture/fallback]\n",
+    )
+    .unwrap_or_else(|error| panic!("retry config: {error}"));
+    with_active_policy(
+        policy_for_config(Some(config)),
+        Executor::new(Some("opencode"), &[]).run(PromptRun {
+            prompt: "resume fixture",
+            model_or_mode: Some(MODEL),
+            max_retries: retries,
+            env: &env,
+            mcp_servers: &mcp_servers,
+            on_notice: None,
+            cancel_token: None,
+            working_dir: Some(&fixture.server.repo),
+            stream: None,
+            tools: vec![],
+            on_session_id: None,
+            resume: Some(id.to_owned()),
+            computer_use: false,
+            permission: PermissionMode::Full,
+        }),
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1222,36 +1341,67 @@ async fn retained_history_is_fenced_before_current_turn_recovery() {
         let fixture = Fixture::new(Scenario::RetainedRecovery { start, terminal }).await;
         let _guards = fixture.guards();
         let checkpoint = |_: &str| Ok(());
-        let first = fixture.execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
-            .await.unwrap_or_else(|error| panic!("retained first turn: {error}"));
-        let id = first.session_id.unwrap_or_else(|| panic!("retained session ID"));
+        let first = fixture
+            .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
+            .await
+            .unwrap_or_else(|error| panic!("retained first turn: {error}"));
+        let id = first
+            .session_id
+            .unwrap_or_else(|| panic!("retained session ID"));
         // The real log is cumulative, including failed and interrupted executions.
         locked(&fixture.server).durable.extend([
             event("session.execution.started", &id, json!({}), 6),
-            event("session.execution.failed", &id, json!({"error":{
-                "type":"provider.api", "message":"historical failure", "status":503
-            }}), 7),
+            event(
+                "session.execution.failed",
+                &id,
+                json!({"error":{
+                    "type":"provider.api", "message":"historical failure", "status":503
+                }}),
+                7,
+            ),
             event("session.execution.started", &id, json!({}), 8),
             event("session.execution.interrupted", &id, json!({}), 9),
         ]);
-        let result = tokio::time::timeout(Duration::from_secs(10),
-            resume_fixture_with_retries(&fixture, &id, 2)).await
-            .unwrap_or_else(|error| panic!("retained recovery: {error}"));
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            resume_fixture_with_retries(&fixture, &id, 2),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("retained recovery: {error}"));
         if terminal {
-            assert_eq!(result.unwrap_or_else(|error| panic!("current terminal: {error}")).result.output, ANSWER);
+            assert_eq!(
+                result
+                    .unwrap_or_else(|error| panic!("current terminal: {error}"))
+                    .result
+                    .output,
+                ANSWER
+            );
         } else {
-            let error = result.err().unwrap_or_else(|| panic!("missing current terminal accepted"));
+            let error = result
+                .err()
+                .unwrap_or_else(|| panic!("missing current terminal accepted"));
             assert!(error.to_string().contains("uncertain"), "{error}");
             let manifest = std::fs::read_dir(fixture.root.path().join("data/cruise/opencode"))
                 .unwrap_or_else(|error| panic!("storage directory: {error}"))
-                .next().unwrap_or_else(|| panic!("retained storage missing"))
-                .unwrap_or_else(|error| panic!("storage entry: {error}")).path().join("manifest.json");
-            let value: Value = serde_json::from_slice(&std::fs::read(manifest)
-                .unwrap_or_else(|error| panic!("manifest: {error}")))
-                .unwrap_or_else(|error| panic!("manifest JSON: {error}"));
-            assert_eq!(value["clean"], false, "failed settlement must remain unclean");
+                .next()
+                .unwrap_or_else(|| panic!("retained storage missing"))
+                .unwrap_or_else(|error| panic!("storage entry: {error}"))
+                .path()
+                .join("manifest.json");
+            let value: Value = serde_json::from_slice(
+                &std::fs::read(manifest).unwrap_or_else(|error| panic!("manifest: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("manifest JSON: {error}"));
+            assert_eq!(
+                value["clean"], false,
+                "failed settlement must remain unclean"
+            );
         }
-        assert_eq!(fixture.prompt_count(), 2, "one prompt per turn, no historical fallback");
+        assert_eq!(
+            fixture.prompt_count(),
+            2,
+            "one prompt per turn, no historical fallback"
+        );
         assert_eq!(fixture.launch_count(), 2);
         fixture.assert_stopped();
     }
@@ -1262,7 +1412,10 @@ async fn unavailable_boundary_admits_no_prompt() {
     let _lock = lock_process();
     let fixture = Fixture::new(Scenario::BoundaryUnavailable).await;
     let _guards = fixture.guards();
-    let error = fixture.execute(Some(MODEL), 2).await.err()
+    let error = fixture
+        .execute(Some(MODEL), 2)
+        .await
+        .err()
         .unwrap_or_else(|| panic!("unavailable boundary accepted"));
     assert!(error.to_string().contains("boundary"), "{error}");
     assert_eq!(fixture.prompt_count(), 0);
@@ -1275,7 +1428,9 @@ async fn executor_cancellation_awaits_admitted_handler_after_peer_disconnect() {
     use std::sync::atomic::{AtomicBool, Ordering};
     struct Release(Arc<AtomicBool>);
     impl Drop for Release {
-        fn drop(&mut self) { self.0.store(true, Ordering::Release); }
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
     }
     let _lock = lock_process();
     let fixture = Fixture::new(Scenario::Pending).await;
@@ -1287,34 +1442,45 @@ async fn executor_cancellation_awaits_admitted_handler_after_peer_disconnect() {
     let gate = release.clone();
     let start = entered.clone();
     let mutation = finished.clone();
-    let tool = cruise::backend::tool::CruiseTool::new("gate", "held handler", json!({}), Arc::new(move |_| {
-        start.store(true, Ordering::Release);
-        while !gate.load(Ordering::Acquire) { std::thread::sleep(Duration::from_millis(5)); }
-        mutation.store(true, Ordering::Release);
-        Ok("final mutation complete".into())
-    }));
+    let tool = cruise::backend::tool::CruiseTool::new(
+        "gate",
+        "held handler",
+        json!({}),
+        Arc::new(move |_| {
+            start.store(true, Ordering::Release);
+            while !gate.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            mutation.store(true, Ordering::Release);
+            Ok("final mutation complete".into())
+        }),
+    );
     let cancel = CancellationToken::new();
     let env = HashMap::new();
     let mcp_servers = cruise::config::McpServers::new();
     let executor = Executor::new(Some("opencode"), &[]);
     let run = executor.run(PromptRun {
-        prompt: "held handler", model_or_mode: Some(MODEL), max_retries: 0,
-        env: &env, mcp_servers: &mcp_servers, on_notice: None, cancel_token: Some(&cancel),
-        working_dir: Some(&fixture.server.repo), stream: None, tools: vec![tool],
-        on_session_id: None, resume: None, computer_use: false, permission: PermissionMode::Full,
+        prompt: "held handler",
+        model_or_mode: Some(MODEL),
+        max_retries: 0,
+        env: &env,
+        mcp_servers: &mcp_servers,
+        on_notice: None,
+        cancel_token: Some(&cancel),
+        working_dir: Some(&fixture.server.repo),
+        stream: None,
+        tools: vec![tool],
+        on_session_id: None,
+        resume: None,
+        computer_use: false,
+        permission: PermissionMode::Full,
     });
     tokio::pin!(run);
     let admit = async {
-        while fixture.prompt_count() == 0 { tokio::time::sleep(Duration::from_millis(5)).await; }
-        let overlay: Value = serde_json::from_slice(&std::fs::read(fixture.root.path().join("cli.overlay"))
-            .unwrap_or_else(|error| panic!("overlay: {error}")))
-            .unwrap_or_else(|error| panic!("overlay JSON: {error}"));
-        let plugin = overlay["plugins"].as_array().and_then(|values| values.last())
-            .and_then(Value::as_str).unwrap_or_else(|| panic!("plugin path"));
-        let path = Path::new(plugin).join("bridge.json");
-        let connection: Value = serde_json::from_slice(&std::fs::read(&path)
-            .unwrap_or_else(|error| panic!("bridge: {error}")))
-            .unwrap_or_else(|error| panic!("bridge JSON: {error}"));
+        while fixture.prompt_count() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let (path, connection) = fixture_bridge_connection(&fixture);
         let request = tokio::spawn(async move {
             reqwest::Client::builder().no_proxy().build().unwrap_or_else(|error| panic!("{error}"))
                 .post(format!("{}/call", connection["url"].as_str().unwrap_or_default()))
@@ -1322,7 +1488,9 @@ async fn executor_cancellation_awaits_admitted_handler_after_peer_disconnect() {
                 .json(&json!({"sessionID":connection["sessionID"],"callID":"held","tool":"gate","input":{}}))
                 .send().await
         });
-        while !entered.load(Ordering::Acquire) { tokio::time::sleep(Duration::from_millis(5)).await; }
+        while !entered.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         request.abort();
         let _ = request.await;
         path
@@ -1332,17 +1500,41 @@ async fn executor_cancellation_awaits_admitted_handler_after_peer_disconnect() {
         result = tokio::time::timeout(Duration::from_secs(5), admit) => result.unwrap_or_else(|error| panic!("admission: {error}")),
     };
     cancel.cancel();
-    assert!(tokio::time::timeout(Duration::from_millis(1500), &mut run).await.is_err(),
-        "Executor returned while a synchronous handler could still mutate state");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1500), &mut run)
+            .await
+            .is_err(),
+        "Executor returned while a synchronous handler could still mutate state"
+    );
     assert!(!finished.load(Ordering::Acquire));
     assert!(secret.exists(), "secret removed before handler drain");
     release.store(true, Ordering::Release);
-    let result = tokio::time::timeout(Duration::from_secs(5), &mut run).await
+    let result = tokio::time::timeout(Duration::from_secs(5), &mut run)
+        .await
         .unwrap_or_else(|error| panic!("Executor drain: {error}"));
     assert!(result.is_err());
     assert!(finished.load(Ordering::Acquire));
     assert!(!secret.exists());
     fixture.assert_stopped();
+}
+
+fn fixture_bridge_connection(fixture: &Fixture) -> (PathBuf, Value) {
+    let overlay: Value = serde_json::from_slice(
+        &std::fs::read(fixture.root.path().join("cli.overlay"))
+            .unwrap_or_else(|error| panic!("overlay: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("overlay JSON: {error}"));
+    let plugin = overlay["plugins"]
+        .as_array()
+        .and_then(|values| values.last())
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("plugin path"));
+    let path = Path::new(plugin).join("bridge.json");
+    let connection: Value = serde_json::from_slice(
+        &std::fs::read(&path).unwrap_or_else(|error| panic!("bridge: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("bridge JSON: {error}"));
+    (path, connection)
 }
 
 async fn configured_fixture_run(
@@ -1354,30 +1546,44 @@ async fn configured_fixture_run(
     let executor = Executor::new(config.sdk.as_deref(), &config.command);
     let model = if planning {
         executor.plan_model_or_mode(
-            config.plan_model.as_ref().and_then(cruise::config::ModelSpec::primary),
-            config.model.as_ref().and_then(cruise::config::ModelSpec::primary),
+            config
+                .plan_model
+                .as_ref()
+                .and_then(cruise::config::ModelSpec::primary),
+            config
+                .model
+                .as_ref()
+                .and_then(cruise::config::ModelSpec::primary),
         )
     } else {
         executor.step_model_or_mode(
-            None, config.model.as_ref().and_then(cruise::config::ModelSpec::primary),
+            None,
+            config
+                .model
+                .as_ref()
+                .and_then(cruise::config::ModelSpec::primary),
         )
     };
-    with_active_policy(policy_for_config(config.retry.clone()), executor.run(PromptRun {
-        prompt: "configured fixture prompt",
-        model_or_mode: model.as_deref(),
-        max_retries: budget,
-        env: &config.env,
-        mcp_servers: &config.mcp_servers,
-        on_notice: None,
-        cancel_token: None,
-        working_dir: Some(&fixture.server.repo),
-        stream: None,
-        tools: vec![],
-        on_session_id: None,
-        resume: None,
-        computer_use: false,
-        permission: PermissionMode::Full,
-    })).await
+    with_active_policy(
+        policy_for_config(config.retry.clone()),
+        executor.run(PromptRun {
+            prompt: "configured fixture prompt",
+            model_or_mode: model.as_deref(),
+            max_retries: budget,
+            env: &config.env,
+            mcp_servers: &config.mcp_servers,
+            on_notice: None,
+            cancel_token: None,
+            working_dir: Some(&fixture.server.repo),
+            stream: None,
+            tools: vec![],
+            on_session_id: None,
+            resume: None,
+            computer_use: false,
+            permission: PermissionMode::Full,
+        }),
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1386,19 +1592,29 @@ async fn model_and_plan_arrays_use_effective_opencode_keys_and_explicit_preceden
     for planning in [false, true] {
         for variant in ["", "#precise"] {
             for precedence in ["array", "raw", "base", "provider", "default", "override"] {
-                let fixture = Fixture::new(Scenario::ProviderFailure { status: 503, side_effect: false }).await;
+                let fixture = Fixture::new(Scenario::ProviderFailure {
+                    status: 503,
+                    side_effect: false,
+                })
+                .await;
                 let _guards = fixture.guards();
                 let _sdk = EnvGuard::set("CRUISE_SDK", "opencode");
                 let field = if planning { "plan_model" } else { "model" };
                 let model_id = format!("team/{field}-{precedence}-{}:high", variant.is_empty());
                 let base = format!("fixture/{model_id}");
                 let primary = format!("{base}{variant}");
-                let sdk = if precedence == "override" { "claude" } else { "opencode" };
+                let sdk = if precedence == "override" {
+                    "claude"
+                } else {
+                    "opencode"
+                };
                 let mut chains = Vec::new();
                 if precedence == "raw" {
                     chains.push(format!("    '{primary}': [explicit/raw]\n"));
                 }
-                if matches!(precedence, "raw" | "base") && (precedence != "raw" || !variant.is_empty()) {
+                if matches!(precedence, "raw" | "base")
+                    && (precedence != "raw" || !variant.is_empty())
+                {
                     chains.push(format!("    '{base}': [explicit/base]\n"));
                 }
                 if matches!(precedence, "raw" | "base" | "provider") {
@@ -1415,8 +1631,11 @@ async fn model_and_plan_arrays_use_effective_opencode_keys_and_explicit_preceden
                 let mut config = cruise::config::WorkflowConfig::from_yaml(&format!(
                     "sdk: {sdk}\n{field}: ['{primary}', array/fallback]\n{retry}steps:\n  implement:\n    prompt: implement\n",
                 )).unwrap_or_else(|error| panic!("configuration: {error}"));
-                config.apply_env_overrides().unwrap_or_else(|error| panic!("effective config: {error}"));
-                let outcome = configured_fixture_run(&fixture, &config, planning, 1).await
+                config
+                    .apply_env_overrides()
+                    .unwrap_or_else(|error| panic!("effective config: {error}"));
+                let outcome = configured_fixture_run(&fixture, &config, planning, 1)
+                    .await
                     .unwrap_or_else(|error| panic!("{field} {primary} {precedence}: {error}"));
                 assert_eq!(outcome.result.output, ANSWER);
                 let expected = match precedence {
@@ -1427,9 +1646,13 @@ async fn model_and_plan_arrays_use_effective_opencode_keys_and_explicit_preceden
                     _ => ("array", "fallback"),
                 };
                 let observations = locked(&fixture.server);
-                let creates: Vec<_> = observations.requests.iter().filter(|request| {
-                    request.method == Method::POST && request.path == "/api/session"
-                }).collect();
+                let creates: Vec<_> = observations
+                    .requests
+                    .iter()
+                    .filter(|request| {
+                        request.method == Method::POST && request.path == "/api/session"
+                    })
+                    .collect();
                 assert_eq!(creates.len(), 2);
                 assert_eq!(creates[0].body["model"]["id"], model_id);
                 assert_eq!(creates[1].body["model"]["providerID"], expected.0);
@@ -1450,11 +1673,18 @@ async fn invalid_opencode_primary_never_launches_or_falls_back_at_any_budget() {
         let mut config = cruise::config::WorkflowConfig::from_yaml(
             "sdk: opencode\nmodel: [invalid-primary, fixture/valid-fallback]\nsteps:\n  implement:\n    prompt: implement\n",
         ).unwrap_or_else(|error| panic!("invalid primary fixture: {error}"));
-        config.apply_env_overrides().unwrap_or_else(|error| panic!("effective config: {error}"));
-        let error = configured_fixture_run(&fixture, &config, false, budget).await.err()
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("effective config: {error}"));
+        let error = configured_fixture_run(&fixture, &config, false, budget)
+            .await
+            .err()
             .unwrap_or_else(|| panic!("invalid primary must fail even with valid fallback"));
         let diagnostic = error.to_string().to_ascii_lowercase();
-        assert!(diagnostic.contains("model") && diagnostic.contains("provider"), "{error}");
+        assert!(
+            diagnostic.contains("model") && diagnostic.contains("provider"),
+            "{error}"
+        );
         assert!(!fixture.root.path().join("cli.pid").exists());
         assert_eq!(fixture.prompt_count(), 0);
     }
@@ -1466,21 +1696,33 @@ async fn clean_resume_survives_prelaunch_overlay_and_missing_executable_failures
     let fixture = Fixture::new(Scenario::Complete).await;
     let _guards = fixture.guards();
     let checkpoint = |_: &str| Ok(());
-    let outcome = fixture.execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
-        .await.unwrap_or_else(|error| panic!("initial retained turn: {error}"));
-    let id = outcome.session_id.unwrap_or_else(|| panic!("retained ID missing"));
+    let outcome = fixture
+        .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
+        .await
+        .unwrap_or_else(|error| panic!("initial retained turn: {error}"));
+    let id = outcome
+        .session_id
+        .unwrap_or_else(|| panic!("retained ID missing"));
     let baseline = fixture.prompt_count();
-    let overlay: Value = serde_json::from_slice(&std::fs::read(fixture.root.path().join("cli.overlay"))
-        .unwrap_or_else(|error| panic!("overlay: {error}")))
-        .unwrap_or_else(|error| panic!("overlay JSON: {error}"));
-    let plugin = overlay["plugins"].as_array().and_then(|values| values.last())
-        .and_then(Value::as_str).unwrap_or_else(|| panic!("plugin path"));
+    let overlay: Value = serde_json::from_slice(
+        &std::fs::read(fixture.root.path().join("cli.overlay"))
+            .unwrap_or_else(|error| panic!("overlay: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("overlay JSON: {error}"));
+    let plugin = overlay["plugins"]
+        .as_array()
+        .and_then(|values| values.last())
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("plugin path"));
     let secret = Path::new(plugin).join("bridge.json");
     {
         let _overlay = EnvGuard::set("OPENCODE_CONFIG_CONTENT", "{broken");
         assert!(resume_fixture(&fixture, &id).await.is_err());
     }
-    assert!(!secret.exists(), "malformed overlay must not leave a bridge secret");
+    assert!(
+        !secret.exists(),
+        "malformed overlay must not leave a bridge secret"
+    );
     assert_eq!(fixture.prompt_count(), baseline);
     assert_eq!(fixture.launch_count(), 1);
     let cli = fixture.root.path().join("bin/opencode");
@@ -1490,21 +1732,28 @@ async fn clean_resume_survives_prelaunch_overlay_and_missing_executable_failures
         let _path = EnvGuard::set("PATH", fixture.root.path().join("bin"));
         assert!(resume_fixture(&fixture, &id).await.is_err());
     }
-    assert!(!secret.exists(), "spawn failure must remove the bridge secret");
+    assert!(
+        !secret.exists(),
+        "spawn failure must remove the bridge secret"
+    );
     std::fs::rename(&saved, &cli).unwrap_or_else(|error| panic!("restore CLI: {error}"));
     assert_eq!(fixture.prompt_count(), baseline);
     assert_eq!(fixture.launch_count(), 1);
-    let resumed = resume_fixture(&fixture, &id).await
+    let resumed = resume_fixture(&fixture, &id)
+        .await
         .unwrap_or_else(|error| panic!("clean ID must remain resumable: {error}"));
     assert_eq!(resumed.session_id.as_deref(), Some(id.as_str()));
     assert_eq!(fixture.prompt_count(), baseline + 1);
     fixture.assert_stopped();
 
-    let script = std::fs::read_to_string(&cli).unwrap_or_else(|error| panic!("CLI script: {error}"));
+    let script =
+        std::fs::read_to_string(&cli).unwrap_or_else(|error| panic!("CLI script: {error}"));
     write_executable_script(&cli, "#!/bin/sh\nprintf 'not-json\\n'\n");
     assert!(resume_fixture(&fixture, &id).await.is_err());
     write_executable_script(&cli, &script);
-    let error = resume_fixture(&fixture, &id).await.err()
+    let error = resume_fixture(&fixture, &id)
+        .await
+        .err()
         .unwrap_or_else(|| panic!("post-launch uncertainty must block resume"));
     assert!(error.to_string().contains("uncertain"), "{error}");
     assert_eq!(fixture.prompt_count(), baseline + 1);

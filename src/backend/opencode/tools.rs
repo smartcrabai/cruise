@@ -332,7 +332,10 @@ impl Bridge {
         // Registration and closure share the lock. A peer disconnect can drop
         // the HTTP future, but cannot drop the ownership of an admitted worker.
         let workers = {
-            let mut admission = self.state.admission.lock()
+            let mut admission = self
+                .state
+                .admission
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             admission.closed = true;
             std::mem::take(&mut admission.workers)
@@ -342,8 +345,14 @@ impl Bridge {
             for worker in workers {
                 failed |= worker.join().is_err();
             }
-            if failed { Err("OpenCode tool worker join failed".to_owned()) } else { Ok(()) }
-        }).await.map_err(|error| format!("OpenCode tool worker drain failed: {error}"))?;
+            if failed {
+                Err("OpenCode tool worker join failed".to_owned())
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|error| format!("OpenCode tool worker drain failed: {error}"))?;
         if let Some(mut task) = self.task.take()
             && tokio::time::timeout(Duration::from_secs(1), &mut task)
                 .await

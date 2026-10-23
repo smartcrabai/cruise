@@ -805,7 +805,12 @@ impl PendingOpenCode {
                 }
                 if path.ends_with("/inbox") { return axum::Json(json!({"data":[]})).into_response(); }
                 if path.ends_with("/log") {
-                    return ([("content-type", "application/x-ndjson")], "").into_response();
+                    let session = path.split('/').nth(4).unwrap_or_default();
+                    let synced = json!({"type":"log.synced", "aggregateID":session, "seq":0});
+                    return (
+                        [("content-type", "text/event-stream")],
+                        format!("data: {synced}\n\n"),
+                    ).into_response();
                 }
                 if path.ends_with("/interrupt") { return axum::Json(json!({"interrupted":true})).into_response(); }
                 if method == axum::http::Method::GET {

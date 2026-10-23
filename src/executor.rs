@@ -3,7 +3,7 @@
 //! Cruise drives prompts through one of four backends: an external `command`
 //! (the classic `claude -p` path), the official **jcode Rust SDK** (`sdk: jcode`,
 //! also the default when a workflow names neither `sdk` nor `command`), the
-//! **Claude SDK** (`sdk: claude`), or the built-in **OpenCode V2 client**
+//! **Claude SDK** (`sdk: claude`), or the built-in **`OpenCode` V2 client**
 //! (`sdk: opencode`). [`Executor`] hides that choice behind a
 //! single [`Executor::run`] call so that `planning.rs`, `engine.rs`, and the
 //! `WebUI` command layer don't need to branch on the backend.
@@ -18,7 +18,7 @@
 //!   suffix, driven in-process through `claude-agent-sdk` -- see
 //!   [`run_claude`] and [`crate::backend::claude`].
 //! - `sdk: opencode` uses `provider/model#variant` references through the
-//!   built-in OpenCode V2 client, preserving colons in model IDs.
+//!   built-in `OpenCode` V2 client, preserving colons in model IDs.
 
 use std::collections::HashMap;
 use std::path::Path;

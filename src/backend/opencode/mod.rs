@@ -6,7 +6,6 @@ mod runtime;
 mod tests;
 mod tools;
 mod types;
-pub(crate) use runtime::cleanup_conversation;
 use crate::{
     backend::{stream::StreamChunk, tool::CruiseTool},
     cancellation::CancellationToken,
@@ -14,6 +13,7 @@ use crate::{
     error::{CruiseError, Result},
 };
 use futures::StreamExt;
+pub(crate) use runtime::cleanup_conversation;
 use serde_json::json;
 use std::{
     collections::HashMap,
@@ -426,7 +426,9 @@ async fn execute(
 // already established, so records after this fence remain available live or in
 // reconciliation, while earlier executions cannot supply terminal evidence.
 async fn durable_boundary(client: &client::Client, id: &str) -> std::result::Result<u64, String> {
-    let response = client.log(id, 0).await
+    let response = client
+        .log(id, 0)
+        .await
         .map_err(|error| format!("OpenCode turn boundary failed: {error}"))?;
     let mut stream = response.bytes_stream();
     let mut decoder = events::Decoder::default();

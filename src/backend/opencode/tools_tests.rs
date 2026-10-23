@@ -22,7 +22,11 @@ fn pending_secret_removes_failed_writes_without_removing_retained_data() {
     }
     let secret = plugin.join("bridge.json");
     // Inject errors after creation, a partial write, and a full write before sync.
-    for bytes in [b"".as_slice(), b"{\"token\":".as_slice(), b"{\"token\":\"secret\"}".as_slice()] {
+    for bytes in [
+        b"".as_slice(),
+        b"{\"token\":".as_slice(),
+        b"{\"token\":\"secret\"}".as_slice(),
+    ] {
         let result = (|| -> std::io::Result<()> {
             let _pending = PendingSecret(Some(secret.clone()));
             let mut file = std::fs::File::create(&secret)?;
@@ -32,8 +36,10 @@ fn pending_secret_removes_failed_writes_without_removing_retained_data() {
         assert!(result.is_err());
         assert!(!secret.exists(), "failed write left an attempt secret");
         for name in ["manifest.json", "opencode.db"] {
-            assert_eq!(std::fs::read(root.path().join(name))
-                .unwrap_or_else(|error| panic!("{error}")), b"retained");
+            assert_eq!(
+                std::fs::read(root.path().join(name)).unwrap_or_else(|error| panic!("{error}")),
+                b"retained"
+            );
         }
     }
 }
@@ -256,39 +262,40 @@ async fn duplicate_call_ids_are_cached_and_cannot_change_identity() {
 #[tokio::test]
 async fn question_cancellation_rejects_http_but_shutdown_drains_the_worker() {
     for disconnect in [false, true] {
-    let release = Arc::new(AtomicBool::new(false));
-    let _release_on_failure = ReleaseOnDrop(release.clone());
-    let gate = Arc::clone(&release);
-    let started = Arc::new(AtomicBool::new(false));
-    let entered = Arc::clone(&started);
-    let finished = Arc::new(AtomicBool::new(false));
-    let mutation = finished.clone();
-    let tool = CruiseTool::new(
-        "ask_user",
-        "wait",
-        json!({"type":"object"}),
-        Arc::new(move |_| {
-            entered.store(true, Ordering::Release);
-            while !gate.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            mutation.store(true, Ordering::Release);
-            Ok("answer".to_string())
-        }),
-    );
-    let cancel = CancellationToken::new();
-    let mut fixture = Fixture::new(&runner(vec![tool], PermissionMode::Full), cancel.clone()).await;
-    let url = format!(
-        "{}/call",
-        fixture.connection["url"].as_str().unwrap_or_default()
-    );
-    let token = fixture.connection["token"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let client = fixture.client.clone();
-    let request = tokio::spawn(async move {
-        client
+        let release = Arc::new(AtomicBool::new(false));
+        let _release_on_failure = ReleaseOnDrop(release.clone());
+        let gate = Arc::clone(&release);
+        let started = Arc::new(AtomicBool::new(false));
+        let entered = Arc::clone(&started);
+        let finished = Arc::new(AtomicBool::new(false));
+        let mutation = finished.clone();
+        let tool = CruiseTool::new(
+            "ask_user",
+            "wait",
+            json!({"type":"object"}),
+            Arc::new(move |_| {
+                entered.store(true, Ordering::Release);
+                while !gate.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                mutation.store(true, Ordering::Release);
+                Ok("answer".to_string())
+            }),
+        );
+        let cancel = CancellationToken::new();
+        let mut fixture =
+            Fixture::new(&runner(vec![tool], PermissionMode::Full), cancel.clone()).await;
+        let url = format!(
+            "{}/call",
+            fixture.connection["url"].as_str().unwrap_or_default()
+        );
+        let token = fixture.connection["token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let client = fixture.client.clone();
+        let request = tokio::spawn(async move {
+            client
             .post(url)
             .header("authorization", token)
             .json(
@@ -296,38 +303,43 @@ async fn question_cancellation_rejects_http_but_shutdown_drains_the_worker() {
             )
             .send()
             .await
-    });
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !started.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|e| panic!("{e}"));
-    if disconnect {
-        request.abort();
-        let _ = request.await;
-    } else {
-    cancel.cancel();
-    let response = tokio::time::timeout(Duration::from_secs(2), request)
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !started.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
         .await
-        .unwrap_or_else(|e| panic!("{e}"))
-        .unwrap_or_else(|e| panic!("{e}"))
         .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    }
-    let stop = fixture.bridge.stop();
-    tokio::pin!(stop);
-    assert!(tokio::time::timeout(Duration::from_millis(150), &mut stop).await.is_err(),
-        "HTTP completion must not count as handler completion");
-    assert!(!finished.load(Ordering::Acquire));
-    assert!(fixture.root.path().join("plugin/bridge.json").exists());
-    release.store(true, Ordering::Release);
-    tokio::time::timeout(Duration::from_secs(2), &mut stop).await
-        .unwrap_or_else(|e| panic!("worker drain: {e}"))
-        .unwrap_or_else(|e| panic!("bridge stop: {e}"));
-    assert!(finished.load(Ordering::Acquire));
-    assert!(!fixture.root.path().join("plugin/bridge.json").exists());
+        if disconnect {
+            request.abort();
+            let _ = request.await;
+        } else {
+            cancel.cancel();
+            let response = tokio::time::timeout(Duration::from_secs(2), request)
+                .await
+                .unwrap_or_else(|e| panic!("{e}"))
+                .unwrap_or_else(|e| panic!("{e}"))
+                .unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+        let stop = fixture.bridge.stop();
+        tokio::pin!(stop);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut stop)
+                .await
+                .is_err(),
+            "HTTP completion must not count as handler completion"
+        );
+        assert!(!finished.load(Ordering::Acquire));
+        assert!(fixture.root.path().join("plugin/bridge.json").exists());
+        release.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(2), &mut stop)
+            .await
+            .unwrap_or_else(|e| panic!("worker drain: {e}"))
+            .unwrap_or_else(|e| panic!("bridge stop: {e}"));
+        assert!(finished.load(Ordering::Acquire));
+        assert!(!fixture.root.path().join("plugin/bridge.json").exists());
     }
 }
 
@@ -340,49 +352,104 @@ async fn admission_racing_shutdown_cannot_lose_a_registered_worker() {
     let gate = release.clone();
     let starts = entered.clone();
     let ends = finished.clone();
-    let tool = CruiseTool::new("gate", "gate", json!({}), Arc::new(move |_| {
-        starts.fetch_add(1, Ordering::SeqCst);
-        while !gate.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        ends.fetch_add(1, Ordering::SeqCst);
-        Ok("finished".into())
-    }));
-    let mut fixture = Fixture::new(&runner(vec![tool], PermissionMode::Full), CancellationToken::new()).await;
+    let tool = CruiseTool::new(
+        "gate",
+        "gate",
+        json!({}),
+        Arc::new(move |_| {
+            starts.fetch_add(1, Ordering::SeqCst);
+            while !gate.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            ends.fetch_add(1, Ordering::SeqCst);
+            Ok("finished".into())
+        }),
+    );
+    let mut fixture = Fixture::new(
+        &runner(vec![tool], PermissionMode::Full),
+        CancellationToken::new(),
+    )
+    .await;
     let mut requests = vec![];
     for index in 0..32 {
         let state = fixture.bridge.state.clone();
         requests.push(tokio::spawn(async move {
             let mut headers = HeaderMap::new();
-            headers.insert("authorization", state.token.parse().unwrap_or_else(|e| panic!("{e}")));
-            callback(State(state), headers, Json(Call {
-                session: "ses_tools".into(), id: format!("race_{index}"), tool: "gate".into(), input: json!({}),
-            })).await
+            headers.insert(
+                "authorization",
+                state.token.parse().unwrap_or_else(|e| panic!("{e}")),
+            );
+            callback(
+                State(state),
+                headers,
+                Json(Call {
+                    session: "ses_tools".into(),
+                    id: format!("race_{index}"),
+                    tool: "gate".into(),
+                    input: json!({}),
+                }),
+            )
+            .await
         }));
     }
     tokio::time::timeout(Duration::from_secs(2), async {
-        while entered.load(Ordering::SeqCst) == 0 { tokio::task::yield_now().await; }
-    }).await.unwrap_or_else(|e| panic!("worker entry: {e}"));
+        while entered.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|e| panic!("worker entry: {e}"));
     let state = fixture.bridge.state.clone();
     let stop = fixture.bridge.stop();
     tokio::pin!(stop);
-    assert!(tokio::time::timeout(Duration::from_millis(100), &mut stop).await.is_err());
-    assert!(state.admission.lock().unwrap_or_else(|e| panic!("{e}")).closed);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut stop)
+            .await
+            .is_err()
+    );
+    assert!(
+        state
+            .admission
+            .lock()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .closed
+    );
     release.store(true, Ordering::Release);
-    tokio::time::timeout(Duration::from_secs(2), &mut stop).await
+    tokio::time::timeout(Duration::from_secs(2), &mut stop)
+        .await
         .unwrap_or_else(|e| panic!("drain: {e}"))
         .unwrap_or_else(|e| panic!("stop: {e}"));
-    for request in requests { let _ = request.await; }
-    assert_eq!(entered.load(Ordering::SeqCst), finished.load(Ordering::SeqCst));
-    assert!(state.admission.lock().unwrap_or_else(|e| panic!("{e}")).workers.is_empty());
+    for request in requests {
+        let _ = request.await;
+    }
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        finished.load(Ordering::SeqCst)
+    );
+    assert!(
+        state
+            .admission
+            .lock()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .workers
+            .is_empty()
+    );
 }
 
 #[test]
 fn local_mcp_overlay_preserves_command_arguments_environment_and_diagnostic() {
-    for args in [vec![], vec!["--flag=a,b".to_owned(), "space and 'quotes' 日本語".to_owned()]] {
+    for args in [
+        vec![],
+        vec![
+            "--flag=a,b".to_owned(),
+            "space and 'quotes' \u{65e5}\u{672c}\u{8a9e}".to_owned(),
+        ],
+    ] {
         let mut config = runner(vec![], PermissionMode::Full);
-        config.env.insert("OPENCODE_CONFIG_CONTENT".into(),
-            "{mcp:{local:{enabled:false,command:['overridden']}}}".into());
+        config.env.insert(
+            "OPENCODE_CONFIG_CONTENT".into(),
+            "{mcp:{local:{enabled:false,command:['overridden']}}}".into(),
+        );
         let server = crate::config::McpServerConfig {
             command: Some("/path with spaces/executable:2026".into()),
             args: args.clone(),
@@ -390,17 +457,30 @@ fn local_mcp_overlay_preserves_command_arguments_environment_and_diagnostic() {
             ..Default::default()
         };
         config.mcp_servers.insert("local".into(), server);
-        let overlay: Value = serde_json::from_str(&configuration_overlay(&config, Path::new("/plugin"))
-            .unwrap_or_else(|error| panic!("overlay: {error}")))
-            .unwrap_or_else(|error| panic!("JSON: {error}"));
+        let overlay: Value = serde_json::from_str(
+            &configuration_overlay(&config, Path::new("/plugin"))
+                .unwrap_or_else(|error| panic!("overlay: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("JSON: {error}"));
         let mut expected = vec!["/path with spaces/executable:2026".to_owned()];
         expected.extend(args);
-        assert_eq!(overlay["mcp"]["local"], json!({
-            "type":"local", "command":expected, "environment":{"PUNCTUATION":"a; b, 'c'"}, "enabled":true
-        }));
-        config.mcp_servers.get_mut("local").unwrap_or_else(|| panic!("server")).command = None;
-        assert_eq!(configuration_overlay(&config, Path::new("/plugin")).err().as_deref(),
-            Some("OpenCode MCP local command missing"));
+        assert_eq!(
+            overlay["mcp"]["local"],
+            json!({
+                "type":"local", "command":expected, "environment":{"PUNCTUATION":"a; b, 'c'"}, "enabled":true
+            })
+        );
+        config
+            .mcp_servers
+            .get_mut("local")
+            .unwrap_or_else(|| panic!("server"))
+            .command = None;
+        assert_eq!(
+            configuration_overlay(&config, Path::new("/plugin"))
+                .err()
+                .as_deref(),
+            Some("OpenCode MCP local command missing")
+        );
     }
 }
 
