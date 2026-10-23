@@ -1,0 +1,26 @@
+# Install/authenticate the OpenCode V2 CLI separately. Cruise owns its local
+# serve --stdio process; no external server or Python/Node SDK is required.
+# Replace the provider/model placeholders with models in your OpenCode setup.
+sdk: opencode
+model: "provider/model#variant"
+plan_model: "provider/planning-model"
+interactive_planning: true
+permission: full
+computer_use: false # OpenCode rejects true, including on individual prompt steps.
+
+# Optional MCP servers use the existing workflow shape. stdio and Streamable
+# HTTP (type: http) are supported. Legacy type: sse is explicitly rejected.
+# mcp_servers:
+#   local:
+#     command: local-mcp
+#     args: [serve]
+#   remote:
+#     type: http
+#     url: https://example.test/mcp
+
+steps:
+  implement:
+    prompt: "Implement the approved plan for: {input}"
+  review:
+    permission: read-only # Tool restrictions plus diff detection, not an OS sandbox.
+    prompt: "Review the implementation without modifying files."

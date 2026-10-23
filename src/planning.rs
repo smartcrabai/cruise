@@ -96,7 +96,7 @@ pub fn setup_plan_vars(
 /// the default `jcode` backend, and that default must reach the same tool-based
 /// planning flow as an explicit `sdk: jcode`.
 ///
-/// Deliberately independent of *which* SDK: both SDK backends support custom
+/// Deliberately independent of *which* SDK: all three SDK backends support custom
 /// tools, so this only selects between the tool-based and the file-writing
 /// planning flow. When false the planning turns fall back to the file-writing
 /// (`command`-style) templates and register no custom tools.

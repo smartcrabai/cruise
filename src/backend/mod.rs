@@ -10,7 +10,9 @@
 //! `sdk: jcode` one.
 
 pub(crate) mod claude;
+pub(crate) mod conversation;
 pub mod effort;
 pub mod jcode;
+pub(crate) mod opencode;
 pub mod stream;
 pub mod tool;

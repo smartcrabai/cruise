@@ -744,3 +744,203 @@ steps:
         "prompt descendant outlived the timeout"
     );
 }
+
+// The fake executable owns a real process lifetime while this HTTP fixture
+// deliberately leaves each V2 turn pending until the engine cancels it.
+#[cfg(unix)]
+struct PendingOpenCode {
+    task: tokio::task::JoinHandle<()>,
+    _path: crate::test_support::EnvGuard,
+}
+
+#[cfg(unix)]
+impl PendingOpenCode {
+    async fn install(root: &std::path::Path) -> Self {
+        use axum::response::IntoResponse as _;
+        use futures::StreamExt as _;
+        use serde_json::json;
+        let directory = root.to_path_buf();
+        let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+            let directory = directory.clone();
+            async move {
+                let path = request.uri().path().to_owned();
+                let method = request.method().clone();
+                let bytes = axum::body::to_bytes(request.into_body(), 1_048_576)
+                    .await
+                    .unwrap_or_default();
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+                if path == "/api/info" {
+                    return axum::Json(json!({"version":"2.1.3", "pid":0, "urls":[], "paths":{"tmp":directory}})).into_response();
+                }
+                if path == "/api/plugin" {
+                    let overlays: Vec<serde_json::Value> = std::fs::read_dir(&directory)
+                        .unwrap_or_else(|e| panic!("{e}"))
+                        .filter_map(std::result::Result::ok)
+                        .filter(|entry| entry.file_name().to_string_lossy().starts_with("overlay."))
+                        .filter_map(|entry| std::fs::read(entry.path()).ok())
+                        .filter_map(|bytes| serde_json::from_slice(&bytes).ok()).collect();
+                    let client = reqwest::Client::builder().no_proxy().build().unwrap_or_else(|e| panic!("{e}"));
+                    for overlay in overlays {
+                        let plugin = overlay["plugins"].as_array().and_then(|plugins| plugins.last()).and_then(serde_json::Value::as_str).unwrap_or_else(|| panic!("native plugin overlay missing"));
+                        let bridge: serde_json::Value = serde_json::from_slice(&std::fs::read(std::path::Path::new(plugin).join("bridge.json")).unwrap_or_else(|e| panic!("{e}"))).unwrap_or_else(|e| panic!("{e}"));
+                        let ready = client.post(format!("{}/ready", bridge["url"].as_str().unwrap_or_default()))
+                            .header("authorization", bridge["token"].as_str().unwrap_or_default())
+                            .json(&json!({"sessionID":bridge["sessionID"]})).send().await.unwrap_or_else(|e| panic!("{e}"));
+                        assert!(ready.status().is_success(), "authenticated readiness failed");
+                    }
+                    return axum::Json(json!({"location":{"directory":directory},"data": []})).into_response();
+                }
+                if path == "/api/event" {
+                    let stream = futures::stream::once(async {
+                        Ok::<_, std::convert::Infallible>("data: {\"id\":\"evt_connected\",\"type\":\"server.connected\",\"data\":{}}\n\n")
+                    }).chain(futures::stream::pending());
+                    return ([("content-type", "text/event-stream")], axum::body::Body::from_stream(stream)).into_response();
+                }
+                if path == "/api/session" {
+                    return axum::Json(json!({"data":{"id":body["id"], "location":{"directory":directory}}})).into_response();
+                }
+                if path.ends_with("/prompt") {
+                    std::fs::write(directory.join(format!("{}.prompt", body["id"].as_str().unwrap_or("input"))), "accepted").unwrap_or_else(|e| panic!("{e}"));
+                    return axum::Json(json!({"data":{"id":body["id"]}})).into_response();
+                }
+                if path.ends_with("/inbox") { return axum::Json(json!({"data":[]})).into_response(); }
+                if path.ends_with("/log") {
+                    return ([("content-type", "application/x-ndjson")], "").into_response();
+                }
+                if path.ends_with("/interrupt") { return axum::Json(json!({"interrupted":true})).into_response(); }
+                if method == axum::http::Method::GET {
+                    return axum::Json(json!({"data":{"id":path.rsplit('/').next(), "location":{"directory":directory}}})).into_response();
+                }
+                axum::http::StatusCode::NO_CONTENT.into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let address = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .unwrap_or_else(|e| panic!("{e}"));
+        });
+        crate::test_support::write_executable_script(
+            &root.join("opencode"),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in --version) echo 'opencode v2.1.3'; exit 0;; esac\numask 077\necho $$ >> '{}'/started.pids\nprintf '%s' \"$OPENCODE_CONFIG_CONTENT\" > '{}/overlay.'$$\ntrap 'touch \"{}/stopped.$$\"; exit 0' INT TERM\nprintf '%s\\n' '{{\"url\":\"http://{address}\"}}'\ncat >/dev/null\ntouch '{}/stopped.'$$\n",
+                root.display(),
+                root.display(),
+                root.display(),
+                root.display()
+            ),
+        );
+        Self {
+            task,
+            _path: crate::test_support::prepend_to_path(root),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PendingOpenCode {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[cfg(unix)]
+fn assert_opencode_children_reaped(root: &std::path::Path, count: usize) {
+    let pids = std::fs::read_to_string(root.join("started.pids"))
+        .unwrap_or_else(|e| panic!("no OpenCode started: {e}"));
+    assert_eq!(pids.lines().count(), count);
+    for pid in pids.lines() {
+        let pid: i32 = pid.parse().unwrap_or_else(|e| panic!("{e}"));
+        // SAFETY: signal zero only checks whether this fixture's child still exists.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "OpenCode child {pid} still alive at engine return"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parallel_opencode_parent_and_child_timeouts_reap_before_successor() {
+    let _lock = crate::test_support::lock_process();
+    let _config = crate::test_support::EnvGuard::remove("OPENCODE_CONFIG_CONTENT");
+    let home = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+    let _home = crate::test_support::set_fake_home(home.path());
+    for owner in ["parent", "child"] {
+        let parent = if owner == "parent" {
+            "    timeout: '1'\n"
+        } else {
+            ""
+        };
+        let child = if owner == "child" {
+            "        timeout: '1'\n"
+        } else {
+            ""
+        };
+        let mut fixture = Fixture::new(&format!(
+            "sdk: opencode\nmodel: fixture/pending\nsteps:\n  checks:\n{parent}    parallel:\n      agent:\n        prompt: wait\n{child}      sibling:\n        command: 'sleep 1.2; touch sibling.done'\n    if: {{ fail: recovered }}\n  recovered:\n    command: 'while read pid; do if kill -0 \"$pid\" 2>/dev/null; then exit 1; fi; done < started.pids; touch recovered'\n"
+        ));
+        let _server = PendingOpenCode::install(fixture.root.path()).await;
+        let result = fixture
+            .run(None, None)
+            .await
+            .unwrap_or_else(|e| panic!("{owner}: {e}"));
+        assert_eq!(result.failed, 0, "{owner} timeout recovery failed");
+        assert!(fixture.root.path().join("recovered").exists());
+        assert!(
+            std::fs::read_dir(fixture.root.path())
+                .unwrap_or_else(|e| panic!("{e}"))
+                .filter_map(std::result::Result::ok)
+                .any(|entry| entry.path().extension().is_some_and(|ext| ext == "prompt")),
+            "{owner} timeout must exercise an accepted V2 turn, not a startup failure"
+        );
+        assert_opencode_children_reaped(fixture.root.path(), 1);
+        if owner == "child" {
+            assert!(fixture.root.path().join("sibling.done").exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parallel_opencode_cancellation_reaps_all_children_before_return() {
+    let _lock = crate::test_support::lock_process();
+    let _config = crate::test_support::EnvGuard::remove("OPENCODE_CONFIG_CONTENT");
+    let home = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+    let _home = crate::test_support::set_fake_home(home.path());
+    let mut fixture = Fixture::new(
+        "sdk: opencode\nmodel: fixture/pending\nsteps:\n  checks:\n    parallel:\n      first: { prompt: wait }\n      second: { prompt: wait }\n  unexpected:\n    command: touch unexpected\n",
+    );
+    let _server = PendingOpenCode::install(fixture.root.path()).await;
+    let root = fixture.root.path().to_path_buf();
+    let token = CancellationToken::new();
+    let cancel = async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let accepted = std::fs::read_dir(&root)
+                    .unwrap_or_else(|e| panic!("{e}"))
+                    .filter_map(std::result::Result::ok)
+                    .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "prompt"))
+                    .count();
+                if accepted == 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("both OpenCode turns must be accepted before cancelling: {e}"));
+        token.cancel();
+    };
+    let (result, ()) = tokio::join!(fixture.run(Some(&token), None), cancel);
+    assert!(
+        matches!(result, Err(CruiseError::Interrupted)),
+        "{result:?}"
+    );
+    assert_opencode_children_reaped(&root, 2);
+    assert!(!root.join("unexpected").exists());
+}

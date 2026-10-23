@@ -103,7 +103,7 @@ steps:
 
 Sometimes a step legitimately makes no file changes — for example, the plan explicitly says "don't add tests for this step" — and the agent reaching that conclusion again on every retry is not a bug to route around, it's the correct answer being rejected. Two ways to tell cruise the no-change is deliberate, both of which disable **both** actions (`failed` and `retry`) for that attempt (a `failed` step does not abort; a `retry` step does not re-run):
 
-1. **Output marker** — the step's raw output contains a line starting with `NO_CHANGES_INTENTIONAL:` (leading whitespace on the line is ignored; trailing text on that line is the reason). Works with every backend — `command:` mode and both `sdk:` modes — since it's plain text scanning with no tool support required. A mid-line mention (e.g. quoted in passing, or inside a code block) does **not** count — the marker must anchor the start of a line.
+1. **Output marker** — the step's raw output contains a line starting with `NO_CHANGES_INTENTIONAL:` (leading whitespace on the line is ignored; trailing text on that line is the reason). Works with every backend — `command:` mode and all three `sdk:` modes — since it's plain text scanning with no tool support required. A mid-line mention (e.g. quoted in passing, or inside a code block) does **not** count — the marker must anchor the start of a line.
 
    ```yaml
    steps:

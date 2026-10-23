@@ -1,4 +1,4 @@
-//! Retryable-failure handling for the SDK backends (`sdk: jcode`, `sdk: claude`).
+//! Retryable-failure handling for the SDK backends (`sdk: jcode`, `sdk: claude`, `sdk: opencode`).
 //!
 //! `FallbackEngine` decides, after a failed turn, whether to retry and how.
 //! It runs in one of two modes, selected by whether the workflow declares an
@@ -39,6 +39,33 @@ pub(crate) const DEFAULT_CHAIN_KEY: &str = "default";
 
 /// Suffix marking a chain key or entry as a provider wildcard (`anthropic/*`).
 pub(crate) const WILDCARD_SUFFIX: &str = "/*";
+
+/// Backend-selected model syntax, never inferred from a display label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ModelReferenceFormat {
+    /// Existing jcode and Claude `model:effort` references.
+    LegacyEffort,
+    /// `OpenCode` `provider/model#variant` references.
+    OpenCode,
+}
+
+impl ModelReferenceFormat {
+    pub(crate) fn split(self, model: &str) -> (&str, Option<&str>) {
+        match self {
+            Self::LegacyEffort => split_thinking_suffix(model),
+            Self::OpenCode => model
+                .split_once('#')
+                .map_or((model, None), |(base, variant)| (base, Some(variant))),
+        }
+    }
+
+    fn suffix(self, value: &str) -> String {
+        match self {
+            Self::LegacyEffort => format!(":{value}"),
+            Self::OpenCode => format!("#{value}"),
+        }
+    }
+}
 
 /// Ceiling of the computed exponential backoff, before jitter.
 const BACKOFF_CEILING_MS: u64 = 8_000;
@@ -166,8 +193,8 @@ static ACTIVE_POLICY: LazyLock<RwLock<Option<Arc<RetryPolicy>>>> =
 /// A workflow may recreate its retry policy when a later turn or config reload
 /// starts, but the plan requires a failed model to remain skipped for the full
 /// cooldown window within this process. The map is deliberately in memory only
-/// and is keyed by the effort-stripped model reference.
-static MODEL_COOLDOWNS: LazyLock<Mutex<HashMap<String, Instant>>> =
+/// and is keyed by the reference format and suffix-stripped model reference.
+static MODEL_COOLDOWNS: LazyLock<Mutex<HashMap<(ModelReferenceFormat, String), Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // Policy context for one asynchronous run. Tokio task-local storage follows
@@ -196,25 +223,25 @@ impl RetryPolicy {
     ///
     /// Keyed by the effort-stripped reference: `provider/m:high` and
     /// `provider/m:low` are the same model behind the same quota.
-    fn start_cooldown(model: &str) {
+    fn start_cooldown(format: ModelReferenceFormat, model: &str) {
         let mut map = MODEL_COOLDOWNS
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         map.insert(
-            split_thinking_suffix(model).0.to_string(),
+            (format, format.split(model).0.to_string()),
             Instant::now() + MODEL_COOLDOWN,
         );
     }
 
     /// Whether `model` is still cooling down, dropping expired entries as it
     /// goes.
-    fn is_cooling(model: &str) -> bool {
+    fn is_cooling(format: ModelReferenceFormat, model: &str) -> bool {
         let mut map = MODEL_COOLDOWNS
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
         map.retain(|_, until| *until > now);
-        map.contains_key(split_thinking_suffix(model).0)
+        map.contains_key(&(format, format.split(model).0.to_string()))
     }
 }
 
@@ -659,14 +686,18 @@ fn jitter_permille() -> u32 {
 /// `provider/model`, then `provider/*`, then [`DEFAULT_CHAIN_KEY`].
 ///
 /// A `provider/*` **entry** keeps the failing model id and swaps only the
-/// provider, carrying the reference's `:effort` suffix along; every other entry
+/// provider, carrying the reference's effort or variant suffix along; every other entry
 /// is used verbatim. Entries equal to the failing model, and duplicates, are
 /// dropped.
-fn chain_for(config: &RetryConfig, model: Option<&str>) -> VecDeque<String> {
-    let base = model.map(|m| split_thinking_suffix(m).0);
+fn chain_for(
+    format: ModelReferenceFormat,
+    config: &RetryConfig,
+    model: Option<&str>,
+) -> VecDeque<String> {
+    let base = model.map(|m| format.split(m).0);
     let effort = model
-        .and_then(|m| split_thinking_suffix(m).1)
-        .map(|suffix| format!(":{suffix}"));
+        .and_then(|m| format.split(m).1)
+        .map(|suffix| format.suffix(suffix));
     let entries = model
         .and_then(|raw| config.fallback_chains.get(raw))
         .or_else(|| {
@@ -687,11 +718,11 @@ fn chain_for(config: &RetryConfig, model: Option<&str>) -> VecDeque<String> {
         let Some(candidate) = expand_entry(entry, base, effort.as_deref()) else {
             continue;
         };
-        let candidate_base = split_thinking_suffix(&candidate).0;
+        let candidate_base = format.split(&candidate).0;
         if Some(candidate_base) == base
             || chain
                 .iter()
-                .any(|existing| split_thinking_suffix(existing).0 == candidate_base)
+                .any(|existing| format.split(existing).0 == candidate_base)
         {
             continue;
         }
@@ -718,6 +749,7 @@ fn expand_entry(entry: &str, base: Option<&str>, effort: Option<&str>) -> Option
 /// Per-run retry state: which model the next attempt uses, what is left of the
 /// fallback chain, and how much of the retry budget the current model spent.
 pub(crate) struct FallbackEngine {
+    format: ModelReferenceFormat,
     policy: Option<Arc<RetryPolicy>>,
     max_retries: usize,
     model: Option<String>,
@@ -747,6 +779,7 @@ impl FallbackEngine {
     /// uses a model the workflow did not name.
     #[must_use]
     pub(crate) fn new(
+        format: ModelReferenceFormat,
         policy: Option<Arc<RetryPolicy>>,
         model_ref: Option<&str>,
         max_retries: usize,
@@ -754,11 +787,12 @@ impl FallbackEngine {
         let model = model_ref.filter(|m| !m.is_empty()).map(str::to_string);
         let chain = match policy.as_deref() {
             Some(policy) if policy.config.model_fallback => {
-                chain_for(&policy.config, model.as_deref())
+                chain_for(format, &policy.config, model.as_deref())
             }
             _ => VecDeque::new(),
         };
         let mut engine = Self {
+            format,
             policy,
             max_retries,
             model,
@@ -771,7 +805,7 @@ impl FallbackEngine {
         };
         if engine.policy.is_some()
             && let Some(current) = engine.model.clone()
-            && RetryPolicy::is_cooling(&current)
+            && RetryPolicy::is_cooling(format, &current)
         {
             if let Some(next) = engine.take_candidate() {
                 engine.model = Some(next.clone());
@@ -881,7 +915,7 @@ impl FallbackEngine {
             && class.cools_down()
             && let Some(model) = self.model.as_deref()
         {
-            RetryPolicy::start_cooldown(model);
+            RetryPolicy::start_cooldown(self.format, model);
         }
         RetryAction::GiveUp
     }
@@ -926,7 +960,7 @@ impl FallbackEngine {
             && class.cools_down()
             && let Some(previous) = from.as_deref()
         {
-            RetryPolicy::start_cooldown(previous);
+            RetryPolicy::start_cooldown(self.format, previous);
         }
         self.attempts = 0;
         self.total += 1;
@@ -943,7 +977,7 @@ impl FallbackEngine {
     fn take_candidate(&mut self) -> Option<String> {
         self.policy.as_ref()?;
         while let Some(candidate) = self.chain.pop_front() {
-            if !RetryPolicy::is_cooling(&candidate) {
+            if !RetryPolicy::is_cooling(self.format, &candidate) {
                 return Some(candidate);
             }
         }
@@ -1025,6 +1059,7 @@ mod tests {
 
     fn engine(config: RetryConfig, model: &str, max_retries: usize) -> FallbackEngine {
         FallbackEngine::new(
+            ModelReferenceFormat::LegacyEffort,
             Some(Arc::new(RetryPolicy::new(config))),
             Some(model),
             max_retries,
@@ -1362,21 +1397,95 @@ mod tests {
             ("anthropic/*", &["fallback/by-provider"]),
             ("anthropic/opus", &["fallback/by-model"]),
         ]);
-        let chain = chain_for(&config, Some("anthropic/opus"));
+        let chain = chain_for(
+            ModelReferenceFormat::LegacyEffort,
+            &config,
+            Some("anthropic/opus"),
+        );
         assert_eq!(chain, ["fallback/by-model"]);
-        let chain = chain_for(&config, Some("anthropic/haiku"));
+        let chain = chain_for(
+            ModelReferenceFormat::LegacyEffort,
+            &config,
+            Some("anthropic/haiku"),
+        );
         assert_eq!(chain, ["fallback/by-provider"]);
-        let chain = chain_for(&config, Some("openai/gpt-5.5"));
+        let chain = chain_for(
+            ModelReferenceFormat::LegacyEffort,
+            &config,
+            Some("openai/gpt-5.5"),
+        );
         assert_eq!(chain, ["fallback/default-model"]);
-        let chain = chain_for(&config, None);
+        let chain = chain_for(ModelReferenceFormat::LegacyEffort, &config, None);
         assert_eq!(chain, ["fallback/default-model"]);
     }
 
     #[test]
     fn retry_chain_wildcard_entry_keeps_the_model_and_effort() {
         let config = policy(&[("default", &["openrouter/*"])]);
-        let chain = chain_for(&config, Some("anthropic/claude-opus-4-6:high"));
+        let chain = chain_for(
+            ModelReferenceFormat::LegacyEffort,
+            &config,
+            Some("anthropic/claude-opus-4-6:high"),
+        );
         assert_eq!(chain, ["openrouter/claude-opus-4-6:high"]);
+    }
+
+    #[test]
+    fn retry_opencode_chain_preserves_nested_colon_ids_and_variants() {
+        let config = policy(&[
+            ("default", &["fallback/default"]),
+            ("source/*", &["wildcard/*"]),
+            ("source/team/model:high", &["base/*"]),
+            (
+                "source/team/model:high#fast",
+                &[
+                    "source/team/model:high#slow",
+                    "exact/*",
+                    "exact/team/model:high#slow",
+                    "exact/team/model:low#fast",
+                ],
+            ),
+        ]);
+        let format = ModelReferenceFormat::OpenCode;
+        assert_eq!(
+            chain_for(format, &config, Some("source/team/model:high#fast")),
+            ["exact/team/model:high#fast", "exact/team/model:low#fast"]
+        );
+        assert_eq!(
+            chain_for(format, &config, Some("source/team/model:high#slow")),
+            ["base/team/model:high#slow"]
+        );
+        assert_eq!(
+            chain_for(format, &config, Some("source/other/id:low#fast")),
+            ["wildcard/other/id:low#fast"]
+        );
+        assert_eq!(chain_for(format, &config, None), ["fallback/default"]);
+    }
+
+    #[test]
+    fn retry_opencode_cooldowns_separate_formats_and_preserve_colons() {
+        let format = ModelReferenceFormat::OpenCode;
+        RetryPolicy::start_cooldown(format, "test-opencode-cool/team/model:high#fast");
+        assert!(RetryPolicy::is_cooling(
+            format,
+            "test-opencode-cool/team/model:high#slow"
+        ));
+        assert!(!RetryPolicy::is_cooling(
+            format,
+            "test-opencode-cool/team/model:low#fast"
+        ));
+        assert!(!RetryPolicy::is_cooling(
+            ModelReferenceFormat::LegacyEffort,
+            "test-opencode-cool/team/model:high#fast"
+        ));
+        let config = policy(&[("default", &["replacement/*"])]);
+        let engine = FallbackEngine::new(
+            format,
+            Some(Arc::new(RetryPolicy::new(config))),
+            Some("test-opencode-cool/team/model:high#slow"),
+            1,
+        );
+        assert_eq!(engine.model(), Some("replacement/team/model:high#slow"));
     }
 
     #[test]
@@ -1385,7 +1494,11 @@ mod tests {
             "test-effort/primary",
             &["test-effort/primary:low", "test-effort/spare"],
         )]);
-        let chain = chain_for(&config, Some("test-effort/primary:high"));
+        let chain = chain_for(
+            ModelReferenceFormat::LegacyEffort,
+            &config,
+            Some("test-effort/primary:high"),
+        );
         assert_eq!(chain, ["test-effort/spare"]);
     }
 
@@ -1462,7 +1575,12 @@ mod tests {
 
     #[test]
     fn retry_without_a_policy_keeps_the_legacy_same_model_backoff() {
-        let mut engine = FallbackEngine::new(None, Some("test-e/only"), 2);
+        let mut engine = FallbackEngine::new(
+            ModelReferenceFormat::LegacyEffort,
+            None,
+            Some("test-e/only"),
+            2,
+        );
 
         // Non-limit failures stayed permanent before the fallback engine.
         assert_eq!(
@@ -1580,7 +1698,10 @@ mod tests {
         // refused, so there is nothing to cool down. Observed directly,
         // because "a later engine still starts on the primary" also holds
         // when the primary *and* every candidate are cooling.
-        assert!(!RetryPolicy::is_cooling("test-client-streamed/primary"));
+        assert!(!RetryPolicy::is_cooling(
+            ModelReferenceFormat::LegacyEffort,
+            "test-client-streamed/primary"
+        ));
         let mut later = engine(config, "test-client-streamed/primary", 3);
         assert_eq!(later.model(), Some("test-client-streamed/primary"));
         assert!(!later.startup_blocked());
@@ -1683,7 +1804,10 @@ mod tests {
         // never be selected again: a later turn — a step retried through
         // `if.fail.retry`, say — starts on the spare instead of spending
         // another request on the identical 400.
-        assert!(RetryPolicy::is_cooling("test-missing/primary"));
+        assert!(RetryPolicy::is_cooling(
+            ModelReferenceFormat::LegacyEffort,
+            "test-missing/primary"
+        ));
         let mut later = engine(config, "test-missing/primary", 1);
         assert_eq!(later.model(), Some("test-missing/spare"));
         assert_eq!(
@@ -1706,7 +1830,10 @@ mod tests {
             RetryAction::GiveUp
         );
         assert_eq!(solo.model(), Some("test-missing-solo/primary"));
-        assert!(RetryPolicy::is_cooling("test-missing-solo/primary"));
+        assert!(RetryPolicy::is_cooling(
+            ModelReferenceFormat::LegacyEffort,
+            "test-missing-solo/primary"
+        ));
 
         // Replaying text the user already saw on another model is never safe,
         // so a streamed turn gives up as well — yet the replay hazard belongs
@@ -1721,7 +1848,10 @@ mod tests {
             RetryAction::GiveUp
         );
         assert_eq!(streamed.model(), Some("test-missing-streamed/primary"));
-        assert!(RetryPolicy::is_cooling("test-missing-streamed/primary"));
+        assert!(RetryPolicy::is_cooling(
+            ModelReferenceFormat::LegacyEffort,
+            "test-missing-streamed/primary"
+        ));
     }
 
     #[test]
@@ -1736,7 +1866,10 @@ mod tests {
 
         // When a later turn resolves the same primary, it is not cooling: a
         // refused request says nothing about the model's health.
-        assert!(!RetryPolicy::is_cooling("test-cool4xx/primary"));
+        assert!(!RetryPolicy::is_cooling(
+            ModelReferenceFormat::LegacyEffort,
+            "test-cool4xx/primary"
+        ));
         let mut later = engine(config, "test-cool4xx/primary", 1);
         assert_eq!(later.model(), Some("test-cool4xx/primary"));
         assert!(!later.startup_blocked());
@@ -1834,7 +1967,12 @@ mod tests {
 
     #[test]
     fn retry_client_error_without_a_policy_fails_the_run() {
-        let mut engine = FallbackEngine::new(None, Some("test-client-none/only"), 3);
+        let mut engine = FallbackEngine::new(
+            ModelReferenceFormat::LegacyEffort,
+            None,
+            Some("test-client-none/only"),
+            3,
+        );
 
         assert_eq!(
             engine.next(Failure::Failed("HTTP 400 bad request"), false),
@@ -1905,7 +2043,12 @@ mod tests {
             "test-h/primary",
             &["test-h/spare"],
         )])));
-        let mut first = FallbackEngine::new(Some(Arc::clone(&shared)), Some("test-h/primary"), 1);
+        let mut first = FallbackEngine::new(
+            ModelReferenceFormat::LegacyEffort,
+            Some(Arc::clone(&shared)),
+            Some("test-h/primary"),
+            1,
+        );
         assert!(matches!(
             first.next(Failure::Limited("429"), false),
             RetryAction::Backoff { .. }
@@ -1916,7 +2059,12 @@ mod tests {
         ));
 
         // The next turn of the same run starts on the spare, and says so.
-        let mut second = FallbackEngine::new(Some(shared), Some("test-h/primary"), 1);
+        let mut second = FallbackEngine::new(
+            ModelReferenceFormat::LegacyEffort,
+            Some(shared),
+            Some("test-h/primary"),
+            1,
+        );
         assert_eq!(second.model(), Some("test-h/spare"));
         assert_eq!(
             second.take_startup_switch(),
@@ -1927,12 +2075,15 @@ mod tests {
 
     #[test]
     fn retry_model_cooldown_last_for_thirty_minutes() {
-        RetryPolicy::start_cooldown("test-cooldown/model");
+        RetryPolicy::start_cooldown(ModelReferenceFormat::LegacyEffort, "test-cooldown/model");
 
         let until = MODEL_COOLDOWNS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get("test-cooldown/model")
+            .get(&(
+                ModelReferenceFormat::LegacyEffort,
+                "test-cooldown/model".to_string(),
+            ))
             .copied()
             .unwrap_or_else(|| panic!("cooldown entry missing"));
         let remaining = until.saturating_duration_since(Instant::now());
@@ -1951,7 +2102,12 @@ mod tests {
     fn retry_cooldowns_are_shared_across_policies_in_one_process() {
         let config = policy(&[("test-j/primary", &["test-j/spare"])]);
         let mine = Arc::new(RetryPolicy::new(config.clone()));
-        let mut engine = FallbackEngine::new(Some(mine), Some("test-j/primary"), 1);
+        let mut engine = FallbackEngine::new(
+            ModelReferenceFormat::LegacyEffort,
+            Some(mine),
+            Some("test-j/primary"),
+            1,
+        );
         assert!(matches!(
             engine.next(Failure::Limited("429"), false),
             RetryAction::Backoff { .. }
@@ -1963,7 +2119,12 @@ mod tests {
 
         // A later policy in the same process still skips the failed model.
         let theirs = Arc::new(RetryPolicy::new(config));
-        let mut other = FallbackEngine::new(Some(theirs), Some("test-j/primary"), 1);
+        let mut other = FallbackEngine::new(
+            ModelReferenceFormat::LegacyEffort,
+            Some(theirs),
+            Some("test-j/primary"),
+            1,
+        );
         assert_eq!(other.model(), Some("test-j/spare"));
         assert_eq!(
             other.take_startup_switch(),
@@ -1973,11 +2134,12 @@ mod tests {
 
     #[test]
     fn retry_does_not_start_when_all_configured_models_are_cooling_down() {
-        RetryPolicy::start_cooldown("test-blocked/primary");
-        RetryPolicy::start_cooldown("test-blocked/spare");
+        RetryPolicy::start_cooldown(ModelReferenceFormat::LegacyEffort, "test-blocked/primary");
+        RetryPolicy::start_cooldown(ModelReferenceFormat::LegacyEffort, "test-blocked/spare");
 
         let config = policy(&[("test-blocked/primary", &["test-blocked/spare"])]);
         let engine = FallbackEngine::new(
+            ModelReferenceFormat::LegacyEffort,
             Some(Arc::new(RetryPolicy::new(config))),
             Some("test-blocked/primary"),
             1,
@@ -1989,8 +2151,11 @@ mod tests {
     #[test]
     fn retry_cooldown_ignores_the_effort_suffix() {
         // `:high` and `:low` are one model behind one quota.
-        RetryPolicy::start_cooldown("test-k/primary:high");
-        assert!(RetryPolicy::is_cooling("test-k/primary:low"));
+        RetryPolicy::start_cooldown(ModelReferenceFormat::LegacyEffort, "test-k/primary:high");
+        assert!(RetryPolicy::is_cooling(
+            ModelReferenceFormat::LegacyEffort,
+            "test-k/primary:low"
+        ));
     }
 
     #[test]
@@ -2035,7 +2200,12 @@ mod tests {
 
     #[test]
     fn retry_undispatchable_model_without_a_policy_fails_the_run() {
-        let mut engine = FallbackEngine::new(None, Some("test-m/primary"), 3);
+        let mut engine = FallbackEngine::new(
+            ModelReferenceFormat::LegacyEffort,
+            None,
+            Some("test-m/primary"),
+            3,
+        );
         assert_eq!(
             engine.next(Failure::Unusable("invalid model reference"), false),
             RetryAction::GiveUp

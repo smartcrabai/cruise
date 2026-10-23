@@ -1,9 +1,10 @@
 //! Prompt-execution backend abstraction.
 //!
-//! Cruise drives prompts through one of three backends: an external `command`
+//! Cruise drives prompts through one of four backends: an external `command`
 //! (the classic `claude -p` path), the official **jcode Rust SDK** (`sdk: jcode`,
-//! also the default when a workflow names neither `sdk` nor `command`), or the
-//! **Claude SDK** (`sdk: claude`). [`Executor`] hides that choice behind a
+//! also the default when a workflow names neither `sdk` nor `command`), the
+//! **Claude SDK** (`sdk: claude`), or the built-in **OpenCode V2 client**
+//! (`sdk: opencode`). [`Executor`] hides that choice behind a
 //! single [`Executor::run`] call so that `planning.rs`, `engine.rs`, and the
 //! `WebUI` command layer don't need to branch on the backend.
 //!
@@ -16,6 +17,8 @@
 //! - `sdk: claude` — a plain `claude --model` name with an optional `:effort`
 //!   suffix, driven in-process through `claude-agent-sdk` -- see
 //!   [`run_claude`] and [`crate::backend::claude`].
+//! - `sdk: opencode` uses `provider/model#variant` references through the
+//!   built-in OpenCode V2 client, preserving colons in model IDs.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -29,7 +32,7 @@ use crate::backend::stream::{ChunkOutcome, ChunkReducer, Folded, LineBuffer, Str
 use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
-use crate::retry::{self, Failure, FallbackEngine, RetryAction, RetryPolicy};
+use crate::retry::{self, Failure, FallbackEngine, ModelReferenceFormat, RetryAction, RetryPolicy};
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt};
 
 /// Callback invoked when an SDK backend reports its session identifier.
@@ -106,6 +109,8 @@ pub enum Executor {
     /// Drive the `claude` CLI in-process through `claude-agent-sdk`
     /// (`sdk: claude`). See [`run_claude`].
     Claude,
+    /// Drive a locally owned `OpenCode` V2 server through the embedded client.
+    OpenCode,
     /// An `sdk:` value cruise does not implement. [`Executor::run`] reports it;
     /// no prompt is executed.
     ///
@@ -120,6 +125,7 @@ impl Executor {
     /// Build an executor from the workflow's backend selection.
     ///
     /// `sdk: jcode` -> [`Executor::Jcode`]; `sdk: claude` -> [`Executor::Claude`];
+    /// `sdk: opencode` -> [`Executor::OpenCode`];
     /// a `command` with no `sdk` -> [`Executor::Command`]; neither named ->
     /// [`Executor::Jcode`], the default backend. Any other `sdk` value ->
     /// [`Executor::Unsupported`], which fails at run time.
@@ -132,6 +138,7 @@ impl Executor {
         match sdk {
             Some("jcode") => Executor::Jcode,
             Some("claude") => Executor::Claude,
+            Some("opencode") => Executor::OpenCode,
             Some(other) => Executor::Unsupported {
                 sdk: other.to_string(),
             },
@@ -142,11 +149,14 @@ impl Executor {
         }
     }
 
-    /// Whether this executor drives prompts through an agent backend (`Jcode`
-    /// or `Claude`) rather than spawning an external `command`.
+    /// Whether this executor drives prompts through an agent backend (`Jcode`,
+    /// `Claude`, or `OpenCode`) rather than spawning an external `command`.
     #[must_use]
     pub fn is_sdk(&self) -> bool {
-        matches!(self, Executor::Jcode | Executor::Claude)
+        matches!(
+            self,
+            Executor::Jcode | Executor::Claude | Executor::OpenCode
+        )
     }
 
     /// Resolve the model reference for an ordinary prompt step: a per-step
@@ -164,6 +174,7 @@ impl Executor {
             Executor::Command { .. }
             | Executor::Jcode
             | Executor::Claude
+            | Executor::OpenCode
             | Executor::Unsupported { .. } => step_model.or(global_model).map(str::to_string),
         }
     }
@@ -180,6 +191,7 @@ impl Executor {
             Executor::Command { .. }
             | Executor::Jcode
             | Executor::Claude
+            | Executor::OpenCode
             | Executor::Unsupported { .. } => plan_model.or(global_model).map(str::to_string),
         }
     }
@@ -241,6 +253,10 @@ impl Executor {
                     .to_string(),
             )),
             Executor::Claude => run_claude(req).await,
+            Executor::OpenCode if req.computer_use => Err(CruiseError::InvalidStepConfig(
+                "computer_use requires the jcode backend and is not supported by OpenCode".to_string(),
+            )),
+            Executor::OpenCode => run_opencode(req).await,
             Executor::Unsupported { sdk } => Err(crate::error::CruiseError::InvalidStepConfig(
                 format!("unsupported `sdk` value '{sdk}'"),
             )),
@@ -349,6 +365,14 @@ async fn stream_to_outcome(
             },
             maybe = rx.recv() => match maybe {
                 Some(chunk) => {
+                    if let StreamChunk::SessionReady { id, ready } = &chunk
+                        && let Some(callback) = on_session_id
+                        && let Err(error) = callback(id)
+                    {
+                        let _ = ready.send(false);
+                        while rx.recv().await.is_some() {}
+                        return Err(error);
+                    }
                     if let StreamChunk::Session(id) = &chunk
                         && let Some(callback) = on_session_id
                     {
@@ -376,7 +400,11 @@ async fn stream_to_outcome(
             cb(line);
         });
     }
-    Ok(Folded { outcome, streamed })
+    Ok(Folded {
+        outcome,
+        streamed,
+        retry_barrier: reducer.retry_barrier(),
+    })
 }
 
 /// `Claude`-backend execution: drive the `claude` CLI in-process through
@@ -395,12 +423,18 @@ async fn stream_to_outcome(
 /// the CLI's output and closes the transport when it fires — that is what
 /// terminates the `claude` child, since the SDK offers no interrupt.
 async fn run_claude(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    run_with_fallback(&req, "claude", retry::active_policy(), |model| {
-        Ok(stream_claude_agent(
-            build_claude_config(&req, model),
-            req.prompt.to_string(),
-        ))
-    })
+    run_with_fallback(
+        &req,
+        "claude",
+        ModelReferenceFormat::LegacyEffort,
+        retry::active_policy(),
+        |model| {
+            Ok(stream_claude_agent(
+                build_claude_config(&req, model),
+                req.prompt.to_string(),
+            ))
+        },
+    )
     .await
 }
 
@@ -488,14 +522,19 @@ impl AttemptFailure {
 ///
 /// Under a policy, a 4xx other than 429 never re-sends the same request to the
 /// same model: it switches to the next fallback entry, or surfaces unchanged.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep attempt completion and retry decisions in one lifecycle loop"
+)]
 async fn run_with_fallback(
     req: &PromptRun<'_>,
     label: &str,
+    format: ModelReferenceFormat,
     policy: Option<Arc<RetryPolicy>>,
     mut start: impl FnMut(Option<&str>) -> Result<std::sync::mpsc::Receiver<StreamChunk>>,
 ) -> Result<PromptOutcome> {
     let on_delta = req.stream.and_then(|s| s.on_stdout);
-    let mut engine = FallbackEngine::new(policy, req.model_or_mode, req.max_retries);
+    let mut engine = FallbackEngine::new(format, policy, req.model_or_mode, req.max_retries);
     let mut model_reported = false;
     if engine.startup_blocked() {
         return Err(CruiseError::Other(
@@ -526,6 +565,15 @@ async fn run_with_fallback(
                     stream_to_outcome(rx_std, on_delta, req.on_session_id, req.cancel_token)
                         .await?;
                 let streamed = folded.streamed;
+                if folded.retry_barrier {
+                    match &folded.outcome {
+                        ChunkOutcome::Limited { message, .. }
+                        | ChunkOutcome::Failed { message, .. } => {
+                            return Err(CruiseError::CommandError(message.clone()));
+                        }
+                        _ => {}
+                    }
+                }
                 match folded.outcome {
                     ChunkOutcome::Done { output, session } => {
                         return Ok(PromptOutcome {
@@ -614,10 +662,75 @@ async fn run_with_fallback(
 /// aborted attempt's session id: re-sending the same prompt into a
 /// partially-answered session would duplicate context.
 async fn run_jcode(req: PromptRun<'_>) -> Result<PromptOutcome> {
-    run_with_fallback(&req, "jcode", retry::active_policy(), |model_ref| {
-        let config = build_jcode_config(&req, model_ref)?;
-        Ok(stream_jcode_agent(config, req.prompt.to_string()))
-    })
+    run_with_fallback(
+        &req,
+        "jcode",
+        ModelReferenceFormat::LegacyEffort,
+        retry::active_policy(),
+        |model_ref| {
+            let config = build_jcode_config(&req, model_ref)?;
+            Ok(stream_jcode_agent(config, req.prompt.to_string()))
+        },
+    )
+    .await
+}
+
+/// Cancels the owned attempt when its caller drops the execution future. The
+/// worker remains responsible for stopping and reaping its process tree.
+struct OpenCodeAttemptGuard(CancellationToken);
+
+impl Drop for OpenCodeAttemptGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+async fn run_opencode(req: PromptRun<'_>) -> Result<PromptOutcome> {
+    use crate::backend::opencode::{OpenCodeRunnerConfig, stream_agent};
+
+    let cancel = req
+        .cancel_token
+        .map_or_else(CancellationToken::new, CancellationToken::child_token);
+    if cancel.is_cancelled() {
+        return Err(CruiseError::Interrupted);
+    }
+    let _guard = OpenCodeAttemptGuard(cancel.clone());
+    let req = PromptRun {
+        cancel_token: Some(&cancel),
+        ..req
+    };
+    run_with_fallback(
+        &req,
+        "opencode",
+        ModelReferenceFormat::OpenCode,
+        retry::active_policy(),
+        |model_ref| {
+            Ok(stream_agent(
+                OpenCodeRunnerConfig {
+                    model_ref: model_ref.map(str::to_string),
+                    cwd: req.working_dir.map(Path::to_path_buf),
+                    resume_session_id: req.resume.clone(),
+                    tools: req.tools.clone(),
+                    env: req.env.clone(),
+                    mcp_servers: req.mcp_servers.clone(),
+                    permission: req.permission,
+                    cancel: req.cancel_token.cloned(),
+                    keep_session_home: req.resume.is_some()
+                        || req.on_session_id.is_some()
+                        || req.tools.iter().any(|tool| {
+                            matches!(
+                                tool.name.as_str(),
+                                crate::sdk_tools::SUBMIT_PLAN_TOOL
+                                    | crate::sdk_tools::UPDATE_PLAN_TOOL
+                            )
+                        }),
+                    cli_path: None,
+                    computer_use: req.computer_use,
+                },
+                req.prompt.to_string(),
+            ))
+        },
+    )
     .await
 }
 
@@ -1153,6 +1266,77 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn retry_barrier_prevents_replay_without_an_output_sink() {
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model_or_mode = Some("barrier/model:tag#precise");
+        req.max_retries = 3;
+        let mut attempts = 0;
+        let result = run_with_fallback(
+            &req,
+            "opencode",
+            ModelReferenceFormat::OpenCode,
+            Some(fast_policy(&[("default", &["barrier/spare"])])),
+            |_| {
+                attempts += 1;
+                Ok(canned(vec![StreamChunk::RetryBarrier, limit_chunk()]))
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn durable_checkpoint_acknowledgement_follows_callback() {
+        let checkpointed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saved = Arc::clone(&checkpointed);
+        let callback = move |id: &str| {
+            assert_eq!(id, "ses_checkpoint");
+            saved.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (ready, ack) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(StreamChunk::SessionReady {
+                id: "ses_checkpoint".to_string(),
+                ready,
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(ack.recv_timeout(Duration::from_secs(2)), Ok(true));
+            assert!(checkpointed.load(std::sync::atomic::Ordering::Acquire));
+            let _ = tx.send(StreamChunk::Done("answer".to_string()));
+        });
+        let result = stream_to_outcome(rx, None, Some(&callback), None)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(matches!(result.outcome, ChunkOutcome::Done { .. }));
+        worker.join().unwrap_or_else(|_| panic!("worker panicked"));
+    }
+
+    #[tokio::test]
+    async fn refused_checkpoint_waits_for_worker_cleanup() {
+        let cleaned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = Arc::clone(&cleaned);
+        let callback = |_: &str| Err(CruiseError::Other("checkpoint refused".to_string()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (ready, ack) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(StreamChunk::SessionReady {
+                id: "ses_checkpoint".to_string(),
+                ready,
+            });
+            assert_eq!(ack.recv_timeout(Duration::from_secs(2)), Ok(false));
+            done.store(true, std::sync::atomic::Ordering::Release);
+        });
+        let result = stream_to_outcome(rx, None, Some(&callback), None).await;
+        assert!(result.is_err());
+        assert!(cleaned.load(std::sync::atomic::Ordering::Acquire));
+        worker.join().unwrap_or_else(|_| panic!("worker panicked"));
+    }
+
     /// Collects strings a callback under test was handed.
     type Recorder = Arc<Mutex<Vec<String>>>;
 
@@ -1197,15 +1381,21 @@ mod tests {
         req.stream = Some(&stream);
 
         let start_events = Arc::clone(&events);
-        let outcome = run_with_fallback(&req, "jcode", None, |model| {
-            assert_eq!(model, req.model_or_mode);
-            record(&start_events, "backend-start");
-            Ok(canned(vec![
-                StreamChunk::Session("session-1".to_string()),
-                StreamChunk::Delta("assistant output\n".to_string()),
-                StreamChunk::Done("assistant result".to_string()),
-            ]))
-        })
+        let outcome = run_with_fallback(
+            &req,
+            "jcode",
+            ModelReferenceFormat::LegacyEffort,
+            None,
+            |model| {
+                assert_eq!(model, req.model_or_mode);
+                record(&start_events, "backend-start");
+                Ok(canned(vec![
+                    StreamChunk::Session("session-1".to_string()),
+                    StreamChunk::Delta("assistant output\n".to_string()),
+                    StreamChunk::Done("assistant result".to_string()),
+                ]))
+            },
+        )
         .await
         .unwrap_or_else(|e| panic!("expected a successful prompt: {e}"));
 
@@ -1236,9 +1426,13 @@ mod tests {
             let mut req = base_req(&env);
             req.on_notice = Some(&on_notice);
 
-            run_with_fallback(&req, backend, None, |_| {
-                Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
-            })
+            run_with_fallback(
+                &req,
+                backend,
+                ModelReferenceFormat::LegacyEffort,
+                None,
+                |_| Ok(canned(vec![StreamChunk::Done("ok".to_string())])),
+            )
             .await
             .unwrap_or_else(|e| panic!("{backend} default run failed: {e}"));
 
@@ -1316,9 +1510,13 @@ mod tests {
             req.model_or_mode = Some(selected.as_str());
             req.on_notice = Some(&on_notice);
 
-            run_with_fallback(&req, "jcode", None, |_| {
-                Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
-            })
+            run_with_fallback(
+                &req,
+                "jcode",
+                ModelReferenceFormat::LegacyEffort,
+                None,
+                |_| Ok(canned(vec![StreamChunk::Done("ok".to_string())])),
+            )
             .await
             .unwrap_or_else(|e| panic!("override run failed: {e}"));
 
@@ -1339,14 +1537,20 @@ mod tests {
         req.max_retries = 1;
         req.on_notice = Some(&on_notice);
 
-        let outcome = run_with_fallback(&req, "jcode", Some(fast_policy(&[])), |model| {
-            record(&models_sink, model.unwrap_or_default());
-            if recorded(&models).len() == 1 {
-                Ok(canned(vec![limit_chunk()]))
-            } else {
-                Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
-            }
-        })
+        let outcome = run_with_fallback(
+            &req,
+            "jcode",
+            ModelReferenceFormat::LegacyEffort,
+            Some(fast_policy(&[])),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                if recorded(&models).len() == 1 {
+                    Ok(canned(vec![limit_chunk()]))
+                } else {
+                    Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
+                }
+            },
+        )
         .await
         .unwrap_or_else(|e| panic!("same-model retry should succeed: {e}"));
 
@@ -1400,15 +1604,21 @@ mod tests {
                 "provider/last-resort:free:xhigh",
             ],
         )]);
-        let outcome = run_with_fallback(&req, "jcode", Some(policy), |model| {
-            let model = model.unwrap_or_default();
-            record(&models_sink, model);
-            if model == "provider/last-resort:free:xhigh" {
-                Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
-            } else {
-                Ok(canned(vec![limit_chunk()]))
-            }
-        })
+        let outcome = run_with_fallback(
+            &req,
+            "jcode",
+            ModelReferenceFormat::LegacyEffort,
+            Some(policy),
+            |model| {
+                let model = model.unwrap_or_default();
+                record(&models_sink, model);
+                if model == "provider/last-resort:free:xhigh" {
+                    Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
+                } else {
+                    Ok(canned(vec![limit_chunk()]))
+                }
+            },
+        )
         .await
         .unwrap_or_else(|e| panic!("fallback chain should reach its final model: {e}"));
 
@@ -1454,15 +1664,21 @@ mod tests {
 
         let policy = fast_policy(&[("test-smoke-400/primary", &["test-smoke-400/spare"])]);
         let diagnostic = "jcode: provider error: API Error: 400 invalid_request: unsupported parameter\nrequest_id: req-test";
-        let outcome = run_with_fallback(&req, "jcode", Some(policy), |model| {
-            let model = model.unwrap_or_default();
-            record(&models_sink, model);
-            if model == "test-smoke-400/spare" {
-                Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
-            } else {
-                Ok(canned(vec![StreamChunk::Error(diagnostic.to_string())]))
-            }
-        })
+        let outcome = run_with_fallback(
+            &req,
+            "jcode",
+            ModelReferenceFormat::LegacyEffort,
+            Some(policy),
+            |model| {
+                let model = model.unwrap_or_default();
+                record(&models_sink, model);
+                if model == "test-smoke-400/spare" {
+                    Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
+                } else {
+                    Ok(canned(vec![StreamChunk::Error(diagnostic.to_string())]))
+                }
+            },
+        )
         .await
         .unwrap_or_else(|e| panic!("400 should switch to the fallback model: {e}"));
 
@@ -1492,13 +1708,19 @@ mod tests {
         first.model_or_mode = Some(primary);
         first.max_retries = 1;
 
-        run_with_fallback(&first, "jcode", Some(Arc::clone(&policy)), |model| {
-            if model == Some(spare) {
-                Ok(canned(vec![StreamChunk::Done("first".to_string())]))
-            } else {
-                Ok(canned(vec![limit_chunk()]))
-            }
-        })
+        run_with_fallback(
+            &first,
+            "jcode",
+            ModelReferenceFormat::LegacyEffort,
+            Some(Arc::clone(&policy)),
+            |model| {
+                if model == Some(spare) {
+                    Ok(canned(vec![StreamChunk::Done("first".to_string())]))
+                } else {
+                    Ok(canned(vec![limit_chunk()]))
+                }
+            },
+        )
         .await
         .unwrap_or_else(|e| panic!("initial fallback run failed: {e}"));
 
@@ -1511,10 +1733,16 @@ mod tests {
         second.model_or_mode = Some(primary);
         second.on_notice = Some(&on_notice);
 
-        run_with_fallback(&second, "jcode", Some(policy), |model| {
-            record(&models_sink, model.unwrap_or_default());
-            Ok(canned(vec![StreamChunk::Done("second".to_string())]))
-        })
+        run_with_fallback(
+            &second,
+            "jcode",
+            ModelReferenceFormat::LegacyEffort,
+            Some(policy),
+            |model| {
+                record(&models_sink, model.unwrap_or_default());
+                Ok(canned(vec![StreamChunk::Done("second".to_string())]))
+            },
+        )
         .await
         .unwrap_or_else(|e| panic!("cooldown replacement run failed: {e}"));
 
@@ -1551,9 +1779,13 @@ mod tests {
             let env = HashMap::new();
             let mut cooling_run = base_req(&env);
             cooling_run.model_or_mode = Some(model);
-            let _ = run_with_fallback(&cooling_run, "jcode", Some(fast_policy(&[])), |_| {
-                Ok(canned(vec![limit_chunk()]))
-            })
+            let _ = run_with_fallback(
+                &cooling_run,
+                "jcode",
+                ModelReferenceFormat::LegacyEffort,
+                Some(fast_policy(&[])),
+                |_| Ok(canned(vec![limit_chunk()])),
+            )
             .await;
         }
         let policy = fast_policy(&[(primary, &[spare])]);
@@ -1565,9 +1797,13 @@ mod tests {
         req.model_or_mode = Some(primary);
         req.on_notice = Some(&on_notice);
 
-        let Err(error) = run_with_fallback(&req, "jcode", Some(policy), |_| {
-            panic!("a fully cooling-down policy must not start a backend")
-        })
+        let Err(error) = run_with_fallback(
+            &req,
+            "jcode",
+            ModelReferenceFormat::LegacyEffort,
+            Some(policy),
+            |_| panic!("a fully cooling-down policy must not start a backend"),
+        )
         .await
         else {
             panic!("all cooling-down models must prevent execution")
@@ -1598,6 +1834,7 @@ mod tests {
         let outcome = run_with_fallback(
             &req,
             "jcode",
+            ModelReferenceFormat::LegacyEffort,
             Some(fast_policy(&[(
                 "test-executor-budget/primary",
                 &["test-executor-budget/spare"],
@@ -1658,6 +1895,7 @@ mod tests {
         let Err(error) = run_with_fallback(
             &req,
             "jcode",
+            ModelReferenceFormat::LegacyEffort,
             Some(fast_policy(&[(
                 "test-executor-zero/primary",
                 &["test-executor-zero/spare"],
@@ -1696,6 +1934,7 @@ mod tests {
         let Err(error) = run_with_fallback(
             &req,
             "jcode",
+            ModelReferenceFormat::LegacyEffort,
             Some(fast_policy(&[(
                 "test-executor-streamed/primary",
                 &["test-executor-streamed/spare"],
@@ -1739,6 +1978,7 @@ mod tests {
         let outcome = run_with_fallback(
             &req,
             "claude",
+            ModelReferenceFormat::LegacyEffort,
             Some(fast_policy(&[(
                 "test-executor-no-sink/primary",
                 &["test-executor-no-sink/spare"],
@@ -1784,6 +2024,7 @@ mod tests {
         let outcome = run_with_fallback(
             &req,
             "jcode",
+            ModelReferenceFormat::LegacyEffort,
             Some(fast_policy(&[(
                 "test-executor-unusable/primary",
                 &["test-executor-unusable/spare"],
@@ -1843,21 +2084,27 @@ mod tests {
         req.max_retries = 1;
 
         let policy = fast_policy(&[("test-primary/model", &[":high", "test-next/model"])]);
-        let outcome = run_with_fallback(&req, "jcode", Some(policy), |model| {
-            let model = model.unwrap_or_default();
-            record(&attempts_sink, model);
-            let config = build_jcode_config(&req, Some(model))?;
-            record(&started_sink, model);
-            if model == "test-primary/model" {
-                Ok(canned(vec![limit_chunk()]))
-            } else if config.model.is_none() {
-                Ok(canned(vec![StreamChunk::Done(
-                    "effort-only model".to_string(),
-                )]))
-            } else {
-                Ok(canned(vec![StreamChunk::Done("next model".to_string())]))
-            }
-        })
+        let outcome = run_with_fallback(
+            &req,
+            "jcode",
+            ModelReferenceFormat::LegacyEffort,
+            Some(policy),
+            |model| {
+                let model = model.unwrap_or_default();
+                record(&attempts_sink, model);
+                let config = build_jcode_config(&req, Some(model))?;
+                record(&started_sink, model);
+                if model == "test-primary/model" {
+                    Ok(canned(vec![limit_chunk()]))
+                } else if config.model.is_none() {
+                    Ok(canned(vec![StreamChunk::Done(
+                        "effort-only model".to_string(),
+                    )]))
+                } else {
+                    Ok(canned(vec![StreamChunk::Done("next model".to_string())]))
+                }
+            },
+        )
         .await
         .unwrap_or_else(|error| {
             panic!("the valid model after the empty candidate should run: {error}")
@@ -1915,9 +2162,13 @@ mod tests {
         let mut req = base_req(&env);
         req.model_or_mode = Some("test-executor-no-chain/primary");
 
-        let Err(error) = run_with_fallback(&req, "jcode", None, |_| {
-            Err(CruiseError::Other("invalid model reference".to_string()))
-        })
+        let Err(error) = run_with_fallback(
+            &req,
+            "jcode",
+            ModelReferenceFormat::LegacyEffort,
+            None,
+            |_| Err(CruiseError::Other("invalid model reference".to_string())),
+        )
         .await
         else {
             panic!("an undispatchable model reference must fail the run");
@@ -1949,6 +2200,7 @@ mod tests {
         let Err(error) = run_with_fallback(
             &req,
             "jcode",
+            ModelReferenceFormat::LegacyEffort,
             Some(fast_policy(&[(
                 "test-executor-cancel/primary",
                 &["test-executor-cancel/spare"],
@@ -1983,6 +2235,7 @@ mod tests {
         let outcome = run_with_fallback(
             &req,
             "jcode",
+            ModelReferenceFormat::LegacyEffort,
             Some(fast_policy(&[(
                 "test-executor-no-callback/primary",
                 &["test-executor-no-callback/spare"],
@@ -2023,6 +2276,7 @@ mod tests {
         let Err(error) = run_with_fallback(
             &req,
             "claude",
+            ModelReferenceFormat::LegacyEffort,
             Some(fast_policy(&[(
                 "test-executor-closed/primary",
                 &["test-executor-closed/spare"],

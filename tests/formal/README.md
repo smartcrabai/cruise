@@ -1,5 +1,10 @@
 # Checkpoint contract verification
 
+For the separate OpenCode V2 admission, retry and lifecycle specifications, see
+`OPENCODE.md` and run `bash scripts/check_opencode_specs.sh`. Both suites are
+required by the provider-native formal CI job. OpenCode execution evidence is
+recorded in `OPENCODE_VERIFICATION.md`.
+
 ## Scope and traceability
 
 CP-01 through CP-08 are reconstructed repository contract identifiers, not recovered labels from an unavailable historical audit. Each ID has a Quint invariant, an Alloy assertion and a production-connected Cucumber scenario in `../features/checkpoint.feature`, implemented in `../checkpoint_bdd.rs`. The fixtures compile real YAML, invoke the production engine with real POSIX shell effects, save/load real checkpoints and execute Rust assertions. No parser-only or dry-run substitute is used.

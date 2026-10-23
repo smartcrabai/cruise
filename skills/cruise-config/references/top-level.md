@@ -60,7 +60,7 @@ create_pr: true           # Optional, workflow-only: automatically commit/push a
 force_exec: false         # Optional: execute direct plan entry points in place (default: false)
 
 ```
-`steps` is required. Setting both `command` and `sdk` is a validation error (an empty `command` array counts as "not set"); the `jcode` backend is used only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied. When `sdk` is set it must be `jcode` or `claude` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order. When a group's `if.file-changed` target is outside the group, its `max_retries` requires one additional global loop-protection budget unit; the group example above uses `max_retries: 3` with a top-level `max_retries: 4`.
+`steps` is required. Setting both `command` and `sdk` is a validation error (an empty `command` array counts as "not set"); the `jcode` backend is used only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied. When `sdk` is set it must be `jcode`, `claude`, or `opencode` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order. When a group's `if.file-changed` target is outside the group, its `max_retries` requires one additional global loop-protection budget unit; the group example above uses `max_retries: 3` with a top-level `max_retries: 4`.
 
 Unknown top-level keys are silently ignored, so obsolete fields from older
 configs (for example `worktree:` or `state:`) still load without error. Only
@@ -110,19 +110,23 @@ project defaults file, and it does not auto-create this template during draft,
 dry-run, workflow discovery, or non-jcode execution. See [SDK backends](sdk.md)
 for model precedence and recovery details.
 
+OpenCode uses `provider/model#variant` (variant optional) rather than the jcode/Claude `:effort` convention. Omitted OpenCode models use its configured default. See [the OpenCode example](../examples/opencode-flow.yaml).
+
 ## `command` vs `sdk`
 
-There are three prompt-execution backends:
+There are four prompt-execution backends:
 
 - `command:` — spawn an external CLI (e.g. `claude -p`) and write the prompt to its stdin.
 - `sdk: jcode` — use the jcode SDK; the fallback only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied. Requires jcode v0.88.0 or newer; Cruise validates the SDK handshake and required capabilities when it starts. `model` / `plan_model` / per-step `model` accept `"provider/model[:effort]"` or a bare model reference. See [sdk.md](sdk.md) for details.
 - `sdk: claude` — drive the `claude` CLI in-process via claude-agent-sdk. Model references are plain `claude --model` names with an optional `:effort` suffix; authentication is the claude CLI's own. See [sdk.md](sdk.md) for details.
 
+- `sdk: opencode` - use the built-in Rust V2 client with a locally managed OpenCode CLI. Install and authenticate that CLI separately. Models use `provider/model#variant`; no V1 fallback or external server connection is provided. `computer_use: true` is unsupported. See [sdk.md](sdk.md).
+
 ## `mcp_servers`
 
 `mcp_servers` is an optional top-level map of MCP server names to Claude Code server entries. It applies to every SDK prompt run, including workflow and `after-pr` steps, planning turns, session-title generation, and PR-description generation. It is not a per-step setting. A called workflow's own top-level value is ignored in favor of the caller's value.
 
-Stdio entries omit `type` or set `type: stdio`, and require a non-blank `command`. HTTP and SSE entries use `type: http` or `type: sse`, require an `http://` or `https://` URL, and are supported only with `sdk: claude`. Stdio entries cannot set `url` or provide non-empty `headers`; remote entries cannot set `command` or provide non-empty `args` or `env`. Names must use only ASCII letters, digits, `_`, or `-`, and `cruise` is reserved. Unknown entry keys are rejected. A non-empty map is invalid with `command:`.
+Stdio entries omit `type` or set `type: stdio`, and require a non-blank `command`. HTTP and SSE entries use `type: http` or `type: sse`, require an `http://` or `https://` URL, with Streamable HTTP supported by `sdk: claude` and `sdk: opencode`, but legacy SSE only by `sdk: claude`. OpenCode explicitly rejects SSE. Stdio entries cannot set `url` or provide non-empty `headers`; remote entries cannot set `command` or provide non-empty `args` or `env`. Names must use only ASCII letters, digits, `_`, or `-`, and `cruise` is reserved. Unknown entry keys are rejected. A non-empty map is invalid with `command:`.
 
 Values are passed verbatim without Cruise `{variable}` substitution. jcode writes workflow servers into the private session copy of `$JCODE_HOME/mcp.json`, preserving the source and preferring workflow entries over same-named entries in that source file. jcode's later Claude Code and project-local config layers can override them; `${VAR}` and `${VAR:-default}` are expanded from the runtime environment, including workflow `env:` values. Claude receives workflow entries through a per-run private JSON file with mode `0600` on Unix (an owner-only ACL on Windows), passed by path via `--mcp-config`; Cruise's own in-process tools are passed separately as the SDK's inline `--mcp-config` value, and the user's Claude MCP config remains enabled. `${VAR}` expansion for the Claude backend is not guaranteed.
 

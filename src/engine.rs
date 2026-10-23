@@ -1178,7 +1178,7 @@ fn nfc_snapshot_key(step_name: &str) -> String {
 ///
 /// Detected in a prompt step's raw output (`vars.prev_output()`) by
 /// [`detect_no_changes_marker`]. Works with every prompt-step backend (command
-/// CLI and both SDK modes) since it is plain text scanning with no tool support
+/// CLI and all three SDK modes) since it is plain text scanning with no tool support
 /// required -- see [`crate::sdk_tools::SKIP_STEP_TOOL`] for the SDK-only,
 /// schema-validated alternative.
 pub(crate) const NO_CHANGES_MARKER: &str = "NO_CHANGES_INTENTIONAL:";

@@ -50,6 +50,10 @@ jobs:
       - name: Formal models and checkpoint behavior
         run: scripts/check_formal.sh
 
+      - name: OpenCode V2 Quint, Alloy and production BDD contracts
+        if: ${{ !cancelled() }}
+        run: bash scripts/check_opencode_specs.sh
+
       - name: Upload formal reports
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

@@ -74,6 +74,10 @@ pub struct WorkflowConfig {
     ///   plain `claude --model` names with an optional `:effort` suffix (unset
     ///   lets the CLI pick its default).
     ///
+    /// - `"opencode"`: drives a locally managed `OpenCode` V2 CLI through the
+    ///   built-in Rust client. Models use `provider/model#variant`, preserving
+    ///   slashes and colons in model IDs. Unset models use `OpenCode`'s default.
+    ///
     /// Omitting both `sdk` and `command` runs prompts on `jcode`, the default
     /// backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -182,7 +186,8 @@ pub struct WorkflowConfig {
     pub retry: Option<RetryConfig>,
 
     /// MCP servers made available to every SDK prompt run (`sdk: jcode`, the
-    /// default backend, and `sdk: claude`). Rejected with a `command` backend.
+    /// default backend, `sdk: claude`, and `sdk: opencode`). Rejected with a
+    /// `command` backend. `OpenCode` supports stdio and Streamable HTTP, not SSE.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub mcp_servers: McpServers,
 
@@ -674,6 +679,11 @@ impl WorkflowConfig {
     /// fallback creates the retry policy when necessary, adds only missing
     /// model-specific entries, and enables model fallback.
     fn resolve_model_fallbacks(&mut self) {
+        let format = if self.sdk.as_deref() == Some("opencode") {
+            crate::retry::ModelReferenceFormat::OpenCode
+        } else {
+            crate::retry::ModelReferenceFormat::LegacyEffort
+        };
         let model_specs = [self.model.as_ref(), self.plan_model.as_ref()];
         if !model_specs.iter().any(|spec| {
             spec.as_ref()
@@ -697,11 +707,9 @@ impl WorkflowConfig {
             if chain.is_empty() {
                 continue;
             }
-            // `chain_for` strips recognized effort suffixes before looking up
-            // an exact chain. Store generated entries under that same key only
-            // when no explicit exact, provider-wildcard, or default chain
-            // applies to this primary model.
-            let primary_key = crate::backend::effort::split_thinking_suffix(primary).0;
+            // Use the same backend-specific base key as `chain_for`, while
+            // retaining raw-exact, base-exact, provider and default precedence.
+            let primary_key = format.split(primary).0;
             let has_explicit_chain = retry.fallback_chains.contains_key(primary)
                 || retry.fallback_chains.contains_key(primary_key)
                 || primary_key.split_once('/').is_some_and(|(provider, _)| {
@@ -1073,7 +1081,7 @@ fn validate_mcp_servers(config: &WorkflowConfig) -> crate::error::Result<()> {
     }
     if config.sdk.is_none() && !config.command.is_empty() {
         return Err(CruiseError::InvalidStepConfig(
-            "`mcp_servers` requires an SDK backend (`sdk: jcode`, `sdk: claude`, or neither `sdk` nor `command`); the command backend cannot receive MCP servers".to_string(),
+            "`mcp_servers` requires an SDK backend (`sdk: jcode`, `sdk: claude`, `sdk: opencode`, or neither `sdk` nor `command`); the command backend cannot receive MCP servers".to_string(),
         ));
     }
 
@@ -1142,6 +1150,13 @@ fn validate_mcp_servers(config: &WorkflowConfig) -> crate::error::Result<()> {
                 if !server.env.is_empty() {
                     return Err(CruiseError::InvalidStepConfig(format!(
                         "`mcp_servers.{name}` with a remote transport cannot set `env`"
+                    )));
+                }
+                if config.sdk.as_deref() == Some("opencode")
+                    && server.transport() == McpTransport::Sse
+                {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "`mcp_servers.{name}` uses type `sse`, which the OpenCode V2 backend does not support; use a stdio or Streamable HTTP (`type: http`) server, or `sdk: claude` for SSE"
                     )));
                 }
                 if uses_jcode {
@@ -1590,7 +1605,7 @@ fn is_model_pattern(value: &str) -> bool {
 }
 
 /// SDK values accepted by [`validate_sdk`].
-const SUPPORTED_SDKS: &[&str] = &["jcode", "claude"];
+const SUPPORTED_SDKS: &[&str] = &["jcode", "claude", "opencode"];
 
 /// SDK values cruise used to accept, each with the migration its config needs.
 ///
@@ -1773,6 +1788,10 @@ fn computer_use_backend_error(
     if config.sdk.as_deref() == Some("claude") {
         crate::error::CruiseError::InvalidStepConfig(format!(
             "{subject} is unsupported: Claude Code's computer use is only available in interactive sessions and cannot be enabled by cruise. Remove the computer_use key, or select `sdk: jcode` in the workflow with no `command:` setting"
+        ))
+    } else if config.sdk.as_deref() == Some("opencode") {
+        crate::error::CruiseError::InvalidStepConfig(format!(
+            "{subject} is unsupported: the OpenCode V2 backend does not support computer_use. Remove the computer_use key or set it to false, or select `sdk: jcode` with no `command:` setting"
         ))
     } else {
         crate::error::CruiseError::InvalidStepConfig(format!(

@@ -20,8 +20,8 @@
     },
     "sdk": {
       "type": "string",
-      "enum": ["jcode", "claude"],
-      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both selects `jcode` only if neither `command` nor `sdk` is set by applicable `default.yaml` layers. `sdk: jcode` uses the official jcode Rust SDK and requires jcode CLI v0.88.0 or newer; Cruise validates the API handshake and required capabilities at runtime. `sdk: claude` uses claude-agent-sdk. SDK model references support `provider/model[:effort]` or a bare model."
+      "enum": ["jcode", "claude", "opencode"],
+      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both selects `jcode` only if neither `command` nor `sdk` is set by applicable `default.yaml` layers. `sdk: jcode` uses the official jcode Rust SDK and requires jcode CLI v0.88.0 or newer; Cruise validates the API handshake and required capabilities at runtime. `sdk: claude` uses claude-agent-sdk. `sdk: opencode` uses a built-in Rust client and a locally managed OpenCode V2 CLI, with no external server or V1 fallback. jcode/Claude model references support `provider/model[:effort]` or a bare model; OpenCode uses `provider/model#variant`, preserving slashes and colons in model IDs, and delegates omitted models to OpenCode's configured default."
     },
     "mcp_servers": {
       "type": "object",
@@ -32,7 +32,7 @@
       "additionalProperties": {
         "$ref": "#/$defs/McpServerConfig"
       },
-      "description": "Workflow-level MCP servers available to every SDK prompt run. Rejected with the command backend; remote http and sse transports require sdk: claude."
+      "description": "Workflow-level MCP servers available to every SDK prompt run. Rejected with the command backend; stdio works with all SDK backends. Streamable HTTP works with sdk: claude and sdk: opencode; legacy SSE requires sdk: claude and is explicitly rejected by OpenCode V2."
     },
     "model": {
       "oneOf": [
@@ -46,7 +46,7 @@
           }
         }
       ],
-      "description": "Default model to use for all steps. Each actual jcode prompt must resolve to a model from its step-level or workflow/default settings; a missing model is an execution error. Claude and command backends retain their existing no-model behavior. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
+      "description": "Default model to use for all steps. Each actual jcode prompt must resolve to a model from its step-level or workflow/default settings; a missing model is an execution error. OpenCode uses provider/model#variant references and its configured default when omitted. Claude and command backends retain their existing no-model behavior. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
     },
     "plan_model": {
       "oneOf": [
@@ -130,7 +130,7 @@
     },
     "computer_use": {
       "type": "boolean",
-      "description": "Allow prompt turns to use jcode's macOS desktop-control tool. Default: false. Only available with the jcode backend on macOS (no effect on Linux); true is rejected for sdk: claude and command: backends."
+      "description": "Allow prompt turns to use jcode's macOS desktop-control tool. Default: false. Only available with the jcode backend on macOS (no effect on Linux); true is rejected for sdk: claude, sdk: opencode, and command: backends."
     },
     "flags": {
       "type": "object",

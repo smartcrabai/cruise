@@ -1617,6 +1617,7 @@ fn preserve_plan_checkpoint(manager: &SessionManager, state: &mut SessionState) 
     let checkpoint = manager.load(&state.id)?;
     state.plan_conversation_id = checkpoint.plan_conversation_id;
     state.plan_conversation_key = checkpoint.plan_conversation_key;
+    state.plan_conversation_backend = checkpoint.plan_conversation_backend;
     state.plan_conversation_home = checkpoint.plan_conversation_home;
     Ok(())
 }
@@ -1694,16 +1695,21 @@ async fn prepare_plan(
         .config
         .stable_identity(context.state.repo.as_deref(), &context.state.id);
     let key = crate::planning::plan_conversation_key(&config, &identity);
-    context.resume = if context.state.plan_conversation_key.as_deref() == Some(key.as_str()) {
+    context.resume = if context.state.plan_conversation_key.as_deref() == Some(key.as_str())
+        && context
+            .state
+            .plan_conversation_backend
+            .as_deref()
+            .unwrap_or("jcode")
+            == config.sdk.as_deref().unwrap_or("jcode")
+    {
         context.state.plan_conversation_id.clone()
     } else {
         None
     };
-    context.key = Some(key.clone());
-    if !request.skip_planning {
-        context.state.plan_conversation_key = Some(key);
-        manager.save(&context.state)?;
-    }
+    context.key = Some(key);
+    // Only the backend checkpoint may associate a key with a conversation ID.
+    // Saving a new key here would relabel an old ID if startup fails.
     Ok(config)
 }
 
@@ -1767,6 +1773,7 @@ fn plan_checkpoint_callback(
     manager: SessionManager,
     id: String,
     key: String,
+    backend: Option<String>,
     source_home: Option<PathBuf>,
     token: CancellationToken,
 ) -> impl Fn(&str) -> Result<()> + Send + Sync + 'static {
@@ -1775,7 +1782,24 @@ fn plan_checkpoint_callback(
             return Err(CruiseError::Interrupted);
         }
         let mut state = manager.load(&id)?;
+        if let Some(previous_id) = state.plan_conversation_id.as_deref()
+            && (previous_id != backend_id
+                || state
+                    .plan_conversation_backend
+                    .as_deref()
+                    .unwrap_or("jcode")
+                    != backend.as_deref().unwrap_or("jcode")
+                || state.plan_conversation_home != source_home)
+        {
+            crate::backend::conversation::cleanup(
+                state.plan_conversation_backend.as_deref(),
+                previous_id,
+                state.plan_conversation_home.as_deref(),
+                state.worktree_path.as_deref().or(Some(&state.base_dir)),
+            )?;
+        }
         state.plan_conversation_id = Some(backend_id.to_string());
+        state.plan_conversation_backend.clone_from(&backend);
         state.plan_conversation_key = Some(key.clone());
         state.plan_conversation_home.clone_from(&source_home);
         manager.save(&state)
@@ -1845,6 +1869,7 @@ async fn run_plan_prompt(
         manager.clone(),
         context.state.id.clone(),
         context.key.clone().unwrap_or_default(),
+        Some(config.sdk.as_deref().unwrap_or("jcode").to_string()),
         jcode_source_home,
         token.clone(),
     );
@@ -2032,16 +2057,16 @@ fn finish_plan(
     }
     if request.skip_planning {
         if let Some(session_id) = context.state.plan_conversation_id.as_deref() {
-            let source_home = context.state.plan_conversation_home.as_deref().map_or_else(
-                || crate::backend::jcode::resolve_source_home(Some(&context.state.base_dir)),
-                Path::to_path_buf,
-            );
-            crate::backend::jcode::cleanup_session_home_at(&source_home, session_id).map_err(
-                |error| CruiseError::Other(format!("could not clean jcode session home: {error}")),
+            crate::backend::conversation::cleanup(
+                context.state.plan_conversation_backend.as_deref(),
+                session_id,
+                context.state.plan_conversation_home.as_deref(),
+                Some(&context.state.base_dir),
             )?;
         }
         context.state.plan_conversation_id = None;
         context.state.plan_conversation_key = None;
+        context.state.plan_conversation_backend = None;
         context.state.plan_conversation_home = None;
     } else {
         context.state.phase = if matches!(
@@ -2058,6 +2083,20 @@ fn finish_plan(
         let checkpoint = manager.load(&id)?;
         let checkpoint_matches =
             checkpoint.plan_conversation_key.as_deref() == context.key.as_deref();
+        if !checkpoint_matches
+            && context.resume.is_none()
+            && let Some(previous_id) = checkpoint.plan_conversation_id.as_deref()
+        {
+            crate::backend::conversation::cleanup(
+                checkpoint.plan_conversation_backend.as_deref(),
+                previous_id,
+                checkpoint.plan_conversation_home.as_deref(),
+                checkpoint
+                    .worktree_path
+                    .as_deref()
+                    .or(Some(&checkpoint.base_dir)),
+            )?;
+        }
         context.state.plan_conversation_id = context.resume.clone().or_else(|| {
             if checkpoint_matches {
                 checkpoint.plan_conversation_id.clone()
@@ -2065,6 +2104,11 @@ fn finish_plan(
                 None
             }
         });
+        context.state.plan_conversation_backend = if checkpoint_matches {
+            checkpoint.plan_conversation_backend
+        } else {
+            None
+        };
         context.state.plan_conversation_home = if checkpoint_matches {
             checkpoint.plan_conversation_home
         } else {
@@ -4229,6 +4273,63 @@ mod tests {
             crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL"),
         ]);
         guards
+    }
+
+    #[test]
+    fn failed_and_cancelled_plans_preserve_opencode_checkpoint_owner() {
+        for cancelled in [false, true] {
+            let tmp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+            let manager = SessionManager::new(tmp.path().join("data"));
+            let state = crate::test_support::make_session("20261023000003", tmp.path());
+            manager
+                .create(&state)
+                .unwrap_or_else(|error| panic!("{error}"));
+            let runtime = Arc::new(ApplicationRuntime::new(manager.clone()));
+            let sink = |_: ApplicationEvent| Ok(());
+            let mut context = start_plan_context(
+                &manager,
+                &runtime,
+                &state.id,
+                OperationKind::Generate,
+                &sink,
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            let checkpoint = plan_checkpoint_callback(
+                manager.clone(),
+                state.id.clone(),
+                "checkpoint-key".to_string(),
+                Some("opencode".to_string()),
+                None,
+                context.claim.token(),
+            );
+            checkpoint("ses_preserved").unwrap_or_else(|error| panic!("{error}"));
+            let result = if cancelled {
+                context.claim.token().cancel();
+                cancel_plan(&manager, &state.id, &sink, &mut context)
+            } else {
+                fail_plan(
+                    &manager,
+                    &state.id,
+                    OperationKind::Generate,
+                    &sink,
+                    &mut context,
+                    CruiseError::Other("test failure".to_string()),
+                )
+            };
+            assert!(result.is_err());
+            let saved = manager
+                .load(&state.id)
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(saved.plan_conversation_backend.as_deref(), Some("opencode"));
+            assert_eq!(saved.plan_conversation_id.as_deref(), Some("ses_preserved"));
+            assert_eq!(
+                saved.plan_conversation_key.as_deref(),
+                Some("checkpoint-key")
+            );
+            assert_eq!(saved.plan_conversation_home, None);
+            assert_eq!(saved.phase, state.phase);
+            assert_eq!(saved.plan_error.is_some(), !cancelled);
+        }
     }
 
     #[test]

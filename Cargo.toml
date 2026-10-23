@@ -73,6 +73,7 @@ include_dir = "0.7"
 indexmap = { version = "2.13.0", features = ["serde"] }
 inquire = "0.9"
 jcode-sdk = { git = "https://github.com/1jehuang/jcode", tag = "v0.99.0" }
+json5 = "=0.4.1"
 jsxrs = "0.1.6"
 pulldown-cmark = { version = "0.13", default-features = false, features = [
   "html",
@@ -80,6 +81,11 @@ pulldown-cmark = { version = "0.13", default-features = false, features = [
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 ratatui-textarea = "0.9.2"
 reedline = "0.52"
+reqwest = { version = "=0.12.28", default-features = false, features = [
+  "rustls-tls",
+  "json",
+  "stream",
+] }
 seher-claude-agent-sdk = "=0.0.59"
 semver = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -136,6 +142,14 @@ vt100 = "=0.18.1"
 harness = false
 name = "checkpoint_bdd"
 path = "tests/checkpoint_bdd.rs"
+
+[[test]]
+harness = false
+name = "opencode_bdd"
+path = "tests/opencode_bdd.rs"
+# POSIX fixture: required explicitly by check_opencode_specs.sh on Linux CI.
+# Do not implicitly run an unavailable platform check in the Windows suite.
+test = false
 
 [profile.release]
 codegen-units = 1

@@ -535,6 +535,7 @@ impl WorkflowDefaults {
 enum BackendClass {
     Jcode,
     Claude,
+    Opencode,
     Command,
     Unsupported,
 }
@@ -543,6 +544,7 @@ fn classify_backend<'a>(sdk: Option<&'a str>, command: &[String]) -> (BackendCla
     match sdk {
         Some("jcode") => (BackendClass::Jcode, "jcode"),
         Some("claude") => (BackendClass::Claude, "claude"),
+        Some("opencode") => (BackendClass::Opencode, "opencode"),
         Some(other) => (BackendClass::Unsupported, other),
         None if command.is_empty() => (BackendClass::Jcode, "jcode"),
         None => (BackendClass::Command, "command"),
