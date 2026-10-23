@@ -16,11 +16,11 @@ use crate::config::{WorkflowConfig, validate_config};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{HistoryScope, NewSessionHistory};
+use crate::planning::saved_plan_session as saved_plan_resume;
 use crate::planning::{
     PlanProgress, PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template,
     setup_plan_vars,
 };
-use crate::planning::saved_plan_session as saved_plan_resume;
 use crate::resolver::ConfigSource;
 use crate::session::{SessionManager, SessionPhase, SessionState};
 use crate::session_config::SessionConfigRef;
@@ -90,7 +90,8 @@ fn cli_plan_session_callback<'a>(
     let key = crate::planning::plan_conversation_key(config, &identity);
     let working_dir = working_dir.to_path_buf();
     let session_id = session.id.clone();
-    let cleanup = crate::backend::conversation::DeferredCleanup::new(manager.clone(), session_id.clone());
+    let cleanup =
+        crate::backend::conversation::DeferredCleanup::new(manager.clone(), session_id.clone());
     Some(Box::new(move |conversation| {
         let backend = conversation.sdk.as_str();
         let backend_id = conversation.id.as_str();
@@ -683,7 +684,8 @@ async fn generate_title_via_sdk(
     let tool = crate::sdk_tools::generate_title_tool(std::sync::Arc::clone(&title_store));
 
     let executor = crate::executor::Executor::new(config.sdk.as_deref(), &config.command);
-    let model = crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref());
+    let model =
+        crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref());
     let prompt = format!(
         "Generate a concise session title (max 80 chars) for this task and plan. \
          Call the generate_title tool with your title.\n\n\
@@ -1812,13 +1814,26 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         let empty_plan = WorkflowConfig::from_yaml(
             "sdk: jcode\nplan_model: []\nmodel:\n  - sdk: claude\n    model: mixed-title-model\n  - unused/planning\nsteps:\n  build:\n    command: echo hi\n",
         )?;
-        assert_eq!(generate_title_via_sdk(&empty_plan, "task", "# Plan", None, None).await?, "Mixed SDK title");
+        assert_eq!(
+            generate_title_via_sdk(&empty_plan, "task", "# Plan", None, None).await?,
+            "Mixed SDK title"
+        );
         let mut session = make_session("20261023000005", tmp.path());
-        let identity = session.config.stable_identity(session.repo.as_deref(), &session.id);
-        session.plan_conversation_key = Some(crate::planning::plan_conversation_key(&empty_plan, &identity));
+        let identity = session
+            .config
+            .stable_identity(session.repo.as_deref(), &session.id);
+        session.plan_conversation_key = Some(crate::planning::plan_conversation_key(
+            &empty_plan,
+            &identity,
+        ));
         session.plan_conversation_id = Some("saved-claude".into());
         session.plan_conversation_backend = Some("claude".into());
-        assert_eq!(saved_plan_resume(&session, &empty_plan).unwrap().sdk, crate::model_selection::Sdk::Claude);
+        assert_eq!(
+            saved_plan_resume(&session, &empty_plan)
+                .unwrap_or_else(|| panic!("saved Claude conversation must be resumable"))
+                .sdk,
+            crate::model_selection::Sdk::Claude
+        );
         Ok(())
     }
 
@@ -2120,13 +2135,20 @@ plan_model:
             id: "claude-intermediate".to_owned(),
         })
         .unwrap_or_else(|error| panic!("{error:?}"));
-        assert!(old_home.exists(), "fallback must preserve the caller's resume storage");
+        assert!(
+            old_home.exists(),
+            "fallback must preserve the caller's resume storage"
+        );
         callback(&crate::model_selection::SdkSessionId {
             sdk: crate::model_selection::Sdk::Jcode,
             id: "old-session-id".to_owned(),
         })
         .unwrap_or_else(|error| panic!("{error:?}"));
-        assert_eq!(fs::read_to_string(old_home.join(".cruise-session-id")).unwrap(), "old-session-id");
+        assert_eq!(
+            fs::read_to_string(old_home.join(".cruise-session-id"))
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}")),
+            "old-session-id"
+        );
         callback(&crate::model_selection::SdkSessionId {
             sdk: crate::model_selection::Sdk::Jcode,
             id: "jcode-session-id".to_owned(),
@@ -2154,7 +2176,10 @@ plan_model:
         );
         assert!(old_home.exists(), "cleanup waits for the entire request");
         drop(callback);
-        assert!(!old_home.exists(), "terminal cleanup removes obsolete storage");
+        assert!(
+            !old_home.exists(),
+            "terminal cleanup removes obsolete storage"
+        );
     }
 
     #[test]
@@ -2162,39 +2187,80 @@ plan_model:
         use crate::model_selection::{Sdk, SdkSessionId};
         let _lock = lock_process();
         for outcome in ["success", "failure", "cancel"] {
-            let tmp = TempDir::new().unwrap();
+            let tmp = TempDir::new()
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
             let source = tmp.path().join("jcode");
             let _home = crate::test_support::EnvGuard::set("JCODE_HOME", &source);
             let manager = SessionManager::new(tmp.path().join("data"));
             let mut session = make_session("20261023000006", tmp.path());
-            let config = WorkflowConfig::from_yaml("sdk: jcode\nmodel: [provider/first, {sdk: claude, model: middle}, provider/last]\nsteps:\n  plan:\n    prompt: plan\n").unwrap();
-            let identity = session.config.stable_identity(session.repo.as_deref(), &session.id);
-            session.plan_conversation_key = Some(crate::planning::plan_conversation_key(&config, &identity));
+            let config = WorkflowConfig::from_yaml("sdk: jcode\nmodel: [provider/first, {sdk: claude, model: middle}, provider/last]\nsteps:\n  plan:\n    prompt: plan\n").unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            let identity = session
+                .config
+                .stable_identity(session.repo.as_deref(), &session.id);
+            session.plan_conversation_key =
+                Some(crate::planning::plan_conversation_key(&config, &identity));
             session.plan_conversation_id = Some("original".into());
             session.plan_conversation_backend = Some("jcode".into());
             session.plan_conversation_home = Some(source.clone());
             let home = source.join(".cruise-sdk-sessions/original");
-            fs::create_dir_all(&home).unwrap();
-            fs::write(home.join(".cruise-session-id"), "original").unwrap();
-            fs::write(home.join("history"), "caller history").unwrap();
-            manager.create(&session).unwrap();
-            let caller = saved_plan_resume(&session, &config).unwrap();
-            let callback = cli_plan_session_callback(&manager, &session, &config, tmp.path()).unwrap();
-            callback(&SdkSessionId { sdk: Sdk::Claude, id: "intermediate".into() }).unwrap();
-            assert_eq!(fs::read_to_string(home.join("history")).unwrap(), "caller history");
+            fs::create_dir_all(&home)
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            fs::write(home.join(".cruise-session-id"), "original")
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            fs::write(home.join("history"), "caller history")
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            manager
+                .create(&session)
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            let caller = saved_plan_resume(&session, &config)
+                .unwrap_or_else(|| panic!("original caller conversation must be resumable"));
+            let callback = cli_plan_session_callback(&manager, &session, &config, tmp.path())
+                .unwrap_or_else(|| {
+                    panic!("interactive planning must register a checkpoint callback")
+                });
+            callback(&SdkSessionId {
+                sdk: Sdk::Claude,
+                id: "intermediate".into(),
+            })
+            .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
+            assert_eq!(
+                fs::read_to_string(home.join("history"))
+                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}")),
+                "caller history"
+            );
             assert_eq!(caller.id, "original");
-            callback(&caller).unwrap();
+            callback(&caller)
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
             if outcome == "success" {
-                callback(&SdkSessionId { sdk: Sdk::Jcode, id: "replacement".into() }).unwrap();
+                callback(&SdkSessionId {
+                    sdk: Sdk::Jcode,
+                    id: "replacement".into(),
+                })
+                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
             } else {
-                let mut final_state = manager.load(&session.id).unwrap();
+                let mut final_state = manager
+                    .load(&session.id)
+                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
                 final_state.plan_error = (outcome == "failure").then(|| "failure".into());
-                manager.save(&final_state).unwrap();
+                manager
+                    .save(&final_state)
+                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
             }
             assert!(home.exists());
             drop(callback);
             assert_eq!(home.exists(), outcome != "success");
-            assert_eq!(manager.load(&session.id).unwrap().plan_conversation_id.as_deref(), Some(if outcome == "success" { "replacement" } else { "original" }));
+            assert_eq!(
+                manager
+                    .load(&session.id)
+                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"))
+                    .plan_conversation_id
+                    .as_deref(),
+                Some(if outcome == "success" {
+                    "replacement"
+                } else {
+                    "original"
+                })
+            );
         }
     }
 

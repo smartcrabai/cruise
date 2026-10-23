@@ -16,11 +16,17 @@ pub(crate) struct DeferredCleanup {
 
 impl DeferredCleanup {
     pub(crate) fn new(manager: crate::session::SessionManager, session_id: String) -> Self {
-        Self { manager, session_id, superseded: std::sync::Mutex::new(Vec::new()) }
+        Self {
+            manager,
+            session_id,
+            superseded: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     pub(crate) fn defer(&self, state: &crate::session::SessionState) {
-        self.superseded.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.superseded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(state.clone());
     }
 }
@@ -36,20 +42,36 @@ impl Drop for DeferredCleanup {
                 return;
             }
         };
-        for previous in self.superseded.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner) {
-            let Some(id) = previous.plan_conversation_id.as_deref() else { continue };
+        for previous in self
+            .superseded
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            let Some(id) = previous.plan_conversation_id.as_deref() else {
+                continue;
+            };
             if current.as_ref().is_some_and(|state| {
                 state.plan_conversation_id.as_deref() == Some(id)
-                    && state.plan_conversation_backend.as_deref().unwrap_or("jcode")
-                        == previous.plan_conversation_backend.as_deref().unwrap_or("jcode")
+                    && state
+                        .plan_conversation_backend
+                        .as_deref()
+                        .unwrap_or("jcode")
+                        == previous
+                            .plan_conversation_backend
+                            .as_deref()
+                            .unwrap_or("jcode")
                     && state.plan_conversation_home == previous.plan_conversation_home
             }) {
                 continue;
             }
             if let Err(error) = cleanup(
-                previous.plan_conversation_backend.as_deref(), id,
+                previous.plan_conversation_backend.as_deref(),
+                id,
                 previous.plan_conversation_home.as_deref(),
-                previous.worktree_path.as_deref().or(Some(&previous.base_dir)),
+                previous
+                    .worktree_path
+                    .as_deref()
+                    .or(Some(&previous.base_dir)),
             ) {
                 eprintln!("warning: deferred conversation cleanup failed: {error}");
             }

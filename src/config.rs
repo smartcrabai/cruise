@@ -1729,7 +1729,10 @@ pub fn validate_computer_use(config: &WorkflowConfig) -> crate::error::Result<()
         && (!is_jcode
             || [
                 config.model.as_ref(),
-                crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref()),
+                crate::model_selection::planning_spec(
+                    config.plan_model.as_ref(),
+                    config.model.as_ref(),
+                ),
             ]
             .into_iter()
             .any(|spec| {
@@ -6328,11 +6331,13 @@ steps:
 
     #[test]
     fn empty_authoritative_chain_excludes_implicit_mcp_owners() {
-        let config = WorkflowConfig::from_yaml("sdk: claude\nmodel: [claude-main, {sdk: jcode, model: unreachable}]\nretry:\n  fallback_chains:\n    default: []\nmcp_servers:\n  remote:\n    type: http\n    url: https://example.invalid/mcp\nsteps:\n  answer:\n    prompt: answer\n").unwrap();
+        let config = WorkflowConfig::from_yaml("sdk: claude\nmodel: [claude-main, {sdk: jcode, model: unreachable}]\nretry:\n  fallback_chains:\n    default: []\nmcp_servers:\n  remote:\n    type: http\n    url: https://example.invalid/mcp\nsteps:\n  answer:\n    prompt: answer\n").unwrap_or_else(|error| panic!("parse workflow with empty authoritative fallback chain: {error}"));
         // Empty explicit chains remain invalid retry configuration, but they
         // must not resurrect the implicit tail during capability collection.
         assert!(validate_retry(&config).is_err());
-        validate_mcp_servers(&config).unwrap();
+        validate_mcp_servers(&config).unwrap_or_else(|error| {
+            panic!("implicit fallback owners must not reject remote MCP servers: {error}")
+        });
     }
 
     #[test]

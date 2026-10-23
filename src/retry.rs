@@ -237,7 +237,11 @@ impl RetryPolicy {
     /// `provider/m:low` are the same model behind the same quota.
     #[cfg(test)]
     fn start_cooldown(format: ModelReferenceFormat, model: &str) {
-        let sdk = if format == ModelReferenceFormat::OpenCode { crate::model_selection::Sdk::OpenCode } else { crate::model_selection::Sdk::Jcode };
+        let sdk = if format == ModelReferenceFormat::OpenCode {
+            crate::model_selection::Sdk::OpenCode
+        } else {
+            crate::model_selection::Sdk::Jcode
+        };
         Self::start_sdk_cooldown(format, sdk, model);
     }
 
@@ -260,7 +264,11 @@ impl RetryPolicy {
     /// goes.
     #[cfg(test)]
     fn is_cooling(format: ModelReferenceFormat, model: &str) -> bool {
-        let sdk = if format == ModelReferenceFormat::OpenCode { crate::model_selection::Sdk::OpenCode } else { crate::model_selection::Sdk::Jcode };
+        let sdk = if format == ModelReferenceFormat::OpenCode {
+            crate::model_selection::Sdk::OpenCode
+        } else {
+            crate::model_selection::Sdk::Jcode
+        };
         Self::is_sdk_cooling(format, sdk, model)
     }
 
@@ -728,16 +736,20 @@ fn explicit_chain<'a>(
     config: &'a RetryConfig,
     model: Option<&str>,
 ) -> Option<&'a Vec<String>> {
-    model.and_then(|raw| {
-        config.fallback_chains.get(raw).or_else(|| {
-            let base = format.split(raw).0;
-            config.fallback_chains.get(base).or_else(|| {
-                base.split_once('/').and_then(|(provider, _)| {
-                    config.fallback_chains.get(&format!("{provider}{WILDCARD_SUFFIX}"))
+    model
+        .and_then(|raw| {
+            config.fallback_chains.get(raw).or_else(|| {
+                let base = format.split(raw).0;
+                config.fallback_chains.get(base).or_else(|| {
+                    base.split_once('/').and_then(|(provider, _)| {
+                        config
+                            .fallback_chains
+                            .get(&format!("{provider}{WILDCARD_SUFFIX}"))
+                    })
                 })
             })
         })
-    }).or_else(|| config.fallback_chains.get(DEFAULT_CHAIN_KEY))
+        .or_else(|| config.fallback_chains.get(DEFAULT_CHAIN_KEY))
 }
 
 #[cfg(test)]
@@ -797,26 +809,57 @@ pub(crate) fn effective_candidates(
     base_sdk: crate::model_selection::Sdk,
 ) -> crate::model_selection::ModelCandidates {
     use crate::model_selection::ModelCandidate;
-    let Some(primary) = candidates.first() else { return Vec::new() };
-    let primary = ModelCandidate { sdk: primary.sdk, model: primary.model.clone().filter(|model| !model.is_empty()) };
+    let Some(primary) = candidates.first() else {
+        return Vec::new();
+    };
+    let primary = ModelCandidate {
+        sdk: primary.sdk,
+        model: primary.model.clone().filter(|model| !model.is_empty()),
+    };
     let mut result = vec![primary.clone()];
     if config.is_some_and(|config| !config.model_fallback) {
         return result;
     }
     let format = ModelReferenceFormat::for_sdk(primary.sdk);
-    if let Some(config) = config.filter(|config| explicit_chain(format, config, primary.model.as_deref()).is_some()) {
-        result.extend(chain_for_formats(format, ModelReferenceFormat::for_sdk(base_sdk), config, primary.model.as_deref(), primary.sdk == base_sdk)
-            .into_iter().map(|model| ModelCandidate { sdk: base_sdk, model: Some(model) }));
+    if let Some(config) =
+        config.filter(|config| explicit_chain(format, config, primary.model.as_deref()).is_some())
+    {
+        result.extend(
+            chain_for_formats(
+                format,
+                ModelReferenceFormat::for_sdk(base_sdk),
+                config,
+                primary.model.as_deref(),
+                primary.sdk == base_sdk,
+            )
+            .into_iter()
+            .map(|model| ModelCandidate {
+                sdk: base_sdk,
+                model: Some(model),
+            }),
+        );
     } else {
         let mut seen = std::collections::HashSet::new();
         if let Some(model) = primary.model.as_deref() {
             seen.insert((primary.sdk, format.split(model).0.to_owned()));
         }
-        result.extend(candidates.iter().skip(1).filter(|candidate| {
-            candidate.model.as_deref().is_some_and(|model| {
-                seen.insert((candidate.sdk, ModelReferenceFormat::for_sdk(candidate.sdk).split(model).0.to_owned()))
-            })
-        }).cloned());
+        result.extend(
+            candidates
+                .iter()
+                .skip(1)
+                .filter(|candidate| {
+                    candidate.model.as_deref().is_some_and(|model| {
+                        seen.insert((
+                            candidate.sdk,
+                            ModelReferenceFormat::for_sdk(candidate.sdk)
+                                .split(model)
+                                .0
+                                .to_owned(),
+                        ))
+                    })
+                })
+                .cloned(),
+        );
     }
     result
 }
@@ -876,16 +919,12 @@ impl FallbackEngine {
         model_ref: Option<&str>,
         max_retries: usize,
     ) -> Self {
-        let sdk = if format == ModelReferenceFormat::OpenCode { crate::model_selection::Sdk::OpenCode } else { crate::model_selection::Sdk::Jcode };
-        Self::new_candidates(
-            format,
-            policy,
-            sdk,
-            sdk,
-            model_ref,
-            &[],
-            max_retries,
-        )
+        let sdk = if format == ModelReferenceFormat::OpenCode {
+            crate::model_selection::Sdk::OpenCode
+        } else {
+            crate::model_selection::Sdk::Jcode
+        };
+        Self::new_candidates(format, policy, sdk, sdk, model_ref, &[], max_retries)
     }
 
     pub(crate) fn new_candidates(
@@ -899,11 +938,17 @@ impl FallbackEngine {
     ) -> Self {
         let format = ModelReferenceFormat::for_sdk(sdk);
         let model = model_ref.filter(|m| !m.is_empty()).map(str::to_string);
-        let mut all = vec![crate::model_selection::ModelCandidate { sdk, model: model.clone() }];
+        let mut all = vec![crate::model_selection::ModelCandidate {
+            sdk,
+            model: model.clone(),
+        }];
         all.extend_from_slice(candidates);
         let chain = policy.as_deref().map_or_else(VecDeque::new, |policy| {
-            effective_candidates(Some(&policy.config), &all, base_sdk).into_iter().skip(1)
-                .filter_map(|candidate| candidate.model.map(|model| (candidate.sdk, model))).collect()
+            effective_candidates(Some(&policy.config), &all, base_sdk)
+                .into_iter()
+                .skip(1)
+                .filter_map(|candidate| candidate.model.map(|model| (candidate.sdk, model)))
+                .collect()
         });
         let mut engine = Self {
             sdk,
@@ -1124,14 +1169,32 @@ mod tests {
 
     #[test]
     fn explicit_chain_lookup_precedence_includes_present_empty_entries() {
-        let mut config = policy(&[("provider/main:high", &[]), ("provider/main", &["base"]), ("provider/*", &["wildcard"]), ("default", &["default"])]);
+        let mut config = policy(&[
+            ("provider/main:high", &[]),
+            ("provider/main", &["base"]),
+            ("provider/*", &["wildcard"]),
+            ("default", &["default"]),
+        ]);
         let format = ModelReferenceFormat::LegacyEffort;
-        for (key, expected) in [("provider/main:high", Vec::<String>::new()), ("provider/main", vec!["base".into()]), ("provider/*", vec!["wildcard".into()]), ("default", vec!["default".into()])] {
-            assert_eq!(explicit_chain(format, &config, Some("provider/main:high")), Some(&expected));
+        for (key, expected) in [
+            ("provider/main:high", Vec::<String>::new()),
+            ("provider/main", vec!["base".into()]),
+            ("provider/*", vec!["wildcard".into()]),
+            ("default", vec!["default".into()]),
+        ] {
+            assert_eq!(
+                explicit_chain(format, &config, Some("provider/main:high")),
+                Some(&expected)
+            );
             config.fallback_chains.remove(key);
         }
-        assert_eq!(explicit_chain(format, &config, Some("provider/main:high")), None);
-        config.fallback_chains.insert("default".into(), vec!["next/*".into()]);
+        assert_eq!(
+            explicit_chain(format, &config, Some("provider/main:high")),
+            None
+        );
+        config
+            .fallback_chains
+            .insert("default".into(), vec!["next/*".into()]);
         assert!(explicit_chain(format, &config, None).is_some());
         assert!(chain_for(format, &config, None).is_empty());
     }
@@ -1146,37 +1209,83 @@ mod tests {
             (Sdk::OpenCode, "normalize/open:low#fast"),
             (Sdk::OpenCode, "normalize/open:low#slow"),
             (Sdk::OpenCode, "normalize/open:high#fast"),
-        ].map(|(sdk, model)| ModelCandidate { sdk, model: Some(model.into()) });
+        ]
+        .map(|(sdk, model)| ModelCandidate {
+            sdk,
+            model: Some(model.into()),
+        });
         for workflow in [Sdk::OpenCode, Sdk::Jcode] {
             let engine = FallbackEngine::new_candidates(
                 ModelReferenceFormat::for_sdk(workflow),
                 Some(Arc::new(RetryPolicy::new(policy(&[])))),
-                Sdk::Claude, workflow, Some("normalize/primary"), &candidates, 1,
+                Sdk::Claude,
+                workflow,
+                Some("normalize/primary"),
+                &candidates,
+                1,
             );
-            assert_eq!(engine.chain.iter().cloned().collect::<Vec<_>>(), vec![
-                (Sdk::Jcode, "normalize/jcode:low".into()),
-                (Sdk::Claude, "normalize/claude:low".into()),
-                (Sdk::OpenCode, "normalize/open:low#fast".into()),
-                (Sdk::OpenCode, "normalize/open:high#fast".into()),
-            ]);
+            assert_eq!(
+                engine.chain.iter().cloned().collect::<Vec<_>>(),
+                vec![
+                    (Sdk::Jcode, "normalize/jcode:low".into()),
+                    (Sdk::Claude, "normalize/claude:low".into()),
+                    (Sdk::OpenCode, "normalize/open:low#fast".into()),
+                    (Sdk::OpenCode, "normalize/open:high#fast".into()),
+                ]
+            );
         }
     }
 
     #[test]
     fn cooldown_identity_survives_workflow_sdk_changes() {
         let policy = Some(Arc::new(RetryPolicy::new(policy(&[]))));
-        let mut first = FallbackEngine::new_candidates(ModelReferenceFormat::OpenCode, policy.clone(), Sdk::Jcode, Sdk::OpenCode, Some("cross-workflow/cooldown:high"), &[], 1);
-        assert_eq!(first.next(Failure::Failed("404 model not found"), false), RetryAction::GiveUp);
-        let later = FallbackEngine::new_candidates(ModelReferenceFormat::LegacyEffort, policy, Sdk::Jcode, Sdk::Claude, Some("cross-workflow/cooldown:low"), &[], 1);
+        let mut first = FallbackEngine::new_candidates(
+            ModelReferenceFormat::OpenCode,
+            policy.clone(),
+            Sdk::Jcode,
+            Sdk::OpenCode,
+            Some("cross-workflow/cooldown:high"),
+            &[],
+            1,
+        );
+        assert_eq!(
+            first.next(Failure::Failed("404 model not found"), false),
+            RetryAction::GiveUp
+        );
+        let later = FallbackEngine::new_candidates(
+            ModelReferenceFormat::LegacyEffort,
+            policy,
+            Sdk::Jcode,
+            Sdk::Claude,
+            Some("cross-workflow/cooldown:low"),
+            &[],
+            1,
+        );
         assert!(later.startup_blocked());
     }
 
     #[test]
     fn qualified_primary_keys_and_string_entries_use_their_own_syntax() {
-        for key in ["qualified/main:low#fast", "qualified/main:low", "qualified/*", "default"] {
+        for key in [
+            "qualified/main:low#fast",
+            "qualified/main:low",
+            "qualified/*",
+            "default",
+        ] {
             let config = policy(&[(key, &["entry/other:high", "entry/other:low"])]);
-            let engine = FallbackEngine::new_candidates(ModelReferenceFormat::LegacyEffort, Some(Arc::new(RetryPolicy::new(config))), Sdk::OpenCode, Sdk::Claude, Some("qualified/main:low#fast"), &[], 1);
-            assert_eq!(engine.chain.iter().cloned().collect::<Vec<_>>(), vec![(Sdk::Claude, "entry/other:high".into())]);
+            let engine = FallbackEngine::new_candidates(
+                ModelReferenceFormat::LegacyEffort,
+                Some(Arc::new(RetryPolicy::new(config))),
+                Sdk::OpenCode,
+                Sdk::Claude,
+                Some("qualified/main:low#fast"),
+                &[],
+                1,
+            );
+            assert_eq!(
+                engine.chain.iter().cloned().collect::<Vec<_>>(),
+                vec![(Sdk::Claude, "entry/other:high".into())]
+            );
         }
     }
 

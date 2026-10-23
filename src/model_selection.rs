@@ -63,7 +63,9 @@ pub(crate) fn applicable_sdks(
     base_sdk: Sdk,
 ) -> std::collections::HashSet<Sdk> {
     crate::retry::effective_candidates(config.retry.as_ref(), candidates, base_sdk)
-        .into_iter().map(|candidate| candidate.sdk).collect()
+        .into_iter()
+        .map(|candidate| candidate.sdk)
+        .collect()
 }
 
 /// Resolve strings against the original workflow SDK, never the preceding entry.
@@ -114,18 +116,19 @@ pub(crate) fn step_model_spec(
         None => workflow.cloned(),
         Some(model)
             if candidates.first().is_some_and(|candidate| {
-                candidate.sdk == sdk && candidate.model.as_deref().is_some_and(|primary| {
-                    let format = crate::retry::ModelReferenceFormat::for_sdk(sdk);
-                    format.split(primary).0 == format.split(model).0
-                })
+                candidate.sdk == sdk
+                    && candidate.model.as_deref().is_some_and(|primary| {
+                        let format = crate::retry::ModelReferenceFormat::for_sdk(sdk);
+                        format.split(primary).0 == format.split(model).0
+                    })
             }) =>
         {
             let mut selected = workflow.cloned()?;
             match &mut selected {
-                ModelSpec::Single(primary) => *primary = model.to_owned(),
+                ModelSpec::Single(primary) => model.clone_into(primary),
                 ModelSpec::Multiple(entries) => match entries.first_mut()? {
-                    ModelEntry::String(primary) => *primary = model.to_owned(),
-                    ModelEntry::SdkModel(primary) => primary.model = model.to_owned(),
+                    ModelEntry::String(primary) => model.clone_into(primary),
+                    ModelEntry::SdkModel(primary) => model.clone_into(&mut primary.model),
                 },
             }
             Some(selected)

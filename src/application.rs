@@ -1589,7 +1589,10 @@ fn start_plan_context(
         key: None,
         resume: None,
         retain_conversation: false,
-        cleanup: Arc::new(crate::backend::conversation::DeferredCleanup::new(manager.clone(), id.to_string())),
+        cleanup: Arc::new(crate::backend::conversation::DeferredCleanup::new(
+            manager.clone(),
+            id.to_string(),
+        )),
     })
 }
 
@@ -2098,14 +2101,13 @@ fn finish_plan(
                     .or(Some(&checkpoint.base_dir)),
             )?;
         }
-        context.state.plan_conversation_id =
-            retained.map(|session| session.id.clone()).or_else(|| {
-                if checkpoint_matches {
-                    checkpoint.plan_conversation_id
-                } else {
-                    None
-                }
-            });
+        context.state.plan_conversation_id = retained.map(|session| session.id.clone()).or({
+            if checkpoint_matches {
+                checkpoint.plan_conversation_id
+            } else {
+                None
+            }
+        });
         context.state.plan_conversation_backend = retained
             .map(|session| session.sdk.as_str().to_owned())
             .or(if checkpoint_matches {
@@ -4289,34 +4291,93 @@ mod tests {
     fn mixed_sdk_checkpoints_defer_cleanup_until_terminal_restoration() {
         use crate::model_selection::{Sdk, SdkSessionId};
         for outcome in ["success", "failure", "cancel"] {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = tempfile::tempdir()
+                .unwrap_or_else(|error| panic!("create checkpoint test directory: {error}"));
             let manager = SessionManager::new(tmp.path().join("data"));
             let source = tmp.path().join("jcode");
             let home = source.join(".cruise-sdk-sessions/original");
-            std::fs::create_dir_all(&home).unwrap();
-            std::fs::write(home.join(".cruise-session-id"), "original").unwrap();
-            std::fs::write(home.join("history"), "original history").unwrap();
+            std::fs::create_dir_all(&home)
+                .unwrap_or_else(|error| panic!("create original conversation home: {error}"));
+            std::fs::write(home.join(".cruise-session-id"), "original")
+                .unwrap_or_else(|error| panic!("write original session ID: {error}"));
+            std::fs::write(home.join("history"), "original history")
+                .unwrap_or_else(|error| panic!("write original conversation history: {error}"));
             let obsolete = source.join(".cruise-sdk-sessions/obsolete");
-            std::fs::create_dir_all(&obsolete).unwrap();
-            std::fs::write(obsolete.join(".cruise-session-id"), "obsolete").unwrap();
+            std::fs::create_dir_all(&obsolete)
+                .unwrap_or_else(|error| panic!("create obsolete conversation home: {error}"));
+            std::fs::write(obsolete.join(".cruise-session-id"), "obsolete")
+                .unwrap_or_else(|error| panic!("write obsolete session ID: {error}"));
             let mut state = crate::test_support::make_session("20261023000004", tmp.path());
             state.plan_conversation_id = Some("original".into());
             state.plan_conversation_backend = Some("jcode".into());
             state.plan_conversation_home = Some(source.clone());
-            manager.create(&state).unwrap();
+            manager
+                .create(&state)
+                .unwrap_or_else(|error| panic!("create checkpoint test session: {error}"));
             let runtime = Arc::new(ApplicationRuntime::new(manager.clone()));
             let sink = |_: ApplicationEvent| Ok(());
-            let mut context = start_plan_context(&manager, &runtime, &state.id, OperationKind::Generate, &sink).unwrap();
-            let checkpoint = plan_checkpoint_callback(manager.clone(), state.id.clone(), "key".into(), Some(source), context.claim.token(), Arc::clone(&context.cleanup));
-            checkpoint(&SdkSessionId { sdk: Sdk::Claude, id: "claude".into() }).unwrap();
-            assert_eq!(std::fs::read_to_string(home.join("history")).unwrap(), "original history");
-            checkpoint(&SdkSessionId { sdk: Sdk::Jcode, id: "obsolete".into() }).unwrap();
-            checkpoint(&SdkSessionId { sdk: Sdk::Jcode, id: "original".into() }).unwrap();
+            let mut context = start_plan_context(
+                &manager,
+                &runtime,
+                &state.id,
+                OperationKind::Generate,
+                &sink,
+            )
+            .unwrap_or_else(|error| panic!("start checkpoint test plan context: {error}"));
+            let checkpoint = plan_checkpoint_callback(
+                manager.clone(),
+                state.id.clone(),
+                "key".into(),
+                Some(source),
+                context.claim.token(),
+                Arc::clone(&context.cleanup),
+            );
+            checkpoint(&SdkSessionId {
+                sdk: Sdk::Claude,
+                id: "claude".into(),
+            })
+            .unwrap_or_else(|error| panic!("checkpoint Claude conversation: {error}"));
+            assert_eq!(
+                std::fs::read_to_string(home.join("history"))
+                    .unwrap_or_else(|error| panic!("read original conversation history: {error}")),
+                "original history"
+            );
+            checkpoint(&SdkSessionId {
+                sdk: Sdk::Jcode,
+                id: "obsolete".into(),
+            })
+            .unwrap_or_else(|error| panic!("checkpoint obsolete Jcode conversation: {error}"));
+            checkpoint(&SdkSessionId {
+                sdk: Sdk::Jcode,
+                id: "original".into(),
+            })
+            .unwrap_or_else(|error| panic!("restore original Jcode checkpoint: {error}"));
             drop(checkpoint);
             match outcome {
-                "failure" => { assert!(fail_plan(&manager, &state.id, OperationKind::Generate, &sink, &mut context, CruiseError::Other("failure".into())).is_err()); }
-                "cancel" => { context.claim.token().cancel(); assert!(cancel_plan(&manager, &state.id, &sink, &mut context).is_err()); }
-                _ => { preserve_plan_checkpoint(&manager, &mut context.state).unwrap(); manager.save(&context.state).unwrap(); }
+                "failure" => {
+                    assert!(
+                        fail_plan(
+                            &manager,
+                            &state.id,
+                            OperationKind::Generate,
+                            &sink,
+                            &mut context,
+                            CruiseError::Other("failure".into())
+                        )
+                        .is_err()
+                    );
+                }
+                "cancel" => {
+                    context.claim.token().cancel();
+                    assert!(cancel_plan(&manager, &state.id, &sink, &mut context).is_err());
+                }
+                _ => {
+                    preserve_plan_checkpoint(&manager, &mut context.state)
+                        .unwrap_or_else(|error| panic!("preserve final plan checkpoint: {error}"));
+                    manager
+                        .save(&context.state)
+                        .unwrap_or_else(|error| panic!("save final plan state: {error}"));
+                }
             }
             assert!(obsolete.exists(), "cleanup follows final restoration");
             drop(context);

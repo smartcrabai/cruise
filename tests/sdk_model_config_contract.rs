@@ -67,9 +67,16 @@ fn unknown_workflow_keys_remain_permissive_but_sdk_objects_are_strict() {
     let mut value = base();
     value["unrelated_future_workflow_key"] = json!({"accepted": true});
     value["model"] = json!([{"sdk": "jcode", "model": "provider/main"}]);
-    validate_config(&workflow(&value)).unwrap();
+    validate_config(&workflow(&value))
+        .unwrap_or_else(|error| panic!("valid workflow fixture rejected: {error}"));
     value["model"][0]["unrelated_future_object_key"] = json!(true);
-    assert!(WorkflowConfig::from_yaml(&serde_yaml::to_string(&value).unwrap()).is_err());
+    assert!(
+        WorkflowConfig::from_yaml(
+            &serde_yaml::to_string(&value)
+                .unwrap_or_else(|error| panic!("serialize workflow fixture: {error}"))
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -260,16 +267,29 @@ fn command_rejects_sdk_objects_at_primary_and_fallback_positions_in_either_list(
 
 #[test]
 fn explicit_chains_replace_incompatible_implicit_tails_for_capabilities() {
-    for chain in [json!([]), json!(["provider/safe"]), json!(["provider/main:low"])] {
+    for chain in [
+        json!([]),
+        json!(["provider/safe"]),
+        json!(["provider/main:low"]),
+    ] {
         let desktop = workflow(&json!({
             "sdk": "jcode", "computer_use": true,
             "model": ["provider/main:high", {"sdk": "claude", "model": "unreachable"}],
             "plan_model": [], "retry": {"fallback_chains": {"provider/main": chain}},
             "steps": {"desktop": {"prompt": "inspect"}}
         }));
-        cruise::config::validate_computer_use(&desktop).unwrap_or_else(|error| panic!("overridden tail must not reject computer use: {error}"));
-        if !desktop.retry.as_ref().unwrap().fallback_chains["provider/main"].is_empty() {
-            validate_config(&desktop).unwrap();
+        cruise::config::validate_computer_use(&desktop).unwrap_or_else(|error| {
+            panic!("overridden tail must not reject computer use: {error}")
+        });
+        if !desktop
+            .retry
+            .as_ref()
+            .unwrap_or_else(|| panic!("desktop fixture must have retry policy"))
+            .fallback_chains["provider/main"]
+            .is_empty()
+        {
+            validate_config(&desktop)
+                .unwrap_or_else(|error| panic!("valid desktop fixture rejected: {error}"));
         }
     }
     for transport in ["http", "sse"] {
@@ -280,15 +300,20 @@ fn explicit_chains_replace_incompatible_implicit_tails_for_capabilities() {
                 "mcp_servers": {"remote": {"type": transport, "url": "https://example.invalid/mcp"}},
                 "steps": {"answer": {"prompt": "answer"}}
             }));
-            validate_config(&remote).unwrap_or_else(|error| panic!("overridden tail must not reject remote MCP: {error}"));
+            validate_config(&remote).unwrap_or_else(|error| {
+                panic!("overridden tail must not reject remote MCP: {error}")
+            });
         }
     }
     // A wildcard with no primary model expands to nothing, but is still authoritative.
-    let remote = workflow(&json!({"sdk": "claude", "model": ["", {"sdk": "jcode", "model": "unreachable"}],
+    let remote = workflow(
+        &json!({"sdk": "claude", "model": ["", {"sdk": "jcode", "model": "unreachable"}],
         "retry": {"fallback_chains": {"default": ["provider/*"]}},
         "mcp_servers": {"remote": {"type": "http", "url": "https://example.invalid/mcp"}},
-        "steps": {"answer": {"prompt": "answer"}}}));
-    validate_config(&remote).unwrap();
+        "steps": {"answer": {"prompt": "answer"}}}),
+    );
+    validate_config(&remote)
+        .unwrap_or_else(|error| panic!("valid remote MCP fixture rejected: {error}"));
 }
 
 #[test]
@@ -296,10 +321,16 @@ fn explicit_candidate_ownership_controls_computer_use_not_workflow_sdk() {
     for sdk in ["claude", "opencode"] {
         let mut value = json!({"sdk": sdk, "model": [{"sdk": "jcode", "model": "provider/desktop"}],
             "plan_model": [], "computer_use": true, "steps": {"desktop": {"prompt": "inspect"}}});
-        validate_config(&workflow(&value)).unwrap();
+        validate_config(&workflow(&value))
+            .unwrap_or_else(|error| panic!("valid workflow fixture rejected: {error}"));
         value["model"][0]["sdk"] = json!("claude");
         let error = validation_error(&workflow(&value));
-        for meaning in ["every effective applicable candidate", "jcode backend", "no `command:`", "does not override SDK-qualified objects"] {
+        for meaning in [
+            "every effective applicable candidate",
+            "jcode backend",
+            "no `command:`",
+            "does not override SDK-qualified objects",
+        ] {
             assert!(error.contains(meaning), "missing {meaning}: {error}");
         }
     }
@@ -321,11 +352,20 @@ fn remote_mcp_transports_require_all_explicit_candidates_to_support_them() {
                     "remote_b": {"type": "http", "url": "https://example.invalid/b"},
                     "local": {"command": "local-mcp"}
                 }, "steps": {"answer": {"prompt": "answer"}}}));
-            if valid { validate_config(&config).unwrap(); } else {
+            if valid {
+                validate_config(&config)
+                    .unwrap_or_else(|error| panic!("valid capability fixture rejected: {error}"));
+            } else {
                 let error = validation_error(&config);
                 assert!(error.contains("mcp_servers."), "{error}");
-                assert!(error.contains("every effective applicable candidate"), "{error}");
-                assert!(error.contains("does not override SDK-qualified objects"), "{error}");
+                assert!(
+                    error.contains("every effective applicable candidate"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("does not override SDK-qualified objects"),
+                    "{error}"
+                );
             }
         }
     }

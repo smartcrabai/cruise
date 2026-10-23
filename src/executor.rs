@@ -550,7 +550,11 @@ async fn run_sdk_with_fallback(
     let on_delta = req.stream.and_then(|s| s.on_stdout);
     let candidates = resolve_candidates(req.model, base_sdk);
     let primary = &candidates[0];
-    let effective = retry::effective_candidates(policy.as_deref().map(|policy| policy.config()), &candidates, base_sdk);
+    let effective = retry::effective_candidates(
+        policy.as_deref().map(retry::RetryPolicy::config),
+        &candidates,
+        base_sdk,
+    );
     for candidate in &effective {
         validate_candidate(req, candidate.sdk)?;
     }
@@ -885,23 +889,58 @@ mod tests {
     #[tokio::test]
     async fn explicit_chain_preflight_ignores_overridden_incompatible_tail() {
         for (sdk, model, computer_use, remote) in [
-            (Sdk::Jcode, "[preflight/main:high, {sdk: claude, model: unreachable}]", true, false),
-            (Sdk::Claude, "[preflight/main:high, {sdk: jcode, model: unreachable}]", false, true),
-            (Sdk::Claude, "['', {sdk: jcode, model: unreachable}]", false, true),
+            (
+                Sdk::Jcode,
+                "[preflight/main:high, {sdk: claude, model: unreachable}]",
+                true,
+                false,
+            ),
+            (
+                Sdk::Claude,
+                "[preflight/main:high, {sdk: jcode, model: unreachable}]",
+                false,
+                true,
+            ),
+            (
+                Sdk::Claude,
+                "['', {sdk: jcode, model: unreachable}]",
+                false,
+                true,
+            ),
         ] {
-            let model: ModelSpec = serde_yaml::from_str(model).unwrap();
+            let model: ModelSpec = serde_yaml::from_str(model)
+                .unwrap_or_else(|error| panic!("invalid preflight model fixture: {error}"));
             let env = HashMap::new();
             let mut req = base_req(&env);
             req.model = Some(&model);
             req.computer_use = computer_use;
-            let servers = serde_yaml::from_str("remote:\n  type: http\n  url: https://example.invalid/mcp\n").unwrap();
-            if remote { req.mcp_servers = &servers; }
-            for entries in [&[][..], &["preflight/safe"][..], &["preflight/main:low"][..], &["provider/*"][..]] {
-                let result = run_sdk_with_fallback(&req, sdk, ModelReferenceFormat::for_sdk(sdk), Some(fast_policy(&[("default", entries)])), |owner, _| {
-                    assert_eq!(owner, sdk);
-                    Ok(canned(vec![StreamChunk::Done("ok".into())]))
-                }).await;
-                assert!(result.is_ok(), "effective candidates must pass preflight: {result:?}");
+            let servers =
+                serde_yaml::from_str("remote:\n  type: http\n  url: https://example.invalid/mcp\n")
+                    .unwrap_or_else(|error| panic!("invalid remote MCP fixture: {error}"));
+            if remote {
+                req.mcp_servers = &servers;
+            }
+            for entries in [
+                &[][..],
+                &["preflight/safe"][..],
+                &["preflight/main:low"][..],
+                &["provider/*"][..],
+            ] {
+                let result = run_sdk_with_fallback(
+                    &req,
+                    sdk,
+                    ModelReferenceFormat::for_sdk(sdk),
+                    Some(fast_policy(&[("default", entries)])),
+                    |owner, _| {
+                        assert_eq!(owner, sdk);
+                        Ok(canned(vec![StreamChunk::Done("ok".into())]))
+                    },
+                )
+                .await;
+                assert!(
+                    result.is_ok(),
+                    "effective candidates must pass preflight: {result:?}"
+                );
             }
         }
     }
@@ -979,16 +1018,40 @@ mod tests {
     #[test]
     fn normalized_step_overrides_match_capability_selection() {
         for (sdk, global, step, expected_len) in [
-            (Sdk::Jcode, "[provider/main:high, fallback]", "provider/main:low", 2),
-            (Sdk::OpenCode, "[provider/main#slow, fallback]", "provider/main#fast", 2),
-            (Sdk::Jcode, "[provider/main:high, fallback]", "provider/other:low", 1),
-            (Sdk::Jcode, "[{sdk: claude, model: provider/main:high}, fallback]", "provider/main:low", 1),
+            (
+                Sdk::Jcode,
+                "[provider/main:high, fallback]",
+                "provider/main:low",
+                2,
+            ),
+            (
+                Sdk::OpenCode,
+                "[provider/main#slow, fallback]",
+                "provider/main#fast",
+                2,
+            ),
+            (
+                Sdk::Jcode,
+                "[provider/main:high, fallback]",
+                "provider/other:low",
+                1,
+            ),
+            (
+                Sdk::Jcode,
+                "[{sdk: claude, model: provider/main:high}, fallback]",
+                "provider/main:low",
+                1,
+            ),
         ] {
-            let global: ModelSpec = serde_yaml::from_str(global).unwrap();
+            let global: ModelSpec = serde_yaml::from_str(global)
+                .unwrap_or_else(|error| panic!("invalid step model fixture: {error}"));
             let executor = Executor::new(Some(sdk.as_str()), &[]);
-            let selected = executor.step_model(Some(step), Some(&global)).unwrap();
+            let selected = executor
+                .step_model(Some(step), Some(&global))
+                .unwrap_or_else(|| panic!("step override must select a model"));
             let execution = resolve_candidates(Some(&selected), sdk);
-            let capability = crate::model_selection::select_step_model(Some(&global), Some(step), sdk);
+            let capability =
+                crate::model_selection::select_step_model(Some(&global), Some(step), sdk);
             assert_eq!(execution, capability);
             assert_eq!(execution.len(), expected_len);
             assert_eq!(execution[0].model.as_deref(), Some(step));

@@ -286,7 +286,10 @@ pub async fn run_plan_prompt_template(
     );
     let prompt = vars.resolve(template)?;
     let executor = ctx.executor();
-    let model = crate::model_selection::planning_spec(ctx.config.plan_model.as_ref(), ctx.config.model.as_ref());
+    let model = crate::model_selection::planning_spec(
+        ctx.config.plan_model.as_ref(),
+        ctx.config.model.as_ref(),
+    );
     // Tool-based planning is gated on `interactive_planning`; when it is off the
     // plan is written to `{plan}` directly via the file-writing templates and no
     // custom tools are registered.
@@ -441,7 +444,10 @@ pub fn saved_plan_session(
         return None;
     }
     let base = Sdk::from_name(config.sdk.as_deref().unwrap_or("jcode"))?;
-    let candidates = resolve_candidates(crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref()), base);
+    let candidates = resolve_candidates(
+        crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref()),
+        base,
+    );
     let sdks = crate::model_selection::applicable_sdks(config, &candidates, base);
     let sdk = match session.plan_conversation_backend.as_deref() {
         Some(owner) => Sdk::from_name(owner)?,
@@ -846,13 +852,28 @@ mod tests {
         let _guard = crate::test_support::lock_process();
         let tmp = make_temp_dir();
         let plan_path = tmp.path().join("plan.md");
-        let config = WorkflowConfig::from_yaml("command: [sh, -c, 'cat >/dev/null; printf %s \"$1\"', sh, '{model}']\nmodel: [command-primary, command-fallback]\nplan_model: []\nsteps:\n  plan:\n    prompt: plan\n").unwrap();
+        let config = WorkflowConfig::from_yaml("command: [sh, -c, 'cat >/dev/null; printf %s \"$1\"', sh, '{model}']\nmodel: [command-primary, command-fallback]\nplan_model: []\nsteps:\n  plan:\n    prompt: plan\n").unwrap_or_else(|error| panic!("parse command workflow with empty planning model array: {error}"));
         let ctx = make_ctx_no_token(&config, &plan_path);
         let mut vars = VariableStore::new("input".into());
-        let result = run_plan_prompt_template(&ctx, &mut vars, "hello", "test", None, &mut None, false).await.unwrap();
+        let result =
+            run_plan_prompt_template(&ctx, &mut vars, "hello", "test", None, &mut None, false)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("run planning prompt with command primary model: {error}")
+                });
         assert_eq!(result.output, "command-primary");
-        assert_eq!(crate::executor::Executor::plan_model(config.plan_model.as_ref(), config.model.as_ref()), config.model);
-        assert_eq!(serde_json::to_value(&config).unwrap()["plan_model"], serde_json::json!([]));
+        assert_eq!(
+            crate::executor::Executor::plan_model(
+                config.plan_model.as_ref(),
+                config.model.as_ref()
+            ),
+            config.model
+        );
+        assert_eq!(
+            serde_json::to_value(&config)
+                .unwrap_or_else(|error| panic!("serialize planning workflow: {error}"))["plan_model"],
+            serde_json::json!([])
+        );
     }
 
     #[cfg(unix)]
