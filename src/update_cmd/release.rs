@@ -113,13 +113,15 @@ pub(super) fn acquire(
     validate_staging_dir(staging)?;
     let current = parse_stable_version(current_version)?;
     let services = service_urls()?;
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(180))
-        .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(30))
-        .timeout_write(Duration::from_secs(30))
-        .redirects(0)
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(180)))
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_per_read(Some(Duration::from_secs(30)))
+        .timeout_per_write(Some(Duration::from_secs(30)))
+        .max_redirects(0)
+        .http_status_as_error(false)
         .build();
+    let agent = ureq::Agent::new_with_config(config);
     let (tag, version, manifest) = latest_release_manifest(&agent, &services)?;
     let Some(selected) = select_update_archive(&manifest, &tag, &version, &current, target)? else {
         return Ok(None);
@@ -485,7 +487,7 @@ fn get_bounded(
     let response = open_response(agent, url, trust, accept)?;
     let expected_length = checked_content_length(&response, limit)?;
     let mut bytes = Vec::new();
-    let size = copy_limited(response.into_reader(), &mut bytes, limit, None)?;
+    let size = copy_limited(response.into_body().into_reader(), &mut bytes, limit, None)?;
     if expected_length.is_some_and(|expected| expected != size) {
         return Err(invalid("release response ended before its Content-Length"));
     }
@@ -505,7 +507,7 @@ fn download_archive(
     *created = true;
     let mut digest = Sha256::new();
     let size = copy_limited(
-        response.into_reader(),
+        response.into_body().into_reader(),
         &mut file,
         MAX_ARCHIVE_SIZE,
         Some(&mut digest),
@@ -552,10 +554,14 @@ fn copy_limited<R: Read, W: Write>(
     Ok(size)
 }
 
-fn content_length(response: &ureq::Response) -> Result<Option<u64>> {
+fn content_length(response: &ureq::http::Response<ureq::Body>) -> Result<Option<u64>> {
     response
-        .header("Content-Length")
+        .headers()
+        .get("Content-Length")
         .map(|value| {
+            let value = value
+                .to_str()
+                .map_err(|_| invalid("release response has an invalid Content-Length"))?;
             value
                 .parse::<u64>()
                 .map_err(|_| invalid("release response has an invalid Content-Length"))
@@ -563,7 +569,10 @@ fn content_length(response: &ureq::Response) -> Result<Option<u64>> {
         .transpose()
 }
 
-fn checked_content_length(response: &ureq::Response, limit: u64) -> Result<Option<u64>> {
+fn checked_content_length(
+    response: &ureq::http::Response<ureq::Body>,
+    limit: u64,
+) -> Result<Option<u64>> {
     let length = content_length(response)?;
     if length.is_some_and(|length| length > limit) {
         return Err(invalid("release response exceeds its size limit"));
@@ -576,36 +585,39 @@ fn open_response(
     url: &Url,
     trust: UrlTrust<'_>,
     accept: &str,
-) -> Result<ureq::Response> {
+) -> Result<ureq::http::Response<ureq::Body>> {
     let mut current = url.clone();
     for redirects in 0..=MAX_REDIRECTS {
         validate_url(&current, trust)?;
         let response = match agent
             .get(current.as_str())
-            .set("Accept", accept)
-            .set("User-Agent", "cruise-native-updater")
+            .header("Accept", accept)
+            .header("User-Agent", "cruise-native-updater")
             .call()
         {
-            Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+            Ok(response) => response,
             Err(error) => return Err(invalid(&format!("release request failed: {error}"))),
         };
-        if (300..400).contains(&response.status()) {
+        if response.status().is_redirection() {
             if redirects == MAX_REDIRECTS {
                 return Err(invalid("release server exceeded the redirect limit"));
             }
             let location = response
-                .header("Location")
-                .ok_or_else(|| invalid("release redirect has no Location header"))?;
+                .headers()
+                .get("Location")
+                .ok_or_else(|| invalid("release redirect has no Location header"))?
+                .to_str()
+                .map_err(|_| invalid("release redirect has an invalid Location header"))?;
             current = current
                 .join(location)
                 .map_err(|error| invalid(&format!("invalid release redirect URL: {error}")))?;
             validate_url(&current, trust)?;
             continue;
         }
-        if response.status() != 200 {
+        if response.status().as_u16() != 200 {
             return Err(invalid(&format!(
                 "release server returned HTTP {}",
-                response.status()
+                response.status().as_u16()
             )));
         }
         return Ok(response);
@@ -954,6 +966,254 @@ fn hex_digest(digest: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::io::{Cursor, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    type FixtureResponse = (String, Vec<u8>, Option<Duration>);
+
+    fn response(status: u16, headers: &str, body: &[u8]) -> FixtureResponse {
+        response_with_delay(status, headers, body, None)
+    }
+
+    fn response_with_delay(
+        status: u16,
+        headers: &str,
+        body: &[u8],
+        delay: Option<Duration>,
+    ) -> FixtureResponse {
+        (
+            format!(
+                "HTTP/1.1 {status} fixture\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n",
+                body.len()
+            ),
+            body.to_vec(),
+            delay,
+        )
+    }
+
+    fn chunked_response(status: u16, body: &[u8]) -> FixtureResponse {
+        let mut encoded = format!("{:x}\r\n", body.len()).into_bytes();
+        encoded.extend_from_slice(body);
+        encoded.extend_from_slice(b"\r\n0\r\n\r\n");
+        (
+            format!(
+                "HTTP/1.1 {status} fixture\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            ),
+            encoded,
+            None,
+        )
+    }
+
+    fn serve(responses: Vec<FixtureResponse>) -> (Url, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap_or_else(|error| panic!("failed to bind HTTP fixture: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("failed to read HTTP fixture address: {error}"));
+        let handle = thread::spawn(move || {
+            for (head, body, delay) in responses {
+                let (mut stream, _) = listener.accept().unwrap_or_else(|error| {
+                    panic!("failed to accept HTTP fixture request: {error}")
+                });
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).unwrap_or_else(|error| {
+                        panic!("failed to read HTTP fixture request: {error}")
+                    });
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let _ = stream.write_all(head.as_bytes());
+                if let Some(delay) = delay {
+                    thread::sleep(delay);
+                }
+                let _ = stream.write_all(&body);
+            }
+        });
+        (
+            Url::parse(&format!("http://{address}/"))
+                .unwrap_or_else(|error| panic!("invalid HTTP fixture URL: {error}")),
+            handle,
+        )
+    }
+
+    fn test_agent(read_timeout: Duration) -> ureq::Agent {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(5)))
+            .timeout_connect(Some(Duration::from_secs(1)))
+            .timeout_per_read(Some(read_timeout))
+            .timeout_per_write(Some(Duration::from_secs(1)))
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .build();
+        ureq::Agent::new_with_config(config)
+    }
+
+    fn get_from_fixture(agent: &ureq::Agent, base: &Url) -> Result<Vec<u8>> {
+        get_bounded(
+            agent,
+            base,
+            UrlTrust::Loopback(base),
+            "application/octet-stream",
+            16,
+        )
+    }
+
+    fn response_with_content_length(
+        value: ureq::http::HeaderValue,
+    ) -> ureq::http::Response<ureq::Body> {
+        ureq::http::Response::builder()
+            .header("Content-Length", value)
+            .body(ureq::Body::builder().data(Vec::<u8>::new()))
+            .unwrap_or_else(|error| panic!("failed to build response fixture: {error}"))
+    }
+
+    #[test]
+    fn bounded_http_download_accepts_200_and_rejects_other_statuses() {
+        let (url, server) = serve(vec![response(200, "", b"hello")]);
+        assert_eq!(
+            get_from_fixture(&test_agent(Duration::from_secs(1)), &url)
+                .unwrap_or_else(|error| panic!("200 response failed: {error}")),
+            b"hello"
+        );
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+
+        for status in [201, 204, 206, 404, 500] {
+            let (url, server) = serve(vec![response(status, "", b"")]);
+            assert!(
+                get_from_fixture(&test_agent(Duration::from_secs(1)), &url).is_err(),
+                "HTTP {status} must not be accepted"
+            );
+            server
+                .join()
+                .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+        }
+    }
+
+    #[test]
+    fn bounded_http_download_validates_redirect_origins_and_limit() {
+        let (url, server) = serve(vec![
+            response(302, "Location: /next\r\n", b""),
+            response(200, "", b"hello"),
+        ]);
+        assert_eq!(
+            get_from_fixture(&test_agent(Duration::from_secs(1)), &url)
+                .unwrap_or_else(|error| panic!("allowed redirect failed: {error}")),
+            b"hello"
+        );
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+
+        let (url, server) = serve(vec![response(
+            302,
+            "Location: http://example.com/escape\r\n",
+            b"",
+        )]);
+        assert!(get_from_fixture(&test_agent(Duration::from_secs(1)), &url).is_err());
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+
+        let redirects = (0..MAX_REDIRECTS)
+            .map(|_| response(302, "Location: /next\r\n", b""))
+            .chain(std::iter::once(response(200, "", b"hello")))
+            .collect();
+        let (url, server) = serve(redirects);
+        assert!(get_from_fixture(&test_agent(Duration::from_secs(1)), &url).is_ok());
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+
+        let redirects = (0..=MAX_REDIRECTS)
+            .map(|_| response(302, "Location: /next\r\n", b""))
+            .collect();
+        let (url, server) = serve(redirects);
+        assert!(get_from_fixture(&test_agent(Duration::from_secs(1)), &url).is_err());
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+    }
+
+    #[test]
+    fn content_length_must_be_valid_and_within_limit() {
+        let invalid = ureq::http::HeaderValue::from_static("not-a-number");
+        assert!(content_length(&response_with_content_length(invalid)).is_err());
+        let non_text = ureq::http::HeaderValue::from_bytes(&[0xff])
+            .unwrap_or_else(|error| panic!("failed to build invalid header fixture: {error}"));
+        assert!(content_length(&response_with_content_length(non_text)).is_err());
+        let oversized = ureq::http::HeaderValue::from_static("17");
+        assert!(checked_content_length(&response_with_content_length(oversized), 16).is_err());
+    }
+
+    #[test]
+    fn bounded_http_download_rejects_truncated_and_oversized_bodies() {
+        let (url, server) = serve(vec![(
+            "HTTP/1.1 200 fixture\r\nContent-Length: not-a-number\r\nConnection: close\r\n\r\n"
+                .to_string(),
+            b"hello".to_vec(),
+            None,
+        )]);
+        assert!(get_from_fixture(&test_agent(Duration::from_secs(1)), &url).is_err());
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+
+        let (url, server) = serve(vec![(
+            "HTTP/1.1 200 fixture\r\nContent-Length: 17\r\nConnection: close\r\n\r\n".to_string(),
+            b"0123456789abcdefg".to_vec(),
+            None,
+        )]);
+        assert!(get_from_fixture(&test_agent(Duration::from_secs(1)), &url).is_err());
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+
+        let (url, server) = serve(vec![(
+            "HTTP/1.1 200 fixture\r\nContent-Length: 10\r\nConnection: close\r\n\r\n".to_string(),
+            b"short".to_vec(),
+            None,
+        )]);
+        assert!(get_from_fixture(&test_agent(Duration::from_secs(1)), &url).is_err());
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+
+        let (url, server) = serve(vec![chunked_response(200, b"0123456789abcdefg")]);
+        assert!(get_from_fixture(&test_agent(Duration::from_secs(1)), &url).is_err());
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+
+        let (url, server) = serve(vec![(
+            "HTTP/1.1 200 fixture\r\nConnection: close\r\n\r\n".to_string(),
+            b"0123456789abcdefg".to_vec(),
+            None,
+        )]);
+        assert!(get_from_fixture(&test_agent(Duration::from_secs(1)), &url).is_err());
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+    }
+
+    #[test]
+    fn bounded_http_download_enforces_per_read_timeout() {
+        let (url, server) = serve(vec![response_with_delay(
+            200,
+            "",
+            b"slow body",
+            Some(Duration::from_millis(150)),
+        )]);
+        assert!(get_from_fixture(&test_agent(Duration::from_millis(25)), &url).is_err());
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("HTTP fixture server panicked"));
+    }
 
     fn write_zip_file(path: &Path, name: &str, options: zip::write::SimpleFileOptions) {
         let file = std::fs::File::create(path).unwrap_or_else(|error| panic!("{error}"));
