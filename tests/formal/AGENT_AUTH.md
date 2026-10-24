@@ -3,7 +3,7 @@
 ## Authority and scope
 
 The authority is the session plan dated 2026-10-24, titled
-`実装計画: ワークフロー開始時のエージェント認証状態チェック`.
+`Implementation plan: workflow-start agent authentication status check`.
 The requirements are its confirmed decisions in section 0 and contracts in
 sections 3 and 4, checked against the current production paths, `README.md`,
 `NEVER.md`, and the existing repository Cucumber/formal conventions.

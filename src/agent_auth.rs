@@ -188,7 +188,9 @@ fn claude_config_dir(config: &WorkflowConfig, cwd: Option<&Path>) -> Option<std:
     if dir.is_absolute() {
         Some(dir)
     } else {
-        let base = cwd.map_or_else(std::env::current_dir, |cwd| Ok(cwd.to_path_buf())).ok()?;
+        let base = cwd
+            .map_or_else(std::env::current_dir, |cwd| Ok(cwd.to_path_buf()))
+            .ok()?;
         Some(base.join(dir))
     }
 }
@@ -293,16 +295,22 @@ mod tests {
         let path = temp.path().join("credentials.json");
         for (field, target, prefix, suffix) in [
             (
-                "refreshToken", CredentialTarget::ClaudeCli,
-                r#"{"claudeAiOauth":{"expiresAt":1"#, "}}",
+                "refreshToken",
+                CredentialTarget::ClaudeCli,
+                r#"{"claudeAiOauth":{"expiresAt":1"#,
+                "}}",
             ),
             (
-                "refresh", CredentialTarget::JcodeAnthropic,
-                r#"{"anthropic_accounts":[{"expires":1"#, "}]}",
+                "refresh",
+                CredentialTarget::JcodeAnthropic,
+                r#"{"anthropic_accounts":[{"expires":1"#,
+                "}]}",
             ),
             (
-                "refresh_token", CredentialTarget::JcodeOpenAi,
-                r#"{"openai_accounts":[{"expires_at":1"#, "}]}",
+                "refresh_token",
+                CredentialTarget::JcodeOpenAi,
+                r#"{"openai_accounts":[{"expires_at":1"#,
+                "}]}",
             ),
         ] {
             for (value, blocked, malformed) in [
@@ -316,10 +324,12 @@ mod tests {
                 (Some("[]"), false, true),
                 (Some("{}"), false, true),
             ] {
-                let refresh = value.map_or_else(String::new, |value| format!(",\"{field}\":{value}"));
+                let refresh =
+                    value.map_or_else(String::new, |value| format!(",\"{field}\":{value}"));
                 let json = format!("{prefix}{refresh}{suffix}");
                 assert_eq!(
-                    serde_json::from_str::<CredentialFile>(&json).is_err(), malformed,
+                    serde_json::from_str::<CredentialFile>(&json).is_err(),
+                    malformed,
                 );
                 std::fs::write(&path, &json).unwrap_or_else(|e| panic!("{e}"));
                 let verdict = inspect_file(&path, target, 1_800_000_000_000);
@@ -328,7 +338,8 @@ mod tests {
                     assert!(verdict == Verdict::Unknown);
                 }
                 assert_eq!(
-                    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e}")), json,
+                    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{e}")),
+                    json,
                 );
             }
         }
@@ -337,7 +348,12 @@ mod tests {
     #[test]
     fn backend_eligibility_preserves_executor_selection() {
         for sdk in [
-            None, Some("jcode"), Some("claude"), Some("opencode"), Some("unsupported"), Some(""),
+            None,
+            Some("jcode"),
+            Some("claude"),
+            Some("opencode"),
+            Some("unsupported"),
+            Some(""),
         ] {
             for command in [vec![], vec!["cat".to_string()]] {
                 let bypass = match sdk {
@@ -345,7 +361,8 @@ mod tests {
                     Some(sdk) => Sdk::from_name(sdk).is_none(),
                 };
                 assert_eq!(
-                    bypass, !crate::executor::Executor::new(sdk, &command).is_sdk(),
+                    bypass,
+                    !crate::executor::Executor::new(sdk, &command).is_sdk(),
                 );
             }
         }

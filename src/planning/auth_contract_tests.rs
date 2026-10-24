@@ -69,7 +69,10 @@ async fn auth_workflow_claude_directory_overrides_inherited_credentials() {
         .unwrap_or_else(|e| panic!("{e}"));
         for directory in [
             "selected{{literal}}".to_string(),
-            selected.to_string_lossy().replace('{', "{{").replace('}', "}}"),
+            selected
+                .to_string_lossy()
+                .replace('{', "{{")
+                .replace('}', "}}"),
         ] {
             let yaml = format!("sdk: claude\nenv:\n  CLAUDE_CONFIG_DIR: '{directory}'");
             let error = fixture.plan(&yaml).await;
@@ -78,10 +81,9 @@ async fn auth_workflow_claude_directory_overrides_inherited_credentials() {
             } else {
                 assert_allowed(&error);
             }
-            let config = WorkflowConfig::from_yaml(&format!(
-                "{yaml}\nsteps:\n  work:\n    prompt: test\n"
-            ))
-            .unwrap_or_else(|e| panic!("{e}"));
+            let config =
+                WorkflowConfig::from_yaml(&format!("{yaml}\nsteps:\n  work:\n    prompt: test\n"))
+                    .unwrap_or_else(|e| panic!("{e}"));
             let execution = crate::agent_auth::ensure_agents_authenticated(
                 &config,
                 crate::agent_auth::AuthScope::Execution,
@@ -104,8 +106,11 @@ async fn auth_workflow_claude_directory_overrides_inherited_credentials() {
     ] {
         assert!(
             crate::agent_auth::ensure_agents_authenticated(
-                &config, scope, Some(fixture.dir.path()),
-            ).is_ok()
+                &config,
+                scope,
+                Some(fixture.dir.path()),
+            )
+            .is_ok()
         );
     }
 }

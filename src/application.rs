@@ -4477,6 +4477,40 @@ mod tests {
         guards
     }
 
+    fn write_relative_auth_fixture(
+        base_dir: &std::path::Path,
+        worktree: &std::path::Path,
+        mode: WorkspaceMode,
+        selected_expired: bool,
+    ) {
+        for (dir, expired) in [
+            (
+                base_dir,
+                if mode == WorkspaceMode::CurrentBranch {
+                    selected_expired
+                } else {
+                    !selected_expired
+                },
+            ),
+            (
+                worktree,
+                if mode == WorkspaceMode::Worktree {
+                    selected_expired
+                } else {
+                    !selected_expired
+                },
+            ),
+        ] {
+            std::fs::create_dir_all(dir.join("relative-auth")).unwrap_or_else(|e| panic!("{e}"));
+            let expires = if expired { 1_i64 } else { 8_000_000_000_000 };
+            std::fs::write(
+                dir.join("relative-auth/auth.json"),
+                format!(r#"{{"anthropic_accounts":[{{"expires":{expires}}}]}}"#),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
     #[test]
     fn setup_run_blocking_resolves_relative_auth_in_prospective_workspace() {
         let _lock = crate::test_support::lock_process();
@@ -4485,7 +4519,9 @@ mod tests {
         let _auth_home = crate::test_support::EnvGuard::set("JCODE_HOME", "relative-auth");
         let _skip = crate::test_support::EnvGuard::remove("CRUISE_SKIP_AGENT_AUTH_CHECK");
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all().build().unwrap_or_else(|e| panic!("{e}"));
+            .enable_all()
+            .build()
+            .unwrap_or_else(|e| panic!("{e}"));
         for mode in [WorkspaceMode::Worktree, WorkspaceMode::CurrentBranch] {
             for selected_expired in [false, true] {
                 let case = tempfile::tempdir_in(temp.path()).unwrap_or_else(|e| panic!("{e}"));
@@ -4493,19 +4529,10 @@ mod tests {
                 let manager = SessionManager::new(case.path().join("data"));
                 let id = "20261024000004";
                 let worktree = manager.worktrees_dir().join(id);
-                for (dir, expired) in [
-                    (&base_dir, if mode == WorkspaceMode::CurrentBranch { selected_expired } else { !selected_expired }),
-                    (&worktree, if mode == WorkspaceMode::Worktree { selected_expired } else { !selected_expired }),
-                ] {
-                    std::fs::create_dir_all(dir.join("relative-auth")).unwrap_or_else(|e| panic!("{e}"));
-                    let expires = if expired { 1_i64 } else { 8_000_000_000_000 };
-                    std::fs::write(
-                        dir.join("relative-auth/auth.json"),
-                        format!(r#"{{"anthropic_accounts":[{{"expires":{expires}}}]}}"#),
-                    ).unwrap_or_else(|e| panic!("{e}"));
-                }
+                write_relative_auth_fixture(&base_dir, &worktree, mode, selected_expired);
                 let mut state = SessionState::new(
-                    id.to_string(), base_dir,
+                    id.to_string(),
+                    base_dir,
                     crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                     "relative auth application contract".to_string(),
                 );
@@ -4520,29 +4547,63 @@ mod tests {
                 std::fs::write(session_dir.join("config.yaml"),
                     "sdk: jcode\nmodel: claude/test-model\nsteps:\n  agent:\n    prompt: never dispatch\n",
                 ).unwrap_or_else(|e| panic!("{e}"));
-                std::fs::write(session_dir.join("plan.md"), "# Plan\n").unwrap_or_else(|e| panic!("{e}"));
-                let compiled = crate::workflow::compile(manager.load_config(&state).unwrap_or_else(|e| panic!("{e}")))
+                std::fs::write(session_dir.join("plan.md"), "# Plan\n")
                     .unwrap_or_else(|e| panic!("{e}"));
+                let compiled = crate::workflow::compile(
+                    manager
+                        .load_config(&state)
+                        .unwrap_or_else(|e| panic!("{e}")),
+                )
+                .unwrap_or_else(|e| panic!("{e}"));
                 let dag = crate::graph::build_graph(&compiled, crate::config::DEFAULT_MAX_RETRIES)
                     .unwrap_or_else(|e| panic!("{e}"));
                 crate::graph::persistence::save_graph(&dag, &manager.dag_path(id))
                     .unwrap_or_else(|e| panic!("{e}"));
-                let before = std::fs::read(session_dir.join("state.json")).unwrap_or_else(|e| panic!("{e}"));
-                let credentials = std::fs::read(worktree.join("relative-auth/auth.json")).unwrap_or_else(|e| panic!("{e}"));
+                let before =
+                    std::fs::read(session_dir.join("state.json")).unwrap_or_else(|e| panic!("{e}"));
+                let credentials = std::fs::read(worktree.join("relative-auth/auth.json"))
+                    .unwrap_or_else(|e| panic!("{e}"));
                 let result = setup_run_blocking(
-                    &manager, runtime.handle(), id, &CancellationToken::new(), Some(mode), None, 0,
+                    &manager,
+                    runtime.handle(),
+                    id,
+                    &CancellationToken::new(),
+                    Some(mode),
+                    None,
+                    0,
                 );
                 let Err(error) = result else {
                     panic!("non-repository sentinel must reject setup");
                 };
-                assert_eq!(error.telemetry_type() == "agent_auth_expired", selected_expired, "{error}");
+                assert_eq!(
+                    error.telemetry_type() == "agent_auth_expired",
+                    selected_expired,
+                    "{error}"
+                );
                 if selected_expired {
-                    assert_eq!(std::fs::read(session_dir.join("state.json")).unwrap_or_else(|e| panic!("{e}")), before);
-                    assert_eq!(std::fs::read(worktree.join("relative-auth/auth.json")).unwrap_or_else(|e| panic!("{e}")), credentials);
+                    assert_eq!(
+                        std::fs::read(session_dir.join("state.json"))
+                            .unwrap_or_else(|e| panic!("{e}")),
+                        before
+                    );
+                    assert_eq!(
+                        std::fs::read(worktree.join("relative-auth/auth.json"))
+                            .unwrap_or_else(|e| panic!("{e}")),
+                        credentials
+                    );
                     assert!(!manager.clones_dir().exists());
-                    assert_eq!(std::fs::read_dir(&worktree).unwrap_or_else(|e| panic!("{e}")).count(), 1);
+                    assert_eq!(
+                        std::fs::read_dir(&worktree)
+                            .unwrap_or_else(|e| panic!("{e}"))
+                            .count(),
+                        1
+                    );
                 } else {
-                    assert!(error.to_string().contains("git") || error.to_string().contains("repository"), "{error}");
+                    assert!(
+                        error.to_string().contains("git")
+                            || error.to_string().contains("repository"),
+                        "{error}"
+                    );
                 }
             }
         }
