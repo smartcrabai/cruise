@@ -106,9 +106,12 @@ const TEST_STATE_CONFLICT_LOG_ENV: &str = "CRUISE_TEST_STATE_CONFLICT_LOG";
 const TEST_STDIN_IS_TERMINAL_ENV: &str = "CRUISE_TEST_STDIN_IS_TERMINAL";
 #[cfg(test)]
 const TEST_WORKSPACE_MODE_ENV: &str = "CRUISE_TEST_WORKSPACE_MODE";
+#[cfg(test)]
+const TEST_FLAG_SELECTION_ENV: &str = "CRUISE_TEST_FLAG_SELECTION";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceOverride {
+    /// Honor saved workspace settings for a single, potentially interactive CLI run.
     RespectSession,
     ForceWorktree,
 }
@@ -265,6 +268,90 @@ fn prompt_workspace_mode() -> Result<WorkspaceMode> {
         ),
         Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
     }
+}
+
+struct FlagPromptChoice<'a>(&'a crate::flags::FlagChoice);
+
+impl std::fmt::Display for FlagPromptChoice<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.name)?;
+        if let Some(description) = &self.0.description {
+            write!(f, "  {description}")?;
+        }
+        Ok(())
+    }
+}
+
+fn prompt_flag_values(
+    config: &crate::config::WorkflowConfig,
+    current: &crate::flags::FlagValues,
+) -> Result<crate::flags::FlagValues> {
+    let choices = crate::flags::choices(config);
+    if choices.is_empty() {
+        return Ok(current.clone());
+    }
+    #[cfg(test)]
+    if let Some(enabled) = test_flag_selection() {
+        return Ok(crate::flags::apply_enabled(current, &choices, &enabled));
+    }
+    if !stdin_is_terminal() {
+        return Ok(current.clone());
+    }
+
+    let _guard = crate::option_handler::prompt_lock_guard();
+    let _blocked = crate::herdr::blocked("Which optional workflow flags should be enabled?");
+    let defaults: Vec<_> = choices
+        .iter()
+        .enumerate()
+        .filter_map(|(index, choice)| {
+            current
+                .get(&choice.name)
+                .copied()
+                .unwrap_or(false)
+                .then_some(index)
+        })
+        .collect();
+    let options = choices.iter().map(FlagPromptChoice).collect();
+    crate::platform::reclaim_terminal_foreground();
+    match inquire::MultiSelect::new("Which optional workflow flags should be enabled?", options)
+        .with_help_message("Space to toggle, Enter to confirm · No selection = all flags off")
+        .with_default(&defaults)
+        .prompt()
+    {
+        Ok(selected) => {
+            let enabled: Vec<_> = selected
+                .into_iter()
+                .map(|choice| choice.0.name.clone())
+                .collect();
+            Ok(crate::flags::apply_enabled(current, &choices, &enabled))
+        }
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Err(
+            CruiseError::Other("workflow flag selection cancelled".to_string()),
+        ),
+        Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
+    }
+}
+
+fn should_prompt_flags(
+    args: &RunArgs,
+    workspace_override: WorkspaceOverride,
+    session: &SessionState,
+) -> bool {
+    !args.dry_run
+        && args.flags.is_empty()
+        && workspace_override == WorkspaceOverride::RespectSession
+        && session.current_step.is_none()
+}
+
+#[cfg(test)]
+fn test_flag_selection() -> Option<Vec<String>> {
+    std::env::var(TEST_FLAG_SELECTION_ENV).ok().map(|value| {
+        value
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -536,6 +623,9 @@ async fn run_single_loaded(
             session.current_step_is_node_id,
             session.execution_id.as_deref(),
         )?;
+        if should_prompt_flags(&args, workspace_override, &session) {
+            session.flags = prompt_flag_values(&config, &session.flags)?;
+        }
         crate::graph::validation::validate_workflow(
             &compiled,
             &dag,
@@ -1392,14 +1482,18 @@ mod tests {
                 std::env::set_var("HOME", home);
                 std::env::set_var("USERPROFILE", home);
             }
-            Self {
+            let mut guard = Self {
                 prev_home,
                 prev_userprofile,
                 prev_path,
                 prev_dir,
                 extra_env: Vec::new(),
                 lock,
-            }
+            };
+            // Explicit prompt tests opt into TTY behavior after constructing this guard.
+            guard.set_env(TEST_STDIN_IS_TERMINAL_ENV, "0");
+            guard.remove_env("CRUISE_TEST_FLAG_SELECTION");
+            guard
         }
 
         fn prepend_path(&self, dir: &Path) {
@@ -4571,6 +4665,293 @@ steps:
             notification_kind_for_run_result(&SessionPhase::Completed, &Ok(()), true),
             None
         );
+    }
+
+    mod workflow_flag_tests {
+        use super::*;
+        use crate::flags::FlagValues;
+
+        const SELECTION_ENV: &str = "CRUISE_TEST_FLAG_SELECTION";
+        const CONFIG: &str = "command: [echo]\nflags:\n  e2e:\n    description: Run E2E\n  docs: {}\nsteps:\n  build:\n    command: touch build.txt\n  e2e-test:\n    flag: e2e\n    command: touch e2e.txt\n  docs-test:\n    flag: docs\n    command: touch docs.txt\n";
+
+        fn fresh_session() -> SessionState {
+            make_current_branch_session("20261024000000", Path::new("/repo"), "flags", "main")
+        }
+
+        #[test]
+        fn fresh_single_run_is_eligible_even_with_saved_flags() {
+            let mut session = fresh_session();
+            session.flags.insert("docs".into(), true);
+            assert!(should_prompt_flags(
+                &run_args(&session.id),
+                WorkspaceOverride::RespectSession,
+                &session,
+            ));
+        }
+
+        #[test]
+        fn dry_run_is_not_eligible_for_flag_selection() {
+            let session = fresh_session();
+            let mut args = run_args(&session.id);
+            args.dry_run = true;
+            assert!(!should_prompt_flags(
+                &args,
+                WorkspaceOverride::RespectSession,
+                &session
+            ));
+        }
+
+        #[test]
+        fn explicit_cli_assignment_even_off_suppresses_selection() {
+            let session = fresh_session();
+            let mut args = run_args(&session.id);
+            args.flags = vec![("e2e".into(), false)];
+            assert!(!should_prompt_flags(
+                &args,
+                WorkspaceOverride::RespectSession,
+                &session
+            ));
+        }
+
+        #[test]
+        fn batch_worktree_run_is_not_eligible_for_selection() {
+            let session = fresh_session();
+            assert!(!should_prompt_flags(
+                &run_args(&session.id),
+                WorkspaceOverride::ForceWorktree,
+                &session,
+            ));
+        }
+
+        #[test]
+        fn resume_uses_saved_flags_without_new_selection() {
+            let mut session = fresh_session();
+            session.current_step = Some("e2e-test".into());
+            assert!(!should_prompt_flags(
+                &run_args(&session.id),
+                WorkspaceOverride::RespectSession,
+                &session,
+            ));
+        }
+
+        #[test]
+        fn non_tty_prompt_preserves_sparse_saved_values() {
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let _process = ProcessStateGuard::new(tmp.path());
+            let config = crate::config::WorkflowConfig::from_yaml(CONFIG)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            let current = FlagValues::from([("docs".into(), true), ("legacy".into(), false)]);
+            assert_eq!(
+                prompt_flag_values(&config, &current).unwrap_or_else(|e| panic!("{e:?}")),
+                current
+            );
+        }
+
+        #[test]
+        fn no_declarations_preserves_saved_values_in_a_tty() {
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let mut process = ProcessStateGuard::new(tmp.path());
+            process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "1");
+            let config =
+                crate::config::WorkflowConfig::from_yaml(&single_command_config("build", "true"))
+                    .unwrap_or_else(|e| panic!("{e:?}"));
+            let current = FlagValues::from([("legacy".into(), true)]);
+            assert_eq!(
+                prompt_flag_values(&config, &current).unwrap_or_else(|e| panic!("{e:?}")),
+                current
+            );
+        }
+
+        #[test]
+        fn selected_names_replace_declared_values_and_preserve_unknown_keys() {
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let mut process = ProcessStateGuard::new(tmp.path());
+            // The override must work even when the test runner has no terminal.
+            process.set_env(SELECTION_ENV, "e2e");
+            let config = crate::config::WorkflowConfig::from_yaml(CONFIG)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            let current = FlagValues::from([("docs".into(), true), ("legacy".into(), true)]);
+            assert_eq!(
+                prompt_flag_values(&config, &current).unwrap_or_else(|e| panic!("{e:?}")),
+                FlagValues::from([
+                    ("e2e".into(), true),
+                    ("docs".into(), false),
+                    ("legacy".into(), true)
+                ]),
+            );
+        }
+
+        #[test]
+        fn comma_separated_selection_enables_multiple_declared_flags() {
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let mut process = ProcessStateGuard::new(tmp.path());
+            process.set_env(SELECTION_ENV, "e2e,docs");
+            let config = crate::config::WorkflowConfig::from_yaml(CONFIG)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(
+                prompt_flag_values(&config, &FlagValues::new()).unwrap_or_else(|e| panic!("{e:?}")),
+                FlagValues::from([("e2e".into(), true), ("docs".into(), true)]),
+            );
+        }
+
+        #[test]
+        fn empty_selection_explicitly_turns_all_declared_flags_off() {
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let mut process = ProcessStateGuard::new(tmp.path());
+            process.set_env(SELECTION_ENV, "");
+            let config = crate::config::WorkflowConfig::from_yaml(CONFIG)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            let current = FlagValues::from([("docs".into(), true)]);
+            assert_eq!(
+                prompt_flag_values(&config, &current).unwrap_or_else(|e| panic!("{e:?}")),
+                FlagValues::from([("e2e".into(), false), ("docs".into(), false)]),
+            );
+        }
+
+        struct FlagRunFixture {
+            process: ProcessStateGuard,
+            _tmp: TempDir,
+            repo: PathBuf,
+            manager: SessionManager,
+            session: SessionState,
+        }
+
+        impl FlagRunFixture {
+            fn new() -> Self {
+                let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+                let mut process = ProcessStateGuard::new(tmp.path());
+                let repo = create_repo_with_origin(&tmp);
+                process.set_current_dir(&repo);
+                process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "1");
+                process.set_env(SELECTION_ENV, "e2e");
+                process.set_env("XDG_CONFIG_HOME", tmp.path().join("config"));
+                process.set_env("XDG_DATA_HOME", tmp.path().join("data"));
+                process.set_env("XDG_STATE_HOME", tmp.path().join("state"));
+                process.set_env("CRUISE_DISABLE_NOTIFICATIONS", "1");
+                let manager = SessionManager::new(
+                    crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")),
+                );
+                let session =
+                    make_current_branch_session("20261024000000", &repo, "flag selection", "main");
+                manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+                write_config(&manager, &session.id, CONFIG);
+                Self {
+                    process,
+                    _tmp: tmp,
+                    repo,
+                    manager,
+                    session,
+                }
+            }
+
+            fn save(&self) {
+                self.manager
+                    .save(&self.session)
+                    .unwrap_or_else(|e| panic!("{e:?}"));
+            }
+
+            fn loaded(&self) -> SessionState {
+                self.manager
+                    .load(&self.session.id)
+                    .unwrap_or_else(|e| panic!("{e:?}"))
+            }
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn fresh_run_executes_selected_step_and_persists_all_declared_values() {
+            let mut f = FlagRunFixture::new();
+            // A prior planning invocation or settings editor may have saved docs.
+            f.session.flags.insert("docs".into(), true);
+            f.save();
+            run(run_args(&f.session.id))
+                .await
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            assert!(
+                f.repo.join("e2e.txt").exists(),
+                "selected flag must reach the engine"
+            );
+            assert!(
+                !f.repo.join("docs.txt").exists(),
+                "deselected saved flag must not execute"
+            );
+            assert_eq!(
+                f.loaded().flags,
+                FlagValues::from([("e2e".into(), true), ("docs".into(), false)])
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn cli_flag_values_win_over_the_interactive_selection() {
+            let f = FlagRunFixture::new();
+            let mut args = run_args(&f.session.id);
+            args.flags = vec![("docs".into(), true), ("e2e".into(), false)];
+            run(args).await.unwrap_or_else(|e| panic!("{e:?}"));
+            assert!(f.repo.join("docs.txt").exists());
+            assert!(!f.repo.join("e2e.txt").exists());
+            assert_eq!(
+                f.loaded().flags,
+                FlagValues::from([("e2e".into(), false), ("docs".into(), true)])
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn resumed_run_preserves_saved_flags_despite_selection_override() {
+            let mut f = FlagRunFixture::new();
+            f.session.phase = SessionPhase::Running;
+            f.session.current_step = Some("e2e-test".into());
+            f.session.flags = FlagValues::from([("docs".into(), true), ("e2e".into(), false)]);
+            f.save();
+            run(run_args(&f.session.id))
+                .await
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            assert!(!f.repo.join("e2e.txt").exists());
+            assert!(f.repo.join("docs.txt").exists());
+            assert_eq!(f.loaded().flags, f.session.flags);
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn non_tty_run_preserves_saved_flag_values() {
+            let mut f = FlagRunFixture::new();
+            f.process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "0");
+            f.process.remove_env(SELECTION_ENV);
+            f.session.flags.insert("docs".into(), true);
+            f.save();
+            run(run_args(&f.session.id))
+                .await
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            assert!(!f.repo.join("e2e.txt").exists());
+            assert!(f.repo.join("docs.txt").exists());
+            assert_eq!(f.loaded().flags, f.session.flags);
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn dry_run_does_not_select_flags_or_persist_changes() {
+            let f = FlagRunFixture::new();
+            let mut args = run_args(&f.session.id);
+            args.dry_run = true;
+            run(args).await.unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(f.loaded().flags, f.session.flags);
+            assert_eq!(f.loaded().phase, SessionPhase::Planned);
+            assert!(!f.repo.join("build.txt").exists());
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn selected_flags_are_used_in_preflight_validation_before_execution() {
+            let f = FlagRunFixture::new();
+            // This unbounded loop is legal only when its flag is disabled.
+            write_config(
+                &f.manager,
+                &f.session.id,
+                "command: [echo]\nflags:\n  e2e: {}\nsteps:\n  loop:\n    flag: e2e\n    command: touch forbidden.txt\n    next: loop\n",
+            );
+            let result = run(run_args(&f.session.id)).await;
+            assert!(
+                matches!(result, Err(CruiseError::InvalidStepConfig(_))),
+                "enabling e2e must expose the invalid workflow during preflight: {result:?}"
+            );
+            assert_eq!(f.loaded().phase, SessionPhase::Planned);
+            assert!(!f.repo.join("forbidden.txt").exists());
+        }
     }
 
     // -- prompt_workspace_mode unit tests --------------------------------

@@ -22,6 +22,20 @@ pub struct FlagChoice {
     pub description: Option<String>,
 }
 
+/// Apply an explicit selection to declared flags, preserving undeclared values.
+#[must_use]
+pub fn apply_enabled(
+    current: &FlagValues,
+    choices: &[FlagChoice],
+    enabled: &[String],
+) -> FlagValues {
+    let mut values = current.clone();
+    for choice in choices {
+        values.insert(choice.name.clone(), enabled.contains(&choice.name));
+    }
+    values
+}
+
 /// Parse a flag name as enabled, or a `NAME=on|off|true|false` assignment.
 ///
 /// # Errors
