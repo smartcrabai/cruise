@@ -40,7 +40,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: '22.22.0'
+          node-version: '22.23.3'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
@@ -78,7 +78,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: '22.22.0'
+          node-version: '22.23.3'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
@@ -109,7 +109,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install taplo
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
         with:
           tool: taplo-cli
 
