@@ -6,6 +6,11 @@ fallback, see `OPENCODE_EFFORT.md` and run
 Quint, Alloy receipt validation, real-Executor Cucumber, and affected Rust
 contracts using this directory's shared locked toolchain.
 
+For the CLI planning-to-execution workflow-flag boundary, see
+`WORKFLOW_FLAGS.md` and run `bash scripts/check_workflow_flags_specs.sh`.
+Its dedicated PR CI job runs Quint, Alloy receipt checks, real PTY Gherkin,
+and production regression tests with the shared pins below.
+
 For SDK-qualified model arrays, ordered cross-SDK fallback, resume ownership,
 and production-connected configuration/CLI Gherkin, see `SDK_MODELS.md` and run
 `bash scripts/check_sdk_model_specs.sh`. This suite has its own required native

@@ -426,6 +426,40 @@ fn workflow_call_rejects_callee_steps_that_carry_a_flag() {
 // ------------------------------------------------------- flags module API
 
 #[test]
+fn apply_enabled_turns_selected_declared_flags_on() {
+    let choices = flags::choices(&parse(TWO_FLAGS));
+    let result = flags::apply_enabled(&values(&[("e2e", false)]), &choices, &["e2e".to_string()]);
+    assert_eq!(result.get("e2e"), Some(&true));
+}
+
+#[test]
+fn apply_enabled_explicitly_disables_every_unselected_declaration() {
+    let choices = flags::choices(&parse(TWO_FLAGS));
+    let result = flags::apply_enabled(&values(&[("e2e", true)]), &choices, &[]);
+    assert_eq!(result, values(&[("e2e", false), ("docs", false)]));
+}
+
+#[test]
+fn apply_enabled_preserves_undeclared_keys_without_adding_unknown_selections() {
+    let choices = flags::choices(&parse(TWO_FLAGS));
+    let current = values(&[("legacy_on", true), ("legacy_off", false)]);
+    let result = flags::apply_enabled(&current, &choices, &["unknown".to_string()]);
+    assert_eq!(result.get("legacy_on"), Some(&true));
+    assert_eq!(result.get("legacy_off"), Some(&false));
+    assert!(!result.contains_key("unknown"));
+    assert_eq!(
+        current,
+        values(&[("legacy_on", true), ("legacy_off", false)])
+    );
+}
+
+#[test]
+fn apply_enabled_without_declarations_preserves_current_values() {
+    let current = values(&[("legacy", true)]);
+    assert_eq!(flags::apply_enabled(&current, &[], &[]), current);
+}
+
+#[test]
 fn parse_assignment_accepts_bare_enable_and_explicit_on_off_values() {
     assert_eq!(flags::parse_assignment("e2e"), Ok(("e2e".into(), true)));
     assert_eq!(flags::parse_assignment("e2e=on"), Ok(("e2e".into(), true)));
