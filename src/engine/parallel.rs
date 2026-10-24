@@ -1,4 +1,3 @@
-use futures::FutureExt as MapFutureExt;
 use indexmap::IndexMap;
 use opentelemetry::trace::FutureExt as OtelFutureExt;
 use serde::Serialize;
@@ -135,48 +134,13 @@ pub(super) async fn run_parallel_step(
     })
 }
 
-fn run_child(
+async fn run_child(
     ctx: &ExecutionContext<'_>,
     child: &StepConfig,
     vars: VariableStore,
     inherited_env: &HashMap<String, String>,
     name: String,
-) -> impl Future<Output = Result<ChildResult>> + Send {
-    let attributes = [
-        ("cruise.step.name", name.as_str()),
-        (
-            "cruise.step.type",
-            if child.command.is_some() {
-                "command"
-            } else {
-                "prompt"
-            },
-        ),
-    ];
-    let operation = crate::telemetry::Operation::start("step", &attributes);
-    run_child_inner(ctx, child, vars, inherited_env, name)
-        .with_context(operation.context())
-        .map(move |result| {
-            match &result {
-                Ok(child) if !child.success => {
-                    operation.set_error_type("command_exit");
-                    operation.finish("failed");
-                }
-                _ => operation.finish_result(&result),
-            }
-            result
-        })
-}
-
-async fn run_child_inner(
-    ctx: &ExecutionContext<'_>,
-    child: &StepConfig,
-    mut vars: VariableStore,
-    inherited_env: &HashMap<String, String>,
-    name: String,
 ) -> Result<ChildResult> {
-    // Only the block calls on_step_start: persisting a child as current_step
-    // would create a resume point that does not exist in the execution graph.
     let log = |stream: &str, line: &str| {
         if let Some(log) = ctx.on_step_log {
             log(stream, &format!("[{name}] {line}"));
@@ -200,6 +164,39 @@ async fn run_child_inner(
             skipped: true,
         });
     }
+    let attributes = [
+        ("cruise.step.name", name.as_str()),
+        (
+            "cruise.step.type",
+            if child.command.is_some() {
+                "command"
+            } else {
+                "prompt"
+            },
+        ),
+    ];
+    let operation = crate::telemetry::Operation::start("step", &attributes);
+    let result = run_child_inner(ctx, child, vars, inherited_env, &name, &log)
+        .with_context(operation.context())
+        .await;
+    match &result {
+        Ok(child) if !child.success => {
+            operation.set_error_type("command_exit");
+            operation.finish("failed");
+        }
+        _ => operation.finish_result(&result),
+    }
+    result
+}
+
+async fn run_child_inner(
+    ctx: &ExecutionContext<'_>,
+    child: &StepConfig,
+    mut vars: VariableStore,
+    inherited_env: &HashMap<String, String>,
+    name: &str,
+    log: &(dyn Fn(&str, &str) + Send + Sync),
+) -> Result<ChildResult> {
     let mut env = inherited_env.clone();
     for (key, value) in &child.env {
         // Inherited values were already resolved by the parent. Resolving them
@@ -223,9 +220,9 @@ async fn run_child_inner(
                     &env,
                     ctx.cancel_token,
                     ctx.working_dir,
-                    super::PromptStepOutput::Redirect(&log),
+                    super::PromptStepOutput::Redirect(log),
                     timeout,
-                    &name,
+                    name,
                     false,
                     false,
                 )
@@ -241,7 +238,7 @@ async fn run_child_inner(
                         env: &env,
                         working_dir: ctx.working_dir,
                         timeout,
-                        on_step_log: Some(&log),
+                        on_step_log: Some(log),
                         cancel_token: ctx.cancel_token,
                     },
                 )

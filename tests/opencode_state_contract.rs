@@ -195,12 +195,26 @@ fn opencode_selects_sdk_planning_templates_and_preserves_model_references() {
         planning::PLAN_GRILL_PROMPT_TEMPLATE_SDK
     );
     assert_eq!(
-        executor.step_model_or_mode(Some("provider/step:tag#fast"), Some("provider/default")),
-        Some("provider/step:tag#fast".to_string())
+        executor.step_model(
+            Some("provider/step:tag#fast"),
+            Some(&cruise::config::ModelSpec::Single(
+                "provider/default".to_owned()
+            ))
+        ),
+        Some(cruise::config::ModelSpec::Single(
+            "provider/step:tag#fast".to_string()
+        ))
     );
     assert_eq!(
-        executor.plan_model_or_mode(None, Some("provider/model:tag#variant")),
-        Some("provider/model:tag#variant".to_string())
+        executor.step_model(
+            None,
+            Some(&cruise::config::ModelSpec::Single(
+                "provider/model:tag#variant".to_owned()
+            ))
+        ),
+        Some(cruise::config::ModelSpec::Single(
+            "provider/model:tag#variant".to_string()
+        ))
     );
     let mut noninteractive = config.clone();
     noninteractive.interactive_planning = false;
@@ -268,7 +282,7 @@ async fn direct_opencode_executor_rejects_computer_use_without_starting_backend(
     let result = Executor::new(Some("opencode"), &[])
         .run(PromptRun {
             prompt: "must not execute",
-            model_or_mode: None,
+            model: None,
             max_retries: 0,
             env: &env,
             mcp_servers: &mcp_servers,

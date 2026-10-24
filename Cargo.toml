@@ -75,6 +75,22 @@ inquire = "0.9"
 jcode-sdk = { git = "https://github.com/1jehuang/jcode", tag = "v0.99.0" }
 json5 = "=0.4.1"
 jsxrs = "0.1.6"
+opentelemetry = { version = "0.33.1", default-features = false, features = [
+  "trace",
+  "metrics",
+] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = [
+  "http-proto",
+  "gzip-http",
+  "reqwest-blocking-client",
+  "reqwest-rustls",
+  "trace",
+  "metrics",
+] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
+  "trace",
+  "metrics",
+] }
 pulldown-cmark = { version = "0.13", default-features = false, features = [
   "html",
 ] }
@@ -95,13 +111,6 @@ sha2 = "0.11.0"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 tar = "0.4"
 thiserror = "2.0.18"
-opentelemetry = { version = "0.33.1", default-features = false, features = ["trace", "metrics"] }
-opentelemetry-otlp = {
-  version = "0.33.1",
-  default-features = false,
-  features = ["http-proto", "gzip-http", "reqwest-blocking-client", "reqwest-rustls", "trace", "metrics"]
-}
-opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "metrics"] }
 tokio = { version = "1.49.0", features = [
   "rt-multi-thread",
   "rt",
@@ -141,7 +150,11 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 cucumber = "=0.23.0"
-opentelemetry-proto = { version = "0.33.1", features = ["gen-tonic-messages", "trace", "metrics"] }
+opentelemetry-proto = { version = "0.33.1", features = [
+  "gen-tonic-messages",
+  "trace",
+  "metrics",
+] }
 portable-pty = "=0.9.0"
 prost = "0.14"
 tempfile = "=3.27.0"
@@ -158,6 +171,13 @@ name = "opencode_bdd"
 path = "tests/opencode_bdd.rs"
 # POSIX fixture: required explicitly by check_opencode_specs.sh on Linux CI.
 # Do not implicitly run an unavailable platform check in the Windows suite.
+test = false
+
+[[test]]
+harness = false
+name = "sdk_model_bdd"
+path = "tests/sdk_model_bdd.rs"
+# POSIX SDK subprocess fixtures, explicitly runnable with --test sdk_model_bdd.
 test = false
 
 [profile.release]

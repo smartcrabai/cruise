@@ -905,3 +905,233 @@ fn file_reference_reloader_reloads_when_only_project_defaults_change() {
         Some("project-after-longer")
     );
 }
+
+fn mixed_sdk_config_value() -> Value {
+    json!({
+        "sdk": "jcode",
+        "model": [
+            "openai/gpt-6.1-sol:medium",
+            {"sdk": "claude", "model": "claude-sonnet-5-5:medium"},
+            "openrouter/z-ai/glm-5.3-flash:high"
+        ],
+        "plan_model": [
+            {"sdk": "claude", "model": "shared-model:medium"},
+            "shared-model:high",
+            {"sdk": "jcode", "model": "shared-model:medium"}
+        ],
+        "steps": {"shared": {"prompt": "preserve model candidates"}}
+    })
+}
+
+#[test]
+fn mixed_sdk_session_snapshots_round_trip_candidate_shapes_and_order() {
+    let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let manager = SessionManager::new(temp.path().join("data"));
+    let expected = mixed_sdk_config_value();
+    let config = WorkflowConfig::from_yaml(&expected.to_string())
+        .unwrap_or_else(|error| panic!("parse mixed SDK snapshot config: {error}"));
+    let yaml = cruise::session_config::serialize_resolved_config(&config)
+        .unwrap_or_else(|error| panic!("serialize mixed SDK snapshot: {error}"));
+
+    for (index, reference) in [
+        inline_snapshot_ref(),
+        builtin_snapshot_ref(),
+        repo_snapshot_ref(".cruise/review.yaml"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("2026102301{index:04}");
+        write_state(&manager, &id, &state_value(&id, temp.path(), &reference));
+        let snapshot = cruise::session_config::snapshot_path(&manager.sessions_dir(), &id);
+        cruise::session_config::write_snapshot_atomically(&snapshot, yaml.as_bytes())
+            .unwrap_or_else(|error| panic!("write mixed SDK snapshot: {error}"));
+        let state = manager
+            .load(&id)
+            .unwrap_or_else(|error| panic!("load state: {error}"));
+        let loaded = manager
+            .load_config(&state)
+            .unwrap_or_else(|error| panic!("load mixed SDK snapshot: {error}"));
+        let actual = serde_json::to_value(&loaded)
+            .unwrap_or_else(|error| panic!("serialize loaded snapshot: {error}"));
+        for field in ["model", "plan_model"] {
+            assert_eq!(
+                actual[field], expected[field],
+                "{field} lost candidates for {reference}"
+            );
+        }
+        let saved_again = cruise::session_config::serialize_resolved_config(&loaded)
+            .unwrap_or_else(|error| panic!("reserialize snapshot: {error}"));
+        let reparsed: Value = serde_yaml::from_str(&saved_again)
+            .unwrap_or_else(|error| panic!("parse reserialized snapshot: {error}"));
+        for field in ["model", "plan_model"] {
+            assert_eq!(
+                reparsed[field], expected[field],
+                "reserialized {field} lost candidate forms"
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_sdk_conversation_keys_change_for_sdk_only_and_candidate_order_changes() {
+    let original = mixed_sdk_config_value();
+    let parse = |value: &Value| {
+        WorkflowConfig::from_yaml(&value.to_string())
+            .unwrap_or_else(|error| panic!("parse conversation config: {error}"))
+    };
+    let identity = "owner/repository::.cruise/review.yaml";
+    let key = plan_conversation_key(&parse(&original), identity);
+    assert_eq!(key, plan_conversation_key(&parse(&original), identity));
+    for field in ["model", "plan_model"] {
+        let mut sdk_changed = original.clone();
+        let object_index = usize::from(field == "model");
+        sdk_changed[field][object_index]["sdk"] = json!("jcode");
+        assert_ne!(
+            key,
+            plan_conversation_key(&parse(&sdk_changed), identity),
+            "changing only {field} candidate SDK must invalidate the conversation"
+        );
+        let mut reordered = original.clone();
+        reordered[field]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("{field} fixture must be an array"))
+            .swap(0, 1);
+        assert_ne!(
+            key,
+            plan_conversation_key(&parse(&reordered), identity),
+            "changing only {field} candidate order must invalidate the conversation"
+        );
+    }
+}
+
+#[test]
+fn mixed_sdk_live_reload_preserves_updated_compiled_candidate_lists() {
+    let _env_lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let _model = EnvGuard::remove("CRUISE_MODEL");
+    let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
+    let _sdk = EnvGuard::remove("CRUISE_SDK");
+    let _xdg_config = EnvGuard::set(
+        "XDG_CONFIG_HOME",
+        temp.path().join("user-config").as_os_str(),
+    );
+    let workflow = temp.path().join("workflow.yaml");
+    let mut expected = mixed_sdk_config_value();
+    fs::write(&workflow, expected.to_string())
+        .unwrap_or_else(|error| panic!("write workflow: {error}"));
+    let reloader = config_reloader_for_reference(
+        &SessionConfigRef::File {
+            path: workflow.clone(),
+        },
+        Some(temp.path().to_path_buf()),
+        3,
+    )
+    .unwrap_or_else(|| panic!("expected live reloader"));
+    assert!(
+        reloader()
+            .unwrap_or_else(|error| panic!("check initial live config: {error}"))
+            .is_none()
+    );
+    for revision in 1..=2 {
+        if revision == 1 {
+            expected["model"][1]["sdk"] = json!("jcode");
+            expected["plan_model"][0]["sdk"] = json!("jcode");
+        } else {
+            for field in ["model", "plan_model"] {
+                expected[field]
+                    .as_array_mut()
+                    .unwrap_or_else(|| panic!("{field} fixture must be an array"))
+                    .swap(0, 1);
+            }
+        }
+        // Different lengths make detection deterministic even on coarse timestamp filesystems.
+        fs::write(
+            &workflow,
+            format!("{}\n# revision {}\n", expected, "x".repeat(revision)),
+        )
+        .unwrap_or_else(|error| panic!("update live workflow: {error}"));
+        let updated = reloader()
+            .unwrap_or_else(|error| panic!("reload mixed SDK workflow: {error}"))
+            .unwrap_or_else(|| panic!("candidate change did not trigger reload"));
+        assert_eq!(
+            serde_json::to_value(&updated.compiled.model)
+                .unwrap_or_else(|error| panic!("serialize compiled model: {error}")),
+            expected["model"]
+        );
+        assert_eq!(
+            serde_json::to_value(&updated.compiled.plan_model)
+                .unwrap_or_else(|error| panic!("serialize compiled plan_model: {error}")),
+            expected["plan_model"]
+        );
+        assert!(
+            reloader()
+                .unwrap_or_else(|error| panic!("check unchanged live config: {error}"))
+                .is_none(),
+            "unchanged config must not reload twice"
+        );
+    }
+}
+
+#[test]
+fn mixed_sdk_defaults_reload_propagates_complete_compiled_candidate_lists() {
+    let _env_lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let _model = EnvGuard::remove("CRUISE_MODEL");
+    let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
+    let _sdk = EnvGuard::remove("CRUISE_SDK");
+    let _xdg_config = EnvGuard::set(
+        "XDG_CONFIG_HOME",
+        temp.path().join("user-config").as_os_str(),
+    );
+    let defaults_dir = temp.path().join(".cruise");
+    fs::create_dir_all(&defaults_dir)
+        .unwrap_or_else(|error| panic!("create defaults directory: {error}"));
+    let defaults_path = defaults_dir.join("default.yaml");
+    fs::write(
+        &defaults_path,
+        "sdk: jcode\nmodel: before\nplan_model: before-plan\n",
+    )
+    .unwrap_or_else(|error| panic!("write initial defaults: {error}"));
+    let workflow = temp.path().join("workflow.yaml");
+    fs::write(
+        &workflow,
+        "steps:\n  shared:\n    prompt: preserve defaults\n",
+    )
+    .unwrap_or_else(|error| panic!("write defaults workflow: {error}"));
+    let reloader = config_reloader_for_reference(
+        &SessionConfigRef::File { path: workflow },
+        Some(temp.path().to_path_buf()),
+        3,
+    )
+    .unwrap_or_else(|| panic!("expected live reloader"));
+    assert!(
+        reloader()
+            .unwrap_or_else(|error| panic!("check initial defaults config: {error}"))
+            .is_none()
+    );
+    let mut expected = mixed_sdk_config_value();
+    expected
+        .as_object_mut()
+        .unwrap_or_else(|| panic!("defaults fixture must be an object"))
+        .remove("steps");
+    fs::write(&defaults_path, expected.to_string())
+        .unwrap_or_else(|error| panic!("write mixed SDK defaults: {error}"));
+    let updated = reloader()
+        .unwrap_or_else(|error| panic!("reload mixed SDK defaults: {error}"))
+        .unwrap_or_else(|| panic!("defaults candidate change did not reload"));
+    assert_eq!(
+        serde_json::to_value(&updated.compiled.model)
+            .unwrap_or_else(|error| panic!("serialize defaults compiled model: {error}")),
+        expected["model"]
+    );
+    assert_eq!(
+        serde_json::to_value(&updated.compiled.plan_model)
+            .unwrap_or_else(|error| panic!("serialize defaults compiled plan_model: {error}")),
+        expected["plan_model"]
+    );
+}

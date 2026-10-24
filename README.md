@@ -14,9 +14,9 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 
 - [`gh` CLI](https://cli.github.com/) -- required for GitHub worktree sessions when automatic PR creation is enabled (the default), PR-backed cleanup, or an opted-in native workflow merge; `glab` for GitLab repositories. A local worktree workflow with `create_pr: false` does not need a forge CLI, but `--repo` still needs `gh`/`glab` to access and clone the repository.
 - [`glab` CLI](https://gitlab.com/gitlab-org/cli) -- required instead of `gh` for GitLab repositories (merge request creation, cleanup, issue publishing, and opted-in native synchronous squash merge). The forge is detected from the host (`github.com` / `gitlab.com`); set `CRUISE_FORGE=github|gitlab` for self-managed hosts (and `GITLAB_HOST` for `owner/repo`-style `--repo` locators). `--repo` accepts `owner/repo`, nested `group/sub/project` (with `CRUISE_FORGE=gitlab`), or a full URL. On GitLab, `{pr.number}` / `{pr.url}` refer to the merge request, and the "post an `@cruise run` comment" option when publishing issues is unavailable.
-- [`jcode` CLI](https://github.com/1jehuang/jcode) v0.88.0 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `jcode login <provider>` after installing. Not needed when every config you run uses `command:`, `sdk: claude`, or `sdk: opencode`.
-- [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required only by `sdk: claude`, which drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, unrelated to `jcode login`.
-- `opencode` CLI with the V2 API, required only by `sdk: opencode`. Cruise starts and stops it locally and uses your existing OpenCode provider configuration and authentication. V1 is not supported.
+- [`jcode` CLI](https://github.com/1jehuang/jcode) v0.88.0 or newer -- required by the default SDK backend (`sdk: jcode`); sign in with `jcode login <provider>` after installing. For SDK execution, install jcode whenever an effective execution or planning candidate uses jcode, including SDK-qualified array entries under another workflow SDK.
+- [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required whenever an effective execution or planning candidate uses claude, including SDK-qualified array entries. Cruise drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, unrelated to `jcode login`.
+- `opencode` CLI with the V2 API, required whenever an effective execution or planning candidate uses opencode, including SDK-qualified array entries. Cruise starts and stops it locally and uses your existing OpenCode provider configuration and authentication. V1 is not supported.
 - An OpenSSH client (`ssh`) on the local `PATH` for `cruise ssh`.
 - On Windows: [Git for Windows](https://gitforwindows.org/) (`git` on `PATH`). `command:` steps run through `cmd.exe /C`, so use cmd.exe syntax (or invoke `powershell -Command ...` / `bash -c ...` explicitly) rather than POSIX shell syntax. Desktop notifications are not sent on Windows, `cruise ssh` needs the Windows OpenSSH client, and herdr reporting is limited to what the herdr environment variables provide.
 - A compatible `cruise` version and its usual workflow prerequisites on the SSH destination, including any required `gh`, `jcode`, `claude`, or `opencode` CLI for the selected workflow. The remote host performs the workflow and owns its authentication, configuration, sessions, worktrees, and clones.
@@ -522,6 +522,20 @@ plan_model:
 
 Workflow and `default.yaml` model settings override these defaults; environment overrides still win. If no layer sets `plan_model`, planning uses the effective `model`. SDK arrays use the existing [fallback behavior](#sdk-mode); command mode uses only the primary. `planModel` is accepted as an alias for `plan_model`. Missing parallelism defaults to `1`, so model-only settings are valid. Updating parallelism through the CLI, WebUI, or TUI preserves both model settings.
 
+Both workflow and application settings support SDK-qualified entries in `model` and `plan_model` arrays:
+
+```yaml
+model:
+  - openai/gpt-6.1-sol:medium
+  - sdk: claude
+    model: claude-sonnet-5-5:medium
+  - openrouter/z-ai/glm-5.3-flash:high
+```
+
+The equivalent JSON is `{"model":["openai/gpt-6.1-sol:medium",{"sdk":"claude","model":"claude-sonnet-5-5:medium"},"openrouter/z-ai/glm-5.3-flash:high"]}`. Strings inherit the workflow's effective SDK, defaulting to `jcode` when neither `sdk` nor `command` is set. Each object overrides only its own entry, so the final string above returns to jcode. Provider prefixes such as `openai/` and `openrouter/` are model references, not SDK names. Existing `opencode` SDK selection is also supported.
+
+Objects require exactly `sdk` and a nonblank `model`, and are allowed only inside arrays. SDK-qualified entries cannot be combined with `command`, even in a fallback position. Legacy string-only command arrays still use their first model. Environment model overrides replace the entire list. Explicit retry chains remain string lists and take precedence over implicit array tails. Only the owning SDK receives the caller's saved resume ID. Another SDK starts without it, and returning to the original owner may reuse that original ID and its retained storage. Newly emitted IDs from failed attempts are not forwarded to subsequent attempts. Capability checks cover every applicable candidate: computer use requires jcode, remote HTTP/SSE MCP cannot use jcode, and OpenCode does not support legacy SSE.
+
 #### `cruise clean`
 
 ```
@@ -880,7 +894,7 @@ resumption.
 
 ##### Computer use
 
-Workflow-level `computer_use` defaults to `false`. Set it to `true` to allow prompt turns to use jcode's `macos_computer_use` desktop-control tool on macOS. A prompt step may set `computer_use: true` or `false` to override the workflow default. Built-in plan, fix-plan, and ask-plan turns follow the workflow value; title and PR-description generation always run with computer use off. The tool is macOS-only and the setting has no effect on Linux. Setting it to `true` with `sdk: claude`, `sdk: opencode`, or `command:` is rejected during config validation.
+Workflow-level `computer_use` defaults to `false`. Set it to `true` to allow prompt turns to use jcode's `macos_computer_use` desktop-control tool on macOS. A prompt step may set `computer_use: true` or `false` to override the workflow default. Built-in plan, fix-plan, and ask-plan turns follow the workflow value; title and PR-description generation always run with computer use off. The tool is macOS-only and the setting has no effect on Linux. Every effective applicable model candidate must use jcode, including SDK-qualified objects and candidates selected by authoritative retry chains, and no `command:` backend may be set. Explicit jcode-only candidates can work under a Claude or OpenCode workflow SDK. Changing only the workflow SDK does not override incompatible SDK-qualified objects.
 
 When computer use is off, Cruise adds `macos_computer_use` to `JCODE_DISABLED_TOOLS`, merging the first available list from workflow `env:`, the Cruise process environment, or `[tools].disabled` in the private copied `config.toml`. This reaches the private runtime's daemon, including swarm workers and subagents. When computer use is on, Cruise leaves `JCODE_DISABLED_TOOLS` unchanged and never removes a jcode-level disable to force-enable the tool. The user must grant macOS Accessibility and Screen Recording permissions.
 
@@ -955,7 +969,7 @@ See [the OpenCode workflow example](skills/cruise-config/examples/opencode-flow.
 
 The optional top-level `mcp_servers` map makes MCP servers available to every SDK prompt run: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It works with `sdk: jcode`, with the default `jcode` backend only when neither `sdk` nor `command` remains set in the resolved workflow after applicable `default.yaml` layers are applied, and with `sdk: claude` or `sdk: opencode`. Per-step overrides are not supported. A called workflow's top-level `mcp_servers` is ignored; the caller's settings remain in force.
 
-Entries use the Claude Code `mcpServers` server shape. Omit `type` or set `type: stdio` for a local server. HTTP is supported with `sdk: claude` and `sdk: opencode`; legacy SSE is supported only with `sdk: claude` and is explicitly rejected by OpenCode V2:
+Entries use the Claude Code `mcpServers` server shape. Omit `type` or set `type: stdio` for a local server. Every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, must support the transport: stdio supports all SDKs, HTTP requires Claude or OpenCode, and legacy SSE requires Claude. Changing the workflow SDK does not override SDK-qualified objects. The command backend cannot receive MCP servers:
 
 ```yaml
 sdk: claude
@@ -1835,7 +1849,7 @@ cruise exec --config cruise.yaml
 - Only HTTP/protobuf is supported; gRPC and HTTP/JSON protocol selections fall back to HTTP/protobuf. Optional compression: `OTEL_EXPORTER_OTLP_COMPRESSION=gzip`.
 - Resources default to `service.name=cruise` and the package's `service.version`. `OTEL_RESOURCE_ATTRIBUTES` adds or overrides resource attributes; `OTEL_SERVICE_NAME` takes precedence for the service name.
 
-Each session operation has a `cruise.execution` root spanning its preparation through finalization. CLI plan/exec/run, background planning workers, and the shared Application API used by TUI/WebUI are covered; parallel sessions have separate execution roots. Root attributes include `cruise.execution.kind`, `cruise.session.id`, `cruise.workflow.kind`, and `cruise.workflow.name`. Workflow names are built-in names or final file names, never full paths.
+Once a session ID is allocated, `cruise.execution` spans preparation through finalization, including repository cloning before session persistence. CLI plan/exec/run, background planning workers, and the shared Application API used by TUI/WebUI are covered; parallel sessions have separate execution roots. Root attributes include `cruise.execution.kind` and `cruise.session.id`; `cruise.workflow.kind` and `cruise.workflow.name` are set when configuration is available. Workflow names are built-in names or final file names, never full paths. A preparation failure can leave a trace with an allocated ID but no persisted session.
 
 | Span | Scope |
 |---|---|
@@ -1847,6 +1861,8 @@ Each session operation has a `cruise.execution` root spanning its preparation th
 | `cruise.attempt` | One backend or shell attempt, with a 1-based `cruise.retry.attempt` and the selected backend/model |
 
 Phases are emitted only when their work runs: skipped planning or disabled/unneeded PR creation does not produce a successful placeholder phase. `cruise.retry` span events record backoff/fallback actions, fixed retry reasons, attempt numbers, and model switches. SDK fallback and the independent command/prompt rate-limit retry loops are instrumented without changing retry policy.
+
+Skipped steps, including parallel children, do not emit step spans or operation observations. Step outcomes include postcondition failures such as `if.no-file-changes`; a later recovery can succeed without erasing the failed step. Cancelling the approval menu is recorded as cancelled while preserving the successful CLI exit; interrupting active planning or title generation still returns an error after draining that work. Choosing Execute now finishes planning before starting a separate execution root.
 
 Outcomes include `success`, `failed`, `error`, `cancelled`, `timeout`, and `paused`. Non-success operations have error status and a payload-free `error.type`, such as `command_exit`, `rate_limit`, `timeout`, or `cancelled`; existing backend retry classifications distinguish network, provider, and model failures. Recovered retries leave failed attempts visible without marking the final successful execution as failed. An Esc-paused exec stays resumable and exits successfully at the CLI, while its root outcome remains `paused`.
 

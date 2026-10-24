@@ -14,8 +14,9 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 use cruise::application::{
     ApplicationEvent, ApplicationEventSink, CruiseApplication, NewSessionRequest, PlanRequest,
+    RunRequest,
 };
-use cruise::session::{SessionManager, WorkspaceMode};
+use cruise::session::{SessionManager, SessionPhase, WorkspaceMode};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point};
@@ -49,16 +50,7 @@ impl Fixture {
         }
     }
 
-    fn command(&self, extra_env: &[(&str, &str)], input: &str) -> Command {
-        self.command_with_args(&[], extra_env, input)
-    }
-
-    fn command_with_args(
-        &self,
-        extra_args: &[&str],
-        extra_env: &[(&str, &str)],
-        input: &str,
-    ) -> Command {
+    fn command_base(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
@@ -70,10 +62,6 @@ impl Fixture {
             }
         }
         command
-            .args(["exec", "--config"])
-            .arg(&self.config)
-            .arg(input)
-            .args(extra_args)
             .current_dir(&self.project)
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
@@ -85,9 +73,39 @@ impl Fixture {
             .env("NO_COLOR", "1")
             .env_remove("HERDR_ENV")
             .stdin(Stdio::null());
+        command
+    }
+
+    fn command(&self, extra_env: &[(&str, &str)], input: &str) -> Command {
+        self.command_with_args(&[], extra_env, input)
+    }
+
+    fn add_env(command: &mut Command, extra_env: &[(&str, &str)]) {
         for (name, value) in extra_env {
             command.env(name, value);
         }
+    }
+
+    fn cli_command(&self, args: &[&str], extra_env: &[(&str, &str)]) -> Command {
+        let mut command = self.command_base();
+        command.args(args);
+        Self::add_env(&mut command, extra_env);
+        command
+    }
+
+    fn command_with_args(
+        &self,
+        extra_args: &[&str],
+        extra_env: &[(&str, &str)],
+        input: &str,
+    ) -> Command {
+        let mut command = self.command_base();
+        command
+            .args(["exec", "--config"])
+            .arg(&self.config)
+            .arg(input)
+            .args(extra_args);
+        Self::add_env(&mut command, extra_env);
         command
     }
 
@@ -119,7 +137,7 @@ fn create_application_session(
         base_dir: base_dir.to_path_buf(),
         config_path: None,
         config_yaml: Some(format!(
-            "command: [sh, -c, 'cat']\nmodel: '{model}'\nsteps:\n  s1:\n    prompt: planning smoke\n"
+            "command: [sh, -c, 'cat']\nmodel: ['{model}']\nsteps:\n  s1:\n    prompt: planning smoke\n"
         )),
         repo: None,
         workspace_mode: WorkspaceMode::Worktree,
@@ -299,6 +317,8 @@ struct SpanRecord {
     trace_id: Vec<u8>,
     span_id: Vec<u8>,
     parent_span_id: Vec<u8>,
+    start_time_unix_nano: u64,
+    end_time_unix_nano: u64,
     attributes: HashMap<String, String>,
     int_attributes: HashMap<String, i64>,
     resource_attributes: HashMap<String, String>,
@@ -327,6 +347,8 @@ fn spans(requests: &[CapturedRequest]) -> Vec<SpanRecord> {
                         trace_id: span.trace_id,
                         span_id: span.span_id,
                         parent_span_id: span.parent_span_id,
+                        start_time_unix_nano: span.start_time_unix_nano,
+                        end_time_unix_nano: span.end_time_unix_nano,
                         attributes: string_attributes(&span.attributes),
                         int_attributes: int_attributes(&span.attributes),
                         resource_attributes: resource_attributes.clone(),
@@ -597,7 +619,14 @@ impl Drop for ExecPty {
 }
 
 fn start_exec_pty(fixture: &Fixture, env: &[(&str, &str)], input: &str) -> ExecPty {
-    let std_command = fixture.command(env, input);
+    start_command_pty(&fixture.command(env, input))
+}
+
+fn start_cli_pty(fixture: &Fixture, args: &[&str], env: &[(&str, &str)]) -> ExecPty {
+    start_command_pty(&fixture.cli_command(args, env))
+}
+
+fn start_command_pty(std_command: &Command) -> ExecPty {
     let mut command = CommandBuilder::new(std_command.get_program());
     command.args(std_command.get_args());
     if let Some(cwd) = std_command.get_current_dir() {
@@ -665,6 +694,59 @@ fn send_pty(pty: &mut ExecPty, bytes: &[u8], purpose: &str) {
         .write_all(bytes)
         .and_then(|()| writer.flush())
         .unwrap_or_else(|error| panic!("{purpose}: {error}"));
+}
+fn pty_transcript(pty: &ExecPty) -> String {
+    let output = pty
+        .output
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn answer_cursor_queries(pty: &mut ExecPty, transcript: &str, answered: &mut usize) {
+    let queries = transcript.matches("\x1b[6n").count();
+    while *answered < queries {
+        send_pty(pty, b"\x1b[1;1R", "answer PTY cursor query");
+        *answered += 1;
+    }
+}
+
+fn wait_for_pty_text(pty: &mut ExecPty, text: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut cursor_queries_answered = 0;
+    loop {
+        let transcript = pty_transcript(pty);
+        answer_cursor_queries(pty, &transcript, &mut cursor_queries_answered);
+        if transcript.contains(text) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "PTY did not reach the expected interaction point: {transcript}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_pty_exit(pty: &mut ExecPty, timeout: Duration) -> (portable_pty::ExitStatus, String) {
+    let deadline = Instant::now() + timeout;
+    let mut cursor_queries_answered = 0;
+    loop {
+        if let Some(status) = pty
+            .child
+            .try_wait()
+            .unwrap_or_else(|error| panic!("wait for PTY cruise CLI: {error}"))
+        {
+            return (status, pty_transcript(pty));
+        }
+        let transcript = pty_transcript(pty);
+        answer_cursor_queries(pty, &transcript, &mut cursor_queries_answered);
+        assert!(
+            Instant::now() < deadline,
+            "PTY cruise CLI did not exit before the deadline: {transcript}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn escape_option_menu(pty: &mut ExecPty) -> (portable_pty::ExitStatus, String) {
@@ -774,6 +856,45 @@ fn paused_exec_exports_paused_root_and_keeps_session_resumable() {
     );
 }
 
+fn assert_successful_trace_spans(exported_spans: &[SpanRecord], execution: &SpanRecord) {
+    for span in exported_spans {
+        assert_eq!(
+            span.trace_id, execution.trace_id,
+            "span escaped execution trace: {span:#?}"
+        );
+        assert_eq!(
+            span.status_code,
+            StatusCode::Ok as i32,
+            "unexpected status: {span:#?}"
+        );
+        assert!(
+            !span.attributes.contains_key("error.type"),
+            "successful operation unexpectedly has error.type: {span:#?}"
+        );
+    }
+}
+
+fn assert_exec_run_isolation(fixture: &Fixture, session_id: &str, trace_id: &[u8]) {
+    let collector = Collector::start();
+    let mut env = otlp_env(&collector.endpoint());
+    env.push((
+        "OTEL_SERVICE_NAME".into(),
+        "cruise-telemetry-contract".into(),
+    ));
+    let output = fixture.run(&borrowed_env(&env), "second-workflow-input-secret");
+    assert_success(&output);
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let (second_session_id, second_trace_id) = assert_parallel_trace(&requests);
+    assert_ne!(
+        session_id, second_session_id,
+        "separate executions reused a session id"
+    );
+    assert_ne!(
+        trace_id, second_trace_id,
+        "separate executions reused a trace"
+    );
+}
+
 fn assert_parallel_trace(requests: &[CapturedRequest]) -> (String, Vec<u8>) {
     let exported_spans = spans(requests);
     let execution = named_span(
@@ -825,6 +946,23 @@ fn assert_parallel_trace(requests: &[CapturedRequest]) -> (String, Vec<u8>) {
             .map(String::as_str),
         Some("workflow.yaml")
     );
+    let step_spans = exported_spans
+        .iter()
+        .filter(|span| span.name == "cruise.step")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        step_spans.len(),
+        3,
+        "only the parallel parent and two executable children should have step spans: {step_spans:#?}"
+    );
+    assert!(
+        step_spans.iter().all(|span| {
+            span.attributes.get("cruise.step.name").is_none_or(|name| {
+                !name.ends_with("skipped_child") && !name.ends_with("missing_child")
+            })
+        }),
+        "non-executable children must not have spans: {step_spans:#?}"
+    );
     let fan = named_span(&exported_spans, "cruise.step", "cruise.step.name", "fan");
     let prompt_child = named_span(&exported_spans, "cruise.step", "cruise.step.type", "prompt");
     let shell_child = named_span(
@@ -838,21 +976,7 @@ fn assert_parallel_trace(requests: &[CapturedRequest]) -> (String, Vec<u8>) {
         execution.parent_span_id.is_empty(),
         "execution must be the trace root"
     );
-    for span in &exported_spans {
-        assert_eq!(
-            span.trace_id, execution.trace_id,
-            "span escaped execution trace: {span:#?}"
-        );
-        assert_eq!(
-            span.status_code,
-            StatusCode::Ok as i32,
-            "unexpected status: {span:#?}"
-        );
-        assert!(
-            !span.attributes.contains_key("error.type"),
-            "successful operation unexpectedly has error.type: {span:#?}"
-        );
-    }
+    assert_successful_trace_spans(&exported_spans, execution);
     assert_eq!(
         fan.attributes.get("cruise.step.type").map(String::as_str),
         Some("parallel")
@@ -997,6 +1121,175 @@ fn assert_application_planning_traces(collector: &Collector, result_path: &std::
             result_path.as_str(),
         ],
     );
+}
+
+fn run_application_failed_step_helper() {
+    let _process = cruise::test_support::lock_process();
+    let temp = TempDir::new().unwrap_or_else(|error| panic!("application run fixture: {error}"));
+    let _environment = cruise::test_support::set_fake_home(temp.path());
+    let telemetry = cruise::telemetry::init()
+        .unwrap_or_else(|error| panic!("initialize application telemetry: {error}"));
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project)
+        .unwrap_or_else(|error| panic!("create application project: {error}"));
+    cruise::test_support::init_git_repo(&project);
+
+    let app = CruiseApplication::new(SessionManager::new(temp.path().join("sessions")));
+    let session = app
+        .create_session(NewSessionRequest {
+            input: "application-run-input-secret".to_owned(),
+            base_dir: project,
+            config_path: None,
+            config_yaml: Some(
+                "command: [sh, -c, 'cat >/dev/null']\ncreate_pr: false\nsteps:\n  failing:\n    command: 'exit 7'\n"
+                    .to_owned(),
+            ),
+            repo: None,
+            workspace_mode: WorkspaceMode::Worktree,
+            allow_dirty_working_tree: false,
+            attachments: vec![],
+            skipped_steps: vec![],
+            flags: std::collections::BTreeMap::new(),
+        })
+        .unwrap_or_else(|error| panic!("create application run session: {error}"));
+    let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
+    app.use_input_as_plan(&session.id, &*sink)
+        .unwrap_or_else(|error| panic!("prepare application run plan: {error}"));
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| panic!("build application run runtime: {error}"));
+    let completed = runtime
+        .block_on(app.run_with_log_sink(
+            &session.id,
+            RunRequest::default(),
+            Arc::clone(&sink),
+            None,
+        ))
+        .unwrap_or_else(|error| panic!("application run unexpectedly returned an error: {error}"));
+    assert_eq!(
+        completed.phase,
+        SessionPhase::Completed,
+        "unresolved step failures must preserve the domain Completed state"
+    );
+    assert_eq!(
+        app.read_session(&session.id)
+            .unwrap_or_else(|error| panic!("read completed application session: {error}"))
+            .phase,
+        SessionPhase::Completed,
+        "completed domain state must be persisted"
+    );
+    drop(runtime);
+    telemetry.shutdown();
+
+    let result_path = std::env::var_os("CRUISE_TELEMETRY_APPLICATION_RUN_RESULT")
+        .unwrap_or_else(|| panic!("missing application run result path"));
+    std::fs::write(
+        result_path,
+        format!("{}\n{}", session.id, temp.path().display()),
+    )
+    .unwrap_or_else(|error| panic!("write application run result: {error}"));
+}
+
+fn assert_application_failed_run_trace(collector: &Collector, result_path: &std::path::Path) {
+    let helper_result = std::fs::read_to_string(result_path)
+        .unwrap_or_else(|error| panic!("read application run result: {error}"));
+    let mut result = helper_result.lines();
+    let session_id = result
+        .next()
+        .unwrap_or_else(|| panic!("application run helper omitted session id"));
+    let helper_path = result
+        .next()
+        .unwrap_or_else(|| panic!("application run helper omitted fixture path"));
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported_spans = spans(&requests);
+    let execution = named_span(
+        &exported_spans,
+        "cruise.execution",
+        "cruise.execution.kind",
+        "run",
+    );
+    let failing = named_span(
+        &exported_spans,
+        "cruise.step",
+        "cruise.step.name",
+        "failing",
+    );
+    assert_eq!(execution.parent_span_id, [0_u8; 0]);
+    assert_eq!(
+        execution
+            .attributes
+            .get("cruise.session.id")
+            .map(String::as_str),
+        Some(session_id)
+    );
+    assert_eq!(execution.status_code, StatusCode::Error as i32);
+    assert_eq!(
+        execution
+            .attributes
+            .get("cruise.outcome")
+            .map(String::as_str),
+        Some("failed")
+    );
+    assert_eq!(
+        execution.attributes.get("error.type").map(String::as_str),
+        Some("step_failed")
+    );
+    assert_eq!(failing.status_code, StatusCode::Error as i32);
+    assert_eq!(
+        failing.attributes.get("error.type").map(String::as_str),
+        Some("command_exit")
+    );
+    let result_path = result_path.to_string_lossy().into_owned();
+    assert_payload_omits(
+        &requests,
+        &[
+            "application-run-input-secret",
+            "exit 7",
+            helper_path,
+            result_path.as_str(),
+        ],
+    );
+}
+
+#[test]
+fn application_run_keeps_completed_domain_state_but_errors_root_for_failed_steps() {
+    if std::env::var_os("CRUISE_TELEMETRY_APPLICATION_RUN_HELPER").is_some() {
+        run_application_failed_step_helper();
+        return;
+    }
+
+    let collector = Collector::start();
+    let result_dir =
+        TempDir::new().unwrap_or_else(|error| panic!("create application run result dir: {error}"));
+    let result_path = result_dir.path().join("run-result.txt");
+    let mut child = Command::new(
+        std::env::current_exe().unwrap_or_else(|error| panic!("test executable path: {error}")),
+    );
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy();
+        if name.starts_with("CRUISE_") || name.starts_with("OTEL_") || name.starts_with("JCODE_") {
+            child.env_remove(name.as_ref());
+        }
+    }
+    let output = child
+        .args([
+            "--exact",
+            "application_run_keeps_completed_domain_state_but_errors_root_for_failed_steps",
+            "--nocapture",
+        ])
+        .env("CRUISE_TELEMETRY_APPLICATION_RUN_HELPER", "1")
+        .env("CRUISE_TELEMETRY_APPLICATION_RUN_RESULT", &result_path)
+        .env("CRUISE_OBSERVABILITY_ENABLED", "true")
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint())
+        .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+        .env("OTEL_EXPORTER_OTLP_TIMEOUT", "3000")
+        .output()
+        .unwrap_or_else(|error| panic!("run application telemetry subprocess: {error}"));
+    assert_success(&output);
+    assert_application_failed_run_trace(&collector, &result_path);
 }
 
 #[test]
@@ -1160,6 +1453,13 @@ steps:
         prompt: "prompt-body-secret"
       shell_child:
         command: "printf '%s' command-source-secret; sleep 0.02"
+      skipped_child:
+        command: "printf '%s' skipped-child-command-secret"
+        skip: true
+      missing_child:
+        command: "printf '%s' missing-child-command-secret"
+        when:
+          exists: ".telemetry-child-must-not-exist"
 "#;
     let fixture = Fixture::new(yaml);
     let mut env = otlp_env(&collector.endpoint());
@@ -1194,6 +1494,8 @@ steps:
             "prompt-body-secret",
             "backend-output-secret",
             "command-source-secret",
+            "skipped-child-command-secret",
+            "missing-child-command-secret",
             "header-value-secret",
             "credential-value-secret",
             root_path.as_str(),
@@ -1204,23 +1506,539 @@ steps:
 
     let (count_points, duration_points) = metrics(&requests);
     assert_success_operation_metrics(&count_points, &duration_points, &session_id);
-    let second_collector = Collector::start();
-    let mut second_env = otlp_env(&second_collector.endpoint());
-    second_env.push((
-        "OTEL_SERVICE_NAME".into(),
-        "cruise-telemetry-contract".into(),
-    ));
-    let second_output = fixture.run(&borrowed_env(&second_env), "second-workflow-input-secret");
-    assert_success(&second_output);
-    let second_requests = second_collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
-    let (second_session_id, second_trace_id) = assert_parallel_trace(&second_requests);
-    assert_ne!(
-        session_id, second_session_id,
-        "separate executions reused a session id"
+    let successful_step_counts = count_points
+        .iter()
+        .filter(|point| {
+            point.attributes.get("cruise.operation").map(String::as_str) == Some("step")
+                && point.attributes.get("cruise.outcome").map(String::as_str) == Some("success")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        successful_step_counts.len(),
+        1,
+        "successful step metrics should aggregate only executable steps: {successful_step_counts:#?}"
     );
+    assert_eq!(successful_step_counts[0].value, 3);
+    let successful_step_durations = duration_points
+        .iter()
+        .filter(|point| {
+            point.attributes.get("cruise.operation").map(String::as_str) == Some("step")
+                && point.attributes.get("cruise.outcome").map(String::as_str) == Some("success")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(successful_step_durations.len(), 1);
+    assert_eq!(successful_step_durations[0].count, 3);
+    assert_exec_run_isolation(&fixture, &session_id, &trace_id);
+}
+
+#[test]
+fn no_file_changes_retry_attempts_keep_failed_step_telemetry() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        "steps:\n  retrying:\n    command: \"if [ ! -f \\\"$HOME/attempt\\\" ]; then touch \\\"$HOME/attempt\\\"; else touch changed.txt; fi\"\n    if:\n      no-file-changes: retry\n",
+    );
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "retry-input-secret",
+    );
+    assert_success(&output);
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported_spans = spans(&requests);
+    let execution = named_span(
+        &exported_spans,
+        "cruise.execution",
+        "cruise.execution.kind",
+        "exec",
+    );
+    let workflow = named_span(
+        &exported_spans,
+        "cruise.workflow",
+        "cruise.operation",
+        "workflow",
+    );
+    let retry_attempts = exported_spans
+        .iter()
+        .filter(|span| {
+            span.name == "cruise.step"
+                && span.attributes.get("cruise.step.name").map(String::as_str) == Some("retrying")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retry_attempts.len(),
+        2,
+        "no-file-changes retry must execute twice: {retry_attempts:#?}"
+    );
+    let failed = retry_attempts
+        .iter()
+        .filter(|span| span.status_code == StatusCode::Error as i32)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failed.len(),
+        1,
+        "first no-change attempt must fail: {retry_attempts:#?}"
+    );
+    assert_eq!(
+        failed[0].attributes.get("error.type").map(String::as_str),
+        Some("step_no_file_changes"),
+        "no-file-changes failure classification: {:#?}",
+        failed[0]
+    );
+    assert_eq!(execution.status_code, StatusCode::Ok as i32);
+    assert_eq!(workflow.status_code, StatusCode::Ok as i32);
+    let (count_points, duration_points) = metrics(&requests);
+    let failed_step_counts = count_points
+        .iter()
+        .filter(|point| {
+            point.attributes.get("cruise.operation").map(String::as_str) == Some("step")
+                && matches!(
+                    point.attributes.get("cruise.outcome").map(String::as_str),
+                    Some("error" | "failed")
+                )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failed_step_counts.len(),
+        1,
+        "one postcondition failure must be counted: {failed_step_counts:#?}"
+    );
+    assert_eq!(failed_step_counts[0].value, 1);
+    assert_eq!(failed_step_counts[0].attributes.len(), 2);
+    assert!(
+        duration_points.iter().any(|point| {
+            point.attributes.get("cruise.operation").map(String::as_str) == Some("step")
+                && matches!(
+                    point.attributes.get("cruise.outcome").map(String::as_str),
+                    Some("error" | "failed")
+                )
+                && point.count == 1
+        }),
+        "failed postcondition duration metric missing or unsafe: {duration_points:#?}"
+    );
+
+    let project_path = fixture.project.to_string_lossy().into_owned();
+    let home_path = fixture.home.to_string_lossy().into_owned();
+    assert_payload_omits(
+        &requests,
+        &[
+            "retry-input-secret",
+            project_path.as_str(),
+            home_path.as_str(),
+            "touch changed.txt",
+        ],
+    );
+}
+
+#[test]
+fn no_file_changes_failure_is_recorded_before_recovery() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        "steps:\n  unchanged:\n    command: 'true'\n    if:\n      no-file-changes: failed\n      fail: recover\n  recover:\n    command: 'touch recovered.txt'\n",
+    );
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "no-change-recovery-input-secret",
+    );
+    assert_success(&output);
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported_spans = spans(&requests);
+    let execution = named_span(
+        &exported_spans,
+        "cruise.execution",
+        "cruise.execution.kind",
+        "exec",
+    );
+    let workflow = named_span(
+        &exported_spans,
+        "cruise.workflow",
+        "cruise.operation",
+        "workflow",
+    );
+    let unchanged = named_span(
+        &exported_spans,
+        "cruise.step",
+        "cruise.step.name",
+        "unchanged",
+    );
+    let recovered = named_span(
+        &exported_spans,
+        "cruise.step",
+        "cruise.step.name",
+        "recover",
+    );
+    assert_eq!(execution.status_code, StatusCode::Ok as i32);
+    assert_eq!(workflow.status_code, StatusCode::Ok as i32);
+    assert_eq!(
+        unchanged.status_code,
+        StatusCode::Error as i32,
+        "postcondition failure must stay visible after recovery: {unchanged:#?}"
+    );
+    assert_eq!(
+        unchanged.attributes.get("error.type").map(String::as_str),
+        Some("step_no_file_changes")
+    );
+    assert_eq!(recovered.status_code, StatusCode::Ok as i32);
+    assert_eq!(unchanged.parent_span_id, workflow.span_id);
+    assert_eq!(recovered.parent_span_id, workflow.span_id);
+    let project_path = fixture.project.to_string_lossy().into_owned();
+    assert_payload_omits(
+        &requests,
+        &[
+            "no-change-recovery-input-secret",
+            project_path.as_str(),
+            "touch recovered.txt",
+        ],
+    );
+}
+
+#[test]
+fn skip_planning_foreground_and_background_omit_planning_telemetry() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        "command: [sh, -c, 'true']\nsteps:\n  local:\n    command: 'touch local.txt'\n",
+    );
+    let env = otlp_env(&collector.endpoint());
+    let borrowed = borrowed_env(&env);
+    let config = fixture.config.to_string_lossy().into_owned();
+
+    let foreground = fixture
+        .cli_command(
+            &[
+                "plan",
+                "--skip-planning",
+                "--config",
+                config.as_str(),
+                "foreground-plan-input-secret",
+            ],
+            &borrowed,
+        )
+        .output()
+        .unwrap_or_else(|error| panic!("run foreground skip-planning: {error}"));
+    assert_success(&foreground);
+
+    let mut background_env = borrowed.clone();
+    background_env.push(("CRUISE_CONFIG", config.as_str()));
+    let mut background =
+        fixture.cli_command(&["--plan", "stdin", "--skip-planning"], &background_env);
+    let mut child = background
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn background skip-planning: {error}"));
+    child
+        .stdin
+        .take()
+        .unwrap_or_else(|| panic!("background plan stdin"))
+        .write_all(b"background-plan-input-secret")
+        .unwrap_or_else(|error| panic!("write background plan input: {error}"));
+    let background = child
+        .wait_with_output()
+        .unwrap_or_else(|error| panic!("wait for background skip-planning: {error}"));
+    assert_success(&background);
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported_spans = spans(&requests);
+    let roots = exported_spans
+        .iter()
+        .filter(|span| {
+            span.name == "cruise.execution"
+                && span
+                    .attributes
+                    .get("cruise.execution.kind")
+                    .map(String::as_str)
+                    == Some("plan")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roots.len(),
+        2,
+        "both planning entry points need roots: {roots:#?}"
+    );
+    assert_ne!(roots[0].trace_id, roots[1].trace_id);
+    assert!(roots.iter().all(|root| root.parent_span_id.is_empty()));
+    assert!(
+        roots
+            .iter()
+            .all(|root| root.attributes.contains_key("cruise.session.id"))
+    );
+    assert!(
+        exported_spans.iter().all(|span| {
+            span.name != "cruise.agent"
+                && !(span.name == "cruise.phase"
+                    && span.attributes.get("cruise.phase.name").map(String::as_str)
+                        == Some("planning"))
+        }),
+        "skip-planning must not emit agent/planning spans: {exported_spans:#?}"
+    );
+    let fixture_path = fixture.root.path().to_string_lossy().into_owned();
+    assert_payload_omits(
+        &requests,
+        &[
+            "foreground-plan-input-secret",
+            "background-plan-input-secret",
+            fixture_path.as_str(),
+        ],
+    );
+}
+
+#[test]
+fn failed_repo_clone_keeps_plan_root_and_preallocated_session_id() {
+    let collector = Collector::start();
+    let fixture = Fixture::new("steps:\n  local:\n    command: 'true'\n");
+    let fake_bin = fixture.root.path().join("fake-gh/bin");
+    std::fs::create_dir_all(&fake_bin)
+        .unwrap_or_else(|error| panic!("create fake forge bin: {error}"));
+    cruise::test_support::write_executable_script(
+        &fake_bin.join("gh"),
+        "#!/bin/sh\nif [ \"$1\" = '--version' ]; then\n  printf 'gh version 2.0.0\\n'\n  exit 0\nfi\nprintf 'repository clone failed\\n' >&2\nexit 2\n",
+    );
+    let search_path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let env = otlp_env(&collector.endpoint());
+    let mut borrowed = borrowed_env(&env);
+    borrowed.push(("PATH", search_path.as_str()));
+    let output = fixture
+        .cli_command(
+            &[
+                "plan",
+                "--repo",
+                "owner/repository",
+                "clone-failure-input-secret",
+            ],
+            &borrowed,
+        )
+        .output()
+        .unwrap_or_else(|error| panic!("run failed repository planning: {error}"));
+    assert!(
+        !output.status.success(),
+        "fake forge clone failure unexpectedly succeeded: {}",
+        output_text(&output)
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported_spans = spans(&requests);
+    let root = named_span(
+        &exported_spans,
+        "cruise.execution",
+        "cruise.execution.kind",
+        "plan",
+    );
+    assert_eq!(root.parent_span_id, [0_u8; 0]);
+    assert_eq!(root.status_code, StatusCode::Error as i32);
+    assert!(root.attributes.contains_key("error.type"));
+    assert!(
+        root.attributes
+            .get("cruise.session.id")
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert!(
+        !fixture
+            .root
+            .path()
+            .join("data/cruise/sessions")
+            .join(&root.attributes["cruise.session.id"])
+            .exists(),
+        "failed clone must not leave a partial session"
+    );
+    let fixture_path = fixture.root.path().to_string_lossy().into_owned();
+    assert_payload_omits(
+        &requests,
+        &[
+            "clone-failure-input-secret",
+            "owner/repository",
+            fixture_path.as_str(),
+        ],
+    );
+}
+
+fn approval_fixture() -> Fixture {
+    Fixture::new(
+        r##"
+command:
+  - sh
+  - -c
+  - 'cat >/dev/null; printf "%s" "$MOCK_PLAN_CONTENT" > "$PLAN_FILE"'
+env:
+  PLAN_FILE: "{plan}"
+  MOCK_PLAN_CONTENT: "# Plan\n\nStep 1.\n"
+create_pr: false
+steps:
+  planning:
+    prompt: "plan-prompt-secret"
+  execute:
+    command: "touch execution-marker-secret"
+ "##,
+    )
+}
+
+#[test]
+fn execute_now_finishes_plan_root_before_separate_run_root() {
+    let collector = Collector::start();
+    let fixture = approval_fixture();
+    let env = otlp_env(&collector.endpoint());
+    let borrowed = borrowed_env(&env);
+    let config = fixture.config.to_string_lossy().into_owned();
+    let mut pty = start_cli_pty(
+        &fixture,
+        &[
+            "plan",
+            "--config",
+            config.as_str(),
+            "execute-now-input-secret",
+        ],
+        &borrowed,
+    );
+    wait_for_pty_text(&mut pty, "Action:", Duration::from_secs(30));
+    send_pty(&mut pty, b"\x1b[B\x1b[B\x1b[B\r", "select Execute now");
+    wait_for_pty_text(&mut pty, "Steps to skip", Duration::from_secs(15));
+    send_pty(&mut pty, b"\r", "confirm empty skip selection");
+    wait_for_pty_text(
+        &mut pty,
+        "Where should cruise execute?",
+        Duration::from_secs(15),
+    );
+    send_pty(&mut pty, b"\x1b[B\r", "select current-branch execution");
+    let (status, _transcript) = wait_for_pty_exit(&mut pty, Duration::from_secs(60));
+    assert_eq!(status.exit_code(), 0, "Execute now CLI command failed");
+    drop(pty);
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported_spans = spans(&requests);
+    let plan = named_span(
+        &exported_spans,
+        "cruise.execution",
+        "cruise.execution.kind",
+        "plan",
+    );
+    let run = named_span(
+        &exported_spans,
+        "cruise.execution",
+        "cruise.execution.kind",
+        "run",
+    );
+    assert_eq!(plan.parent_span_id, [0_u8; 0]);
+    assert_eq!(run.parent_span_id, [0_u8; 0]);
     assert_ne!(
-        trace_id, second_trace_id,
-        "separate executions reused a trace"
+        plan.trace_id, run.trace_id,
+        "Execute now must start run outside the plan trace"
+    );
+    assert!(
+        plan.end_time_unix_nano <= run.start_time_unix_nano,
+        "plan root overlapped the run root: {plan:#?} {run:#?}"
+    );
+    let session_id = plan
+        .attributes
+        .get("cruise.session.id")
+        .unwrap_or_else(|| panic!("plan root omitted session id: {plan:#?}"));
+    assert_eq!(
+        run.attributes.get("cruise.session.id"),
+        Some(session_id),
+        "the run root must belong to the approved plan session"
+    );
+    assert_eq!(plan.status_code, StatusCode::Ok as i32);
+    assert_eq!(run.status_code, StatusCode::Ok as i32);
+    assert_eq!(
+        plan.attributes.get("cruise.outcome").map(String::as_str),
+        Some("success")
+    );
+    assert_eq!(
+        run.attributes.get("cruise.outcome").map(String::as_str),
+        Some("success")
+    );
+    let fixture_path = fixture.root.path().to_string_lossy().into_owned();
+    assert_payload_omits(
+        &requests,
+        &[
+            "execute-now-input-secret",
+            "plan-prompt-secret",
+            "execution-marker-secret",
+            fixture_path.as_str(),
+        ],
+    );
+}
+
+#[test]
+fn cancelling_plan_approval_exits_successfully_deletes_session_and_cancels_root() {
+    let collector = Collector::start();
+    let fixture = approval_fixture();
+    let env = otlp_env(&collector.endpoint());
+    let borrowed = borrowed_env(&env);
+    let config = fixture.config.to_string_lossy().into_owned();
+    let mut pty = start_cli_pty(
+        &fixture,
+        &[
+            "plan",
+            "--config",
+            config.as_str(),
+            "cancel-plan-input-secret",
+        ],
+        &borrowed,
+    );
+    wait_for_pty_text(&mut pty, "Action:", Duration::from_secs(30));
+    send_pty(&mut pty, b"\x1b", "cancel plan approval");
+    let (status, _transcript) = wait_for_pty_exit(&mut pty, Duration::from_secs(30));
+    assert_eq!(
+        status.exit_code(),
+        0,
+        "cancelled plan did not exit successfully"
+    );
+    drop(pty);
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported_spans = spans(&requests);
+    let plan = named_span(
+        &exported_spans,
+        "cruise.execution",
+        "cruise.execution.kind",
+        "plan",
+    );
+    assert_eq!(plan.parent_span_id, [0_u8; 0]);
+    assert_eq!(plan.status_code, StatusCode::Error as i32);
+    assert_eq!(
+        plan.attributes.get("cruise.outcome").map(String::as_str),
+        Some("cancelled")
+    );
+    assert_eq!(
+        plan.attributes.get("error.type").map(String::as_str),
+        Some("cancelled")
+    );
+    let session_id = plan
+        .attributes
+        .get("cruise.session.id")
+        .unwrap_or_else(|| panic!("cancelled plan root omitted session id: {plan:#?}"));
+    assert!(
+        !fixture
+            .root
+            .path()
+            .join("data/cruise/sessions")
+            .join(session_id)
+            .exists(),
+        "cancelled plan session must be deleted"
+    );
+    assert!(
+        exported_spans.iter().all(|span| {
+            span.name != "cruise.execution"
+                || span
+                    .attributes
+                    .get("cruise.execution.kind")
+                    .map(String::as_str)
+                    != Some("run")
+        }),
+        "cancelled approval must not launch workflow execution: {exported_spans:#?}"
+    );
+    let fixture_path = fixture.root.path().to_string_lossy().into_owned();
+    assert_payload_omits(
+        &requests,
+        &[
+            "cancel-plan-input-secret",
+            "plan-prompt-secret",
+            fixture_path.as_str(),
+        ],
     );
 }
 
@@ -1446,7 +2264,11 @@ fn telemetry_is_off_by_default_and_sdk_disabled_takes_precedence() {
     let collector = Collector::start();
     let fixture = Fixture::new("steps:\n  local:\n    command: 'printf local-only >/dev/null'\n");
 
-    let default_off = fixture.run(&[], "default-off-input");
+    let endpoint = collector.endpoint();
+    let default_off = fixture.run(
+        &[("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint.as_str())],
+        "default-off-input",
+    );
     assert_success(&default_off);
     thread::sleep(Duration::from_millis(100));
     assert!(

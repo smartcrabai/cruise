@@ -726,9 +726,10 @@ impl Fixture {
     ) -> cruise::error::Result<PromptOutcome> {
         let env = HashMap::from([("WORKFLOW_VALUE".to_owned(), "step-value".to_owned())]);
         let mcp_servers = cruise::config::McpServers::new();
+        let model = model.map(|model| cruise::config::ModelSpec::Single(model.to_owned()));
         let request = PromptRun {
             prompt: "fixture prompt",
-            model_or_mode: model,
+            model: model.as_ref(),
             max_retries,
             env: &env,
             mcp_servers: &mcp_servers,
@@ -878,7 +879,9 @@ async fn cli_sigint_drains_each_planning_future_before_return_or_discard() {
         #[cfg(target_os = "linux")]
         command.args(["-q", "-e", "-c", &shell, "/dev/null"]);
         for (name, _) in std::env::vars_os() {
-            if name.to_string_lossy().starts_with("CRUISE_")
+            // The inherited Git hook and its guarded repository identity must
+            // stay together, even when isolating workflow configuration overrides.
+            if (name.to_string_lossy().starts_with("CRUISE_") && name != "CRUISE_GUARD_COMMON_DIR")
                 || name.to_string_lossy().starts_with("OPENCODE_")
             {
                 command.env_remove(name);
@@ -1201,7 +1204,7 @@ async fn missing_resume_target_is_not_replaced_with_a_new_conversation() {
         Duration::from_secs(15),
         Executor::new(Some("opencode"), &[]).run(PromptRun {
             prompt: "resume input",
-            model_or_mode: Some(MODEL),
+            model: Some(&cruise::config::ModelSpec::Single(MODEL.to_owned())),
             max_retries: 2,
             env: &env,
             mcp_servers: &mcp,
@@ -1211,7 +1214,10 @@ async fn missing_resume_target_is_not_replaced_with_a_new_conversation() {
             stream: None,
             tools: vec![],
             on_session_id: None,
-            resume: Some("ses_missing_resume_target".to_owned()),
+            resume: Some(cruise::model_selection::SdkSessionId {
+                sdk: cruise::model_selection::Sdk::OpenCode,
+                id: "ses_missing_resume_target".to_owned(),
+            }),
             computer_use: false,
             permission: PermissionMode::Full,
         }),
@@ -1276,8 +1282,9 @@ async fn session_id_is_checkpointed_before_prompt_can_block_on_tools() {
     let _lock = lock_process();
     let fixture = Fixture::new(Scenario::Complete).await;
     let _guards = fixture.guards();
-    let callback = |id: &str| -> cruise::error::Result<()> {
-        std::fs::write(fixture.root.path().join("checkpoint"), id)?;
+    let callback = |id: &cruise::model_selection::SdkSessionId| -> cruise::error::Result<()> {
+        assert_eq!(id.sdk, cruise::model_selection::Sdk::OpenCode);
+        std::fs::write(fixture.root.path().join("checkpoint"), &id.id)?;
         Ok(())
     };
     let outcome = fixture
@@ -1286,7 +1293,10 @@ async fn session_id_is_checkpointed_before_prompt_can_block_on_tools() {
         .unwrap_or_else(|error| panic!("checkpointed turn must complete: {error}"));
     let observations = locked(&fixture.server);
     assert_eq!(
-        outcome.session_id.as_deref(),
+        outcome
+            .session_id
+            .as_ref()
+            .map(|session| session.id.as_str()),
         Some(observations.session_id.as_str())
     );
     assert_eq!(
@@ -1316,7 +1326,7 @@ async fn resume_fixture_with_retries(
         policy_for_config(Some(config)),
         Executor::new(Some("opencode"), &[]).run(PromptRun {
             prompt: "resume fixture",
-            model_or_mode: Some(MODEL),
+            model: Some(&cruise::config::ModelSpec::Single(MODEL.to_owned())),
             max_retries: retries,
             env: &env,
             mcp_servers: &mcp_servers,
@@ -1326,7 +1336,10 @@ async fn resume_fixture_with_retries(
             stream: None,
             tools: vec![],
             on_session_id: None,
-            resume: Some(id.to_owned()),
+            resume: Some(cruise::model_selection::SdkSessionId {
+                sdk: cruise::model_selection::Sdk::OpenCode,
+                id: id.to_owned(),
+            }),
             computer_use: false,
             permission: PermissionMode::Full,
         }),
@@ -1340,14 +1353,14 @@ async fn retained_history_is_fenced_before_current_turn_recovery() {
     for (start, terminal) in [(true, false), (true, true), (false, false)] {
         let fixture = Fixture::new(Scenario::RetainedRecovery { start, terminal }).await;
         let _guards = fixture.guards();
-        let checkpoint = |_: &str| Ok(());
+        let checkpoint = |_: &cruise::model_selection::SdkSessionId| Ok(());
         let first = fixture
             .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
             .await
             .unwrap_or_else(|error| panic!("retained first turn: {error}"));
         let id = first
             .session_id
-            .unwrap_or_else(|| panic!("retained session ID"));
+            .map_or_else(|| panic!("retained session ID"), |session| session.id);
         // The real log is cumulative, including failed and interrupted executions.
         locked(&fixture.server).durable.extend([
             event("session.execution.started", &id, json!({}), 6),
@@ -1459,9 +1472,10 @@ async fn executor_cancellation_awaits_admitted_handler_after_peer_disconnect() {
     let env = HashMap::new();
     let mcp_servers = cruise::config::McpServers::new();
     let executor = Executor::new(Some("opencode"), &[]);
+    let selection = cruise::config::ModelSpec::Single(MODEL.to_owned());
     let run = executor.run(PromptRun {
         prompt: "held handler",
-        model_or_mode: Some(MODEL),
+        model: Some(&selection),
         max_retries: 0,
         env: &env,
         mcp_servers: &mcp_servers,
@@ -1545,30 +1559,19 @@ async fn configured_fixture_run(
 ) -> cruise::error::Result<PromptOutcome> {
     let executor = Executor::new(config.sdk.as_deref(), &config.command);
     let model = if planning {
-        executor.plan_model_or_mode(
-            config
-                .plan_model
-                .as_ref()
-                .and_then(cruise::config::ModelSpec::primary),
-            config
-                .model
-                .as_ref()
-                .and_then(cruise::config::ModelSpec::primary),
-        )
+        config
+            .plan_model
+            .as_ref()
+            .or(config.model.as_ref())
+            .cloned()
     } else {
-        executor.step_model_or_mode(
-            None,
-            config
-                .model
-                .as_ref()
-                .and_then(cruise::config::ModelSpec::primary),
-        )
+        executor.step_model(None, config.model.as_ref())
     };
     with_active_policy(
         policy_for_config(config.retry.clone()),
         executor.run(PromptRun {
             prompt: "configured fixture prompt",
-            model_or_mode: model.as_deref(),
+            model: model.as_ref(),
             max_retries: budget,
             env: &config.env,
             mcp_servers: &config.mcp_servers,
@@ -1695,14 +1698,14 @@ async fn clean_resume_survives_prelaunch_overlay_and_missing_executable_failures
     let _lock = lock_process();
     let fixture = Fixture::new(Scenario::Complete).await;
     let _guards = fixture.guards();
-    let checkpoint = |_: &str| Ok(());
+    let checkpoint = |_: &cruise::model_selection::SdkSessionId| Ok(());
     let outcome = fixture
         .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
         .await
         .unwrap_or_else(|error| panic!("initial retained turn: {error}"));
     let id = outcome
         .session_id
-        .unwrap_or_else(|| panic!("retained ID missing"));
+        .map_or_else(|| panic!("retained ID missing"), |session| session.id);
     let baseline = fixture.prompt_count();
     let overlay: Value = serde_json::from_slice(
         &std::fs::read(fixture.root.path().join("cli.overlay"))
@@ -1742,7 +1745,13 @@ async fn clean_resume_survives_prelaunch_overlay_and_missing_executable_failures
     let resumed = resume_fixture(&fixture, &id)
         .await
         .unwrap_or_else(|error| panic!("clean ID must remain resumable: {error}"));
-    assert_eq!(resumed.session_id.as_deref(), Some(id.as_str()));
+    assert_eq!(
+        resumed
+            .session_id
+            .as_ref()
+            .map(|session| session.id.as_str()),
+        Some(id.as_str())
+    );
     assert_eq!(fixture.prompt_count(), baseline + 1);
     fixture.assert_stopped();
 
@@ -1764,7 +1773,7 @@ async fn checkpoint_callback_failure_stops_cli_without_sending_prompt() {
     let _lock = lock_process();
     let fixture = Fixture::new(Scenario::Complete).await;
     let _guards = fixture.guards();
-    let callback = |_: &str| -> cruise::error::Result<()> {
+    let callback = |_: &cruise::model_selection::SdkSessionId| -> cruise::error::Result<()> {
         Err(cruise::error::CruiseError::Other(
             "checkpoint-refused".to_owned(),
         ))
@@ -1901,7 +1910,10 @@ async fn live_disconnect_recovers_durable_text_without_resending_prompt() {
         .unwrap_or_else(|error| panic!("durable recovery must succeed: {error}"));
     assert_eq!(outcome.result.output, ANSWER);
     assert_eq!(
-        outcome.session_id.as_deref(),
+        outcome
+            .session_id
+            .as_ref()
+            .map(|session| session.id.as_str()),
         Some(locked(&fixture.server).session_id.as_str())
     );
     assert_eq!(

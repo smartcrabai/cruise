@@ -196,6 +196,12 @@ impl AppConfig {
     ///
     /// Returns [`CruiseError::Other`] if any field is invalid.
     pub fn validate(&self) -> Result<()> {
+        if let Some(model) = &self.model {
+            model.validate("model")?;
+        }
+        if let Some(model) = &self.plan_model {
+            model.validate("plan_model")?;
+        }
         if self.run_all_parallelism == 0 {
             return Err(CruiseError::Other(
                 "run_all_parallelism must be >= 1 (got 0)".to_string(),
@@ -376,8 +382,8 @@ mod tests {
             (
                 r#"{"model":["primary","fallback"]}"#,
                 Some(crate::config::ModelSpec::Multiple(vec![
-                    "primary".to_string(),
-                    "fallback".to_string(),
+                    "primary".into(),
+                    "fallback".into(),
                 ])),
             ),
             (r#"{"model":null,"plan_model":null}"#, None),
@@ -400,10 +406,7 @@ mod tests {
         for (index, (key, expected)) in [
             (
                 "plan_model",
-                crate::config::ModelSpec::Multiple(vec![
-                    "primary".to_string(),
-                    "fallback".to_string(),
-                ]),
+                crate::config::ModelSpec::Multiple(vec!["primary".into(), "fallback".into()]),
             ),
             (
                 "planModel",
@@ -480,12 +483,12 @@ mod tests {
         let original = AppConfig {
             run_all_parallelism: 8,
             model: Some(crate::config::ModelSpec::Multiple(vec![
-                "primary".to_string(),
-                "fallback".to_string(),
+                "primary".into(),
+                "fallback".into(),
             ])),
             plan_model: Some(crate::config::ModelSpec::Multiple(vec![
-                "plan-primary".to_string(),
-                "plan-fallback".to_string(),
+                "plan-primary".into(),
+                "plan-fallback".into(),
             ])),
         };
         // When: save then load
@@ -523,8 +526,8 @@ mod tests {
                     run_all_parallelism: 8,
                     model: Some(crate::config::ModelSpec::Single("primary".to_string())),
                     plan_model: Some(crate::config::ModelSpec::Multiple(vec![
-                        "plan-primary".to_string(),
-                        "plan-fallback".to_string(),
+                        "plan-primary".into(),
+                        "plan-fallback".into(),
                     ])),
                 },
             ),
@@ -533,8 +536,8 @@ mod tests {
                 AppConfig {
                     run_all_parallelism: 4,
                     model: Some(crate::config::ModelSpec::Multiple(vec![
-                        "primary".to_string(),
-                        "fallback".to_string(),
+                        "primary".into(),
+                        "fallback".into(),
                     ])),
                     plan_model: Some(crate::config::ModelSpec::Single("plan-primary".to_string())),
                 },

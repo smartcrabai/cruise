@@ -133,7 +133,7 @@ pub struct SessionState {
     /// Configuration/backend identity that produced `plan_conversation_id`.
     #[serde(default)]
     pub plan_conversation_key: Option<String>,
-    /// Backend that owns the retained conversation. Missing means legacy jcode.
+    /// Backend that owns the retained conversation. Missing requires safe legacy inference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_conversation_backend: Option<String>,
     /// Absolute jcode source-home path for cleaning the saved conversation.

@@ -331,10 +331,6 @@ mod tests {
                 "undefined_variable",
             ),
             (
-                CruiseError::EmptyVariableReference,
-                "empty_variable_reference",
-            ),
-            (
                 CruiseError::InvalidTemplateSyntax("secret".into()),
                 "invalid_template_syntax",
             ),
@@ -366,7 +362,6 @@ mod tests {
                 ),
                 "serialization_error",
             ),
-            (CruiseError::NotGitRepository, "not_git_repository"),
             (
                 CruiseError::WorktreeError("secret".into()),
                 "worktree_error",
@@ -399,7 +394,6 @@ mod tests {
                 },
                 "github_review_failed",
             ),
-            (CruiseError::Interrupted, "cancelled"),
             (
                 CruiseError::SquashMergeFailed("secret".into()),
                 "squash_merge_failed",
@@ -408,17 +402,33 @@ mod tests {
                 CruiseError::CommitGuardViolation("secret".into()),
                 "commit_guard_violation",
             ),
-            (
-                CruiseError::ReadOnlyWorkspaceChanged,
-                "read_only_workspace_changed",
-            ),
             (CruiseError::Other("secret".into()), "other"),
-            (CruiseError::StepPaused, "paused"),
         ];
 
         for (error, expected) in cases {
             assert_eq!(error.telemetry_type(), expected);
             assert_ne!(error.telemetry_type(), "secret");
+        }
+    }
+
+    #[test]
+    fn telemetry_type_is_fixed_for_payload_free_control_flow_errors() {
+        let cases = [
+            (
+                CruiseError::EmptyVariableReference,
+                "empty_variable_reference",
+            ),
+            (CruiseError::NotGitRepository, "not_git_repository"),
+            (CruiseError::Interrupted, "cancelled"),
+            (
+                CruiseError::ReadOnlyWorkspaceChanged,
+                "read_only_workspace_changed",
+            ),
+            (CruiseError::StepPaused, "paused"),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.telemetry_type(), expected);
         }
     }
 }

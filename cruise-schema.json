@@ -32,7 +32,7 @@
       "additionalProperties": {
         "$ref": "#/$defs/McpServerConfig"
       },
-      "description": "Workflow-level MCP servers available to every SDK prompt run. Rejected with the command backend; stdio works with all SDK backends. Streamable HTTP works with sdk: claude and sdk: opencode; legacy SSE requires sdk: claude and is explicitly rejected by OpenCode V2."
+      "description": "Workflow-level MCP servers available to every SDK prompt run. Rejected with the command backend. Every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, must support the transport: stdio supports all SDKs, Streamable HTTP requires Claude or OpenCode, and legacy SSE requires Claude. Changing the workflow SDK does not override SDK-qualified objects."
     },
     "model": {
       "oneOf": [
@@ -42,7 +42,7 @@
         {
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/ModelEntry"
           }
         }
       ],
@@ -56,7 +56,7 @@
         {
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/ModelEntry"
           }
         }
       ],
@@ -130,7 +130,7 @@
     },
     "computer_use": {
       "type": "boolean",
-      "description": "Allow prompt turns to use jcode's macOS desktop-control tool. Default: false. Only available with the jcode backend on macOS (no effect on Linux); true is rejected for sdk: claude, sdk: opencode, and command: backends."
+      "description": "Allow prompt turns to use jcode's macOS desktop-control tool. Default: false; no effect on Linux. Every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, must use jcode, with no command backend. Claude and OpenCode candidates are incompatible; changing only the workflow SDK does not override SDK-qualified objects."
     },
     "flags": {
       "type": "object",
@@ -144,6 +144,20 @@
     }
   },
   "$defs": {
+    "ModelEntry": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sdk", "model"],
+          "properties": {
+            "sdk": { "type": "string", "enum": ["jcode", "claude", "opencode"] },
+            "model": { "type": "string", "minLength": 1, "pattern": "\\S" }
+          }
+        }
+      ]
+    },
     "FlagConfig": {
       "type": "object",
       "additionalProperties": false,

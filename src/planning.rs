@@ -269,7 +269,7 @@ pub async fn run_plan_prompt_template(
     template: &str,
     label: &str,
     stream_callbacks: Option<&StreamCallbacks<'_>>,
-    resume: &mut Option<String>,
+    resume: &mut Option<crate::model_selection::SdkSessionId>,
     register_plan_tools: bool,
 ) -> Result<PromptResult> {
     // The context owns the authoritative plan path. Normal callers already
@@ -286,15 +286,9 @@ pub async fn run_plan_prompt_template(
     );
     let prompt = vars.resolve(template)?;
     let executor = ctx.executor();
-    let model_or_mode = executor.plan_model_or_mode(
-        ctx.config
-            .plan_model
-            .as_ref()
-            .and_then(crate::config::ModelSpec::primary),
-        ctx.config
-            .model
-            .as_ref()
-            .and_then(crate::config::ModelSpec::primary),
+    let model = crate::model_selection::planning_spec(
+        ctx.config.plan_model.as_ref(),
+        ctx.config.model.as_ref(),
     );
     // Tool-based planning is gated on `interactive_planning`; when it is off the
     // plan is written to `{plan}` directly via the file-writing templates and no
@@ -349,7 +343,7 @@ pub async fn run_plan_prompt_template(
     let outcome = executor
         .run(PromptRun {
             prompt: &prompt,
-            model_or_mode: model_or_mode.as_deref(),
+            model,
             max_retries: ctx.rate_limit_retries,
             env: &env,
             mcp_servers: &ctx.config.mcp_servers,
@@ -358,8 +352,16 @@ pub async fn run_plan_prompt_template(
             working_dir: ctx.working_dir,
             stream: stream_callbacks,
             tools,
-            on_session_id: ctx.on_session_id,
-            resume: resume.clone(),
+            on_session_id: if plan_tools_enabled {
+                ctx.on_session_id
+            } else {
+                None
+            },
+            resume: if plan_tools_enabled {
+                resume.clone()
+            } else {
+                None
+            },
             computer_use: ctx.config.computer_use(),
             permission: crate::config::PermissionMode::Full,
         })
@@ -372,6 +374,8 @@ pub async fn run_plan_prompt_template(
     // Assigning `None` also clears any stale session id from a prior backend.
     if plan_tools_enabled {
         *resume = outcome.session_id;
+    } else if executor.is_sdk() {
+        *resume = None;
     }
     Ok(outcome.result)
 }
@@ -417,6 +421,47 @@ pub fn write_input_as_plan(plan_path: &Path, input: &str) -> Result<String> {
     write_plan_atomically(plan_path, content.as_bytes())
         .map_err(|e| crate::error::CruiseError::Other(format!("failed to write plan: {e}")))?;
     Ok(content)
+}
+
+/// Recover a planning conversation only when its SDK ownership is unambiguous.
+/// Legacy IDs with no owner may use a recorded jcode home or a jcode-only
+/// candidate list. Other legacy backends cannot safely claim a jcode-era ID.
+#[must_use]
+pub fn saved_plan_session(
+    session: &crate::session::SessionState,
+    config: &WorkflowConfig,
+) -> Option<crate::model_selection::SdkSessionId> {
+    use crate::model_selection::{Sdk, SdkSessionId, resolve_candidates};
+
+    if !sdk_plan_tools_enabled(config) {
+        return None;
+    }
+    let identity = session
+        .config
+        .stable_identity(session.repo.as_deref(), &session.id);
+    let key = plan_conversation_key(config, &identity);
+    if session.plan_conversation_key.as_deref() != Some(key.as_str()) {
+        return None;
+    }
+    let base = Sdk::from_name(config.sdk.as_deref().unwrap_or("jcode"))?;
+    let candidates = resolve_candidates(
+        crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref()),
+        base,
+    );
+    let sdks = crate::model_selection::applicable_sdks(config, &candidates, base);
+    let sdk = match session.plan_conversation_backend.as_deref() {
+        Some(owner) => Sdk::from_name(owner)?,
+        None if session.plan_conversation_home.is_some() => Sdk::Jcode,
+        None if sdks.iter().all(|sdk| *sdk == Sdk::Jcode) => Sdk::Jcode,
+        None => return None,
+    };
+    if !sdks.contains(&sdk) {
+        return None;
+    }
+    Some(SdkSessionId {
+        sdk,
+        id: session.plan_conversation_id.clone()?,
+    })
 }
 
 /// Build the stable identity used to decide whether a planning conversation
@@ -801,6 +846,36 @@ mod tests {
     /// Given: no cancel token, command backend = cat
     /// When: `run_plan_prompt_template` is called with a simple template
     /// Then: returns Ok (baseline — no regression)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn empty_planning_array_retains_command_primary() {
+        let _guard = crate::test_support::lock_process();
+        let tmp = make_temp_dir();
+        let plan_path = tmp.path().join("plan.md");
+        let config = WorkflowConfig::from_yaml("command: [sh, -c, 'cat >/dev/null; printf %s \"$1\"', sh, '{model}']\nmodel: [command-primary, command-fallback]\nplan_model: []\nsteps:\n  plan:\n    prompt: plan\n").unwrap_or_else(|error| panic!("parse command workflow with empty planning model array: {error}"));
+        let ctx = make_ctx_no_token(&config, &plan_path);
+        let mut vars = VariableStore::new("input".into());
+        let result =
+            run_plan_prompt_template(&ctx, &mut vars, "hello", "test", None, &mut None, false)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("run planning prompt with command primary model: {error}")
+                });
+        assert_eq!(result.output, "command-primary");
+        assert_eq!(
+            crate::executor::Executor::plan_model(
+                config.plan_model.as_ref(),
+                config.model.as_ref()
+            ),
+            config.model
+        );
+        assert_eq!(
+            serde_json::to_value(&config)
+                .unwrap_or_else(|error| panic!("serialize planning workflow: {error}"))["plan_model"],
+            serde_json::json!([])
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn run_plan_prompt_template_with_no_cancel_token_completes() {
