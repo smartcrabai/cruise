@@ -861,6 +861,20 @@ steps:
 
 Instead of spawning an external CLI via `command`, prompt steps can be driven through an SDK backend by setting the top-level `sdk` field. `command` and `sdk` are mutually exclusive; the default `jcode` backend is used only when neither remains set in the resolved workflow after applicable `default.yaml` layers are applied. Three values are accepted: `jcode`, `claude`, and `opencode`.
 
+#### Startup OAuth expiration checks
+
+Before starting agents for `cruise plan`, `cruise run`, or `cruise exec`, and for session planning/execution in the TUI or WebUI, Cruise checks local OAuth credential files for the applicable SDK candidates only. Planning uses the effective `plan_model` (falling back to `model`); execution includes workflow models and step overrides, including `after-pr`, groups, and parallel children. Model arrays, SDK-qualified entries, and effective retry fallback chains are included, even if a fallback is not ultimately used. This is not a global check at TUI/WebUI startup. Command backends, dry-runs, and `cruise workflow generate` are outside this check.
+
+- **Claude SDK:** reads `$CLAUDE_CONFIG_DIR/.credentials.json`, or `~/.claude/.credentials.json` when unset, using `claudeAiOauth.expiresAt`, `refreshToken`, and optional `refreshTokenExpiresAt`.
+- **Jcode SDK:** checks only explicit providers `claude`, `claude-oauth`, and `claude-subprocess` in the source home's `auth.json`, and `openai` and `openai-oauth` in `openai-auth.json`. The source home is the process `JCODE_HOME`, or `~/.jcode` when unset. With multiple accounts, it stops only if every account is conclusively expired.
+- **Skipped:** OpenCode, jcode bare models with no provider, API-key providers such as `anthropic-api` / `openai-api`, and all other providers. Missing/unreadable files, invalid JSON, or insufficient expiration data pass without blocking. For Claude, a non-empty process or workflow-level `env` value for `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, or `CLAUDE_CODE_USE_FOUNDRY` also skips the file check.
+
+Exception: SDK title generation during foreground CLI approval, including `cruise plan --skip-planning`, uses only the inherited process environment and process working directory. Its expiration preflight therefore ignores workflow-level `env`, including `CLAUDE_CONFIG_DIR` and alternative-authentication variables. A workflow-only API key does not bypass this title-generation check; conclusively expired inherited OAuth credentials stop approval.
+
+Cruise stops only when the access token has expired and the refresh token is absent or its recorded expiration is at or before the current time. An expired access token with a refresh token and no known refresh expiration passes without warning, leaving automatic refresh to the backend. The check only reads files: it does not invoke auth-status CLIs, contact providers, refresh tokens, write credentials, or take credential locks. To sign in again, use `claude auth login`, `jcode login claude`, or `jcode login openai` as appropriate.
+
+This is an expiration preflight, not proof that authentication will succeed. It cannot detect server-side revocation of refresh tokens and does not read jcode refresh-failure state or macOS Keychain credentials. Step-level `env` API keys are not considered. To bypass a false positive, set the process environment variable `CRUISE_SKIP_AGENT_AUTH_CHECK=1`; only the exact value `1` opts out, not `true` or whitespace-padded values.
+
 ```yaml
 sdk: jcode        # Explicitly select jcode. If omitted, it is the fallback only
                   # when neither `command` nor `sdk` remains set in the resolved
@@ -1036,6 +1050,8 @@ The CLI and WebUI also apply these process-level workflow overrides when loading
 `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` add a `Co-authored-by:` trailer to the commits cruise creates for a PR. Both must be set and non-blank, and a name containing `<`, `>`, or a line break -- or an invalid address -- disables the trailer instead of failing the commit.
 
 `CRUISE_DISABLE_HERDR=1` disables the herdr lifecycle-state reporting described above.
+
+`CRUISE_SKIP_AGENT_AUTH_CHECK=1` bypasses the SDK startup OAuth expiration check described under SDK Mode. It is a process-only runtime switch, not a workflow-config override. Only the exact value `1` skips the check.
 
 
 ```yaml

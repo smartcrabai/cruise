@@ -1,4 +1,5 @@
 // Core modules exported for library consumers.
+mod agent_auth;
 pub mod app_config;
 pub mod application;
 pub mod artifacts;

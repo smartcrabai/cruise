@@ -498,19 +498,49 @@ async fn run_single_loaded(
     }
     let prepare_operation = crate::telemetry::Operation::phase("prepare");
     let prepared: Result<_> = async {
-        if !args.dry_run && session.pr_skipped_reason.take().is_some() {
-            initial_fingerprint = save_session_state_with_conflict_resolution(
-                &manager,
-                &session,
-                initial_fingerprint,
-            )?;
-        }
         if cancel_token.is_cancelled() {
             return Err(CruiseError::Interrupted);
         }
         observer.on_phase(&session_id, RunPhase::Preparing);
         let config = manager.load_config(&session)?;
         validate_config(&config)?;
+        let effective_workspace_mode = if args.dry_run {
+            session.workspace_mode
+        } else if session.repo.is_some() {
+            // Explicit repo sessions always execute in a worktree.
+            WorkspaceMode::Worktree
+        } else {
+            match workspace_override {
+                WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
+                WorkspaceOverride::RespectSession => {
+                    if session.current_step.is_none()
+                        && session.workspace_mode == WorkspaceMode::Worktree
+                    {
+                        prompt_workspace_mode()?
+                    } else {
+                        session.workspace_mode
+                    }
+                }
+            }
+        };
+        if !args.dry_run {
+            let execution_dir = match effective_workspace_mode {
+                WorkspaceMode::Worktree => manager.worktrees_dir().join(&session.id),
+                WorkspaceMode::CurrentBranch => session.base_dir.clone(),
+            };
+            crate::agent_auth::ensure_agents_authenticated(
+                &config,
+                crate::agent_auth::AuthScope::Execution,
+                Some(&execution_dir),
+            )?;
+            if session.pr_skipped_reason.take().is_some() {
+                initial_fingerprint = save_session_state_with_conflict_resolution(
+                    &manager,
+                    &session,
+                    initial_fingerprint,
+                )?;
+            }
+        }
         let cli_flags = crate::flags::from_cli(&args.flags)?;
         crate::flags::validate_names(&config, &cli_flags)?;
         session.flags.extend(cli_flags);
@@ -542,12 +572,26 @@ async fn run_single_loaded(
             &start_node,
             &crate::flags::preflight_skips(&compiled, &session.flags, &session.skipped_steps),
         )?;
-        Ok((config, effective_max_retries, retry_policy, compiled, dag))
+        Ok((
+            config,
+            effective_max_retries,
+            retry_policy,
+            compiled,
+            dag,
+            effective_workspace_mode,
+        ))
     }
     .with_context(prepare_operation.context())
     .await;
     prepare_operation.finish_result(&prepared);
-    let (config, effective_max_retries, mut retry_policy, mut compiled, mut dag) = prepared?;
+    let (
+        config,
+        effective_max_retries,
+        mut retry_policy,
+        mut compiled,
+        mut dag,
+        effective_workspace_mode,
+    ) = prepared?;
     if args.dry_run {
         eprintln!("{}", style(format!("Session: {session_id}")).dim());
         print_dry_run(&config, session.current_step.as_deref());
@@ -559,24 +603,6 @@ async fn run_single_loaded(
         if cancel_token.is_cancelled() {
             return Err(CruiseError::Interrupted);
         }
-        let effective_workspace_mode = if session.repo.is_some() {
-            // Repo-backed sessions always execute in a worktree on a fresh clone;
-            // current-branch mode is not available for explicit repo sessions.
-            WorkspaceMode::Worktree
-        } else {
-            match workspace_override {
-                WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
-                WorkspaceOverride::RespectSession => {
-                    if session.current_step.is_none()
-                        && session.workspace_mode == WorkspaceMode::Worktree
-                    {
-                        prompt_workspace_mode()?
-                    } else {
-                        session.workspace_mode
-                    }
-                }
-            }
-        };
         session.workspace_mode = effective_workspace_mode;
         if effective_workspace_mode == WorkspaceMode::CurrentBranch
             && let Some(ctx) = session.worktree_context()
@@ -1586,6 +1612,104 @@ mod tests {
             no_cleanup_after_pr: false,
             flags: vec![],
         }
+    }
+
+    async fn check_expired_agent_auth_execution(dry_run: bool) {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut process = ProcessStateGuard::new(tmp.path());
+        let base_dir = tmp.path().join("not-a-repository");
+        fs::create_dir_all(&base_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        process.set_current_dir(&base_dir);
+        process.set_env("XDG_DATA_HOME", tmp.path().join("data"));
+        process.set_env("XDG_CONFIG_HOME", tmp.path().join("config"));
+        process.set_env("XDG_STATE_HOME", tmp.path().join("state"));
+        process.set_env("CRUISE_DISABLE_NOTIFICATIONS", "1");
+        process.set_env("JCODE_HOME", tmp.path().join("jcode"));
+        process.set_env("CRUISE_DISABLE_HERDR", "1");
+        process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "0");
+        process.set_env(TEST_WORKSPACE_MODE_ENV, "worktree");
+        process.remove_env("CRUISE_SKIP_AGENT_AUTH_CHECK");
+        fs::create_dir_all(tmp.path().join("jcode")).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(
+            tmp.path().join("jcode/auth.json"),
+            r#"{"anthropic_accounts":[{"access":"expired-test-token","expires":1}]}"#,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let manager =
+            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
+        let id = "20261024000001";
+        let mut session = SessionState::new(
+            id.to_string(),
+            base_dir.clone(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "auth wiring test".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        session.workspace_mode = WorkspaceMode::Worktree;
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(
+            &manager,
+            id,
+            "sdk: jcode\nmodel: claude/test-model\nsteps:\n  agent:\n    prompt: never invoke an agent\n",
+        );
+        let state_path = manager.sessions_dir().join(id).join("state.json");
+        let before = fs::read(&state_path).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut args = run_args(id);
+        args.dry_run = dry_run;
+        let (session, initial_fingerprint) = manager
+            .load_with_fingerprint(id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut workflow_failed = false;
+        let result = run_single_loaded(
+            args,
+            WorkspaceOverride::RespectSession,
+            &NoOpOptionHandler,
+            CancellationToken::new(),
+            &NoopObserver,
+            LoadedRunSession {
+                manager: manager.clone(),
+                session_id: id.to_string(),
+                session,
+                initial_fingerprint,
+            },
+            &mut workflow_failed,
+        )
+        .await;
+        assert!(!workflow_failed);
+        if dry_run {
+            assert!(
+                result.is_ok(),
+                "dry-run must bypass expired auth: {result:?}"
+            );
+            assert_eq!(
+                fs::read(&state_path).unwrap_or_else(|e| panic!("{e:?}")),
+                before
+            );
+        } else {
+            let Err(error) = result else {
+                panic!("expired credentials must reject execution");
+            };
+            assert_eq!(error.telemetry_type(), "agent_auth_expired", "{error}");
+            assert!(!error.to_string().contains("expired-test-token"));
+        }
+        assert!(!manager.worktrees_dir().exists());
+        assert!(!manager.clones_dir().exists());
+        assert_eq!(
+            fs::read_dir(&base_dir)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_single_loaded_rejects_expired_agent_auth_before_workspace() {
+        check_expired_agent_auth_execution(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_single_loaded_dry_run_bypasses_expired_agent_auth() {
+        check_expired_agent_auth_execution(true).await;
     }
 
     struct PauseOptionHandler;

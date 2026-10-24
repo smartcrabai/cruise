@@ -1,5 +1,10 @@
 # Checkpoint contract verification
 
+For workflow-start OAuth authentication preflight, including bounded Quint and
+Alloy checks and production CLI Gherkin, see `AGENT_AUTH.md` and run
+`bash scripts/check_agent_auth_specs.sh`. Its dedicated `agent-auth-specs` PR CI
+job uses the same pinned toolchain and validates every Alloy receipt command.
+
 For SDK-qualified model arrays, ordered cross-SDK fallback, resume ownership,
 and production-connected configuration/CLI Gherkin, see `SDK_MODELS.md` and run
 `bash scripts/check_sdk_model_specs.sh`. This suite has its own required native

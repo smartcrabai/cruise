@@ -800,6 +800,15 @@ async fn approve_with_title(
     // The `generate_title` tool needs an SDK backend, which includes the default
     // `jcode` one a config gets by naming neither `sdk:` nor `command:`.
     if crate::executor::Executor::new(config.sdk.as_deref(), &config.command).is_sdk() {
+        // Title dispatch forwards neither workflow env nor a working directory.
+        // Keep this gate outside the optional title-error warning handler.
+        let mut auth_config = config.clone();
+        auth_config.env.clear();
+        crate::agent_auth::ensure_agents_authenticated(
+            &auth_config,
+            crate::agent_auth::AuthScope::Planning,
+            None,
+        )?;
         let log_notice = cli_notice_callback(manager, &session.id);
         let on_notice = |message: &str| {
             crate::status_eprintln!("{}", style(message).dim());

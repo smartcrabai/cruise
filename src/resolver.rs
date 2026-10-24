@@ -585,6 +585,9 @@ mod tests {
         let _lock = lock_process();
         // Given: an explicit config file and a prompt file beside it.
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let _home = crate::test_support::set_fake_home(dir.path());
+        let _model = crate::test_support::EnvGuard::remove("CRUISE_MODEL");
+        let _plan_model = crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL");
         let prompt_path = dir.path().join("prompts").join("implement.md");
         std::fs::create_dir_all(
             prompt_path

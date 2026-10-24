@@ -19,6 +19,9 @@ pub enum CruiseError {
     #[error("{0}")]
     MissingJcodeModel(String),
 
+    #[error("{0}")]
+    AgentAuthExpired(String),
+
     #[error("undefined variable: {{{0}}}")]
     UndefinedVariable(String),
 
@@ -109,6 +112,7 @@ impl CruiseError {
             Self::StepNotFound(_) => "step_not_found",
             Self::InvalidStepConfig(_) => "invalid_step_config",
             Self::MissingJcodeModel(_) => "model_unavailable",
+            Self::AgentAuthExpired(_) => "agent_auth_expired",
             Self::UndefinedVariable(_) => "undefined_variable",
             Self::EmptyVariableReference => "empty_variable_reference",
             Self::InvalidTemplateSyntax(_) => "invalid_template_syntax",
@@ -307,6 +311,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table covers all payload-bearing telemetry categories"
+    )]
     fn telemetry_type_is_fixed_and_does_not_expose_error_payloads() {
         let cases = [
             (
@@ -325,6 +333,10 @@ mod tests {
             (
                 CruiseError::MissingJcodeModel("secret".into()),
                 "model_unavailable",
+            ),
+            (
+                CruiseError::AgentAuthExpired("secret".into()),
+                "agent_auth_expired",
             ),
             (
                 CruiseError::UndefinedVariable("secret".into()),

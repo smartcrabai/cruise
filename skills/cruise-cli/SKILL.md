@@ -325,6 +325,8 @@ recreate a snapshot session after changing its model configuration.
 
 These process environment variables are read directly at runtime and are not workflow-config overrides. `CRUISE_RUNTIME` overrides the launcher’s runtime executable path; `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` append a `Co-authored-by:` trailer when both are set; `CRUISE_DISABLE_NOTIFICATIONS=1` disables desktop notifications; `CRUISE_DISABLE_HERDR=1` disables herdr reporting. When `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_BIN_PATH` are set, the TUI and `cruise plan` / `cruise run` / `cruise exec` report lifecycle states to herdr.
 
+`CRUISE_SKIP_AGENT_AUTH_CHECK=1` bypasses the file-only OAuth expiration preflight before session planning/execution (`cruise plan`, `cruise run`, `cruise exec`, and TUI/WebUI equivalents). Only the exact process-environment value `1` opts out, not `true` or whitespace-padded values. The check covers applicable Claude SDK and explicit jcode Claude/OpenAI OAuth candidates, including effective fallbacks and step overrides, not every installed provider. It stops only for expired access tokens with no refresh token or a known expired refresh token. Refreshable expired access tokens pass without warning. Command backends, dry-runs, OpenCode, API-key/unsupported providers, bare jcode models, and unreadable or indeterminate credential files are skipped. This does not validate server-side revocation or Keychain credentials; step-level `env` API keys are not considered. See [SDK authentication details](../cruise-config/references/sdk.md#startup-oauth-expiration-checks) for credential paths, Claude environment bypasses, and limitations.
+
 ## Runtime file layout (XDG)
 
 | Kind | Path (default) |
