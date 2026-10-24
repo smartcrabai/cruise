@@ -336,7 +336,7 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
-            flags: vec![],
+            flags: args.flags,
         };
         return crate::run_cmd::run(run_args).await;
     }
