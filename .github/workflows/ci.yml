@@ -28,6 +28,44 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
+  agent-auth-specs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install pinned Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22.22.0'
+          cache: npm
+          cache-dependency-path: tests/formal/package-lock.json
+
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.99.1 --profile minimal
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: agent-auth-specs
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      - name: Auth preflight Quint, Alloy receipts and production Gherkin
+        run: bash scripts/check_agent_auth_specs.sh
+
+      - name: Upload authentication specification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: agent-auth-spec-reports
+          path: target/formal-reports/agent-auth.*/
+          if-no-files-found: error
+          retention-days: 14
+
   workflow-flags-specs:
     runs-on: ubuntu-latest
     timeout-minutes: 30

@@ -1,5 +1,10 @@
 # Checkpoint contract verification
 
+For workflow-start OAuth authentication preflight, including bounded Quint and
+Alloy checks and production CLI Gherkin, see `AGENT_AUTH.md` and run
+`bash scripts/check_agent_auth_specs.sh`. Its dedicated `agent-auth-specs` PR CI
+job uses the same pinned toolchain and validates every Alloy receipt command.
+
 For the CLI planning-to-execution workflow-flag boundary, see
 `WORKFLOW_FLAGS.md` and run `bash scripts/check_workflow_flags_specs.sh`.
 Its dedicated PR CI job runs Quint, Alloy receipt checks, real PTY Gherkin,

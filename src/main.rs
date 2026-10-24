@@ -1,3 +1,4 @@
+mod agent_auth;
 mod app_config;
 pub mod application;
 mod artifacts;

@@ -186,6 +186,13 @@ path = "tests/sdk_model_bdd.rs"
 # POSIX SDK subprocess fixtures, explicitly runnable with --test sdk_model_bdd.
 test = false
 
+[[test]]
+harness = false
+name = "agent_auth_bdd"
+path = "tests/agent_auth_bdd.rs"
+# Unix SDK subprocess boundary fixtures, explicitly runnable on supported hosts.
+test = false
+
 [profile.release]
 codegen-units = 1
 lto = true

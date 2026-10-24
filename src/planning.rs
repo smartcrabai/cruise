@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use console::style;
 
+use crate::agent_auth::{AuthScope, ensure_agents_authenticated};
 use crate::ask_handler::AskHandler;
 use crate::cancellation::CancellationToken;
 use crate::config::WorkflowConfig;
@@ -286,6 +287,7 @@ pub async fn run_plan_prompt_template(
     );
     let prompt = vars.resolve(template)?;
     let executor = ctx.executor();
+    ensure_agents_authenticated(ctx.config, AuthScope::Planning, ctx.working_dir)?;
     let model = crate::model_selection::planning_spec(
         ctx.config.plan_model.as_ref(),
         ctx.config.model.as_ref(),
@@ -548,6 +550,10 @@ pub fn resolve_generated_plan_content(
 ) -> Result<String> {
     crate::metadata::resolve_plan_content(plan_path, stdout, stderr)
 }
+
+#[cfg(test)]
+#[path = "planning/auth_contract_tests.rs"]
+mod auth_contract_tests;
 
 #[cfg(test)]
 mod tests {

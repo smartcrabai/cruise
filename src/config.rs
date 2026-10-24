@@ -1786,40 +1786,70 @@ pub fn validate_computer_use(config: &WorkflowConfig) -> crate::error::Result<()
     Ok(())
 }
 
-fn candidate_sdks(
+/// Resolve the planning models after applying authoritative retry fallbacks.
+pub(crate) fn planning_model_candidates(
     config: &WorkflowConfig,
-) -> std::collections::HashSet<crate::model_selection::Sdk> {
-    use crate::model_selection::{Sdk, resolve_candidates, select_step_model};
+) -> crate::model_selection::ModelCandidates {
+    use crate::model_selection::{Sdk, planning_spec, resolve_candidates};
     let sdk = Sdk::from_name(config.sdk.as_deref().unwrap_or("jcode")).unwrap_or(Sdk::Jcode);
-    let mut sdks: std::collections::HashSet<_> = [
-        config.model.as_ref(),
-        crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref()),
-    ]
-    .into_iter()
-    .flat_map(|spec| applicable_sdks(config, &resolve_candidates(spec, sdk), sdk))
-    .collect();
-    for (_, step) in config
-        .steps
-        .iter()
-        .chain(&config.after_pr)
-        .chain(config.groups.values().flat_map(|group| &group.steps))
-    {
-        sdks.extend(applicable_sdks(
-            config,
+    crate::retry::effective_candidates(
+        config.retry.as_ref(),
+        &resolve_candidates(
+            planning_spec(config.plan_model.as_ref(), config.model.as_ref()),
+            sdk,
+        ),
+        sdk,
+    )
+}
+
+/// Collect execution models from the workflow and every nested step.
+pub(crate) fn execution_model_candidates(
+    config: &WorkflowConfig,
+) -> crate::model_selection::ModelCandidates {
+    use crate::model_selection::{ModelCandidates, Sdk, resolve_candidates, select_step_model};
+    fn collect_step(
+        config: &WorkflowConfig,
+        step: &StepConfig,
+        sdk: Sdk,
+        candidates: &mut ModelCandidates,
+    ) {
+        candidates.extend(crate::retry::effective_candidates(
+            config.retry.as_ref(),
             &select_step_model(config.model.as_ref(), step.model.as_deref(), sdk),
             sdk,
         ));
         if let Some(children) = &step.parallel {
             for child in children.values() {
-                sdks.extend(applicable_sdks(
-                    config,
-                    &select_step_model(config.model.as_ref(), child.model.as_deref(), sdk),
-                    sdk,
-                ));
+                collect_step(config, child, sdk, candidates);
             }
         }
     }
-    sdks
+
+    let sdk = Sdk::from_name(config.sdk.as_deref().unwrap_or("jcode")).unwrap_or(Sdk::Jcode);
+    let mut candidates = crate::retry::effective_candidates(
+        config.retry.as_ref(),
+        &resolve_candidates(config.model.as_ref(), sdk),
+        sdk,
+    );
+    for step in config.steps.values().chain(config.after_pr.values()).chain(
+        config
+            .groups
+            .values()
+            .flat_map(|group| group.steps.values()),
+    ) {
+        collect_step(config, step, sdk, &mut candidates);
+    }
+    candidates
+}
+
+fn candidate_sdks(
+    config: &WorkflowConfig,
+) -> std::collections::HashSet<crate::model_selection::Sdk> {
+    planning_model_candidates(config)
+        .into_iter()
+        .chain(execution_model_candidates(config))
+        .map(|candidate| candidate.sdk)
+        .collect()
 }
 
 /// Validate permission modes: prompt-only, unsupported on the command backend
@@ -6326,6 +6356,173 @@ steps:
     prompt: hi
 ",
             "env",
+        );
+    }
+
+    #[test]
+    fn model_candidate_scopes_preserve_arrays_and_sdk_qualified_entries() {
+        use crate::model_selection::Sdk;
+        let config = WorkflowConfig::from_yaml(
+            "sdk: claude\nmodel: [run-main, {sdk: jcode, model: openai/run-tail}, run-last]\nplan_model: [plan-main, {sdk: opencode, model: plan-tail}, plan-last]\nsteps: {}\n",
+        ).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_candidate_values(
+            planning_model_candidates(&config),
+            &[
+                (Sdk::Claude, Some("plan-main")),
+                (Sdk::OpenCode, Some("plan-tail")),
+                (Sdk::Claude, Some("plan-last")),
+            ],
+        );
+        assert_candidate_values(
+            execution_model_candidates(&config),
+            &[
+                (Sdk::Claude, Some("run-main")),
+                (Sdk::Jcode, Some("openai/run-tail")),
+                (Sdk::Claude, Some("run-last")),
+            ],
+        );
+    }
+
+    fn assert_candidate_values(
+        candidates: crate::model_selection::ModelCandidates,
+        expected: &[(crate::model_selection::Sdk, Option<&str>)],
+    ) {
+        let actual: std::collections::HashSet<_> = candidates
+            .into_iter()
+            .map(|candidate| (candidate.sdk, candidate.model))
+            .collect();
+        let expected: std::collections::HashSet<_> = expected
+            .iter()
+            .map(|(sdk, model)| (*sdk, model.map(str::to_owned)))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn planning_model_candidates_inherit_global_when_plan_model_is_absent_or_empty() {
+        use crate::model_selection::Sdk;
+        for planning in ["", "plan_model: []\n"] {
+            let config = WorkflowConfig::from_yaml(&format!(
+                "model: [claude/main, {{sdk: claude, model: sonnet}}]\n{planning}steps:\n  run:\n    prompt: hi\n    model: execution-only\n",
+            )).unwrap_or_else(|error| panic!("{error:?}"));
+            assert_candidate_values(
+                planning_model_candidates(&config),
+                &[
+                    (Sdk::Jcode, Some("claude/main")),
+                    (Sdk::Claude, Some("sonnet")),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn execution_model_candidates_include_step_overrides_in_every_container() {
+        use crate::model_selection::Sdk;
+        let config = WorkflowConfig::from_yaml(
+            r"
+sdk: jcode
+model: openai/base
+plan_model: planning-only
+steps:
+  direct:
+    prompt: hi
+    model: openai/direct
+  concurrent:
+    parallel:
+      child:
+        prompt: hi
+        model: openai/parallel
+after-pr:
+  post:
+    prompt: hi
+    model: openai/after
+  concurrent:
+    parallel:
+      child:
+        prompt: hi
+        model: openai/after-parallel
+groups:
+  review:
+    steps:
+      nested:
+        prompt: hi
+        model: openai/group
+      concurrent:
+        parallel:
+          child:
+            prompt: hi
+            model: openai/group-parallel
+",
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_candidate_values(
+            execution_model_candidates(&config),
+            &[
+                (Sdk::Jcode, Some("openai/base")),
+                (Sdk::Jcode, Some("openai/direct")),
+                (Sdk::Jcode, Some("openai/parallel")),
+                (Sdk::Jcode, Some("openai/after")),
+                (Sdk::Jcode, Some("openai/after-parallel")),
+                (Sdk::Jcode, Some("openai/group")),
+                (Sdk::Jcode, Some("openai/group-parallel")),
+            ],
+        );
+        assert_candidate_values(
+            planning_model_candidates(&config),
+            &[(Sdk::Jcode, Some("planning-only"))],
+        );
+    }
+
+    #[test]
+    fn execution_model_candidates_respect_disabled_fallback_for_step_overrides() {
+        use crate::model_selection::Sdk;
+        let config = WorkflowConfig::from_yaml(
+            "sdk: jcode\nmodel: [openai/main, {sdk: claude, model: sonnet}]\nretry:\n  model_fallback: false\nsteps:\n  run:\n    prompt: hi\n    model: openai/main:high\n",
+        ).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_candidate_values(
+            execution_model_candidates(&config),
+            &[
+                (Sdk::Jcode, Some("openai/main")),
+                (Sdk::Jcode, Some("openai/main:high")),
+            ],
+        );
+    }
+
+    #[test]
+    fn model_candidate_scopes_replace_implicit_retry_tails() {
+        use crate::model_selection::Sdk;
+        let config = WorkflowConfig::from_yaml(
+            r"
+sdk: jcode
+model: [openai/run, {sdk: claude, model: unreachable-run}]
+plan_model: [openai/plan, {sdk: opencode, model: unreachable-plan}]
+retry:
+  fallback_chains:
+    openai/run: [claude/run-fallback]
+    openai/plan: [claude/plan-fallback]
+    openai/override: [claude/override-fallback]
+steps:
+  run:
+    prompt: hi
+    model: openai/override
+",
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_candidate_values(
+            planning_model_candidates(&config),
+            &[
+                (Sdk::Jcode, Some("openai/plan")),
+                (Sdk::Jcode, Some("claude/plan-fallback")),
+            ],
+        );
+        assert_candidate_values(
+            execution_model_candidates(&config),
+            &[
+                (Sdk::Jcode, Some("openai/run")),
+                (Sdk::Jcode, Some("claude/run-fallback")),
+                (Sdk::Jcode, Some("openai/override")),
+                (Sdk::Jcode, Some("claude/override-fallback")),
+            ],
         );
     }
 
