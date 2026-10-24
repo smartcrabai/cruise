@@ -6,6 +6,7 @@ use std::process::Stdio;
 
 use console::style;
 use inquire::InquireError;
+use opentelemetry::trace::FutureExt as OtelFutureExt;
 
 use std::sync::Arc;
 
@@ -224,11 +225,7 @@ async fn run_force_exec(
     .await
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "plan-creation flow: input + dry-run + attachments + worktree + plan + approve loop"
-)]
-pub async fn run(args: PlanArgs) -> Result<()> {
+pub async fn run(mut args: PlanArgs) -> Result<()> {
     // Resolve config first so the path is visible before prompting for input.
     // For repo sessions the config lives in the temporary clone, which doesn't
     // exist yet; resolution is deferred until after cloning.
@@ -250,7 +247,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         ));
     }
 
-    let (raw_input, from_interactive) = read_plan_input(args.input, noninteractive)?;
+    let (raw_input, from_interactive) = read_plan_input(args.input.take(), noninteractive)?;
     // Auto-detect image paths only from the interactive prompt (Claude-Code-like
     // drag-and-drop). For arg/stdin input, treat the text as opaque so prose
     // mentioning a path like "what changed in /tmp/x.png" stays intact.
@@ -300,47 +297,140 @@ pub async fn run(args: PlanArgs) -> Result<()> {
 
     let _herdr = crate::herdr::start();
     let manager = SessionManager::new(crate::paths::data_dir()?);
-    let (mut config, mut session) =
-        create_session_for_target(&manager, target, args.config.as_deref(), input.trim())?;
-    apply_cli_flags_or_discard(&manager, &config, &mut session, &args.flags)?;
 
-    if let Err(e) = attach_images_or_discard(&manager, &mut session, &images) {
-        eprintln!(
-            "\n{} Failed to attach images. Session {} discarded.",
-            style("✗").red().bold(),
-            session.id
-        );
-        return Err(e);
-    }
-
-    if args.no_interactive_planning {
-        config.interactive_planning = false;
-    }
-
-    // Grill mode relies on the SDK `ask_user` tool, which is only registered in
-    // the interactive tool-based planning flow. Reject when no SDK backend is
-    // selected or when `interactive_planning` is disabled, discarding the
-    // session we just created.
-    if args.grill && !crate::planning::sdk_plan_tools_enabled(&config) {
-        if let Err(del_err) = manager.delete(&session.id) {
-            eprintln!("warning: failed to clean up session: {del_err}");
+    let session_id = SessionManager::new_session_id();
+    let operation = crate::telemetry::Operation::execution("plan", &session_id, None);
+    let created = create_session_for_target(
+        &manager,
+        target,
+        args.config.as_deref(),
+        input.trim(),
+        &session_id,
+    );
+    let plan_result = match created {
+        Ok((config, session)) => {
+            operation.set_workflow(&session.config);
+            run_created_plan(&args, &manager, config, session, noninteractive, images)
+                .with_context(operation.context())
+                .await
         }
-        return Err(CruiseError::Other(
-            "--grill requires an SDK backend with interactive planning enabled \
-             (`command:` must not be set and `interactive_planning` must not be \
-             disabled); the command backend and tool-less planning have no \
-             interactive ask_user tool"
-                .to_string(),
-        ));
+        Err(error) => Err(error),
+    };
+    if matches!(&plan_result, Ok(PlanDisposition::Cancelled)) {
+        operation.finish("cancelled");
+        return Ok(());
     }
+    operation.finish_result(&plan_result);
+    if matches!(plan_result?, PlanDisposition::ExecuteNow) {
+        eprintln!(
+            "\n{} Executing session {}...",
+            style("->").cyan(),
+            session_id
+        );
+        let run_args = crate::cli::RunArgs {
+            session: Some(session_id),
+            all: false,
+            parallelism: None,
+            max_retries: None,
+            rate_limit_retries: args.rate_limit_retries,
+            dry_run: false,
+            cleanup_after_pr: false,
+            no_cleanup_after_pr: false,
+            flags: vec![],
+        };
+        return crate::run_cmd::run(run_args).await;
+    }
+    Ok(())
+}
 
-    setup_planning_worktree_or_discard(&manager, &mut session)?;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlanDisposition {
+    Completed,
+    Cancelled,
+    ExecuteNow,
+}
 
-    // Set up variables with the session plan path.
+async fn run_created_plan(
+    args: &PlanArgs,
+    manager: &SessionManager,
+    mut config: WorkflowConfig,
+    mut session: SessionState,
+    noninteractive: bool,
+    images: Vec<PathBuf>,
+) -> Result<PlanDisposition> {
+    let prepare_operation = crate::telemetry::Operation::phase("prepare");
+    let prepared: Result<()> = (|| {
+        apply_cli_flags_or_discard(manager, &config, &mut session, &args.flags)?;
+
+        if let Err(e) = attach_images_or_discard(manager, &mut session, &images) {
+            eprintln!(
+                "\n{} Failed to attach images. Session {} discarded.",
+                style("✗").red().bold(),
+                session.id
+            );
+            return Err(e);
+        }
+
+        if args.no_interactive_planning {
+            config.interactive_planning = false;
+        }
+
+        // Grill mode relies on the SDK `ask_user` tool, which is only registered in
+        // the interactive tool-based planning flow. Reject when no SDK backend is
+        // selected or when `interactive_planning` is disabled, discarding the
+        // session we just created.
+        if args.grill && !crate::planning::sdk_plan_tools_enabled(&config) {
+            if let Err(del_err) = manager.delete(&session.id) {
+                eprintln!("warning: failed to clean up session: {del_err}");
+            }
+            return Err(CruiseError::Other(
+                "--grill requires an SDK backend with interactive planning enabled \
+                 (`command:` must not be set and `interactive_planning` must not be \
+                 disabled); the command backend and tool-less planning have no \
+                 interactive ask_user tool"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    })();
+    prepare_operation.finish_result(&prepared);
+    prepared?;
+
+    let workspace_operation = crate::telemetry::Operation::phase("workspace");
+    let workspace = setup_planning_worktree_or_discard(manager, &mut session);
+    workspace_operation.finish_result(&workspace);
+    workspace?;
+
+    let (plan_path, mut vars, mut resume) =
+        generate_created_plan(args, manager, &config, &mut session, noninteractive).await?;
+    run_approve_loop(
+        &config,
+        manager,
+        &mut session,
+        &plan_path,
+        &mut vars,
+        args.rate_limit_retries,
+        noninteractive,
+        &mut resume,
+    )
+    .await
+}
+
+async fn generate_created_plan(
+    args: &PlanArgs,
+    manager: &SessionManager,
+    config: &WorkflowConfig,
+    session: &mut SessionState,
+    noninteractive: bool,
+) -> Result<(
+    PathBuf,
+    VariableStore,
+    Option<crate::model_selection::SdkSessionId>,
+)> {
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), &config);
+    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), config);
 
-    // SDK backends return a session id for plan / fix / ask turns so the turns
+    // SDK backends return an SDK-owned session id for plan / fix / ask turns so the turns
     // share one conversation; command mode always leaves this `None`.
     let mut resume: Option<crate::model_selection::SdkSessionId> = None;
     let interactive = !noninteractive;
@@ -351,31 +441,31 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         let plan_content = session.input_with_attachments();
         let write_result = crate::planning::write_input_as_plan(&plan_path, &plan_content)
             .and_then(|content| {
-                crate::metadata::refresh_session_title_from_plan(&mut session, &content);
+                crate::metadata::refresh_session_title_from_plan(session, &content);
                 session.mark_input_as_plan();
-                manager.save(&session)
+                manager.save(session)
             });
         if let Err(e) = write_result {
-            notify_plan_result(&session, &Err(CruiseError::Other(e.to_string())));
+            notify_plan_result(session, &Err(CruiseError::Other(e.to_string())));
             eprintln!(
                 "\n{} Failed to write input as plan. Session {} discarded.",
                 style("✗").red().bold(),
                 session.id
             );
-            cleanup_discarded_session_workspace(&manager, &session);
+            cleanup_discarded_session_workspace(manager, session);
             if let Err(del_err) = manager.delete(&session.id) {
                 eprintln!("warning: failed to clean up session: {del_err}");
             }
             return Err(e);
         }
-        notify_plan_result(&session, &Ok(()));
+        notify_plan_result(session, &Ok(()));
     } else {
-        let work_dir = plan_working_dir(&session).to_path_buf();
+        let work_dir = plan_working_dir(session).to_path_buf();
         let cancel_token = CancellationToken::new();
-        let on_notice = cli_notice_callback(&manager, &session.id);
-        let on_session_id = cli_plan_session_callback(&manager, &session, &config, &work_dir);
+        let on_notice = cli_notice_callback(manager, &session.id);
+        let on_session_id = cli_plan_session_callback(manager, session, config, &work_dir);
         let ctx = cli_plan_ctx(
-            &config,
+            config,
             &plan_path,
             Some(&work_dir),
             interactive,
@@ -385,7 +475,8 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             on_session_id.as_deref(),
             Some(&on_notice),
         );
-        let plan_result = {
+        let planning_operation = crate::telemetry::Operation::phase("planning");
+        let plan_result: Result<_> = async {
             let planning = generate_plan_markdown(&ctx, &mut vars, &mut resume);
             tokio::pin!(planning);
             tokio::select! {
@@ -396,39 +487,30 @@ pub async fn run(args: PlanArgs) -> Result<()> {
                     Err(CruiseError::Interrupted)
                 },
             }
-        };
+        }
+        .with_context(planning_operation.context())
+        .await;
+        planning_operation.finish_result(&plan_result);
         if let Err(e) = plan_result {
             if !matches!(&e, &CruiseError::Interrupted) {
-                notify_plan_result(&session, &Err(CruiseError::Other(e.to_string())));
+                notify_plan_result(session, &Err(CruiseError::Other(e.to_string())));
             }
             eprintln!(
                 "\n{} Plan generation failed. Session {} discarded.",
                 style("✗").red().bold(),
                 session.id
             );
-            cleanup_discarded_session_workspace(&manager, &session);
+            cleanup_discarded_session_workspace(manager, session);
             if let Err(del_err) = manager.delete(&session.id) {
                 eprintln!("warning: failed to clean up session: {del_err}");
             }
             return Err(e);
         }
-        notify_plan_result(&session, &Ok(()));
+        notify_plan_result(session, &Ok(()));
         let session_id = session.id.clone();
-        session = manager.load(&session_id)?;
+        *session = manager.load(&session_id)?;
     }
-
-    // Approve-plan loop.
-    run_approve_loop(
-        &config,
-        &manager,
-        &mut session,
-        &plan_path,
-        &mut vars,
-        args.rate_limit_retries,
-        noninteractive,
-        &mut resume,
-    )
-    .await
+    Ok((plan_path, vars, resume))
 }
 
 pub async fn launch_background_plan(
@@ -472,52 +554,100 @@ pub async fn launch_background_plan(
     }
 
     let manager = SessionManager::new(crate::paths::data_dir()?);
-    let (config, mut session) = create_session_for_target(&manager, target, None, &input)?;
-    apply_cli_flags_or_discard(&manager, &config, &mut session, flags)?;
-    attach_images_or_discard(&manager, &mut session, &detected_images)?;
-    setup_planning_worktree_or_discard(&manager, &mut session)?;
+    let session_id = SessionManager::new_session_id();
+    let operation = crate::telemetry::Operation::execution("plan", &session_id, None);
+    let result: Result<()> =
+        match create_session_for_target(&manager, target, None, &input, &session_id) {
+            Ok((config, mut session)) => {
+                operation.set_workflow(&session.config);
+                async {
+                    let prepare_operation = crate::telemetry::Operation::phase("prepare");
+                    let prepared: Result<()> = (|| {
+                        apply_cli_flags_or_discard(&manager, &config, &mut session, flags)?;
+                        attach_images_or_discard(&manager, &mut session, &detected_images)
+                    })();
+                    prepare_operation.finish_result(&prepared);
+                    prepared?;
 
-    if skip_planning {
-        let plan_path = session.plan_path(&manager.sessions_dir());
-        let plan_content = session.input_with_attachments();
-        let skip_result =
-            crate::planning::write_input_as_plan(&plan_path, &plan_content).and_then(|content| {
-                crate::metadata::refresh_session_title_from_plan(&mut session, &content);
-                session.mark_input_as_plan();
-                finalize_skip_planning_session(&manager, &mut session, config.create_pr)
-            });
-        if let Err(error) = skip_result {
-            notify_plan_result(&session, &Err(CruiseError::Other(error.to_string())));
-            cleanup_discarded_session_workspace(&manager, &session);
-            if let Err(del_err) = manager.delete(&session.id) {
-                eprintln!("warning: failed to clean up session: {del_err}");
+                    let workspace_operation = crate::telemetry::Operation::phase("workspace");
+                    let workspace = setup_planning_worktree_or_discard(&manager, &mut session);
+                    workspace_operation.finish_result(&workspace);
+                    workspace?;
+
+                    if skip_planning {
+                        write_and_finalize_background_plan_input(
+                            &manager,
+                            &mut session,
+                            config.create_pr,
+                        )?;
+                        eprintln!(
+                            "\n{} Session {} created (input used as plan).",
+                            style("✓").green().bold(),
+                            session.id
+                        );
+                        eprintln!("  Check status with: {}", style("cruise list").cyan());
+                        eprintln!(
+                            "  Run with: {}",
+                            style(format!("cruise run {}", session.id)).cyan()
+                        );
+                    } else {
+                        let finalize_operation = crate::telemetry::Operation::phase("finalize");
+                        let launched = spawn_plan_worker(&session.id, DEFAULT_RATE_LIMIT_RETRIES);
+                        finalize_operation.finish_result(&launched);
+                        launched?;
+                        eprintln!(
+                            "\n{} Session {} created. Planning in background.",
+                            style("✓").green().bold(),
+                            session.id
+                        );
+                        eprintln!("  Check status with: {}", style("cruise list").cyan());
+                        eprintln!(
+                            "  Run once ready: {}",
+                            style(format!("cruise run {}", session.id)).cyan()
+                        );
+                    }
+                    Ok(())
+                }
+                .with_context(operation.context())
+                .await
             }
-            return Err(error);
-        }
-        notify_plan_result(&session, &Ok(()));
-        eprintln!(
-            "\n{} Session {} created (input used as plan).",
-            style("✓").green().bold(),
-            session.id
-        );
-        eprintln!("  Check status with: {}", style("cruise list").cyan());
-        eprintln!(
-            "  Run with: {}",
-            style(format!("cruise run {}", session.id)).cyan()
-        );
+            Err(error) => Err(error),
+        };
+    operation.finish_result(&result);
+    result
+}
+
+fn write_and_finalize_background_plan_input(
+    manager: &SessionManager,
+    session: &mut SessionState,
+    create_pr: bool,
+) -> Result<()> {
+    let plan_path = session.plan_path(&manager.sessions_dir());
+    let plan_content = session.input_with_attachments();
+    let plan_result =
+        crate::planning::write_input_as_plan(&plan_path, &plan_content).and_then(|content| {
+            crate::metadata::refresh_session_title_from_plan(session, &content);
+            session.mark_input_as_plan();
+            manager.save(session)
+        });
+
+    let skip_result = if plan_result.is_ok() {
+        let finalize_operation = crate::telemetry::Operation::phase("finalize");
+        let finalized = finalize_skip_planning_session(manager, session, create_pr);
+        finalize_operation.finish_result(&finalized);
+        finalized
     } else {
-        spawn_plan_worker(&session.id, DEFAULT_RATE_LIMIT_RETRIES)?;
-        eprintln!(
-            "\n{} Session {} created. Planning in background.",
-            style("✓").green().bold(),
-            session.id
-        );
-        eprintln!("  Check status with: {}", style("cruise list").cyan());
-        eprintln!(
-            "  Run once ready: {}",
-            style(format!("cruise run {}", session.id)).cyan()
-        );
+        plan_result
+    };
+    if let Err(error) = skip_result {
+        notify_plan_result(session, &Err(CruiseError::Other(error.to_string())));
+        cleanup_discarded_session_workspace(manager, session);
+        if let Err(del_err) = manager.delete(&session.id) {
+            eprintln!("warning: failed to clean up session: {del_err}");
+        }
+        return Err(error);
     }
+    notify_plan_result(session, &Ok(()));
     Ok(())
 }
 
@@ -544,36 +674,63 @@ fn finalize_skip_planning_session(
 }
 
 pub async fn run_plan_worker(args: PlanWorkerArgs) -> Result<()> {
+    let operation = crate::telemetry::Operation::execution("plan", &args.session, None);
+    let result = run_plan_worker_inner(args, &operation)
+        .with_context(operation.context())
+        .await;
+    operation.finish_result(&result);
+    result
+}
+
+async fn run_plan_worker_inner(
+    args: PlanWorkerArgs,
+    operation: &crate::telemetry::Operation,
+) -> Result<()> {
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let mut session = match manager.load(&args.session) {
         Ok(session) => session,
         Err(CruiseError::SessionError(_)) => return Ok(()),
         Err(err) => return Err(err),
     };
+    operation.set_workflow(&session.config);
+    let prepare_operation = crate::telemetry::Operation::phase("prepare");
     session.plan_error = None;
-    manager.save(&session)?;
+    let prepared = manager.save(&session);
+    prepare_operation.finish_result(&prepared);
+    prepared?;
 
-    let result = generate_plan_for_session(&manager, &session, args.rate_limit_retries).await;
-    let session_id = session.id.clone();
-    session = manager.load(&session_id)?;
-    match result {
-        Ok(plan_markdown) => {
-            crate::metadata::refresh_session_title_from_plan(&mut session, &plan_markdown);
-            session.plan_error = None;
-            manager.save(&session)?;
-            notify_plan_result(&session, &Ok(()));
-            Ok(())
-        }
-        Err(err) => {
-            let plan_error = err.to_string();
-            session.plan_error = Some(plan_error.clone());
-            manager.save(&session)?;
-            if !matches!(&err, &CruiseError::Interrupted) {
-                notify_plan_result(&session, &Err(CruiseError::Other(plan_error.clone())));
+    let planning_operation = crate::telemetry::Operation::phase("planning");
+    let result = generate_plan_for_session(&manager, &session, args.rate_limit_retries)
+        .with_context(planning_operation.context())
+        .await;
+    planning_operation.finish_result(&result);
+    let finalize_operation = crate::telemetry::Operation::phase("finalize");
+    let finalized: Result<()> = async {
+        let session_id = session.id.clone();
+        session = manager.load(&session_id)?;
+        match result {
+            Ok(plan_markdown) => {
+                crate::metadata::refresh_session_title_from_plan(&mut session, &plan_markdown);
+                session.plan_error = None;
+                manager.save(&session)?;
+                notify_plan_result(&session, &Ok(()));
+                Ok(())
             }
-            Err(CruiseError::Other(plan_error))
+            Err(err) => {
+                let plan_error = err.to_string();
+                session.plan_error = Some(plan_error.clone());
+                manager.save(&session)?;
+                if !matches!(&err, &CruiseError::Interrupted) {
+                    notify_plan_result(&session, &Err(CruiseError::Other(plan_error.clone())));
+                }
+                Err(CruiseError::Other(plan_error))
+            }
         }
     }
+    .with_context(finalize_operation.context())
+    .await;
+    finalize_operation.finish_result(&finalized);
+    finalized
 }
 
 /// Read task input from CLI arg, piped stdin, or interactive prompt. The
@@ -796,11 +953,11 @@ fn create_planning_session(
     yaml: &str,
     source: &ConfigSource,
     input: String,
+    session_id: &str,
 ) -> Result<SessionState> {
-    let session_id = SessionManager::new_session_id();
     let base_dir = std::env::current_dir()?;
     let config_ref = SessionConfigRef::from_source(source, None)?;
-    let session = SessionState::new(session_id.clone(), base_dir, config_ref, input);
+    let session = SessionState::new(session_id.to_string(), base_dir, config_ref, input);
     let config = crate::resolver::load_config_from_source(yaml, source)?;
     manager.create_with_config(&session, &config)?;
 
@@ -882,6 +1039,7 @@ fn create_session_for_target(
     target: PlanTarget,
     explicit_config: Option<&str>,
     input: &str,
+    session_id: &str,
 ) -> Result<(WorkflowConfig, SessionState)> {
     match target {
         PlanTarget::Local {
@@ -889,12 +1047,17 @@ fn create_session_for_target(
             source,
             config,
         } => {
-            let session = create_planning_session(manager, &yaml, &source, input.to_string())?;
+            let session =
+                create_planning_session(manager, &yaml, &source, input.to_string(), session_id)?;
             Ok((config, session))
         }
-        PlanTarget::Repo(repo) => {
-            create_repo_planning_session(manager, &repo, explicit_config, input.to_string())
-        }
+        PlanTarget::Repo(repo) => create_repo_planning_session(
+            manager,
+            &repo,
+            explicit_config,
+            input.to_string(),
+            session_id,
+        ),
     }
 }
 
@@ -906,9 +1069,9 @@ fn create_repo_planning_session(
     repo: &str,
     explicit_config: Option<&str>,
     input: String,
+    session_id: &str,
 ) -> Result<(WorkflowConfig, SessionState)> {
-    let session_id = SessionManager::new_session_id();
-    let clone_path = manager.clones_dir().join(&session_id);
+    let clone_path = manager.clones_dir().join(session_id);
     eprintln!("{} cloning {} (planning)...", style("->").cyan(), repo);
     crate::repo_clone::clone_repo(repo, &clone_path)?;
 
@@ -917,12 +1080,12 @@ fn create_repo_planning_session(
         repo,
         explicit_config,
         input,
-        &session_id,
+        session_id,
         &clone_path,
     );
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&clone_path);
-        if let Err(del_err) = manager.delete(&session_id) {
+        if let Err(del_err) = manager.delete(session_id) {
             eprintln!("warning: failed to clean up session: {del_err}");
         }
     }
@@ -1232,7 +1395,7 @@ async fn run_approve_loop(
     rate_limit_retries: usize,
     noninteractive: bool,
     resume: &mut Option<crate::model_selection::SdkSessionId>,
-) -> Result<()> {
+) -> Result<PlanDisposition> {
     let working_dir = session
         .worktree_path
         .clone()
@@ -1276,7 +1439,12 @@ async fn run_approve_loop(
         crate::display::print_bordered(&plan_content, Some("plan.md"));
 
         if noninteractive {
-            approve_with_title(session, manager, config, &plan_content, None).await?;
+            let finalize_operation = crate::telemetry::Operation::phase("finalize");
+            let result = approve_with_title(session, manager, config, &plan_content, None)
+                .with_context(finalize_operation.context())
+                .await;
+            finalize_operation.finish_result(&result);
+            result?;
             eprintln!(
                 "\n{} Session {} created.",
                 style("v").green().bold(),
@@ -1286,7 +1454,7 @@ async fn run_approve_loop(
                 "  Run with: {}",
                 style(format!("cruise run {}", session.id)).cyan()
             );
-            return Ok(());
+            return Ok(PlanDisposition::Completed);
         }
 
         let review = crate::herdr::blocked("Plan ready: approve, fix, or ask");
@@ -1299,7 +1467,7 @@ async fn run_approve_loop(
                 eprintln!("\nCancelled. Session {} discarded.", session.id);
                 cleanup_discarded_session_workspace(manager, session);
                 manager.delete(&session.id)?;
-                return Ok(());
+                return Ok(PlanDisposition::Cancelled);
             }
             Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
         };
@@ -1314,7 +1482,8 @@ async fn run_approve_loop(
                 session.skipped_steps = skipped_steps;
                 drop(review);
                 let mut approval_interrupted = false;
-                let approval_result = {
+                let finalize_operation = crate::telemetry::Operation::phase("finalize");
+                let approval_result: Result<()> = async {
                     let approval = approve_with_title(
                         session,
                         manager,
@@ -1332,13 +1501,17 @@ async fn run_approve_loop(
                             Err(CruiseError::Interrupted)
                         },
                     }
-                };
+                }
+                .with_context(finalize_operation.context())
+                .await;
+                finalize_operation.finish_result(&approval_result);
                 if approval_interrupted {
                     eprintln!("\nCancelled. Session {} discarded.", session.id);
                     cleanup_discarded_session_workspace(manager, session);
                     if let Err(del_err) = manager.delete(&session.id) {
                         eprintln!("warning: failed to clean up session: {del_err}");
                     }
+                    return Err(CruiseError::Interrupted);
                 }
                 approval_result?;
                 if !execute_now {
@@ -1351,25 +1524,9 @@ async fn run_approve_loop(
                         "  Run with: {}",
                         style(format!("cruise run {}", session.id)).cyan()
                     );
-                    return Ok(());
+                    return Ok(PlanDisposition::Completed);
                 }
-                eprintln!(
-                    "\n{} Executing session {}...",
-                    style("->").cyan(),
-                    session.id
-                );
-                let run_args = crate::cli::RunArgs {
-                    session: Some(session.id.clone()),
-                    all: false,
-                    parallelism: None,
-                    max_retries: None,
-                    rate_limit_retries,
-                    dry_run: false,
-                    cleanup_after_pr: false,
-                    no_cleanup_after_pr: false,
-                    flags: vec![],
-                };
-                return crate::run_cmd::run(run_args).await;
+                return Ok(PlanDisposition::ExecuteNow);
             }
             "Fix" => {
                 let text = match prompt_multiline("Describe the changes needed:")? {
@@ -1378,7 +1535,8 @@ async fn run_approve_loop(
                 };
                 vars.set_prev_input(Some(text));
                 drop(review);
-                let fix_result = {
+                let planning_operation = crate::telemetry::Operation::phase("planning");
+                let fix_result: Result<()> = async {
                     let fixing = run_fix_plan(&ctx, vars, resume);
                     tokio::pin!(fixing);
                     tokio::select! {
@@ -1389,7 +1547,10 @@ async fn run_approve_loop(
                             Err(CruiseError::Interrupted)
                         },
                     }
-                };
+                }
+                .with_context(planning_operation.context())
+                .await;
+                planning_operation.finish_result(&fix_result);
                 let _ = fix_result
                     .as_ref()
                     .inspect_err(|_| notify_plan_result(session, &fix_result));
@@ -1412,7 +1573,8 @@ async fn run_approve_loop(
                 };
                 vars.set_prev_input(Some(text));
                 drop(review);
-                let ask_result = {
+                let planning_operation = crate::telemetry::Operation::phase("planning");
+                let ask_result: Result<()> = async {
                     let asking = run_ask_plan(&ctx, vars, resume);
                     tokio::pin!(asking);
                     tokio::select! {
@@ -1423,7 +1585,10 @@ async fn run_approve_loop(
                             Err(CruiseError::Interrupted)
                         },
                     }
-                };
+                }
+                .with_context(planning_operation.context())
+                .await;
+                planning_operation.finish_result(&ask_result);
                 let _ = ask_result
                     .as_ref()
                     .inspect_err(|_| notify_plan_result(session, &ask_result));
@@ -1441,18 +1606,21 @@ async fn run_approve_loop(
                 } else {
                     false
                 };
-                match crate::issue_publish::publish_plan_issue_and_delete(
+                let finalize_operation = crate::telemetry::Operation::phase("finalize");
+                let published = crate::issue_publish::publish_plan_issue_and_delete(
                     manager,
                     session.clone(),
                     trigger_cruise,
-                ) {
+                );
+                finalize_operation.finish_result(&published);
+                match published {
                     Ok(published) => {
                         eprintln!(
                             "\n{} Published plan as issue: {}",
                             style("v").green().bold(),
                             published.url
                         );
-                        return Ok(());
+                        return Ok(PlanDisposition::Completed);
                     }
                     Err(e) => {
                         eprintln!(
@@ -2022,6 +2190,7 @@ plan_model:
             crate::config::BUILTIN_CONFIG_YAML,
             &ConfigSource::Builtin,
             "use builtin".to_string(),
+            &SessionManager::new_session_id(),
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -2092,7 +2261,9 @@ plan_model:
             );
             assert_eq!((engine.sdk(), engine.model()), (sdk, Some(primary)));
             assert!(matches!(
-                engine.next(crate::retry::Failure::Failed("HTTP 400 bad request"), false),
+                engine
+                    .next_with_class(crate::retry::Failure::Failed("HTTP 400 bad request"), false)
+                    .0,
                 crate::retry::RetryAction::Switch { .. }
             ));
             assert_eq!((engine.sdk(), engine.model()), (sdk, Some(fallback)));

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use command_group::{AsyncCommandGroup as _, AsyncGroupChild};
+use opentelemetry::trace::FutureExt as OtelFutureExt;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -60,14 +61,33 @@ async fn run_command<S: std::hash::BuildHasher>(
 ) -> Result<CommandResult> {
     let mut attempts = 0;
     loop {
-        let result =
-            execute_command_cancel(cmd, env, cwd, timeout, on_step_log, cancel_token).await?;
+        let attempt_number = attempts + 1;
+        let attempt = crate::telemetry::Operation::attempt(attempt_number, "command", None);
+        let result = execute_command_cancel(cmd, env, cwd, timeout, on_step_log, cancel_token)
+            .with_context(attempt.context())
+            .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let failed: Result<CommandResult> = Err(error);
+                attempt.finish_result(&failed);
+                return failed;
+            }
+        };
         if result.success {
+            attempt.finish("success");
             return Ok(result);
         }
-        if is_rate_limited(&result.stderr) && attempts < max_retries {
+        let rate_limited = is_rate_limited(&result.stderr);
+        if rate_limited && attempts < max_retries {
+            attempt.set_error_type("rate_limit");
             attempts += 1;
             let delay = calculate_backoff(attempts);
+            {
+                let _guard = attempt.context().attach();
+                crate::telemetry::record_retry("backoff", "rate_limit", attempts, None, None);
+            }
+            attempt.finish("error");
             crate::status_eprintln!(
                 "Rate limit detected. Retrying in {:.1}s... ({}/{})",
                 delay.as_secs_f64(),
@@ -80,6 +100,13 @@ async fn run_command<S: std::hash::BuildHasher>(
             }
             continue;
         }
+        attempt.set_error_type(if rate_limited {
+            "rate_limit"
+        } else {
+            "command_exit"
+        });
+        crate::telemetry::record_error_type("command_exit");
+        attempt.finish("error");
         return Ok(result);
     }
 }

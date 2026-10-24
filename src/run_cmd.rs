@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use console::style;
 use inquire::InquireError;
+use opentelemetry::trace::FutureExt as OtelFutureExt;
 
 use crate::cancellation::CancellationToken;
 use crate::cli::RunArgs;
@@ -110,6 +111,14 @@ const TEST_WORKSPACE_MODE_ENV: &str = "CRUISE_TEST_WORKSPACE_MODE";
 enum WorkspaceOverride {
     RespectSession,
     ForceWorktree,
+}
+
+/// A session and the fingerprint that identifies the state version it was loaded from.
+struct LoadedRunSession {
+    manager: SessionManager,
+    session_id: String,
+    session: SessionState,
+    initial_fingerprint: SessionStateFingerprint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,7 +332,31 @@ fn load_run_all_result_state(manager: &SessionManager, fallback: &SessionState) 
     }
 }
 
+// Keep the shared execution state off Windows' small main-thread stack.
 pub async fn run(args: RunArgs) -> Result<()> {
+    finish_cli_run(Box::pin(run_inner(args, None)).await)
+}
+
+pub(crate) fn finish_cli_run(result: Result<()>) -> Result<()> {
+    match result {
+        Err(CruiseError::StepPaused) => {
+            eprintln!("Session paused. Resume with `cruise run`.");
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+pub(crate) async fn run_with_operation(
+    args: RunArgs,
+    operation: &crate::telemetry::Operation,
+) -> Result<()> {
+    Box::pin(run_inner(args, Some(operation)))
+        .with_context(operation.context())
+        .await
+}
+
+async fn run_inner(args: RunArgs, operation: Option<&crate::telemetry::Operation>) -> Result<()> {
     let _herdr = crate::herdr::start();
     // Validate --parallelism before any session is selected or executed.
     if let Some(parallelism) = args.parallelism {
@@ -365,42 +398,97 @@ pub async fn run(args: RunArgs) -> Result<()> {
         })
     };
     let cancel_token = CancellationToken::new();
-    let result = run_single(
+    let mut workflow_failed = false;
+    let result = run_single_with_operation(
         args,
         WorkspaceOverride::RespectSession,
         &CliOptionHandler,
         cancel_token,
         &NoopObserver,
+        operation,
+        &mut workflow_failed,
     )
     .await;
     if let Some((manager, id, phase, fingerprint)) = explicit_exec {
         manager.dispose_exec_session_if_owned(&id, &phase, fingerprint);
     }
 
-    match result {
-        Err(CruiseError::StepPaused) => {
-            eprintln!("Session paused. Resume with `cruise run`.");
-            Ok(())
+    result
+}
+
+async fn run_single_with_operation(
+    mut args: RunArgs,
+    workspace_override: WorkspaceOverride,
+    option_handler: &dyn OptionHandler,
+    cancel_token: CancellationToken,
+    observer: &dyn RunObserver,
+    operation: Option<&crate::telemetry::Operation>,
+    workflow_failed: &mut bool,
+) -> Result<()> {
+    let manager = SessionManager::new(crate::paths::data_dir()?);
+    let session_id = args
+        .session
+        .take()
+        .map_or_else(|| select_pending_session(&manager), Ok)?;
+    let (session, initial_fingerprint) = manager.load_with_fingerprint(&session_id)?;
+    let mut owned_operation = None;
+    let active_operation: &crate::telemetry::Operation = match operation {
+        Some(operation) => operation,
+        None => owned_operation.insert(crate::telemetry::Operation::execution(
+            if session.exec { "exec" } else { "run" },
+            &session_id,
+            Some(&session.config),
+        )),
+    };
+    let result = run_single_loaded(
+        args,
+        workspace_override,
+        option_handler,
+        cancel_token,
+        observer,
+        LoadedRunSession {
+            manager,
+            session_id,
+            session,
+            initial_fingerprint,
+        },
+        workflow_failed,
+    )
+    .with_context(active_operation.context())
+    .await;
+    if let Some(owned_operation) = owned_operation {
+        if *workflow_failed && result.is_ok() {
+            owned_operation.set_error_type("step_failed");
+            owned_operation.finish("error");
+        } else {
+            owned_operation.finish_result(&result);
         }
-        other => other,
+    } else if *workflow_failed
+        && result.is_ok()
+        && let Some(operation) = operation
+    {
+        operation.set_error_type("step_failed");
     }
+    result
 }
 
 #[expect(clippy::too_many_lines)]
-async fn run_single(
+async fn run_single_loaded(
     args: RunArgs,
     workspace_override: WorkspaceOverride,
     option_handler: &dyn OptionHandler,
     cancel_token: CancellationToken,
     observer: &dyn RunObserver,
+    loaded: LoadedRunSession,
+    workflow_failed: &mut bool,
 ) -> Result<()> {
+    let LoadedRunSession {
+        manager,
+        session_id,
+        mut session,
+        mut initial_fingerprint,
+    } = loaded;
     let cleanup_override = args.cleanup_after_pr_override();
-    let manager = SessionManager::new(crate::paths::data_dir()?);
-    let session_id = args
-        .session
-        .map_or_else(|| select_pending_session(&manager), Ok)?;
-    let (mut session, mut initial_fingerprint) = manager.load_with_fingerprint(&session_id)?;
-
     if !session.phase.is_runnable() {
         return Err(CruiseError::Other(format!(
             "Session {} is in '{}' phase and cannot be run. Approve it first with `cruise list`.",
@@ -408,121 +496,137 @@ async fn run_single(
             session.phase.label()
         )));
     }
-    if !args.dry_run && session.pr_skipped_reason.take().is_some() {
-        initial_fingerprint =
-            save_session_state_with_conflict_resolution(&manager, &session, initial_fingerprint)?;
+    let prepare_operation = crate::telemetry::Operation::phase("prepare");
+    let prepared: Result<_> = async {
+        if !args.dry_run && session.pr_skipped_reason.take().is_some() {
+            initial_fingerprint = save_session_state_with_conflict_resolution(
+                &manager,
+                &session,
+                initial_fingerprint,
+            )?;
+        }
+        if cancel_token.is_cancelled() {
+            return Err(CruiseError::Interrupted);
+        }
+        observer.on_phase(&session_id, RunPhase::Preparing);
+        let config = manager.load_config(&session)?;
+        validate_config(&config)?;
+        let cli_flags = crate::flags::from_cli(&args.flags)?;
+        crate::flags::validate_names(&config, &cli_flags)?;
+        session.flags.extend(cli_flags);
+        if !args.dry_run
+            && !session.exec
+            && (session.plan_error.is_some() || !session.has_usable_plan(&manager.sessions_dir()))
+        {
+            return Err(CruiseError::Other(format!(
+                "Session {session_id} has no usable plan; retry planning first."
+            )));
+        }
+        let effective_max_retries =
+            crate::config::resolve_effective_max_retries(args.max_retries, &config);
+        crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
+        let retry_policy = crate::retry::policy_for_config(config.retry.clone());
+        let compiled = crate::workflow::compile(config.clone())?;
+        let mut dag = crate::graph::build_graph(&compiled, effective_max_retries)?;
+        let start_node = crate::graph::persistence::prepare_resume(
+            &mut dag,
+            &manager.dag_path(&session.id),
+            session.has_dag,
+            session.current_step.as_deref(),
+            session.current_step_is_node_id,
+            session.execution_id.as_deref(),
+        )?;
+        crate::graph::validation::validate_workflow(
+            &compiled,
+            &dag,
+            &start_node,
+            &crate::flags::preflight_skips(&compiled, &session.flags, &session.skipped_steps),
+        )?;
+        Ok((config, effective_max_retries, retry_policy, compiled, dag))
     }
-
-    if cancel_token.is_cancelled() {
-        return Err(CruiseError::Interrupted);
-    }
-    observer.on_phase(&session_id, RunPhase::Preparing);
-    let config = manager.load_config(&session)?;
-    validate_config(&config)?;
-    let cli_flags = crate::flags::from_cli(&args.flags)?;
-    crate::flags::validate_names(&config, &cli_flags)?;
-    session.flags.extend(cli_flags);
-    if !args.dry_run
-        && !session.exec
-        && (session.plan_error.is_some() || !session.has_usable_plan(&manager.sessions_dir()))
-    {
-        return Err(CruiseError::Other(format!(
-            "Session {session_id} has no usable plan; retry planning first."
-        )));
-    }
-    let effective_max_retries =
-        crate::config::resolve_effective_max_retries(args.max_retries, &config);
-    crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
-    let mut retry_policy = crate::retry::policy_for_config(config.retry.clone());
-
-    let mut compiled = crate::workflow::compile(config.clone())?;
-    let mut dag = crate::graph::build_graph(&compiled, effective_max_retries)?;
-    let start_node = crate::graph::persistence::prepare_resume(
-        &mut dag,
-        &manager.dag_path(&session.id),
-        session.has_dag,
-        session.current_step.as_deref(),
-        session.current_step_is_node_id,
-        session.execution_id.as_deref(),
-    )?;
-    crate::graph::validation::validate_workflow(
-        &compiled,
-        &dag,
-        &start_node,
-        &crate::flags::preflight_skips(&compiled, &session.flags, &session.skipped_steps),
-    )?;
-
+    .with_context(prepare_operation.context())
+    .await;
+    prepare_operation.finish_result(&prepared);
+    let (config, effective_max_retries, mut retry_policy, mut compiled, mut dag) = prepared?;
     if args.dry_run {
         eprintln!("{}", style(format!("Session: {session_id}")).dim());
         print_dry_run(&config, session.current_step.as_deref());
         return Ok(());
     }
 
-    if cancel_token.is_cancelled() {
-        return Err(CruiseError::Interrupted);
-    }
-    let effective_workspace_mode = if session.repo.is_some() {
-        // Repo-backed sessions always execute in a worktree on a fresh clone;
-        // current-branch mode is not available for explicit repo sessions.
-        WorkspaceMode::Worktree
-    } else {
-        match workspace_override {
-            WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
-            WorkspaceOverride::RespectSession => {
-                if session.current_step.is_none()
-                    && session.workspace_mode == WorkspaceMode::Worktree
-                {
-                    prompt_workspace_mode()?
-                } else {
-                    session.workspace_mode
+    let workspace_operation = crate::telemetry::Operation::phase("workspace");
+    let workspace: Result<_> = async {
+        if cancel_token.is_cancelled() {
+            return Err(CruiseError::Interrupted);
+        }
+        let effective_workspace_mode = if session.repo.is_some() {
+            // Repo-backed sessions always execute in a worktree on a fresh clone;
+            // current-branch mode is not available for explicit repo sessions.
+            WorkspaceMode::Worktree
+        } else {
+            match workspace_override {
+                WorkspaceOverride::ForceWorktree => WorkspaceMode::Worktree,
+                WorkspaceOverride::RespectSession => {
+                    if session.current_step.is_none()
+                        && session.workspace_mode == WorkspaceMode::Worktree
+                    {
+                        prompt_workspace_mode()?
+                    } else {
+                        session.workspace_mode
+                    }
                 }
             }
+        };
+        session.workspace_mode = effective_workspace_mode;
+        if effective_workspace_mode == WorkspaceMode::CurrentBranch
+            && let Some(ctx) = session.worktree_context()
+        {
+            crate::status_eprintln!(
+                "{} cleaning up planning worktree: {}",
+                style("->").cyan(),
+                ctx.path.display()
+            );
+            let _ = crate::worktree::cleanup_worktree(&ctx);
+            session.worktree_path = None;
+            session.worktree_branch = None;
         }
-    };
-    session.workspace_mode = effective_workspace_mode;
-    if effective_workspace_mode == WorkspaceMode::CurrentBranch
-        && let Some(ctx) = session.worktree_context()
-    {
-        crate::status_eprintln!(
-            "{} cleaning up planning worktree: {}",
-            style("->").cyan(),
-            ctx.path.display()
-        );
-        let _ = crate::worktree::cleanup_worktree(&ctx);
-        session.worktree_path = None;
-        session.worktree_branch = None;
+        if session.repo.is_some() {
+            crate::forge::ensure_forge_available(crate::forge::session_forge(&session))?;
+        }
+        if cancel_token.is_cancelled() {
+            return Err(CruiseError::Interrupted);
+        }
+        log_resume_message(&session);
+        if cancel_token.is_cancelled() {
+            return Err(CruiseError::Interrupted);
+        }
+        // Repo-backed sessions execute in a temporary clone; re-create it if the
+        // post-approval cleanup (or a previous run) removed it.
+        if crate::repo_clone::ensure_repo_session_workspace(&manager, &mut session)? {
+            crate::status_eprintln!(
+                "{} clone: {}",
+                style("->").cyan(),
+                session.base_dir.display()
+            );
+        }
+        if cancel_token.is_cancelled() {
+            return Err(CruiseError::Interrupted);
+        }
+        let execution_workspace =
+            prepare_execution_workspace(&manager, &mut session, effective_workspace_mode)?;
+        log_execution_workspace(&execution_workspace);
+        update_session_workspace(&mut session, &execution_workspace);
+        session.set_runner_to_current_process();
+        session.pr_skipped_reason = None;
+        session.phase = SessionPhase::Running;
+        initial_fingerprint =
+            save_session_state_with_conflict_resolution(&manager, &session, initial_fingerprint)?;
+        Ok((execution_workspace, initial_fingerprint))
     }
-    if session.repo.is_some() {
-        crate::forge::ensure_forge_available(crate::forge::session_forge(&session))?;
-    }
-    if cancel_token.is_cancelled() {
-        return Err(CruiseError::Interrupted);
-    }
-    log_resume_message(&session);
-    if cancel_token.is_cancelled() {
-        return Err(CruiseError::Interrupted);
-    }
-    // Repo-backed sessions execute in a temporary clone; re-create it if the
-    // post-approval cleanup (or a previous run) removed it.
-    if crate::repo_clone::ensure_repo_session_workspace(&manager, &mut session)? {
-        crate::status_eprintln!(
-            "{} clone: {}",
-            style("->").cyan(),
-            session.base_dir.display()
-        );
-    }
-    if cancel_token.is_cancelled() {
-        return Err(CruiseError::Interrupted);
-    }
-    let execution_workspace =
-        prepare_execution_workspace(&manager, &mut session, effective_workspace_mode)?;
-    log_execution_workspace(&execution_workspace);
-    update_session_workspace(&mut session, &execution_workspace);
-    session.set_runner_to_current_process();
-    session.pr_skipped_reason = None;
-    session.phase = SessionPhase::Running;
-    let initial_fingerprint =
-        save_session_state_with_conflict_resolution(&manager, &session, initial_fingerprint)?;
+    .with_context(workspace_operation.context())
+    .await;
+    workspace_operation.finish_result(&workspace);
+    let (execution_workspace, initial_fingerprint) = workspace?;
 
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.template_input(&manager.sessions_dir()));
@@ -569,49 +673,69 @@ async fn run_single(
     let on_step_log = |stream: &str, line: &str| {
         logger.write(&format!("[{stream}] {line}"));
     };
-    let exec_result = {
-        let ctx = crate::engine::ExecutionContext {
-            compiled: &compiled,
-            max_retries: effective_max_retries,
-            rate_limit_retries: args.rate_limit_retries,
-            on_step_start: &on_step_start,
-            on_step_log: Some(&on_step_log),
-            cancel_token: Some(&cancel_token),
-            option_handler: &notifying_option_handler,
-            config_reloader: config_reloader.as_deref(),
-            working_dir: Some(execution_workspace.path()),
-            skipped_steps: &skipped_steps,
-            flags: &flag_values,
+    let workflow_operation = crate::telemetry::Operation::phase("workflow");
+    let exec_result: Result<_> = async {
+        let exec_result = {
+            let ctx = crate::engine::ExecutionContext {
+                compiled: &compiled,
+                max_retries: effective_max_retries,
+                rate_limit_retries: args.rate_limit_retries,
+                on_step_start: &on_step_start,
+                on_step_log: Some(&on_step_log),
+                cancel_token: Some(&cancel_token),
+                option_handler: &notifying_option_handler,
+                config_reloader: config_reloader.as_deref(),
+                working_dir: Some(execution_workspace.path()),
+                skipped_steps: &skipped_steps,
+                flags: &flag_values,
+            };
+            crate::retry::with_active_policy(retry_policy.clone(), async {
+                let execution = execute_steps_with_graph(
+                    &ctx,
+                    &mut vars,
+                    &mut tracker,
+                    &mut dag,
+                    &on_node_start,
+                );
+                tokio::pin!(execution);
+                tokio::select! {
+                    result = &mut execution => result,
+                    _ = tokio::signal::ctrl_c() => {
+                        cancel_token.cancel();
+                        // Keep polling so every running child can stop and release
+                        // its workspace before this session becomes resumable.
+                        let _ = execution.await;
+                        Err(CruiseError::Interrupted)
+                    },
+                }
+            })
+            .await
         };
-        crate::retry::with_active_policy(retry_policy.clone(), async {
-            let execution =
-                execute_steps_with_graph(&ctx, &mut vars, &mut tracker, &mut dag, &on_node_start);
-            tokio::pin!(execution);
-            tokio::select! {
-                result = &mut execution => result,
-                _ = tokio::signal::ctrl_c() => {
-                    cancel_token.cancel();
-                    // Keep polling so every running child can stop and release
-                    // its workspace before this session becomes resumable.
-                    let _ = execution.await;
-                    Err(CruiseError::Interrupted)
-                },
-            }
-        })
-        .await
-    };
 
-    let exec_result = exec_result.and_then(|result| {
-        crate::graph::persistence::save_graph(&dag, &manager.dag_path(&session_id))?;
-        Ok(result)
-    });
-    let exec_result = exec_result.map(|mut result| {
-        if let Some(reloaded) = result.reloaded_workflow.take() {
-            compiled = reloaded.compiled;
-            retry_policy = reloaded.retry_policy;
-        }
-        result
-    });
+        let exec_result = exec_result.and_then(|result| {
+            crate::graph::persistence::save_graph(&dag, &manager.dag_path(&session_id))?;
+            Ok(result)
+        });
+        exec_result.map(|mut result| {
+            if let Some(reloaded) = result.reloaded_workflow.take() {
+                compiled = reloaded.compiled;
+                retry_policy = reloaded.retry_policy;
+            }
+            result
+        })
+    }
+    .with_context(workflow_operation.context())
+    .await;
+    if exec_result
+        .as_ref()
+        .is_ok_and(|execution| execution.failed > 0)
+    {
+        *workflow_failed = true;
+        workflow_operation.set_error_type("step_failed");
+        workflow_operation.finish("error");
+    } else {
+        workflow_operation.finish_result(&exec_result);
+    }
     let session = session_cell
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -708,89 +832,97 @@ async fn run_single(
         }
     };
 
-    // Handle Ctrl+C (during steps or PR creation): save as Suspended so the session can be resumed.
-    if matches!(overall_result, Err(CruiseError::Interrupted)) {
-        logger.write("|| cancelled");
-        crate::status_eprintln!(
-            "\n{} Interrupted -- session saved as Suspended.",
-            style("||").yellow().bold()
-        );
-        session.clear_pending_input();
-        session.clear_runner();
-        session.phase = SessionPhase::Suspended;
-        session.pr_skipped_reason = None;
-        manager.save(session)?;
-        return Err(CruiseError::Interrupted);
-    }
-
-    if let Err(e) = &overall_result
-        && matches!(
-            e,
-            CruiseError::SessionStateConflict(_) | CruiseError::SessionStateConflictAborted(_)
-        )
-    {
-        return overall_result;
-    }
-
-    apply_run_result_to_session(session, &overall_result);
-    // Repo-backed sessions: drop the temporary clone (and its worktree) once
-    // the PR has been created.
-    if compiled.create_pr
-        && session.repo.is_some()
-        && matches!(session.phase, SessionPhase::Completed)
-        && session.pr_url.is_some()
-    {
-        let _ = crate::repo_clone::cleanup_session_workspace(&manager, session);
-        session.worktree_path = None;
-        crate::status_eprintln!(
-            "{} removed temporary clone for {}",
-            style("->").cyan(),
-            session.id
-        );
-    }
-    // Non-repo worktree sessions: remove the worktree and branch when configured.
-    let effective_cleanup = cleanup_override
-        .or(session.cleanup_after_pr_override)
-        .unwrap_or(compiled.cleanup_after_pr);
-    if compiled.create_pr
-        && effective_cleanup
-        && session.repo.is_none()
-        && matches!(session.phase, SessionPhase::Completed)
-        && session.pr_url.is_some()
-        && let ExecutionWorkspace::Worktree { ctx, .. } = &execution_workspace
-    {
-        if let Err(e) = crate::worktree::cleanup_worktree(ctx) {
+    let finalize_operation = crate::telemetry::Operation::phase("finalize");
+    let finalized: Result<()> = async {
+        // Handle Ctrl+C (during steps or PR creation): save as Suspended so the session can be resumed.
+        if matches!(overall_result, Err(CruiseError::Interrupted)) {
+            logger.write("|| cancelled");
             crate::status_eprintln!(
-                "{} warning: post-PR cleanup failed: {}",
-                style("!").yellow(),
-                e
+                "\n{} Interrupted -- session saved as Suspended.",
+                style("||").yellow().bold()
             );
-        } else {
+            session.clear_pending_input();
+            session.clear_runner();
+            session.phase = SessionPhase::Suspended;
+            session.pr_skipped_reason = None;
+            manager.save(session)?;
+            return Err(CruiseError::Interrupted);
+        }
+
+        if let Err(e) = &overall_result
+            && matches!(
+                e,
+                CruiseError::SessionStateConflict(_) | CruiseError::SessionStateConflictAborted(_)
+            )
+        {
+            return overall_result;
+        }
+
+        apply_run_result_to_session(session, &overall_result);
+        // Repo-backed sessions: drop the temporary clone (and its worktree) once
+        // the PR has been created.
+        if compiled.create_pr
+            && session.repo.is_some()
+            && matches!(session.phase, SessionPhase::Completed)
+            && session.pr_url.is_some()
+        {
+            let _ = crate::repo_clone::cleanup_session_workspace(&manager, session);
+            session.worktree_path = None;
             crate::status_eprintln!(
-                "{} removed worktree and branch for {}",
+                "{} removed temporary clone for {}",
                 style("->").cyan(),
                 session.id
             );
         }
-        session.worktree_path = None;
-        session.worktree_branch = None;
-    }
+        // Non-repo worktree sessions: remove the worktree and branch when configured.
+        let effective_cleanup = cleanup_override
+            .or(session.cleanup_after_pr_override)
+            .unwrap_or(compiled.cleanup_after_pr);
+        if compiled.create_pr
+            && effective_cleanup
+            && session.repo.is_none()
+            && matches!(session.phase, SessionPhase::Completed)
+            && session.pr_url.is_some()
+            && let ExecutionWorkspace::Worktree { ctx, .. } = &execution_workspace
+        {
+            if let Err(e) = crate::worktree::cleanup_worktree(ctx) {
+                crate::status_eprintln!(
+                    "{} warning: post-PR cleanup failed: {}",
+                    style("!").yellow(),
+                    e
+                );
+            } else {
+                crate::status_eprintln!(
+                    "{} removed worktree and branch for {}",
+                    style("->").cyan(),
+                    session.id
+                );
+            }
+            session.worktree_path = None;
+            session.worktree_branch = None;
+        }
 
-    save_session_state_with_conflict_resolution(
-        &manager,
-        session,
-        *lock_unpoisoned(&session_fingerprint),
-    )?;
-    if let Some(kind) = notification_kind_for_run_result(&session.phase, &overall_result, false) {
-        let detail = overall_result.as_ref().err().map(ToString::to_string);
-        crate::desktop_notifications::send_best_effort(
-            kind,
-            Some(session.title_or_input()),
-            detail.as_deref(),
-            &session.id,
-        );
+        save_session_state_with_conflict_resolution(
+            &manager,
+            session,
+            *lock_unpoisoned(&session_fingerprint),
+        )?;
+        if let Some(kind) = notification_kind_for_run_result(&session.phase, &overall_result, false)
+        {
+            let detail = overall_result.as_ref().err().map(ToString::to_string);
+            crate::desktop_notifications::send_best_effort(
+                kind,
+                Some(session.title_or_input()),
+                detail.as_deref(),
+                &session.id,
+            );
+        }
+        overall_result
     }
-    overall_result
+    .with_context(finalize_operation.context())
+    .await;
+    finalize_operation.finish_result(&finalized);
+    finalized
 }
 
 /// Apply the result of a step execution to the session state.
@@ -891,6 +1023,11 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
             }
             Box::pin(async move {
                 let session_id = session.id.clone();
+                let operation = crate::telemetry::Operation::execution(
+                    if session.exec { "exec" } else { "run" },
+                    &session.id,
+                    Some(&session.config),
+                );
                 let session_args = RunArgs {
                     session: Some(session_id.clone()),
                     all: false,
@@ -911,17 +1048,27 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
                 let observer: &dyn RunObserver = dashboard
                     .as_deref()
                     .map_or(&noop as &dyn RunObserver, |dashboard| dashboard);
-                let outcome = run_single(
+                let mut workflow_failed = false;
+                let outcome = run_single_with_operation(
                     session_args,
                     WorkspaceOverride::ForceWorktree,
                     option_handler,
                     session_cancel,
                     observer,
+                    Some(&operation),
+                    &mut workflow_failed,
                 )
+                .with_context(operation.context())
                 .await;
                 if let Some(dashboard) = &dashboard {
                     let state = load_run_all_result_state(&manager, &session);
                     dashboard.finish(&session_id, &state, &outcome);
+                }
+                if workflow_failed && outcome.is_ok() {
+                    operation.set_error_type("step_failed");
+                    operation.finish("error");
+                } else {
+                    operation.finish_result(&outcome);
                 }
                 outcome
             })
@@ -939,6 +1086,15 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
     crate::console_mode::set_quiet(false);
     let batch_results = batch_result?;
 
+    report_run_all_results(&batch_results, &manager);
+
+    Ok(())
+}
+
+fn report_run_all_results(
+    batch_results: &[crate::batch_run::BatchSessionResult],
+    manager: &SessionManager,
+) {
     let mut results = Vec::with_capacity(batch_results.len());
     for batch_result in batch_results {
         match &batch_result.outcome {
@@ -955,7 +1111,7 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
             }
         }
         results.push(load_run_all_result_state(
-            &manager,
+            manager,
             &batch_result.scheduled_state,
         ));
     }
@@ -964,8 +1120,6 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
     if !summary.is_empty() {
         eprintln!("\n{summary}");
     }
-
-    Ok(())
 }
 
 /// Select a pending session interactively (or automatically if only one).
@@ -1486,13 +1640,16 @@ steps:
             events: Mutex::new(Vec::new()),
         };
 
-        // When: the session is executed through run_single
-        let result = run_single(
+        // When: the session is executed through run_single_with_operation
+        let mut workflow_failed = false;
+        let result = run_single_with_operation(
             run_args(session_id),
             WorkspaceOverride::RespectSession,
             &NoOpOptionHandler,
             CancellationToken::new(),
             &observer,
+            None,
+            &mut workflow_failed,
         )
         .await;
 
@@ -1842,12 +1999,15 @@ steps:
         );
 
         // When: the workflow is run and the option interaction is cancelled
-        let result = run_single(
+        let mut workflow_failed = false;
+        let result = run_single_with_operation(
             run_args(id),
             WorkspaceOverride::RespectSession,
             &PauseOptionHandler,
             CancellationToken::new(),
             &NoopObserver,
+            None,
+            &mut workflow_failed,
         )
         .await;
 
@@ -4470,7 +4630,7 @@ steps:
         );
     }
 
-    // -- run_single workspace mode selection integration tests ------------
+    // -- run workspace mode selection integration tests ------------------
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_single_prompts_on_fresh_default_session_and_selects_current_branch() {

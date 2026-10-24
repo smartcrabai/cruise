@@ -1,3 +1,4 @@
+use opentelemetry::trace::FutureExt as OtelFutureExt;
 /// Shared worktree PR helper functions used by both the CLI and the `WebUI`.
 ///
 /// Functions in this module are extracted from `run_cmd.rs` so that
@@ -168,98 +169,130 @@ pub async fn handle_worktree_pr_with_persistence(
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
     }
-    if !compiled.create_pr {
-        session.pr_skipped_reason = Some(crate::session::PrSkippedReason::Disabled);
-        log_after_pr_skipped(
-            compiled,
-            flags,
-            skipped_steps,
-            "pull-request creation is disabled",
-        );
+    let skipped_reason = if compiled.create_pr {
+        session.pr_skipped_reason = None;
+        pr_creation_skip_reason(ctx, cancel_token).await?
+    } else {
+        Some(crate::session::PrSkippedReason::Disabled)
+    };
+    if let Some(reason) = skipped_reason {
+        mark_pr_skipped(session, compiled, flags, skipped_steps, reason);
         return Ok(());
     }
-    session.pr_skipped_reason = None;
-    let existing_commits = branch_commit_count(ctx, cancel_token).await?;
-    if existing_commits == 0 && !worktree_has_changes(ctx, cancel_token).await? {
-        session.pr_skipped_reason = Some(crate::session::PrSkippedReason::NoCommits);
-        log_after_pr_skipped(
-            compiled,
-            flags,
-            skipped_steps,
-            "the worktree has no commits or changes to open a pull request",
-        );
-        return Ok(());
-    }
-    // Repo-backed sessions need forge availability before execution to clone
-    // private repositories; local worktrees defer this until PR processing is
-    // actually needed.
-    if session.repo.is_none() {
-        crate::forge::ensure_forge_available(crate::forge::session_forge(session))?;
-    }
-    if let Some(on_pr_processing) = on_pr_processing {
-        on_pr_processing()?;
-    }
+    let operation = crate::telemetry::Operation::phase("pull_request");
+    let mut pr_creation_failed = false;
+    let result: Result<()> = async {
+        // Repo-backed sessions need forge availability before execution to clone
+        // private repositories; local worktrees defer this until PR processing is
+        // actually needed.
+        if session.repo.is_none() {
+            crate::forge::ensure_forge_available(crate::forge::session_forge(session))?;
+        }
+        if let Some(on_pr_processing) = on_pr_processing {
+            on_pr_processing()?;
+        }
 
-    let pr_attempt = create_pr_attempt(
-        ctx,
-        compiled,
-        vars,
-        session,
-        rate_limit_retries,
-        cancel_token,
-        on_step_log,
-    )
-    .await?;
-    pr_attempt.report();
-    match pr_attempt {
-        PrAttemptOutcome::Created { url, .. } => {
-            crate::status_eprintln!("{} PR created: {}", style("v").green().bold(), url);
-            if let Some(number) = extract_last_path_segment(&url) {
-                vars.set_named_value(PR_NUMBER_VAR, number);
+        let pr_attempt = create_pr_attempt(
+            ctx,
+            compiled,
+            vars,
+            session,
+            rate_limit_retries,
+            cancel_token,
+            on_step_log,
+        )
+        .await?;
+        pr_attempt.report();
+        match pr_attempt {
+            PrAttemptOutcome::Created { url, .. } => {
+                crate::status_eprintln!("{} PR created: {}", style("v").green().bold(), url);
+                if let Some(number) = extract_last_path_segment(&url) {
+                    vars.set_named_value(PR_NUMBER_VAR, number);
+                }
+                vars.set_named_value(PR_URL_VAR, url.clone());
+                session.pr_url = Some(url);
+                session.pr_skipped_reason = None;
+                if let Some(persist) = on_pr_created {
+                    persist(session)?;
+                }
+                if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+                    return Err(CruiseError::Interrupted);
+                }
+                run_after_pr_steps(
+                    compiled,
+                    vars,
+                    tracker,
+                    max_retries,
+                    rate_limit_retries,
+                    ctx.path.as_path(),
+                    skipped_steps,
+                    flags,
+                    cancel_token,
+                    option_handler,
+                    on_step_log,
+                )
+                .await?;
+                Ok(())
             }
-            vars.set_named_value(PR_URL_VAR, url.clone());
-            session.pr_url = Some(url);
-            session.pr_skipped_reason = None;
-            if let Some(persist) = on_pr_created {
-                persist(session)?;
+            PrAttemptOutcome::SkippedNoCommits => {
+                session.pr_skipped_reason = Some(crate::session::PrSkippedReason::NoCommits);
+                log_after_pr_skipped(
+                    compiled,
+                    flags,
+                    skipped_steps,
+                    "the worktree has no commits or changes to open a pull request",
+                );
+                Ok(())
             }
-            if cancel_token.is_some_and(CancellationToken::is_cancelled) {
-                return Err(CruiseError::Interrupted);
+            PrAttemptOutcome::CreateFailed { error, .. } => {
+                if session.repo.is_some() {
+                    return Err(CruiseError::Other(format!("PR creation failed: {error}")));
+                }
+                crate::status_eprintln!("warning: PR creation failed: {error}");
+                pr_creation_failed = true;
+                Ok(())
             }
-            run_after_pr_steps(
-                compiled,
-                vars,
-                tracker,
-                max_retries,
-                rate_limit_retries,
-                ctx.path.as_path(),
-                skipped_steps,
-                flags,
-                cancel_token,
-                option_handler,
-                on_step_log,
-            )
-            .await?;
-            Ok(())
-        }
-        PrAttemptOutcome::SkippedNoCommits => {
-            session.pr_skipped_reason = Some(crate::session::PrSkippedReason::NoCommits);
-            log_after_pr_skipped(
-                compiled,
-                flags,
-                skipped_steps,
-                "the worktree has no commits or changes to open a pull request",
-            );
-            Ok(())
-        }
-        PrAttemptOutcome::CreateFailed { error, .. } => {
-            if session.repo.is_some() {
-                return Err(CruiseError::Other(format!("PR creation failed: {error}")));
-            }
-            crate::status_eprintln!("warning: PR creation failed: {error}");
-            Ok(())
         }
     }
+    .with_context(operation.context())
+    .await;
+    if pr_creation_failed && result.is_ok() {
+        operation.set_error_type("pr_creation_failed");
+        operation.finish("error");
+    } else {
+        operation.finish_result(&result);
+    }
+    result
+}
+
+async fn pr_creation_skip_reason(
+    ctx: &worktree::WorktreeContext,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<Option<crate::session::PrSkippedReason>> {
+    if branch_commit_count(ctx, cancel_token).await? == 0
+        && !worktree_has_changes(ctx, cancel_token).await?
+    {
+        Ok(Some(crate::session::PrSkippedReason::NoCommits))
+    } else {
+        Ok(None)
+    }
+}
+
+fn mark_pr_skipped(
+    session: &mut SessionState,
+    compiled: &CompiledWorkflow,
+    flags: &crate::flags::FlagValues,
+    skipped_steps: &[String],
+    reason: crate::session::PrSkippedReason,
+) {
+    let message = match &reason {
+        crate::session::PrSkippedReason::Disabled => "pull-request creation is disabled",
+        crate::session::PrSkippedReason::NoCommits => {
+            "the worktree has no commits or changes to open a pull request"
+        }
+    };
+    session.pr_skipped_reason = Some(reason);
+    log_after_pr_skipped(compiled, flags, skipped_steps, message);
 }
 
 async fn create_pr_attempt(

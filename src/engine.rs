@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use console::style;
+use opentelemetry::trace::FutureExt as OtelFutureExt;
 
 use crate::cancellation::CancellationToken;
 use crate::condition::{should_skip, should_skip_due_to_when};
@@ -313,8 +314,27 @@ fn save_checkpoint(
 ///
 /// # Errors
 /// Propagates checkpoint failures, invalid transitions and step errors.
-#[expect(clippy::too_many_lines, reason = "checkpointed execution loop")]
 pub async fn execute_steps_with_graph(
+    ctx: &ExecutionContext<'_>,
+    vars: &mut VariableStore,
+    tracker: &mut FileTracker,
+    graph: &mut ExecutionGraph,
+    checkpoint: &(dyn Fn(&NodeCheckpoint<'_>, &ExecutionGraph) -> Result<()> + Send + Sync),
+) -> Result<ExecutionResult> {
+    let operation = crate::telemetry::Operation::start("workflow", &[]);
+    let context = operation.context();
+    let result = execute_steps_with_graph_inner(ctx, vars, tracker, graph, checkpoint)
+        .with_context(context)
+        .await;
+    match &result {
+        Ok(result) if result.failed > 0 => operation.finish("failed"),
+        _ => operation.finish_result(&result),
+    }
+    result
+}
+
+#[expect(clippy::too_many_lines, reason = "checkpointed execution loop")]
+async fn execute_steps_with_graph_inner(
     ctx: &ExecutionContext<'_>,
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
@@ -686,176 +706,202 @@ async fn step_loop_iteration(
         .as_deref()
         .map(crate::timeout::parse_timeout)
         .transpose()?;
-
-    let nfc_key = take_pre_snapshots(
-        ctx.compiled,
-        tracker,
-        current_step,
-        step_call_site,
-        step_if_file_changed.is_some() && nfc_cond.is_none(),
-        nfc_cond.is_some(),
-    )?;
-
-    let outcome = execute_step_kind(
-        ctx,
-        &kind,
-        vars,
-        &merged_env,
-        step_start,
-        &mut state.counters.failed,
-        timeout_duration,
-        if_fail.is_some(),
-        nfc_cond.is_some(),
-        current_step,
-        step_config.allow_commit,
-    )
-    .await?;
-    state.counters.run += 1;
-
-    let (nfc_failed, nfc_retry) = if let Some(ref key) = nfc_key
-        && let Some(nfc) = nfc_cond
-        && !tracker.has_files_changed(key)?
-    {
-        // The agent can declare that making no file changes this turn was a
-        // deliberate, correct decision -- either via the `skip_step` SDK tool
-        // (`outcome.skip_step_reason`) or the `NO_CHANGES_INTENTIONAL:` output
-        // marker, which works on every backend. Either one disables both
-        // actions below for this attempt; a declaration is always
-        // logged so it stays visible even though it changes behavior silently
-        // from the workflow's point of view.
-        let declared_reason =
-            resolve_declared_no_changes(outcome.skip_step_reason.clone(), vars.prev_output());
-        if let Some(reason) = declared_reason {
-            let msg = format!("intentional no-changes declared: {reason}");
-            crate::status_eprintln!("  {} {msg}", style("i").cyan());
-            if let Some(log) = ctx.on_step_log {
-                log("info", &msg);
-            }
-            (false, false)
-        } else {
-            match nfc {
-                NoFileChangesAction::Failed => (true, false),
-                NoFileChangesAction::Retry => {
-                    crate::status_eprintln!(
-                        "  {} no file changes, will retry (if.no-file-changes: retry)",
-                        style("R").cyan()
-                    );
-                    (false, true)
-                }
-            }
-        }
-    } else {
-        (false, false)
-    };
-
-    let step_failed = outcome.failed || nfc_failed;
-
-    let mut if_fail_next: Option<String> = None;
-    let mut if_fail_retry = false;
-
-    if step_failed {
-        match if_fail {
-            Some(FailAction::Goto(name)) => {
-                // A failure handled by an explicit if.fail jump is part of a
-                // successful recovery path, not an unresolved workflow
-                // failure. Keep the attempt visible in the step log, but do
-                // not report it in ExecutionResult::failed.
-                if outcome.failed {
-                    state.counters.failed -= 1;
-                }
-                crate::status_eprintln!(
-                    "  {} step failed, jumping to: {}",
-                    style("R").cyan(),
-                    name
-                );
-                if_fail_next = Some(name.clone());
-            }
-            Some(FailAction::Detailed(d)) if d.retry => {
-                // This attempt is recovered by the retry path. Keep failed
-                // limited to unresolved failures rather than counting an
-                // intermediate attempt as a failed workflow.
-                if outcome.failed {
-                    state.counters.failed -= 1;
-                }
-                crate::status_eprintln!(
-                    "  {} step failed, will retry (if.fail.retry)",
-                    style("R").cyan()
-                );
-                if_fail_retry = true;
-            }
-            _ => {
-                if nfc_failed {
-                    return Err(CruiseError::StepMadeNoFileChanges(current_step.to_string()));
-                }
-            }
-        }
-    }
-
-    let if_next = if if_fail_next.is_none() && !if_fail_retry {
-        resolve_if_next(
+    let attributes = [
+        ("cruise.step.name", current_step),
+        (
+            "cruise.step.type",
+            match kind {
+                StepKind::Prompt(_) => "prompt",
+                StepKind::Command(_) => "command",
+                StepKind::Option(_) => "option",
+                StepKind::Parallel(_) => "parallel",
+                StepKind::GitHubReview(_) => "github_review",
+                StepKind::SquashMerge => "squash_merge",
+            },
+        ),
+    ];
+    let operation = crate::telemetry::Operation::start("step", &attributes);
+    let mut failed_attempt = false;
+    let result: Result<StepOutcome> = async {
+        let nfc_key = take_pre_snapshots(
             ctx.compiled,
             tracker,
             current_step,
             step_call_site,
-            if nfc_cond.is_none() {
-                step_if_file_changed
-            } else {
-                None
-            },
-        )?
-    } else {
-        None
-    };
+            step_if_file_changed.is_some() && nfc_cond.is_none(),
+            nfc_cond.is_some(),
+        )?;
 
-    let group_retry = if if_next.as_ref().is_some_and(|(_, group)| *group) {
-        step_call_site.map(str::to_owned)
-    } else {
-        None
-    };
-    let reason = if let Some(target) = &if_fail_next {
-        TransitionReason::IfFailGoto {
-            target: crate::graph::resolve_target(ctx.compiled, target)?,
-        }
-    } else if if_fail_retry {
-        TransitionReason::IfFailRetry
-    } else if let Some((target, group)) = &if_next {
-        let target = crate::graph::resolve_target(ctx.compiled, target)?;
-        if *group {
-            TransitionReason::GroupRetry { target }
+        let outcome = execute_step_kind_inner(
+            ctx,
+            &kind,
+            vars,
+            &merged_env,
+            step_start,
+            &mut state.counters.failed,
+            timeout_duration,
+            if_fail.is_some(),
+            nfc_cond.is_some(),
+            current_step,
+            step_config.allow_commit,
+        )
+        .await?;
+        state.counters.run += 1;
+
+        let (nfc_failed, nfc_retry) = if let Some(ref key) = nfc_key
+            && let Some(nfc) = nfc_cond
+            && !tracker.has_files_changed(key)?
+        {
+            // The agent can declare that making no file changes this turn was a
+            // deliberate, correct decision -- either via the `skip_step` SDK tool
+            // (`outcome.skip_step_reason`) or the `NO_CHANGES_INTENTIONAL:` output
+            // marker, which works on every backend. Either one disables both
+            // actions below for this attempt; a declaration is always
+            // logged so it stays visible even though it changes behavior silently
+            // from the workflow's point of view.
+            let declared_reason =
+                resolve_declared_no_changes(outcome.skip_step_reason.clone(), vars.prev_output());
+            if let Some(reason) = declared_reason {
+                let msg = format!("intentional no-changes declared: {reason}");
+                crate::status_eprintln!("  {} {msg}", style("i").cyan());
+                if let Some(log) = ctx.on_step_log {
+                    log("info", &msg);
+                }
+                (false, false)
+            } else {
+                match nfc {
+                    NoFileChangesAction::Failed => (true, false),
+                    NoFileChangesAction::Retry => {
+                        crate::status_eprintln!(
+                            "  {} no file changes, will retry (if.no-file-changes: retry)",
+                            style("R").cyan()
+                        );
+                        (false, true)
+                    }
+                }
+            }
         } else {
-            TransitionReason::IfFileChanged { target }
+            (false, false)
+        };
+
+        let step_failed = outcome.failed || nfc_failed;
+        failed_attempt = step_failed || nfc_retry;
+        if nfc_failed || nfc_retry {
+            crate::telemetry::record_error_type("step_no_file_changes");
         }
-    } else if nfc_retry {
-        TransitionReason::IfNoFileChangesRetry
-    } else if step_config.option.is_some() {
-        TransitionReason::OptionChoice {
-            selector: String::new(),
+
+        let mut if_fail_next: Option<String> = None;
+        let mut if_fail_retry = false;
+
+        if step_failed {
+            match if_fail {
+                Some(FailAction::Goto(name)) => {
+                    // A failure handled by an explicit if.fail jump is part of a
+                    // successful recovery path, not an unresolved workflow
+                    // failure. Keep the attempt visible in the step log, but do
+                    // not report it in ExecutionResult::failed.
+                    if outcome.failed {
+                        state.counters.failed -= 1;
+                    }
+                    crate::status_eprintln!(
+                        "  {} step failed, jumping to: {}",
+                        style("R").cyan(),
+                        name
+                    );
+                    if_fail_next = Some(name.clone());
+                }
+                Some(FailAction::Detailed(d)) if d.retry => {
+                    // This attempt is recovered by the retry path. Keep failed
+                    // limited to unresolved failures rather than counting an
+                    // intermediate attempt as a failed workflow.
+                    if outcome.failed {
+                        state.counters.failed -= 1;
+                    }
+                    crate::status_eprintln!(
+                        "  {} step failed, will retry (if.fail.retry)",
+                        style("R").cyan()
+                    );
+                    if_fail_retry = true;
+                }
+                _ => {
+                    if nfc_failed {
+                        return Err(CruiseError::StepMadeNoFileChanges(current_step.to_string()));
+                    }
+                }
+            }
         }
-    } else if step_next.is_some() {
-        TransitionReason::Next
-    } else {
-        TransitionReason::Sequential
-    };
-    let effective_next = if_fail_next
-        .or(if_fail_retry.then(|| current_step.to_string()))
-        .or(if_next.map(|(target, _)| target))
-        .or(nfc_retry.then(|| current_step.to_string()))
-        .or(outcome.option_next)
-        .or(step_next);
-    let next = get_next_step(&ctx.compiled.steps, current_step, effective_next.as_deref());
-    let target = next
-        .map(|target| crate::graph::resolve_target(ctx.compiled, &target))
-        .transpose()?;
-    Ok(Transition {
-        target,
-        reason,
-        budgeted: true,
-        group_retry,
-    })
+
+        let if_next = if if_fail_next.is_none() && !if_fail_retry {
+            resolve_if_next(
+                ctx.compiled,
+                tracker,
+                current_step,
+                step_call_site,
+                if nfc_cond.is_none() {
+                    step_if_file_changed
+                } else {
+                    None
+                },
+            )?
+        } else {
+            None
+        };
+
+        let group_retry = if if_next.as_ref().is_some_and(|(_, group)| *group) {
+            step_call_site.map(str::to_owned)
+        } else {
+            None
+        };
+        let reason = if let Some(target) = &if_fail_next {
+            TransitionReason::IfFailGoto {
+                target: crate::graph::resolve_target(ctx.compiled, target)?,
+            }
+        } else if if_fail_retry {
+            TransitionReason::IfFailRetry
+        } else if let Some((target, group)) = &if_next {
+            let target = crate::graph::resolve_target(ctx.compiled, target)?;
+            if *group {
+                TransitionReason::GroupRetry { target }
+            } else {
+                TransitionReason::IfFileChanged { target }
+            }
+        } else if nfc_retry {
+            TransitionReason::IfNoFileChangesRetry
+        } else if step_config.option.is_some() {
+            TransitionReason::OptionChoice {
+                selector: String::new(),
+            }
+        } else if step_next.is_some() {
+            TransitionReason::Next
+        } else {
+            TransitionReason::Sequential
+        };
+        let effective_next = if_fail_next
+            .or(if_fail_retry.then(|| current_step.to_string()))
+            .or(if_next.map(|(target, _)| target))
+            .or(nfc_retry.then(|| current_step.to_string()))
+            .or(outcome.option_next)
+            .or(step_next);
+        let next = get_next_step(&ctx.compiled.steps, current_step, effective_next.as_deref());
+        let target = next
+            .map(|target| crate::graph::resolve_target(ctx.compiled, &target))
+            .transpose()?;
+        Ok(Transition {
+            target,
+            reason,
+            budgeted: true,
+            group_retry,
+        })
+    }
+    .with_context(operation.context())
+    .await;
+    match &result {
+        Ok(_) if failed_attempt => operation.finish("failed"),
+        _ => operation.finish_result(&result),
+    }
+    result
 }
 
-/// Execute a single step kind and return execution outcome.
-///
 /// `has_nfc_condition` is only consulted for `StepKind::Prompt`: it tells
 /// [`run_prompt_step`] whether to register the `skip_step` SDK tool (see
 /// [`crate::sdk_tools::skip_step_tool`]), which is restricted to prompt steps
@@ -867,7 +913,7 @@ async fn step_loop_iteration(
     clippy::too_many_lines,
     reason = "step-kind arms have distinct execution and error-handling branches"
 )]
-async fn execute_step_kind(
+async fn execute_step_kind_inner(
     ctx: &ExecutionContext<'_>,
     kind: &StepKind,
     vars: &mut VariableStore,
@@ -1045,6 +1091,7 @@ async fn execute_step_kind(
                     })
                 }
                 Err(CruiseError::StepTimeout { .. }) => {
+                    crate::telemetry::record_error_type("timeout");
                     crate::status_eprintln!(
                         "  {} timed out",
                         style(format!("x {}", format_duration(elapsed))).red()
@@ -1061,6 +1108,7 @@ async fn execute_step_kind(
                 ) => Err(e),
                 Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
                 Err(e) if has_if_fail => {
+                    crate::telemetry::record_error_type(e.telemetry_type());
                     crate::status_eprintln!(
                         "  {} prompt error: {e}",
                         style(format!("x {}", format_duration(elapsed))).red()
@@ -1093,6 +1141,7 @@ async fn execute_step_kind(
             match result {
                 Ok(success) => {
                     if !success {
+                        crate::telemetry::record_error_type("command_exit");
                         *failed += 1;
                     }
                     log_step_result(elapsed, success);
@@ -1103,6 +1152,7 @@ async fn execute_step_kind(
                     })
                 }
                 Err(CruiseError::StepTimeout { .. }) => {
+                    crate::telemetry::record_error_type("timeout");
                     crate::status_eprintln!(
                         "  {} timed out",
                         style(format!("x {}", format_duration(elapsed))).red()
@@ -1236,7 +1286,7 @@ pub struct ResolvedModelCommand {
     /// Whether an unescaped `{model}` placeholder was actually found and consumed.
     ///
     /// `false` means the caller should still append `--model <model>` itself
-    /// (see [`crate::step::prompt::run_prompt`]) when a model is given.
+    /// (see [`crate::step::prompt::run_prompt_with_attempt_model`]) when a model is given.
     pub consumed_model_placeholder: bool,
 }
 
