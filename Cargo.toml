@@ -162,6 +162,12 @@ vt100 = "=0.18.1"
 
 [[test]]
 harness = false
+name = "workflow_flags_bdd"
+path = "tests/workflow_flags_bdd.rs"
+test = false
+
+[[test]]
+harness = false
 name = "checkpoint_bdd"
 path = "tests/checkpoint_bdd.rs"
 

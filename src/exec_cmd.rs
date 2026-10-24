@@ -48,13 +48,13 @@ pub(crate) async fn run_resolved(
     let graph = crate::graph::build_graph(&compiled, effective_max_retries)?;
     let flag_values = crate::flags::from_cli(&req.flags)?;
     crate::flags::validate_names(config, &flag_values)?;
-    crate::graph::validation::validate_workflow(
-        &compiled,
-        &graph,
-        &graph.start,
-        &crate::flags::preflight_skips(&compiled, &flag_values, &[]),
-    )?;
     if req.dry_run {
+        crate::graph::validation::validate_workflow(
+            &compiled,
+            &graph,
+            &graph.start,
+            &crate::flags::preflight_skips(&compiled, &flag_values, &[]),
+        )?;
         engine::print_dry_run(config, None);
         return Ok(());
     }
@@ -75,7 +75,7 @@ pub(crate) async fn run_resolved(
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
-            flags: vec![],
+            flags: req.flags,
         };
         crate::run_cmd::run_with_operation(run_args, &operation).await
     }
@@ -200,6 +200,8 @@ mod tests {
                 _data_dirs: vec![
                     crate::test_support::EnvGuard::remove("APPDATA"),
                     crate::test_support::EnvGuard::remove("LOCALAPPDATA"),
+                    crate::test_support::EnvGuard::set("CRUISE_TEST_STDIN_IS_TERMINAL", "0"),
+                    crate::test_support::EnvGuard::remove("CRUISE_TEST_FLAG_SELECTION"),
                 ],
                 lock,
             }
