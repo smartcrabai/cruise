@@ -1007,7 +1007,14 @@ async fn common_effort_selects_catalog_variants_without_changing_model_punctuati
         let location = url::form_urlencoded::parse(catalog[0].query.as_bytes())
             .find(|(key, _)| key == "location[directory]")
             .map(|(_, value)| value.into_owned());
-        assert_eq!(location.as_deref(), fixture.server.repo.to_str());
+        // The runner canonicalizes the working directory before querying OpenCode.
+        // macOS temp paths can use /var, a symlink to /private/var.
+        let expected_directory = fixture
+            .server
+            .repo
+            .canonicalize()
+            .unwrap_or_else(|error| panic!("canonicalize fixture repository: {error}"));
+        assert_eq!(location.as_deref(), expected_directory.to_str());
         assert!(
             catalog[0]
                 .authorization
