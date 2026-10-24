@@ -3540,6 +3540,22 @@ fn setup_run_blocking(
     }
     let config = manager.load_config(&state)?;
     crate::config::validate_config(&config)?;
+    let workspace_mode = if state.exec {
+        WorkspaceMode::CurrentBranch
+    } else if state.repo.is_some() {
+        WorkspaceMode::Worktree
+    } else {
+        requested_mode.unwrap_or(state.workspace_mode)
+    };
+    let execution_dir = match workspace_mode {
+        WorkspaceMode::Worktree => manager.worktrees_dir().join(&state.id),
+        WorkspaceMode::CurrentBranch => state.base_dir.clone(),
+    };
+    crate::agent_auth::ensure_agents_authenticated(
+        &config,
+        crate::agent_auth::AuthScope::Execution,
+        Some(&execution_dir),
+    )?;
     let max_retries = max_retries_override
         .unwrap_or_else(|| crate::config::resolve_effective_max_retries(None, &config));
     crate::config::validate_group_retry_budget(&config, max_retries)?;
@@ -3560,13 +3576,6 @@ fn setup_run_blocking(
         &entry,
         &crate::flags::preflight_skips(&compiled, &state.flags, &state.skipped_steps),
     )?;
-    let workspace_mode = if state.exec {
-        WorkspaceMode::CurrentBranch
-    } else if state.repo.is_some() {
-        WorkspaceMode::Worktree
-    } else {
-        requested_mode.unwrap_or(state.workspace_mode)
-    };
     if state.repo.is_some() {
         crate::forge::ensure_forge_available(crate::forge::session_forge(&state))?;
     }
@@ -4468,6 +4477,202 @@ mod tests {
         guards
     }
 
+    fn write_relative_auth_fixture(
+        base_dir: &std::path::Path,
+        worktree: &std::path::Path,
+        mode: WorkspaceMode,
+        selected_expired: bool,
+    ) {
+        for (dir, expired) in [
+            (
+                base_dir,
+                if mode == WorkspaceMode::CurrentBranch {
+                    selected_expired
+                } else {
+                    !selected_expired
+                },
+            ),
+            (
+                worktree,
+                if mode == WorkspaceMode::Worktree {
+                    selected_expired
+                } else {
+                    !selected_expired
+                },
+            ),
+        ] {
+            std::fs::create_dir_all(dir.join("relative-auth")).unwrap_or_else(|e| panic!("{e}"));
+            let expires = if expired { 1_i64 } else { 8_000_000_000_000 };
+            std::fs::write(
+                dir.join("relative-auth/auth.json"),
+                format!(r#"{{"anthropic_accounts":[{{"expires":{expires}}}]}}"#),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    #[test]
+    fn setup_run_blocking_resolves_relative_auth_in_prospective_workspace() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _home = isolate_application_config(temp.path());
+        let _auth_home = crate::test_support::EnvGuard::set("JCODE_HOME", "relative-auth");
+        let _skip = crate::test_support::EnvGuard::remove("CRUISE_SKIP_AGENT_AUTH_CHECK");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|e| panic!("{e}"));
+        for mode in [WorkspaceMode::Worktree, WorkspaceMode::CurrentBranch] {
+            for selected_expired in [false, true] {
+                let case = tempfile::tempdir_in(temp.path()).unwrap_or_else(|e| panic!("{e}"));
+                let base_dir = case.path().join("not-a-repository");
+                let manager = SessionManager::new(case.path().join("data"));
+                let id = "20261024000004";
+                let worktree = manager.worktrees_dir().join(id);
+                write_relative_auth_fixture(&base_dir, &worktree, mode, selected_expired);
+                let mut state = SessionState::new(
+                    id.to_string(),
+                    base_dir,
+                    crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+                    "relative auth application contract".to_string(),
+                );
+                state.phase = SessionPhase::Suspended;
+                state.current_step = Some("agent".into());
+                state.has_dag = true;
+                state.workspace_mode = mode;
+                state.worktree_path = Some(worktree.clone());
+                state.worktree_branch = Some("retained-planning-worktree".into());
+                manager.create(&state).unwrap_or_else(|e| panic!("{e}"));
+                let session_dir = manager.sessions_dir().join(id);
+                std::fs::write(session_dir.join("config.yaml"),
+                    "sdk: jcode\nmodel: claude/test-model\nsteps:\n  agent:\n    prompt: never dispatch\n",
+                ).unwrap_or_else(|e| panic!("{e}"));
+                std::fs::write(session_dir.join("plan.md"), "# Plan\n")
+                    .unwrap_or_else(|e| panic!("{e}"));
+                let compiled = crate::workflow::compile(
+                    manager
+                        .load_config(&state)
+                        .unwrap_or_else(|e| panic!("{e}")),
+                )
+                .unwrap_or_else(|e| panic!("{e}"));
+                let dag = crate::graph::build_graph(&compiled, crate::config::DEFAULT_MAX_RETRIES)
+                    .unwrap_or_else(|e| panic!("{e}"));
+                crate::graph::persistence::save_graph(&dag, &manager.dag_path(id))
+                    .unwrap_or_else(|e| panic!("{e}"));
+                let before =
+                    std::fs::read(session_dir.join("state.json")).unwrap_or_else(|e| panic!("{e}"));
+                let credentials = std::fs::read(worktree.join("relative-auth/auth.json"))
+                    .unwrap_or_else(|e| panic!("{e}"));
+                let result = setup_run_blocking(
+                    &manager,
+                    runtime.handle(),
+                    id,
+                    &CancellationToken::new(),
+                    Some(mode),
+                    None,
+                    0,
+                );
+                let Err(error) = result else {
+                    panic!("non-repository sentinel must reject setup");
+                };
+                assert_eq!(
+                    error.telemetry_type() == "agent_auth_expired",
+                    selected_expired,
+                    "{error}"
+                );
+                if selected_expired {
+                    assert_eq!(
+                        std::fs::read(session_dir.join("state.json"))
+                            .unwrap_or_else(|e| panic!("{e}")),
+                        before
+                    );
+                    assert_eq!(
+                        std::fs::read(worktree.join("relative-auth/auth.json"))
+                            .unwrap_or_else(|e| panic!("{e}")),
+                        credentials
+                    );
+                    assert!(!manager.clones_dir().exists());
+                    assert_eq!(
+                        std::fs::read_dir(&worktree)
+                            .unwrap_or_else(|e| panic!("{e}"))
+                            .count(),
+                        1
+                    );
+                } else {
+                    assert!(
+                        error.to_string().contains("git")
+                            || error.to_string().contains("repository"),
+                        "{error}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn setup_run_blocking_rejects_expired_agent_auth_before_workspace() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _home = isolate_application_config(temp.path());
+        let auth_home = temp.path().join("jcode");
+        let _auth_home = crate::test_support::EnvGuard::set("JCODE_HOME", &auth_home);
+        let _skip = crate::test_support::EnvGuard::remove("CRUISE_SKIP_AGENT_AUTH_CHECK");
+        std::fs::create_dir_all(&auth_home).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            auth_home.join("auth.json"),
+            r#"{"anthropic_accounts":[{"access":"expired-app-test-token","expires":1}]}"#,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        // If the preflight is missing, git rejects this directory before any SDK can run.
+        let base_dir = temp.path().join("not-a-repository");
+        std::fs::create_dir_all(&base_dir).unwrap_or_else(|e| panic!("{e}"));
+        let manager = SessionManager::new(temp.path().join("data"));
+        let id = "20261024000003";
+        let mut state = SessionState::new(
+            id.to_string(),
+            base_dir.clone(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "application auth wiring".to_string(),
+        );
+        state.phase = SessionPhase::Planned;
+        state.workspace_mode = WorkspaceMode::Worktree;
+        manager.create(&state).unwrap_or_else(|e| panic!("{e}"));
+        let session_dir = manager.sessions_dir().join(id);
+        std::fs::write(
+            session_dir.join("config.yaml"),
+            "sdk: jcode\nmodel: claude/test-model\nsteps:\n  agent:\n    prompt: never invoke an agent\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(session_dir.join("plan.md"), "# Application auth test\n")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|e| panic!("{e}"));
+        let result = setup_run_blocking(
+            &manager,
+            runtime.handle(),
+            id,
+            &CancellationToken::new(),
+            Some(WorkspaceMode::Worktree),
+            None,
+            0,
+        );
+        let Err(error) = result else {
+            panic!("expired credentials must reject application execution");
+        };
+        assert_eq!(error.telemetry_type(), "agent_auth_expired", "{error}");
+        assert!(!error.to_string().contains("expired-app-test-token"));
+        assert!(!manager.worktrees_dir().exists());
+        assert!(!manager.clones_dir().exists());
+        assert_eq!(
+            std::fs::read_dir(&base_dir)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .count(),
+            0
+        );
+    }
+
     #[test]
     fn mixed_sdk_checkpoints_defer_cleanup_until_terminal_restoration() {
         use crate::model_selection::{Sdk, SdkSessionId};
@@ -4640,11 +4845,8 @@ mod tests {
         let _lock = crate::test_support::lock_process();
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
         // This test targets timeout validation, not inherited model selection.
-        let _home = crate::test_support::set_fake_home(dir.path());
-        let _model_env: Vec<_> = ["CRUISE_MODEL", "CRUISE_PLAN_MODEL", "CRUISE_SDK"]
-            .into_iter()
-            .map(crate::test_support::EnvGuard::remove)
-            .collect();
+        let _home = isolate_application_config(dir.path());
+        let _sdk = crate::test_support::EnvGuard::remove("CRUISE_SDK");
         let path = dir.path().join("workflow.yaml");
         std::fs::write(
             &path,
