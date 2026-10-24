@@ -4637,7 +4637,14 @@ mod tests {
 
     #[test]
     fn config_reloader_rejects_invalid_updated_config() {
+        let _lock = crate::test_support::lock_process();
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        // This test targets timeout validation, not inherited model selection.
+        let _home = crate::test_support::set_fake_home(dir.path());
+        let _model_env: Vec<_> = ["CRUISE_MODEL", "CRUISE_PLAN_MODEL", "CRUISE_SDK"]
+            .into_iter()
+            .map(crate::test_support::EnvGuard::remove)
+            .collect();
         let path = dir.path().join("workflow.yaml");
         std::fs::write(
             &path,

@@ -21,7 +21,7 @@
     "sdk": {
       "type": "string",
       "enum": ["jcode", "claude", "opencode"],
-      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both selects `jcode` only if neither `command` nor `sdk` is set by applicable `default.yaml` layers. `sdk: jcode` uses the official jcode Rust SDK and requires jcode CLI v0.88.0 or newer; Cruise validates the API handshake and required capabilities at runtime. `sdk: claude` uses claude-agent-sdk. `sdk: opencode` uses a built-in Rust client and a locally managed OpenCode V2 CLI, with no external server or V1 fallback. jcode/Claude model references support `provider/model[:effort]` or a bare model; OpenCode uses `provider/model#variant`, preserving slashes and colons in model IDs, and delegates omitted models to OpenCode's configured default."
+      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both selects `jcode` only if neither `command` nor `sdk` is set by applicable `default.yaml` layers. `sdk: jcode` uses the official jcode Rust SDK and requires jcode CLI v0.88.0 or newer; Cruise validates the API handshake and required capabilities at runtime. `sdk: claude` uses claude-agent-sdk. `sdk: opencode` uses a built-in Rust client and a locally managed OpenCode V2 CLI, with no external server or V1 fallback. jcode/Claude model references support `provider/model[:effort]` or a bare model; OpenCode uses catalog-validated `provider/model[:effort]` or native `provider/model#variant`, which cannot be combined. Recognized trailing effort suffixes are reserved; embedded slashes and unknown colon suffixes in model IDs are preserved. Omitted models use OpenCode's configured default."
     },
     "mcp_servers": {
       "type": "object",
@@ -46,7 +46,7 @@
           }
         }
       ],
-      "description": "Default model to use for all steps. Each actual jcode prompt must resolve to a model from its step-level or workflow/default settings; a missing model is an execution error. OpenCode uses provider/model#variant references and its configured default when omitted. Claude and command backends retain their existing no-model behavior. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
+      "description": "Default model to use for all steps. Each actual jcode prompt must resolve to a model from its step-level or workflow/default settings; a missing model is an execution error. OpenCode uses catalog-validated provider/model[:effort] or native provider/model#variant, which cannot be combined. Recognized trailing effort suffixes are reserved; embedded slashes and unknown colon suffixes in model IDs are preserved. OpenCode uses its configured default when omitted. Claude and command backends retain their existing no-model behavior. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
     },
     "plan_model": {
       "oneOf": [

@@ -43,6 +43,7 @@ pub(crate) enum Scenario {
     Pending,
     PluginDisabled,
     ProviderFailure { status: u16, side_effect: bool },
+    NoRoute { side_effect: bool },
     UndeliveredFailure { settle: bool },
     RetainedRecovery { start: bool, terminal: bool },
     BoundaryUnavailable,
@@ -53,6 +54,15 @@ struct ObservedRequest {
     path: String,
     body: Value,
     authorization: Option<String>,
+    query: String,
+}
+
+#[derive(Clone)]
+pub(crate) enum Catalog {
+    Models(Value),
+    Http(StatusCode),
+    InvalidJson,
+    Transport,
 }
 
 #[derive(Default)]
@@ -62,6 +72,8 @@ struct Observations {
     durable: Vec<Value>,
     checkpoint_at_prompt: Option<String>,
     pending: Option<String>,
+    plugin_ready: bool,
+    notices: Vec<String>,
 }
 
 struct Server {
@@ -71,6 +83,7 @@ struct Server {
     url: String,
     observations: Mutex<Observations>,
     events: broadcast::Sender<Option<String>>,
+    catalog: Mutex<Catalog>,
 }
 
 fn locked(server: &Server) -> std::sync::MutexGuard<'_, Observations> {
@@ -205,6 +218,7 @@ fn session_info(server: &Server, id: &str) -> Value {
 async fn serve(State(server): State<Arc<Server>>, request: Request) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
+    let query = request.uri().query().unwrap_or_default().to_owned();
     let after = request
         .uri()
         .query()
@@ -232,8 +246,40 @@ async fn serve(State(server): State<Arc<Server>>, request: Request) -> Response 
         path: path.clone(),
         body: body.clone(),
         authorization,
+        query,
     });
     match (method, path.as_str()) {
+        (Method::GET, "/api/model") => {
+            // Before plugin settlement the real API may expose an empty snapshot.
+            if !locked(&server).plugin_ready {
+                return Json(json!({"data":[]})).into_response();
+            }
+            let catalog = server
+                .catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            match catalog {
+                Catalog::Models(data) => {
+                    Json(json!({"location":{"directory":server.repo},"data":data})).into_response()
+                }
+                Catalog::Http(status) => {
+                    (status, Json(json!({"message":"catalog request refused"}))).into_response()
+                }
+                Catalog::InvalidJson => {
+                    ([("content-type", "application/json")], "{broken").into_response()
+                }
+                Catalog::Transport => {
+                    let broken = futures::stream::once(async {
+                        Err::<String, _>(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "catalog response lost",
+                        ))
+                    });
+                    Body::from_stream(broken).into_response()
+                }
+            }
+        }
         (Method::GET, "/api/plugin") => {
             if matches!(server.scenario, Scenario::PluginDisabled) {
                 return Json(json!({"location":{"directory":server.repo},"data":[]}))
@@ -277,9 +323,11 @@ async fn serve(State(server): State<Arc<Server>>, request: Request) -> Response 
                 response.status().is_success(),
                 "authenticated plugin readiness rejected"
             );
+            locked(&server).plugin_ready = true;
             Json(json!({"location":{"directory":server.repo},"data": []})).into_response()
         }
         (Method::GET, "/api/info") => {
+            locked(&server).plugin_ready = false;
             if let Scenario::HandshakeFailure(status) = server.scenario {
                 return (
                     status,
@@ -338,7 +386,7 @@ async fn serve(State(server): State<Arc<Server>>, request: Request) -> Response 
                     Scenario::ProviderFailure {
                         side_effect: true,
                         ..
-                    }
+                    } | Scenario::NoRoute { side_effect: true }
                 )
             {
                 report_tool_effect(&server).await;
@@ -349,6 +397,25 @@ async fn serve(State(server): State<Arc<Server>>, request: Request) -> Response 
 }
 
 fn prompt_events(server: &Server, session: &str, inbox: &str) -> Vec<Value> {
+    if matches!(server.scenario, Scenario::NoRoute { .. }) && server_prompt_count(server) == 1 {
+        return vec![
+            event("session.execution.started", session, json!({}), 1),
+            event(
+                "session.inbox.delivered",
+                session,
+                json!({"inboxID":inbox}),
+                2,
+            ),
+            event(
+                "session.execution.failed",
+                session,
+                json!({"error":{
+                    "type":"provider.no-route", "message":"Model unavailable: fixture primary"
+                }}),
+                3,
+            ),
+        ];
+    }
     if let Scenario::RetainedRecovery { start, terminal } = server.scenario
         && server_prompt_count(server) > 1
     {
@@ -656,6 +723,7 @@ impl Fixture {
             url,
             observations: Mutex::new(Observations::default()),
             events,
+            catalog: Mutex::new(Catalog::Models(json!([]))),
         });
         let router = Router::new()
             .fallback(serve)
@@ -727,13 +795,14 @@ impl Fixture {
         let env = HashMap::from([("WORKFLOW_VALUE".to_owned(), "step-value".to_owned())]);
         let mcp_servers = cruise::config::McpServers::new();
         let model = model.map(|model| cruise::config::ModelSpec::Single(model.to_owned()));
+        let notice = |text: &str| locked(&self.server).notices.push(text.to_owned());
         let request = PromptRun {
             prompt: "fixture prompt",
             model: model.as_ref(),
             max_retries,
             env: &env,
             mcp_servers: &mcp_servers,
-            on_notice: None,
+            on_notice: Some(&notice),
             cancel_token,
             working_dir: Some(&self.server.repo),
             stream: None,
@@ -792,6 +861,18 @@ impl Fixture {
             .count()
     }
 
+    pub(crate) fn catalog_count(&self) -> usize {
+        locked(&self.server)
+            .requests
+            .iter()
+            .filter(|r| r.path == "/api/model")
+            .count()
+    }
+
+    pub(crate) fn notices(&self) -> Vec<String> {
+        locked(&self.server).notices.clone()
+    }
+
     pub(crate) fn assert_interrupted(&self) {
         assert!(
             locked(&self.server)
@@ -820,6 +901,511 @@ impl Drop for Fixture {
 
 fn quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+pub(crate) fn set_catalog(fixture: &Fixture, catalog: Catalog) {
+    *fixture
+        .server
+        .catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = catalog;
+}
+
+pub(crate) fn effort_catalog(id: &str, variants: &Value) -> Catalog {
+    Catalog::Models(json!([
+        // A same-name model from another provider must never supply capabilities.
+        {"providerID":"other","id":id,"variants":[{"id":"medium"}]},
+        {"providerID":"fixture","id":id,"variants":variants,"unknownFutureField":true}
+    ]))
+}
+
+pub(crate) fn selected_models(fixture: &Fixture) -> Vec<Value> {
+    locked(&fixture.server)
+        .requests
+        .iter()
+        .filter(|request| {
+            request.method == Method::POST
+                && (request.path == "/api/session" || request.path.ends_with("/model"))
+        })
+        .map(|request| request.body["model"].clone())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn common_effort_selects_catalog_variants_without_changing_model_punctuation() {
+    let _lock = lock_process();
+    for (raw, id, variants, expected) in [
+        (
+            "fixture/deepseek-v4.1-flash-free:max",
+            "deepseek-v4.1-flash-free",
+            json!([{"id":"max","settings":{"reasoningEffort":"max"}},{"id":"low"}]),
+            "max",
+        ),
+        (
+            "fixture/model:MED",
+            "model",
+            json!([{"id":"medium"}]),
+            "medium",
+        ),
+        (
+            "fixture/model:4",
+            "model",
+            json!([{"id":"deliberate","settings":{"reasoningEffort":"xhigh"}}]),
+            "deliberate",
+        ),
+        (
+            "fixture/model:minimal",
+            "model",
+            json!([{"id":"low"}]),
+            "low",
+        ),
+        (
+            "fixture/model:free:high",
+            "model:free",
+            json!([{"id":"deep","settings":{"reasoningEffort":"high"}}]),
+            "deep",
+        ),
+        // Canonical IDs win only when their declared effort does not contradict them.
+        (
+            "fixture/model:high",
+            "model",
+            json!([{"id":"high","settings":{"reasoningEffort":"low"}}, {"id":"deep","settings":{"reasoningEffort":"high"}}]),
+            "deep",
+        ),
+        (
+            "fixture/model:high",
+            "model",
+            json!([{"id":"deep","settings":{"reasoningEffort":"high"}}, {"id":"high"}]),
+            "high",
+        ),
+    ] {
+        let fixture = Fixture::new(Scenario::Complete).await;
+        let _guards = fixture.guards();
+        set_catalog(&fixture, effort_catalog(id, &variants));
+        let outcome = fixture
+            .execute(Some(raw), 0)
+            .await
+            .unwrap_or_else(|error| panic!("{raw}: {error}"));
+        assert_eq!(outcome.result.output, ANSWER);
+        assert_eq!(
+            selected_models(&fixture),
+            vec![json!({"providerID":"fixture","id":id,"variant":expected})],
+            "{raw}"
+        );
+        assert_eq!(
+            fixture.catalog_count(),
+            1,
+            "effort needs one capability snapshot"
+        );
+        let observations = locked(&fixture.server);
+        let catalog: Vec<_> = observations
+            .requests
+            .iter()
+            .filter(|r| r.path == "/api/model")
+            .collect();
+        assert_eq!(catalog.len(), 1, "catalog observation must be present");
+        let location = url::form_urlencoded::parse(catalog[0].query.as_bytes())
+            .find(|(key, _)| key == "location[directory]")
+            .map(|(_, value)| value.into_owned());
+        assert_eq!(location.as_deref(), fixture.server.repo.to_str());
+        assert!(
+            catalog[0]
+                .authorization
+                .as_deref()
+                .is_some_and(|value| value.starts_with("Basic "))
+        );
+        drop(observations);
+        fixture.assert_stopped();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn common_effort_is_resolved_for_resumed_model_updates() {
+    let _lock = lock_process();
+    let fixture = Fixture::new(Scenario::Complete).await;
+    let _guards = fixture.guards();
+    let checkpoint = |_: &cruise::model_selection::SdkSessionId| Ok(());
+    let first = fixture
+        .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    let id = first
+        .session_id
+        .unwrap_or_else(|| panic!("retained session missing"))
+        .id;
+    set_catalog(
+        &fixture,
+        effort_catalog(
+            "model",
+            &json!([{"id":"deep","settings":{"reasoningEffort":"max"}}]),
+        ),
+    );
+    let resumed = resume_fixture_with_model(&fixture, &id, 0, "fixture/model:max")
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(resumed.result.output, ANSWER);
+    assert_eq!(resumed.session_id.map(|session| session.id), Some(id));
+    assert_eq!(
+        selected_models(&fixture).last(),
+        Some(&json!({"providerID":"fixture","id":"model","variant":"deep"}))
+    );
+    assert_eq!(fixture.prompt_count(), 2);
+    fixture.assert_stopped();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn common_effort_in_workflow_and_plan_candidate_arrays_reaches_each_provider() {
+    let _lock = lock_process();
+    for planning in [false, true] {
+        let fixture = Fixture::new(Scenario::ProviderFailure {
+            status: 503,
+            side_effect: false,
+        })
+        .await;
+        let _guards = fixture.guards();
+        set_catalog(
+            &fixture,
+            Catalog::Models(json!([
+                {"providerID":"fixture","id":format!("array-primary-{planning}"),"variants":[{"id":"max"}]},
+                {"providerID":"fixture","id":"array-spare","variants":[{"id":"deep","settings":{"reasoningEffort":"high"}}]}
+            ])),
+        );
+        let field = if planning { "plan_model" } else { "model" };
+        let config = cruise::config::WorkflowConfig::from_yaml(&format!(
+            "sdk: opencode\n{field}: ['fixture/array-primary-{planning}:max', 'fixture/array-spare:high']\nretry:\n  base_delay_ms: 1\nsteps:\n  implement:\n    prompt: implement\n"
+        )).unwrap_or_else(|e| panic!("{e}"));
+        let outcome = configured_fixture_run(&fixture, &config, planning, 1)
+            .await
+            .unwrap_or_else(|e| panic!("{field}: {e}"));
+        assert_eq!(outcome.result.output, ANSWER);
+        assert_eq!(
+            selected_models(&fixture),
+            vec![
+                json!({"providerID":"fixture","id":format!("array-primary-{planning}"),"variant":"max"}),
+                json!({"providerID":"fixture","id":"array-spare","variant":"deep"})
+            ]
+        );
+        assert_eq!(fixture.prompt_count(), 2);
+        fixture.assert_stopped();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_exec_resolves_workflow_and_step_common_effort() {
+    let _lock = lock_process();
+    for step_override in [false, true] {
+        let fixture = Fixture::new(Scenario::Complete).await;
+        let _guards = fixture.guards();
+        set_catalog(
+            &fixture,
+            effort_catalog(
+                "cli-model",
+                &json!([{"id":"deep","settings":{"reasoningEffort":"max"}}]),
+            ),
+        );
+        let config = fixture.root.path().join("effort.yaml");
+        let (workflow, step) = if step_override {
+            ("fixture/unused", "    model: 'fixture/cli-model:max'\n")
+        } else {
+            ("fixture/cli-model:max", "")
+        };
+        std::fs::write(&config, format!("sdk: opencode\nmodel: '{workflow}'\npermission: full\nsteps:\n  implement:\n{step}    prompt: '{{input}}'\n")).unwrap_or_else(|e| panic!("{e}"));
+        let output = tokio::time::timeout(
+            Duration::from_secs(20),
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_cruise"))
+                .args(["exec", "-c"])
+                .arg(&config)
+                .arg("fixture prompt")
+                .current_dir(&fixture.server.repo)
+                .env_remove("CRUISE_SDK")
+                .env_remove("CRUISE_MODEL")
+                .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+                .env("NO_COLOR", "1")
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("CLI deadline: {e}"))
+        .unwrap_or_else(|e| panic!("{e}"));
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{diagnostic}");
+        assert!(
+            diagnostic.contains(ANSWER.trim()),
+            "CLI did not complete response"
+        );
+        assert_eq!(
+            selected_models(&fixture),
+            vec![json!({"providerID":"fixture","id":"cli-model","variant":"deep"})]
+        );
+        assert_eq!(fixture.prompt_count(), 1);
+        fixture.assert_stopped();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_unknown_and_unspecified_models_do_not_require_catalog_access() {
+    let _lock = lock_process();
+    for (raw, expected) in [
+        (None, Value::Null),
+        (
+            Some("fixture/model"),
+            json!({"providerID":"fixture","id":"model"}),
+        ),
+        (
+            Some("fixture/model:free"),
+            json!({"providerID":"fixture","id":"model:free"}),
+        ),
+        (
+            Some("fixture/team/model:2026#precise"),
+            json!({"providerID":"fixture","id":"team/model:2026","variant":"precise"}),
+        ),
+        (
+            Some("fixture/model#none"),
+            json!({"providerID":"fixture","id":"model","variant":"none"}),
+        ),
+    ] {
+        let fixture = Fixture::new(Scenario::Complete).await;
+        let _guards = fixture.guards();
+        set_catalog(&fixture, Catalog::Http(StatusCode::UNAUTHORIZED));
+        let outcome = fixture
+            .execute(raw, 0)
+            .await
+            .unwrap_or_else(|e| panic!("{raw:?}: {e}"));
+        assert_eq!(outcome.result.output, ANSWER);
+        assert_eq!(selected_models(&fixture), vec![expected]);
+        assert!(
+            !locked(&fixture.server)
+                .requests
+                .iter()
+                .any(|r| r.path == "/api/model")
+        );
+        fixture.assert_stopped();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_effort_selections_are_explicit_errors_not_fallback_requests() {
+    let _lock = lock_process();
+    for suffix in [":off", ":none", ":0", ":5", ":high#precise"] {
+        let fixture = Fixture::new(Scenario::Complete).await;
+        let _guards = fixture.guards();
+        let raw = format!("fixture/model{suffix}");
+        let error = fixture
+            .execute(Some(&raw), 2)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{raw} must fail explicitly"));
+        let diagnostic = error.to_string().to_ascii_lowercase();
+        assert!(
+            diagnostic.contains("model")
+                && (diagnostic.contains("unsupported") || diagnostic.contains("conflict")),
+            "{diagnostic}"
+        );
+        assert_eq!(fixture.prompt_count(), 0);
+        assert_eq!(selected_models(&fixture), Vec::<Value>::new());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn effort_suffix_cannot_substitute_for_a_model_id() {
+    let _lock = lock_process();
+    let fixture = Fixture::new(Scenario::Complete).await;
+    let _guards = fixture.guards();
+    let error = fixture
+        .execute(Some("fixture/:max"), 2)
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("stripping an effort must leave a nonempty model ID"));
+    assert!(
+        error.to_string().to_ascii_lowercase().contains("model"),
+        "{error}"
+    );
+    assert_eq!(fixture.prompt_count(), 0);
+    assert_eq!(selected_models(&fixture), Vec::<Value>::new());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_resolution_failures_never_send_prompts_or_mutate_resume_models() {
+    let _lock = lock_process();
+    let cases = [
+        (
+            effort_catalog("model", &json!([{"id":"low"},{"id":"high"},{"id":"max"}])),
+            vec!["unsupported", "medium", "low", "high", "max"],
+        ),
+        (
+            effort_catalog("model", &json!([])),
+            vec!["unsupported", "medium"],
+        ),
+        (Catalog::Models(json!([])), vec!["catalog", "model"]),
+        (
+            effort_catalog(
+                "model",
+                &json!([{"id":"a","settings":{"reasoningEffort":"medium"}}, {"id":"b","settings":{"reasoningEffort":"medium"}}]),
+            ),
+            vec!["ambiguous", "medium"],
+        ),
+        (Catalog::InvalidJson, vec!["protocol"]),
+        (
+            Catalog::Models(json!([{"providerID":"fixture","id":"model"}])),
+            vec!["protocol"],
+        ),
+        (
+            Catalog::Models(json!([{"id":"model","variants":[]}])),
+            vec!["protocol"],
+        ),
+        (
+            Catalog::Models(json!([{"providerID":"fixture","variants":[]}])),
+            vec!["protocol"],
+        ),
+        (
+            Catalog::Models(json!([{"providerID":"fixture","id":"model","variants":"medium"}])),
+            vec!["protocol"],
+        ),
+        (Catalog::Http(StatusCode::UNAUTHORIZED), vec!["401"]),
+        (Catalog::Http(StatusCode::SERVICE_UNAVAILABLE), vec!["503"]),
+        (Catalog::Transport, vec!["transport"]),
+    ];
+    for (catalog, fragments) in cases {
+        for resume in [false, true] {
+            let fixture = Fixture::new(Scenario::Complete).await;
+            let _guards = fixture.guards();
+            let id = if resume {
+                let checkpoint = |_: &cruise::model_selection::SdkSessionId| Ok(());
+                Some(
+                    fixture
+                        .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
+                        .await
+                        .unwrap_or_else(|e| panic!("{e}"))
+                        .session_id
+                        .unwrap_or_else(|| panic!("session missing"))
+                        .id,
+                )
+            } else {
+                None
+            };
+            let baseline = fixture.prompt_count();
+            let selections = selected_models(&fixture).len();
+            let launches = if id.is_some() { fixture.launch_count() } else { 0 };
+            set_catalog(&fixture, catalog.clone());
+            let result = if let Some(id) = &id {
+                resume_fixture_with_model(&fixture, id, 2, "fixture/model:medium").await
+            } else {
+                fixture.execute(Some("fixture/model:medium"), 2).await
+            };
+            let error = result
+                .err()
+                .unwrap_or_else(|| panic!("catalog failure must not silently select a default"));
+            let diagnostic = error.to_string().to_ascii_lowercase();
+            for fragment in &fragments {
+                assert!(
+                    diagnostic.contains(fragment),
+                    "missing {fragment}: {diagnostic}"
+                );
+            }
+            if matches!(fragments[0], "unsupported" | "ambiguous") {
+                assert!(
+                    diagnostic.contains("fixture/model"),
+                    "resolution diagnostic must name the requested model: {diagnostic}"
+                );
+            }
+            assert_eq!(
+                fixture.prompt_count(),
+                baseline,
+                "setup failure must not dispatch or fall back"
+            );
+            assert_eq!(
+                selected_models(&fixture).len(),
+                selections,
+                "setup failure must not change the conversation's model"
+            );
+            assert_eq!(fixture.launch_count(), launches + 1, "no retry or fallback");
+            fixture.assert_stopped();
+            if let Some(id) = &id {
+                let manifest = std::fs::read_dir(fixture.root.path().join("data/cruise/opencode"))
+                    .unwrap_or_else(|error| panic!("storage directory: {error}"))
+                    .next()
+                    .unwrap_or_else(|| panic!("retained storage missing"))
+                    .unwrap_or_else(|error| panic!("storage entry: {error}"))
+                    .path()
+                    .join("manifest.json");
+                let value: Value = serde_json::from_slice(
+                    &std::fs::read(manifest).unwrap_or_else(|error| panic!("manifest: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("manifest JSON: {error}"));
+                assert_eq!(
+                    value["clean"], true,
+                    "catalog rejection must preserve cleanliness"
+                );
+                set_catalog(&fixture, effort_catalog("model", &json!([{"id":"medium"}])));
+                let resumed = resume_fixture_with_model(&fixture, id, 2, "fixture/model:medium")
+                    .await
+                    .unwrap_or_else(|error| panic!("catalog rejection must allow resume: {error}"));
+                assert_eq!(
+                    resumed
+                        .session_id
+                        .as_ref()
+                        .map(|session| session.id.as_str()),
+                    Some(id.as_str())
+                );
+                assert_eq!(fixture.prompt_count(), baseline + 1);
+                assert_eq!(
+                    &selected_models(&fixture)[selections..],
+                    &[json!({"providerID":"fixture","id":"model","variant":"medium"})]
+                );
+                fixture.assert_stopped();
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_route_switches_once_but_tool_effects_and_zero_budget_prevent_replay() {
+    let _lock = lock_process();
+    for (side_effect, budget, succeeds) in [(false, 2, true), (true, 2, false), (false, 0, false)] {
+        let fixture = Fixture::new(Scenario::NoRoute { side_effect }).await;
+        let _guards = fixture.guards();
+        let primary = format!("fixture/no-route-{side_effect}-{budget}");
+        let result = fixture.execute(Some(&primary), budget).await;
+        if succeeds {
+            assert_eq!(
+                result
+                    .unwrap_or_else(|e| panic!("safe no-route must fall back: {e}"))
+                    .result
+                    .output,
+                ANSWER
+            );
+            assert_eq!(
+                selected_models(&fixture),
+                vec![
+                    json!({"providerID":"fixture","id":format!("no-route-{side_effect}-{budget}")}),
+                    json!({"providerID":"fixture","id":"fallback"})
+                ]
+            );
+            assert!(
+                fixture.notices().iter().any(|notice| {
+                    notice.contains("provider.no-route")
+                        && notice.contains("Model unavailable: fixture primary")
+                }),
+                "fallback notice must retain the original provider failure"
+            );
+        } else {
+            let error = result
+                .err()
+                .unwrap_or_else(|| panic!("unsafe or disabled replay must fail"));
+            assert!(
+                error.to_string().contains("provider.no-route")
+                    && error.to_string().contains("Model unavailable"),
+                "{error}"
+            );
+        }
+        assert_eq!(fixture.prompt_count(), if succeeds { 2 } else { 1 });
+        fixture.assert_stopped();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1316,6 +1902,15 @@ async fn resume_fixture_with_retries(
     id: &str,
     retries: usize,
 ) -> cruise::error::Result<PromptOutcome> {
+    resume_fixture_with_model(fixture, id, retries, MODEL).await
+}
+
+pub(crate) async fn resume_fixture_with_model(
+    fixture: &Fixture,
+    id: &str,
+    retries: usize,
+    model: &str,
+) -> cruise::error::Result<PromptOutcome> {
     let env = HashMap::new();
     let mcp_servers = cruise::config::McpServers::new();
     let config: RetryConfig = serde_yaml::from_str(
@@ -1326,7 +1921,7 @@ async fn resume_fixture_with_retries(
         policy_for_config(Some(config)),
         Executor::new(Some("opencode"), &[]).run(PromptRun {
             prompt: "resume fixture",
-            model: Some(&cruise::config::ModelSpec::Single(MODEL.to_owned())),
+            model: Some(&cruise::config::ModelSpec::Single(model.to_owned())),
             max_retries: retries,
             env: &env,
             mcp_servers: &mcp_servers,
@@ -1603,7 +2198,7 @@ async fn model_and_plan_arrays_use_effective_opencode_keys_and_explicit_preceden
                 let _guards = fixture.guards();
                 let _sdk = EnvGuard::set("CRUISE_SDK", "opencode");
                 let field = if planning { "plan_model" } else { "model" };
-                let model_id = format!("team/{field}-{precedence}-{}:high", variant.is_empty());
+                let model_id = format!("team/{field}-{precedence}-{}:2026", variant.is_empty());
                 let base = format!("fixture/{model_id}");
                 let primary = format!("{base}{variant}");
                 let sdk = if precedence == "override" {
@@ -2079,7 +2674,7 @@ async fn missing_required_plugin_stops_before_prompt_and_does_not_fallback() {
             .iter()
             .filter(|request| request.method == Method::POST && request.path == "/api/session")
             .count(),
-        1
+        0
     );
     fixture.assert_stopped();
 }

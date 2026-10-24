@@ -32,10 +32,11 @@ impl EffortLevel {
 /// Every `:suffix` recognized on a model reference, paired with the effort tier
 /// it selects. Compared case-insensitively after trimming.
 ///
-/// Some recognized suffixes have no tier: they are stripped off the model id but
-/// leave the effort unset, so the backend runs at its own default. `off` /
-/// `none` / `0` mean "no extended thinking", which is not an effort tier at all;
-/// `5` is only an alias spelling that cruise has never mapped to a tier.
+/// Some recognized suffixes have no tier: Jcode and Claude strip them off the
+/// model id and leave effort unset, using their backend default. OpenCode rejects
+/// these tierless suffixes. `off` / `none` / `0` mean "no extended thinking",
+/// which is not an effort tier at all; `5` is only an alias spelling that cruise
+/// has never mapped to a tier.
 const THINKING_SUFFIXES: &[(&str, Option<EffortLevel>)] = &[
     ("off", None),
     ("none", None),

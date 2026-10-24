@@ -165,7 +165,8 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
         "model":"local-smoke/smoke",
         "providers":{"local-smoke":{"package":"@opencode/ai/providers/openai-compatible", "env":[],
             "settings":{"baseURL":format!("http://{address}"),"apiKey":"local-test-not-a-credential"},
-            "models":{"smoke":{"name":"Deterministic local smoke", "limit":{"context":262_144,"output":1024},"capabilities":{"tools":true}}}}}
+            "models":{"smoke":{"name":"Deterministic local smoke", "limit":{"context":262_144,"output":1024},"capabilities":{"tools":true},
+                "variants":[{"id":"high","settings":{"reasoningEffort":"high"}},{"id":"max","settings":{"reasoningEffort":"max"}}]}}}}
     });
     let _config = EnvGuard::set("OPENCODE_CONFIG_CONTENT", config.to_string());
     let _no_auth = EnvGuard::remove("OPENCODE_AUTH_JSON");
@@ -212,10 +213,11 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
         *checkpoint.lock().unwrap_or_else(|e| panic!("{e}")) = Some(id.id.clone());
         Ok(())
     };
-    let selection = cruise::config::ModelSpec::Single("local-smoke/smoke".to_owned());
-    let request = |resume, cancel_token| PromptRun {
+    let selection = cruise::config::ModelSpec::Single("local-smoke/smoke:high".to_owned());
+    let resume_selection = cruise::config::ModelSpec::Single("local-smoke/smoke:max".to_owned());
+    let request = |selection, resume, cancel_token| PromptRun {
         prompt: "Run the local acceptance tools, then return LOCAL_V2_SMOKE_OK",
-        model: Some(&selection),
+        model: Some(selection),
         max_retries: 0,
         env: &env,
         mcp_servers: &mcp,
@@ -229,10 +231,13 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
         computer_use: false,
         permission: PermissionMode::ReadOnly,
     };
-    let first = tokio::time::timeout(Duration::from_secs(90), executor.run(request(None, None)))
-        .await
-        .unwrap_or_else(|e| panic!("real V2 turn timed out: {e}"))
-        .unwrap_or_else(|e| panic!("real V2 local-model turn: {e}"));
+    let first = tokio::time::timeout(
+        Duration::from_secs(90),
+        executor.run(request(&selection, None, None)),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("real V2 turn timed out: {e}"))
+    .unwrap_or_else(|e| panic!("real V2 local-model turn: {e}"));
     assert_eq!(first.result.output.trim(), "LOCAL_V2_SMOKE_OK");
     assert_eq!(
         *title.lock().unwrap_or_else(|e| panic!("{e}")),
@@ -294,6 +299,7 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
     let second = tokio::time::timeout(
         Duration::from_secs(60),
         executor.run(request(
+            &resume_selection,
             Some(cruise::model_selection::SdkSessionId {
                 sdk: cruise::model_selection::Sdk::OpenCode,
                 id: session.to_owned(),
@@ -349,6 +355,29 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
     );
     {
         let requests = model.requests.lock().unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            before_resume > 0,
+            "new session must reach the local provider"
+        );
+        assert!(
+            requests.len() > before_resume,
+            "resume must reach the local provider"
+        );
+        for (turn, requests, effort) in [
+            ("new", &requests[..before_resume], "high"),
+            ("resume", &requests[before_resume..], "max"),
+        ] {
+            for request in requests {
+                assert_eq!(
+                    request["model"], "smoke",
+                    "{turn} model must not retain effort suffix"
+                );
+                assert_eq!(
+                    request["reasoning_effort"], effort,
+                    "{turn} must forward common effort through the real CLI to the provider"
+                );
+            }
+        }
         assert!(
             requests[before_resume..]
                 .iter()
@@ -462,6 +491,7 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
     let (cancelled, ()) = tokio::time::timeout(Duration::from_secs(45), async {
         tokio::join!(
             executor.run(request(
+                &resume_selection,
                 Some(cruise::model_selection::SdkSessionId {
                     sdk: cruise::model_selection::Sdk::OpenCode,
                     id: session.to_owned()
