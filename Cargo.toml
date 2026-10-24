@@ -95,6 +95,13 @@ sha2 = "0.11.0"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 tar = "0.4"
 thiserror = "2.0.18"
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace", "metrics"] }
+opentelemetry-otlp = {
+  version = "0.33.1",
+  default-features = false,
+  features = ["http-proto", "gzip-http", "reqwest-blocking-client", "reqwest-rustls", "trace", "metrics"]
+}
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "metrics"] }
 tokio = { version = "1.49.0", features = [
   "rt-multi-thread",
   "rt",
@@ -134,7 +141,9 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 cucumber = "=0.23.0"
+opentelemetry-proto = { version = "0.33.1", features = ["gen-tonic-messages", "trace", "metrics"] }
 portable-pty = "=0.9.0"
+prost = "0.14"
 tempfile = "=3.27.0"
 vt100 = "=0.18.1"
 

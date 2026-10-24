@@ -25,6 +25,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::FutureExt as MapFutureExt;
+use opentelemetry::trace::FutureExt as OtelFutureExt;
+
 use crate::backend::claude::{ClaudeRunnerConfig, stream_agent as stream_claude_agent};
 use crate::backend::effort::{effort_from_suffix, split_thinking_suffix};
 use crate::backend::jcode::{self, JcodeRunnerConfig, stream_agent as stream_jcode_agent};
@@ -33,7 +36,7 @@ use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
 use crate::retry::{self, Failure, FallbackEngine, ModelReferenceFormat, RetryAction, RetryPolicy};
-use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt};
+use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt_with_attempt_model};
 
 /// Callback invoked when an SDK backend reports its session identifier.
 pub type SessionIdCallback<'a> = dyn Fn(&str) -> Result<()> + Send + Sync + 'a;
@@ -204,7 +207,25 @@ impl Executor {
     /// `jcode` run or the `claude` CLI run fails, or if `sdk` named a backend
     /// cruise does not implement. A jcode request with no effective Cruise model
     /// returns [`CruiseError::MissingJcodeModel`] before starting the backend.
-    pub async fn run(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
+    pub fn run(&self, req: PromptRun<'_>) -> impl Future<Output = Result<PromptOutcome>> + Send {
+        let backend = match self {
+            Executor::Command { .. } => "command",
+            Executor::Jcode => "jcode",
+            Executor::Claude => "claude",
+            Executor::OpenCode => "opencode",
+            Executor::Unsupported { .. } => "unsupported",
+        };
+        let operation =
+            crate::telemetry::Operation::start("agent", &[("cruise.agent.backend", backend)]);
+        self.run_inner(req)
+            .with_context(operation.context())
+            .map(move |result| {
+                operation.finish_result(&result);
+                result
+            })
+    }
+
+    async fn run_inner(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
         const GUARD: &str = "read-only";
 
         if matches!(self, Executor::Jcode) {
@@ -304,9 +325,10 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
             cb(msg);
         }
     };
-    let result = run_prompt(
+    let result = run_prompt_with_attempt_model(
         &resolved_command,
         model_arg.as_deref(),
+        req.model_or_mode,
         req.prompt,
         req.max_retries,
         req.env,
@@ -503,6 +525,20 @@ impl AttemptFailure {
             AttemptFailure::Unusable { error, .. } => error,
         }
     }
+
+    /// Safe fixed category when no retry class is available.
+    fn error_type(&self) -> &'static str {
+        match self {
+            AttemptFailure::Unusable { error, .. } => error.telemetry_type(),
+            AttemptFailure::Limited { .. } | AttemptFailure::Failed { .. } => "command_error",
+        }
+    }
+}
+
+enum AttemptCompletion {
+    Done(PromptOutcome),
+    Retry(AttemptFailure),
+    Barrier(AttemptFailure),
 }
 /// Run one prompt on an SDK backend, retrying through
 /// [`crate::retry::FallbackEngine`].
@@ -528,7 +564,7 @@ impl AttemptFailure {
 )]
 async fn run_with_fallback(
     req: &PromptRun<'_>,
-    label: &str,
+    label: &'static str,
     format: ModelReferenceFormat,
     policy: Option<Arc<RetryPolicy>>,
     mut start: impl FnMut(Option<&str>) -> Result<std::sync::mpsc::Receiver<StreamChunk>>,
@@ -541,7 +577,8 @@ async fn run_with_fallback(
             "all configured models are cooling down after retryable failures".to_string(),
         ));
     }
-    if let Some((from, to)) = engine.take_startup_switch()
+    let mut startup_switch = engine.take_startup_switch();
+    if let Some((from, to)) = &startup_switch
         && let Some(cb) = req.on_notice
     {
         cb(&format!(
@@ -549,58 +586,128 @@ async fn run_with_fallback(
         ));
     }
 
+    let mut attempt_number = 0;
     loop {
+        attempt_number += 1;
         let model = engine.model().map(str::to_string);
-        let failed = match start(model.as_deref()) {
-            Err(error) => AttemptFailure::Unusable {
-                message: error.to_string(),
-                error,
-            },
-            Ok(rx_std) => {
-                if !model_reported {
-                    notify_model_notice(req.on_notice, model.as_deref(), label);
-                    model_reported = true;
+        let attempt = crate::telemetry::Operation::attempt(attempt_number, label, model.as_deref());
+        if let Some((from, to)) = startup_switch.take() {
+            let _guard = attempt.context().attach();
+            crate::telemetry::record_retry("fallback", "model_cooldown", 1, Some(&from), Some(&to));
+        }
+        let completion = async {
+            let rx_std = match start(model.as_deref()) {
+                Ok(rx_std) => rx_std,
+                Err(error) => {
+                    return Ok(AttemptCompletion::Retry(AttemptFailure::Unusable {
+                        message: error.to_string(),
+                        error,
+                    }));
                 }
-                let folded =
-                    stream_to_outcome(rx_std, on_delta, req.on_session_id, req.cancel_token)
-                        .await?;
-                let streamed = folded.streamed;
-                if folded.retry_barrier {
-                    match &folded.outcome {
-                        ChunkOutcome::Limited { message, .. }
-                        | ChunkOutcome::Failed { message, .. } => {
-                            return Err(CruiseError::CommandError(message.clone()));
-                        }
-                        _ => {}
-                    }
+            };
+            if !model_reported {
+                notify_model_notice(req.on_notice, model.as_deref(), label);
+                model_reported = true;
+            }
+            let folded =
+                stream_to_outcome(rx_std, on_delta, req.on_session_id, req.cancel_token).await?;
+            let streamed = folded.streamed;
+            let retry_barrier = folded.retry_barrier;
+            match folded.outcome {
+                ChunkOutcome::Done { output, session } => {
+                    Ok(AttemptCompletion::Done(PromptOutcome {
+                        result: PromptResult {
+                            output,
+                            stderr: String::new(),
+                        },
+                        session_id: session,
+                    }))
                 }
-                match folded.outcome {
-                    ChunkOutcome::Done { output, session } => {
-                        return Ok(PromptOutcome {
-                            result: PromptResult {
-                                output,
-                                stderr: String::new(),
-                            },
-                            session_id: session,
-                        });
-                    }
-                    ChunkOutcome::Closed { .. } => {
-                        return Err(CruiseError::Other(format!(
-                            "{label} stream closed before completion"
-                        )));
-                    }
-                    ChunkOutcome::Limited { message, .. } => {
-                        AttemptFailure::Limited { message, streamed }
-                    }
-                    ChunkOutcome::Failed { message, .. } => {
-                        AttemptFailure::Failed { message, streamed }
-                    }
+                ChunkOutcome::Closed { .. } => Err(CruiseError::Other(format!(
+                    "{label} stream closed before completion"
+                ))),
+                ChunkOutcome::Limited { message, .. } => {
+                    let failed = AttemptFailure::Limited { message, streamed };
+                    Ok(if retry_barrier {
+                        AttemptCompletion::Barrier(failed)
+                    } else {
+                        AttemptCompletion::Retry(failed)
+                    })
+                }
+                ChunkOutcome::Failed { message, .. } => {
+                    let failed = AttemptFailure::Failed { message, streamed };
+                    Ok(if retry_barrier {
+                        AttemptCompletion::Barrier(failed)
+                    } else {
+                        AttemptCompletion::Retry(failed)
+                    })
                 }
             }
+        }
+        .with_context(attempt.context())
+        .await;
+
+        let failed = match completion {
+            Err(error) => {
+                let failed: Result<PromptOutcome> = Err(error);
+                attempt.finish_result(&failed);
+                return failed;
+            }
+            Ok(AttemptCompletion::Done(outcome)) => {
+                attempt.finish("success");
+                return Ok(outcome);
+            }
+            Ok(AttemptCompletion::Barrier(failed)) => {
+                let (failure, _) = failed.failure();
+                let error_type = engine
+                    .classify_failure(failure)
+                    .map_or_else(|| failed.error_type(), retry::RetryClass::telemetry_type);
+                attempt.set_error_type(error_type);
+                attempt.finish("error");
+                return Err(failed.into_error());
+            }
+            Ok(AttemptCompletion::Retry(failed)) => failed,
         };
 
         let (failure, streamed) = failed.failure();
-        let action = engine.next(failure, streamed);
+        let (action, retry_class) = {
+            let _guard = attempt.context().attach();
+            let (action, retry_class) = engine.next_with_class(failure, streamed);
+            if let Some(class) = retry_class {
+                match &action {
+                    RetryAction::Switch {
+                        from,
+                        to,
+                        attempt: retry_attempt,
+                        ..
+                    } => crate::telemetry::record_retry(
+                        "fallback",
+                        class.telemetry_reason(),
+                        *retry_attempt,
+                        from.as_deref(),
+                        Some(to.as_str()),
+                    ),
+                    RetryAction::Backoff {
+                        attempt: retry_attempt,
+                        ..
+                    } => {
+                        crate::telemetry::record_retry(
+                            "backoff",
+                            class.telemetry_reason(),
+                            *retry_attempt,
+                            model.as_deref(),
+                            model.as_deref(),
+                        );
+                    }
+                    RetryAction::GiveUp => {}
+                }
+            }
+            (action, retry_class)
+        };
+        attempt.set_error_type(
+            retry_class.map_or_else(|| failed.error_type(), retry::RetryClass::telemetry_type),
+        );
+        attempt.finish("error");
         let delay = match action {
             RetryAction::GiveUp => return Err(failed.into_error()),
             RetryAction::Switch {

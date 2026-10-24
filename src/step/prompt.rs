@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use command_group::{AsyncCommandGroup as _, AsyncGroupChild};
+use opentelemetry::trace::FutureExt as OtelFutureExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
@@ -15,6 +16,17 @@ pub struct PromptResult {
     pub stderr: String,
 }
 
+enum PromptExecutionError {
+    Cruise(CruiseError),
+    CommandExit(CruiseError),
+}
+
+impl From<CruiseError> for PromptExecutionError {
+    fn from(error: CruiseError) -> Self {
+        Self::Cruise(error)
+    }
+}
+
 /// Grouped callbacks for streaming LLM stdout/stderr output line by line.
 pub struct StreamCallbacks<'a> {
     pub on_stdout: Option<&'a (dyn Fn(&str) + Send + Sync)>,
@@ -27,9 +39,10 @@ pub struct StreamCallbacks<'a> {
 ///
 /// Returns an error if the LLM process fails to spawn or returns a fatal error.
 #[expect(clippy::too_many_arguments)]
-pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
+pub(crate) async fn run_prompt_with_attempt_model<S: std::hash::BuildHasher, F: Fn(&str)>(
     command: &[String],
     model: Option<&str>,
+    telemetry_model: Option<&str>,
     prompt: &str,
     max_retries: usize,
     env: &HashMap<String, String, S>,
@@ -41,6 +54,8 @@ pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
     let mut attempts = 0;
 
     loop {
+        let attempt =
+            crate::telemetry::Operation::attempt(attempts + 1, "command", telemetry_model);
         let result = execute_prompt(
             command,
             model,
@@ -50,13 +65,23 @@ pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
             cwd,
             stream_callbacks,
         )
+        .with_context(attempt.context())
         .await;
 
         match result {
-            Ok((output, stderr)) => return Ok(PromptResult { output, stderr }),
-            Err(e) => {
-                let err_msg = e.to_string();
-                if is_rate_limited(&err_msg) && attempts < max_retries {
+            Ok((output, stderr)) => {
+                attempt.finish("success");
+                return Ok(PromptResult { output, stderr });
+            }
+            Err(error) => {
+                let (error, command_exit) = match error {
+                    PromptExecutionError::Cruise(error) => (error, false),
+                    PromptExecutionError::CommandExit(error) => (error, true),
+                };
+                let err_msg = error.to_string();
+                let rate_limited = is_rate_limited(&err_msg);
+                if rate_limited && attempts < max_retries {
+                    attempt.set_error_type("rate_limit");
                     attempts += 1;
                     let delay = calculate_backoff(attempts);
                     let msg = format!(
@@ -65,6 +90,17 @@ pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
                         attempts,
                         max_retries
                     );
+                    {
+                        let _guard = attempt.context().attach();
+                        crate::telemetry::record_retry(
+                            "backoff",
+                            "rate_limit",
+                            attempts,
+                            model,
+                            model,
+                        );
+                    }
+                    attempt.finish("error");
                     if let Some(cb) = on_retry {
                         cb(&msg);
                     } else {
@@ -74,9 +110,21 @@ pub async fn run_prompt<S: std::hash::BuildHasher, F: Fn(&str)>(
                         () = tokio::time::sleep(delay) => {}
                         () = maybe_cancelled(cancel_token) => return Err(CruiseError::Interrupted),
                     }
-                    continue;
+                } else {
+                    if command_exit {
+                        crate::telemetry::record_error_type("command_exit");
+                    }
+                    attempt.set_error_type(if rate_limited {
+                        "rate_limit"
+                    } else if command_exit {
+                        "command_exit"
+                    } else {
+                        error.telemetry_type()
+                    });
+                    let failed: Result<PromptResult> = Err(error);
+                    attempt.finish_result(&failed);
+                    return failed;
                 }
-                return Err(e);
             }
         }
     }
@@ -181,7 +229,7 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
     cancel_token: Option<&CancellationToken>,
     cwd: Option<&std::path::Path>,
     stream_callbacks: Option<&StreamCallbacks<'_>>,
-) -> Result<(String, String)> {
+) -> std::result::Result<(String, String), PromptExecutionError> {
     let mut child = spawn_prompt_command(command, model, env, cwd)?;
     write_prompt(&mut child, prompt, cancel_token).await?;
     let stdout_pipe = child.inner().stdout.take();
@@ -212,7 +260,7 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
         }
         () = maybe_cancelled(cancel_token) => {
             let _ = child.kill().await;
-            return Err(CruiseError::Interrupted);
+            return Err(CruiseError::Interrupted.into());
         }
     }
 
@@ -225,7 +273,9 @@ async fn execute_prompt<S: std::hash::BuildHasher>(
         } else {
             stderr_for_err
         };
-        return Err(CruiseError::CommandError(error_msg));
+        return Err(PromptExecutionError::CommandExit(
+            CruiseError::CommandError(error_msg),
+        ));
     }
 
     Ok((stdout_buf, stderr_buf))
@@ -272,7 +322,7 @@ mod tests {
             "/C".to_string(),
             "start /b cmd /c ping -n 30 127.0.0.1 >nul & ping -n 30 127.0.0.1 >nul".to_string(),
         ];
-        // `run_prompt` has no timeout, so the tree is stopped via cancellation.
+        // Prompt execution has no timeout, so the tree is stopped via cancellation.
         let token = CancellationToken::new();
         let canceller = token.clone();
         tokio::spawn(async move {
@@ -280,8 +330,9 @@ mod tests {
             canceller.cancel();
         });
         let started = std::time::Instant::now();
-        let result = run_prompt(
+        let result = run_prompt_with_attempt_model(
             &command,
+            None,
             None,
             "prompt",
             0,
@@ -305,8 +356,9 @@ mod tests {
         let _guard = crate::test_support::lock_process();
         // Use `cat` to echo back stdin as a stand-in for a real LLM.
         let command = vec!["cat".to_string()];
-        let result = run_prompt(
+        let result = run_prompt_with_attempt_model(
             &command,
+            None,
             None,
             "test prompt",
             0,
@@ -323,8 +375,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_prompt_empty_command() {
-        let result = run_prompt(
+        let result = run_prompt_with_attempt_model(
             &[],
+            None,
             None,
             "prompt",
             0,
@@ -346,8 +399,9 @@ mod tests {
         let command = vec!["cat".to_string()];
         let mut env = HashMap::new();
         env.insert("SOME_VAR".to_string(), "some_value".to_string());
-        let result = run_prompt(
+        let result = run_prompt_with_attempt_model(
             &command,
+            None,
             None,
             "prompt text",
             0,
@@ -368,8 +422,9 @@ mod tests {
         let _guard = crate::test_support::lock_process();
         // "sh -c cat" ignores extra positional args (--model test-model become $0/$1 in sh).
         let command = vec!["sh".to_string(), "-c".to_string(), "cat".to_string()];
-        let result = run_prompt(
+        let result = run_prompt_with_attempt_model(
             &command,
+            Some("test-model"),
             Some("test-model"),
             "hello model",
             0,
@@ -396,8 +451,9 @@ mod tests {
             "printf output".to_string(),
         ];
         let prompt = "x".repeat(1024 * 1024);
-        let result = run_prompt(
+        let result = run_prompt_with_attempt_model(
             &command,
+            None,
             None,
             &prompt,
             0,
@@ -423,9 +479,10 @@ mod tests {
             "-c".to_string(),
             "echo out_text; echo err_text >&2".to_string(),
         ];
-        // When: run_prompt is called with an empty prompt (stdin ignored by the script)
-        let result = run_prompt(
+        // When prompt execution is called with an empty prompt (stdin ignored by the script)
+        let result = run_prompt_with_attempt_model(
             &command,
+            None,
             None,
             "",
             0,
@@ -448,9 +505,10 @@ mod tests {
         let _guard = crate::test_support::lock_process();
         // Given: a command that writes only to stdout (cat echoes stdin)
         let command = vec!["cat".to_string()];
-        // When: run_prompt is called
-        let result = run_prompt(
+        // When the prompt runner is called
+        let result = run_prompt_with_attempt_model(
             &command,
+            None,
             None,
             "only stdout",
             0,
@@ -481,13 +539,14 @@ mod tests {
         let on_stdout = |line: &str| {
             lines.lock().expect("lock poisoned").push(line.to_string());
         };
-        // When: run_prompt is called with on_stdout callback
+        // When the prompt runner is called with an on_stdout callback
         let stream_callbacks = StreamCallbacks {
             on_stdout: Some(&on_stdout as &(dyn Fn(&str) + Send + Sync)),
             on_stderr: None,
         };
-        let result = run_prompt(
+        let result = run_prompt_with_attempt_model(
             &command,
+            None,
             None,
             "",
             0,
@@ -519,13 +578,14 @@ mod tests {
         let on_stderr = |line: &str| {
             lines.lock().expect("lock poisoned").push(line.to_string());
         };
-        // When: run_prompt is called with on_stderr callback
+        // When the prompt runner is called with an on_stderr callback
         let stream_callbacks = StreamCallbacks {
             on_stdout: None,
             on_stderr: Some(&on_stderr as &(dyn Fn(&str) + Send + Sync)),
         };
-        let result = run_prompt(
+        let result = run_prompt_with_attempt_model(
             &command,
+            None,
             None,
             "",
             0,

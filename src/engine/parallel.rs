@@ -1,4 +1,6 @@
+use futures::FutureExt as MapFutureExt;
 use indexmap::IndexMap;
+use opentelemetry::trace::FutureExt as OtelFutureExt;
 use serde::Serialize;
 
 use super::{
@@ -121,6 +123,11 @@ pub(super) async fn run_parallel_step(
     if let Some(error) = fatal_error {
         return Err(error);
     }
+    if timed_out {
+        crate::telemetry::record_error_type("parallel_timeout");
+    } else if failed {
+        crate::telemetry::record_error_type("parallel_failed");
+    }
     Ok(StepExecOutcome {
         option_next: None,
         failed,
@@ -128,7 +135,40 @@ pub(super) async fn run_parallel_step(
     })
 }
 
-async fn run_child(
+fn run_child(
+    ctx: &ExecutionContext<'_>,
+    child: &StepConfig,
+    vars: VariableStore,
+    inherited_env: &HashMap<String, String>,
+    name: String,
+) -> impl Future<Output = Result<ChildResult>> + Send {
+    let attributes = [
+        ("cruise.step.name", name.as_str()),
+        (
+            "cruise.step.type",
+            if child.command.is_some() {
+                "command"
+            } else {
+                "prompt"
+            },
+        ),
+    ];
+    let operation = crate::telemetry::Operation::start("step", &attributes);
+    run_child_inner(ctx, child, vars, inherited_env, name)
+        .with_context(operation.context())
+        .map(move |result| {
+            match &result {
+                Ok(child) if !child.success => {
+                    operation.set_error_type("command_exit");
+                    operation.finish("failed");
+                }
+                _ => operation.finish_result(&result),
+            }
+            result
+        })
+}
+
+async fn run_child_inner(
     ctx: &ExecutionContext<'_>,
     child: &StepConfig,
     mut vars: VariableStore,

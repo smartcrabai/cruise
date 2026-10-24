@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use futures::FutureExt;
+use opentelemetry::trace::FutureExt as OtelFutureExt;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
 use uuid::Uuid;
@@ -40,6 +41,32 @@ pub enum OperationKind {
     BatchQueued,
     BatchRun,
     Mutate,
+}
+
+fn execution_kind(operation: OperationKind) -> &'static str {
+    match operation {
+        OperationKind::Generate => "generate",
+        OperationKind::Fix => "fix",
+        OperationKind::Ask => "ask",
+        OperationKind::Replan => "replan",
+        OperationKind::Run | OperationKind::BatchRun => "run",
+        OperationKind::BatchQueued => "batch_queued",
+        OperationKind::Mutate => "mutate",
+    }
+}
+
+fn finish_session_operation(operation: crate::telemetry::Operation, result: &Result<SessionState>) {
+    match result {
+        Err(_) => operation.finish_result(result),
+        Ok(state) => match &state.phase {
+            SessionPhase::Failed(_) => {
+                operation.set_error_type("step_failed");
+                operation.finish("error");
+            }
+            SessionPhase::Suspended => operation.finish("cancelled"),
+            _ => operation.finish("success"),
+        },
+    }
 }
 
 /// Stable stream names used by plan and run events.
@@ -1687,9 +1714,20 @@ async fn prepare_plan(
         ));
     }
     let token = context.claim.token();
-    crate::repo_clone::ensure_repo_session_workspace_cancelled(manager, &mut context.state, &token)
+    let workspace = crate::telemetry::Operation::phase("workspace");
+    let workspace_result = async {
+        crate::repo_clone::ensure_repo_session_workspace_cancelled(
+            manager,
+            &mut context.state,
+            &token,
+        )
         .await?;
-    manager.save(&context.state)?;
+        manager.save(&context.state)
+    }
+    .with_context(workspace.context())
+    .await;
+    workspace.finish_result(&workspace_result);
+    workspace_result?;
     let identity = context
         .state
         .config
@@ -2004,20 +2042,27 @@ async fn execute_plan(
     request: &PlanRequest,
     operation: OperationKind,
     sink: &Arc<dyn ApplicationEventSink>,
+    config: &crate::config::WorkflowConfig,
 ) -> Result<()> {
-    let config = prepare_plan(manager, context, request).await?;
-    with_plan_retry_policy(&config, async {
-        if request.skip_planning {
+    if request.skip_planning {
+        with_plan_retry_policy(config, async {
             crate::planning::write_input_as_plan(
                 &context.staged_plan_path,
                 &context.state.input_with_attachments(),
             )
             .and_then(|_| context.state.use_input_as_plan())
-        } else {
-            run_plan_prompt(runtime, manager, context, request, operation, &config, sink).await
-        }
-    })
-    .await
+        })
+        .await
+    } else {
+        let planning = crate::telemetry::Operation::phase("planning");
+        let result = with_plan_retry_policy(config, async {
+            run_plan_prompt(runtime, manager, context, request, operation, config, sink).await
+        })
+        .with_context(planning.context())
+        .await;
+        planning.finish_result(&result);
+        result
+    }
 }
 
 /// Run one planning operation with the policy belonging to its resolved config.
@@ -2861,26 +2906,65 @@ impl CruiseApplication {
         sink: Arc<dyn ApplicationEventSink>,
         operation: OperationKind,
     ) -> Result<SessionState> {
-        let _quiet = crate::console_mode::quiet_guard();
-        let mut context = start_plan_context(&self.manager, &self.runtime, id, operation, &*sink)?;
-        let result = execute_plan(
-            &self.manager,
-            &self.runtime,
-            &mut context,
-            &request,
-            operation,
-            &sink,
-        )
+        let execution = crate::telemetry::Operation::execution(execution_kind(operation), id, None);
+        let result = async {
+            let _quiet = crate::console_mode::quiet_guard();
+            let preparation = crate::telemetry::Operation::phase("prepare");
+            let context_result =
+                async { start_plan_context(&self.manager, &self.runtime, id, operation, &*sink) }
+                    .with_context(preparation.context())
+                    .await;
+            if context_result.is_err() {
+                preparation.finish_result(&context_result);
+                let Err(error) = context_result else {
+                    unreachable!()
+                };
+                return Err(error);
+            }
+            let mut context = context_result?;
+            execution.set_workflow(&context.state.config);
+            let config_result = prepare_plan(&self.manager, &mut context, &request)
+                .with_context(preparation.context())
+                .await;
+            preparation.finish_result(&config_result);
+
+            let plan_result = match config_result {
+                Err(error) => Err(error),
+                Ok(config) => {
+                    execute_plan(
+                        &self.manager,
+                        &self.runtime,
+                        &mut context,
+                        &request,
+                        operation,
+                        &sink,
+                        &config,
+                    )
+                    .await
+                }
+            };
+
+            let finalize = crate::telemetry::Operation::phase("finalize");
+            let result = async {
+                finish_plan(
+                    &self.manager,
+                    &self.runtime,
+                    operation,
+                    &request,
+                    &*sink,
+                    &mut context,
+                    plan_result,
+                )
+            }
+            .with_context(finalize.context())
+            .await;
+            finalize.finish_result(&result);
+            result
+        }
+        .with_context(execution.context())
         .await;
-        finish_plan(
-            &self.manager,
-            &self.runtime,
-            operation,
-            &request,
-            &*sink,
-            &mut context,
-            result,
-        )
+        finish_session_operation(execution, &result);
+        result
     }
     /// Apply feedback to a session plan.
     ///
@@ -3227,18 +3311,25 @@ impl CruiseApplication {
         log_sink: Option<Arc<dyn LogSink>>,
         batch_started: bool,
     ) -> Result<SessionState> {
-        let exec_initial = self
-            .manager
-            .load_with_fingerprint(id)
-            .ok()
-            .and_then(|(state, fingerprint)| state.exec.then_some((state.phase, fingerprint)));
+        let execution = crate::telemetry::Operation::execution("run", id, None);
+        let exec_initial =
+            self.manager
+                .load_with_fingerprint(id)
+                .ok()
+                .and_then(|(state, fingerprint)| {
+                    execution.set_workflow(&state.config);
+                    state.exec.then_some((state.phase, fingerprint))
+                });
         let result = self
             .run_claimed_inner(id, claim, request, sink, log_sink, batch_started)
+            .with_context(execution.context())
             .await;
         if let Some((initial_phase, fingerprint)) = exec_initial {
+            let _guard = execution.context().attach();
             self.manager
                 .dispose_exec_session_if_owned(id, &initial_phase, fingerprint);
         }
+        finish_session_operation(execution, &result);
         result
     }
 
@@ -3252,42 +3343,79 @@ impl CruiseApplication {
         batch_started: bool,
     ) -> Result<SessionState> {
         let _quiet = crate::console_mode::quiet_guard();
-        let mut setup = match prepare_run_setup(&self.manager, id, claim, &request).await {
-            Ok(setup) => setup,
-            Err(error) => return self.persist_setup_failure(id, error, &sink),
-        };
-        if claim.token().is_cancelled() {
-            let cleanup = cleanup_new_execution_workspace(
-                &self.manager,
-                &mut setup.state,
-                &setup.workspace,
-                setup.repo_clone_created,
-            );
-            setup.state.phase = SessionPhase::Suspended;
-            setup.state.pr_skipped_reason = None;
-            setup.state.clear_pending_input();
-            setup.state.clear_runner();
-            self.manager.save(&setup.state)?;
-            sink.send(ApplicationEvent::RunCancelled {
-                session_id: id.to_string(),
-            })?;
-            let _ = cleanup;
-            return Err(CruiseError::Interrupted);
+        let prepare = crate::telemetry::Operation::phase("prepare");
+        let setup_result = prepare_run_setup(&self.manager, id, claim, &request)
+            .with_context(prepare.context())
+            .await;
+        if setup_result.is_err() {
+            prepare.finish_result(&setup_result);
+            let Err(error) = setup_result else {
+                unreachable!()
+            };
+            let finalize = crate::telemetry::Operation::phase("finalize");
+            let result = async { self.persist_setup_failure(id, error, &sink) }
+                .with_context(finalize.context())
+                .await;
+            finalize.finish_result(&result);
+            return result;
         }
-        let mut inputs = match prepare_run_inputs(&self.manager, &mut setup) {
-            Ok(inputs) => inputs,
-            Err(error) => {
+        let mut setup = setup_result?;
+
+        if claim.token().is_cancelled() {
+            let cancelled: Result<()> = Err(CruiseError::Interrupted);
+            prepare.finish_result(&cancelled);
+            let finalize = crate::telemetry::Operation::phase("finalize");
+            let result: Result<SessionState> = async {
+                let cleanup = cleanup_new_execution_workspace(
+                    &self.manager,
+                    &mut setup.state,
+                    &setup.workspace,
+                    setup.repo_clone_created,
+                );
+                setup.state.phase = SessionPhase::Suspended;
+                setup.state.pr_skipped_reason = None;
+                setup.state.clear_pending_input();
+                setup.state.clear_runner();
+                self.manager.save(&setup.state)?;
+                sink.send(ApplicationEvent::RunCancelled {
+                    session_id: id.to_string(),
+                })?;
+                let _ = cleanup;
+                Err(CruiseError::Interrupted)
+            }
+            .with_context(finalize.context())
+            .await;
+            finalize.finish_result(&result);
+            return result;
+        }
+
+        let inputs_result = prepare_run_inputs(&self.manager, &mut setup);
+        if inputs_result.is_err() {
+            prepare.finish_result(&inputs_result);
+            let Err(error) = inputs_result else {
+                unreachable!()
+            };
+            let finalize = crate::telemetry::Operation::phase("finalize");
+            let result = async {
                 let _ = cleanup_new_execution_workspace(
                     &self.manager,
                     &mut setup.state,
                     &setup.workspace,
                     setup.repo_clone_created,
                 );
-                return self.persist_setup_failure(id, error, &sink);
+                self.persist_setup_failure(id, error, &sink)
             }
-        };
-        emit_run_started(&self.manager, id, &*sink, &mut setup, batch_started)?;
-        let result = execute_run(
+            .with_context(finalize.context())
+            .await;
+            finalize.finish_result(&result);
+            return result;
+        }
+        let mut inputs = inputs_result?;
+        let started = emit_run_started(&self.manager, id, &*sink, &mut setup, batch_started);
+        prepare.finish_result(&started);
+        started?;
+
+        let execution_result = execute_run(
             &self.manager,
             claim,
             &mut setup,
@@ -3297,15 +3425,22 @@ impl CruiseApplication {
             batch_started,
         )
         .await;
-        finish_run(
-            &self.manager,
-            &self.runtime,
-            id,
-            claim,
-            &*sink,
-            &mut setup,
-            result,
-        )
+        let finalize = crate::telemetry::Operation::phase("finalize");
+        let result = async {
+            finish_run(
+                &self.manager,
+                &self.runtime,
+                id,
+                claim,
+                &*sink,
+                &mut setup,
+                execution_result,
+            )
+        }
+        .with_context(finalize.context())
+        .await;
+        finalize.finish_result(&result);
+        result
     }
 }
 
@@ -3406,10 +3541,16 @@ fn setup_run_blocking(
     if state.repo.is_some() {
         crate::forge::ensure_forge_available(crate::forge::session_forge(&state))?;
     }
-    let (workspace, repo_clone_created) =
-        prepare_run_workspace(manager, runtime_handle, &mut state, workspace_mode, token)?;
-    crate::workspace::update_session_workspace(&mut state, &workspace);
-    state.workspace_mode = workspace_mode;
+    let workspace_phase = crate::telemetry::Operation::phase("workspace");
+    let workspace_result = (|| {
+        let (workspace, repo_clone_created) =
+            prepare_run_workspace(manager, runtime_handle, &mut state, workspace_mode, token)?;
+        crate::workspace::update_session_workspace(&mut state, &workspace);
+        state.workspace_mode = workspace_mode;
+        Ok((workspace, repo_clone_created))
+    })();
+    workspace_phase.finish_result(&workspace_result);
+    let (workspace, repo_clone_created) = workspace_result?;
     Ok(RunSetup {
         state,
         compiled,
@@ -3435,7 +3576,9 @@ async fn prepare_run_setup(
     let requested_mode = request.workspace_mode;
     let max_retries_override = request.max_retries;
     let rate_limit_retries = request.rate_limit_retries;
+    let setup_context = opentelemetry::Context::current();
     tokio::task::spawn_blocking(move || {
+        let _guard = setup_context.attach();
         setup_run_blocking(
             &setup_manager,
             &runtime_handle,
@@ -3669,6 +3812,7 @@ async fn execute_run(
         setup.state.workflow_defaults_dir().map(Path::to_path_buf),
         setup.max_retries,
     );
+    let workflow = crate::telemetry::Operation::phase("workflow");
     let mut execution = {
         let ctx = crate::engine::ExecutionContext {
             compiled: &setup.compiled,
@@ -3691,9 +3835,47 @@ async fn execute_run(
             &mut setup.dag,
             &on_node_start,
         )
+        .with_context(workflow.context())
         .await
     };
-    if let Ok(result) = &mut execution
+    match &execution {
+        Ok(result) if result.failed > 0 => {
+            workflow.set_error_type("step_failed");
+            workflow.finish("failed");
+        }
+        _ => workflow.finish_result(&execution),
+    }
+    refresh_run_after_execution(manager, id, setup, inputs, &mut execution);
+    match execution {
+        Err(error) => Err(error),
+        Ok(_) if claim.token().is_cancelled() => Err(CruiseError::Interrupted),
+        Ok(_) if setup.state.exec => Ok(()),
+        Ok(_) => {
+            let worktree = match &setup.workspace {
+                crate::workspace::ExecutionWorkspace::CurrentBranch { .. } => return Ok(()),
+                crate::workspace::ExecutionWorkspace::Worktree { ctx, .. } => ctx.clone(),
+            };
+            WorktreeRun {
+                manager,
+                sink: &sink,
+                worktree: &worktree,
+                claim,
+                option: &option,
+            }
+            .execute(setup, inputs, &on_log)
+            .await
+        }
+    }
+}
+
+fn refresh_run_after_execution(
+    manager: &SessionManager,
+    id: &str,
+    setup: &mut RunSetup,
+    inputs: &RunInputs,
+    execution: &mut Result<crate::engine::ExecutionResult>,
+) {
+    if let Ok(result) = execution.as_mut()
         && let Some(reloaded) = result.reloaded_workflow.take()
     {
         setup.compiled = reloaded.compiled;
@@ -3720,27 +3902,8 @@ async fn execute_run(
             "current-branch workspaces do not create pull requests",
         );
     }
-    match execution {
-        Err(error) => Err(error),
-        Ok(_) if claim.token().is_cancelled() => Err(CruiseError::Interrupted),
-        Ok(_) if setup.state.exec => Ok(()),
-        Ok(_) => {
-            let worktree = match &setup.workspace {
-                crate::workspace::ExecutionWorkspace::CurrentBranch { .. } => return Ok(()),
-                crate::workspace::ExecutionWorkspace::Worktree { ctx, .. } => ctx.clone(),
-            };
-            WorktreeRun {
-                manager,
-                sink: &sink,
-                worktree: &worktree,
-                claim,
-                option: &option,
-            }
-            .execute(setup, inputs, &on_log)
-            .await
-        }
-    }
 }
+
 fn cancel_run(
     manager: &SessionManager,
     id: &str,

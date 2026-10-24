@@ -6,6 +6,7 @@ use crate::paths;
 use crate::resolver::{ConfigSource, load_config_from_source, resolve_config};
 use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
 use crate::session_config::SessionConfigRef;
+use opentelemetry::trace::FutureExt as OtelFutureExt;
 
 pub(crate) struct ExecRequest {
     pub input: String,
@@ -58,23 +59,30 @@ pub(crate) async fn run_resolved(
         return Ok(());
     }
 
-    let manager = SessionManager::new(paths::data_dir()?);
-    let session = setup_exec_session(&manager, source, yaml, req.input)?;
-    let session = persist_exec_flags(&manager, session, flag_values)?;
-
-    let run_args = RunArgs {
-        session: Some(session.id.clone()),
-        all: false,
-        parallelism: None,
-        max_retries: req.max_retries,
-        rate_limit_retries: req.rate_limit_retries,
-        dry_run: false,
-        cleanup_after_pr: false,
-        no_cleanup_after_pr: false,
-        flags: vec![],
-    };
-
-    crate::run_cmd::run(run_args).await
+    let session_id = SessionManager::new_session_id();
+    let operation = crate::telemetry::Operation::execution("exec", &session_id, None);
+    let result = async {
+        let manager = SessionManager::new(paths::data_dir()?);
+        let session = setup_exec_session(&manager, source, yaml, req.input, &session_id)?;
+        operation.set_workflow(&session.config);
+        let session = persist_exec_flags(&manager, session, flag_values)?;
+        let run_args = RunArgs {
+            session: Some(session.id.clone()),
+            all: false,
+            parallelism: None,
+            max_retries: req.max_retries,
+            rate_limit_retries: req.rate_limit_retries,
+            dry_run: false,
+            cleanup_after_pr: false,
+            no_cleanup_after_pr: false,
+            flags: vec![],
+        };
+        crate::run_cmd::run_with_operation(run_args, &operation).await
+    }
+    .with_context(operation.context())
+    .await;
+    operation.finish_result(&result);
+    crate::run_cmd::finish_cli_run(result)
 }
 
 /// Store explicit flag values on a freshly created exec session.
@@ -107,11 +115,11 @@ pub(crate) fn setup_exec_session(
     source: &ConfigSource,
     yaml: &str,
     input: String,
+    session_id: &str,
 ) -> Result<SessionState> {
-    let session_id = SessionManager::new_session_id();
     let base_dir = std::env::current_dir()?;
     let config_ref = SessionConfigRef::from_source(source, None)?;
-    let mut session = SessionState::new(session_id.clone(), base_dir, config_ref, input);
+    let mut session = SessionState::new(session_id.to_owned(), base_dir, config_ref, input);
     session.workspace_mode = WorkspaceMode::CurrentBranch;
     session.allow_dirty_working_tree = true;
     session.phase = SessionPhase::Planned;
@@ -121,7 +129,7 @@ pub(crate) fn setup_exec_session(
         &crate::resolver::load_config_from_source(yaml, source)?,
     )?;
 
-    let session_dir = manager.sessions_dir().join(&session_id);
+    let session_dir = manager.sessions_dir().join(session_id);
     let write_result: crate::error::Result<()> = (|| {
         let plan_path = session.plan_path(&manager.sessions_dir());
         std::fs::write(&plan_path, "")?;
@@ -326,8 +334,14 @@ mod tests {
         let source = crate::resolver::ConfigSource::Explicit(config_file);
 
         // When: setup_exec_session is called
-        let session = setup_exec_session(&manager, &source, &yaml, "test task".to_string())
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let session = setup_exec_session(
+            &manager,
+            &source,
+            &yaml,
+            "test task".to_string(),
+            &SessionManager::new_session_id(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: workspace_mode is CurrentBranch and phase is Planned
         assert_eq!(
@@ -374,8 +388,14 @@ mod tests {
         let source = crate::resolver::ConfigSource::Explicit(config_file);
 
         // When: setup_exec_session is called
-        let session = setup_exec_session(&manager, &source, &yaml, "placeholder test".to_string())
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let session = setup_exec_session(
+            &manager,
+            &source,
+            &yaml,
+            "placeholder test".to_string(),
+            &SessionManager::new_session_id(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: an empty plan.md exists at the expected path
         let plan_path = session.plan_path(&manager.sessions_dir());
@@ -404,9 +424,14 @@ mod tests {
             SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
 
         // When: setup_exec_session is called with an explicit config source
-        let session =
-            setup_exec_session(&manager, &source, &yaml, "explicit config test".to_string())
-                .unwrap_or_else(|e| panic!("{e:?}"));
+        let session = setup_exec_session(
+            &manager,
+            &source,
+            &yaml,
+            "explicit config test".to_string(),
+            &SessionManager::new_session_id(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         // Then: the session stores the supplied file as a live absolute reference
         let stored = match session.config {

@@ -310,6 +310,24 @@ pub(crate) enum RetryClass {
 }
 
 impl RetryClass {
+    /// Stable low-cardinality category for retry telemetry and error types.
+    #[must_use]
+    pub(crate) fn telemetry_type(self) -> &'static str {
+        match self {
+            RetryClass::RateLimit => "rate_limit",
+            RetryClass::ServerError => "server_error",
+            RetryClass::ClientError => "client_error",
+            RetryClass::ModelMissing => "model_missing",
+            RetryClass::Network => "network",
+            RetryClass::ModelUnusable => "model_unusable",
+        }
+    }
+
+    /// Retry metrics reuse the same fixed categories as retry decisions.
+    #[must_use]
+    pub(crate) fn telemetry_reason(self) -> &'static str {
+        self.telemetry_type()
+    }
     /// Sentence-leading label for progress notices.
     #[must_use]
     pub(crate) fn label(self) -> &'static str {
@@ -842,7 +860,8 @@ impl FallbackEngine {
     }
 
     /// Decide what to do after a failed turn. `streamed` reports whether the
-    /// turn already pushed assistant text to the user's output sink.
+    /// turn already pushed assistant text to the user's output sink. Returns
+    /// both the action and its existing retry class for telemetry.
     ///
     /// A [`RetryClass::ClientError`] only ever switches models: the provider
     /// refused this request, so re-sending it unchanged would fail the same
@@ -857,16 +876,23 @@ impl FallbackEngine {
     /// when no candidate is usable, the turn already streamed visible text, or
     /// `--rate-limit-retries 0` disabled retrying, and cools the model it
     /// switched away from down.
-    pub(crate) fn next(&mut self, failure: Failure<'_>, streamed: bool) -> RetryAction {
+    pub(crate) fn next_with_class(
+        &mut self,
+        failure: Failure<'_>,
+        streamed: bool,
+    ) -> (RetryAction, Option<RetryClass>) {
         let Some(class) = self.classify(failure) else {
-            return RetryAction::GiveUp;
+            return (RetryAction::GiveUp, None);
         };
         let message = failure.message();
 
         // Nothing was sent, so there is no delay to serve and no budget to
         // spend: the only useful move is the next chain entry.
         if matches!(failure, Failure::Unusable(_)) {
-            return self.switch(class, message).unwrap_or(RetryAction::GiveUp);
+            return (
+                self.switch(class, message).unwrap_or(RetryAction::GiveUp),
+                Some(class),
+            );
         }
 
         // Every class but a rate limit uses a fallback immediately when one is
@@ -879,7 +905,7 @@ impl FallbackEngine {
             && !streamed
             && let Some(action) = self.switch(class, message)
         {
-            return action;
+            return (action, Some(class));
         }
 
         // Rate limits retry the same model first. Server/network failures reach
@@ -893,12 +919,15 @@ impl FallbackEngine {
         {
             self.attempts += 1;
             self.total += 1;
-            return RetryAction::Backoff {
-                delay,
-                class,
-                attempt: self.total,
-                of: self.of(),
-            };
+            return (
+                RetryAction::Backoff {
+                    delay,
+                    class,
+                    attempt: self.total,
+                    of: self.of(),
+                },
+                Some(class),
+            );
         }
 
         // Budget spent or the next delay would exceed `max_delay_ms`: move to
@@ -909,7 +938,7 @@ impl FallbackEngine {
             && !streamed
             && let Some(action) = self.switch(class, message)
         {
-            return action;
+            return (action, Some(class));
         }
         if self.policy.is_some()
             && class.cools_down()
@@ -917,7 +946,13 @@ impl FallbackEngine {
         {
             RetryPolicy::start_cooldown(self.format, model);
         }
-        RetryAction::GiveUp
+        (RetryAction::GiveUp, Some(class))
+    }
+
+    /// Classify a failure without applying the retry decision, for the
+    /// streamed-output barrier which must never re-run a turn.
+    pub(crate) fn classify_failure(&self, failure: Failure<'_>) -> Option<RetryClass> {
+        self.classify(failure)
     }
 
     /// Retryable class of `failure`: without a policy only a backend-reported
@@ -952,7 +987,7 @@ impl FallbackEngine {
 
     /// Move to the next usable chain entry, cooling down the model left behind
     /// — except after a [`RetryClass::ClientError`] (see
-    /// [`FallbackEngine::next`]).
+    /// [`FallbackEngine::next_with_class`]).
     fn switch(&mut self, class: RetryClass, message: &str) -> Option<RetryAction> {
         let to = self.take_candidate()?;
         let from = self.model.replace(to.clone());
@@ -1256,7 +1291,7 @@ mod tests {
             assert_eq!(classify_retryable(message), None, "for {message}");
             let mut engine = engine(policy(&[]), "test-limit-exhaustion/model", 1);
             assert_eq!(
-                engine.next(Failure::Limited(message), false),
+                engine.next_with_class(Failure::Limited(message), false).0,
                 RetryAction::GiveUp,
                 "for {message}"
             );
@@ -1264,7 +1299,9 @@ mod tests {
 
         let mut engine = engine(policy(&[]), "test-genuine-rate-limit/model", 1);
         assert!(matches!(
-            engine.next(Failure::Limited("HTTP 429 Too Many Requests"), false),
+            engine
+                .next_with_class(Failure::Limited("HTTP 429 Too Many Requests"), false)
+                .0,
             RetryAction::Backoff {
                 class: RetryClass::RateLimit,
                 ..
@@ -1367,7 +1404,9 @@ mod tests {
         config.base_delay_ms = 500;
         let mut engine = engine(config, "test-hint/model", 1);
         assert_eq!(
-            engine.next(Failure::Limited("429; retry-after: 30"), false),
+            engine
+                .next_with_class(Failure::Limited("429; retry-after: 30"), false)
+                .0,
             RetryAction::Backoff {
                 delay: Duration::from_secs(30),
                 class: RetryClass::RateLimit,
@@ -1383,7 +1422,9 @@ mod tests {
         config.max_delay_ms = 5_000;
         let mut engine = engine(config, "test-hint2/model", 3);
         assert_eq!(
-            engine.next(Failure::Limited("429; retry-after: 30"), false),
+            engine
+                .next_with_class(Failure::Limited("429; retry-after: 30"), false)
+                .0,
             RetryAction::GiveUp
         );
     }
@@ -1515,14 +1556,18 @@ mod tests {
 
         // The primary model is retried on its own budget first.
         assert!(matches!(
-            engine.next(Failure::Limited("HTTP status 429"), false),
+            engine
+                .next_with_class(Failure::Limited("HTTP status 429"), false)
+                .0,
             RetryAction::Backoff { attempt: 1, .. }
         ));
         assert_eq!(engine.model(), Some("test-a/model-429"));
 
         // Budget spent: switch, immediately, with a fresh budget.
         assert_eq!(
-            engine.next(Failure::Limited("HTTP status 429"), false),
+            engine
+                .next_with_class(Failure::Limited("HTTP status 429"), false)
+                .0,
             RetryAction::Switch {
                 from: Some("test-a/model-429".to_string()),
                 to: "test-b/model-429".to_string(),
@@ -1541,21 +1586,21 @@ mod tests {
         let mut engine = engine(config, "test-d/primary", 1);
 
         assert!(matches!(
-            engine.next(Failure::Limited("429"), false),
+            engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Backoff { .. }
         ));
         assert!(matches!(
-            engine.next(Failure::Limited("429"), false),
+            engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Switch { .. }
         ));
         // Chain exhausted: the spare backs off within its own budget, then the
         // failure surfaces.
         assert!(matches!(
-            engine.next(Failure::Limited("429"), false),
+            engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Backoff { .. }
         ));
         assert_eq!(
-            engine.next(Failure::Limited("429"), false),
+            engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::GiveUp
         );
     }
@@ -1567,7 +1612,7 @@ mod tests {
         let config = policy(&[("test-z/primary", &["test-z/spare"])]);
         let mut engine = engine(config, "test-z/primary", 0);
         assert_eq!(
-            engine.next(Failure::Limited("429"), false),
+            engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::GiveUp
         );
         assert_eq!(engine.model(), Some("test-z/primary"));
@@ -1584,13 +1629,15 @@ mod tests {
 
         // Non-limit failures stayed permanent before the fallback engine.
         assert_eq!(
-            engine.next(Failure::Failed("HTTP 503 service unavailable"), false),
+            engine
+                .next_with_class(Failure::Failed("HTTP 503 service unavailable"), false)
+                .0,
             RetryAction::GiveUp
         );
         // Limits retry on the command backend's 2s-doubling backoff, on the
         // same model, even after visible output.
         assert_eq!(
-            engine.next(Failure::Limited("429"), true),
+            engine.next_with_class(Failure::Limited("429"), true).0,
             RetryAction::Backoff {
                 delay: crate::step::command::calculate_backoff(1),
                 class: RetryClass::RateLimit,
@@ -1599,7 +1646,7 @@ mod tests {
             }
         );
         assert_eq!(
-            engine.next(Failure::Limited("429"), true),
+            engine.next_with_class(Failure::Limited("429"), true).0,
             RetryAction::Backoff {
                 delay: crate::step::command::calculate_backoff(2),
                 class: RetryClass::RateLimit,
@@ -1608,7 +1655,7 @@ mod tests {
             }
         );
         assert_eq!(
-            engine.next(Failure::Limited("429"), true),
+            engine.next_with_class(Failure::Limited("429"), true).0,
             RetryAction::GiveUp
         );
         assert_eq!(engine.model(), Some("test-e/only"), "no model switching");
@@ -1621,12 +1668,12 @@ mod tests {
 
         // Same-model backoff is what cruise always did, policy or not.
         assert!(matches!(
-            engine.next(Failure::Limited("429"), true),
+            engine.next_with_class(Failure::Limited("429"), true).0,
             RetryAction::Backoff { .. }
         ));
         // Replaying streamed text on another model is not.
         assert_eq!(
-            engine.next(Failure::Limited("429"), true),
+            engine.next_with_class(Failure::Limited("429"), true).0,
             RetryAction::GiveUp
         );
         assert_eq!(engine.model(), Some("test-f/primary"));
@@ -1638,7 +1685,9 @@ mod tests {
         let mut engine = engine(config, "test-server/primary", 3);
 
         assert_eq!(
-            engine.next(Failure::Failed("HTTP status 503"), false),
+            engine
+                .next_with_class(Failure::Failed("HTTP status 503"), false)
+                .0,
             RetryAction::Switch {
                 from: Some("test-server/primary".to_string()),
                 to: "test-server/fallback".to_string(),
@@ -1657,10 +1706,12 @@ mod tests {
 
         // Given a 4xx, the next chain entry takes over at once.
         assert_eq!(
-            engine.next(
-                Failure::Failed("API Error: 400 invalid_request: context length exceeded"),
-                false
-            ),
+            engine
+                .next_with_class(
+                    Failure::Failed("API Error: 400 invalid_request: context length exceeded"),
+                    false
+                )
+                .0,
             RetryAction::Switch {
                 from: Some("test-client/primary".to_string()),
                 to: "test-client/fallback".to_string(),
@@ -1674,7 +1725,9 @@ mod tests {
         // Then, with the chain exhausted, the error surfaces instead of the
         // fallback re-sending a request the provider already refused.
         assert_eq!(
-            engine.next(Failure::Failed("API Error: 400 invalid_request"), false),
+            engine
+                .next_with_class(Failure::Failed("API Error: 400 invalid_request"), false)
+                .0,
             RetryAction::GiveUp
         );
         assert_eq!(engine.model(), Some("test-client/fallback"));
@@ -1689,7 +1742,9 @@ mod tests {
         let mut streamed = engine(config.clone(), "test-client-streamed/primary", 3);
 
         assert_eq!(
-            streamed.next(Failure::Failed("HTTP 413 payload too large"), true),
+            streamed
+                .next_with_class(Failure::Failed("HTTP 413 payload too large"), true)
+                .0,
             RetryAction::GiveUp
         );
         assert_eq!(streamed.model(), Some("test-client-streamed/primary"));
@@ -1790,7 +1845,9 @@ mod tests {
         let config = policy(&[("test-missing/primary", &["test-missing/spare"])]);
         let mut first = engine(config.clone(), "test-missing/primary", 1);
         assert_eq!(
-            first.next(Failure::Failed("HTTP 400 model_not_supported"), false),
+            first
+                .next_with_class(Failure::Failed("HTTP 400 model_not_supported"), false)
+                .0,
             RetryAction::Switch {
                 from: Some("test-missing/primary".to_string()),
                 to: "test-missing/spare".to_string(),
@@ -1826,7 +1883,8 @@ mod tests {
         let solo = policy(&[("test-missing-solo/primary", &[])]);
         let mut solo = engine(solo, "test-missing-solo/primary", 3);
         assert_eq!(
-            solo.next(Failure::Failed("404 model_not_found"), false),
+            solo.next_with_class(Failure::Failed("404 model_not_found"), false)
+                .0,
             RetryAction::GiveUp
         );
         assert_eq!(solo.model(), Some("test-missing-solo/primary"));
@@ -1844,7 +1902,9 @@ mod tests {
         )]);
         let mut streamed = engine(config, "test-missing-streamed/primary", 3);
         assert_eq!(
-            streamed.next(Failure::Failed("HTTP 404 model_not_found"), true),
+            streamed
+                .next_with_class(Failure::Failed("HTTP 404 model_not_found"), true)
+                .0,
             RetryAction::GiveUp
         );
         assert_eq!(streamed.model(), Some("test-missing-streamed/primary"));
@@ -1860,7 +1920,9 @@ mod tests {
         let config = policy(&[("test-cool4xx/primary", &["test-cool4xx/spare"])]);
         let mut first = engine(config.clone(), "test-cool4xx/primary", 1);
         assert!(matches!(
-            first.next(Failure::Failed("HTTP 400 bad request"), false),
+            first
+                .next_with_class(Failure::Failed("HTTP 400 bad request"), false)
+                .0,
             RetryAction::Switch { .. }
         ));
 
@@ -1883,7 +1945,9 @@ mod tests {
         let config = policy(&[("test-client-zero/primary", &["test-client-zero/spare"])]);
         let mut engine = engine(config, "test-client-zero/primary", 0);
         assert_eq!(
-            engine.next(Failure::Failed("HTTP 400 bad request"), false),
+            engine
+                .next_with_class(Failure::Failed("HTTP 400 bad request"), false)
+                .0,
             RetryAction::GiveUp
         );
         assert_eq!(engine.model(), Some("test-client-zero/primary"));
@@ -1898,7 +1962,9 @@ mod tests {
         config.model_fallback = false;
         let mut engine = engine(config, "test-client-nofb/primary", 3);
         assert_eq!(
-            engine.next(Failure::Failed("HTTP 400 bad request"), false),
+            engine
+                .next_with_class(Failure::Failed("HTTP 400 bad request"), false)
+                .0,
             RetryAction::GiveUp
         );
         assert_eq!(engine.model(), Some("test-client-nofb/primary"));
@@ -1911,10 +1977,12 @@ mod tests {
         let config = policy(&[("test-408/primary", &["test-408/spare"])]);
         let mut switching = engine(config, "test-408/primary", 3);
         assert_eq!(
-            switching.next(
-                Failure::Failed("API Error: HTTP 408 request timeout"),
-                false
-            ),
+            switching
+                .next_with_class(
+                    Failure::Failed("API Error: HTTP 408 request timeout"),
+                    false
+                )
+                .0,
             RetryAction::Switch {
                 from: Some("test-408/primary".to_string()),
                 to: "test-408/spare".to_string(),
@@ -1929,10 +1997,12 @@ mod tests {
         config.model_fallback = false;
         let mut alone = engine(config, "test-408-alone/primary", 1);
         assert!(matches!(
-            alone.next(
-                Failure::Failed("API Error: HTTP 408 request timeout"),
-                false
-            ),
+            alone
+                .next_with_class(
+                    Failure::Failed("API Error: HTTP 408 request timeout"),
+                    false
+                )
+                .0,
             RetryAction::Backoff {
                 class: RetryClass::Network,
                 attempt: 1,
@@ -1948,7 +2018,9 @@ mod tests {
         let config = policy(&[("test-cool5xx/primary", &["test-cool5xx/spare"])]);
         let mut first = engine(config.clone(), "test-cool5xx/primary", 1);
         assert!(matches!(
-            first.next(Failure::Failed("HTTP status 503"), false),
+            first
+                .next_with_class(Failure::Failed("HTTP status 503"), false)
+                .0,
             RetryAction::Switch { .. }
         ));
 
@@ -1975,7 +2047,9 @@ mod tests {
         );
 
         assert_eq!(
-            engine.next(Failure::Failed("HTTP 400 bad request"), false),
+            engine
+                .next_with_class(Failure::Failed("HTTP 400 bad request"), false)
+                .0,
             RetryAction::GiveUp
         );
         assert_eq!(engine.model(), Some("test-client-none/only"));
@@ -1988,7 +2062,9 @@ mod tests {
         let mut engine = engine(config, "test-server-no-switch/primary", 1);
 
         assert!(matches!(
-            engine.next(Failure::Failed("HTTP status 503"), false),
+            engine
+                .next_with_class(Failure::Failed("HTTP status 503"), false)
+                .0,
             RetryAction::Backoff {
                 class: RetryClass::ServerError,
                 attempt: 1,
@@ -1997,7 +2073,9 @@ mod tests {
             }
         ));
         assert_eq!(
-            engine.next(Failure::Failed("HTTP status 503"), false),
+            engine
+                .next_with_class(Failure::Failed("HTTP status 503"), false)
+                .0,
             RetryAction::GiveUp
         );
     }
@@ -2008,7 +2086,9 @@ mod tests {
         let mut engine = engine(config, "test-network/primary", 3);
 
         assert_eq!(
-            engine.next(Failure::Failed("connection reset by peer"), false),
+            engine
+                .next_with_class(Failure::Failed("connection reset by peer"), false)
+                .0,
             RetryAction::Switch {
                 from: Some("test-network/primary".to_string()),
                 to: "test-network/fallback".to_string(),
@@ -2027,12 +2107,12 @@ mod tests {
         config.max_delay_ms = 1_000;
         let mut engine = engine(config, "test-g/only", 3);
         assert!(matches!(
-            engine.next(Failure::Limited("429"), false),
+            engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Switch { .. }
         ));
         // The spare cannot serve a usable delay either, and the chain is empty.
         assert_eq!(
-            engine.next(Failure::Limited("429"), false),
+            engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::GiveUp
         );
     }
@@ -2050,11 +2130,11 @@ mod tests {
             1,
         );
         assert!(matches!(
-            first.next(Failure::Limited("429"), false),
+            first.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Backoff { .. }
         ));
         assert!(matches!(
-            first.next(Failure::Limited("429"), false),
+            first.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Switch { .. }
         ));
 
@@ -2109,11 +2189,11 @@ mod tests {
             1,
         );
         assert!(matches!(
-            engine.next(Failure::Limited("429"), false),
+            engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Backoff { .. }
         ));
         assert!(matches!(
-            engine.next(Failure::Limited("429"), false),
+            engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Switch { .. }
         ));
 
@@ -2164,11 +2244,11 @@ mod tests {
         config.model_fallback = false;
         let mut engine = engine(config, "test-i/primary", 1);
         assert!(matches!(
-            engine.next(Failure::Limited("429"), false),
+            engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Backoff { .. }
         ));
         assert_eq!(
-            engine.next(Failure::Limited("429"), false),
+            engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::GiveUp
         );
         assert_eq!(engine.model(), Some("test-i/primary"));
@@ -2179,10 +2259,12 @@ mod tests {
         let config = policy(&[("test-l/primary", &["test-l/spare"])]);
         let mut engine = engine(config, "test-l/primary", 0);
         assert_eq!(
-            engine.next(
-                Failure::Unusable("invalid model reference 'test-l/primary'"),
-                false
-            ),
+            engine
+                .next_with_class(
+                    Failure::Unusable("invalid model reference 'test-l/primary'"),
+                    false
+                )
+                .0,
             RetryAction::Switch {
                 from: Some("test-l/primary".to_string()),
                 to: "test-l/spare".to_string(),
@@ -2193,7 +2275,9 @@ mod tests {
         );
         // No candidate left: the caller surfaces the backend's own error.
         assert_eq!(
-            engine.next(Failure::Unusable("invalid model reference"), false),
+            engine
+                .next_with_class(Failure::Unusable("invalid model reference"), false)
+                .0,
             RetryAction::GiveUp
         );
     }
@@ -2207,7 +2291,9 @@ mod tests {
             3,
         );
         assert_eq!(
-            engine.next(Failure::Unusable("invalid model reference"), false),
+            engine
+                .next_with_class(Failure::Unusable("invalid model reference"), false)
+                .0,
             RetryAction::GiveUp
         );
     }

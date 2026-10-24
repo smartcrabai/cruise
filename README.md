@@ -1817,6 +1817,47 @@ Then open an issue, or comment on one, starting with `@cruise`:
 
 See [`docs/github-actions.md`](docs/github-actions.md) for the full command grammar, a typical plan -> fix -> run -> review walkthrough, the provider table (Anthropic/OpenAI/Kimi/Google/Groq/DeepSeek/xAI/...), inputs/outputs, security notes, and how to point it at your own workflow config or a self-hosted endpoint. See [`examples/`](examples/) for drop-in workflow files and a sample repo config.
 
+## OpenTelemetry
+
+Inspired by [TAKT's observability support](https://github.com/nrslib/takt/blob/main/docs/observability.md), Cruise can export workflow traces and execution metrics over OTLP HTTP/protobuf. Telemetry is off by default; no workflow YAML changes are needed.
+
+```sh
+CRUISE_OBSERVABILITY_ENABLED=true \
+OTEL_SERVICE_NAME=cruise \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf \
+cruise exec --config cruise.yaml
+```
+
+- `CRUISE_OBSERVABILITY_ENABLED=true` opts in (case-insensitive). `OTEL_SDK_DISABLED=true` overrides it. Disabled telemetry creates no exporter or network client.
+- Without an endpoint override, enabled telemetry uses `http://localhost:4318`. The base endpoint gets `/v1/traces` and `/v1/metrics` appended. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` override each URL verbatim, including its signal path.
+- `OTEL_EXPORTER_OTLP_HEADERS` supplies comma-separated, URL-encoded `key=value` authentication headers; use an environment/secret manager, not workflow YAML. `OTEL_EXPORTER_OTLP_TIMEOUT` sets the request timeout in milliseconds (SDK default: 10,000). Signal-specific `OTEL_EXPORTER_OTLP_TRACES_*` / `OTEL_EXPORTER_OTLP_METRICS_*` values take precedence.
+- Only HTTP/protobuf is supported; gRPC and HTTP/JSON protocol selections fall back to HTTP/protobuf. Optional compression: `OTEL_EXPORTER_OTLP_COMPRESSION=gzip`.
+- Resources default to `service.name=cruise` and the package's `service.version`. `OTEL_RESOURCE_ATTRIBUTES` adds or overrides resource attributes; `OTEL_SERVICE_NAME` takes precedence for the service name.
+
+Each session operation has a `cruise.execution` root spanning its preparation through finalization. CLI plan/exec/run, background planning workers, and the shared Application API used by TUI/WebUI are covered; parallel sessions have separate execution roots. Root attributes include `cruise.execution.kind`, `cruise.session.id`, `cruise.workflow.kind`, and `cruise.workflow.name`. Workflow names are built-in names or final file names, never full paths.
+
+| Span | Scope |
+|---|---|
+| `cruise.execution` | A session operation, correlated by session ID |
+| `cruise.phase` | Actual `prepare`, `workspace`, `planning`, `workflow`, `pull_request`, or `finalize` work |
+| `cruise.workflow` | Engine execution under the workflow phase |
+| `cruise.step` | One step; parallel children are siblings under their parallel step |
+| `cruise.agent` | A prompt backend call, including its retry lifecycle |
+| `cruise.attempt` | One backend or shell attempt, with a 1-based `cruise.retry.attempt` and the selected backend/model |
+
+Phases are emitted only when their work runs: skipped planning or disabled/unneeded PR creation does not produce a successful placeholder phase. `cruise.retry` span events record backoff/fallback actions, fixed retry reasons, attempt numbers, and model switches. SDK fallback and the independent command/prompt rate-limit retry loops are instrumented without changing retry policy.
+
+Outcomes include `success`, `failed`, `error`, `cancelled`, `timeout`, and `paused`. Non-success operations have error status and a payload-free `error.type`, such as `command_exit`, `rate_limit`, `timeout`, or `cancelled`; existing backend retry classifications distinguish network, provider, and model failures. Recovered retries leave failed attempts visible without marking the final successful execution as failed. An Esc-paused exec stays resumable and exits successfully at the CLI, while its root outcome remains `paused`.
+
+Metrics are `cruise.operation.count` and `cruise.operation.duration` (seconds), labeled only by `cruise.operation` and `cruise.outcome`, plus `cruise.retry.count`, labeled only by `cruise.retry.action` and `cruise.retry.reason`. Session/workflow/model identifiers are trace-only, not metric labels. OTLP logs, token usage, and cost are not exported.
+
+Prompt/input text, agent output, command bodies, working paths, exception messages, and authentication headers are not included in telemetry payloads. Session IDs, workflow file names, step/model names, and explicitly supplied resource attributes are exported; keep secrets out of those values.
+
+Providers flush on normal CLI completion, including workflow errors. Collector/export failures do not change the workflow result, though shutdown can wait for export timeouts. Invalid exporter initialization settings stop startup with a redacted diagnostic. Forced termination cannot guarantee a flush.
+
+Backend acceptance is not a persistence guarantee. Local E2E investigation found that GreptimeDB retained all histogram observations when SDK exports were posted separately, but lost earlier histogram points when the same exports were combined into one OTLP request with multiple `ResourceMetrics`. The SDK payloads contained all observations and the gateway returned HTTP 200. This downstream ingestion issue is not worked around by duplicating application exports.
+
 ## Development build
 
 To test the launcher locally, build both binaries. The `cruise` launcher starts the adjacent `cruise-runtime`, so both are needed:

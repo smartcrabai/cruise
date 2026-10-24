@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use console::style;
+use opentelemetry::trace::FutureExt as OtelFutureExt;
 
 use crate::cancellation::CancellationToken;
 use crate::condition::{should_skip, should_skip_due_to_when};
@@ -313,8 +314,27 @@ fn save_checkpoint(
 ///
 /// # Errors
 /// Propagates checkpoint failures, invalid transitions and step errors.
-#[expect(clippy::too_many_lines, reason = "checkpointed execution loop")]
 pub async fn execute_steps_with_graph(
+    ctx: &ExecutionContext<'_>,
+    vars: &mut VariableStore,
+    tracker: &mut FileTracker,
+    graph: &mut ExecutionGraph,
+    checkpoint: &(dyn Fn(&NodeCheckpoint<'_>, &ExecutionGraph) -> Result<()> + Send + Sync),
+) -> Result<ExecutionResult> {
+    let operation = crate::telemetry::Operation::start("workflow", &[]);
+    let context = operation.context();
+    let result = execute_steps_with_graph_inner(ctx, vars, tracker, graph, checkpoint)
+        .with_context(context)
+        .await;
+    match &result {
+        Ok(result) if result.failed > 0 => operation.finish("failed"),
+        _ => operation.finish_result(&result),
+    }
+    result
+}
+
+#[expect(clippy::too_many_lines, reason = "checkpointed execution loop")]
+async fn execute_steps_with_graph_inner(
     ctx: &ExecutionContext<'_>,
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
@@ -863,11 +883,65 @@ async fn step_loop_iteration(
 /// non-empty tool list narrows SDK-mode provider resolution to tool-capable
 /// backends, so it must stay opt-in per step rather than always-on.
 #[expect(clippy::too_many_arguments)]
+fn execute_step_kind(
+    ctx: &ExecutionContext<'_>,
+    kind: &StepKind,
+    vars: &mut VariableStore,
+    merged_env: &HashMap<String, String>,
+    step_start: Instant,
+    failed: &mut usize,
+    timeout: Option<Duration>,
+    has_if_fail: bool,
+    has_nfc_condition: bool,
+    current_step: &str,
+    allow_commit: bool,
+) -> impl Future<Output = Result<StepExecOutcome>> + Send {
+    let attributes = [
+        ("cruise.step.name", current_step),
+        (
+            "cruise.step.type",
+            match kind {
+                StepKind::Prompt(_) => "prompt",
+                StepKind::Command(_) => "command",
+                StepKind::Option(_) => "option",
+                StepKind::Parallel(_) => "parallel",
+                StepKind::GitHubReview(_) => "github_review",
+                StepKind::SquashMerge => "squash_merge",
+            },
+        ),
+    ];
+    let operation = crate::telemetry::Operation::start("step", &attributes);
+    let context = operation.context();
+    async move {
+        let result = execute_step_kind_inner(
+            ctx,
+            kind,
+            vars,
+            merged_env,
+            step_start,
+            failed,
+            timeout,
+            has_if_fail,
+            has_nfc_condition,
+            current_step,
+            allow_commit,
+        )
+        .with_context(context)
+        .await;
+        match &result {
+            Ok(outcome) if outcome.failed => operation.finish("failed"),
+            _ => operation.finish_result(&result),
+        }
+        result
+    }
+}
+
+#[expect(clippy::too_many_arguments)]
 #[expect(
     clippy::too_many_lines,
     reason = "step-kind arms have distinct execution and error-handling branches"
 )]
-async fn execute_step_kind(
+async fn execute_step_kind_inner(
     ctx: &ExecutionContext<'_>,
     kind: &StepKind,
     vars: &mut VariableStore,
@@ -1045,6 +1119,7 @@ async fn execute_step_kind(
                     })
                 }
                 Err(CruiseError::StepTimeout { .. }) => {
+                    crate::telemetry::record_error_type("timeout");
                     crate::status_eprintln!(
                         "  {} timed out",
                         style(format!("x {}", format_duration(elapsed))).red()
@@ -1061,6 +1136,7 @@ async fn execute_step_kind(
                 ) => Err(e),
                 Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
                 Err(e) if has_if_fail => {
+                    crate::telemetry::record_error_type(e.telemetry_type());
                     crate::status_eprintln!(
                         "  {} prompt error: {e}",
                         style(format!("x {}", format_duration(elapsed))).red()
@@ -1093,6 +1169,7 @@ async fn execute_step_kind(
             match result {
                 Ok(success) => {
                     if !success {
+                        crate::telemetry::record_error_type("command_exit");
                         *failed += 1;
                     }
                     log_step_result(elapsed, success);
@@ -1103,6 +1180,7 @@ async fn execute_step_kind(
                     })
                 }
                 Err(CruiseError::StepTimeout { .. }) => {
+                    crate::telemetry::record_error_type("timeout");
                     crate::status_eprintln!(
                         "  {} timed out",
                         style(format!("x {}", format_duration(elapsed))).red()

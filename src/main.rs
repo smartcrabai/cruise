@@ -74,6 +74,7 @@ mod session_edit;
 mod spinner;
 mod ssh_cmd;
 mod step;
+pub mod telemetry;
 #[cfg(test)]
 mod test_binary_support;
 #[cfg(test)]
@@ -100,13 +101,23 @@ mod yaml_metadata;
 // open menu would freeze every other concurrently running session.
 #[tokio::main]
 async fn main() {
-    if let Err(e) = Box::pin(run()).await {
+    let cli = cli::parse_cli();
+    let telemetry = match telemetry::init() {
+        Ok(telemetry) => telemetry,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+    };
+    let result = Box::pin(run(cli)).await;
+    telemetry.shutdown();
+    if let Err(e) = result {
         eprintln!("Error: {}", e.detailed_message());
         std::process::exit(1);
     }
 }
 
-async fn run() -> error::Result<()> {
+async fn run(cli: cli::Cli) -> error::Result<()> {
     let cli::Cli {
         plan,
         command,
@@ -116,7 +127,7 @@ async fn run() -> error::Result<()> {
         repo,
         images,
         flags,
-    } = cli::parse_cli();
+    } = cli;
     match command {
         Some(cli::Commands::PlanWorker(args)) => plan_cmd::run_plan_worker(args).await,
         Some(cli::Commands::Plan(args)) => Box::pin(plan_cmd::run(args)).await,
