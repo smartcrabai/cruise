@@ -251,7 +251,24 @@ fn missing_jcode_model_creates_user_template_and_stops_for_explicit_and_implicit
         let marker = home.path().join("jcode-started");
         let mut command = cruise(home.path(), project.path());
         #[cfg(unix)]
-        install_jcode_marker(&mut command, home.path(), &marker);
+        {
+            install_jcode_marker(&mut command, home.path(), &marker);
+            // Match Windows' main-stack budget without changing the test process.
+            let mut bounded = Command::new("/bin/sh");
+            bounded.args(["-c", "ulimit -s 1024; exec \"$@\"", "cruise-stack"]);
+            bounded.arg(command.get_program());
+            if let Some(cwd) = command.get_current_dir() {
+                bounded.current_dir(cwd);
+            }
+            for (key, value) in command.get_envs() {
+                if let Some(value) = value {
+                    bounded.env(key, value);
+                } else {
+                    bounded.env_remove(key);
+                }
+            }
+            command = bounded;
+        }
         let output = command
             .args(["exec", "--config", "workflow.yaml"])
             .env("JCODE_MODEL", "backend/default-model")

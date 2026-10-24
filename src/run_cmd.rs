@@ -332,8 +332,9 @@ fn load_run_all_result_state(manager: &SessionManager, fallback: &SessionState) 
     }
 }
 
+// Keep the shared execution state off Windows' small main-thread stack.
 pub async fn run(args: RunArgs) -> Result<()> {
-    finish_cli_run(run_inner(args, None).await)
+    finish_cli_run(Box::pin(run_inner(args, None)).await)
 }
 
 pub(crate) fn finish_cli_run(result: Result<()>) -> Result<()> {
@@ -350,7 +351,7 @@ pub(crate) async fn run_with_operation(
     args: RunArgs,
     operation: &crate::telemetry::Operation,
 ) -> Result<()> {
-    run_inner(args, Some(operation))
+    Box::pin(run_inner(args, Some(operation)))
         .with_context(operation.context())
         .await
 }

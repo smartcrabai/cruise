@@ -1882,6 +1882,8 @@ To test the launcher locally, build both binaries. The `cruise` launcher starts 
 cargo build --bin cruise --bin cruise-runtime
 ```
 
+`cargo test --all-features --test workflow_defaults_cli` also checks CLI startup with a 1 MiB main-stack budget on Unix; Windows CI exercises the native main-thread limit.
+
 ## Support
 
 If you find cruise useful, consider [sponsoring smartcrabai](https://github.com/sponsors/smartcrabai)
