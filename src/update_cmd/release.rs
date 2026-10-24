@@ -822,7 +822,12 @@ fn extract_zip(
                 "release ZIP uses encryption or unsupported compression",
             ));
         }
-        let normalized = normalize_archive_path(entry.name(), false)?;
+        let normalized = {
+            let name = entry
+                .name()
+                .map_err(|error| invalid(&format!("invalid release ZIP entry name: {error}")))?;
+            normalize_archive_path(name.as_ref(), false)?
+        };
         if normalized.contains('/') || !seen.insert(normalized.clone()) {
             return Err(invalid("release ZIP contains a nested or duplicate path"));
         }
