@@ -33,7 +33,7 @@ impl EffortLevel {
 /// it selects. Compared case-insensitively after trimming.
 ///
 /// Some recognized suffixes have no tier: Jcode and Claude strip them off the
-/// model id and leave effort unset, using their backend default. OpenCode rejects
+/// model id and leave effort unset, using their backend default. `OpenCode` rejects
 /// these tierless suffixes. `off` / `none` / `0` mean "no extended thinking",
 /// which is not an effort tier at all; `5` is only an alias spelling that cruise
 /// has never mapped to a tier.

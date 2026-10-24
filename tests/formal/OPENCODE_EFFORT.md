@@ -23,7 +23,7 @@ fresh run reports under `target/formal-reports/opencode-effort.*/` for 14 days.
 
 ## Authority and traceability
 
-The authority is the session plan titled “OpenCodeの共通effort指定対応とモデル未提供時のフォールバック修正”,
+The authority is the session plan titled "OpenCode common effort support and fallback fixes for unavailable models",
 Requirements and Design sections 1-4. The request to add formal checks supersedes
 that plan's earlier `formal_methods=off` execution setting. Repository `NEVER.md`
 continues to apply: switching is failure-driven, not cost routing. The models do

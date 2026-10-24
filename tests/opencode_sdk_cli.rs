@@ -1229,10 +1229,8 @@ async fn effort_suffix_cannot_substitute_for_a_model_id() {
     assert_eq!(selected_models(&fixture), Vec::<Value>::new());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn catalog_resolution_failures_never_send_prompts_or_mutate_resume_models() {
-    let _lock = lock_process();
-    let cases = [
+fn catalog_failure_cases() -> Vec<(Catalog, Vec<&'static str>)> {
+    vec![
         (
             effort_catalog("model", &json!([{"id":"low"},{"id":"high"},{"id":"max"}])),
             vec!["unsupported", "medium", "low", "high", "max"],
@@ -1269,8 +1267,13 @@ async fn catalog_resolution_failures_never_send_prompts_or_mutate_resume_models(
         (Catalog::Http(StatusCode::UNAUTHORIZED), vec!["401"]),
         (Catalog::Http(StatusCode::SERVICE_UNAVAILABLE), vec!["503"]),
         (Catalog::Transport, vec!["transport"]),
-    ];
-    for (catalog, fragments) in cases {
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_resolution_failures_never_send_prompts_or_mutate_resume_models() {
+    let _lock = lock_process();
+    for (catalog, fragments) in catalog_failure_cases() {
         for resume in [false, true] {
             let fixture = Fixture::new(Scenario::Complete).await;
             let _guards = fixture.guards();
@@ -1290,7 +1293,11 @@ async fn catalog_resolution_failures_never_send_prompts_or_mutate_resume_models(
             };
             let baseline = fixture.prompt_count();
             let selections = selected_models(&fixture).len();
-            let launches = if id.is_some() { fixture.launch_count() } else { 0 };
+            let launches = if id.is_some() {
+                fixture.launch_count()
+            } else {
+                0
+            };
             set_catalog(&fixture, catalog.clone());
             let result = if let Some(id) = &id {
                 resume_fixture_with_model(&fixture, id, 2, "fixture/model:medium").await
