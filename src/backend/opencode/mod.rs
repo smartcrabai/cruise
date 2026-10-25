@@ -7,6 +7,7 @@ mod tests;
 mod tools;
 mod types;
 use crate::{
+    backend::effort::{EffortLevel, effort_from_suffix, split_thinking_suffix},
     backend::{stream::StreamChunk, tool::CruiseTool},
     cancellation::CancellationToken,
     config::{McpServers, PermissionMode},
@@ -21,7 +22,7 @@ use std::{
     sync::mpsc::{Receiver, SyncSender, sync_channel},
     time::Duration,
 };
-pub(crate) use types::ModelRef;
+use types::ModelRef;
 
 #[derive(Default)]
 pub(crate) struct OpenCodeRunnerConfig {
@@ -37,15 +38,36 @@ pub(crate) struct OpenCodeRunnerConfig {
     pub keep_session_home: bool,
     pub computer_use: bool,
 }
-pub(crate) fn parse_model_ref(raw: Option<&str>) -> Result<Option<ModelRef>> {
+struct ModelRequest {
+    model: ModelRef,
+    effort: Option<EffortLevel>,
+}
+fn parse_model_ref(raw: Option<&str>) -> Result<Option<ModelRequest>> {
     let Some(raw) = raw else {
         return Ok(None);
     };
     let (base, variant) = raw
         .split_once('#')
         .map_or((raw, None), |(base, variant)| (base, Some(variant)));
+    let (base, suffix) = split_thinking_suffix(base);
+    if suffix.is_some() && variant.is_some() {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "conflicting OpenCode model selection: {raw} specifies effort and native variant"
+        )));
+    }
+    let effort = suffix
+        .map(|suffix| {
+            effort_from_suffix(suffix).ok_or_else(|| {
+                CruiseError::InvalidStepConfig(format!(
+                    "unsupported OpenCode model effort suffix: {suffix} in {raw}"
+                ))
+            })
+        })
+        .transpose()?;
     let (provider, id) = base.split_once('/').ok_or_else(|| {
-        CruiseError::InvalidStepConfig("OpenCode model requires provider/model#variant".into())
+        CruiseError::InvalidStepConfig(
+            "OpenCode model requires provider/model[:effort] or provider/model#variant".into(),
+        )
     })?;
     if provider.is_empty()
         || id.is_empty()
@@ -53,14 +75,71 @@ pub(crate) fn parse_model_ref(raw: Option<&str>) -> Result<Option<ModelRef>> {
         || raw.trim() != raw
     {
         return Err(CruiseError::InvalidStepConfig(
-            "invalid OpenCode provider/model#variant reference".into(),
+            "invalid OpenCode model reference; expected provider/model[:effort] or provider/model#variant".into(),
         ));
     }
-    Ok(Some(ModelRef {
-        provider_id: provider.into(),
-        id: id.into(),
-        variant: variant.map(str::to_owned),
+    Ok(Some(ModelRequest {
+        model: ModelRef {
+            provider_id: provider.into(),
+            id: id.into(),
+            variant: variant.map(str::to_owned),
+        },
+        effort,
     }))
+}
+fn resolve_effort(
+    model: &mut ModelRef,
+    effort: EffortLevel,
+    catalog: &[types::ModelInfo],
+) -> Result<()> {
+    fn declared(variant: &types::ModelVariant) -> Option<&str> {
+        variant
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.reasoning_effort.as_deref())
+    }
+    let name = format!("{}/{}", model.provider_id, model.id);
+    let entry = catalog
+        .iter()
+        .find(|entry| entry.provider_id == model.provider_id && entry.id == model.id)
+        .ok_or_else(|| {
+            CruiseError::InvalidStepConfig(format!(
+                "OpenCode model {name} is not listed in the catalog for effort {}",
+                effort.as_str()
+            ))
+        })?;
+    let canonical = effort.as_str();
+    let exact = entry.variants.iter().find(|variant| {
+        variant.id == canonical && declared(variant).is_none_or(|value| value == canonical)
+    });
+    let selected = if let Some(exact) = exact {
+        exact
+    } else {
+        let mut matches = entry
+            .variants
+            .iter()
+            .filter(|variant| declared(variant) == Some(canonical));
+        match (matches.next(), matches.next()) {
+            (Some(variant), None) => variant,
+            (first, _) => {
+                let variants: Vec<_> = entry
+                    .variants
+                    .iter()
+                    .map(|variant| variant.id.as_str())
+                    .collect();
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "{} OpenCode model effort {canonical} for {name}; published variants: {variants:?}",
+                    if first.is_some() {
+                        "ambiguous"
+                    } else {
+                        "unsupported"
+                    }
+                )));
+            }
+        }
+    };
+    model.variant = Some(selected.id.clone());
+    Ok(())
 }
 struct AttemptError {
     message: String,
@@ -142,7 +221,7 @@ async fn run_attempt(
     if config.computer_use {
         return Err("OpenCode does not support computer_use".into());
     }
-    let model = parse_model_ref(config.model_ref.as_deref()).map_err(|e| e.to_string())?;
+    let request = parse_model_ref(config.model_ref.as_deref()).map_err(|e| e.to_string())?;
     let cwd = match &config.cwd {
         Some(cwd) => cwd.clone(),
         None => std::env::current_dir().map_err(|e| e.to_string())?,
@@ -163,6 +242,7 @@ async fn run_attempt(
     let storage = runtime::Storage::prepare(config, id.clone(), cwd.clone())?;
     let mut safe_failure = None;
     let mut conversation_clean = storage.initial_clean;
+    let mut catalog_resolution_rejected = false;
     let mut checkpointed = config.resume_session_id.is_some();
     let result = async {
         let mut bridge =
@@ -195,6 +275,33 @@ async fn run_attempt(
                 if !info.version.starts_with("2.") {
                     return Err(format!("OpenCode V2 required, received {}", info.version));
                 }
+                // The location snapshot may precede plugin settlement. The bridge
+                // handshake establishes readiness before catalog or model changes.
+                client
+                    .plugins(&cwd)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                bridge.wait_ready(&cancel).await?;
+                let model = if let Some(mut request) = request {
+                    if let Some(effort) = request.effort {
+                        let resolution = async {
+                            let catalog = client
+                                .models(&cwd)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            resolve_effort(&mut request.model, effort, &catalog)
+                                .map_err(|error| error.to_string())
+                        }
+                        .await;
+                        if let Err(error) = resolution {
+                            catalog_resolution_rejected = true;
+                            return Err(error);
+                        }
+                    }
+                    Some(request.model)
+                } else {
+                    None
+                };
                 let rules = tools::permissions(config);
                 let session = if config.resume_session_id.is_some() {
                     let session = client.session(&id).await.map_err(|e| e.to_string())?;
@@ -246,14 +353,6 @@ async fn run_attempt(
                     .environment(&id, &variables)
                     .await
                     .map_err(|e| e.to_string())?;
-                // The canonical endpoint initializes location plugins asynchronously.
-                // Its snapshot can be empty before setup has completed, so only the
-                // authenticated bridge handshake establishes native tool readiness.
-                client
-                    .plugins(&cwd)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                bridge.wait_ready(&cancel).await?;
                 Ok(())
             })
             .await
@@ -323,6 +422,9 @@ async fn run_attempt(
         }
         stop?;
         bridge_stop?;
+        if catalog_resolution_rejected {
+            conversation_clean = storage.initial_clean;
+        }
         turn_result
     }
     .await;

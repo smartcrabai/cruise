@@ -17,8 +17,11 @@
 //! - `sdk: claude` — a plain `claude --model` name with an optional `:effort`
 //!   suffix, driven in-process through `claude-agent-sdk` -- see
 //!   [`run_sdk`] and [`crate::backend::claude`].
-//! - `sdk: opencode` uses `provider/model#variant` references through the
-//!   built-in `OpenCode` V2 client, preserving colons in model IDs.
+//! - `sdk: opencode` uses catalog-validated `provider/model[:effort]` or native
+//!   `provider/model#variant` references through the built-in `OpenCode` V2 client.
+//!   Effort and native variants cannot be combined. Recognized trailing effort
+//!   suffixes are reserved; embedded slashes and unknown colon suffixes in model
+//!   IDs are preserved. Omitted models use `OpenCode`'s configured default.
 
 use std::collections::HashMap;
 use std::path::Path;

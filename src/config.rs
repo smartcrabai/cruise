@@ -76,8 +76,10 @@ pub struct WorkflowConfig {
     ///   lets the CLI pick its default).
     ///
     /// - `"opencode"`: drives a locally managed `OpenCode` V2 CLI through the
-    ///   built-in Rust client. Models use `provider/model#variant`, preserving
-    ///   slashes and colons in model IDs. Unset models use `OpenCode`'s default.
+    ///   built-in Rust client. Models use catalog-validated `provider/model[:effort]`
+    ///   or native `provider/model#variant`, which cannot be combined. Recognized
+    ///   trailing effort suffixes are reserved; embedded slashes and unknown colon
+    ///   suffixes in model IDs are preserved. Unset models use `OpenCode`'s default.
     ///
     /// Omitting both `sdk` and `command` runs prompts on `jcode`, the default
     /// backend.

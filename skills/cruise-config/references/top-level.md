@@ -113,7 +113,7 @@ project defaults file, and it does not auto-create this template during draft,
 dry-run, workflow discovery, or non-jcode execution. See [SDK backends](sdk.md)
 for model precedence and recovery details.
 
-OpenCode uses `provider/model#variant` (variant optional) rather than the jcode/Claude `:effort` convention. Omitted OpenCode models use its configured default. See [the OpenCode example](../examples/opencode-flow.yaml).
+OpenCode accepts `provider/model[:effort]` or native `provider/model#variant`, never both suffixes together. Common tiers (`low`/`medium`/`high`/`xhigh`/`max`) and aliases (`min`/`minimal`/`1`, `med`/`2`, `3`, `4`) are case-insensitive, reserved trailing suffixes. Cruise validates effort against the live model catalog; unsupported/ambiguous effort, an unlisted model, or tierless `:off`/`:none`/`:0`/`:5` fails explicitly without fallback, not by guessing or downgrading. Unknown suffixes such as `:free`/`:2026` remain in the ID. Native variants and omitted models retain existing behavior, including OpenCode's configured default. This applies to workflow, planning, step, array, and resumed model selections. See [SDK details](sdk.md) and [the OpenCode example](../examples/opencode-flow.yaml).
 
 ## `command` vs `sdk`
 
@@ -123,7 +123,7 @@ There are four prompt-execution backends:
 - `sdk: jcode` — use the jcode SDK; the fallback only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied. Requires jcode v0.88.0 or newer; Cruise validates the SDK handshake and required capabilities when it starts. `model` / `plan_model` / per-step `model` accept `"provider/model[:effort]"` or a bare model reference. See [sdk.md](sdk.md) for details.
 - `sdk: claude` — drive the `claude` CLI in-process via claude-agent-sdk. Model references are plain `claude --model` names with an optional `:effort` suffix; authentication is the claude CLI's own. See [sdk.md](sdk.md) for details.
 
-- `sdk: opencode` - use the built-in Rust V2 client with a locally managed OpenCode CLI. Install and authenticate that CLI separately. Models use `provider/model#variant`; no V1 fallback or external server connection is provided. `computer_use: true` is unsupported. See [sdk.md](sdk.md).
+- `sdk: opencode` - use the built-in Rust V2 client with a locally managed OpenCode CLI. Install and authenticate that CLI separately. Models use `provider/model[:effort]` with catalog validation or native `provider/model#variant`; no V1 fallback or external server connection is provided. `computer_use: true` is unsupported. See [sdk.md](sdk.md).
 
 ## `mcp_servers`
 

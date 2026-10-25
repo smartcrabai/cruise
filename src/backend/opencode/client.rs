@@ -1,5 +1,5 @@
 use super::types::{
-    CreateSession, Envelope, Error, ModelRef, Prompt, Result, ServerInfo, SessionInfo,
+    CreateSession, Envelope, Error, ModelInfo, ModelRef, Prompt, Result, ServerInfo, SessionInfo,
 };
 use reqwest::{Method, Response};
 use serde::{Serialize, de::DeserializeOwned};
@@ -92,6 +92,15 @@ impl Client {
     pub async fn create(&self, request: &CreateSession<'_>) -> Result<SessionInfo> {
         let value: Envelope<SessionInfo> = self
             .json(Method::POST, "/api/session", Some(request))
+            .await?;
+        Ok(value.data)
+    }
+    pub async fn models(&self, directory: &std::path::Path) -> Result<Vec<ModelInfo>> {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("location[directory]", &directory.to_string_lossy());
+        let query = query.finish();
+        let value: Envelope<Vec<ModelInfo>> = self
+            .json(Method::GET, &format!("/api/model?{query}"), None::<&Value>)
             .await?;
         Ok(value.data)
     }

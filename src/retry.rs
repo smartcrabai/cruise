@@ -45,8 +45,15 @@ pub(crate) const WILDCARD_SUFFIX: &str = "/*";
 pub(crate) enum ModelReferenceFormat {
     /// Existing jcode and Claude `model:effort` references.
     LegacyEffort,
-    /// `OpenCode` `provider/model#variant` references.
+    /// `OpenCode` `provider/model:effort` or `provider/model#variant` references.
     OpenCode,
+}
+
+/// Keep common effort distinct from native variants until backend resolution.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ModelSuffix<'a> {
+    Effort(&'a str),
+    Variant(&'a str),
 }
 
 impl ModelReferenceFormat {
@@ -57,19 +64,32 @@ impl ModelReferenceFormat {
         }
     }
 
-    pub(crate) fn split(self, model: &str) -> (&str, Option<&str>) {
+    pub(crate) fn split(self, model: &str) -> (&str, Option<ModelSuffix<'_>>) {
         match self {
-            Self::LegacyEffort => split_thinking_suffix(model),
-            Self::OpenCode => model
-                .split_once('#')
-                .map_or((model, None), |(base, variant)| (base, Some(variant))),
+            Self::LegacyEffort => {
+                let (base, effort) = split_thinking_suffix(model);
+                (base, effort.map(ModelSuffix::Effort))
+            }
+            Self::OpenCode => {
+                if let Some((base, variant)) = model.split_once('#') {
+                    (
+                        split_thinking_suffix(base).0,
+                        Some(ModelSuffix::Variant(variant)),
+                    )
+                } else {
+                    let (base, effort) = split_thinking_suffix(model);
+                    (base, effort.map(ModelSuffix::Effort))
+                }
+            }
         }
     }
 
-    fn suffix(self, value: &str) -> String {
-        match self {
-            Self::LegacyEffort => format!(":{value}"),
-            Self::OpenCode => format!("#{value}"),
+    fn suffix(self, suffix: ModelSuffix<'_>) -> String {
+        match (self, suffix) {
+            (_, ModelSuffix::Effort(value)) | (Self::LegacyEffort, ModelSuffix::Variant(value)) => {
+                format!(":{value}")
+            }
+            (Self::OpenCode, ModelSuffix::Variant(value)) => format!("#{value}"),
         }
     }
 }
@@ -474,6 +494,26 @@ fn is_model_missing(head: &str) -> bool {
         .any(|marker| head.contains(marker))
 }
 
+/// Only the structured `OpenCode` execution diagnostic identifies a missing route.
+/// Authentication and invalid requests must not inherit missing-model overrides.
+fn is_opencode_no_route(head: &str) -> bool {
+    head.starts_with("opencode model execution failed [provider.no-route]:")
+}
+
+fn is_no_route_permanent(head: &str) -> bool {
+    ["401", "403", "407"]
+        .iter()
+        .any(|code| has_status_code(head, code))
+        || NON_RETRYABLE_LIMIT_MARKERS
+            .iter()
+            .chain(
+                PERMANENT_MARKERS
+                    .iter()
+                    .filter(|marker| **marker != "not found"),
+            )
+            .any(|marker| head.contains(marker))
+}
+
 /// The provider's own error text: everything before the child-process stderr
 /// tail the SDK backends append (`\njcode stderr:\n…`,
 /// `\nclaude stderr:\n…`; see [`crate::backend::jcode`]).
@@ -560,7 +600,12 @@ pub(crate) fn classify_retryable(text: &str) -> Option<RetryClass> {
 /// Classify `lower`, which must already be lowercased.
 fn classify_retryable_lower(lower: &str) -> Option<RetryClass> {
     let client_status = first_client_status_code(lower);
-    let model_missing = is_model_missing(provider_head(lower));
+    let head = provider_head(lower);
+    let no_route = is_opencode_no_route(head);
+    if no_route && is_no_route_permanent(head) {
+        return None;
+    }
+    let model_missing = is_model_missing(head) || no_route;
     if is_permanent(lower) && client_status.is_none() && !model_missing {
         return None;
     }
@@ -1203,6 +1248,218 @@ mod tests {
     use crate::model_selection::{ModelCandidate, Sdk};
 
     #[test]
+    fn opencode_common_effort_chain_precedence_and_wildcards() {
+        let format = ModelReferenceFormat::OpenCode;
+        let mut config = policy(&[
+            ("source/team/model:free:max", &["exact/*"]),
+            ("source/team/model:free", &["base/*"]),
+            ("source/*", &["provider/*"]),
+            ("default", &["default/*"]),
+        ]);
+        for (key, expected) in [
+            ("source/team/model:free:max", "exact/team/model:free:max"),
+            ("source/team/model:free", "base/team/model:free:max"),
+            ("source/*", "provider/team/model:free:max"),
+            ("default", "default/team/model:free:max"),
+        ] {
+            assert_eq!(
+                chain_for(format, &config, Some("source/team/model:free:max")),
+                [expected],
+                "chain selected before removing {key}"
+            );
+            config.fallback_chains.remove(key);
+        }
+        for (source, target) in [
+            (format, format),
+            (format, ModelReferenceFormat::LegacyEffort),
+            (ModelReferenceFormat::LegacyEffort, format),
+        ] {
+            assert_eq!(
+                chain_for_formats(
+                    source,
+                    target,
+                    &policy(&[("default", &["other/*"])]),
+                    Some("source/team/model:2026:MED"),
+                    false,
+                ),
+                ["other/team/model:2026:MED"],
+                "common effort must not become a native variant"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_common_effort_and_native_variants_share_only_same_sdk_identity() {
+        let candidates = [
+            (Sdk::OpenCode, "effort-identity/main:high"),
+            (Sdk::OpenCode, "effort-identity/main#max"),
+            (Sdk::Jcode, "effort-identity/main:low"),
+            (Sdk::OpenCode, "effort-identity/spare:high"),
+            (Sdk::OpenCode, "effort-identity/spare:max"),
+            (Sdk::OpenCode, "effort-identity/spare#max"),
+        ]
+        .map(|(sdk, model)| ModelCandidate {
+            sdk,
+            model: Some(model.into()),
+        });
+        let mut engine = FallbackEngine::new_candidates(
+            ModelReferenceFormat::OpenCode,
+            Some(Arc::new(RetryPolicy::new(policy(&[])))),
+            Sdk::OpenCode,
+            Sdk::OpenCode,
+            Some("effort-identity/main:max"),
+            &candidates,
+            1,
+        );
+        let failure = Failure::Failed("HTTP 422 request refused");
+        for (sdk, model) in [
+            (Sdk::Jcode, "effort-identity/main:low"),
+            (Sdk::OpenCode, "effort-identity/spare:high"),
+        ] {
+            let (action, _) = engine.next_with_class(failure, false);
+            assert!(
+                matches!(action, RetryAction::Switch { ref to, .. } if to == model),
+                "{action:?}"
+            );
+            assert_eq!(engine.sdk(), sdk);
+            assert_eq!(engine.model(), Some(model));
+        }
+        assert_eq!(
+            engine.next_with_class(failure, false).0,
+            RetryAction::GiveUp
+        );
+    }
+
+    #[test]
+    fn opencode_no_route_classification_is_header_scoped_and_narrow() {
+        for body in [
+            "Model unavailable: provider/model",
+            "not found",
+            "no matching route",
+        ] {
+            let message = format!("OpenCode model execution failed [provider.no-route]: {body}");
+            assert_eq!(classify_retryable(&message), Some(RetryClass::ModelMissing));
+        }
+        for message in [
+            "Model unavailable: provider/model",
+            "OpenCode model execution failed [provider.auth]: Model unavailable: provider/model",
+            "OpenCode model execution failed [provider.api]: Model unavailable: provider/model",
+            "Other model execution failed [provider.no-route]: Model unavailable: provider/model",
+            "prefix OpenCode model execution failed [provider.no-route]: Model unavailable",
+            "OpenCode model execution failed [provider.no-route-extra]: Model unavailable",
+            "execution failed\nopencode stderr:\nOpenCode model execution failed [provider.no-route]: Model unavailable",
+        ] {
+            assert_eq!(classify_retryable(message), None, "for {message}");
+        }
+        // Even generic missing-model markers must not bypass this header's auth guard.
+        for body in [
+            "HTTP 401 model not found",
+            "HTTP 403 unknown model",
+            "HTTP 407 model_not_supported",
+            "authentication failed: model not found",
+            "permission denied: unknown model",
+            "invalid_request_error: model not found",
+        ] {
+            let message = format!("OpenCode model execution failed [provider.no-route]: {body}");
+            assert_eq!(classify_retryable(&message), None, "for {message}");
+        }
+        for (status, expected) in [
+            ("429 Too Many Requests", RetryClass::RateLimit),
+            ("408 Request Timeout", RetryClass::Network),
+            ("500 Internal Server Error", RetryClass::ServerError),
+            ("503 Service Unavailable", RetryClass::ServerError),
+        ] {
+            let message = format!(
+                "OpenCode model execution failed [provider.no-route]: HTTP {status}: Model unavailable"
+            );
+            assert_eq!(
+                classify_retryable(&message),
+                Some(expected),
+                "for {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_no_route_switches_immediately_and_cools_all_effort_variants() {
+        let format = ModelReferenceFormat::OpenCode;
+        let config = policy(&[("no-route-cool/main", &["no-route-cool/spare:max"])]);
+        let mut first = FallbackEngine::new(
+            format,
+            Some(Arc::new(RetryPolicy::new(config.clone()))),
+            Some("no-route-cool/main:max"),
+            1,
+        );
+        let message = "OpenCode model execution failed [provider.no-route]: Model unavailable: no-route-cool/main";
+        let (action, class) = first.next_with_class(Failure::Failed(message), false);
+        assert_eq!(class, Some(RetryClass::ModelMissing));
+        let RetryAction::Switch {
+            from, to, attempt, ..
+        } = action
+        else {
+            panic!("expected immediate switch, got {action:?}");
+        };
+        assert_eq!(from.as_deref(), Some("no-route-cool/main:max"));
+        assert_eq!(to, "no-route-cool/spare:max");
+        assert_eq!(attempt, 1);
+        for suffix in [":high", ":max", "#max"] {
+            assert!(RetryPolicy::is_cooling(
+                format,
+                &format!("no-route-cool/main{suffix}")
+            ));
+        }
+        assert!(!RetryPolicy::is_sdk_cooling(
+            format,
+            Sdk::Jcode,
+            "no-route-cool/main:max"
+        ));
+        let later = FallbackEngine::new(
+            format,
+            Some(Arc::new(RetryPolicy::new(config))),
+            Some("no-route-cool/main#max"),
+            1,
+        );
+        assert_eq!(later.model(), Some("no-route-cool/spare:max"));
+    }
+
+    #[test]
+    fn opencode_no_route_does_not_switch_without_policy_budget_or_replay_safety() {
+        let message =
+            "OpenCode model execution failed [provider.no-route]: Model unavailable: primary";
+        for case in [
+            "no-policy",
+            "disabled",
+            "no-candidate",
+            "zero-budget",
+            "visible-output",
+        ] {
+            let primary = format!("no-route-exclusion-{case}/main:max");
+            let mut config = policy(&[("default", &["no-route-exclusion/spare"])]);
+            if case == "disabled" {
+                config.model_fallback = false;
+            }
+            if case == "no-candidate" {
+                config.fallback_chains.clear();
+            }
+            let mut engine = FallbackEngine::new(
+                ModelReferenceFormat::OpenCode,
+                (case != "no-policy").then(|| Arc::new(RetryPolicy::new(config))),
+                Some(&primary),
+                if case == "zero-budget" { 0 } else { 2 },
+            );
+            let failure = Failure::Failed(message);
+            assert_eq!(failure.message(), message);
+            let (action, class) = engine.next_with_class(failure, case == "visible-output");
+            assert_eq!(action, RetryAction::GiveUp, "for {case}");
+            assert_eq!(engine.model(), Some(primary.as_str()), "for {case}");
+            assert_eq!(
+                class,
+                (case != "no-policy").then_some(RetryClass::ModelMissing)
+            );
+        }
+    }
+
+    #[test]
     fn explicit_chain_lookup_precedence_includes_present_empty_entries() {
         let mut config = policy(&[
             ("provider/main:high", &[]),
@@ -1236,14 +1493,16 @@ mod tests {
 
     #[test]
     fn mixed_sdk_normalization_uses_candidate_owner_not_workflow() {
+        // Recognized effort suffixes are reserved, so literal colon IDs paired
+        // with native variants use unknown suffixes instead of :low/:high.
         let candidates = [
             (Sdk::Jcode, "normalize/jcode:low"),
             (Sdk::Jcode, "normalize/jcode:high"),
             (Sdk::Claude, "normalize/claude:low"),
             (Sdk::Claude, "normalize/claude:high"),
-            (Sdk::OpenCode, "normalize/open:low#fast"),
-            (Sdk::OpenCode, "normalize/open:low#slow"),
-            (Sdk::OpenCode, "normalize/open:high#fast"),
+            (Sdk::OpenCode, "normalize/open:free#fast"),
+            (Sdk::OpenCode, "normalize/open:free#slow"),
+            (Sdk::OpenCode, "normalize/open:2026#fast"),
         ]
         .map(|(sdk, model)| ModelCandidate {
             sdk,
@@ -1264,8 +1523,8 @@ mod tests {
                 vec![
                     (Sdk::Jcode, "normalize/jcode:low".into()),
                     (Sdk::Claude, "normalize/claude:low".into()),
-                    (Sdk::OpenCode, "normalize/open:low#fast".into()),
-                    (Sdk::OpenCode, "normalize/open:high#fast".into()),
+                    (Sdk::OpenCode, "normalize/open:free#fast".into()),
+                    (Sdk::OpenCode, "normalize/open:2026#fast".into()),
                 ]
             );
         }
@@ -1304,8 +1563,8 @@ mod tests {
     #[test]
     fn qualified_primary_keys_and_string_entries_use_their_own_syntax() {
         for key in [
-            "qualified/main:low#fast",
-            "qualified/main:low",
+            "qualified/main:free#fast",
+            "qualified/main:free",
             "qualified/*",
             "default",
         ] {
@@ -1315,7 +1574,7 @@ mod tests {
                 Some(Arc::new(RetryPolicy::new(config))),
                 Sdk::OpenCode,
                 Sdk::Claude,
-                Some("qualified/main:low#fast"),
+                Some("qualified/main:free#fast"),
                 &[],
                 1,
             );
@@ -1892,29 +2151,29 @@ mod tests {
         let config = policy(&[
             ("default", &["fallback/default"]),
             ("source/*", &["wildcard/*"]),
-            ("source/team/model:high", &["base/*"]),
+            ("source/team/model:free", &["base/*"]),
             (
-                "source/team/model:high#fast",
+                "source/team/model:free#fast",
                 &[
-                    "source/team/model:high#slow",
+                    "source/team/model:free#slow",
                     "exact/*",
-                    "exact/team/model:high#slow",
-                    "exact/team/model:low#fast",
+                    "exact/team/model:free#slow",
+                    "exact/team/model:2026#fast",
                 ],
             ),
         ]);
         let format = ModelReferenceFormat::OpenCode;
         assert_eq!(
-            chain_for(format, &config, Some("source/team/model:high#fast")),
-            ["exact/team/model:high#fast", "exact/team/model:low#fast"]
+            chain_for(format, &config, Some("source/team/model:free#fast")),
+            ["exact/team/model:free#fast", "exact/team/model:2026#fast"]
         );
         assert_eq!(
-            chain_for(format, &config, Some("source/team/model:high#slow")),
-            ["base/team/model:high#slow"]
+            chain_for(format, &config, Some("source/team/model:free#slow")),
+            ["base/team/model:free#slow"]
         );
         assert_eq!(
-            chain_for(format, &config, Some("source/other/id:low#fast")),
-            ["wildcard/other/id:low#fast"]
+            chain_for(format, &config, Some("source/other/id:free#fast")),
+            ["wildcard/other/id:free#fast"]
         );
         assert_eq!(chain_for(format, &config, None), ["fallback/default"]);
     }
@@ -1922,27 +2181,27 @@ mod tests {
     #[test]
     fn retry_opencode_cooldowns_separate_formats_and_preserve_colons() {
         let format = ModelReferenceFormat::OpenCode;
-        RetryPolicy::start_cooldown(format, "test-opencode-cool/team/model:high#fast");
+        RetryPolicy::start_cooldown(format, "test-opencode-cool/team/model:free#fast");
         assert!(RetryPolicy::is_cooling(
             format,
-            "test-opencode-cool/team/model:high#slow"
+            "test-opencode-cool/team/model:free#slow"
         ));
         assert!(!RetryPolicy::is_cooling(
             format,
-            "test-opencode-cool/team/model:low#fast"
+            "test-opencode-cool/team/model:2026#fast"
         ));
         assert!(!RetryPolicy::is_cooling(
             ModelReferenceFormat::LegacyEffort,
-            "test-opencode-cool/team/model:high#fast"
+            "test-opencode-cool/team/model:free#fast"
         ));
         let config = policy(&[("default", &["replacement/*"])]);
         let engine = FallbackEngine::new(
             format,
             Some(Arc::new(RetryPolicy::new(config))),
-            Some("test-opencode-cool/team/model:high#slow"),
+            Some("test-opencode-cool/team/model:free#slow"),
             1,
         );
-        assert_eq!(engine.model(), Some("replacement/team/model:high#slow"));
+        assert_eq!(engine.model(), Some("replacement/team/model:free#slow"));
     }
 
     #[test]

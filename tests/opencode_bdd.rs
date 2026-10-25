@@ -1,4 +1,4 @@
-//! Executable `OpenCode` contracts from plan sections 4.3, 5.2, 5.3 and 5.5.
+//! Executable OpenCode V2 execution, common-effort, and no-route fallback contracts.
 //! Reuses the pinned HTTP/SSE and CLI-lifetime fixture, not a mock Executor.
 #![expect(clippy::unwrap_used, reason = "isolated executable contract fixtures")]
 
@@ -13,15 +13,23 @@ mod fixture;
 
 #[cfg(unix)]
 mod contracts {
-    use super::fixture::{ANSWER, Fixture, MODEL, Scenario};
+    use super::fixture::{
+        ANSWER, Catalog, Fixture, MODEL, Scenario, effort_catalog, resume_fixture_with_model,
+        selected_models, set_catalog,
+    };
     use cruise::executor::PromptOutcome;
     use cucumber::{World as _, given, then, when};
+    use serde_json::json;
 
     #[derive(Default, cucumber::World)]
     pub struct OpenCodeWorld {
         case: String,
         fixture: Option<Fixture>,
         outcome: Option<cruise::error::Result<PromptOutcome>>,
+        baseline_prompts: usize,
+        baseline_selections: usize,
+        expected_model: serde_json::Value,
+        retained_id: Option<String>,
     }
 
     impl std::fmt::Debug for OpenCodeWorld {
@@ -35,6 +43,223 @@ mod contracts {
     #[given(expr = "a pinned V2 server exercising {word}")]
     fn server(w: &mut OpenCodeWorld, case: String) {
         w.case = case;
+    }
+
+    #[when(expr = "the Executor selects {word} on a {word} conversation")]
+    async fn select(w: &mut OpenCodeWorld, case: String, conversation: String) {
+        w.case = case.clone();
+        let _lock = cruise::test_support::lock_process();
+        let fixture = Fixture::new(Scenario::Complete).await;
+        let _guards = fixture.guards();
+        if conversation == "resumed" {
+            let checkpoint = |_: &cruise::model_selection::SdkSessionId| Ok(());
+            let first = fixture
+                .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
+                .await
+                .unwrap();
+            w.retained_id = Some(first.session_id.unwrap().id);
+        } else {
+            assert_eq!(conversation, "new");
+        }
+        w.baseline_prompts = fixture.prompt_count();
+        w.baseline_selections = selected_models(&fixture).len();
+        let (raw, catalog, expected) = match case.as_str() {
+            "canonical" => (
+                Some("fixture/model:max"),
+                effort_catalog(
+                    "model",
+                    &json!([{"id":"max"},{"id":"deep","settings":{"reasoningEffort":"max"}}]),
+                ),
+                json!({"providerID":"fixture","id":"model","variant":"max"}),
+            ),
+            "metadata" => (
+                Some("fixture/model:free:high"),
+                effort_catalog(
+                    "model:free",
+                    &json!([{"id":"deep","settings":{"reasoningEffort":"high"}}]),
+                ),
+                json!({"providerID":"fixture","id":"model:free","variant":"deep"}),
+            ),
+            "unsupported" => (
+                Some("fixture/model:medium"),
+                effort_catalog("model", &json!([{"id":"low"},{"id":"max"}])),
+                json!(null),
+            ),
+            "ambiguous" => (
+                Some("fixture/model:medium"),
+                effort_catalog(
+                    "model",
+                    &json!([{"id":"a","settings":{"reasoningEffort":"medium"}},{"id":"b","settings":{"reasoningEffort":"medium"}}]),
+                ),
+                json!(null),
+            ),
+            "missing" => (
+                Some("fixture/model:medium"),
+                Catalog::Models(json!([])),
+                json!(null),
+            ),
+            "protocol" => (
+                Some("fixture/model:medium"),
+                Catalog::InvalidJson,
+                json!(null),
+            ),
+            "unauthorized" => (
+                Some("fixture/model:medium"),
+                Catalog::Http(axum::http::StatusCode::UNAUTHORIZED),
+                json!(null),
+            ),
+            "unavailable" => (
+                Some("fixture/model:medium"),
+                Catalog::Http(axum::http::StatusCode::SERVICE_UNAVAILABLE),
+                json!(null),
+            ),
+            "transport" => (
+                Some("fixture/model:medium"),
+                Catalog::Transport,
+                json!(null),
+            ),
+            "native" => (
+                Some(MODEL),
+                Catalog::InvalidJson,
+                json!({"providerID":"fixture","id":"team/model:2026","variant":"precise"}),
+            ),
+            "unknown" => (
+                Some("fixture/model:free"),
+                Catalog::InvalidJson,
+                json!({"providerID":"fixture","id":"model:free"}),
+            ),
+            "plain" => (
+                Some("fixture/model"),
+                Catalog::InvalidJson,
+                json!({"providerID":"fixture","id":"model"}),
+            ),
+            "unspecified" => (None, Catalog::InvalidJson, json!(null)),
+            _ => panic!("unknown selection case: {case}"),
+        };
+        set_catalog(&fixture, catalog);
+        w.expected_model = expected;
+        w.outcome = Some(if let Some(id) = &w.retained_id {
+            resume_fixture_with_model(&fixture, id, 2, raw.unwrap()).await
+        } else {
+            fixture.execute(raw, 2).await
+        });
+        fixture.assert_stopped();
+        w.fixture = Some(fixture);
+    }
+
+    #[then(expr = "the catalog was requested {int} times")]
+    fn catalogs(w: &mut OpenCodeWorld, count: usize) {
+        assert_eq!(w.fixture.as_ref().unwrap().catalog_count(), count);
+    }
+
+    #[then("the selected wire model matches the catalog without altering the model ID")]
+    fn wire_model(w: &mut OpenCodeWorld) {
+        let fixture = w.fixture.as_ref().unwrap();
+        assert_eq!(
+            &selected_models(fixture)[w.baseline_selections..],
+            std::slice::from_ref(&w.expected_model)
+        );
+        assert_eq!(fixture.prompt_count(), w.baseline_prompts + 1);
+        if let Some(id) = &w.retained_id {
+            assert_eq!(
+                &w.outcome
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .session_id
+                    .as_ref()
+                    .unwrap()
+                    .id,
+                id
+            );
+        }
+    }
+
+    #[then("selection fails explicitly without a prompt or conversation model mutation")]
+    fn selection_failure(w: &mut OpenCodeWorld) {
+        let diagnostic = w
+            .outcome
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .to_ascii_lowercase();
+        let markers: &[&str] = match w.case.as_str() {
+            "unsupported" => &["unsupported", "fixture/model", "medium", "low", "max"],
+            "ambiguous" => &["ambiguous", "fixture/model", "medium"],
+            "missing" => &["catalog", "model"],
+            "protocol" => &["protocol"],
+            "unauthorized" => &["401"],
+            "unavailable" => &["503"],
+            "transport" => &["transport"],
+            _ => panic!("unknown failure case"),
+        };
+        for marker in markers {
+            assert!(
+                diagnostic.contains(marker),
+                "missing {marker}: {diagnostic}"
+            );
+        }
+        let fixture = w.fixture.as_ref().unwrap();
+        assert_eq!(fixture.prompt_count(), w.baseline_prompts);
+        assert_eq!(selected_models(fixture).len(), w.baseline_selections);
+        assert_eq!(
+            fixture.launch_count(),
+            if w.retained_id.is_some() { 2 } else { 1 }
+        );
+    }
+
+    #[when(expr = "a no-route provider fails with {word} and retry budget {int}")]
+    async fn no_route(w: &mut OpenCodeWorld, effect: String, budget: usize) {
+        let _lock = cruise::test_support::lock_process();
+        let fixture = Fixture::new(Scenario::NoRoute {
+            side_effect: effect == "tool-effect",
+        })
+        .await;
+        let _guards = fixture.guards();
+        // Unique primary identity prevents another scenario's cooldown leaking in.
+        let primary = format!("fixture/no-route-bdd-{effect}-{budget}");
+        w.outcome = Some(fixture.execute(Some(&primary), budget).await);
+        fixture.assert_stopped();
+        w.fixture = Some(fixture);
+    }
+
+    #[then("no-route falls back once and retains the provider diagnostic")]
+    fn switched(w: &mut OpenCodeWorld) {
+        let fixture = w.fixture.as_ref().unwrap();
+        let models = selected_models(fixture);
+        assert_eq!(models.len(), 2);
+        assert!(
+            models[0]["id"]
+                .as_str()
+                .unwrap()
+                .starts_with("no-route-bdd-")
+        );
+        assert_eq!(models[1], json!({"providerID":"fixture","id":"fallback"}));
+        assert!(
+            fixture
+                .notices()
+                .iter()
+                .any(|n| n.contains("provider.no-route") && n.contains("Model unavailable"))
+        );
+    }
+
+    #[then("no-route fails with its original diagnostic and never switches")]
+    fn not_switched(w: &mut OpenCodeWorld) {
+        let diagnostic = w
+            .outcome
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            diagnostic.contains("provider.no-route") && diagnostic.contains("Model unavailable"),
+            "{diagnostic}"
+        );
+        assert_eq!(selected_models(w.fixture.as_ref().unwrap()).len(), 1);
     }
 
     #[when("the real OpenCode Executor runs with two retries and a fallback model")]

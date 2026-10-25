@@ -12,6 +12,24 @@ pub(crate) struct ModelRef {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct ModelInfo {
+    #[serde(rename = "providerID")]
+    pub provider_id: String,
+    pub id: String,
+    pub variants: Vec<ModelVariant>,
+}
+#[derive(Debug, Deserialize)]
+pub(crate) struct ModelVariant {
+    pub id: String,
+    pub settings: Option<VariantSettings>,
+}
+#[derive(Debug, Deserialize)]
+pub(crate) struct VariantSettings {
+    #[serde(rename = "reasoningEffort")]
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct Envelope<T> {
     pub data: T,
 }

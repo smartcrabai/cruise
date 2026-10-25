@@ -312,7 +312,8 @@ fn complete_text_appends_only_suffix_and_duplicate_endings_emit_nothing() {
 fn model_reference_keeps_punctuation_and_requires_provider() {
     let model = parse_model_ref(Some("provider/team/model:2026#precise"))
         .unwrap_or_else(|error| panic!("model: {error}"));
-    let value = serde_json::to_value(model).unwrap_or_else(|error| panic!("model JSON: {error}"));
+    let value = serde_json::to_value(model.map(|request| request.model))
+        .unwrap_or_else(|error| panic!("model JSON: {error}"));
     assert_eq!(
         value,
         json!({"providerID":"provider","id":"team/model:2026","variant":"precise"})

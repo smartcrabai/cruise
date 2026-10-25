@@ -1,5 +1,11 @@
 # Checkpoint contract verification
 
+For OpenCode common effort resolution and replay-safe `provider.no-route`
+fallback, see `OPENCODE_EFFORT.md` and run
+`bash scripts/check_opencode_effort_specs.sh`. The dedicated native CI job runs
+Quint, Alloy receipt validation, real-Executor Cucumber, and affected Rust
+contracts using this directory's shared locked toolchain.
+
 For workflow-start OAuth authentication preflight, including bounded Quint and
 Alloy checks and production CLI Gherkin, see `AGENT_AUTH.md` and run
 `bash scripts/check_agent_auth_specs.sh`. Its dedicated `agent-auth-specs` PR CI
