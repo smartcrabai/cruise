@@ -1,7 +1,7 @@
 export default function OptionDialog(props) {
   return (
-    <div id={`dialog-${props.requestId}`} class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <div role="dialog" aria-modal="true" class="bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg p-6 max-w-lg w-full space-y-4">
+    <div id={`dialog-${props.requestId}`} class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <div role="dialog" aria-modal="true" class="bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg p-6 max-w-lg w-full max-h-full overflow-y-auto space-y-4">
         <h2 class="text-gray-900 dark:text-gray-100 font-semibold text-lg">{props.sessionTitle}</h2>
         <p class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{props.prompt}</p>
         <div class="space-y-3">
@@ -11,7 +11,7 @@ export default function OptionDialog(props) {
           <input type="hidden" name="requestId" value={props.requestId} />
           <input type="hidden" name="nextStep" value={props.textNextStep} />
           <label class="text-sm text-gray-700 dark:text-gray-300 block">{props.textLabel}</label>
-          <input type="text" name="textInput" required class="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200" />
+          <input type="text" name="textInput" required class="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-base md:text-sm text-gray-800 dark:text-gray-200" />
           <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded text-sm">Submit</button>
         </form>}
       </div>

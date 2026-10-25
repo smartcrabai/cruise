@@ -6,14 +6,14 @@ export default function NewSession(props) {
       hx-target="#main"
       hx-swap="innerHTML"
       hx-disable="this"
-      class="p-6 max-w-2xl mx-auto space-y-4"
+      class="p-4 md:p-6 max-w-2xl mx-auto space-y-4"
     >
       <h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100">New Session</h2>
       {props.error && <p class="text-sm text-red-600 dark:text-red-400">{props.error}</p>}
 
       <div class="space-y-1.5">
         <span class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Source</span>
-        <div class="flex gap-4" role="radiogroup" aria-label="Workspace source">
+        <div class="flex flex-wrap gap-x-4 gap-y-2" role="radiogroup" aria-label="Workspace source">
           <label class="flex items-center gap-2 cursor-pointer">
             {props.directorySelected && <input type="radio" name="sourceMode" value="directory" checked hx-on:change="app.toggleSource(this.value)" class="accent-blue-500" />}
             {!props.directorySelected && <input type="radio" name="sourceMode" value="directory" hx-on:change="app.toggleSource(this.value)" class="accent-blue-500" />}
@@ -42,10 +42,10 @@ export default function NewSession(props) {
           hx-target="#dir-suggestions"
           hx-include="this"
           placeholder="e.g. /Users/you/projects/myapp"
-          class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none"
+          class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-base md:text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none"
         />
         <div id="dir-suggestions" class="relative"></div>
-        {props.recentWorkingDirs && <div class="relative z-[60] flex flex-wrap gap-2 pt-1">{props.recentWorkingDirs.map(dir => <button type="button" class="px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800" hx-on:click={`app.pickDir('${dir}')`}>{dir}</button>)}</div>}
+        {props.recentWorkingDirs && <div class="relative z-[60] flex flex-wrap gap-2 pt-1">{props.recentWorkingDirs.map(dir => <button type="button" class="max-w-full break-all text-left px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800" hx-on:click={`app.pickDir('${dir}')`}>{dir}</button>)}</div>}
       </fieldset>
 
       <fieldset id="source-repo" class={props.directorySelected ? "space-y-2 hidden" : "space-y-2"}>
@@ -57,7 +57,7 @@ export default function NewSession(props) {
           value={props.repo}
           list="repo-options"
           placeholder="owner/repo"
-          class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none"
+          class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-base md:text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none"
         />
         <datalist id="repo-options" hx-get="/webui/repos" hx-trigger="load" hx-swap="innerHTML"></datalist>
       </fieldset>
@@ -86,7 +86,7 @@ export default function NewSession(props) {
           name="input"
           rows="6"
           placeholder="Describe the task..."
-          class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none resize-none"
+          class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-base md:text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none resize-none"
         >{props.input}</textarea>
       </div>
 
@@ -107,7 +107,7 @@ export default function NewSession(props) {
       </label>
 
       <label for="workspace-mode" class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Workspace</label>
-      <select id="workspace-mode" name="workspaceMode" class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-sm text-gray-800 dark:text-gray-200 focus:border-blue-500 outline-none">
+      <select id="workspace-mode" name="workspaceMode" class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-base md:text-sm text-gray-800 dark:text-gray-200 focus:border-blue-500 outline-none">
         {props.workspaceMode === "Worktree" ? <option value="Worktree" selected>Worktree</option> : <option value="Worktree">Worktree</option>}
         {props.workspaceMode === "CurrentBranch" ? <option value="CurrentBranch" selected>Current branch</option> : <option value="CurrentBranch">Current branch</option>}
       </select>
@@ -130,7 +130,7 @@ export default function NewSession(props) {
         />
       </div>
 
-      <div class="flex gap-2">
+      <div class="flex flex-wrap gap-2">
         <button type="button" hx-post="/webui/drafts" hx-include="closest form" hx-swap="none" class="px-5 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">
           Save draft
         </button>

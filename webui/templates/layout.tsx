@@ -10,12 +10,17 @@ export default function Layout(props) {
         <script src="/static/htmax.min.js"></script>
         <script src="/static/app.js" defer></script>
       </Head>
-      <div id="app" class="flex h-screen bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100">
-        <aside id="sidebar" class="flex-shrink-0 overflow-hidden border-r border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900" style="width:288px">{props.sidebar}</aside>
-        <div id="sidebar-resizer" role="separator" aria-orientation="vertical" tabindex="0" class="w-1 cursor-col-resize bg-gray-200 dark:bg-gray-800 hover:bg-blue-500"></div>
-        <main id="main" class="flex-1 min-w-0 overflow-auto">{props.main}</main>
+      <div id="app" data-sidebar-open="false" class="flex flex-col md:flex-row h-dvh bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100">
+        <header class="md:hidden flex flex-shrink-0 items-center gap-2 px-3 py-2 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900">
+          <button id="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Toggle sessions" class="px-2 py-1 text-lg leading-none text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800 rounded">☰</button>
+          <span class="text-sm font-semibold text-gray-800 dark:text-gray-200">Cruise</span>
+        </header>
+        <div id="sidebar-backdrop" hidden class="fixed inset-0 z-30 bg-black/40 md:hidden"></div>
+        <aside id="sidebar" class="flex-shrink-0 overflow-hidden border-r border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900">{props.sidebar}</aside>
+        <div id="sidebar-resizer" role="separator" aria-orientation="vertical" tabindex="0" class="hidden md:block w-1 cursor-col-resize bg-gray-200 dark:bg-gray-800 hover:bg-blue-500"></div>
+        <main id="main" class="flex-1 min-h-0 min-w-0 overflow-auto">{props.main}</main>
       </div>
-      <div id="toasts" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm w-full pointer-events-none"></div>
+      <div id="toasts" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm w-[calc(100%-2rem)] pointer-events-none"></div>
       <div id="dialogs">{props.dialogs}</div>
       <div hx-sse:connect="/webui/events" hx-swap="none" hx-on:notify="app.notify(event)"></div>
     </>

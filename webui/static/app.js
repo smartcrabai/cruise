@@ -6,6 +6,7 @@
   const MIN_WIDTH = 180;
   const MAX_WIDTH = 600;
   const RESIZE_STEP = 16;
+  const MOBILE_QUERY = "(width < 48rem)"; // encre-css md breakpoint
   // Mirrors run_all_state::LOG_CAP so the live log DOM cannot grow without bound.
   const RUN_ALL_LOG_CAP = 2000;
 
@@ -37,7 +38,7 @@
     const sidebar = document.getElementById("sidebar");
     if (!sidebar) return null;
     const next = clamp(Math.round(width), MIN_WIDTH, MAX_WIDTH);
-    sidebar.style.width = `${next}px`;
+    sidebar.style.setProperty("--sidebar-width", `${next}px`);
     if (persist) saveWidth(next);
     return next;
   }
@@ -85,6 +86,41 @@
       const width = sidebar.getBoundingClientRect().width || sidebar.offsetWidth || readStoredWidth();
       setSidebarWidth(width + direction * RESIZE_STEP);
     });
+  }
+
+  function setSidebarOpen(open) {
+    const app = document.getElementById("app");
+    const toggle = document.getElementById("sidebar-toggle");
+    const backdrop = document.getElementById("sidebar-backdrop");
+    if (app) app.setAttribute("data-sidebar-open", String(open));
+    if (toggle) toggle.setAttribute("aria-expanded", String(open));
+    if (backdrop) backdrop.hidden = !open;
+  }
+
+  function setupSidebarDrawer() {
+    const app = document.getElementById("app");
+    const toggle = document.getElementById("sidebar-toggle");
+    const backdrop = document.getElementById("sidebar-backdrop");
+    const sidebar = document.getElementById("sidebar");
+    if (!app || !toggle || !backdrop || !sidebar) return;
+
+    toggle.addEventListener("click", () => {
+      setSidebarOpen(app.getAttribute("data-sidebar-open") !== "true");
+    });
+    backdrop.addEventListener("click", () => setSidebarOpen(false));
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || app.getAttribute("data-sidebar-open") !== "true") return;
+      setSidebarOpen(false);
+      toggle.focus();
+    });
+    document.addEventListener("htmx:before:request", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element) || !sidebar.contains(target)) return;
+      if (target.getAttribute("hx-target") === "#main") setSidebarOpen(false);
+    });
+    if (typeof window.matchMedia === "function") {
+      window.matchMedia(MOBILE_QUERY).addEventListener("change", () => setSidebarOpen(false));
+    }
   }
 
   function errorMessage(error) {
@@ -235,6 +271,7 @@
 
   function setup() {
     setupSidebarResize();
+    setupSidebarDrawer();
     setupToasts();
     setupNotifications();
     document.addEventListener("htmx:before:swap", rememberScrollPositions);

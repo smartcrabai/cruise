@@ -1,5 +1,11 @@
 # Checkpoint contract verification
 
+For responsive WebUI drawer transitions, width persistence, real browser layout
+and htmx Gherkin, see `RESPONSIVE_WEBUI.md` and run
+`bash scripts/check_responsive_webui_specs.sh`. The dedicated secret-free
+`responsive-webui-specs.yml` workflow executes all checks and validates Alloy
+assertion and witness receipts.
+
 For OpenCode common effort resolution and replay-safe `provider.no-route`
 fallback, see `OPENCODE_EFFORT.md` and run
 `bash scripts/check_opencode_effort_specs.sh`. The dedicated native CI job runs

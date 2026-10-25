@@ -229,12 +229,20 @@ async fn root_page_has_shell_contract() {
         "id=\"main\"",
         "id=\"toasts\"",
         "id=\"dialogs\"",
+        "id=\"sidebar-toggle\"",
+        "aria-controls=\"sidebar\"",
+        "id=\"sidebar-backdrop\"",
+        "data-sidebar-open=\"false\"",
         "hx-sse:connect=\"/webui/events\"",
         "/static/app.css",
         "/static/htmax.min.js",
     ] {
         assert!(body.contains(needle), "missing {needle}");
     }
+    assert!(
+        !body.contains("style=\"width:"),
+        "inline sidebar width would override the mobile drawer width"
+    );
 }
 
 #[cfg(unix)]
@@ -438,7 +446,15 @@ async fn css_endpoint_serves_generated_css() {
     assert_eq!(status, StatusCode::OK);
     assert!(content_type.starts_with("text/css"), "{content_type}");
     assert!(body.contains(".prose"), "handwritten extras missing");
-    assert!(body.contains(".h-screen"), "layout utility missing");
+    assert!(body.contains(".h-dvh"), "dynamic viewport utility missing");
+    assert!(
+        body.contains(".md\\:hidden"),
+        "responsive visibility missing"
+    );
+    assert!(
+        body.contains("#app[data-sidebar-open=\"true\"] #sidebar"),
+        "open drawer styling missing"
+    );
 }
 
 #[tokio::test]
