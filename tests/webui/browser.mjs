@@ -287,11 +287,14 @@ try {
     const phases = await page.locator('#run-all-results > div > span').allTextContents();
     assert.equal(phases.length, 21, 'every real batch session must produce a result');
     assert(phases.every(phase => phase === 'Completed'), `live-log workflows must complete: ${JSON.stringify(phases)}`);
-    const liveLog = await page.locator('#run-all-log').evaluate(el => ({
-      height: el.clientHeight, total: el.scrollHeight, top: el.scrollTop,
-    }));
-    assert(liveLog.total > liveLog.height, 'fixture must produce a genuinely scrolling live log');
-    assert(liveLog.total - liveLog.top - liveLog.height < 24, 'R5 live log keeps following production SSE swaps');
+    try {
+      await page.waitForFunction(() => {
+        const el = document.querySelector('#run-all-log');
+        return el && el.scrollHeight > el.clientHeight && el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+      }, null, { timeout: 5000 });
+    } catch {
+      assert.fail('R5 live log keeps following production SSE swaps');
+    }
     assert(await page.locator('#main').evaluate(el => el.scrollHeight > el.clientHeight), 'R5 Run All scrolls main on mobile');
     assert.equal(await page.locator('#run-all-results').evaluate(el => getComputedStyle(el).overflowY), 'visible', 'mobile results do not become a second constrained scroll panel');
     await page.locator('#run-all-results > div').last().scrollIntoViewIfNeeded();

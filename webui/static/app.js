@@ -172,13 +172,17 @@
     }));
   }
 
-  function restoreScrollPositions() {
+  function followStuckLogs() {
     if (!scrollState) return;
     scrollState.forEach(({ id, element, stuck }) => {
       if (!stuck) return;
       const current = document.getElementById(id) || element;
       if (current) current.scrollTop = current.scrollHeight;
     });
+  }
+
+  function restoreScrollPositions() {
+    followStuckLogs();
     scrollState = undefined;
   }
 
@@ -275,6 +279,7 @@
     setupToasts();
     setupNotifications();
     document.addEventListener("htmx:before:swap", rememberScrollPositions);
+    document.addEventListener("htmx:before:settle", followStuckLogs);
     document.addEventListener("htmx:after:swap", () => {
       trimRunAllLog();
       restoreScrollPositions();
