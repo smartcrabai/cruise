@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
@@ -829,6 +829,316 @@ fn removed_builtin_names_are_rejected_by_cli() {
         assert!(
             terminal.contains("unknown built-in workflow"),
             "{name}: {terminal}"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn builtin_wait_ci_command(name: &str) -> String {
+    let workflow = cruise::builtin_workflows::find_builtin(name)
+        .unwrap_or_else(|| panic!("missing builtin workflow {name}"));
+    let config = cruise::config::WorkflowConfig::from_yaml(workflow.yaml)
+        .unwrap_or_else(|error| panic!("parse builtin workflow {name}: {error}"));
+    let command = config
+        .after_pr
+        .get("wait-ci")
+        .and_then(|step| step.command.as_ref())
+        .unwrap_or_else(|| panic!("{name} has no wait-ci command"));
+    let mut variables = cruise::variable::VariableStore::new(String::new());
+    variables.set_named_value("pr.number", "42".to_owned());
+    variables.set_named_value("pr.url", "https://github.com/owner/repo/pull/42".to_owned());
+    variables
+        .resolve(&command.as_slice().join("\n"))
+        .unwrap_or_else(|error| panic!("resolve {name} wait-ci command: {error}"))
+}
+
+#[cfg(unix)]
+const FAKE_GH_SCRIPT: &str = r#"#!/bin/sh
+if [ "$1" = repo ]; then
+  printf '123/true\n'
+  exit 0
+fi
+if [ "$1" != api ] || [ "$2" != graphql ]; then
+  printf 'unexpected fake gh call: %s\n' "$*" >&2
+  exit 91
+fi
+case " $* " in
+  *" head=$WAIT_CI_EXPECTED_HEAD "*) ;;
+  *) printf 'GraphQL request was not pinned to local HEAD: %s\n' "$*" >&2; exit 92 ;;
+esac
+case " $* " in
+  *" number=42 "*) ;;
+  *) printf 'GraphQL request did not identify PR 42: %s\n' "$*" >&2; exit 93 ;;
+esac
+case "$*" in
+  *'pullRequest(number:$number)'*'object(oid:$head)'*statusCheckRollup*) ;;
+  *) printf 'GraphQL request did not correlate the PR head with its commit rollup: %s\n' "$*" >&2; exit 94 ;;
+esac
+typed_owner=false
+typed_name=false
+typed_head=false
+typed_number=false
+previous=
+for arg in "$@"; do
+  case "$previous:$arg" in
+    -F:owner=123)
+      printf '{"errors":[{"message":"owner was coerced to a number"}]}\n'
+      exit 0 ;;
+    -F:head=*)
+      printf '{"errors":[{"message":"head was passed using typed field coercion"}]}\n'
+      exit 0 ;;
+    -F:name=true)
+      printf '{"errors":[{"message":"name was coerced to a boolean"}]}\n'
+      exit 0 ;;
+    -F:number=42) typed_number=true ;;
+    -f:number=42)
+      printf '{"errors":[{"message":"number was passed as a raw string"}]}\n'
+      exit 0 ;;
+    -f:owner=123) typed_owner=true ;;
+    -f:name=true) typed_name=true ;;
+    -f:head=$WAIT_CI_EXPECTED_HEAD) typed_head=true ;;
+  esac
+  previous=$arg
+done
+if [ "$typed_owner" != true ] || [ "$typed_name" != true ] || [ "$typed_head" != true ] || [ "$typed_number" != true ]; then
+  printf '{"errors":[{"message":"owner/name/head were not passed as strings or number was not typed"}]}\n'
+  exit 0
+fi
+count=$(cat "$WAIT_CI_GH_COUNT" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$WAIT_CI_GH_COUNT"
+response="$WAIT_CI_RESPONSES/$count.json"
+if [ ! -f "$response" ]; then
+  printf 'no fake GitHub response for poll %s\n' "$count" >&2
+  exit 94
+fi
+cat "$response"
+"#;
+
+#[cfg(unix)]
+struct GithubWaitCiFixture {
+    _root: TempDir,
+    repo: PathBuf,
+    bin: PathBuf,
+    responses: PathBuf,
+    gh_count: PathBuf,
+    date_count: PathBuf,
+    head: String,
+}
+
+#[cfg(unix)]
+impl GithubWaitCiFixture {
+    fn new() -> Self {
+        let root = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create repo: {error}"));
+        cruise::test_support::init_git_repo(&repo);
+        let head_output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap_or_else(|error| panic!("read test HEAD: {error}"));
+        assert!(head_output.status.success(), "read test HEAD failed");
+        let head = String::from_utf8(head_output.stdout)
+            .unwrap_or_else(|error| panic!("HEAD is not UTF-8: {error}"))
+            .trim()
+            .to_owned();
+
+        let bin = root.path().join("bin");
+        let responses = root.path().join("responses");
+        std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("create fake bin: {error}"));
+        std::fs::create_dir_all(&responses)
+            .unwrap_or_else(|error| panic!("create fake responses: {error}"));
+        let gh_count = root.path().join("gh-count");
+        let date_count = root.path().join("date-count");
+        cruise::test_support::write_executable_script(&bin.join("gh"), FAKE_GH_SCRIPT);
+        cruise::test_support::write_executable_script(
+            &bin.join("date"),
+            r#"#!/bin/sh
+count=$(cat "$WAIT_CI_DATE_COUNT" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$WAIT_CI_DATE_COUNT"
+if [ "${WAIT_CI_TIMEOUT-0}" = 1 ] && [ "$count" -gt 1 ]; then
+  printf '700\n'
+else
+  printf '100\n'
+fi
+"#,
+        );
+        cruise::test_support::write_executable_script(&bin.join("sleep"), "#!/bin/sh\nexit 0\n");
+        Self {
+            _root: root,
+            repo,
+            bin,
+            responses,
+            gh_count,
+            date_count,
+            head,
+        }
+    }
+
+    fn run(&self, command: &str, responses: &[serde_json::Value], timeout: bool) -> Output {
+        let _ = std::fs::remove_file(&self.gh_count);
+        let _ = std::fs::remove_file(&self.date_count);
+        for (index, response) in responses.iter().enumerate() {
+            let bytes = serde_json::to_vec(response)
+                .unwrap_or_else(|error| panic!("serialize fake GitHub response: {error}"));
+            std::fs::write(self.responses.join(format!("{}.json", index + 1)), bytes)
+                .unwrap_or_else(|error| panic!("write fake GitHub response: {error}"));
+        }
+        let mut paths = vec![self.bin.clone()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let path = std::env::join_paths(paths)
+            .unwrap_or_else(|error| panic!("join fake command PATH: {error}"));
+        Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&self.repo)
+            .env("PATH", path)
+            .env("WAIT_CI_EXPECTED_HEAD", &self.head)
+            .env("WAIT_CI_GH_COUNT", &self.gh_count)
+            .env("WAIT_CI_DATE_COUNT", &self.date_count)
+            .env("WAIT_CI_RESPONSES", &self.responses)
+            .env("WAIT_CI_TIMEOUT", if timeout { "1" } else { "0" })
+            .output()
+            .unwrap_or_else(|error| panic!("run builtin wait-ci command: {error}"))
+    }
+
+    fn gh_calls(&self) -> usize {
+        std::fs::read_to_string(&self.gh_count)
+            .unwrap_or_else(|error| panic!("read fake gh call count: {error}"))
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("parse fake gh call count: {error}"))
+    }
+}
+
+#[cfg(unix)]
+fn github_ci_response(
+    pr_head: &str,
+    rollup_head: &str,
+    state: Option<&str>,
+    check_count: usize,
+) -> serde_json::Value {
+    let rollup = state.map_or(serde_json::Value::Null, |state| {
+        serde_json::json!({
+            "state": state,
+            "contexts": {"totalCount": check_count}
+        })
+    });
+    serde_json::json!({
+        "data": {
+            "repository": {
+                "pullRequest": {"headRefOid": pr_head},
+                "object": {
+                    "oid": rollup_head,
+                    "statusCheckRollup": rollup
+                }
+            }
+        }
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
+    let old_head = "1111111111111111111111111111111111111111";
+    for workflow in cruise::builtin_workflows::BUILTIN_WORKFLOWS {
+        let fixture = GithubWaitCiFixture::new();
+        let command = builtin_wait_ci_command(workflow.name);
+        let output = fixture.run(
+            &command,
+            &[
+                github_ci_response(&fixture.head, old_head, Some("SUCCESS"), 1),
+                github_ci_response(&fixture.head, &fixture.head, Some("PENDING"), 1),
+                github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            ],
+            false,
+        );
+        let terminal = text(&output);
+        assert!(output.status.success(), "{}: {terminal}", workflow.name);
+        assert!(
+            terminal.contains(&format!("rollup HEAD {old_head}")),
+            "{terminal}"
+        );
+        assert!(terminal.contains("state PENDING"), "{terminal}");
+        assert!(
+            terminal.contains(&format!("CI passed for HEAD {}", fixture.head)),
+            "{terminal}"
+        );
+        assert_eq!(fixture.gh_calls(), 3, "{}", workflow.name);
+    }
+
+    let command = builtin_wait_ci_command("tdd");
+    let fixture = GithubWaitCiFixture::new();
+    let output = fixture.run(
+        &command,
+        &[github_ci_response(
+            &fixture.head,
+            &fixture.head,
+            Some("FAILURE"),
+            1,
+        )],
+        false,
+    );
+    let terminal = text(&output);
+    assert!(!output.status.success(), "{terminal}");
+    assert!(terminal.contains("GitHub CI failed"), "{terminal}");
+    assert!(terminal.contains(&fixture.head), "{terminal}");
+
+    let fixture = GithubWaitCiFixture::new();
+    let changed_head = "2222222222222222222222222222222222222222";
+    let output = fixture.run(
+        &command,
+        &[github_ci_response(
+            changed_head,
+            &fixture.head,
+            Some("SUCCESS"),
+            1,
+        )],
+        false,
+    );
+    let terminal = text(&output);
+    assert!(!output.status.success(), "{terminal}");
+    assert!(terminal.contains("head changed"), "{terminal}");
+    assert!(terminal.contains(&fixture.head), "{terminal}");
+    assert!(terminal.contains(changed_head), "{terminal}");
+
+    let fixture = GithubWaitCiFixture::new();
+    let output = fixture.run(
+        &command,
+        &[serde_json::json!({"errors": [{"message": "query rejected"}]})],
+        false,
+    );
+    let terminal = text(&output);
+    assert!(!output.status.success(), "{terminal}");
+    assert!(terminal.contains("query returned errors"), "{terminal}");
+
+    for (state, check_count) in [(None, 0), (Some("SUCCESS"), 0)] {
+        let fixture = GithubWaitCiFixture::new();
+        let output = fixture.run(
+            &command,
+            &[github_ci_response(
+                &fixture.head,
+                &fixture.head,
+                state,
+                check_count,
+            )],
+            true,
+        );
+        let terminal = text(&output);
+        assert!(!output.status.success(), "{terminal}");
+        assert!(terminal.contains("GitHub CI timed out"), "{terminal}");
+        assert!(terminal.contains(&fixture.head), "{terminal}");
+        assert!(
+            terminal.contains(if state.is_some() {
+                "state no-checks"
+            } else {
+                "state not-registered"
+            }),
+            "{terminal}"
         );
     }
 }
