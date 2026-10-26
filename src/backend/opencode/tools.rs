@@ -11,6 +11,7 @@ use crate::{
     backend::{stream::StreamChunk, tool::ToolHandler},
     cancellation::CancellationToken,
     config::{McpTransport, PermissionMode},
+    tool_policy::{ShellRule, shell_command_violation},
 };
 use axum::{
     Json, Router,
@@ -53,6 +54,8 @@ struct BridgeState {
     session: String,
     tools: HashMap<String, ToolHandler>,
     allowed: HashSet<String>,
+    denied: HashSet<String>,
+    shell_rules: Vec<ShellRule>,
     restricted: bool,
     admission: Arc<Mutex<Admission>>,
     cancel: CancellationToken,
@@ -85,6 +88,8 @@ struct Effect {
     #[serde(rename = "callID")]
     id: String,
     tool: String,
+    #[serde(default)]
+    input: Value,
 }
 
 impl BridgeState {
@@ -131,6 +136,26 @@ async fn effect(
         || (state.restricted && !state.allowed.contains(&call.tool))
     {
         return reject(StatusCode::FORBIDDEN, "invalid tool execution identity");
+    }
+    if state.denied.contains(&call.tool) {
+        return reject(StatusCode::FORBIDDEN, "tool denied by disallowed_tools");
+    }
+    if matches!(call.tool.as_str(), "bash" | "shell") && !state.shell_rules.is_empty() {
+        let Some(command) = call.input.get("command").and_then(Value::as_str) else {
+            return reject(
+                StatusCode::FORBIDDEN,
+                "bash command missing from policy check",
+            );
+        };
+        if let Some(rule) = shell_command_violation(command, &state.shell_rules) {
+            return reject(
+                StatusCode::FORBIDDEN,
+                &format!(
+                    "shell command denied by Cruise policy: {} ({:?})",
+                    rule.prefix, rule.source
+                ),
+            );
+        }
     }
     if !state.barrier() {
         return reject(StatusCode::CONFLICT, "execution cancelled");
@@ -265,6 +290,8 @@ impl Bridge {
                 .map(|t| (t.name.clone(), Arc::clone(&t.handler)))
                 .collect(),
             allowed: allowed_tools(config),
+            denied: denied_tools(config),
+            shell_rules: config.tool_policy.shell_rules.clone(),
             restricted: config.permission != PermissionMode::Full,
             admission: Arc::default(),
             cancel: cancel.child_token(),
@@ -298,6 +325,7 @@ impl Bridge {
         let bridge_config = serde_json::to_vec(&json!({
             "url": url, "token": token, "sessionID": id, "tools": tools,
             "allowed": state.allowed, "restricted": state.restricted,
+            "denied": state.denied, "shell_rules": state.shell_rules,
         }))
         .map_err(|e| e.to_string())?;
         let secret_path = plugin.join("bridge.json");
@@ -460,7 +488,22 @@ pub(crate) fn allowed_tools(config: &OpenCodeRunnerConfig) -> HashSet<String> {
         );
     }
     tools.extend(config.tools.iter().map(|t| t.name.clone()));
+    let denied = denied_tools(config);
+    tools.retain(|name| !denied.contains(name));
     tools
+}
+
+fn denied_tools(config: &OpenCodeRunnerConfig) -> HashSet<String> {
+    let mut denied = HashSet::new();
+    if config.tool_policy.deny_web {
+        denied.extend(["webfetch".to_owned(), "websearch".to_owned()]);
+    }
+    if config.tool_policy.deny_subagent {
+        // The pinned V2 core names this tool `subagent`; retain `task` for
+        // compatible runtimes exposing the older model-facing vocabulary.
+        denied.extend(["task".to_owned(), "subagent".to_owned()]);
+    }
+    denied
 }
 
 pub(crate) fn permissions(config: &OpenCodeRunnerConfig) -> Value {
@@ -472,6 +515,27 @@ pub(crate) fn permissions(config: &OpenCodeRunnerConfig) -> Value {
         allowed.sort();
         for name in allowed {
             rules.push(json!({"action": name, "resource": "*", "effect": "allow"}));
+        }
+    }
+    let mut denied: Vec<_> = denied_tools(config).into_iter().collect();
+    denied.sort();
+    for name in denied {
+        rules.push(json!({"action": name, "resource": "*", "effect": "deny"}));
+    }
+    for rule in &config.tool_policy.shell_rules {
+        let resource = format!(
+            "{}{}",
+            rule.prefix,
+            if rule.prefix.ends_with('=') {
+                "*"
+            } else {
+                " *"
+            }
+        );
+        // V2's native shell permission action is `shell`, even on runtimes
+        // exposing a model-facing `bash` tool. Last matching rule wins.
+        for action in ["bash", "shell"] {
+            rules.push(json!({"action": action, "resource": resource, "effect": "deny"}));
         }
     }
     for name in ["question", "ask", "ask_user_question"] {

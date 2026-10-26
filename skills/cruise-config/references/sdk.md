@@ -67,7 +67,47 @@ Cruise resolves the process `JCODE_HOME` as its source home, falling back to `~/
 
 **Upgrade note:** After upgrading from an MCP-bridge release, remove the stale `mcpServers.cruise` entry from the source `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json` when `JCODE_HOME` is unset). Cruise strips it from each private session copy and leaves the source configuration unchanged.
 
-The backend exposes Cruise session tools through jcode's session-tools support. Restricted `permission` modes force `macos_computer_use` off and disable the jcode tool `bash`. `read-only` additionally disables `edit`, `write` and `apply_patch`.
+The backend exposes Cruise session tools through jcode's session-tools support. Restricted `permission` modes force `macos_computer_use` off and disable the jcode tool `bash`. `read-only` additionally disables `edit`, `write`, `apply_patch`, and `replace`.
+
+## Tool restriction enforcement
+
+Workflow and step `disallowed_tools` lists use SDK-neutral `web`, `subagent`,
+`mcp`, `mcp:<name>`, and `shell:<prefix>` values, not native backend syntax.
+They are unioned with implicit Git denials when `allow_commit` is false.
+`allow_commit: true` removes only those implicit rules and the commit guard,
+not explicit restrictions or the permission preset. Restricted presets discard
+shell rules because shell is already disabled. See [steps.md](steps.md) for
+the complete implicit list, prefix grammar, and allowed positions.
+
+| Backend | Enforcement |
+|---------|-------------|
+| Claude | Native denies for `WebFetch`/`WebSearch`, `Agent`, and `Bash(<prefix> *)` (or `Bash(<prefix>*)` when ending in `=`), including in `bypassPermissions` |
+| jcode | Merge `webfetch`/`websearch`/`browser` and `swarm` into `JCODE_DISABLED_TOOLS`; append Cruise's shell pre-tool gate without discarding user hooks |
+| OpenCode | Native web/task/bash deny rules and Cruise plugin/bridge checks before tool execution |
+| `command:` | Explicit restrictions are errors; implicit shell denials are not enforced, while the commit guard remains |
+
+jcode selects existing pre-tool hooks from workflow env, process env, then
+`[hooks].pre_tool` in config, appending the gate. A gate without existing hooks
+uses a single command string; combining hooks needs a jcode release supporting
+hook arrays. `JCODE_HOOKS_DISABLED` in workflow or process env disables the gate
+and warns. Failure to prepare the gate warns as well. The gate returns `2` for
+a denial or malformed policy/input, but jcode hook execution failures and other
+exit codes are fail-open. Tool-list merging also applies with
+`computer_use: true` when explicit web/subagent denials exist.
+
+jcode/OpenCode shell matching splits compound commands, strips assignments
+and common wrappers, examines shell `-c` scripts, compares executable basenames,
+and normalizes Git global options. Heredoc body lines may produce false
+positives. Claude uses native matching instead and does **not** normalize Git
+global options: `git -C path commit` may evade a `git commit` prefix rule.
+These are best-effort controls, not a shell interpreter, sandbox, or security
+boundary. The prompt warning, reference-transaction hook, and CAS rollback
+remain in place.
+
+MCP denials filter only workflow `mcp_servers` before backend launch. User-level
+backend MCP configuration and Cruise's own session tools remain unaffected.
+Built-in planning/fix/ask/title/PR-description and workflow-generation turns
+remain `full` without explicit or implicit tool restrictions.
 
 ## `sdk: opencode` - the OpenCode V2 client
 
@@ -135,6 +175,10 @@ The structured action is available only on prompt steps that carry an `if.no-fil
 Command and option steps behave identically in both modes.
 
 ## MCP servers
+
+Prompt `disallowed_tools: [mcp]` or `["mcp:<name>"]` can exclude workflow
+servers for that step. This does not disable user-level MCP configuration or
+Cruise's session tools, and does not restrict built-in turns.
 
 The optional top-level `mcp_servers` map configures servers for all SDK prompt runs: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It is not a per-step setting, and a `workflow_call` callee's top-level MCP settings are ignored. Every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, must support the transport: stdio supports all SDKs, Streamable HTTP requires Claude or OpenCode, and legacy SSE requires Claude. Changing the workflow SDK does not override SDK-qualified objects. MCP servers cannot be used with the command backend.
 

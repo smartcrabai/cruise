@@ -295,6 +295,7 @@ async fn direct_opencode_executor_rejects_computer_use_without_starting_backend(
             resume: None,
             computer_use: true,
             permission: PermissionMode::Full,
+            tool_policy: cruise::tool_policy::ToolPolicy::default(),
         })
         .await;
     match result {

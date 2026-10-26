@@ -156,6 +156,9 @@ pub struct WorkflowConfig {
     /// Default permission mode for prompt steps.
     #[serde(default)]
     pub permission: PermissionMode,
+    /// Default prompt tool restrictions. Explicit empty values override defaults files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disallowed_tools: Option<Vec<crate::tool_policy::ToolRestriction>>,
 
     /// Environment variables applied to all steps.
     #[serde(default)]
@@ -356,6 +359,9 @@ pub struct StepConfig {
     /// Per-prompt override for the workflow-level permission mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<PermissionMode>,
+    /// Additional prompt-only restrictions, unioned with workflow defaults.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disallowed_tools: Vec<crate::tool_policy::ToolRestriction>,
 
     /// Message displayed to the user before this step runs (prompt steps only).
     pub instruction: Option<String>,
@@ -719,6 +725,12 @@ impl WorkflowConfig {
     pub fn permission(&self) -> PermissionMode {
         self.permission
     }
+
+    /// Workflow restrictions, or an empty slice when unspecified.
+    #[must_use]
+    pub fn disallowed_tools(&self) -> &[crate::tool_policy::ToolRestriction] {
+        self.disallowed_tools.as_deref().unwrap_or_default()
+    }
 }
 
 impl WorkflowConfig {
@@ -1038,6 +1050,7 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_flags(config)?;
     validate_computer_use(config)?;
     validate_permission(config)?;
+    validate_tool_restrictions(config)?;
     validate_output_file_usage(config)?;
     validate_squash_merge(config)?;
     validate_github_review(config)?;
@@ -1414,13 +1427,14 @@ pub(crate) fn validate_squash_merge_step(
         || step.group.is_some()
         || step.workflow_call.is_some()
         || step.computer_use.is_some()
+        || !step.disallowed_tools.is_empty()
         || step.permission.is_some()
         || step.output_file.is_some()
         || step.github_review.is_some()
         || step.allow_commit
     {
         return Err(invalid(
-            "cannot be combined with prompt/SDK fields, command, option, output_file, permission, allow_commit, or control-flow fields",
+            "cannot be combined with prompt/SDK fields, command, option, output_file, disallowed_tools, permission, allow_commit, or control-flow fields",
         ));
     }
     Ok(())
@@ -1466,11 +1480,12 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
         || step.plan.is_some()
         || step.allow_commit
         || step.computer_use.is_some()
+        || !step.disallowed_tools.is_empty()
         || step.permission.is_some()
         || step.output_file.is_some()
     {
         return Err(CruiseError::InvalidStepConfig(format!(
-            "parallel step '{name}' only supports parallel, env, skip, flag, when, next, if, and timeout; computer_use and permission are only supported on prompt children"
+            "parallel step '{name}' only supports parallel, env, skip, flag, when, next, if, and timeout; computer_use, disallowed_tools and permission are only supported on prompt children"
         )));
     }
     for (child_name, child) in children {
@@ -1499,11 +1514,12 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
             || child.plan.is_some()
             || child.allow_commit
             || (child.computer_use.is_some() && child.command.is_some())
+            || (!child.disallowed_tools.is_empty() && child.command.is_some())
             || (child.permission.is_some() && child.command.is_some())
         {
             return Err(CruiseError::InvalidStepConfig(format!(
                 "parallel child '{path}' requires exactly one of prompt, prompt_file, or command; \
-                 only model, env, skip, when, timeout, computer_use and permission (prompt children only), \
+                 only model, env, skip, when, timeout, computer_use, disallowed_tools and permission (prompt children only), \
                  and output_file (prompt children only) may accompany it"
             )));
         }
@@ -1854,9 +1870,63 @@ fn candidate_sdks(
         .collect()
 }
 
-/// Validate permission modes: prompt-only, unsupported on the command backend
-/// when restricted, independent of `allow_commit` only for writable modes, and
-/// never mixed with writable siblings in a parallel block.
+/// Validate explicit restriction placement, MCP references, and SDK support.
+fn validate_tool_restrictions(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+    use crate::tool_policy::ToolRestriction;
+
+    let command_backend = matches!(
+        crate::executor::Executor::new(config.sdk.as_deref(), &config.command),
+        crate::executor::Executor::Command { .. }
+    );
+    let check_names = |name: &str, restrictions: &[ToolRestriction]| {
+        for restriction in restrictions {
+            if let ToolRestriction::McpServer(server) = restriction
+                && !config.mcp_servers.contains_key(server)
+            {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "{name} uses disallowed_tools mcp:{server}, but that MCP server is not defined in mcp_servers"
+                )));
+            }
+        }
+        Ok(())
+    };
+    check_names("workflow", config.disallowed_tools())?;
+    let check = |name: &str, step: &StepConfig| {
+        let is_prompt = step.prompt.is_some() || step.prompt_file.is_some();
+        if !step.disallowed_tools.is_empty() && !is_prompt {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "step '{name}' uses disallowed_tools, which is only supported on prompt steps"
+            )));
+        }
+        check_names(name, &step.disallowed_tools)?;
+        if is_prompt
+            && command_backend
+            && (!config.disallowed_tools().is_empty() || !step.disallowed_tools.is_empty())
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "step '{name}' uses disallowed_tools on the command backend, which cannot restrict a CLI's tools"
+            )));
+        }
+        Ok(())
+    };
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        check(name, step)?;
+        if let Some(children) = &step.parallel {
+            for (child_name, child) in children {
+                check(&format!("{name}/{child_name}"), child)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate permission modes and read-only parallel sibling compatibility.
 fn validate_permission(config: &WorkflowConfig) -> crate::error::Result<()> {
     use crate::error::CruiseError;
 
@@ -2059,6 +2129,11 @@ fn validate_step_groups(
             if step.computer_use.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' uses computer_use on a group call; set it on the inner prompt step"
+                )));
+            }
+            if !step.disallowed_tools.is_empty() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses disallowed_tools on a group call; set it on the inner prompt step"
                 )));
             }
             if step.permission.is_some() {
@@ -4489,6 +4564,7 @@ steps:
                 "languages",
                 "env",
                 "force_exec",
+                "disallowed_tools",
                 "computer_use",
                 "groups",
                 "steps",
@@ -4646,6 +4722,7 @@ steps:
                 "model",
                 "prompt",
                 "allow_commit",
+                "disallowed_tools",
                 "computer_use",
                 "instruction",
                 "plan",
@@ -4668,6 +4745,54 @@ steps:
         assert!(
             !step_props.contains_key("fail-if-no-file-changes"),
             "removed fail-if-no-file-changes must not remain in the StepConfig schema"
+        );
+    }
+
+    #[test]
+    fn test_schema_disallowed_tools_constrains_prompt_and_parallel_children() {
+        let schema = load_schema();
+        for properties in [
+            &schema["properties"],
+            &schema["$defs"]["StepConfig"]["properties"],
+        ] {
+            assert_eq!(properties["disallowed_tools"]["type"], "array");
+            assert_eq!(
+                properties["disallowed_tools"]["items"]["$ref"],
+                "#/$defs/ToolRestriction"
+            );
+        }
+        assert_eq!(schema["$defs"]["ToolRestriction"]["type"], "string");
+        let rules = schema["$defs"]["StepConfig"]["allOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("StepConfig rules must exist"));
+        let rule = rules
+            .iter()
+            .find(|rule| rule["if"]["required"] == serde_json::json!(["disallowed_tools"]))
+            .unwrap_or_else(|| panic!("disallowed_tools must require prompts"));
+        assert_eq!(
+            rule["then"]["oneOf"],
+            serde_json::json!([
+                {"required": ["prompt"]}, {"required": ["prompt_file"]}
+            ])
+        );
+        for field in ["parallel", "group", "workflow_call", "squash-merge"] {
+            let rule = rules
+                .iter()
+                .find(|rule| rule["if"]["required"] == serde_json::json!([field]))
+                .unwrap_or_else(|| panic!("missing rule for {field}"));
+            assert_eq!(
+                rule["then"]["properties"]["disallowed_tools"]["maxItems"],
+                0
+            );
+        }
+        assert_eq!(
+            schema["$defs"]["ParallelChild"]["properties"]["disallowed_tools"]["$ref"],
+            "#/$defs/StepConfig/properties/disallowed_tools"
+        );
+        assert_eq!(
+            schema["$defs"]["ParallelChild"]["allOf"][0]["then"]["properties"]["disallowed_tools"]
+                ["maxItems"],
+            0
         );
     }
 
@@ -7278,6 +7403,38 @@ steps:
             validate_config(&config).is_ok(),
             "an option step whose choices all set next has no reachable \
              fall-through edge"
+        );
+    }
+
+    #[test]
+    fn disallowed_tools_validate_locations_and_command_backend() {
+        for yaml in [
+            "steps:\n  a:\n    command: echo\n    disallowed_tools: [web]\n",
+            "steps:\n  a:\n    option:\n      - label: x\n        next: end\n    disallowed_tools: [web]\n",
+            "steps:\n  a:\n    disallowed_tools: [web]\n    parallel:\n      b:\n        prompt: hi\n",
+            "steps:\n  a:\n    parallel:\n      b:\n        command: echo\n        disallowed_tools: [web]\n",
+            "command: [echo]\ndisallowed_tools: [web]\nsteps:\n  a:\n    prompt: hi\n",
+            "command: [echo]\nsteps:\n  a:\n    prompt: hi\nafter-pr:\n  b:\n    prompt: hi\n    disallowed_tools: [web]\n",
+            "command: [echo]\ngroups:\n  g:\n    steps:\n      b:\n        prompt: hi\n        disallowed_tools: [web]\nsteps:\n  a:\n    group: g\n",
+        ] {
+            assert_permission_invalid(yaml, &["disallowed_tools"]);
+        }
+        assert_permission_valid("command: [echo]\nsteps:\n  a:\n    prompt: hi\n");
+        assert_permission_valid(
+            "disallowed_tools: [web]\nsteps:\n  a:\n    parallel:\n      b:\n        prompt: hi\n        disallowed_tools: [subagent]\n",
+        );
+    }
+
+    #[test]
+    fn disallowed_tools_validate_mcp_server_names() {
+        for yaml in [
+            "disallowed_tools: [mcp:missing]\nsteps:\n  a:\n    prompt: hi\n",
+            "steps:\n  a:\n    prompt: hi\n    disallowed_tools: [mcp:missing]\n",
+        ] {
+            assert_permission_invalid(yaml, &["disallowed_tools", "missing", "mcp_servers"]);
+        }
+        assert_permission_valid(
+            "mcp_servers:\n  github:\n    command: echo\ndisallowed_tools: [mcp:github]\nsteps:\n  a:\n    prompt: hi\n",
         );
     }
 

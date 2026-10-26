@@ -745,9 +745,9 @@ fresh snapshot session to use updated settings.
 
 - `env` and `mcp_servers` merge per key (higher layer wins).
 - `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
-- Other fields (`model`, `plan_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `retry`) are taken from the highest layer that sets them.
+- Other fields (`model`, `plan_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
 - `description`, `steps`, `groups`, and `after-pr` are workflow-only and are a load error in `default.yaml`. Unknown keys are errors too.
-- If defaults name a backend (`command` / `sdk`) of a different kind than the workflow's own, validation fails when they would fill an unset backend-specific `model`, `plan_model`, or `retry`, add a missing `mcp_servers` entry, or fill an unset `computer_use` or `permission` field, regardless of its value. Set the field in the workflow or remove it from `default.yaml`. The check runs before `CRUISE_SDK` overrides, which are not considered.
+- If defaults name a backend (`command` / `sdk`) of a different kind than the workflow's own, validation fails when they would fill an unset backend-specific `model`, `plan_model`, or `retry`, add a missing `mcp_servers` entry, or fill an unset `computer_use`, `permission`, or `disallowed_tools` field, regardless of its value. Set the field in the workflow or remove it from `default.yaml`. The check runs before `CRUISE_SDK` overrides, which are not considered.
 
 `pre_steps:` defines command-only steps (`command`, `env`, `timeout`, `skip`, `when`) inserted at the start of the workflow's `steps` as `pre/<name>`. They do not run in planning or `after-pr`. User steps come first, then project steps; a project step with the same name replaces the user one in place.
 
@@ -792,6 +792,7 @@ languages:                # prompt languages (optional; defaults to English)
   plan: English           # language used by built-in planning prompts
 # force_exec: false       # execute direct plan entry points in place (use --no-force-exec to opt out)
 # permission: full        # prompt permission: read-only | edit | full (default full)
+# disallowed_tools: [web, subagent, "shell:npm publish"] # SDK prompt deny list
 # computer_use: false     # jcode only, macOS: let prompts control the desktop (macos_computer_use)
 # Deprecated compatibility fields: pr_language and plan_language
 
@@ -910,18 +911,106 @@ resumption.
 
 Workflow-level `computer_use` defaults to `false`. Set it to `true` to allow prompt turns to use jcode's `macos_computer_use` desktop-control tool on macOS. A prompt step may set `computer_use: true` or `false` to override the workflow default. Built-in plan, fix-plan, and ask-plan turns follow the workflow value; title and PR-description generation always run with computer use off. The tool is macOS-only and the setting has no effect on Linux. Every effective applicable model candidate must use jcode, including SDK-qualified objects and candidates selected by authoritative retry chains, and no `command:` backend may be set. Explicit jcode-only candidates can work under a Claude or OpenCode workflow SDK. Changing only the workflow SDK does not override incompatible SDK-qualified objects.
 
-When computer use is off, Cruise adds `macos_computer_use` to `JCODE_DISABLED_TOOLS`, merging the first available list from workflow `env:`, the Cruise process environment, or `[tools].disabled` in the private copied `config.toml`. This reaches the private runtime's daemon, including swarm workers and subagents. When computer use is on, Cruise leaves `JCODE_DISABLED_TOOLS` unchanged and never removes a jcode-level disable to force-enable the tool. The user must grant macOS Accessibility and Screen Recording permissions.
+When computer use is off, Cruise adds `macos_computer_use` to `JCODE_DISABLED_TOOLS`, merging the first available list from workflow `env:`, the Cruise process environment, or `[tools].disabled` in the private copied `config.toml`. This reaches the private runtime's daemon, including swarm workers and subagents. When computer use is on with full permission and no explicit web/subagent denials, Cruise leaves `JCODE_DISABLED_TOOLS` unchanged and never removes a jcode-level disable to force-enable the tool. The user must grant macOS Accessibility and Screen Recording permissions.
 
 ### Permission modes
 
-Workflow-level `permission` defaults to `full`. A prompt step may set `permission: read-only | edit | full` to override it. `full` keeps today's behavior. `edit` disables shell execution (Claude `Bash`, jcode `bash`) but keeps direct edit/write/patch tools. `read-only` also disables file mutation tools (Claude `Edit`/`Write`/`NotebookEdit`, jcode `edit`/`write`/`apply_patch`). Restricted modes force `macos_computer_use` off even with `computer_use: true`, and Claude runs them with `dontAsk` so no permission prompt can block an unattended run. Jcode's mode-specific tools are merged into the selected `JCODE_DISABLED_TOOLS` list.
+Workflow-level `permission` defaults to `full`. A prompt step may set `permission: read-only | edit | full` to override it. `full` keeps today's behavior. `edit` disables shell execution (Claude `Bash`, jcode `bash`) but keeps direct edit/write/patch tools. `read-only` also disables file mutation tools (Claude `Edit`/`Write`/`NotebookEdit`, jcode `edit`/`write`/`apply_patch`/`replace`). Restricted modes force `macos_computer_use` off even with `computer_use: true`, and Claude runs them with `dontAsk` so no permission prompt can block an unattended run. Jcode's mode-specific tools are merged into the selected `JCODE_DISABLED_TOOLS` list.
 
 - `read-only` and `edit` are rejected with a `command:` backend, because cruise cannot control an arbitrary CLI's tools.
-- `read-only` combined with `allow_commit: true` is a configuration error. `allow_commit` only controls the HEAD/ref commit guard and never widens the permission mode.
+- `read-only` combined with `allow_commit: true` is a configuration error. `allow_commit: true` removes only the HEAD/ref commit guard and implicit Git denials, not explicit restrictions, and never widens the permission mode.
 - A group call, `workflow_call`, or `parallel` wrapper cannot set `permission`. Set it on the inner prompt or parallel prompt child. A parallel block with any read-only child must contain only read-only prompt children.
 - A `workflow_call` callee's top-level `permission` is ignored (the caller's default applies), while per-step overrides inside the callee are kept.
 - A read-only step additionally fails with `ReadOnlyWorkspaceChanged` if the workspace snapshot changes during the step. This is change detection, not an OS sandbox or rollback, and it ignores `.git`, `target`, and `node_modules`.
-- Built-in planning, fix/ask, title, and PR-description turns always run with `full`.
+- Built-in planning, fix/ask, title, PR-description, and workflow-generation turns always run with `full`, without `disallowed_tools` or implicit Git restrictions.
+
+### Tool restrictions
+
+`disallowed_tools` narrows SDK prompt capabilities without granting permissions:
+
+```yaml
+disallowed_tools: ["shell:npm publish"]
+steps:
+  review:
+    prompt: Review without publishing or delegating.
+    disallowed_tools: [web, subagent, "mcp:github", "shell:gh pr merge"]
+```
+
+| Value | Denied capability |
+|-------|-------------------|
+| `web` | Web fetch/search and backend browser tools where available |
+| `subagent` | Subagent or swarm delegation |
+| `mcp` | All workflow `mcp_servers` entries |
+| `mcp:<name>` | One workflow MCP server; unknown names are errors |
+| `shell:<prefix>` | Simple shell commands whose leading words match the prefix |
+
+These are SDK-neutral values, not Claude `Bash(...)` syntax. Use `permission`
+for blanket shell/edit restrictions; bare `shell` and `edit` are invalid.
+Shell prefixes are trimmed and repeated whitespace is collapsed. They must be
+nonempty and use only ASCII letters, digits, spaces, and `._/:=@+%-`.
+Wildcards, quotes, commas, parentheses, shell operators, backslashes, newlines,
+and control characters are rejected. A final word ending in `=` matches the
+start of that word, for example `shell:git -c core.hooksPath=`.
+
+The effective list is the deduplicated **union of workflow defaults, step
+restrictions, and implicit Git rules**. A step's `[]` cannot undo workflow
+restrictions. Across user/project `default.yaml` and workflow layers, the
+highest-precedence explicit workflow-level list replaces lower lists;
+workflow `disallowed_tools: []` clears inherited defaults. With `edit` or
+`read-only`, shell rules are dropped because shell is already disabled.
+
+Nonempty lists are prompt-only, including parallel prompt children, prompts
+inside groups or expanded workflows, `after-pr`, and `github-review` loops.
+Command/option steps, parallel wrappers, group and `workflow_call` call sites,
+and native `squash-merge` reject them. Called workflows retain step lists but
+their top-level list is ignored in favor of the caller's. A `command:` prompt
+backend rejects explicit restrictions and does not enforce implicit shell
+rules; its existing commit guard remains active.
+
+Unless `allow_commit: true`, SDK prompts implicitly deny these shell prefixes:
+
+```text
+git commit                 git merge                  git rebase
+git cherry-pick            git revert                 git am
+git pull                   git push                   git reset
+git switch                 git checkout -b            git checkout -B
+git update-ref             git config core.hooksPath  git -c core.hooksPath=
+```
+
+This also blocks `git reset HEAD file`; use `git restore --staged` to unstage.
+It does not block `git checkout -- file`, `git stash create`, `git branch`
+listing, or `git status`/`diff`/`log`. Prefix matching cannot distinguish all
+safe and unsafe Git operations, so commit guards remain the final defense.
+Unlike the repository-scoped commit guard, shell prefix denials also apply to
+matching commands targeting temporary or unrelated repositories.
+
+Backend enforcement and limits:
+
+- **Claude:** native deny rules map `web` to `WebFetch`/`WebSearch`, `subagent`
+  to `Agent`, and shell prefixes to `Bash(...)`. Denies remain active with
+  `bypassPermissions`. Native Claude matching does **not** normalize Git global
+  options, so `git -C path commit` may not match `git commit`.
+- **jcode:** merges `webfetch`, `websearch`, `browser`, and/or `swarm` into
+  `JCODE_DISABLED_TOOLS`, preserving user entries. Shell rules use Cruise's
+  pre-tool gate appended to existing hooks, selected from workflow env,
+  process env, then config `[hooks].pre_tool`. `JCODE_HOOKS_DISABLED` in workflow
+  or process env disables the gate and produces a warning. Gate setup failure
+  also warns. The gate exits `2` to block, including malformed policy/input;
+  hook execution failures or other exit codes are fail-open in jcode. Older
+  releases may not support the array form needed to combine existing hooks.
+- **OpenCode:** native deny rules plus the Cruise plugin/bridge deny web tools,
+  `task` delegation, and matching bash input before execution.
+- **jcode/OpenCode shell matching:** splits compound commands, removes leading
+  assignments and common wrappers (`env`, `command`, `builtin`, `exec`, `nohup`,
+  `nice`, `time`, `timeout`, `stdbuf`, `xargs`), examines `sh`/`bash`/`zsh`/`dash`
+  `-c` scripts, compares executable basenames, and normalizes Git global options.
+  Heredoc body lines can cause false-positive denials. This is not a complete
+  shell interpreter or a security boundary.
+
+MCP restrictions filter only workflow-provided entries before backend launch.
+User-level backend MCP configuration remains enabled and unaffected, as do
+Cruise's own session tools. These controls are defense in depth, not a sandbox;
+the prompt warning, reference-transaction hook, and CAS rollback remain.
 
 **Upgrade note:** On macOS, earlier Cruise versions exposed `macos_computer_use` to every jcode prompt implicitly. Set workflow-level `computer_use: true` to retain that behavior.
 
@@ -983,7 +1072,7 @@ See [the OpenCode workflow example](skills/cruise-config/examples/opencode-flow.
 
 #### MCP servers (`mcp_servers`)
 
-The optional top-level `mcp_servers` map makes MCP servers available to every SDK prompt run: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It works with `sdk: jcode`, with the default `jcode` backend only when neither `sdk` nor `command` remains set in the resolved workflow after applicable `default.yaml` layers are applied, and with `sdk: claude` or `sdk: opencode`. Per-step overrides are not supported. A called workflow's top-level `mcp_servers` is ignored; the caller's settings remain in force.
+The optional top-level `mcp_servers` map makes MCP servers available to every SDK prompt run: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It works with `sdk: jcode`, with the default `jcode` backend only when neither `sdk` nor `command` remains set in the resolved workflow after applicable `default.yaml` layers are applied, and with `sdk: claude` or `sdk: opencode`. Per-step overrides are not supported, but prompt `disallowed_tools: [mcp]` or `["mcp:<name>"]` can exclude workflow entries for a step; user-level MCP configuration is unaffected. A called workflow's top-level `mcp_servers` is ignored; the caller's settings remain in force.
 
 Entries use the Claude Code `mcpServers` server shape. Omit `type` or set `type: stdio` for a local server. Every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, must support the transport: stdio supports all SDKs, HTTP requires Claude or OpenCode, and legacy SSE requires Claude. Changing the workflow SDK does not override SDK-qualified objects. The command backend cannot receive MCP servers:
 
@@ -1046,7 +1135,7 @@ The CLI and WebUI also apply these process-level workflow overrides when loading
 
 `JCODE_OPENAI_SERVICE_TIER` controls jcode SDK's OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Explicit values are respected.
 
-`JCODE_DISABLED_TOOLS` is jcode's comma- or newline-separated disabled-tool list. When `computer_use` is false, Cruise uses workflow `env:` first, then the process environment, then `[tools].disabled` from the private jcode `config.toml`, and appends `macos_computer_use` without discarding the selected policy. When `computer_use` is true and the permission is `full`, Cruise does not alter this variable or the jcode config, so a tool disabled by jcode remains disabled. Restricted `permission` modes append their tools (`bash`, plus `edit`, `write`, `apply_patch` for `read-only`) to the selected list.
+`JCODE_DISABLED_TOOLS` is jcode's comma- or newline-separated disabled-tool list. When `computer_use` is false, Cruise uses workflow `env:` first, then the process environment, then `[tools].disabled` from the private jcode `config.toml`, and appends `macos_computer_use` without discarding the selected policy. When `computer_use` is true, permission is `full`, and no explicit web/subagent denials apply, Cruise does not alter this variable or the jcode config, so a tool disabled by jcode remains disabled. Restricted `permission` modes append their tools (`bash`, plus `edit`, `write`, `apply_patch`, `replace` for `read-only`) to the selected list.
 
 
 `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` add a `Co-authored-by:` trailer to the commits cruise creates for a PR. Both must be set and non-blank, and a name containing `<`, `>`, or a line break -- or an invalid address -- disables the trailer instead of failing the commit.
@@ -1111,9 +1200,9 @@ sessions retain artifacts for resume.
 
 An `instruction` is a message shown to the user immediately before a step runs, not a system prompt. If `{input}` is empty, the message is used as a multiline input prompt and the submitted text becomes `{input}`; otherwise it is displayed without being sent to the LLM.
 
-Prompt steps are commit-guarded by default. Set `allow_commit: true` only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and all SDK backends (`jcode`, `claude`, and `opencode`), while command and option steps remain unaffected. Ref rejection is scoped to the repository the step runs in, identified by its git common dir: `HEAD` and `refs/heads/*` updates are rejected in every worktree of that repository, including the main checkout and any linked worktree. Commits in throwaway repositories created below the step (temporary repositories used by test suites, other clones, nested repositories) keep working, while commits in the guarded repository's own checkout or in any of its linked worktrees are still rejected. A detected movement fails the step and cruise may restore the original branch reference without resetting the index or worktree.
+Prompt steps are commit-guarded by default. SDK prompts also receive the implicit Git shell denials described under [Tool restrictions](#tool-restrictions); `allow_commit: true` removes these and the guard, not explicit `disallowed_tools`, and never grants broader permissions. Set `allow_commit: true` only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and all SDK backends (`jcode`, `claude`, and `opencode`), while command and option steps remain unaffected. Ref rejection is scoped to the repository the step runs in, identified by its git common dir: `HEAD` and `refs/heads/*` updates are rejected in every worktree of that repository, including the main checkout and any linked worktree. The repository-scoped commit guard permits ref updates in throwaway repositories created below the step (temporary repositories used by test suites, other clones, nested repositories), but SDK shell prefix denials still block matching Git commands targeting those repositories. Commits in the guarded repository's own checkout or any of its linked worktrees remain rejected. A detected movement fails the step and cruise may restore the original branch reference without resetting the index or worktree.
 
-When `allow_commit` is omitted or `false`, cruise also appends an instruction telling the agent to leave edits uncommitted, not move `HEAD` or local branch refs in the working repository or its linked worktrees, and not bypass the commit guard even if the task requests it. This notice supplements Git enforcement; `allow_commit: true` leaves the prompt unchanged.
+When `allow_commit` is omitted or `false`, cruise also appends an instruction telling the agent to leave edits uncommitted, not move `HEAD` or local branch refs in the working repository or its linked worktrees, and not bypass the commit guard even if the task requests it. This notice supplements Git enforcement; `allow_commit: true` omits this commit-guard notice, but explicit `disallowed_tools` still adds its own restriction notice.
 
 Set `allow_commit: true` on the actual prompt, not a `group:` or `workflow_call:` invocation. The guard is implemented by injecting `core.hooksPath` and `CRUISE_GUARD_COMMON_DIR` through the step's child environment, which installs a `reference-transaction` hook that rejects ref updates only in the repository named by that variable. Only that rejection is repository-scoped: the injected hooks path applies to every git invocation below the step, in every repository, so a repository's own hooks (`pre-commit`, `commit-msg`, `pre-push`, ...) do not run under a guarded step, not even in an unrelated repository whose ref updates are allowed. The hook identifies the current repository from the `GIT_DIR` that git exports to hooks, following the `commondir` file for linked worktrees, and falls back to `git rev-parse --git-common-dir`. The guard is fail-closed: if the repository of a transaction cannot be resolved the transaction is rejected and the step fails with a commit guard violation, while a missing working directory or a directory outside a Git worktree is still a graceful no-op. It remains a best-effort same-user policy, not a security boundary: other repositories are not post-checked.
 
@@ -1192,7 +1281,7 @@ steps:
 - Each child receives the same input and `{prev.*}` values from before the
   block. Environment precedence is workflow < parallel block < child. Children
   can use `model`, `env`, `skip`, `when`, and `timeout`; prompt children may also
-  set `computer_use` and `permission` (the parent cannot), and `output_file` with distinct artifact names within the block. `prompt_file`
+  set `computer_use`, `permission`, and `disallowed_tools` (the parent cannot), and `output_file` with distinct artifact names within the block. `prompt_file`
   resolves relative to its config as usual. Command arrays remain sequential per
   child.
   A child prompt that reads an artifact produced by a sibling in the same block
@@ -1263,6 +1352,10 @@ steps:
 ```
 
 ### Post-PR Automation (`after-pr`)
+
+Prompt steps here, including `github-review` prompts, inherit workflow
+`disallowed_tools` and may add step restrictions. Native `squash-merge` is not
+a prompt and cannot carry a nonempty `disallowed_tools` list.
 
 On GitLab, the built-in `after-pr` steps detect `/-/merge_requests/` in `{pr.url}` and use `glab` (`glab mr update --ready`, `glab ci get --merge-request`, `glab ci trace`) instead of `gh`.
 
@@ -1550,7 +1643,7 @@ A `workflow_call` step is a pure delegation point. Only `skip`, `when`, `next`, 
 - `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).
 - `flag` is applied to every expanded step. A called workflow's own steps cannot use `flag:`.
 
-All other step fields (`prompt`, `prompt_file`, `command`, `model`, `instruction`, `plan`, `option`, `if`, `timeout`, `env`, `output_file`, `group`, `parallel`, `computer_use`, `permission`) and `allow_commit: true` are rejected at validation time, and the error names every offending field. An explicit `allow_commit: false` is equivalent to omission.
+All other step fields (`prompt`, `prompt_file`, `command`, `model`, `instruction`, `plan`, `option`, `if`, `timeout`, `env`, `output_file`, `group`, `parallel`, `computer_use`, `permission`, `disallowed_tools`) and `allow_commit: true` are rejected at validation time, and the error names every offending field. An explicit `allow_commit: false` is equivalent to omission.
 
 #### Nesting and cycle detection
 

@@ -150,6 +150,7 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 cucumber = "=0.23.0"
+jsonschema = { version = "=0.49.9", default-features = false }
 opentelemetry-proto = { version = "0.33.1", features = [
   "gen-tonic-messages",
   "trace",
@@ -192,6 +193,11 @@ name = "agent_auth_bdd"
 path = "tests/agent_auth_bdd.rs"
 # Unix SDK subprocess boundary fixtures, explicitly runnable on supported hosts.
 test = false
+
+[[test]]
+harness = false
+name = "tool_restrictions_bdd"
+path = "tests/tool_restrictions_bdd.rs"
 
 [profile.release]
 codegen-units = 1

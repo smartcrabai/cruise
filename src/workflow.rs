@@ -180,6 +180,8 @@ pub struct CompiledWorkflow {
     pub computer_use: bool,
     /// Default permission mode for prompt steps.
     pub permission: crate::config::PermissionMode,
+    /// Workflow defaults retained separately from per-step restrictions.
+    pub disallowed_tools: Vec<crate::tool_policy::ToolRestriction>,
     /// Flat steps after group-call expansion. Order matches the original YAML.
     pub steps: IndexMap<String, StepConfig>,
     /// Flat after-pr steps after group-call expansion.
@@ -211,6 +213,7 @@ impl CompiledWorkflow {
             cleanup_after_pr: self.cleanup_after_pr,
             computer_use: self.computer_use,
             permission: self.permission,
+            disallowed_tools: self.disallowed_tools.clone(),
             steps: self.after_pr.clone(),
             invocations: self.after_pr_invocations.clone(),
             step_to_invocation: self.after_pr_step_to_invocation.clone(),
@@ -259,6 +262,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         cleanup_after_pr,
         computer_use,
         permission,
+        disallowed_tools: config.disallowed_tools.unwrap_or_default(),
         steps,
         after_pr,
         invocations,
@@ -268,6 +272,10 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "group expansion validates call-site fields and preserves invocation metadata together"
+)]
 fn expand_steps(
     steps: &IndexMap<String, StepConfig>,
     groups: &HashMap<String, crate::config::GroupConfig>,
@@ -293,6 +301,11 @@ fn expand_steps(
             if step.computer_use.is_some() {
                 return Err(crate::error::CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' uses computer_use on a group call; set it on the inner prompt step"
+                )));
+            }
+            if !step.disallowed_tools.is_empty() {
+                return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses disallowed_tools on a group call; set it on the inner prompt step"
                 )));
             }
             if step.permission.is_some() {
@@ -1356,5 +1369,70 @@ after-pr:
             panic!("group call sites cannot set permission");
         };
         assert!(error.to_string().contains("permission"));
+    }
+
+    #[test]
+    fn compiled_groups_and_after_pr_preserve_step_tool_restrictions() {
+        let compiled = compiled(
+            "sdk: jcode\ndisallowed_tools: [web]\ngroups:\n  g:\n    steps:\n      inner:\n        prompt: inner\n        disallowed_tools: [subagent]\n      plain:\n        prompt: plain\nsteps:\n  run:\n    group: g\nafter-pr:\n  publish:\n    group: g\n  notify:\n    prompt: notify\n    disallowed_tools: [shell:npm publish]\n",
+        );
+        let after = compiled.to_after_pr_compiled();
+        assert_eq!(
+            compiled.disallowed_tools,
+            vec![crate::tool_policy::ToolRestriction::Web]
+        );
+        assert_eq!(after.disallowed_tools, compiled.disallowed_tools);
+        for (steps, restricted, plain) in [
+            (&compiled.steps, "run/inner", "run/plain"),
+            (&after.steps, "publish/inner", "publish/plain"),
+        ] {
+            let restricted =
+                serde_json::to_value(&steps[restricted]).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(
+                restricted["disallowed_tools"],
+                serde_json::json!(["subagent"])
+            );
+            let plain = serde_json::to_value(&steps[plain]).unwrap_or_else(|e| panic!("{e}"));
+            assert!(plain["disallowed_tools"].is_null());
+        }
+        let notify = serde_json::to_value(&after.steps["notify"]).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            notify["disallowed_tools"],
+            serde_json::json!(["shell:npm publish"])
+        );
+    }
+
+    #[test]
+    fn consuming_compile_preserves_workflow_restriction_order_and_empty_default() {
+        use crate::tool_policy::ToolRestriction;
+
+        for (restriction_yaml, expected) in [
+            ("", vec![]),
+            ("disallowed_tools: []\n", vec![]),
+            ("disallowed_tools: [subagent, web]\n", vec![ToolRestriction::Subagent, ToolRestriction::Web]),
+        ] {
+            let workflow = compiled(&format!("sdk: jcode\n{restriction_yaml}steps:\n  run:\n    prompt: review\n"));
+            assert_eq!(workflow.disallowed_tools, expected);
+            assert_eq!(workflow.to_after_pr_compiled().disallowed_tools, expected);
+        }
+    }
+
+    #[test]
+    fn compile_rejects_disallowed_tools_on_group_call_sites() {
+        for section in ["steps", "after-pr"] {
+            let yaml = format!(
+                "groups:\n  g:\n    steps:\n      inner:\n        prompt: hi\nsteps: {{}}\n{section}:\n  run:\n    group: g\n    disallowed_tools: [web]\n"
+            );
+            // Avoid duplicate steps keys when exercising the main section.
+            let yaml = if section == "steps" {
+                yaml.replacen("steps: {}\n", "", 1)
+            } else {
+                yaml
+            };
+            let Err(error) = compile(parsed(&yaml)) else {
+                panic!("group call sites cannot set tool restrictions in {section}");
+            };
+            assert!(error.to_string().contains("disallowed_tools"));
+        }
     }
 }

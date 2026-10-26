@@ -41,6 +41,11 @@ pub mod session_edit;
 pub mod step;
 pub mod telemetry;
 pub mod timeout;
+#[expect(
+    dead_code,
+    reason = "pre-tool gate entry point is used only by the runtime binary"
+)]
+pub mod tool_policy;
 pub mod variable;
 pub mod workflow;
 pub mod workflow_call;

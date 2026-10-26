@@ -26,6 +26,7 @@ plan_model: opus          # Optional: model for the built-in plan step
 max_retries: 4           # Optional: global graph edge traversal ceiling (default: 3)
 interactive_planning: true # Optional: enable SDK plan tools (default: true)
 permission: full           # Optional: prompt permission read-only | edit | full (default: full)
+# disallowed_tools: [web, "shell:npm publish"] # Optional: SDK prompt deny list
 computer_use: false       # Optional: enable jcode's macOS computer-use tool (default: false)
 languages:                # Optional: prompt languages; defaults to English
   pr: English             # Language for auto-generated PR title/body
@@ -75,7 +76,7 @@ fails the load (see [steps.md](steps.md)).
 
 A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`,
 `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`,
-`force_exec`, `computer_use`, `permission`, `env`, `retry`, `mcp_servers`, and
+`force_exec`, `computer_use`, `permission`, `disallowed_tools`, `env`, `retry`, `mcp_servers`, and
 `pre_steps`. Unknown keys and workflow-only keys (`description`, `steps`,
 `groups`, `after-pr`, and `create_pr`) are rejected.
 
@@ -89,6 +90,16 @@ precedence. `command` and `sdk` are replaced together when either is set;
 `env` and `mcp_servers` merge by key, with the higher-precedence value winning.
 Other defaulted fields fill only values the workflow leaves unset, so explicit
 workflow values take precedence. Environment overrides are applied afterward.
+
+`disallowed_tools` lists replace across default layers rather than merge.
+Explicit workflow `disallowed_tools: []` clears inherited defaults, but a step
+list is unioned with the effective workflow list and cannot relax it. Values
+are `web`, `subagent`, `mcp`, `mcp:<name>`, and `shell:<prefix>`; see
+[steps.md](steps.md) for syntax, implicit Git rules, and prompt-only positions.
+Backend-kind mismatch validation also covers defaults that would fill an unset
+`disallowed_tools`, even an empty list. Set it explicitly in the workflow or
+remove the mismatched default. Called workflows ignore their top-level list
+and preserve their step lists under the caller's default.
 
 Application settings in `$XDG_CONFIG_HOME/cruise/config.json` or `config.yaml`
 may also set `model` and `plan_model` (alias `planModel`) as a string or an
@@ -127,7 +138,7 @@ There are four prompt-execution backends:
 
 ## `mcp_servers`
 
-`mcp_servers` is an optional top-level map of MCP server names to Claude Code server entries. It applies to every SDK prompt run, including workflow and `after-pr` steps, planning turns, session-title generation, and PR-description generation. It is not a per-step setting. A called workflow's own top-level value is ignored in favor of the caller's value.
+`mcp_servers` is an optional top-level map of MCP server names to Claude Code server entries. It applies to every SDK prompt run, including workflow and `after-pr` steps, planning turns, session-title generation, and PR-description generation. It is not a per-step setting, but prompt `disallowed_tools: [mcp]` or `["mcp:<name>"]` can exclude workflow entries. User-level backend MCP configuration and Cruise's own tools are unaffected. A called workflow's own top-level value is ignored in favor of the caller's value.
 
 Stdio entries omit `type` or set `type: stdio`, and require a non-blank `command`. HTTP and SSE entries use `type: http` or `type: sse` and require an `http://` or `https://` URL. Every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, must support the transport: stdio supports all SDKs, Streamable HTTP requires Claude or OpenCode, and legacy SSE requires Claude. Changing the workflow SDK does not override SDK-qualified objects. Stdio entries cannot set `url` or provide non-empty `headers`; remote entries cannot set `command` or provide non-empty `args` or `env`. Names must use only ASCII letters, digits, `_`, or `-`, and `cruise` is reserved. Unknown entry keys are rejected. A non-empty map is invalid with `command:`.
 

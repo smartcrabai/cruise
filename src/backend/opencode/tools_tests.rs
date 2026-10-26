@@ -524,3 +524,265 @@ fn restricted_permissions_deny_execution_bypasses_and_overlay_preserves_jsonc() 
         assert!(!error.contains("secret"));
     }
 }
+
+fn explicit_tool_policy() -> crate::tool_policy::ToolPolicy {
+    use crate::tool_policy::{RuleSource, ShellRule, ToolPolicy};
+    ToolPolicy {
+        deny_web: true,
+        deny_subagent: true,
+        shell_rules: vec![
+            ShellRule {
+                prefix: "git commit".into(),
+                source: RuleSource::AllowCommit,
+            },
+            ShellRule {
+                prefix: "git -c core.hooksPath=".into(),
+                source: RuleSource::AllowCommit,
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn tool_policy_permissions_append_native_denies_after_full_allow() {
+    let mut config = runner(vec![], PermissionMode::Full);
+    config.tool_policy = explicit_tool_policy();
+    let rules = permissions(&config);
+    assert_eq!(
+        rules[0],
+        json!({"action":"*", "resource":"*", "effect":"allow"})
+    );
+    let rules = rules
+        .as_array()
+        .unwrap_or_else(|| panic!("permission rules array"));
+    for (action, resource) in [
+        ("webfetch", "*"),
+        ("websearch", "*"),
+        ("task", "*"),
+        ("bash", "git commit *"),
+        ("bash", "git -c core.hooksPath=*"),
+    ] {
+        assert!(rules.iter().skip(1).any(|rule| *rule == json!({"action":action, "resource":resource, "effect":"deny"})), "missing deny {action}: {resource}");
+    }
+}
+
+#[tokio::test]
+async fn native_v2_tool_names_enforce_the_same_neutral_policy() {
+    let mut config = runner(vec![], PermissionMode::Full);
+    config.tool_policy = explicit_tool_policy();
+    let rules = permissions(&config);
+    let rules = rules
+        .as_array()
+        .unwrap_or_else(|| panic!("permission rules array"));
+    for (action, resource) in [("subagent", "*"), ("shell", "git commit *")] {
+        assert!(rules.iter().any(|rule| {
+            *rule == json!({"action": action, "resource": resource, "effect": "deny"})
+        }));
+    }
+    let mut fixture = Fixture::new(&config, CancellationToken::new()).await;
+    for (tool, input) in [
+        ("subagent", json!({"prompt": "delegate"})),
+        ("shell", json!({"command": "git -C . commit -m blocked"})),
+    ] {
+        let response = fixture
+            .request(
+                "effect",
+                json!({
+                    "sessionID": "ses_tools", "callID": format!("native_{tool}"),
+                    "tool": tool, "input": input,
+                }),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: Value = response
+            .json()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(body.get("error").is_some());
+        assert!(!fixture.bridge.had_side_effects());
+    }
+    fixture
+        .bridge
+        .stop()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn restricted_tool_policy_removes_web_without_removing_read_or_edit_tools() {
+    for permission in [PermissionMode::ReadOnly, PermissionMode::Edit] {
+        let mut config = runner(vec![], permission);
+        config.tool_policy = crate::tool_policy::ToolPolicy {
+            deny_web: true,
+            deny_subagent: true,
+            ..Default::default()
+        };
+        let allowed = allowed_tools(&config);
+        for name in ["webfetch", "websearch", "task", "bash"] {
+            assert!(!allowed.contains(name), "{permission:?}: allowed {name}");
+        }
+        for name in ["read", "glob", "grep", "list"] {
+            assert!(allowed.contains(name), "{permission:?}: missing {name}");
+        }
+        assert_eq!(allowed.contains("edit"), permission == PermissionMode::Edit);
+        let rules = permissions(&config);
+        let rules = rules
+            .as_array()
+            .unwrap_or_else(|| panic!("permission rules array"));
+        assert!(
+            !rules
+                .iter()
+                .any(|rule| rule["action"] == "bash" && rule["resource"] != "*")
+        );
+    }
+}
+
+#[tokio::test]
+async fn tool_policy_effect_rejects_denied_tools_and_structured_shell_commands() {
+    let mut config = runner(vec![], PermissionMode::Full);
+    config.tool_policy = explicit_tool_policy();
+    let mut fixture = Fixture::new(&config, CancellationToken::new()).await;
+    for (index, (tool, input, denied)) in [
+        ("webfetch", json!({"url":"https://example.com"}), true),
+        ("websearch", json!({"query":"example"}), true),
+        ("task", json!({"prompt":"delegate"}), true),
+        ("bash", json!({"command":"git commit -m blocked"}), true),
+        (
+            "bash",
+            json!({"command":"git -C . commit -m blocked"}),
+            true,
+        ),
+        (
+            "bash",
+            json!({"command":"sh -c 'git commit -m blocked'"}),
+            true,
+        ),
+        (
+            "bash",
+            json!({"command":"git -c core.hooksPath=/dev/null status"}),
+            true,
+        ),
+        ("bash", json!({"command":"git status"}), false),
+        ("bash", json!({"command":"echo 'git commit'"}), false),
+        ("bash", json!({"command":"git commit-tree"}), false),
+        ("read", json!({"filePath":"README.md"}), false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = fixture
+            .request(
+                "effect",
+                json!({
+                    "sessionID":"ses_tools", "callID":format!("policy_{index}"),
+                    "tool":tool, "input":input
+                }),
+            )
+            .await;
+        assert_eq!(
+            response.status(),
+            if denied {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::OK
+            },
+            "{tool}: {input}"
+        );
+        let body: Value = response
+            .json()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        if denied {
+            assert!(body.get("error").is_some(), "structured rejection: {body}");
+            assert!(
+                !fixture.bridge.had_side_effects(),
+                "denial must precede the retry barrier"
+            );
+        } else {
+            assert_eq!(body["accepted"], true);
+        }
+    }
+    fixture
+        .bridge
+        .stop()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[tokio::test]
+async fn tool_policy_effect_env_search_path_denies_before_admission() {
+    use crate::tool_policy::{ToolPolicy, ToolRestriction};
+
+    for explicit in [false, true] {
+        let mut config = runner(vec![], PermissionMode::Full);
+        let restrictions = if explicit {
+            vec![ToolRestriction::ShellPrefix("git push".into())]
+        } else {
+            vec![]
+        };
+        config.tool_policy = ToolPolicy::for_prompt_step(
+            &restrictions, &[], explicit, PermissionMode::Full,
+        );
+        let mut fixture = Fixture::new(&config, CancellationToken::new()).await;
+        for (call, command, expected) in [
+            ("push", "env -P /usr/bin git push", StatusCode::FORBIDDEN),
+            ("status", "env -P /usr/bin git status", StatusCode::OK),
+        ] {
+            let response = fixture.request("effect", json!({
+                "sessionID":"ses_tools", "callID":call, "tool":"bash", "input":{"command":command}
+            })).await;
+            assert_eq!(response.status(), expected, "{command}");
+            if expected == StatusCode::FORBIDDEN {
+                assert!(!fixture.bridge.had_side_effects(), "denial must precede admission");
+            }
+        }
+        fixture.bridge.stop().await.unwrap_or_else(|error| panic!("{error}"));
+    }
+}
+
+#[tokio::test]
+async fn tool_policy_effect_git_config_operands_deny_before_admission() {
+    use crate::tool_policy::{ToolPolicy, ToolRestriction};
+
+    for explicit in [false, true] {
+        let mut config = runner(vec![], PermissionMode::Full);
+        let restrictions = if explicit {
+            vec![ToolRestriction::ShellPrefix("git -c core.hooksPath=".into())]
+        } else {
+            vec![]
+        };
+        config.tool_policy = ToolPolicy::for_prompt_step(
+            &restrictions, &[], explicit, PermissionMode::Full,
+        );
+        for tool in ["bash", "shell"] {
+            let mut fixture = Fixture::new(&config, CancellationToken::new()).await;
+            for (index, command) in [
+                "git -C . -c core.hooksPath=/dev/null status",
+                "git -c color.ui=false -c core.hooksPath=/dev/null status",
+            ].into_iter().enumerate() {
+                let response = fixture.request("effect", json!({
+                    "sessionID":"ses_tools", "callID":format!("hooks_{index}"),
+                    "tool":tool, "input":{"command":command}
+                })).await;
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{command}");
+                let body: Value = response.json().await.unwrap_or_else(|error| panic!("{error}"));
+                assert!(body.get("error").is_some(), "structured rejection: {body}");
+                assert!(!fixture.bridge.had_side_effects(), "denial must precede admission");
+            }
+            for (index, command) in [
+                "git -C . -c color.ui=false status",
+                "git -c color.ui=false -c advice.statusHints=false status",
+            ].into_iter().enumerate() {
+                let response = fixture.request("effect", json!({
+                    "sessionID":"ses_tools", "callID":format!("ordinary_{index}"),
+                    "tool":tool, "input":{"command":command}
+                })).await;
+                assert_eq!(response.status(), StatusCode::OK, "{command}");
+                let body: Value = response.json().await.unwrap_or_else(|error| panic!("{error}"));
+                assert_eq!(body["accepted"], true);
+            }
+            fixture.bridge.stop().await.unwrap_or_else(|error| panic!("{error}"));
+        }
+    }
+}

@@ -1,5 +1,11 @@
 # Checkpoint contract verification
 
+For per-prompt `disallowed_tools`, implicit git denials and MCP filtering, see
+`TOOL_RESTRICTIONS.md` and run `bash scripts/check_tool_restrictions_specs.sh`.
+The dedicated `tool-restrictions-specs` native PR job runs Quint, all Alloy
+assertions and witnesses with receipt validation, production Cucumber scenarios,
+negative controls and affected Rust contracts using the shared pins below.
+
 For OpenCode common effort resolution and replay-safe `provider.no-route`
 fallback, see `OPENCODE_EFFORT.md` and run
 `bash scripts/check_opencode_effort_specs.sh`. The dedicated native CI job runs

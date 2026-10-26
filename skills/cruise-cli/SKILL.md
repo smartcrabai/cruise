@@ -11,6 +11,19 @@ GitHub (`gh`) and GitLab (`glab`) are supported. The forge is detected from the 
 
 Prompt steps accept `permission: read-only | edit | full` (default `full`; see the **cruise-config** skill). A `read-only` step that changes the workspace fails with "read-only step changed the workspace"; this is snapshot-diff detection, not a sandbox. The command backend rejects restricted modes at validation. The built-in `research` workflow and the inventory/audit/triage phases of `security` require these SDK read-only permissions; security's repair and verification phases use full permission. If neither `command:` nor `sdk:` remains set after workflow and applicable defaults are resolved, Cruise falls back to `sdk: jcode`.
 
+Prompt `disallowed_tools` uses SDK-neutral `web`, `subagent`, `mcp`,
+`mcp:<name>`, and `shell:<prefix>` denies. Step lists add to workflow defaults,
+not replace them; workflow `[]` can clear inherited `default.yaml` lists.
+SDK prompts without `allow_commit: true` also deny common Git ref-changing
+commands, including all `git reset` forms (use `git restore --staged` to unstage).
+`allow_commit: true` removes the guard and implicit Git denies only, never
+explicit restrictions or permission presets. Command backends reject explicit
+lists and keep only commit guards. Built-in planning/fix/ask/title/PR-description
+turns stay unrestricted. These controls are not a sandbox: jcode hooks can be
+disabled by `JCODE_HOOKS_DISABLED` or fail open, Claude native matching does not
+normalize Git global options, and user-level MCP configuration is unaffected.
+See the **cruise-config** skill for the full implicit list and backend limits.
+
 ## Generating workflow YAML
 
 `cruise workflow generate "description" --name <name> [--user] [--config <path>]` drafts a new workflow with the backend selected by normal config resolution. It saves `./.cruise/<name>.yaml` (or the user workflows dir with `--user`), never overwrites an existing file, and does not run the result or create a session. Output must be raw YAML; each candidate passes the `exec` preflight, with up to 3 repairs, and nothing is written on failure. Validation does not prove command safety, and the backend keeps its normal repository permissions, so review the YAML before running it.

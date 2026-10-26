@@ -82,6 +82,7 @@ mod test_binary_support;
 #[cfg(test)]
 mod test_support;
 mod timeout;
+mod tool_policy;
 mod tui;
 mod update_cmd;
 mod variable;
@@ -98,12 +99,25 @@ mod worktree;
 mod worktree_pr;
 mod yaml_metadata;
 
+// Hooks run once per tool call, without constructing a runtime or telemetry.
+fn main() {
+    let cli = cli::parse_cli();
+    if matches!(
+        &cli.command,
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::JcodePreTool,
+        }))
+    ) {
+        std::process::exit(tool_policy::run_jcode_pre_tool_gate());
+    }
+    runtime_main(cli);
+}
+
 // Multi-threaded runtime: parallel `run --all` workers execute blocking
 // terminal prompts inline in their tasks; on a single-threaded runtime any
 // open menu would freeze every other concurrently running session.
 #[tokio::main]
-async fn main() {
-    let cli = cli::parse_cli();
+async fn runtime_main(cli: cli::Cli) {
     let telemetry = match telemetry::init() {
         Ok(telemetry) => telemetry,
         Err(error) => {
@@ -161,6 +175,9 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::SyncBase { pr_number, url },
         })) => worktree_pr::sync_base(&pr_number, url.as_deref()),
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::JcodePreTool,
+        })) => unreachable!("jcode pre-tool gate exits before runtime initialization"),
         None if plan.is_some() => {
             Box::pin(plan_cmd::launch_background_plan(
                 &plan.unwrap_or_default(),

@@ -7,6 +7,7 @@ export default {
   setup: async (ctx) => {
     const bridge = JSON.parse(await readFile(new URL("./bridge.json", import.meta.url), "utf8"))
     const allowed = new Set(bridge.allowed)
+    const denied = new Set(bridge.denied)
     const questions = new Set(["question", "ask", "ask_user_question"])
     const call = async (path, body, signal) => {
       const response = await fetch(`${bridge.url}/${path}`, {
@@ -16,9 +17,9 @@ export default {
         signal,
         redirect: "error",
       })
-      if (!response.ok) throw new Error(`Cruise tool bridge HTTP ${response.status}`)
       const result = await response.json()
       if (result.error) throw new Error(result.error)
+      if (!response.ok) throw new Error(`Cruise tool bridge HTTP ${response.status}`)
       return result
     }
     await ctx.tool.transform((editor) => {
@@ -39,15 +40,18 @@ export default {
     await ctx.session.hook("context", (event) => {
       if (event.sessionID !== bridge.sessionID) return
       for (const name of Object.keys(event.tools)) {
-        if (questions.has(name) || (bridge.restricted && !allowed.has(name))) delete event.tools[name]
+        if (questions.has(name) || denied.has(name) || (bridge.restricted && !allowed.has(name))) delete event.tools[name]
       }
     })
     await ctx.tool.hook("execute.before", async (event) => {
       if (event.sessionID !== bridge.sessionID) return
-      if (questions.has(event.tool) || (bridge.restricted && !allowed.has(event.tool))) {
+      if (questions.has(event.tool) || denied.has(event.tool) || (bridge.restricted && !allowed.has(event.tool))) {
         throw new Error("Tool is not allowed by Cruise permissions")
       }
-      await call("effect", { callID: event.id, tool: event.tool }, AbortSignal.timeout(5000))
+      // Both the pinned core and installed V2 provide execute.before.input.
+      // Do not forward potentially large write/edit payloads to the barrier.
+      const input = ["bash", "shell"].includes(event.tool) ? { input: event.input } : {}
+      await call("effect", { callID: event.id, tool: event.tool, ...input }, AbortSignal.timeout(5000))
     })
     await ctx.session.hook("retry", (event) => {
       if (event.sessionID === bridge.sessionID) event.decision = { retry: false }

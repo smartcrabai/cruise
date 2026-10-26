@@ -92,6 +92,9 @@ pub struct PromptRun<'a> {
     pub computer_use: bool,
     /// Agent permission mode for this run.
     pub permission: crate::config::PermissionMode,
+    /// SDK tool restrictions. Command mode rejects explicit restrictions and
+    /// ignores implicit `allow_commit` rules, retaining the commit guard.
+    pub tool_policy: crate::tool_policy::ToolPolicy,
 }
 
 /// Outcome of [`Executor::run`]: the prompt result plus, in SDK mode, the
@@ -309,6 +312,12 @@ impl Executor {
                         .to_string(),
                 ))
             }
+            Executor::Command { .. } if req.tool_policy.has_explicit() => {
+                Err(CruiseError::InvalidStepConfig(
+                    "disallowed_tools requires an SDK backend because a command CLI manages its own tools"
+                        .to_string(),
+                ))
+            }
             Executor::Command { command } => run_command(command, req).await,
             Executor::Jcode | Executor::Claude | Executor::OpenCode => run_sdk(req, self.sdk()).await,
             Executor::Unsupported { sdk } => Err(crate::error::CruiseError::InvalidStepConfig(
@@ -483,6 +492,7 @@ fn build_claude_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> ClaudeRu
         cancel: req.cancel_token.cloned(),
         cli_path: None,
         permission: req.permission,
+        tool_policy: req.tool_policy.clone(),
     }
 }
 
@@ -870,6 +880,7 @@ async fn run_sdk(req: PromptRun<'_>, sdk: Sdk) -> Result<PromptOutcome> {
                         }),
                     cli_path: None,
                     computer_use: req.computer_use,
+                    tool_policy: req.tool_policy.clone(),
                 },
                 req.prompt.to_string(),
             )),
@@ -897,6 +908,7 @@ fn build_jcode_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> Result<Jc
         mcp_servers: req.mcp_servers.clone(),
         computer_use: req.computer_use,
         permission: req.permission,
+        tool_policy: req.tool_policy.clone(),
         cancel: req.cancel_token.cloned(),
         keep_session_home: req.resume.is_some()
             || req.on_session_id.is_some()
@@ -1221,6 +1233,7 @@ mod tests {
                 resume: None,
                 computer_use: false,
                 permission: crate::config::PermissionMode::Full,
+                tool_policy: crate::tool_policy::ToolPolicy::default(),
             })
             .await;
         let Err(err) = result else {
@@ -1305,6 +1318,7 @@ mod tests {
             resume: None,
             computer_use: false,
             permission: crate::config::PermissionMode::Full,
+            tool_policy: crate::tool_policy::ToolPolicy::default(),
         }
     }
 
@@ -1339,6 +1353,60 @@ mod tests {
         assert!(matches!(error, CruiseError::InvalidStepConfig(_)));
         assert!(error.to_string().contains("jcode backend"));
         assert!(!marker.exists(), "the command must not be spawned");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_backend_rejects_explicit_tool_policy_without_spawning() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let marker = temp.path().join("command-was-spawned");
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.tool_policy.deny_web = true;
+        let executor = Executor::Command {
+            command: vec!["touch".to_string(), marker.to_string_lossy().into_owned()],
+        };
+        assert!(matches!(
+            executor.run(req).await,
+            Err(CruiseError::InvalidStepConfig(_))
+        ));
+        assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_backend_ignores_only_implicit_tool_policy() {
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.tool_policy = crate::tool_policy::ToolPolicy::for_prompt_step(
+            &[],
+            &[],
+            false,
+            crate::config::PermissionMode::Full,
+        );
+        let executor = sh_executor("cat >/dev/null; printf allowed");
+        let outcome = executor
+            .run(req)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(outcome.result.output, "allowed");
+    }
+
+    #[test]
+    fn runner_configs_preserve_effective_tool_policy() {
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.tool_policy = crate::tool_policy::ToolPolicy::for_prompt_step(
+            &[crate::tool_policy::ToolRestriction::Web],
+            &[crate::tool_policy::ToolRestriction::Subagent],
+            false,
+            crate::config::PermissionMode::Full,
+        );
+        let claude = build_claude_config(&req, None);
+        let jcode = build_jcode_config(&req, Some("test-provider/test-model"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(claude.tool_policy, req.tool_policy);
+        assert_eq!(jcode.tool_policy, req.tool_policy);
     }
 
     // -- build_claude_config ---------------------------------------------------
@@ -1399,6 +1467,7 @@ mod tests {
             }),
             computer_use: false,
             permission: crate::config::PermissionMode::Full,
+            tool_policy: crate::tool_policy::ToolPolicy::default(),
         };
         let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary));
         assert_eq!(config.cwd, Some(dir));
@@ -1875,6 +1944,7 @@ mod tests {
                     resume: None,
                     computer_use: false,
                     permission: crate::config::PermissionMode::Full,
+                    tool_policy: crate::tool_policy::ToolPolicy::default(),
                 })
                 .await
                 .unwrap_or_else(|e| panic!("command run failed: {e}"));
@@ -2742,6 +2812,7 @@ mod tests {
                 resume: None,
                 computer_use: false,
                 permission,
+                tool_policy: crate::tool_policy::ToolPolicy::default(),
             })
             .await
     }
