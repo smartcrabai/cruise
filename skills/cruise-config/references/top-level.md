@@ -24,6 +24,7 @@ plan_model: opus          # Optional: model for the built-in plan step
                           # (in SDK mode, a "provider/model[:effort]" reference)
                           # In SDK mode, [primary, fallback, ...] is an implicit chain
 max_retries: 4           # Optional: global graph edge traversal ceiling (default: 3)
+# subagent_model: haiku   # SDK-only: one string or {sdk: claude, model: haiku}; no effort
 interactive_planning: true # Optional: enable SDK plan tools (default: true)
 permission: full           # Optional: prompt permission read-only | edit | full (default: full)
 computer_use: false       # Optional: enable jcode's macOS computer-use tool (default: false)
@@ -73,7 +74,7 @@ fails the load (see [steps.md](steps.md)).
 
 ## Workflow defaults (`default.yaml`)
 
-A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`,
+A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`, `subagent_model`,
 `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`,
 `force_exec`, `computer_use`, `permission`, `env`, `retry`, `mcp_servers`, and
 `pre_steps`. Unknown keys and workflow-only keys (`description`, `steps`,
@@ -89,6 +90,11 @@ precedence. `command` and `sdk` are replaced together when either is set;
 `env` and `mcp_servers` merge by key, with the higher-precedence value winning.
 Other defaulted fields fill only values the workflow leaves unset, so explicit
 workflow values take precedence. Environment overrides are applied afterward.
+
+If defaults specify a different backend than the workflow, filling an unset
+`subagent_model` is a backend collision, just like `model` or `plan_model`.
+Set it explicitly in the workflow or remove it from those defaults. This check
+runs before `CRUISE_SDK` overrides.
 
 Application settings in `$XDG_CONFIG_HOME/cruise/config.json` or `config.yaml`
 may also set `model` and `plan_model` (alias `planModel`) as a string or an
@@ -188,6 +194,22 @@ steps:
 ## `plan_model`
 
 Model used by the built-in plan step (driven by `cruise plan`). Falls back to `model` if unset. In SDK mode it is a plain model reference (see [sdk.md](sdk.md)), or an array whose first entry is primary and remaining entries are fallbacks.
+
+## `subagent_model`
+
+Optional default model for spawned agents on Claude/jcode prompt steps and
+planning's plan/fix/ask turns. Accepts one nonblank string or an object such as
+`{sdk: claude, model: haiku}`, never an array or fallback chain. Strings resolve
+against the workflow SDK (jcode when omitted); objects target only their named
+SDK's attempts. A step value overrides this default, and the resolved SDK must
+have an applicable model candidate. Recognized `:effort` suffixes, OpenCode
+subagent models, and `command:` backends are rejected.
+
+Layered `default.yaml` supports this field; application model defaults and a
+`CRUISE_SUBAGENT_MODEL` environment override do not. Title generation, PR
+metadata, and `workflow generate` do not use it. A called workflow's top-level
+value is ignored, but its step overrides survive. See [sdk.md](sdk.md) for
+Claude's forced model, jcode's swarm default, and fallback behavior.
 
 ## `description`
 

@@ -204,6 +204,147 @@ fn send_message_accepted<W: Write>(writer: &mut W, session_id: &str) {
         writer,
     );
 }
+
+fn model_settings_harness(requests: Arc<Mutex<Vec<&'static str>>>, fail: bool) -> JcodeClient {
+    fake_harness(move |frame, writer| {
+        let mut seen = requests.lock().unwrap_or_else(|error| panic!("{error}"));
+        match &frame.request {
+            ApiRequest::CreateSession { .. } => send_reply(
+                frame,
+                jcode_sdk::api::ApiEvent::Attached {
+                    session: session("models"),
+                },
+                writer,
+            ),
+            ApiRequest::Ping => send_reply(frame, jcode_sdk::api::ApiEvent::Ok, writer),
+            ApiRequest::GetRuntimeInfo { session_id } => {
+                seen.push("runtime");
+                send_reply(
+                    frame,
+                    jcode_sdk::api::ApiEvent::RuntimeInfo {
+                        session_id: session_id.clone(),
+                        provider: None,
+                        model: None,
+                        reasoning_effort: None,
+                        auth_method: None,
+                        routes: vec![ModelRouteInfo {
+                            model: "cheap-model".to_string(),
+                            provider: "OpenAI-compatible".to_string(),
+                            api_method: "openai-compatible:minimax".to_string(),
+                            available: true,
+                            detail: String::new(),
+                            usage: None,
+                        }],
+                    },
+                    writer,
+                );
+            }
+            ApiRequest::SetModel { model, .. } => {
+                seen.push("model");
+                assert_eq!(model, "openai:main-model");
+                send_reply(frame, jcode_sdk::api::ApiEvent::Ok, writer);
+            }
+            ApiRequest::SetReasoningEffort { effort, .. } => {
+                seen.push("effort");
+                assert_eq!(effort, "high");
+                send_reply(frame, jcode_sdk::api::ApiEvent::Ok, writer);
+            }
+            ApiRequest::RuntimeCommand {
+                session_id,
+                command,
+                args,
+            } => {
+                seen.push("swarm");
+                assert_eq!(session_id, "models");
+                assert_eq!(*command, jcode_sdk::api::RuntimeCommand::Agents);
+                assert_eq!(args, &["swarm", "minimax:cheap-model"]);
+                let event = if fail {
+                    jcode_sdk::api::ApiEvent::Error {
+                        code: ErrorCode::Internal,
+                        message: "swarm rejected".to_string(),
+                    }
+                } else {
+                    jcode_sdk::api::ApiEvent::RuntimeCommandResult {
+                        session_id: session_id.clone(),
+                        command: *command,
+                        data: json!({}),
+                        message: "configured".to_string(),
+                    }
+                };
+                send_reply(frame, event, writer);
+            }
+            ApiRequest::SendMessage { session_id, .. } => {
+                seen.push("send");
+                send_message_accepted(writer, session_id);
+                send_text_after_accept(writer, session_id);
+            }
+            request => panic!("unexpected request: {request:?}"),
+        }
+    })
+}
+
+#[test]
+fn subagent_model_uses_agents_swarm_after_model_and_effort() {
+    for (main_model, subagent_model, fail) in [
+        (true, true, false),
+        (false, true, false),
+        (true, false, false),
+        (false, false, false),
+        (true, true, true),
+    ] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let client = model_settings_harness(Arc::clone(&seen), fail);
+        let (chunks, worker) = spawn_turn(
+            client,
+            JcodeRunnerConfig {
+                model: main_model.then(|| "main-model".to_string()),
+                provider: Some("openai".to_string()),
+                effort: Some(EffortLevel::High),
+                subagent_model: subagent_model.then(|| "cheap-model".to_string()),
+                subagent_provider: Some("minimax".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            chunks.recv().unwrap_or_else(|error| panic!("{error}")),
+            StreamChunk::Session(_)
+        ));
+        if !fail {
+            assert!(matches!(
+                chunks.recv().unwrap_or_else(|error| panic!("{error}")),
+                StreamChunk::Delta(_)
+            ));
+        }
+        let (result, _, _home) = worker
+            .join()
+            .unwrap_or_else(|_| panic!("turn worker panicked"));
+        if fail {
+            assert!(
+                matches!(result, Err(message) if message.contains("failed to set the jcode subagent model:") && message.contains("swarm rejected"))
+            );
+        } else {
+            assert!(matches!(result, Ok(StreamChunk::Done(_))));
+        }
+        let mut expected = Vec::new();
+        if main_model || subagent_model {
+            expected.push("runtime");
+        }
+        if main_model {
+            expected.push("model");
+        }
+        expected.push("effort");
+        if subagent_model {
+            expected.push("swarm");
+        }
+        if !fail {
+            expected.push("send");
+        }
+        assert_eq!(
+            *seen.lock().unwrap_or_else(|error| panic!("{error}")),
+            expected
+        );
+    }
+}
 #[test]
 fn jcode_capability_errors_name_the_required_runtime_floor() {
     let client =

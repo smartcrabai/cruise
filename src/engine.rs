@@ -1482,6 +1482,10 @@ pub(crate) async fn run_prompt_step(
         let run_future = executor.run(crate::executor::PromptRun {
             prompt: &prompt,
             model: model_or_mode.as_ref(),
+            subagent_model: step
+                .subagent_model
+                .as_ref()
+                .or(compiled.subagent_model.as_ref()),
             max_retries: rate_limit_retries,
             env: prompt_env,
             mcp_servers: &compiled.mcp_servers,

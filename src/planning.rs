@@ -346,6 +346,7 @@ pub async fn run_plan_prompt_template(
         .run(PromptRun {
             prompt: &prompt,
             model,
+            subagent_model: ctx.config.subagent_model.as_ref(),
             max_retries: ctx.rate_limit_retries,
             env: &env,
             mcp_servers: &ctx.config.mcp_servers,

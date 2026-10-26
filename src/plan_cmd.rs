@@ -862,6 +862,7 @@ async fn generate_title_via_sdk(
         .run(crate::executor::PromptRun {
             prompt: &prompt,
             model,
+            subagent_model: None,
             max_retries: 1,
             env: &env,
             mcp_servers: &config.mcp_servers,

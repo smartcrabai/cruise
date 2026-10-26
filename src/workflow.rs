@@ -162,6 +162,7 @@ pub struct CompiledWorkflow {
     /// with both unset, prompts run on the default `jcode` backend.
     pub sdk: Option<String>,
     pub model: Option<crate::config::ModelSpec>,
+    pub subagent_model: Option<crate::config::ModelEntry>,
     pub plan_model: Option<crate::config::ModelSpec>,
     pub env: HashMap<String, String>,
     /// Language to use for PR title/body generation.
@@ -202,6 +203,7 @@ impl CompiledWorkflow {
             command: self.command.clone(),
             sdk: self.sdk.clone(),
             model: self.model.clone(),
+            subagent_model: self.subagent_model.clone(),
             plan_model: self.plan_model.clone(),
             env: self.env.clone(),
             pr_language: self.pr_language.clone(),
@@ -250,6 +252,7 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         command: config.command,
         sdk: config.sdk,
         model: config.model,
+        subagent_model: config.subagent_model,
         plan_model: config.plan_model,
         env: config.env,
         pr_language,
@@ -268,6 +271,10 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "group expansion keeps call-site validation and invocation metadata together"
+)]
 fn expand_steps(
     steps: &IndexMap<String, StepConfig>,
     groups: &HashMap<String, crate::config::GroupConfig>,
@@ -298,6 +305,11 @@ fn expand_steps(
             if step.permission.is_some() {
                 return Err(crate::error::CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' uses permission on a group call; set it on the inner prompt step"
+                )));
+            }
+            if step.subagent_model.is_some() {
+                return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses subagent_model on a group call; set it on the inner prompt step"
                 )));
             }
 
@@ -403,6 +415,55 @@ mod tests {
 
     fn compiled(yaml: &str) -> CompiledWorkflow {
         compile(parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    #[test]
+    fn subagent_model_default_survives_compile_and_after_pr() {
+        let workflow = compiled(
+            "sdk: claude\nsubagent_model: haiku\nsteps:\n  main:\n    prompt: main\nafter-pr:\n  review:\n    prompt: review\n",
+        );
+        let expected = Some(crate::config::ModelEntry::String("haiku".to_owned()));
+        assert_eq!(workflow.subagent_model, expected);
+        assert_eq!(workflow.to_after_pr_compiled().subagent_model, expected);
+    }
+
+    #[test]
+    fn subagent_model_survives_group_expansion() {
+        let workflow = compiled(
+            "sdk: jcode\nmodel: [openai/main, {sdk: claude, model: sonnet}]\nsubagent_model: openai/default\ngroups:\n  review:\n    steps:\n      inspect:\n        prompt: inspect\n        subagent_model: {sdk: claude, model: haiku}\n      plain:\n        prompt: plain\nsteps:\n  run:\n    group: review\nafter-pr:\n  publish:\n    group: review\n  summary:\n    prompt: summarize\n    subagent_model: openai/summary\n",
+        );
+        let steps = serde_json::to_value(&workflow.steps).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            steps["run/inspect"]["subagent_model"],
+            serde_json::json!({"sdk": "claude", "model": "haiku"})
+        );
+        assert!(steps["run/plain"].get("subagent_model").is_none());
+    }
+
+    #[test]
+    fn subagent_model_survives_after_pr_compilation() {
+        let workflow = compiled(
+            "sdk: jcode\nmodel: [openai/main, {sdk: claude, model: sonnet}]\nsubagent_model: openai/default\ngroups:\n  review:\n    steps:\n      inspect:\n        prompt: inspect\n        subagent_model: {sdk: claude, model: haiku}\n      plain:\n        prompt: plain\nsteps:\n  run:\n    prompt: run\nafter-pr:\n  publish:\n    group: review\n  summary:\n    prompt: summarize\n    subagent_model: openai/summary\n",
+        );
+        let after = workflow.to_after_pr_compiled();
+        let steps = serde_json::to_value(&after.steps).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            steps["publish/inspect"]["subagent_model"],
+            serde_json::json!({"sdk": "claude", "model": "haiku"})
+        );
+        assert!(steps["publish/plain"].get("subagent_model").is_none());
+        assert_eq!(steps["summary"]["subagent_model"], "openai/summary");
+    }
+
+    #[test]
+    fn subagent_model_is_rejected_on_group_call_site() {
+        let result = compile(parsed(
+            "groups:\n  g:\n    steps:\n      inner:\n        prompt: inspect\nsteps:\n  run:\n    group: g\n    subagent_model: openai/mini\n",
+        ));
+        let Err(error) = result else {
+            panic!("subagent_model is not supported on group call sites");
+        };
+        assert!(error.to_string().contains("subagent_model"));
     }
 
     #[test]

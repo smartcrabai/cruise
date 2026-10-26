@@ -84,6 +84,7 @@ impl Fixture {
                     model: Some(&cruise::config::ModelSpec::Single(
                         "contract/model".to_owned(),
                     )),
+                    subagent_model: None,
                     max_retries: 0,
                     env: &env,
                     mcp_servers: &mcp,

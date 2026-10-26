@@ -92,6 +92,11 @@ pub struct WorkflowConfig {
     /// the first entry.
     pub model: Option<ModelSpec>,
 
+    /// Subagent model for Claude or jcode. Strings resolve in the workflow SDK;
+    /// `{sdk, model}` limits the override to that SDK. Effort suffixes are unsupported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_model: Option<ModelEntry>,
+
     /// Model to use for the built-in plan step (falls back to `model`). In SDK
     /// mode, a list uses its first entry as the primary model and the remaining
     /// entries as an implicit fallback chain; command mode uses only the first
@@ -341,6 +346,10 @@ pub enum SkipCondition {
 pub struct StepConfig {
     /// Model to use (prompt steps only).
     pub model: Option<String>,
+
+    /// Per-prompt override for the workflow subagent model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_model: Option<ModelEntry>,
 
     /// Inline prompt body (prompt steps only; use `prompt` or `prompt_file`).
     pub prompt: Option<String>,
@@ -1038,6 +1047,7 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_flags(config)?;
     validate_computer_use(config)?;
     validate_permission(config)?;
+    validate_subagent_model(config)?;
     validate_output_file_usage(config)?;
     validate_squash_merge(config)?;
     validate_github_review(config)?;
@@ -1415,12 +1425,13 @@ pub(crate) fn validate_squash_merge_step(
         || step.workflow_call.is_some()
         || step.computer_use.is_some()
         || step.permission.is_some()
+        || step.subagent_model.is_some()
         || step.output_file.is_some()
         || step.github_review.is_some()
         || step.allow_commit
     {
         return Err(invalid(
-            "cannot be combined with prompt/SDK fields, command, option, output_file, permission, allow_commit, or control-flow fields",
+            "cannot be combined with prompt/SDK fields, command, option, output_file, permission, subagent_model, allow_commit, or control-flow fields",
         ));
     }
     Ok(())
@@ -1467,10 +1478,11 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
         || step.allow_commit
         || step.computer_use.is_some()
         || step.permission.is_some()
+        || step.subagent_model.is_some()
         || step.output_file.is_some()
     {
         return Err(CruiseError::InvalidStepConfig(format!(
-            "parallel step '{name}' only supports parallel, env, skip, flag, when, next, if, and timeout; computer_use and permission are only supported on prompt children"
+            "parallel step '{name}' only supports parallel, env, skip, flag, when, next, if, and timeout; computer_use, permission and subagent_model are only supported on prompt children"
         )));
     }
     for (child_name, child) in children {
@@ -1500,10 +1512,11 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
             || child.allow_commit
             || (child.computer_use.is_some() && child.command.is_some())
             || (child.permission.is_some() && child.command.is_some())
+            || (child.subagent_model.is_some() && child.command.is_some())
         {
             return Err(CruiseError::InvalidStepConfig(format!(
                 "parallel child '{path}' requires exactly one of prompt, prompt_file, or command; \
-                 only model, env, skip, when, timeout, computer_use and permission (prompt children only), \
+                 only model, env, skip, when, timeout, computer_use, permission and subagent_model (prompt children only), \
                  and output_file (prompt children only) may accompany it"
             )));
         }
@@ -1949,6 +1962,144 @@ fn computer_use_backend_error(
     }
 }
 
+/// Validate a single subagent override and return its resolved SDK.
+pub(crate) fn validate_subagent_model_entry(
+    entry: &ModelEntry,
+    base: crate::model_selection::Sdk,
+    field: &str,
+) -> crate::error::Result<crate::model_selection::Sdk> {
+    use crate::error::CruiseError;
+    use crate::model_selection::{Sdk, resolve_entry};
+    if let ModelEntry::SdkModel(entry) = entry {
+        let sdk = entry.sdk.as_str();
+        if !SUPPORTED_SDKS.contains(&sdk) && !REMOVED_SDKS.iter().any(|(name, _)| *name == sdk) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "unknown `{field}.sdk` value '{sdk}'; expected one of: jcode, claude"
+            )));
+        }
+        validate_sdk_name(&entry.sdk, &format!("{field}.sdk"))?;
+    }
+    let candidate = resolve_entry(entry, base);
+    let model = candidate.model.as_deref().unwrap_or_default();
+    let invalid = |reason: &str| CruiseError::InvalidStepConfig(format!("{field}: {reason}"));
+    if model.trim().is_empty() {
+        return Err(invalid("model must not be blank"));
+    }
+    if candidate.sdk == Sdk::OpenCode {
+        return Err(invalid("subagent_model only supports claude / jcode"));
+    }
+    if crate::backend::effort::split_thinking_suffix(model)
+        .1
+        .is_some()
+    {
+        return Err(invalid("effort suffixes are not supported"));
+    }
+    if candidate.sdk == Sdk::Jcode {
+        let (_, model, _) = crate::backend::jcode::parse_model_ref(Some(model)).map_err(|_| {
+            invalid(&format!(
+                "invalid model reference '{model}' for `sdk: jcode`: expected 'provider/model' or 'model'; effort suffixes are not supported"
+            ))
+        })?;
+        if model.is_none() {
+            return Err(invalid("jcode requires a model"));
+        }
+    }
+    Ok(candidate.sdk)
+}
+
+fn validate_subagent_model(config: &WorkflowConfig) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+    use crate::model_selection::Sdk;
+    let sdk = Sdk::from_name(config.sdk.as_deref().unwrap_or("jcode")).unwrap_or(Sdk::Jcode);
+    let command_backend = !config.command.is_empty();
+    let validate_entry = |entry: &ModelEntry, field: &str| {
+        if command_backend {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "{field} is not supported on the command backend"
+            )));
+        }
+        validate_subagent_model_entry(entry, sdk, field)
+    };
+    if let Some(entry) = &config.subagent_model {
+        let owner = validate_entry(entry, "subagent_model")?;
+        if !candidate_sdks(config).contains(&owner) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "subagent_model SDK {owner} does not apply to any model candidate"
+            )));
+        }
+    }
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        check_subagent_model_step(config, name, step, sdk, &validate_entry)?;
+    }
+    Ok(())
+}
+
+fn check_subagent_model_step(
+    config: &WorkflowConfig,
+    name: &str,
+    step: &StepConfig,
+    sdk: crate::model_selection::Sdk,
+    validate_entry: &impl Fn(&ModelEntry, &str) -> crate::error::Result<crate::model_selection::Sdk>,
+) -> crate::error::Result<()> {
+    use crate::error::CruiseError;
+    use crate::model_selection::select_step_model;
+    if let Some(entry) = &step.subagent_model {
+        validate_subagent_model_step(name, step)?;
+        let owner = validate_entry(entry, &format!("step '{name}' subagent_model"))?;
+        if !applicable_sdks(
+            config,
+            &select_step_model(config.model.as_ref(), step.model.as_deref(), sdk),
+            sdk,
+        )
+        .contains(&owner)
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "step '{name}' subagent_model SDK {owner} does not apply to any model candidate"
+            )));
+        }
+    }
+    if let Some(children) = &step.parallel {
+        for (child_name, child) in children {
+            check_subagent_model_step(
+                config,
+                &format!("{name}/{child_name}"),
+                child,
+                sdk,
+                validate_entry,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_subagent_model_step(name: &str, step: &StepConfig) -> crate::error::Result<()> {
+    let kind = if step.parallel.is_some() {
+        "parallel"
+    } else if step.group.is_some() {
+        "group"
+    } else if step.workflow_call.is_some() {
+        "workflow_call"
+    } else if step.command.is_some() {
+        "command"
+    } else if step.option.is_some() {
+        "option"
+    } else if step.squash_merge.is_some() {
+        "squash-merge"
+    } else if step.prompt.is_some() || step.prompt_file.is_some() {
+        return Ok(());
+    } else {
+        "non-prompt"
+    };
+    Err(crate::error::CruiseError::InvalidStepConfig(format!(
+        "step '{name}' uses subagent_model, which is only supported on prompt steps (found {kind})"
+    )))
+}
+
 fn validate_computer_use_step(name: &str, step: &StepConfig) -> crate::error::Result<()> {
     let Some(_) = step.computer_use else {
         return Ok(());
@@ -2059,6 +2210,11 @@ fn validate_step_groups(
             if step.computer_use.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "step '{step_name}' uses computer_use on a group call; set it on the inner prompt step"
+                )));
+            }
+            if step.subagent_model.is_some() {
+                return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses subagent_model on a group call; set it on the inner prompt step"
                 )));
             }
             if step.permission.is_some() {
@@ -7278,6 +7434,386 @@ steps:
             validate_config(&config).is_ok(),
             "an option step whose choices all set next has no reachable \
              fall-through edge"
+        );
+    }
+
+    // -- subagent_model contract ---------------------------------------------
+
+    fn assert_subagent_fixture_baseline(yaml: &str) {
+        fn strip_subagent_model(value: &mut serde_yaml::Value) {
+            match value {
+                serde_yaml::Value::Mapping(mapping) => {
+                    mapping.remove(serde_yaml::Value::String("subagent_model".into()));
+                    for child in mapping.values_mut() {
+                        strip_subagent_model(child);
+                    }
+                }
+                serde_yaml::Value::Sequence(sequence) => {
+                    for child in sequence {
+                        strip_subagent_model(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut baseline: serde_yaml::Value = serde_yaml::from_str(yaml)
+            .unwrap_or_else(|error| panic!("invalid fixture YAML: {yaml}: {error}"));
+        strip_subagent_model(&mut baseline);
+        let config: WorkflowConfig = serde_yaml::from_value(baseline)
+            .unwrap_or_else(|error| panic!("invalid fixture baseline: {yaml}: {error}"));
+        validate_config(&config)
+            .unwrap_or_else(|error| panic!("invalid fixture baseline: {yaml}: {error}"));
+    }
+
+    fn assert_subagent_invalid(yaml: &str, fragments: &[&str]) -> String {
+        assert_subagent_fixture_baseline(yaml);
+        let config: WorkflowConfig =
+            serde_yaml::from_str(yaml).unwrap_or_else(|error| panic!("{yaml}: {error}"));
+        let message = match validate_config(&config) {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("must reject subagent_model: {yaml}"),
+        };
+        assert!(message.contains("subagent_model"), "{yaml}: {message}");
+        for fragment in fragments {
+            assert!(
+                message.contains(fragment),
+                "expected {fragment:?}: {message}"
+            );
+        }
+        message
+    }
+
+    fn assert_subagent_retained(yaml: &str, pointer: &str, expected: serde_json::Value) {
+        assert_subagent_fixture_baseline(yaml);
+        let config: WorkflowConfig =
+            serde_yaml::from_str(yaml).unwrap_or_else(|error| panic!("{yaml}: {error}"));
+        validate_config(&config).unwrap_or_else(|error| panic!("{yaml}: {error}"));
+        let value = serde_json::to_value(&config).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(value.pointer(pointer), Some(&expected), "{yaml}");
+        let serialized = serde_yaml::to_string(&config).unwrap_or_else(|error| panic!("{error}"));
+        let round_trip: WorkflowConfig =
+            serde_yaml::from_str(&serialized).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            serde_json::to_value(round_trip)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .pointer(pointer)
+                .cloned(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_subagent_model_string_and_object_round_trip() {
+        for (entry, expected) in [
+            ("haiku", serde_json::json!("haiku")),
+            (
+                "{sdk: claude, model: haiku}",
+                serde_json::json!({"sdk": "claude", "model": "haiku"}),
+            ),
+        ] {
+            assert_subagent_retained(
+                &format!("sdk: claude\nsubagent_model: {entry}\nsteps:\n  run:\n    prompt: hi\n"),
+                "/subagent_model",
+                expected.clone(),
+            );
+            assert_subagent_retained(
+                &format!(
+                    "sdk: claude\nsteps:\n  run:\n    prompt: hi\n    subagent_model: {entry}\n"
+                ),
+                "/steps/run/subagent_model",
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn test_subagent_model_absent_is_omitted() {
+        let config: WorkflowConfig = serde_yaml::from_str("steps:\n  run:\n    prompt: hi\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let value = serde_json::to_value(config).unwrap_or_else(|error| panic!("{error}"));
+        assert!(value.get("subagent_model").is_none());
+        assert!(value["steps"]["run"].get("subagent_model").is_none());
+    }
+
+    #[test]
+    fn test_subagent_model_arrays_and_fallback_objects_are_not_entries() {
+        for entry in ["[haiku]", "[]", "{fallback: [haiku]}"] {
+            for yaml in [
+                format!("subagent_model: {entry}\nsteps: {{}}\n"),
+                format!("steps:\n  run:\n    prompt: hi\n    subagent_model: {entry}\n"),
+            ] {
+                assert!(
+                    serde_yaml::from_str::<WorkflowConfig>(&yaml).is_err(),
+                    "accepted: {yaml}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_subagent_model_step_still_rejects_unknown_fields() {
+        assert!(serde_yaml::from_str::<WorkflowConfig>("steps:\n  run:\n    prompt: hi\n    subagent_model: haiku\n    subagent_modle: typo\n").is_err());
+    }
+
+    fn assert_subagent_invalid_in_workflow_and_step(
+        sdk: &str,
+        entry: &str,
+        fragments: &[&str],
+    ) -> [String; 2] {
+        [
+            assert_subagent_invalid(
+                &format!("sdk: {sdk}\nsubagent_model: {entry}\nsteps:\n  run:\n    prompt: hi\n"),
+                fragments,
+            ),
+            assert_subagent_invalid(
+                &format!("sdk: {sdk}\nsteps:\n  run:\n    prompt: hi\n    subagent_model: {entry}\n"),
+                fragments,
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_subagent_model_rejects_opencode_sdk() {
+        for (sdk, entry) in [
+            ("opencode", "haiku"),
+            ("jcode", "{sdk: opencode, model: haiku}"),
+        ] {
+            assert_subagent_invalid_in_workflow_and_step(sdk, entry, &["claude", "jcode"]);
+        }
+    }
+
+    #[test]
+    fn test_subagent_model_rejects_unknown_sdk() {
+        for message in assert_subagent_invalid_in_workflow_and_step(
+            "jcode",
+            "{sdk: nonexistent, model: haiku}",
+            &[
+                "subagent_model.sdk",
+                "nonexistent",
+                "expected one of:",
+                "jcode",
+                "claude",
+            ],
+        ) {
+            assert!(!message.contains("opencode"), "{message}");
+        }
+        let message = validate_sdk_name("nonexistent", "model[0].sdk")
+            .err()
+            .unwrap_or_else(|| panic!("unknown main-model SDK must fail"))
+            .to_string();
+        assert!(message.contains("opencode"), "{message}");
+        for (sdk, migration) in REMOVED_SDKS {
+            assert_subagent_invalid_in_workflow_and_step(
+                "jcode",
+                &format!("{{sdk: {sdk}, model: haiku}}"),
+                &["no longer supported", migration],
+            );
+        }
+    }
+
+    #[test]
+    fn test_subagent_model_rejects_blank_models() {
+        for (sdk, entry) in [
+            ("claude", "'   '"),
+            ("claude", "{sdk: claude, model: '   '}"),
+            ("jcode", "{sdk: jcode, model: ''}"),
+        ] {
+            assert_subagent_invalid_in_workflow_and_step(sdk, entry, &[]);
+        }
+    }
+
+    #[test]
+    fn test_subagent_model_rejects_recognized_effort_suffix() {
+        for (sdk, entry) in [("claude", "haiku:high"), ("jcode", "openai/model:high")] {
+            assert_subagent_invalid_in_workflow_and_step(sdk, entry, &[]);
+        }
+    }
+
+    #[test]
+    fn test_subagent_model_rejects_malformed_jcode_refs() {
+        for entry in ["'provider/'", "{sdk: jcode, model: 'provider/'}"] {
+            for message in assert_subagent_invalid_in_workflow_and_step(
+                "jcode",
+                entry,
+                &[
+                    "invalid model reference 'provider/'",
+                    "sdk: jcode",
+                    "expected 'provider/model' or 'model'",
+                    "effort suffixes are not supported",
+                ],
+            ) {
+                assert!(!message.contains("[:effort]"), "{message}");
+            }
+        }
+        let message = crate::backend::jcode::parse_model_ref(Some("provider/"))
+            .err()
+            .unwrap_or_else(|| panic!("malformed main-model reference must fail"))
+            .to_string();
+        assert!(message.contains("provider/model[:effort]"), "{message}");
+        assert!(message.contains("model[:effort]"), "{message}");
+    }
+
+    #[test]
+    fn test_subagent_model_unknown_effort_suffix_is_model_id() {
+        assert_subagent_retained(
+            "sdk: jcode\nsubagent_model: openai/model:free\nsteps:\n  run:\n    prompt: hi\n",
+            "/subagent_model",
+            serde_json::json!("openai/model:free"),
+        );
+    }
+
+    #[test]
+    fn test_subagent_model_command_backend_rejected_at_all_depths() {
+        for body in [
+            "subagent_model: haiku\nsteps:\n  run:\n    prompt: hi\n",
+            "steps:\n  run:\n    prompt: hi\n    subagent_model: haiku\n",
+            "steps:\n  run:\n    prompt: hi\nafter-pr:\n  review:\n    prompt: hi\n    subagent_model: haiku\n",
+            "groups:\n  checks:\n    steps:\n      inner:\n        prompt: hi\n        subagent_model: haiku\nsteps:\n  run:\n    group: checks\n",
+            "steps:\n  checks:\n    parallel:\n      inner:\n        prompt: hi\n        subagent_model: haiku\n",
+        ] {
+            assert_subagent_invalid(&format!("command: [echo]\n{body}"), &["command"]);
+        }
+    }
+
+    #[test]
+    fn test_subagent_model_rejected_on_non_prompt_steps() {
+        for body in [
+            "command: echo",
+            "option:\n      - label: finish\n        next: end",
+            "parallel:\n      child:\n        prompt: hi",
+            "group: checks",
+            "workflow_call: ./callee.yaml",
+        ] {
+            assert_subagent_invalid(
+                &format!(
+                    "sdk: claude\ngroups:\n  checks:\n    steps:\n      inner:\n        prompt: hi\nsteps:\n  run:\n    {body}\n    subagent_model: haiku\n"
+                ),
+                &[],
+            );
+        }
+        assert_subagent_invalid(
+            "sdk: claude\nflags: {merge: {}}\nsteps:\n  run:\n    prompt: hi\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n    subagent_model: haiku\n",
+            &[],
+        );
+        assert_subagent_invalid(
+            "sdk: claude\nsteps:\n  checks:\n    parallel:\n      child:\n        command: echo\n        subagent_model: haiku\n",
+            &[],
+        );
+    }
+
+    #[test]
+    fn test_subagent_model_nested_prompt_steps_retain_entries() {
+        for (yaml, pointer) in [
+            (
+                "steps:\n  checks:\n    parallel:\n      child:\n        prompt: hi\n        subagent_model: haiku\n",
+                "/steps/checks/parallel/child/subagent_model",
+            ),
+            (
+                "groups:\n  checks:\n    steps:\n      inner:\n        prompt: hi\n        subagent_model: haiku\nsteps:\n  run:\n    group: checks\n",
+                "/groups/checks/steps/inner/subagent_model",
+            ),
+            (
+                "steps:\n  run:\n    prompt: hi\nafter-pr:\n  review:\n    prompt: hi\n    subagent_model: haiku\n",
+                "/after-pr/review/subagent_model",
+            ),
+        ] {
+            assert_subagent_retained(
+                &format!("sdk: claude\n{yaml}"),
+                pointer,
+                serde_json::json!("haiku"),
+            );
+        }
+    }
+
+    #[test]
+    fn test_subagent_model_requires_applicable_sdk() {
+        assert_subagent_invalid(
+            "sdk: jcode\nsubagent_model: {sdk: claude, model: haiku}\nsteps:\n  run:\n    prompt: hi\n",
+            &["claude"],
+        );
+        assert_subagent_invalid(
+            "sdk: jcode\nsteps:\n  run:\n    prompt: hi\n    subagent_model: {sdk: claude, model: haiku}\n",
+            &["claude"],
+        );
+    }
+
+    #[test]
+    fn test_subagent_model_fallback_sdk_is_applicable() {
+        let entry = serde_json::json!({"sdk": "claude", "model": "haiku"});
+        assert_subagent_retained(
+            "sdk: opencode\nmodel: [main, {sdk: claude, model: sonnet}]\nsubagent_model: {sdk: claude, model: haiku}\nsteps:\n  run:\n    prompt: hi\n",
+            "/subagent_model",
+            entry.clone(),
+        );
+        assert_subagent_retained(
+            "sdk: opencode\nmodel: [main, {sdk: claude, model: sonnet}]\nsteps:\n  run:\n    prompt: hi\n    subagent_model: {sdk: claude, model: haiku}\n",
+            "/steps/run/subagent_model",
+            entry,
+        );
+    }
+
+    #[test]
+    fn test_subagent_model_planning_only_candidate_accepts_workflow_entry() {
+        assert_subagent_retained(
+            "sdk: jcode\nplan_model: [{sdk: claude, model: sonnet}]\nsubagent_model: {sdk: claude, model: haiku}\nsteps:\n  run:\n    prompt: hi\n",
+            "/subagent_model",
+            serde_json::json!({"sdk": "claude", "model": "haiku"}),
+        );
+    }
+
+    #[test]
+    fn test_subagent_model_planning_only_candidate_rejects_step_entry() {
+        assert_subagent_invalid(
+            "sdk: jcode\nplan_model: [{sdk: claude, model: sonnet}]\nsteps:\n  run:\n    prompt: hi\n    subagent_model: {sdk: claude, model: haiku}\n",
+            &["claude"],
+        );
+    }
+
+    #[test]
+    fn test_subagent_model_default_jcode_string_is_retained() {
+        assert_subagent_retained(
+            "subagent_model: openai/mini\nsteps:\n  run:\n    prompt: hi\n",
+            "/subagent_model",
+            serde_json::json!("openai/mini"),
+        );
+    }
+
+    #[test]
+    fn test_subagent_model_prompt_file_is_allowed() {
+        assert_subagent_retained(
+            "sdk: claude\nsteps:\n  run:\n    prompt_file: prompt.md\n    subagent_model: haiku\n",
+            "/steps/run/subagent_model",
+            serde_json::json!("haiku"),
+        );
+    }
+
+    #[test]
+    fn test_subagent_model_github_review_is_allowed() {
+        assert_subagent_retained(
+            "sdk: claude\nsteps:\n  run:\n    prompt: hi\nafter-pr:\n  review:\n    github-review:\n      bots: [reviewbot]\n    prompt: fix\n    timeout: 30m\n    subagent_model: haiku\n",
+            "/after-pr/review/subagent_model",
+            serde_json::json!("haiku"),
+        );
+    }
+
+    #[test]
+    fn test_subagent_model_nested_entries_are_validated() {
+        for body in [
+            "steps:\n  run:\n    prompt: hi\nafter-pr:\n  review:\n    prompt: hi\n    subagent_model: '   '\n",
+            "groups:\n  checks:\n    steps:\n      inner:\n        prompt: hi\n        subagent_model: '   '\nsteps:\n  run:\n    group: checks\n",
+            "steps:\n  checks:\n    parallel:\n      inner:\n        prompt: hi\n        subagent_model: '   '\n",
+            "steps:\n  run:\n    prompt: hi\nafter-pr:\n  checks:\n    parallel:\n      inner:\n        prompt: hi\n        subagent_model: '   '\n",
+        ] {
+            assert_subagent_invalid(&format!("sdk: claude\n{body}"), &[]);
+        }
+    }
+
+    #[test]
+    fn test_subagent_model_step_model_override_can_remove_fallback_applicability() {
+        assert_subagent_invalid(
+            "sdk: jcode\nmodel: [openai/main, {sdk: claude, model: sonnet}]\nsteps:\n  run:\n    prompt: hi\n    model: openai/other\n    subagent_model: {sdk: claude, model: haiku}\n",
+            &["claude"],
         );
     }
 

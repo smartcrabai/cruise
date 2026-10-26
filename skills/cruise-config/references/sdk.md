@@ -51,6 +51,49 @@ The common `:effort` parser recognizes tiers (`low`/`medium`/`high`/`xhigh`/`max
 
 A `/` with an empty side (`"/model"`, `"provider/"`) is rejected by `sdk: jcode` when the prompt runs — a step error, not a config-validation error, so `cruise plan --dry-run` does not catch it. `sdk: claude` forwards it to the CLI, which fails with its own message.
 
+## Subagent model
+
+`subagent_model` is independent of the main `model` / `plan_model`. Set it at
+workflow level or override it on a prompt step. It accepts exactly one nonblank
+string or `{sdk: claude, model: haiku}` object (`jcode` is also supported), with
+no array or fallback chain. Strings inherit the workflow SDK, defaulting to
+jcode; explicit objects resolve in their named SDK. Each execution/fallback
+attempt receives the setting only when its SDK matches that resolved SDK.
+Other attempts retain their backend defaults. Validation rejects values with
+no applicable candidate, OpenCode subagent models, and all `command:` backends.
+Mixed-SDK workflows can use an explicit object for a Claude/jcode candidate.
+
+Recognized `:effort` suffixes, including `:off`, are rejected rather than
+silently ignored. Unknown suffixes such as `:free` remain part of the model ID.
+jcode model references must contain a valid nonempty model (not `provider/`).
+
+Claude injects `CLAUDE_CODE_SUBAGENT_MODEL=<model>` and
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` to fix all subagents, including Explore and
+Plan. These override same-named workflow/step `env:` entries. If the field is
+unset, Cruise leaves those keys untouched. jcode instead sets the session's
+swarm default using `Agents` with `swarm` before sending the prompt; a worker
+spawn with an explicit `model` wins over that default. It is not a forced model
+and does not use jcode's user-invoked `/subagent` model setting.
+
+The setting covers workflow prompt steps (including group, `after-pr`, parallel
+prompt child, and `github-review` prompts) and planning's plan/fix/ask turns.
+Title generation, PR metadata, and `workflow generate` do not use it. Non-prompt
+steps and group/workflow-call/parallel wrappers reject it. A called workflow's
+top-level value is ignored in favor of the caller's default, but per-step
+overrides inside the callee remain. Layered `default.yaml` supports it;
+application `config.json` / `config.yaml` defaults and
+`CRUISE_SUBAGENT_MODEL` overrides are not provided.
+
+```yaml
+sdk: claude
+model: sonnet
+subagent_model: haiku
+steps:
+  review:
+    prompt: Delegate implementation checks and summarize findings.
+    subagent_model: {sdk: claude, model: sonnet}
+```
+
 ## `sdk: jcode` — the jcode SDK (default)
 
 `sdk: jcode` uses the official jcode Rust SDK and requires jcode v0.88.0 or newer. Cruise checks the SDK handshake for `sessions` and, when custom tools are registered, `session_tools`; it does not run a CLI version probe. A missing capability produces an actionable upgrade error. `model`, `plan_model`, and per-step `model` accept `provider/model[:effort]` or a bare model. Every actual jcode prompt must resolve to a model: ordinary prompts use step `model` then workflow/default `model`; planning calls use `plan_model` then `model`. An omitted model, blank value, or effort-only reference stops the call before jcode starts. Cruise creates or preserves the user-level `default.yaml` template to explain the setting; it never uses `JCODE_MODEL`, the jcode home default, or a resume session to fill in Cruise's missing model. Claude and external `command` backends retain their existing no-model behavior.

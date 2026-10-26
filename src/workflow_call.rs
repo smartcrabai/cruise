@@ -333,6 +333,7 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
         ("output_file", step.output_file.is_some()),
         ("squash-merge", step.squash_merge.is_some()),
         ("permission", step.permission.is_some()),
+        ("subagent_model", step.subagent_model.is_some()),
     ]
     .into_iter()
     .filter_map(|(field, present)| present.then_some(field))
@@ -2315,6 +2316,60 @@ after-pr:
             resolved.steps["shared/inner"].permission,
             Some(crate::config::PermissionMode::Edit)
         );
+    }
+
+    #[test]
+    fn subagent_model_uses_caller_default_and_preserves_callee_inner_override() {
+        let dir = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        write_file(
+            &dir,
+            "callee.yaml",
+            "sdk: jcode\nsubagent_model: openai/callee\nsteps:\n  plain:\n    prompt: plain\n  inner:\n    prompt: inner\n    subagent_model: {sdk: jcode, model: openai/inner}\n",
+        );
+        for caller_default in ["", "subagent_model: openai/caller\n"] {
+            let config = WorkflowConfig::from_yaml(&format!(
+                "sdk: jcode\n{caller_default}steps:\n  shared:\n    workflow_call: ./callee.yaml\n"
+            ))
+            .unwrap_or_else(|error| panic!("{error}"));
+            let resolved = resolve_workflow_calls_with_defaults(
+                config,
+                dir.path(),
+                &WorkflowDefaults::default(),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            let value = serde_json::to_value(&resolved).unwrap_or_else(|error| panic!("{error}"));
+            if caller_default.is_empty() {
+                assert!(value.get("subagent_model").is_none());
+            } else {
+                assert_eq!(value["subagent_model"], "openai/caller");
+            }
+            assert!(
+                value["steps"]["shared/plain"]
+                    .get("subagent_model")
+                    .is_none()
+            );
+            assert_eq!(
+                value["steps"]["shared/inner"]["subagent_model"],
+                serde_json::json!({"sdk": "jcode", "model": "openai/inner"})
+            );
+        }
+    }
+
+    #[test]
+    fn subagent_model_is_rejected_on_workflow_call_site() {
+        let dir = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        write_file(
+            &dir,
+            "callee.yaml",
+            "steps:\n  inspect:\n    prompt: inspect\n",
+        );
+        let config = WorkflowConfig::from_yaml("steps:\n  shared:\n    workflow_call: ./callee.yaml\n    subagent_model: openai/mini\n").unwrap_or_else(|error| panic!("{error}"));
+        let Err(error) =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+        else {
+            panic!("subagent_model is not supported on a workflow_call site");
+        };
+        assert!(error.to_string().contains("subagent_model"));
     }
 
     #[test]

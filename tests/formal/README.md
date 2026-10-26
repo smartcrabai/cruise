@@ -1,5 +1,12 @@
 # Checkpoint contract verification
 
+For task-scoped `subagent_model` selection, backend configuration and exclusions,
+see `SUBAGENT_MODEL.md` and run `bash scripts/check_subagent_model_specs.sh`.
+The dedicated `subagent-model-specs` PR job runs pinned Quint verification,
+Alloy assertions and witnesses with receipt validation, production Gherkin and
+Rust CLI/API regression tests. Local evidence is in
+`SUBAGENT_MODEL_VERIFICATION.md`.
+
 For OpenCode common effort resolution and replay-safe `provider.no-route`
 fallback, see `OPENCODE_EFFORT.md` and run
 `bash scripts/check_opencode_effort_specs.sh`. The dedicated native CI job runs

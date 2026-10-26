@@ -8,8 +8,8 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::config::{
-    LanguagesConfig, McpServers, ModelSpec, PermissionMode, RetryConfig, SkipCondition, StepConfig,
-    StringOrVec, WhenCondition, WorkflowConfig,
+    LanguagesConfig, McpServers, ModelEntry, ModelSpec, PermissionMode, RetryConfig, SkipCondition,
+    StepConfig, StringOrVec, WhenCondition, WorkflowConfig,
 };
 use crate::error::{CruiseError, Result};
 
@@ -131,6 +131,7 @@ struct DefaultsFile {
     command: Option<Vec<String>>,
     sdk: Option<String>,
     model: Option<ModelSpec>,
+    subagent_model: Option<ModelEntry>,
     plan_model: Option<ModelSpec>,
     max_retries: Option<usize>,
     interactive_planning: Option<bool>,
@@ -171,6 +172,7 @@ fn parse_error(path: &Path, detail: impl std::fmt::Display) -> CruiseError {
 pub struct WorkflowDefaults {
     backend: Option<Sourced<(Vec<String>, Option<String>)>>,
     model: Option<Sourced<ModelSpec>>,
+    subagent_model: Option<Sourced<ModelEntry>>,
     plan_model: Option<Sourced<ModelSpec>>,
     max_retries: Option<usize>,
     interactive_planning: Option<bool>,
@@ -325,6 +327,7 @@ impl WorkflowDefaults {
         self.force_exec = file.force_exec.or(self.force_exec);
         self.computer_use = sourced(file.computer_use, path).or(self.computer_use.take());
         self.permission = sourced(file.permission, path).or(self.permission.take());
+        self.subagent_model = sourced(file.subagent_model, path).or(self.subagent_model.take());
         self.retry = sourced(file.retry, path).or(self.retry.take());
         self.env.extend(file.env);
         for (name, server) in file.mcp_servers {
@@ -385,7 +388,14 @@ impl WorkflowDefaults {
             return Ok(());
         }
 
-        let conflicts: [(&str, Option<&Path>); 6] = [
+        let conflicts: [(&str, Option<&Path>); 7] = [
+            (
+                "subagent_model",
+                self.subagent_model
+                    .as_ref()
+                    .filter(|_| config.subagent_model.is_none())
+                    .map(|s| s.path.as_path()),
+            ),
             (
                 "model",
                 self.model
@@ -450,6 +460,9 @@ impl WorkflowDefaults {
         }
         if config.model.is_none() {
             config.model = self.model.as_ref().map(|s| s.value.clone());
+        }
+        if config.subagent_model.is_none() {
+            config.subagent_model = self.subagent_model.as_ref().map(|s| s.value.clone());
         }
         if config.plan_model.is_none() {
             config.plan_model = self.plan_model.as_ref().map(|s| s.value.clone());
@@ -799,6 +812,71 @@ mod tests {
         let mut set = workflow("command: [echo]\nmodel: wf/y");
         applied(&env, &mut set);
         assert_eq!(set.model, Some(ModelSpec::Single("wf/y".into())));
+    }
+
+    #[test]
+    fn subagent_model_defaults_fill_unset_but_workflow_wins() {
+        let env = env();
+        write(&env.user_file, "subagent_model: openai/user\n");
+        write(
+            &env.project_file,
+            "subagent_model: {sdk: jcode, model: openai/project}\n",
+        );
+        let unset = applied_with_presence(
+            &env,
+            "sdk: jcode\nsteps:\n  inspect:\n    prompt: inspect\n",
+        );
+        assert_eq!(
+            serde_json::to_value(&unset).unwrap_or_else(|error| panic!("{error}"))["subagent_model"],
+            serde_json::json!({"sdk": "jcode", "model": "openai/project"})
+        );
+        let set = applied_with_presence(
+            &env,
+            "sdk: jcode\nsubagent_model: openai/workflow\nsteps:\n  inspect:\n    prompt: inspect\n",
+        );
+        assert_eq!(
+            serde_json::to_value(&set).unwrap_or_else(|error| panic!("{error}"))["subagent_model"],
+            "openai/workflow"
+        );
+    }
+
+    #[test]
+    fn subagent_model_defaults_conflict_with_different_backend() {
+        let env = env();
+        write(
+            &env.project_file,
+            "sdk: jcode\nsubagent_model: openai/mini\n",
+        );
+        let defaults = WorkflowDefaults::load(Some(env.project.path()))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut resolution = WorkflowConfigResolution::from_yaml(
+            "sdk: claude\nsteps:\n  inspect:\n    prompt: inspect\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        match defaults.apply_to(&mut resolution) {
+            Err(CruiseError::InvalidStepConfig(message)) => {
+                assert!(message.contains("subagent_model"), "{message}");
+                assert!(message.contains("default.yaml"), "{message}");
+            }
+            other => panic!("expected InvalidStepConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subagent_model_workflow_override_avoids_defaults_backend_collision() {
+        let env = env();
+        write(
+            &env.project_file,
+            "sdk: jcode\nsubagent_model: openai/mini\n",
+        );
+        let config = applied_with_presence(
+            &env,
+            "sdk: claude\nsubagent_model: haiku\nsteps:\n  inspect:\n    prompt: inspect\n",
+        );
+        assert_eq!(
+            serde_json::to_value(&config).unwrap_or_else(|error| panic!("{error}"))["subagent_model"],
+            "haiku"
+        );
     }
 
     #[test]

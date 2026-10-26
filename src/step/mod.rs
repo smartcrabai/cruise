@@ -36,6 +36,7 @@ pub struct GitHubReviewStep {
 #[derive(Debug, Clone)]
 pub struct PromptStep {
     pub model: Option<String>,
+    pub subagent_model: Option<crate::config::ModelEntry>,
     pub prompt: String,
     pub instruction: Option<String>,
     pub output_file: Option<String>,
@@ -124,6 +125,11 @@ impl TryFrom<StepConfig> for StepKind {
                 "computer_use is only supported on prompt steps".to_string(),
             ));
         }
+        if config.subagent_model.is_some() && !is_prompt_step {
+            return Err(CruiseError::InvalidStepConfig(
+                "subagent_model is only supported on prompt steps".to_string(),
+            ));
+        }
         if config.permission.is_some() && !is_prompt_step {
             return Err(CruiseError::InvalidStepConfig(
                 "permission is only supported on prompt steps".to_string(),
@@ -143,6 +149,7 @@ impl TryFrom<StepConfig> for StepKind {
                 review,
                 prompt: PromptStep {
                     model: config.model,
+                    subagent_model: config.subagent_model,
                     prompt,
                     instruction: config.instruction,
                     output_file: None,
@@ -162,6 +169,7 @@ impl TryFrom<StepConfig> for StepKind {
         if let Some(prompt) = config.prompt {
             return Ok(StepKind::Prompt(PromptStep {
                 model: config.model,
+                subagent_model: config.subagent_model,
                 prompt,
                 instruction: config.instruction,
                 output_file: config.output_file,
@@ -545,6 +553,25 @@ mod tests {
             panic!("permission is only supported on prompt steps");
         };
         assert!(error.to_string().contains("permission"));
+    }
+
+    #[test]
+    fn test_subagent_model_is_rejected_by_non_prompt_step_conversion() {
+        for body in [
+            "command: echo",
+            "option: [{label: finish, next: end}]",
+            "parallel: {child: {prompt: inspect}}",
+            "group: review",
+            "workflow_call: ./callee.yaml",
+        ] {
+            let config: StepConfig =
+                serde_yaml::from_str(&format!("{body}\nsubagent_model: haiku\n"))
+                    .unwrap_or_else(|error| panic!("step fixture: {error}"));
+            let Err(CruiseError::InvalidStepConfig(message)) = StepKind::try_from(config) else {
+                panic!("subagent_model must not be silently ignored by {body}");
+            };
+            assert!(message.contains("subagent_model"), "{message}");
+        }
     }
 
     #[test]

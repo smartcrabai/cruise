@@ -379,6 +379,7 @@ async fn generate_pr_description(
             .run(crate::executor::PromptRun {
                 prompt: &pr_prompt,
                 model,
+                subagent_model: None,
                 max_retries: rate_limit_retries,
                 env: &env,
                 mcp_servers: &compiled.mcp_servers,
@@ -452,6 +453,7 @@ async fn generate_pr_via_sdk_tool(
         .run(crate::executor::PromptRun {
             prompt: &prompt,
             model,
+            subagent_model: None,
             max_retries: rate_limit_retries,
             env,
             mcp_servers,
@@ -1129,11 +1131,15 @@ mod tests {
         let _sdk = crate::test_support::EnvGuard::remove("CRUISE_SDK");
         let _model = crate::test_support::EnvGuard::remove("CRUISE_MODEL");
         let _plan_model = crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL");
+        let _subagent_model = crate::test_support::EnvGuard::remove("CLAUDE_CODE_SUBAGENT_MODEL");
+        let _subagent_force =
+            crate::test_support::EnvGuard::remove("CLAUDE_CODE_SUBAGENT_MODEL_FORCE");
         let script = format!(
             r#"#!/bin/sh
 case "$1" in --version) echo '2.0.0'; exit 0;; --cruise-exec-probe) exit 0;; esac
 d='{}'
 printf '%s\n' "$@" > "$d/args"
+printf 'model=%s force=%s\n' "${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}" "${{CLAUDE_CODE_SUBAGENT_MODEL_FORCE-unset}}" > "$d/subagent-env"
 pwd > "$d/cwd"
 read -r input
 printf '%s\n' '{{"type":"control_request","request_id":"pr-request","request":{{"subtype":"mcp_message","server_name":"cruise","message":{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"submit_pr_metadata","arguments":{{"title":"Mixed SDK PR","body":"Metadata from the selected Claude candidate."}}}}}}}}}}'
@@ -1173,9 +1179,11 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             )
         );
         let config = crate::config::WorkflowConfig::from_yaml(
-            "sdk: jcode\nmodel:\n  - sdk: claude\n    model: mixed-pr-model\n  - unused/jcode\nsteps:\n  build:\n    command: echo hi\n",
+            "sdk: jcode\nsubagent_model: {sdk: claude, model: haiku}\nmodel:\n  - sdk: claude\n    model: mixed-pr-model\n  - unused/jcode\nsteps:\n  build:\n    command: echo hi\n",
         )?;
         let compiled = crate::workflow::compile(config)?;
+        // The configured generation must create its own dispatch evidence.
+        std::fs::remove_file(tmp.path().join("subagent-env"))?;
         let plan_path = tmp.path().join("plan.md");
         std::fs::write(&plan_path, "# Mixed SDK plan")?;
         let mut vars = VariableStore::new("implement mixed SDK feature".to_string());
@@ -1193,6 +1201,10 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             )
         );
         let args = std::fs::read_to_string(tmp.path().join("args"))?;
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("subagent-env"))?,
+            "model=unset force=unset\n"
+        );
         assert!(args.lines().any(|line| line == "--model"));
         assert!(args.lines().any(|line| line == "mixed-pr-model"));
         let cwd = std::fs::read_to_string(tmp.path().join("cwd"))?;
@@ -1546,6 +1558,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             sdk: None,
             model: None,
             plan_model: None,
+            subagent_model: None,
             env: HashMap::new(),
             plan_language: "English".to_string(),
             pr_language: "English".to_string(),

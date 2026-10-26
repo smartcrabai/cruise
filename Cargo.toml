@@ -193,6 +193,19 @@ path = "tests/agent_auth_bdd.rs"
 # Unix SDK subprocess boundary fixtures, explicitly runnable on supported hosts.
 test = false
 
+[[test]]
+harness = false
+name = "subagent_model_bdd"
+path = "tests/subagent_model_bdd.rs"
+required-features = ["test-utils"]
+# Unix subprocess contracts, explicitly runnable with --test subagent_model_bdd.
+test = false
+
+[[test]]
+name = "subagent_model_jcode_cli"
+path = "tests/subagent_model_jcode_cli.rs"
+required-features = ["test-utils"]
+
 [profile.release]
 codegen-units = 1
 lto = true

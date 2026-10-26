@@ -71,6 +71,9 @@ pub(crate) struct JcodeRunnerConfig {
     pub(crate) permission: crate::config::PermissionMode,
     pub(crate) model: Option<String>,
     pub(crate) provider: Option<String>,
+    pub(crate) subagent_provider: Option<String>,
+    /// Session swarm default. Explicit worker models still take precedence.
+    pub(crate) subagent_model: Option<String>,
     pub(crate) effort: Option<EffortLevel>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) resume_session_id: Option<String>,
@@ -421,10 +424,16 @@ fn run_client_turn(
             .map_err(|error| error.to_string())?;
     }
 
-    if let Some(model) = config.model.as_deref() {
-        let runtime = client
-            .get_runtime_info(&session.session_id)
-            .map_err(|error| error.to_string())?;
+    let runtime = if config.model.is_some() || config.subagent_model.is_some() {
+        Some(
+            client
+                .get_runtime_info(&session.session_id)
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+    if let (Some(model), Some(runtime)) = (config.model.as_deref(), runtime.as_ref()) {
         let model_request =
             model_switch_request(config.provider.as_deref(), model, &runtime.routes);
         client
@@ -435,6 +444,18 @@ fn run_client_turn(
         client
             .set_reasoning_effort(&session.session_id, effort.as_str())
             .map_err(|error| error.to_string())?;
+    }
+
+    if let (Some(model), Some(runtime)) = (config.subagent_model.as_deref(), runtime.as_ref()) {
+        let model_request =
+            model_switch_request(config.subagent_provider.as_deref(), model, &runtime.routes);
+        client
+            .runtime_command(
+                &session.session_id,
+                jcode_sdk::api::RuntimeCommand::Agents,
+                vec!["swarm".to_string(), model_request],
+            )
+            .map_err(|error| format!("failed to set the jcode subagent model: {error}"))?;
     }
 
     // Subscribe before sending so early text and tool events cannot be missed.

@@ -42,6 +42,18 @@ pub struct ModelCandidate {
 }
 pub type ModelCandidates = Vec<ModelCandidate>;
 
+/// Resolve a single entry against the original workflow SDK.
+#[must_use]
+pub fn resolve_entry(entry: &ModelEntry, sdk: Sdk) -> ModelCandidate {
+    ModelCandidate {
+        sdk: match entry {
+            ModelEntry::String(_) => sdk,
+            ModelEntry::SdkModel(entry) => Sdk::from_name(&entry.sdk).unwrap_or(sdk),
+        },
+        model: Some(entry.model().to_owned()),
+    }
+}
+
 /// An empty planning list is accepted configuration, not a model override.
 pub(crate) fn planning_spec<'a>(
     plan: Option<&'a ModelSpec>,
@@ -78,16 +90,7 @@ pub fn resolve_candidates(spec: Option<&ModelSpec>, sdk: Sdk) -> ModelCandidates
         }],
         Some(ModelSpec::Multiple(entries)) if !entries.is_empty() => entries
             .iter()
-            .map(|entry| match entry {
-                ModelEntry::String(model) => ModelCandidate {
-                    sdk,
-                    model: Some(model.clone()),
-                },
-                ModelEntry::SdkModel(entry) => ModelCandidate {
-                    sdk: Sdk::from_name(&entry.sdk).unwrap_or(sdk),
-                    model: Some(entry.model.clone()),
-                },
-            })
+            .map(|entry| resolve_entry(entry, sdk))
             .collect(),
         _ => vec![ModelCandidate { sdk, model: None }],
     }
@@ -134,5 +137,49 @@ pub(crate) fn step_model_spec(
             Some(selected)
         }
         Some(model) => Some(ModelSpec::Single(model.to_owned())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_entry_uses_workflow_sdk_for_strings_and_explicit_sdk_for_objects() {
+        let string = ModelEntry::String("worker".to_owned());
+        let object: ModelEntry = serde_yaml::from_str("{sdk: claude, model: haiku}")
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            resolve_entry(&string, Sdk::Jcode),
+            ModelCandidate {
+                sdk: Sdk::Jcode,
+                model: Some("worker".to_owned())
+            }
+        );
+        assert_eq!(
+            resolve_entry(&string, Sdk::Claude),
+            ModelCandidate {
+                sdk: Sdk::Claude,
+                model: Some("worker".to_owned())
+            }
+        );
+        assert_eq!(
+            resolve_entry(&object, Sdk::Jcode),
+            ModelCandidate {
+                sdk: Sdk::Claude,
+                model: Some("haiku".to_owned())
+            }
+        );
+        let unknown = ModelEntry::SdkModel(crate::config::SdkModel {
+            sdk: "unknown".to_owned(),
+            model: " worker:free ".to_owned(),
+        });
+        let string = ModelEntry::String(unknown.model().to_owned());
+        for sdk in [Sdk::Jcode, Sdk::Claude, Sdk::OpenCode] {
+            let candidate = resolve_entry(&unknown, sdk);
+            assert_eq!(candidate, resolve_entry(&string, sdk));
+            assert_eq!(candidate.sdk, sdk);
+            assert_eq!(candidate.model.as_deref(), Some(" worker:free "));
+        }
     }
 }

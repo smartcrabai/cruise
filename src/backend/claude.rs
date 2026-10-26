@@ -47,6 +47,8 @@ const STDERR_TAIL_LINES: usize = 64;
 /// The CLI's own diagnosis is on stderr, which is appended by
 /// [`send_error_with_stderr`].
 const NO_RESULT_MESSAGE: &str = "the claude CLI exited without reporting a result";
+const SUBAGENT_MODEL_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
+const SUBAGENT_MODEL_FORCE_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL_FORCE";
 
 /// Cap on how long [`await_stderr_drain`] waits for the stderr drain task to
 /// consume residual lines after the transport closes. The child has already
@@ -68,6 +70,8 @@ static PRIVATE_MCP_CONFIG_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub(crate) struct ClaudeRunnerConfig {
     pub(crate) permission: crate::config::PermissionMode,
     pub(crate) model: Option<String>,
+    /// FORCE fixes all subagents, including Explore and Plan, to this model.
+    pub(crate) subagent_model: Option<String>,
     pub(crate) effort: Option<EffortLevel>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) resume_session_id: Option<String>,
@@ -496,6 +500,12 @@ fn build_options(config: &ClaudeRunnerConfig) -> ClaudeAgentOptions {
         opts.sdk_mcp_server = Some(AgentToolbox::new(CRUISE_TOOLBOX_NAME).with_tools(tools));
     }
     opts.env.clone_from(&config.env);
+    if let Some(model) = &config.subagent_model {
+        opts.env
+            .insert(SUBAGENT_MODEL_ENV.to_string(), model.clone());
+        opts.env
+            .insert(SUBAGENT_MODEL_FORCE_ENV.to_string(), "1".to_string());
+    }
     opts
 }
 
@@ -539,6 +549,32 @@ mod tests {
             opts.permission_mode,
             Some(PermissionMode::BypassPermissions)
         ));
+    }
+
+    #[test]
+    fn build_options_forces_subagent_model_over_workflow_env() {
+        let env = HashMap::from([
+            (SUBAGENT_MODEL_ENV.to_string(), "old-model".to_string()),
+            (SUBAGENT_MODEL_FORCE_ENV.to_string(), "0".to_string()),
+            ("KEEP_ME".to_string(), "unchanged".to_string()),
+        ]);
+        let opts = build_options(&ClaudeRunnerConfig {
+            subagent_model: Some("haiku".to_string()),
+            env: env.clone(),
+            ..Default::default()
+        });
+        assert_eq!(opts.env[SUBAGENT_MODEL_ENV], "haiku");
+        assert_eq!(opts.env[SUBAGENT_MODEL_FORCE_ENV], "1");
+        assert_eq!(opts.env["KEEP_ME"], "unchanged");
+
+        let opts = build_options(&ClaudeRunnerConfig {
+            env: env.clone(),
+            ..Default::default()
+        });
+        assert_eq!(opts.env, env);
+        let opts = build_options(&ClaudeRunnerConfig::default());
+        assert!(!opts.env.contains_key(SUBAGENT_MODEL_ENV));
+        assert!(!opts.env.contains_key(SUBAGENT_MODEL_FORCE_ENV));
     }
 
     #[test]

@@ -1131,6 +1131,79 @@ esac
     use crate::option_handler::NoOpOptionHandler;
     use crate::variable::VariableStore;
 
+    async fn run_after_pr_sdk(f: &Fixture, yaml: &str) -> Result<()> {
+        // Exercise compilation and the after-pr conversion without forcing the
+        // command backend used by the other integration tests.
+        let config =
+            crate::config::WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        crate::config::validate_config(&config).unwrap_or_else(|e| panic!("{e:?}"));
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut vars = VariableStore::new("input".to_string());
+        vars.set_named_value("pr.number", "42".to_string());
+        vars.set_artifacts_root(f.path().join("artifacts"));
+        let mut tracker = FileTracker::with_root(f.path().to_path_buf());
+        crate::worktree_pr::run_after_pr_steps_for_test(
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            f.path(),
+            &NoOpOptionHandler,
+        )
+        .await
+    }
+
+    fn install_after_pr_claude(f: &Fixture) {
+        crate::test_support::write_executable_script(
+            &f.path().join("bin/claude"),
+            r#"#!/bin/sh
+read -r user_frame
+printf '%s\n' "$user_frame" >> "$GH_FIXTURE_DIR/claude-input"
+printf '%s\n' "${CLAUDE_CODE_SUBAGENT_MODEL-}" "${CLAUDE_CODE_SUBAGENT_MODEL_FORCE-}" >> "$GH_FIXTURE_DIR/claude-subagent"
+cat <<'JSON'
+{"type":"system","subtype":"init","session_id":"fake-after-pr-session"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"{\"actions\":[]}"}]},"session_id":"fake-after-pr-session"}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fake-after-pr-session","result":"{\"actions\":[]}"}
+JSON
+"#,
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_after_pr_prompt_inherits_workflow_subagent_model() {
+        let f = Fixture::new();
+        install_after_pr_claude(&f);
+        let result = run_after_pr_sdk(
+            &f,
+            "sdk: claude\nmodel: sonnet\nsubagent_model: haiku\nenv:\n  CLAUDE_CODE_SUBAGENT_MODEL: stale-workflow-env\n  CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '0'\nsteps:\n  main:\n    prompt: unused main\nafter-pr:\n  answer:\n    prompt: AFTER_PR_GLOBAL_SUBAGENT\n    timeout: 30\n",
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert!(f.read("claude-input").contains("AFTER_PR_GLOBAL_SUBAGENT"));
+        assert_eq!(f.read("claude-subagent"), "haiku\n1\n");
+    }
+
+    #[tokio::test]
+    async fn github_review_prompt_overrides_workflow_subagent_model() {
+        let f = Fixture::new();
+        install_after_pr_claude(&f);
+        f.reviews(&[(BOT, OID)]);
+        f.threads(&[thread_node("t1", false, &[BOT])], None);
+        let yaml = format!(
+            "sdk: claude\nmodel: sonnet\nsubagent_model: haiku\nsteps:\n  main:\n    prompt: unused main\nafter-pr:\n  review:\n    github-review:\n      bots: [\"{BOT}\"]\n      max-iterations: 1\n    prompt: GITHUB_REVIEW_SUBAGENT_OVERRIDE\n    subagent_model: opus\n    env:\n      CLAUDE_CODE_SUBAGENT_MODEL: stale-step-env\n      CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '0'\n    timeout: 30\n"
+        );
+        let result = run_after_pr_sdk(&f, &yaml).await;
+        assert!(
+            f.read("claude-input")
+                .contains("GITHUB_REVIEW_SUBAGENT_OVERRIDE"),
+            "review must invoke Claude before reaching the iteration limit: {result:?}"
+        );
+        assert_eq!(f.read("claude-subagent"), "opus\n1\n");
+        assert!(
+            matches!(&result, Err(CruiseError::GitHubReviewFailed { .. })),
+            "{result:?}"
+        );
+    }
+
     async fn run_after_pr(f: &Fixture, yaml: &str, command: &str) -> (Result<()>, VariableStore) {
         let mut config =
             crate::config::WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));

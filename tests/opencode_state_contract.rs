@@ -283,6 +283,7 @@ async fn direct_opencode_executor_rejects_computer_use_without_starting_backend(
         .run(PromptRun {
             prompt: "must not execute",
             model: None,
+            subagent_model: None,
             max_retries: 0,
             env: &env,
             mcp_servers: &mcp_servers,

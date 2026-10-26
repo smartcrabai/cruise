@@ -39,7 +39,7 @@ use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::config::ModelSpec;
 use crate::error::{CruiseError, Result};
-use crate::model_selection::{Sdk, SdkSessionId, resolve_candidates};
+use crate::model_selection::{Sdk, SdkSessionId, resolve_candidates, resolve_entry};
 use crate::retry::{self, Failure, FallbackEngine, ModelReferenceFormat, RetryAction, RetryPolicy};
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt_with_attempt_model};
 
@@ -60,6 +60,8 @@ pub struct PromptRun<'a> {
     /// Model name (command mode) or model reference (`sdk: jcode`,
     /// `sdk: claude`).
     pub model: Option<&'a ModelSpec>,
+    /// Applies only to attempts with a matching SDK. Rejected in command mode.
+    pub subagent_model: Option<&'a crate::config::ModelEntry>,
     /// Maximum retries per prompt. SDK fallback policies also use this budget
     /// for 4xx (except 429), 5xx and network failures and fallback switching.
     pub max_retries: usize,
@@ -266,6 +268,15 @@ impl Executor {
             }
         }
 
+        if let Some(entry) = req.subagent_model {
+            if matches!(self, Self::Command { .. }) {
+                return Err(CruiseError::InvalidStepConfig(
+                    "`command` cannot be combined with `subagent_model`".to_owned(),
+                ));
+            }
+            crate::config::validate_subagent_model_entry(entry, self.sdk(), "subagent_model")?;
+        }
+
         if self.is_sdk() {
             if req
                 .cancel_token
@@ -470,10 +481,15 @@ async fn stream_to_outcome(
 ///
 /// Built fresh per attempt because [`crate::backend::claude::stream_agent`]
 /// consumes the config.
-fn build_claude_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> ClaudeRunnerConfig {
+fn build_claude_config(
+    req: &PromptRun<'_>,
+    model_ref: Option<&str>,
+    subagent_model: Option<&str>,
+) -> ClaudeRunnerConfig {
     let (model, suffix) = split_thinking_suffix(model_ref.unwrap_or_default());
     ClaudeRunnerConfig {
         model: (!model.is_empty()).then(|| model.to_string()),
+        subagent_model: subagent_model.map(str::to_owned),
         effort: suffix.and_then(effort_from_suffix),
         cwd: req.working_dir.map(Path::to_path_buf),
         resume_session_id: resume_for(req, Sdk::Claude),
@@ -831,6 +847,7 @@ async fn run_sdk(req: PromptRun<'_>, sdk: Sdk) -> Result<PromptOutcome> {
         cancel_token: Some(&cancel),
         ..req
     };
+    let subagent = req.subagent_model.map(|entry| resolve_entry(entry, sdk));
     run_sdk_with_fallback(
         &req,
         sdk,
@@ -840,45 +857,55 @@ async fn run_sdk(req: PromptRun<'_>, sdk: Sdk) -> Result<PromptOutcome> {
             ModelReferenceFormat::LegacyEffort
         },
         retry::active_policy(),
-        |candidate_sdk, model_ref| match candidate_sdk {
-            Sdk::Jcode => Ok(stream_jcode_agent(
-                build_jcode_config(&req, model_ref)?,
-                req.prompt.to_string(),
-            )),
-            Sdk::Claude => Ok(stream_claude_agent(
-                build_claude_config(&req, model_ref),
-                req.prompt.to_string(),
-            )),
-            Sdk::OpenCode => Ok(stream_agent(
-                OpenCodeRunnerConfig {
-                    model_ref: model_ref.map(str::to_string),
-                    cwd: req.working_dir.map(Path::to_path_buf),
-                    resume_session_id: resume_for(&req, Sdk::OpenCode),
-                    tools: req.tools.clone(),
-                    env: req.env.clone(),
-                    mcp_servers: req.mcp_servers.clone(),
-                    permission: req.permission,
-                    cancel: req.cancel_token.cloned(),
-                    keep_session_home: req.resume.is_some()
-                        || req.on_session_id.is_some()
-                        || req.tools.iter().any(|tool| {
-                            matches!(
-                                tool.name.as_str(),
-                                crate::sdk_tools::SUBMIT_PLAN_TOOL
-                                    | crate::sdk_tools::UPDATE_PLAN_TOOL
-                            )
-                        }),
-                    cli_path: None,
-                    computer_use: req.computer_use,
-                },
-                req.prompt.to_string(),
-            )),
+        |candidate_sdk, model_ref| {
+            let subagent_model = subagent
+                .as_ref()
+                .filter(|candidate| candidate.sdk == candidate_sdk)
+                .and_then(|candidate| candidate.model.as_deref());
+            match candidate_sdk {
+                Sdk::Jcode => Ok(stream_jcode_agent(
+                    build_jcode_config(&req, model_ref, subagent_model)?,
+                    req.prompt.to_string(),
+                )),
+                Sdk::Claude => Ok(stream_claude_agent(
+                    build_claude_config(&req, model_ref, subagent_model),
+                    req.prompt.to_string(),
+                )),
+                Sdk::OpenCode => Ok(stream_agent(
+                    OpenCodeRunnerConfig {
+                        model_ref: model_ref.map(str::to_string),
+                        cwd: req.working_dir.map(Path::to_path_buf),
+                        resume_session_id: resume_for(&req, Sdk::OpenCode),
+                        tools: req.tools.clone(),
+                        env: req.env.clone(),
+                        mcp_servers: req.mcp_servers.clone(),
+                        permission: req.permission,
+                        cancel: req.cancel_token.cloned(),
+                        keep_session_home: req.resume.is_some()
+                            || req.on_session_id.is_some()
+                            || req.tools.iter().any(|tool| {
+                                matches!(
+                                    tool.name.as_str(),
+                                    crate::sdk_tools::SUBMIT_PLAN_TOOL
+                                        | crate::sdk_tools::UPDATE_PLAN_TOOL
+                                )
+                            }),
+                        cli_path: None,
+                        computer_use: req.computer_use,
+                    },
+                    req.prompt.to_string(),
+                )),
+            }
         },
     )
     .await
 }
 
-fn build_jcode_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> Result<JcodeRunnerConfig> {
+fn build_jcode_config(
+    req: &PromptRun<'_>,
+    model_ref: Option<&str>,
+    subagent_model: Option<&str>,
+) -> Result<JcodeRunnerConfig> {
     let (provider, model, effort) = jcode::parse_model_ref(model_ref)?;
     if model.is_none() {
         return Err(CruiseError::InvalidStepConfig(format!(
@@ -886,10 +913,22 @@ fn build_jcode_config(req: &PromptRun<'_>, model_ref: Option<&str>) -> Result<Jc
             model_ref.unwrap_or("<unset>")
         )));
     }
+    let has_subagent_model = subagent_model.is_some();
+    let has_subagent_effort =
+        subagent_model.is_some_and(|model| split_thinking_suffix(model.trim()).1.is_some());
+    let (subagent_provider, subagent_model, _) = jcode::parse_model_ref(subagent_model)?;
+    if has_subagent_effort || (has_subagent_model && subagent_model.is_none()) {
+        return Err(CruiseError::InvalidStepConfig(
+            "subagent_model for `sdk: jcode` must identify a model without an effort suffix"
+                .to_owned(),
+        ));
+    }
     Ok(JcodeRunnerConfig {
         model,
         provider,
         effort,
+        subagent_provider,
+        subagent_model,
         cwd: req.working_dir.map(Path::to_path_buf),
         resume_session_id: resume_for(req, Sdk::Jcode),
         tools: req.tools.clone(),
@@ -1209,6 +1248,7 @@ mod tests {
             .run(PromptRun {
                 prompt: "hi",
                 model: None,
+                subagent_model: None,
                 max_retries: 0,
                 env: &env,
                 mcp_servers: &EMPTY_MCP_SERVERS,
@@ -1293,6 +1333,7 @@ mod tests {
         PromptRun {
             prompt: "hi",
             model: None,
+            subagent_model: None,
             max_retries: 0,
             env,
             mcp_servers: &EMPTY_MCP_SERVERS,
@@ -1341,6 +1382,59 @@ mod tests {
         assert!(!marker.exists(), "the command must not be spawned");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_backend_rejects_subagent_model_without_spawning() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let marker = temp.path().join("spawned");
+        let env = HashMap::new();
+        let entry = crate::config::ModelEntry::String("haiku".to_owned());
+        let mut req = base_req(&env);
+        req.subagent_model = Some(&entry);
+        let executor = Executor::Command {
+            command: vec!["touch".to_owned(), marker.to_string_lossy().into_owned()],
+        };
+        let Err(error) = executor.run(req).await else {
+            panic!("command backend must reject subagent_model");
+        };
+        assert!(matches!(error, CruiseError::InvalidStepConfig(_)));
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn subagent_model_builders_forward_backend_settings() {
+        let env = HashMap::new();
+        let req = base_req(&env);
+        let claude = build_claude_config(&req, Some("sonnet"), Some("haiku"));
+        assert_eq!(claude.subagent_model.as_deref(), Some("haiku"));
+        let jcode = build_jcode_config(&req, Some("openai/main"), Some("openai/worker"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(jcode.subagent_provider.as_deref(), Some("openai"));
+        assert_eq!(jcode.subagent_model.as_deref(), Some("worker"));
+    }
+
+    #[test]
+    fn subagent_model_jcode_builder_rejects_missing_model_and_effort() {
+        let env = HashMap::new();
+        let req = base_req(&env);
+        for model in ["", "   ", "provider/", "worker:high", "worker:none"] {
+            assert!(build_jcode_config(&req, Some("openai/main"), Some(model)).is_err());
+        }
+        let omitted = build_jcode_config(&req, Some("openai/main"), None)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(omitted.subagent_provider.is_none());
+        assert!(omitted.subagent_model.is_none());
+        let error = build_jcode_config(&req, Some("openai/main"), Some("provider/:high"))
+            .err()
+            .unwrap_or_else(|| panic!("malformed subagent reference must fail"))
+            .to_string();
+        assert!(error.contains("invalid model reference"), "{error}");
+        assert!(!error.contains("subagent_model"), "{error}");
+        let config = build_jcode_config(&req, Some("openai/main"), Some("openai/worker:free"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(config.subagent_model.as_deref(), Some("worker:free"));
+    }
+
     // -- build_claude_config ---------------------------------------------------
 
     #[test]
@@ -1348,7 +1442,7 @@ mod tests {
         let env = HashMap::new();
         let mut req = base_req(&env);
         req.model = fixture_model(Some("claude-sonnet-4-6:xhigh"));
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary));
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None);
         assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(config.effort, Some(EffortLevel::XHigh));
     }
@@ -1357,7 +1451,7 @@ mod tests {
     fn build_claude_config_leaves_model_unset_so_the_cli_picks_its_default() {
         let env = HashMap::new();
         let req = base_req(&env);
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary));
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None);
         assert_eq!(config.model, None);
         assert_eq!(config.effort, None);
     }
@@ -1384,6 +1478,7 @@ mod tests {
         let req = PromptRun {
             prompt: "hi",
             model: fixture_model(Some("claude-opus-4-6")),
+            subagent_model: None,
             max_retries: 0,
             env: &env,
             mcp_servers: &mcp_servers,
@@ -1400,7 +1495,7 @@ mod tests {
             computer_use: false,
             permission: crate::config::PermissionMode::Full,
         };
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary));
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None);
         assert_eq!(config.cwd, Some(dir));
         assert_eq!(config.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(config.resume_session_id.as_deref(), Some("sess-1"));
@@ -1424,7 +1519,7 @@ mod tests {
         );
         req.mcp_servers = &mcp_servers;
 
-        let config = build_jcode_config(&req, req.model.and_then(ModelSpec::primary))
+        let config = build_jcode_config(&req, req.model.and_then(ModelSpec::primary), None)
             .unwrap_or_else(|error| panic!("{error}"));
 
         assert_eq!(config.mcp_servers, mcp_servers);
@@ -1438,7 +1533,7 @@ mod tests {
         let req = base_req(&env);
 
         for model in [None, Some(""), Some("  \t"), Some(":high"), Some(":none")] {
-            let result = build_jcode_config(&req, model);
+            let result = build_jcode_config(&req, model, None);
             assert!(
                 matches!(result, Err(CruiseError::InvalidStepConfig(_))),
                 "model reference {model:?} must not produce a runner config"
@@ -1451,13 +1546,13 @@ mod tests {
         let env = HashMap::new();
         let req = base_req(&env);
 
-        let effort = build_jcode_config(&req, Some("test-provider/test-model:high"))
+        let effort = build_jcode_config(&req, Some("test-provider/test-model:high"), None)
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(effort.provider.as_deref(), Some("test-provider"));
         assert_eq!(effort.model.as_deref(), Some("test-model"));
         assert_eq!(effort.effort, Some(EffortLevel::High));
 
-        let free = build_jcode_config(&req, Some("test-provider/free-model:free"))
+        let free = build_jcode_config(&req, Some("test-provider/free-model:free"), None)
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(free.provider.as_deref(), Some("test-provider"));
         assert_eq!(free.model.as_deref(), Some("free-model:free"));
@@ -1863,6 +1958,7 @@ mod tests {
                 .run(PromptRun {
                     prompt: "assistant output",
                     model: fixture_model(model),
+                    subagent_model: None,
                     max_retries: 0,
                     env: &env,
                     mcp_servers: &EMPTY_MCP_SERVERS,
@@ -2501,7 +2597,7 @@ mod tests {
             |model| {
                 let model = model.unwrap_or_default();
                 record(&attempts_sink, model);
-                let config = build_jcode_config(&req, Some(model))?;
+                let config = build_jcode_config(&req, Some(model), None)?;
                 record(&started_sink, model);
                 if model == "test-primary/model" {
                     Ok(canned(vec![limit_chunk()]))
@@ -2730,6 +2826,7 @@ mod tests {
             .run(PromptRun {
                 prompt: "go",
                 model: None,
+                subagent_model: None,
                 max_retries: 0,
                 env: &env,
                 mcp_servers: &EMPTY_MCP_SERVERS,
