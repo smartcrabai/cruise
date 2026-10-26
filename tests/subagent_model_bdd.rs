@@ -282,6 +282,7 @@ mod contracts {
                 resume: None,
                 computer_use: false,
                 permission: Default::default(),
+                tool_policy: Default::default(),
             })
             .await;
         w.error = Some(

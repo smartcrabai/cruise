@@ -483,28 +483,73 @@ async fn edit_session_settings_interactive(
 ) -> crate::error::Result<()> {
     use crate::session_edit::{CurrentStepUpdate, SessionSettingsUpdate, update_session_settings};
 
+    let config = manager.load_config(session).ok();
+    let declared_flags = config
+        .as_ref()
+        .map(crate::flags::choices)
+        .unwrap_or_default();
+    let flags = if declared_flags.is_empty() {
+        None
+    } else {
+        let mut values = session.flags.clone();
+        for flag in &declared_flags {
+            let current = match session.flags.get(&flag.name) {
+                Some(true) => "on",
+                Some(false) => "off",
+                None => "unset",
+            };
+            let keep = format!("Keep (current: {current})");
+            let options = vec![keep.clone(), "on".to_string(), "off".to_string()];
+            let message = format!("Flag '{}':", flag.name);
+            let mut prompt = inquire::Select::new(&message, options);
+            if let Some(description) = flag.description.as_deref() {
+                prompt = prompt.with_help_message(description);
+            }
+            match prompt.prompt() {
+                Ok(choice) if choice == keep => {}
+                Ok(choice) => {
+                    values.insert(flag.name.clone(), choice == "on");
+                }
+                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(CruiseError::Other(format!("selection error: {e}")));
+                }
+            }
+        }
+        Some(values)
+    };
+
     // Load config to enumerate available step names for the multi-select.
     // Main-phase steps and after-pr steps are kept separate: after-pr IDs are
     // labelled so the user can tell them apart, and current_step is restricted
     // to main-phase expanded IDs (after-pr steps are not valid resume points).
-    let (main_nodes, after_pr_nodes) = match manager.load_config(session) {
-        Ok(config) => {
-            let main = list_skippable_steps(&config).unwrap_or_default();
-            let after = list_skippable_after_pr_steps(&config).unwrap_or_default();
+    let (main_nodes, after_pr_nodes) = match config.as_ref() {
+        Some(config) => {
+            let main = list_skippable_steps(config).unwrap_or_default();
+            let after = list_skippable_after_pr_steps(config).unwrap_or_default();
             (main, after)
         }
-        Err(_) => (Vec::new(), Vec::new()),
+        None => (Vec::new(), Vec::new()),
     };
     let main_ids: Vec<String> = main_nodes
         .iter()
         .flat_map(|n| n.expanded_step_ids.clone())
         .collect();
-    let after_ids: Vec<String> = after_pr_nodes
+    let effective_flags = flags.as_ref().unwrap_or(&session.flags);
+    let skip_main_nodes = crate::flags::skip_candidates(&main_nodes, effective_flags);
+    let skip_after_nodes = crate::flags::skip_candidates(&after_pr_nodes, effective_flags);
+    let skip_main_ids: Vec<String> = skip_main_nodes
+        .iter()
+        .flat_map(|n| n.expanded_step_ids.clone())
+        .collect();
+    let after_ids: Vec<String> = skip_after_nodes
         .iter()
         .flat_map(|n| n.expanded_step_ids.clone())
         .collect();
 
-    let choices: Vec<StepChoice> = main_ids
+    let choices: Vec<StepChoice> = skip_main_ids
         .iter()
         .map(|id| StepChoice {
             label: id.clone(),
@@ -517,8 +562,12 @@ async fn edit_session_settings_interactive(
         .collect();
 
     let skipped_steps = if choices.is_empty() {
-        eprintln!("(no steps available from config — skipped_steps unchanged)");
-        session.skipped_steps.clone()
+        eprintln!("(no steps available for selected flags)");
+        crate::flags::drop_disabled_skips(
+            session.skipped_steps.clone(),
+            main_nodes.iter().chain(&after_pr_nodes),
+            effective_flags,
+        )
     } else {
         let defaults: Vec<usize> = choices
             .iter()
@@ -567,44 +616,6 @@ async fn edit_session_settings_interactive(
         }
     } else {
         CurrentStepUpdate::Unchanged
-    };
-
-    // One Select per declared flag: keep the current value or set on/off.
-    let declared_flags = manager
-        .load_config(session)
-        .map(|config| crate::flags::choices(&config))
-        .unwrap_or_default();
-    let flags = if declared_flags.is_empty() {
-        None
-    } else {
-        let mut values = session.flags.clone();
-        for flag in &declared_flags {
-            let current = match session.flags.get(&flag.name) {
-                Some(true) => "on",
-                Some(false) => "off",
-                None => "unset",
-            };
-            let keep = format!("Keep (current: {current})");
-            let options = vec![keep.clone(), "on".to_string(), "off".to_string()];
-            let message = format!("Flag '{}':", flag.name);
-            let mut prompt = inquire::Select::new(&message, options);
-            if let Some(description) = flag.description.as_deref() {
-                prompt = prompt.with_help_message(description);
-            }
-            match prompt.prompt() {
-                Ok(choice) if choice == keep => {}
-                Ok(choice) => {
-                    values.insert(flag.name.clone(), choice == "on");
-                }
-                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-                    return Ok(());
-                }
-                Err(e) => {
-                    return Err(CruiseError::Other(format!("selection error: {e}")));
-                }
-            }
-        }
-        Some(values)
     };
 
     let (updated, config_changed) = update_session_settings(

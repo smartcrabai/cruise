@@ -343,7 +343,8 @@ pub(crate) fn step_tree_html(
     base_dir: &str,
     config_path: Option<&str>,
     repo: Option<&str>,
-    skipped: &[String],
+    skipped: Option<&[String]>,
+    flags: &crate::flags::FlagValues,
 ) -> Result<String> {
     let defaults = state.application.new_session_config_defaults(
         std::path::Path::new(base_dir),
@@ -352,13 +353,11 @@ pub(crate) fn step_tree_html(
     );
     let vm = match defaults {
         Ok(defaults) => {
-            let effective = if skipped.is_empty() {
-                defaults.default_skipped_steps.clone()
-            } else {
-                skipped.to_vec()
-            };
-            let mut vm = step_tree_vm(&defaults.steps, &defaults.after_pr_steps, &effective);
-            vm.flags = flag_rows(&defaults.flags, &crate::flags::FlagValues::new());
+            let effective = skipped.unwrap_or(&defaults.default_skipped_steps);
+            let steps = crate::flags::skip_candidates(&defaults.steps, flags);
+            let after_pr = crate::flags::skip_candidates(&defaults.after_pr_steps, flags);
+            let mut vm = step_tree_vm(&steps, &after_pr, effective);
+            vm.flags = flag_rows(&defaults.flags, flags);
             vm
         }
         Err(_) => StepTreeVm {
@@ -445,7 +444,8 @@ pub(crate) fn new_session_html(state: &WebState) -> Result<String> {
             &base_dir,
             config_path.as_deref(),
             Some(&repo),
-            &skipped,
+            (!skipped.is_empty()).then_some(skipped.as_slice()),
+            &crate::flags::FlagValues::new(),
         )?),
         attachments: RawHtml::new(state.templates.render(
             "attachment-list",

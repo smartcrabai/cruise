@@ -68,6 +68,7 @@ static PRIVATE_MCP_CONFIG_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// caller needs to format the config.
 #[derive(Default)]
 pub(crate) struct ClaudeRunnerConfig {
+    pub tool_policy: crate::tool_policy::ToolPolicy,
     pub(crate) permission: crate::config::PermissionMode,
     pub(crate) model: Option<String>,
     /// FORCE fixes all subagents, including Explore and Plan, to this model.
@@ -493,6 +494,18 @@ fn build_options(config: &ClaudeRunnerConfig) -> ClaudeAgentOptions {
             );
         }
     }
+    if config.tool_policy.deny_web {
+        opts.disallowed_tools
+            .extend(["WebFetch", "WebSearch"].map(str::to_string));
+    }
+    if config.tool_policy.deny_subagent {
+        opts.disallowed_tools.push("Agent".to_string());
+    }
+    opts.disallowed_tools
+        .extend(config.tool_policy.shell_rules.iter().map(|rule| {
+            let separator = if rule.prefix.ends_with('=') { "" } else { " " };
+            format!("Bash({}{separator}*)", rule.prefix)
+        }));
     // Workflow MCP servers are passed to the CLI by `run_async` through a
     // private config file, never through the SDK's inline `--mcp-config` JSON.
     if !config.tools.is_empty() {
@@ -1482,5 +1495,102 @@ mod tests {
             Some("bypassPermissions")
         );
         assert!(!args.iter().any(|a| a == "--disallowedTools"));
+    }
+
+    #[test]
+    fn tool_policy_maps_native_denies_without_changing_full_mode() {
+        use crate::tool_policy::{RuleSource, ShellRule, ToolPolicy};
+        let config = ClaudeRunnerConfig {
+            tool_policy: ToolPolicy {
+                deny_web: true,
+                deny_subagent: true,
+                shell_rules: vec![
+                    ShellRule {
+                        prefix: "git commit".into(),
+                        source: RuleSource::AllowCommit,
+                    },
+                    ShellRule {
+                        prefix: "git -c core.hooksPath=".into(),
+                        source: RuleSource::AllowCommit,
+                    },
+                    ShellRule {
+                        prefix: "npm publish".into(),
+                        source: RuleSource::DisallowedTools,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let expected = [
+            "WebFetch",
+            "WebSearch",
+            "Agent",
+            "Bash(git commit *)",
+            "Bash(git -c core.hooksPath=*)",
+            "Bash(npm publish *)",
+        ];
+        let opts = build_options(&config);
+        assert!(matches!(
+            opts.permission_mode,
+            Some(PermissionMode::BypassPermissions)
+        ));
+        let args = claude_args(&config);
+        assert_eq!(
+            arg_after(&args, "--permission-mode").as_deref(),
+            Some("bypassPermissions")
+        );
+        let cli_denies = csv(&args, "--disallowedTools");
+        for deny in expected {
+            assert!(
+                opts.disallowed_tools.iter().any(|tool| tool == deny),
+                "missing {deny}"
+            );
+            assert!(
+                cli_denies.iter().any(|tool| tool == deny),
+                "missing CLI deny {deny}"
+            );
+        }
+        assert!(
+            !opts
+                .disallowed_tools
+                .iter()
+                .any(|tool| tool.starts_with("mcp__"))
+        );
+    }
+
+    #[test]
+    fn restricted_tool_policy_keeps_dont_ask_and_whole_bash_deny() {
+        for permission in [
+            crate::config::PermissionMode::ReadOnly,
+            crate::config::PermissionMode::Edit,
+        ] {
+            let config = ClaudeRunnerConfig {
+                permission,
+                tool_policy: crate::tool_policy::ToolPolicy {
+                    deny_web: true,
+                    deny_subagent: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let opts = build_options(&config);
+            assert!(matches!(
+                opts.permission_mode,
+                Some(PermissionMode::DontAsk)
+            ));
+            for deny in ["Bash", "WebFetch", "WebSearch", "Agent"] {
+                assert!(
+                    opts.disallowed_tools.iter().any(|tool| tool == deny),
+                    "{permission:?}: missing {deny}"
+                );
+            }
+            assert!(
+                !opts
+                    .disallowed_tools
+                    .iter()
+                    .any(|tool| tool.starts_with("Bash("))
+            );
+        }
     }
 }

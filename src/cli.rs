@@ -157,6 +157,8 @@ pub struct InternalArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum InternalCommand {
+    /// Enforce this prompt's jcode pre-tool shell policy.
+    JcodePreTool,
     /// Merge the PR base branch into the current branch.
     SyncBase {
         /// Pull request number.

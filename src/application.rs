@@ -484,6 +484,9 @@ fn create_session_inner(
         request.skipped_steps
     };
     crate::flags::validate_names(&config, &request.flags)?;
+    let mut nodes = crate::workflow::list_skippable_steps(&config)?;
+    nodes.extend(crate::workflow::list_skippable_after_pr_steps(&config)?);
+    let skipped_steps = crate::flags::drop_disabled_skips(skipped_steps, &nodes, &request.flags);
     let mut state = SessionState::new_draft(
         id.to_string(),
         base_dir,
@@ -4475,6 +4478,104 @@ mod tests {
             crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL"),
         ]);
         guards
+    }
+
+    fn assert_create_session_flag_skips(flags: &crate::flags::FlagValues, expected: &[&str]) {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _app_config = isolate_application_config(temp.path());
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let skipped = [
+            "build",
+            "optional",
+            "review",
+            "review/check",
+            "publish",
+            "notify",
+            "notify/check",
+            "unknown-step",
+        ];
+        let session = app
+            .create_session(NewSessionRequest {
+                input: "flag skip pruning".to_string(),
+                base_dir: temp.path().to_path_buf(),
+                config_path: None,
+                config_yaml: Some(
+                    "command: [echo]
+flags:
+  optional: {}
+groups:
+  checks:
+    steps:
+      check:
+        command: 'true'
+steps:
+  build:
+    command: 'true'
+  optional:
+    flag: optional
+    command: 'true'
+  review:
+    flag: optional
+    group: checks
+after-pr:
+  publish:
+    flag: optional
+    command: 'true'
+  notify:
+    flag: optional
+    group: checks
+"
+                    .to_string(),
+                ),
+                repo: None,
+                workspace_mode: WorkspaceMode::Worktree,
+                allow_dirty_working_tree: false,
+                attachments: vec![],
+                skipped_steps: skipped.into_iter().map(str::to_string).collect(),
+                flags: flags.clone(),
+            })
+            .unwrap_or_else(|e| panic!("create session: {e}"));
+        assert_eq!(session.skipped_steps, expected);
+        assert_eq!(&session.flags, flags);
+        let saved = manager.load(&session.id).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(saved.skipped_steps, expected);
+        let history = app
+            .history()
+            .unwrap_or_else(|e| panic!("load history: {e}"));
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].skipped_steps, expected);
+    }
+
+    #[test]
+    fn create_session_prunes_flag_disabled_skips_and_history() {
+        assert_create_session_flag_skips(&BTreeMap::new(), &["build", "unknown-step"]);
+    }
+
+    #[test]
+    fn create_session_prunes_explicitly_off_flag_skips_and_history() {
+        assert_create_session_flag_skips(
+            &BTreeMap::from([("optional".to_string(), false)]),
+            &["build", "unknown-step"],
+        );
+    }
+
+    #[test]
+    fn create_session_retains_flag_enabled_skips_and_history() {
+        assert_create_session_flag_skips(
+            &BTreeMap::from([("optional".to_string(), true)]),
+            &[
+                "build",
+                "optional",
+                "review",
+                "review/check",
+                "publish",
+                "notify",
+                "notify/check",
+                "unknown-step",
+            ],
+        );
     }
 
     fn write_relative_auth_fixture(

@@ -812,6 +812,7 @@ impl Fixture {
             resume: None,
             computer_use: false,
             permission: PermissionMode::Full,
+            tool_policy: cruise::tool_policy::ToolPolicy::default(),
         };
         let config: RetryConfig = serde_yaml::from_str("base_delay_ms: 1\nmodel_fallback: true\nfallback_chains:\n  default: [fixture/fallback]\n").unwrap_or_else(|error| panic!("retry config: {error}"));
         tokio::time::timeout(
@@ -1822,6 +1823,7 @@ async fn missing_resume_target_is_not_replaced_with_a_new_conversation() {
             }),
             computer_use: false,
             permission: PermissionMode::Full,
+            tool_policy: cruise::tool_policy::ToolPolicy::default(),
         }),
     )
     .await
@@ -1954,6 +1956,7 @@ pub(crate) async fn resume_fixture_with_model(
             }),
             computer_use: false,
             permission: PermissionMode::Full,
+            tool_policy: cruise::tool_policy::ToolPolicy::default(),
         }),
     )
     .await
@@ -2101,6 +2104,7 @@ async fn executor_cancellation_awaits_admitted_handler_after_peer_disconnect() {
         resume: None,
         computer_use: false,
         permission: PermissionMode::Full,
+        tool_policy: cruise::tool_policy::ToolPolicy::default(),
     });
     tokio::pin!(run);
     let admit = async {
@@ -2198,6 +2202,7 @@ async fn configured_fixture_run(
             resume: None,
             computer_use: false,
             permission: PermissionMode::Full,
+            tool_policy: cruise::tool_policy::ToolPolicy::default(),
         }),
     )
     .await

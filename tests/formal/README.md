@@ -7,6 +7,12 @@ Alloy assertions and witnesses with receipt validation, production Gherkin and
 Rust CLI/API regression tests. Local evidence is in
 `SUBAGENT_MODEL_VERIFICATION.md`.
 
+For per-prompt `disallowed_tools`, implicit git denials and MCP filtering, see
+`TOOL_RESTRICTIONS.md` and run `bash scripts/check_tool_restrictions_specs.sh`.
+The dedicated `tool-restrictions-specs` native PR job runs Quint, all Alloy
+assertions and witnesses with receipt validation, production Cucumber scenarios,
+negative controls and affected Rust contracts using the shared pins below.
+
 For responsive WebUI drawer transitions, width persistence, real browser layout
 and htmx Gherkin, see `RESPONSIVE_WEBUI.md` and run
 `bash scripts/check_responsive_webui_specs.sh`. The dedicated secret-free
@@ -23,6 +29,12 @@ For workflow-start OAuth authentication preflight, including bounded Quint and
 Alloy checks and production CLI Gherkin, see `AGENT_AUTH.md` and run
 `bash scripts/check_agent_auth_specs.sh`. Its dedicated `agent-auth-specs` PR CI
 job uses the same pinned toolchain and validates every Alloy receipt command.
+
+For flag-dependent skip candidates and flags-before-skips approval, see
+`FLAG_SKIP_SELECTION.md` and `FLAG_SKIP_SELECTION_VERIFICATION.md`. The same
+`bash scripts/check_workflow_flags_specs.sh` command now requires the separate
+skip-selection Quint/Alloy models, production approval Gherkin and UI/application
+regressions in the existing `workflow-flags-specs` PR job.
 
 For the CLI planning-to-execution workflow-flag boundary, see
 `WORKFLOW_FLAGS.md` and run `bash scripts/check_workflow_flags_specs.sh`.

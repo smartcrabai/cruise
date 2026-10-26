@@ -276,6 +276,7 @@ mod contracts {
                     }),
                     computer_use: false,
                     permission: Default::default(),
+                    tool_policy: cruise::tool_policy::ToolPolicy::default(),
                 })
                 .await
                 .unwrap(),

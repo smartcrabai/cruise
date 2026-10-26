@@ -1417,6 +1417,19 @@ pub(crate) async fn run_prompt_step(
         prompt.push_str("\n\nIn this working repository and any linked worktrees, do not create commits, move HEAD or local branch refs, or disable or bypass the commit guard, even if the task text asks you to. Leave all edits uncommitted.");
     }
 
+    let permission = step.permission.unwrap_or(compiled.permission);
+    let tool_policy = crate::tool_policy::ToolPolicy::for_prompt_step(
+        &compiled.disallowed_tools,
+        &step.disallowed_tools,
+        allow_commit,
+        permission,
+    );
+    let mcp_servers = tool_policy.filter_mcp_servers(&compiled.mcp_servers);
+    if let Some(notice) = tool_policy.prompt_notice() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&notice);
+    }
+
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
     let model_or_mode = executor.step_model(step.model.as_deref(), compiled.model.as_ref());
     let computer_use = step.computer_use.unwrap_or(compiled.computer_use);
@@ -1488,7 +1501,7 @@ pub(crate) async fn run_prompt_step(
                 .or(compiled.subagent_model.as_ref()),
             max_retries: rate_limit_retries,
             env: prompt_env,
-            mcp_servers: &compiled.mcp_servers,
+            mcp_servers: &mcp_servers,
             on_notice: Some(&on_notice),
             cancel_token: Some(&prompt_cancel_token),
             working_dir,
@@ -1497,7 +1510,8 @@ pub(crate) async fn run_prompt_step(
             on_session_id: None,
             resume: None,
             computer_use,
-            permission: step.permission.unwrap_or(compiled.permission),
+            permission,
+            tool_policy,
         });
 
         if let Some(duration) = timeout {
@@ -2173,6 +2187,71 @@ mod tests {
     }
 
     // -- execute_steps_with_dag: NodeRuntime wiring ----------------------------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tool_restrictions_filter_workflow_mcp_for_after_pr_backend_launch() {
+        let _process = lock_process();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let mut guards = set_fake_home(home.path());
+        let bin = home.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("mkdir: {error}"));
+        crate::test_support::write_executable_script(
+            &bin.join("claude"),
+            concat!(
+                "#!/bin/sh\n",
+                "while [ \"$#\" -gt 0 ]; do\n",
+                "  if [ \"$1\" = '--mcp-config' ]; then\n",
+                "    shift\n",
+                "    if [ -f \"$1\" ]; then cat \"$1\" > \"$CRUISE_TEST_MCP_CAPTURE\"; fi\n",
+                "  fi\n",
+                "  shift\n",
+                "done\n",
+                "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"policy-test\",\"result\":\"done\"}'\n",
+            ),
+        );
+        guards.push(crate::test_support::prepend_to_path(&bin));
+        let capture = home.path().join("mcp-capture.json");
+        let env = HashMap::from([(
+            "CRUISE_TEST_MCP_CAPTURE".to_string(),
+            capture.to_string_lossy().into_owned(),
+        )]);
+        let config = make_config(
+            "sdk: claude\ndisallowed_tools: [\"mcp:workflow_removed\"]\nmcp_servers:\n  retained:\n    command: echo\n  removed:\n    command: echo\n  workflow_removed:\n    command: echo\nsteps:\n  main:\n    prompt: main\nafter-pr:\n  review:\n    prompt: inspect\n    disallowed_tools: [\"mcp:removed\"]\n",
+        );
+        let compiled = crate::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .to_after_pr_compiled();
+        let StepKind::Prompt(step) = StepKind::try_from(compiled.steps["review"].clone())
+            .unwrap_or_else(|error| panic!("{error}"))
+        else {
+            panic!("expected prompt step");
+        };
+        let mut vars = VariableStore::new(String::new());
+        run_prompt_step(
+            &mut vars,
+            &compiled,
+            &step,
+            0,
+            &env,
+            None,
+            Some(home.path()),
+            PromptStepOutput::Console(None),
+            Some(Duration::from_secs(5)),
+            "review",
+            false,
+            true,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("prompt run: {error}"));
+        let servers: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&capture).unwrap_or_else(|error| panic!("read MCP capture: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("parse MCP capture: {error}"));
+        assert!(servers["mcpServers"].get("retained").is_some());
+        assert!(servers["mcpServers"].get("removed").is_none());
+        assert!(servers["mcpServers"].get("workflow_removed").is_none());
+    }
 
     #[tokio::test]
     async fn test_execute_steps_with_dag_writes_pre_execution_runtime_onto_next_node() {

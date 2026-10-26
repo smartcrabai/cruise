@@ -334,6 +334,7 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
         ("squash-merge", step.squash_merge.is_some()),
         ("permission", step.permission.is_some()),
         ("subagent_model", step.subagent_model.is_some()),
+        ("disallowed_tools", !step.disallowed_tools.is_empty()),
     ]
     .into_iter()
     .filter_map(|(field, present)| present.then_some(field))
@@ -2391,5 +2392,57 @@ after-pr:
             panic!("permission is not supported on a workflow_call site");
         };
         assert!(error.to_string().contains("permission"));
+    }
+
+    #[test]
+    fn workflow_call_keeps_caller_restrictions_and_callee_step_restrictions() {
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        write_file(
+            &dir,
+            "callee.yaml",
+            "disallowed_tools: [web]\nsteps:\n  plain:\n    prompt: plain\n  inner:\n    prompt: inner\n    disallowed_tools: [subagent]\n",
+        );
+        for (caller, expected) in [
+            ("", serde_json::Value::Null),
+            ("disallowed_tools: []\n", serde_json::json!([])),
+            (
+                "disallowed_tools: [shell:npm publish]\n",
+                serde_json::json!(["shell:npm publish"]),
+            ),
+        ] {
+            let config = WorkflowConfig::from_yaml(&format!(
+                "{caller}steps:\n  shared:\n    workflow_call: ./callee.yaml\n"
+            ))
+            .unwrap_or_else(|e| panic!("{e}"));
+            let resolved = resolve_workflow_calls_with_defaults(
+                config,
+                dir.path(),
+                &WorkflowDefaults::default(),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+            let value = serde_json::to_value(resolved).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(value["disallowed_tools"], expected);
+            assert!(value["steps"]["shared/plain"]["disallowed_tools"].is_null());
+            assert_eq!(
+                value["steps"]["shared/inner"]["disallowed_tools"],
+                serde_json::json!(["subagent"])
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_call_rejects_disallowed_tools_on_call_site() {
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        write_file(&dir, "callee.yaml", "steps:\n  inner:\n    prompt: hi\n");
+        let config = WorkflowConfig::from_yaml(
+            "steps:\n  shared:\n    workflow_call: ./callee.yaml\n    disallowed_tools: [web]\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let Err(error) =
+            resolve_workflow_calls_with_defaults(config, dir.path(), &WorkflowDefaults::default())
+        else {
+            panic!("workflow_call cannot carry prompt restrictions");
+        };
+        assert!(error.to_string().contains("disallowed_tools"));
     }
 }

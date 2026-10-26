@@ -11,7 +11,7 @@ A pure `workflow_call:` call site (optionally with `skip`,
 executable steps, including under `after-pr`; it cannot be nested in a group.
 Every other step field on the call site is rejected: `model`, `prompt`,
 `prompt_file`, `instruction`, `plan`, `option`, `command`, `parallel`,
-`group`, `if`, `timeout`, `env`, `allow_commit`, `computer_use`, `permission`, `subagent_model`,
+`group`, `if`, `timeout`, `env`, `allow_commit`, `computer_use`, `permission`, `subagent_model`, `disallowed_tools`,
 `output_file`, and `squash-merge`.
 
 `parallel:` is a container step for concurrent prompt/command children (see below).
@@ -22,6 +22,21 @@ rejected on group calls, `workflow_call`, and parallel wrappers, and
 combined with `allow_commit: true`, and a parallel block containing a
 read-only child may only contain read-only prompt children. Read-only is
 enforced by tool restrictions plus a workspace snapshot diff, not a sandbox.
+
+`disallowed_tools` accepts SDK-neutral `web`, `subagent`, `mcp`, `mcp:<name>`,
+and `shell:<prefix>` entries on prompt steps and parallel prompt children only.
+Unknown MCP names are errors. Workflow and step lists form a deduplicated union,
+so step `[]` cannot relax workflow restrictions. Nonempty lists are rejected on
+command/option steps, group/workflow-call sites, parallel wrappers, and native
+`squash-merge`; explicit restrictions are invalid with a `command:` backend.
+Called workflows keep step lists but use the caller's workflow defaults.
+Use `permission` for blanket shell/edit restrictions, not bare `shell` or `edit`.
+Shell prefixes are nonempty, whitespace-normalized word sequences using only
+ASCII letters, digits, spaces, and `._/:=@+%-`, without quotes or shell syntax.
+A last word ending in `=` matches the start of that word. Shell rules are
+discarded in `read-only`/`edit`, where shell is already disabled.
+See [SDK enforcement and limits](sdk.md#tool-restriction-enforcement) and
+[workflow defaults](top-level.md#workflow-defaults-defaultyaml).
 
 `computer_use` can be set on a `prompt` or `prompt_file` step to override the
 workflow-level setting. Parallel prompt children can also set it. It is rejected
@@ -96,7 +111,15 @@ steps:
     prompt: "Fix the issue and commit the changes"
     allow_commit: true
 ```
-Omitting the field (or setting it to `false`) keeps the guard enabled; false values are omitted when configs are serialized. Setting it to `true` bypasses all commit-guard behavior for that prompt. This applies to prompt execution through classic `command:` prompts and `sdk: jcode` / `sdk: claude` / `sdk: opencode`. Command and option steps are unaffected. A guarded `HEAD` movement is reported as a commit-guard violation and the step fails, even when cruise can restore the original branch reference without touching the index or worktree. `allow_commit: true` is rejected on `group:` and `workflow_call:` call sites; configure the expanded prompt step instead.
+Omitting the field (or setting it to `false`) keeps the guard enabled; false values are omitted when configs are serialized. Setting it to `true` bypasses all commit-guard behavior and implicit Git shell denials for that prompt, but never widens `permission` or removes explicit `disallowed_tools`. This applies to prompt execution through classic `command:` prompts and `sdk: jcode` / `sdk: claude` / `sdk: opencode`, except that command backends do not enforce implicit shell denials. Command and option steps are unaffected. A guarded `HEAD` movement is reported as a commit-guard violation and the step fails, even when cruise can restore the original branch reference without touching the index or worktree. `allow_commit: true` is rejected on `group:` and `workflow_call:` call sites; configure the expanded prompt step instead.
+
+Unless `allow_commit: true`, SDK prompts deny `git commit`, `merge`, `rebase`,
+`cherry-pick`, `revert`, `am`, `pull`, `push`, `reset`, `switch`, `checkout -b`,
+`checkout -B`, `update-ref`, `config core.hooksPath`, and `-c core.hooksPath=`
+(each prefixed by `git`). This includes unstage via `git reset HEAD file`;
+use `git restore --staged`. `git checkout -- file`, `git stash create`, branch
+listing, and status/diff/log remain available. Prefix denial is defense in
+depth, not a security boundary or replacement for the commit guard.
 
 For a longer prompt, load the body from a file:
 
@@ -176,7 +199,7 @@ still run sequentially. Command children have no interactive stdin.
 Each child gets a private copy of the incoming variables. Environment precedence:
 workflow < parent block < child. Children support `prompt`/`prompt_file` or
 `command`, plus `model`, `env`, `skip`, `when`, and `timeout`. Prompt children
-may also set `permission` and `output_file`, but names must be distinct within the block. Child names must
+may also set `permission`, `disallowed_tools`, and `output_file`, but artifact names must be distinct within the block. Workflow restrictions and implicit Git denials apply to each prompt child. Child names must
 be non-empty and contain no `/`. Child `next`, `if`, `option`, `instruction`,
 `plan`, `group`, `workflow_call`, nested `parallel`, `flag`, `squash-merge`,
 and `allow_commit: true` are rejected. Parent fields: `parallel`, `env`, `skip`,
@@ -231,6 +254,8 @@ steps:
 |-------|------|-------------|
 | `model` | string | Model for prompt steps (overrides top-level; a model reference in SDK mode) |
 | `allow_commit` | bool | Allow this prompt step to create commits or otherwise advance Git `HEAD` (default `false`; only for prompt steps) |
+| `permission` | string | Prompt capability preset: `read-only`, `edit`, or `full` |
+| `disallowed_tools` | string array | Prompt-only SDK deny list, unioned with workflow restrictions and implicit Git denials; cannot relax defaults |
 | `prompt` | string | Inline prompt body (use with prompt steps) |
 | `prompt_file` | string \| null | File or supported GitHub blob/raw URL whose contents become the prompt; absolute, `~/`, or config-file-relative path (`~`/null means the local home directory) |
 | `output_file` | string \| null | Relative session artifact file receiving the final output of a prompt step |

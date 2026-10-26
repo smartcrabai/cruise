@@ -231,6 +231,7 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
         resume,
         computer_use: false,
         permission: PermissionMode::ReadOnly,
+        tool_policy: cruise::tool_policy::ToolPolicy::default(),
     };
     let first = tokio::time::timeout(
         Duration::from_secs(90),
@@ -521,5 +522,171 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
         std::fs::read_to_string(repo.join("read-only-sentinel")).unwrap_or_else(|e| panic!("{e}")),
         "unchanged"
     );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps isolated installed CLI setup and one tool-policy acceptance scenario together"
+)]
+#[ignore = "requires an explicitly selected installed OpenCode V2 CLI, never a provider account"]
+async fn installed_v2_explicit_shell_restriction_blocks_commit() {
+    let _lock = lock_process();
+    let root = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+    let executable = std::env::var_os("OPENCODE_REAL_CLI").map_or_else(
+        || PathBuf::from("/opt/homebrew/bin/opencode"),
+        PathBuf::from,
+    );
+    assert!(
+        executable.is_file(),
+        "set OPENCODE_REAL_CLI to the installed V2 executable"
+    );
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
+    let _home = set_fake_home(&home);
+    let _xdg: Vec<_> = [
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_CACHE_HOME", "cache"),
+    ]
+    .into_iter()
+    .map(|(key, directory)| EnvGuard::set(key, root.path().join(directory)))
+    .collect();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("{e}"));
+    write_executable_script(
+        &bin.join("opencode"),
+        &format!("#!/bin/sh\nexec '{}' \"$@\"\n", executable.display()),
+    );
+    for backend in ["jcode", "claude"] {
+        write_executable_script(&bin.join(backend), "#!/bin/sh\nexit 97\n");
+    }
+    let _path = cruise::test_support::prepend_to_path(&bin);
+    let model = Arc::new(Model::default());
+    // The pinned V2 core and installed 2.1.4 register `shell`, not `bash`:
+    // packages/core/src/tool/plugin/shell.ts:23 at baseline 74f8d486.
+    *model.calls.lock().unwrap_or_else(|e| panic!("{e}")) = VecDeque::from([
+        (
+            "shell",
+            json!({"command":"git commit --allow-empty -m LOCAL_TOOL_POLICY_MUST_BLOCK", "description":"Attempt explicitly denied commit"}),
+        ),
+        (
+            "shell",
+            json!({"command":"printf LOCAL_ALLOWED_BASH_OK > tool-policy-allowed", "description":"Prove unrelated shell remains available"}),
+        ),
+    ]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    let address = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
+    let app = Router::new()
+        .route("/chat/completions", axum::routing::post(respond))
+        .with_state(model.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+    });
+    let config = json!({
+        "update":"disable", "share":"disabled", "snapshots":false, "compaction":{"auto":false},
+        "model":"local-smoke/smoke",
+        "providers":{"local-smoke":{"package":"@opencode/ai/providers/openai-compatible", "env":[],
+            "settings":{"baseURL":format!("http://{address}"),"apiKey":"local-test-not-a-credential"},
+            "models":{"smoke":{"name":"Deterministic local policy", "limit":{"context":262_144,"output":1024},"capabilities":{"tools":true}}}}}
+    });
+    let _config = EnvGuard::set("OPENCODE_CONFIG_CONTENT", config.to_string());
+    let _no_auth = EnvGuard::remove("OPENCODE_AUTH_JSON");
+    let _config_path = EnvGuard::remove("OPENCODE_CONFIG");
+    let _config_dir = EnvGuard::remove("OPENCODE_CONFIG_DIR");
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e}"));
+    cruise::test_support::init_git_repo(&repo);
+    let git_history = || {
+        let output = std::process::Command::new("git")
+            .args(["reflog", "--format=%H %gs", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap_or_else(|e| panic!("git history: {e}"));
+        assert!(output.status.success(), "git history failed: {output:?}");
+        output.stdout
+    };
+    let history_before = git_history();
+    let workflow = root.path().join("restricted-workflow.yaml");
+    // Full exposes shell. allow_commit bypasses the guard and rollback, so only
+    // the explicit tool restriction can prevent the attempted ref mutation.
+    std::fs::write(&workflow, "sdk: opencode\nmodel: local-smoke/smoke\npermission: full\ninteractive_planning: false\nsteps:\n  implement:\n    prompt: '{input}'\n    allow_commit: true\n    disallowed_tools: [shell:git commit]\n").unwrap_or_else(|e| panic!("{e}"));
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_cruise"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("CRUISE_") {
+            command.env_remove(key);
+        }
+    }
+    command
+        .args(["exec", "-c"])
+        .arg(&workflow)
+        .arg("local deterministic tool-policy acceptance")
+        .current_dir(&repo)
+        // Only this disposable fixture repository is under test, not an outer workflow guard.
+        .env("GIT_CONFIG_COUNT", "0")
+        .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(90), command.output())
+        .await
+        .unwrap_or_else(|e| panic!("restricted cruise exec timed out: {e}"))
+        .unwrap_or_else(|e| panic!("restricted cruise exec: {e}"));
+    let terminal = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "restricted YAML workflow failed: {terminal}"
+    );
+    assert_eq!(
+        terminal.matches("LOCAL_V2_SMOKE_OK").count(),
+        1,
+        "{terminal}"
+    );
+    assert!(
+        model
+            .calls
+            .lock()
+            .unwrap_or_else(|e| panic!("{e}"))
+            .is_empty(),
+        "real CLI must attempt both queued shell calls, not silently omit shell"
+    );
+    assert_eq!(
+        git_history(),
+        history_before,
+        "denied commit must never create or roll back a ref"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("tool-policy-allowed")).unwrap_or_else(|e| panic!("{e}")),
+        "LOCAL_ALLOWED_BASH_OK",
+        "unrelated shell must remain allowed"
+    );
+    {
+        let requests = model.requests.lock().unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            requests.iter().any(
+                |request| request["messages"]
+                    .as_array()
+                    .is_some_and(|messages| messages.iter().any(|message| {
+                        let content = message["content"].to_string().to_lowercase();
+                        message["role"] == "tool"
+                            && message["tool_call_id"] == "call_local_0"
+                            && ["denied", "blocked", "not allowed", "permission"]
+                                .iter()
+                                .any(|reason| content.contains(reason))
+                    }))
+            ),
+            "model must receive the rejected commit's tool result: {requests:#?}"
+        );
+    }
     server.abort();
 }

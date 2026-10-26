@@ -128,6 +128,11 @@
       "type": "boolean",
       "description": "Execute direct plan entry points in the current directory instead of planning. Default: false; --no-force-exec opts out for one invocation."
     },
+    "disallowed_tools": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ToolRestriction" },
+      "description": "Default prompt tool restrictions, unioned with step restrictions. An explicit empty list overrides default.yaml."
+    },
     "permission": {
       "$ref": "#/$defs/PermissionMode",
       "description": "Default agent permission mode for prompt steps. Default: full. read-only and edit are unsupported with command: backends; read-only cannot be combined with allow_commit. Not a sandbox: read-only is enforced by tool restrictions plus a workspace snapshot diff."
@@ -205,6 +210,11 @@
         "allow_commit": {
           "type": "boolean",
           "description": "Allow this prompt step to create commits or otherwise advance Git HEAD. Defaults to false and is omitted when false during serialization. Only applies to prompt steps; group-call and workflow-call steps cannot set it to true."
+        },
+        "disallowed_tools": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ToolRestriction" },
+          "description": "Additional prompt tool restrictions. Cannot loosen workflow restrictions."
         },
         "permission": {
           "$ref": "#/$defs/PermissionMode",
@@ -394,6 +404,22 @@
           }
         },
         {
+          "if": { "required": ["disallowed_tools"], "properties": { "disallowed_tools": { "minItems": 1 } } },
+          "then": {
+            "oneOf": [
+              { "required": ["prompt"] },
+              { "required": ["prompt_file"] }
+            ],
+            "properties": {
+              "command": { "type": "null" },
+              "option": { "type": "null" },
+              "parallel": { "type": "null" },
+              "group": { "type": "null" },
+              "workflow_call": { "type": "null" }
+            }
+          }
+        },
+        {
           "if": { "required": ["permission"] },
           "then": {
             "oneOf": [
@@ -425,6 +451,7 @@
               "plan": { "type": "null" },
               "output_file": { "type": "null" },
               "computer_use": { "type": "null" },
+              "disallowed_tools": { "maxItems": 0 },
               "permission": { "type": "null" },
               "allow_commit": { "const": false },
               "flag": { "type": "null" }
@@ -464,6 +491,7 @@
               "allow_commit": { "const": false },
               "output_file": { "type": "null" },
               "computer_use": { "type": "null" },
+              "disallowed_tools": { "maxItems": 0 },
               "permission": { "type": "null" }
             }
           }
@@ -488,6 +516,7 @@
               "timeout": { "type": "null" },
               "output_file": { "type": "null" },
               "computer_use": { "type": "null" },
+              "disallowed_tools": { "maxItems": 0 },
               "permission": { "type": "null" }
             }
           }
@@ -520,12 +549,17 @@
               "output_file": { "type": "null" },
               "github-review": { "type": "null" },
               "computer_use": { "type": "null" },
+              "disallowed_tools": { "maxItems": 0 },
               "permission": { "type": "null" },
               "allow_commit": { "const": false }
             }
           }
         }
       ]
+    },
+    "ToolRestriction": {
+      "type": "string",
+      "pattern": "^(web|subagent|mcp|mcp:[A-Za-z0-9_-]+|shell: *[A-Za-z0-9._/:=@+%-]+( +[A-Za-z0-9._/:=@+%-]+)* *)(?![\\s\\S])"
     },
     "PermissionMode": {
       "type": "string",
@@ -546,6 +580,7 @@
         "timeout": { "$ref": "#/$defs/StepConfig/properties/timeout" },
         "computer_use": { "$ref": "#/$defs/StepConfig/properties/computer_use" },
         "permission": { "$ref": "#/$defs/StepConfig/properties/permission" },
+        "disallowed_tools": { "$ref": "#/$defs/StepConfig/properties/disallowed_tools" },
         "output_file": { "$ref": "#/$defs/StepConfig/properties/output_file" },
         "allow_commit": { "const": false }
       },
@@ -561,6 +596,7 @@
             "properties": {
               "subagent_model": { "type": "null" },
               "computer_use": { "type": "null" },
+              "disallowed_tools": { "maxItems": 0 },
               "permission": { "type": "null" }
             }
           }

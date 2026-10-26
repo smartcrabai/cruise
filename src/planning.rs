@@ -367,6 +367,7 @@ pub async fn run_plan_prompt_template(
             },
             computer_use: ctx.config.computer_use(),
             permission: crate::config::PermissionMode::Full,
+            tool_policy: crate::tool_policy::ToolPolicy::default(),
         })
         .await;
     drop(spinner);

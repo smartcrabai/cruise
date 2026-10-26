@@ -221,7 +221,7 @@ Running `cruise` with no arguments opens cruise's official interactive keyboard 
 cruise
 ```
 
-Typical flow: run `cruise`, press `n`, choose the Source, working directory or repository, and workflow config, then type the task. Press `Ctrl-P` for normal planning, `Ctrl-G` for grill planning, or `Ctrl-U` to use the input directly as the plan, or press `Tab` to answer the remaining questions one at a time and pick the launch mode at the end. After Task, the remaining questions are Images, Skipped steps, declared workflow flags (if any), Workspace (Directory sessions only), Dirty tree when applicable, and Launch. Press `1` to inspect or act on sessions, then `3` to run the planned queue in **Run All**. On Run All, press `p` to edit the shared parallelism setting, type a positive integer, and press `Enter` to save or `Esc` to cancel.
+Typical flow: run `cruise`, press `n`, choose the Source, working directory or repository, and workflow config, then type the task. Press `Ctrl-P` for normal planning, `Ctrl-G` for grill planning, or `Ctrl-U` to use the input directly as the plan, or press `Tab` to answer the remaining questions one at a time and pick the launch mode at the end. After Task, the remaining questions are Images, declared workflow flags (if any), Skipped steps (flag-disabled steps are hidden), Workspace (Directory sessions only), Dirty tree when applicable, and Launch. Press `1` to inspect or act on sessions, then `3` to run the planned queue in **Run All**. On Run All, press `p` to edit the shared parallelism setting, type a positive integer, and press `Enter` to save or `Esc` to cancel.
 
 The TUI requires an interactive TTY on macOS, Linux, or Windows. It is an interactive client, not an automation interface: use the CLI for automation, JSON output, and CI. GitHub-backed workflows use the external [`gh` CLI](https://cli.github.com/); the TUI does not bundle or replace it. Current-branch-only work does not require `gh` (`glab` for GitLab repositories).
 
@@ -230,7 +230,7 @@ The TUI requires an interactive TTY on macOS, Linux, or Windows. It is an intera
 The TUI has three views:
 
 - **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, or **Log** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The Graph tab shows its node list plus the selected node's dependency and edge details; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
-- **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above and the remaining questions below. The order is Source (local Directory or GitHub repository), working directory or repository, workflow config, task, images, skipped steps, workflow flags (shown only when the config declares flags), workspace mode, dirty-tree allowance (current-branch runs only), and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and all built-in workflows with `tdd` first. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
+- **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above and the remaining questions below. The order is Source (local Directory or GitHub repository), working directory or repository, workflow config, task, images, workflow flags (shown only when the config declares flags), skipped steps (flag-disabled steps are hidden), workspace mode, dirty-tree allowance (current-branch runs only), and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and all built-in workflows with `tdd` first. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
 - **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Press `p` to edit the shared WebUI/TUI parallelism setting. Changes are saved to the app configuration and can be made while a batch is active; a new limit applies at the next scheduling point, without cancelling workers that are already running. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
 PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS, `explorer.exe` on Windows, or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `config` and `exec` operations remain available through their CLI commands rather than TUI screens.
@@ -438,7 +438,7 @@ Options:
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable; conflicts with --all)
 ```
 
-**Workflow flags.** A workflow config can declare `flags:` and attach them to steps with `flag: <name>`. A flagged step runs only when its effective value is on; absent flags are off. Enable one with `--flag NAME`, several with `--flag browser_e2e,app_e2e`, or repeat `--flag`; `-f` is an alias for `--flag`. Explicit `NAME=on|off|true|false` assignments remain supported, so `--flag NAME=off` overrides a saved enabled value. Resuming a session preserves saved flag values unless supplied flags override them. Unknown names are rejected, and `--flag` conflicts with `--all`. A fresh single-session CLI run with declared flags and TTY stdin prompts once to select optional workflow flags, unless any `-f/--flag` was supplied for that invocation (including `NAME=off`). Saved enabled values are preselected; Space toggles choices and Enter confirms, saving selected flags as on and unselected flags as off. With no selection, all declared flags are off. Resumes, dry runs, `run --all`, non-TTY stdin (including CI and pipes), and configs without flags skip this prompt and retain saved values plus explicit CLI overrides. TUI New Session flags start off and Enter proceeds without requiring a selection; WebUI on/off selectors default to off. The TUI Edit Settings dialog accepts `flag:NAME=on|off` lines. See [Top-level structure](skills/cruise-config/references/top-level.md#flags).
+**Workflow flags.** A workflow config can declare `flags:` and attach them to steps with `flag: <name>`. A flagged step runs only when its effective value is on; absent flags are off. Enable one with `--flag NAME`, several with `--flag browser_e2e,app_e2e`, or repeat `--flag`; `-f` is an alias for `--flag`. Explicit `NAME=on|off|true|false` assignments remain supported, so `--flag NAME=off` overrides a saved enabled value. Resuming a session preserves saved flag values unless supplied flags override them. Unknown names are rejected, and `--flag` conflicts with `--all`. A fresh single-session CLI run with declared flags and TTY stdin prompts once to select optional workflow flags, unless any `-f/--flag` was supplied for that invocation (including `NAME=off`). Saved enabled values are preselected; Space toggles choices and Enter confirms, saving selected flags as on and unselected flags as off. With no selection, all declared flags are off. Resumes, dry runs, `run --all`, non-TTY stdin (including CI and pipes), and configs without flags skip this prompt and retain saved values plus explicit CLI overrides. TUI New Session flags start off and Enter proceeds without requiring a selection; WebUI on/off selectors default to off. CLI, TUI, and WebUI skip selectors hide flag-disabled steps. Approve and Execute now select flags before skips unless `-f/--flag` was supplied; Execute now forwards that selection without prompting again at execution start. The TUI Edit Settings dialog accepts `flag:NAME=on|off` lines. See [Top-level structure](skills/cruise-config/references/top-level.md#flags).
 
 `--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the summary, that session is reported as `Failed` with the state path and error, and the batch still completes. `--all` and `[SESSION]` are mutually exclusive.
 
@@ -596,7 +596,7 @@ On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cru
    - **Execute now** -- Skip approval and run immediately.
    - **Publish as Issue** -- Publish `plan.md` as a GitHub issue (or GitLab issue) and delete the local session.
 
-   After approving (or choosing "Execute now"), a **step skip selector** is shown if the workflow config defines more than zero steps. A multi-select prompt lists all steps (grouped steps appear as a parent with children); toggle any steps you want to skip for this run. The selection is persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected as the default for the next session using the same config. Cancelling the selector returns to the approve-plan menu without approving or executing the session. Workflow flags are selected once at fresh execution start, not in this approval menu (see [Workflow flags](#cruise-run)). Execute now carries any `-f/--flag` from the planning invocation through to execution, suppressing the flag selector.
+   After choosing **Approve** or **Execute now**, declared workflow flags are selected first when no `-f/--flag` was supplied. Then a **step skip selector** lists only steps enabled by those values (grouped steps appear as a parent with children); no selector is shown when there are no candidates. Toggle any steps you want to skip for this run. Only selections from the visible candidates are persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected for the next session using the same config. Cancelling either selector returns to the approve-plan menu without saving partial flag changes, approving, or executing the session. Execute now forwards the approval-time flag values as explicit assignments, suppressing another flag prompt at execution start. After Approve, a later `cruise run` still offers the fresh-execution flag selector and does not ask for skips again (see [Workflow flags](#cruise-run)).
 
 5. **`cruise run`** -- Without an ID, picks a pending session (Planned, Running, Failed, or Suspended; prompts when several qualify), reuses (or creates) the git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, and executes the workflow. By default it creates a PR when the run leaves branch commits, then runs configured `after-pr` steps. In built-in workflows, `-f after_pr` enables that prelude without merging; `-f merge` enables the same prelude once plus the final native synchronous squash merge. If a successful run has no new branch commits, PR creation is skipped without error (existing branch commits are still eligible), and opted-in after-PR actions are skipped with a reason. Workflow-level `create_pr: false` skips automatic commit, push, PR creation, `after-pr`, and PR-based cleanup, while preserving the normal session, artifacts, and worktree; opted-in actions are skipped with a reason and merge never overrides the no-PR setting. Explicit `if.no-file-changes` failure/retry behavior is unchanged. An actual PR-creation failure still makes a `--repo` session `Failed`; a plain worktree session logs a warning and completes without a PR, skipping `after-pr`.
 
@@ -751,9 +751,9 @@ fresh snapshot session to use updated settings.
 
 - `env` and `mcp_servers` merge per key (higher layer wins).
 - `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
-- Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `retry`) are taken from the highest layer that sets them.
+- Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
 - `description`, `steps`, `groups`, and `after-pr` are workflow-only and are a load error in `default.yaml`. Unknown keys are errors too.
-- If defaults name a backend (`command` / `sdk`) of a different kind than the workflow's own, validation fails when they would fill an unset backend-specific `model`, `plan_model`, `subagent_model`, or `retry`, add a missing `mcp_servers` entry, or fill an unset `computer_use` or `permission` field, regardless of its value. Set the field in the workflow or remove it from `default.yaml`. The check runs before `CRUISE_SDK` overrides, which are not considered.
+- If defaults name a backend (`command` / `sdk`) of a different kind than the workflow's own, validation fails when they would fill an unset backend-specific `model`, `plan_model`, `subagent_model`, or `retry`, add a missing `mcp_servers` entry, or fill an unset `computer_use`, `permission`, or `disallowed_tools` field, regardless of its value. Set the field in the workflow or remove it from `default.yaml`. The check runs before `CRUISE_SDK` overrides, which are not considered.
 
 `pre_steps:` defines command-only steps (`command`, `env`, `timeout`, `skip`, `when`) inserted at the start of the workflow's `steps` as `pre/<name>`. They do not run in planning or `after-pr`. User steps come first, then project steps; a project step with the same name replaces the user one in place.
 
@@ -799,6 +799,7 @@ languages:                # prompt languages (optional; defaults to English)
   plan: English           # language used by built-in planning prompts
 # force_exec: false       # execute direct plan entry points in place (use --no-force-exec to opt out)
 # permission: full        # prompt permission: read-only | edit | full (default full)
+# disallowed_tools: [web, subagent, "shell:npm publish"] # SDK prompt deny list
 # computer_use: false     # jcode only, macOS: let prompts control the desktop (macos_computer_use)
 # Deprecated compatibility fields: pr_language and plan_language
 
@@ -956,18 +957,106 @@ resumption.
 
 Workflow-level `computer_use` defaults to `false`. Set it to `true` to allow prompt turns to use jcode's `macos_computer_use` desktop-control tool on macOS. A prompt step may set `computer_use: true` or `false` to override the workflow default. Built-in plan, fix-plan, and ask-plan turns follow the workflow value; title and PR-description generation always run with computer use off. The tool is macOS-only and the setting has no effect on Linux. Every effective applicable model candidate must use jcode, including SDK-qualified objects and candidates selected by authoritative retry chains, and no `command:` backend may be set. Explicit jcode-only candidates can work under a Claude or OpenCode workflow SDK. Changing only the workflow SDK does not override incompatible SDK-qualified objects.
 
-When computer use is off, Cruise adds `macos_computer_use` to `JCODE_DISABLED_TOOLS`, merging the first available list from workflow `env:`, the Cruise process environment, or `[tools].disabled` in the private copied `config.toml`. This reaches the private runtime's daemon, including swarm workers and subagents. When computer use is on, Cruise leaves `JCODE_DISABLED_TOOLS` unchanged and never removes a jcode-level disable to force-enable the tool. The user must grant macOS Accessibility and Screen Recording permissions.
+When computer use is off, Cruise adds `macos_computer_use` to `JCODE_DISABLED_TOOLS`, merging the first available list from workflow `env:`, the Cruise process environment, or `[tools].disabled` in the private copied `config.toml`. This reaches the private runtime's daemon, including swarm workers and subagents. When computer use is on with full permission and no explicit web/subagent denials, Cruise leaves `JCODE_DISABLED_TOOLS` unchanged and never removes a jcode-level disable to force-enable the tool. The user must grant macOS Accessibility and Screen Recording permissions.
 
 ### Permission modes
 
-Workflow-level `permission` defaults to `full`. A prompt step may set `permission: read-only | edit | full` to override it. `full` keeps today's behavior. `edit` disables shell execution (Claude `Bash`, jcode `bash`) but keeps direct edit/write/patch tools. `read-only` also disables file mutation tools (Claude `Edit`/`Write`/`NotebookEdit`, jcode `edit`/`write`/`apply_patch`). Restricted modes force `macos_computer_use` off even with `computer_use: true`, and Claude runs them with `dontAsk` so no permission prompt can block an unattended run. Jcode's mode-specific tools are merged into the selected `JCODE_DISABLED_TOOLS` list.
+Workflow-level `permission` defaults to `full`. A prompt step may set `permission: read-only | edit | full` to override it. `full` keeps today's behavior. `edit` disables shell execution (Claude `Bash`, jcode `bash`) but keeps direct edit/write/patch tools. `read-only` also disables file mutation tools (Claude `Edit`/`Write`/`NotebookEdit`, jcode `edit`/`write`/`apply_patch`/`replace`). Restricted modes force `macos_computer_use` off even with `computer_use: true`, and Claude runs them with `dontAsk` so no permission prompt can block an unattended run. Jcode's mode-specific tools are merged into the selected `JCODE_DISABLED_TOOLS` list.
 
 - `read-only` and `edit` are rejected with a `command:` backend, because cruise cannot control an arbitrary CLI's tools.
-- `read-only` combined with `allow_commit: true` is a configuration error. `allow_commit` only controls the HEAD/ref commit guard and never widens the permission mode.
+- `read-only` combined with `allow_commit: true` is a configuration error. `allow_commit: true` removes only the HEAD/ref commit guard and implicit Git denials, not explicit restrictions, and never widens the permission mode.
 - A group call, `workflow_call`, or `parallel` wrapper cannot set `permission`. Set it on the inner prompt or parallel prompt child. A parallel block with any read-only child must contain only read-only prompt children.
 - A `workflow_call` callee's top-level `permission` is ignored (the caller's default applies), while per-step overrides inside the callee are kept.
 - A read-only step additionally fails with `ReadOnlyWorkspaceChanged` if the workspace snapshot changes during the step. This is change detection, not an OS sandbox or rollback, and it ignores `.git`, `target`, and `node_modules`.
-- Built-in planning, fix/ask, title, and PR-description turns always run with `full`.
+- Built-in planning, fix/ask, title, PR-description, and workflow-generation turns always run with `full`, without `disallowed_tools` or implicit Git restrictions.
+
+### Tool restrictions
+
+`disallowed_tools` narrows SDK prompt capabilities without granting permissions:
+
+```yaml
+disallowed_tools: ["shell:npm publish"]
+steps:
+  review:
+    prompt: Review without publishing or delegating.
+    disallowed_tools: [web, subagent, "mcp:github", "shell:gh pr merge"]
+```
+
+| Value | Denied capability |
+|-------|-------------------|
+| `web` | Web fetch/search and backend browser tools where available |
+| `subagent` | Subagent or swarm delegation |
+| `mcp` | All workflow `mcp_servers` entries |
+| `mcp:<name>` | One workflow MCP server; unknown names are errors |
+| `shell:<prefix>` | Simple shell commands whose leading words match the prefix |
+
+These are SDK-neutral values, not Claude `Bash(...)` syntax. Use `permission`
+for blanket shell/edit restrictions; bare `shell` and `edit` are invalid.
+Shell prefixes are trimmed and repeated whitespace is collapsed. They must be
+nonempty and use only ASCII letters, digits, spaces, and `._/:=@+%-`.
+Wildcards, quotes, commas, parentheses, shell operators, backslashes, newlines,
+and control characters are rejected. A final word ending in `=` matches the
+start of that word, for example `shell:git -c core.hooksPath=`.
+
+The effective list is the deduplicated **union of workflow defaults, step
+restrictions, and implicit Git rules**. A step's `[]` cannot undo workflow
+restrictions. Across user/project `default.yaml` and workflow layers, the
+highest-precedence explicit workflow-level list replaces lower lists;
+workflow `disallowed_tools: []` clears inherited defaults. With `edit` or
+`read-only`, shell rules are dropped because shell is already disabled.
+
+Nonempty lists are prompt-only, including parallel prompt children, prompts
+inside groups or expanded workflows, `after-pr`, and `github-review` loops.
+Command/option steps, parallel wrappers, group and `workflow_call` call sites,
+and native `squash-merge` reject them. Called workflows retain step lists but
+their top-level list is ignored in favor of the caller's. A `command:` prompt
+backend rejects explicit restrictions and does not enforce implicit shell
+rules; its existing commit guard remains active.
+
+Unless `allow_commit: true`, SDK prompts implicitly deny these shell prefixes:
+
+```text
+git commit                 git merge                  git rebase
+git cherry-pick            git revert                 git am
+git pull                   git push                   git reset
+git switch                 git checkout -b            git checkout -B
+git update-ref             git config core.hooksPath  git -c core.hooksPath=
+```
+
+This also blocks `git reset HEAD file`; use `git restore --staged` to unstage.
+It does not block `git checkout -- file`, `git stash create`, `git branch`
+listing, or `git status`/`diff`/`log`. Prefix matching cannot distinguish all
+safe and unsafe Git operations, so commit guards remain the final defense.
+Unlike the repository-scoped commit guard, shell prefix denials also apply to
+matching commands targeting temporary or unrelated repositories.
+
+Backend enforcement and limits:
+
+- **Claude:** native deny rules map `web` to `WebFetch`/`WebSearch`, `subagent`
+  to `Agent`, and shell prefixes to `Bash(...)`. Denies remain active with
+  `bypassPermissions`. Native Claude matching does **not** normalize Git global
+  options, so `git -C path commit` may not match `git commit`.
+- **jcode:** merges `webfetch`, `websearch`, `browser`, and/or `swarm` into
+  `JCODE_DISABLED_TOOLS`, preserving user entries. Shell rules use Cruise's
+  pre-tool gate appended to existing hooks, selected from workflow env,
+  process env, then config `[hooks].pre_tool`. `JCODE_HOOKS_DISABLED` in workflow
+  or process env disables the gate and produces a warning. Gate setup failure
+  also warns. The gate exits `2` to block, including malformed policy/input;
+  hook execution failures or other exit codes are fail-open in jcode. Older
+  releases may not support the array form needed to combine existing hooks.
+- **OpenCode:** native deny rules plus the Cruise plugin/bridge deny web tools,
+  `task` delegation, and matching bash input before execution.
+- **jcode/OpenCode shell matching:** splits compound commands, removes leading
+  assignments and common wrappers (`env`, `command`, `builtin`, `exec`, `nohup`,
+  `nice`, `time`, `timeout`, `stdbuf`, `xargs`), examines `sh`/`bash`/`zsh`/`dash`
+  `-c` scripts, compares executable basenames, and normalizes Git global options.
+  Heredoc body lines can cause false-positive denials. This is not a complete
+  shell interpreter or a security boundary.
+
+MCP restrictions filter only workflow-provided entries before backend launch.
+User-level backend MCP configuration remains enabled and unaffected, as do
+Cruise's own session tools. These controls are defense in depth, not a sandbox;
+the prompt warning, reference-transaction hook, and CAS rollback remain.
 
 **Upgrade note:** On macOS, earlier Cruise versions exposed `macos_computer_use` to every jcode prompt implicitly. Set workflow-level `computer_use: true` to retain that behavior.
 
@@ -1029,7 +1118,7 @@ See [the OpenCode workflow example](skills/cruise-config/examples/opencode-flow.
 
 #### MCP servers (`mcp_servers`)
 
-The optional top-level `mcp_servers` map makes MCP servers available to every SDK prompt run: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It works with `sdk: jcode`, with the default `jcode` backend only when neither `sdk` nor `command` remains set in the resolved workflow after applicable `default.yaml` layers are applied, and with `sdk: claude` or `sdk: opencode`. Per-step overrides are not supported. A called workflow's top-level `mcp_servers` is ignored; the caller's settings remain in force.
+The optional top-level `mcp_servers` map makes MCP servers available to every SDK prompt run: workflow prompt steps (including parallel children), `after-pr` steps, planning turns, session-title generation, and PR-description generation. It works with `sdk: jcode`, with the default `jcode` backend only when neither `sdk` nor `command` remains set in the resolved workflow after applicable `default.yaml` layers are applied, and with `sdk: claude` or `sdk: opencode`. Per-step overrides are not supported, but prompt `disallowed_tools: [mcp]` or `["mcp:<name>"]` can exclude workflow entries for a step; user-level MCP configuration is unaffected. A called workflow's top-level `mcp_servers` is ignored; the caller's settings remain in force.
 
 Entries use the Claude Code `mcpServers` server shape. Omit `type` or set `type: stdio` for a local server. Every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, must support the transport: stdio supports all SDKs, HTTP requires Claude or OpenCode, and legacy SSE requires Claude. Changing the workflow SDK does not override SDK-qualified objects. The command backend cannot receive MCP servers:
 
@@ -1092,7 +1181,7 @@ The CLI and WebUI also apply these process-level workflow overrides when loading
 
 `JCODE_OPENAI_SERVICE_TIER` controls jcode SDK's OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Explicit values are respected.
 
-`JCODE_DISABLED_TOOLS` is jcode's comma- or newline-separated disabled-tool list. When `computer_use` is false, Cruise uses workflow `env:` first, then the process environment, then `[tools].disabled` from the private jcode `config.toml`, and appends `macos_computer_use` without discarding the selected policy. When `computer_use` is true and the permission is `full`, Cruise does not alter this variable or the jcode config, so a tool disabled by jcode remains disabled. Restricted `permission` modes append their tools (`bash`, plus `edit`, `write`, `apply_patch` for `read-only`) to the selected list.
+`JCODE_DISABLED_TOOLS` is jcode's comma- or newline-separated disabled-tool list. When `computer_use` is false, Cruise uses workflow `env:` first, then the process environment, then `[tools].disabled` from the private jcode `config.toml`, and appends `macos_computer_use` without discarding the selected policy. When `computer_use` is true, permission is `full`, and no explicit web/subagent denials apply, Cruise does not alter this variable or the jcode config, so a tool disabled by jcode remains disabled. Restricted `permission` modes append their tools (`bash`, plus `edit`, `write`, `apply_patch`, `replace` for `read-only`) to the selected list.
 
 
 `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` add a `Co-authored-by:` trailer to the commits cruise creates for a PR. Both must be set and non-blank, and a name containing `<`, `>`, or a line break -- or an invalid address -- disables the trailer instead of failing the commit.
@@ -1157,9 +1246,9 @@ sessions retain artifacts for resume.
 
 An `instruction` is a message shown to the user immediately before a step runs, not a system prompt. If `{input}` is empty, the message is used as a multiline input prompt and the submitted text becomes `{input}`; otherwise it is displayed without being sent to the LLM.
 
-Prompt steps are commit-guarded by default. Set `allow_commit: true` only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and all SDK backends (`jcode`, `claude`, and `opencode`), while command and option steps remain unaffected. Ref rejection is scoped to the repository the step runs in, identified by its git common dir: `HEAD` and `refs/heads/*` updates are rejected in every worktree of that repository, including the main checkout and any linked worktree. Commits in throwaway repositories created below the step (temporary repositories used by test suites, other clones, nested repositories) keep working, while commits in the guarded repository's own checkout or in any of its linked worktrees are still rejected. A detected movement fails the step and cruise may restore the original branch reference without resetting the index or worktree.
+Prompt steps are commit-guarded by default. SDK prompts also receive the implicit Git shell denials described under [Tool restrictions](#tool-restrictions); `allow_commit: true` removes these and the guard, not explicit `disallowed_tools`, and never grants broader permissions. Set `allow_commit: true` only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and all SDK backends (`jcode`, `claude`, and `opencode`), while command and option steps remain unaffected. Ref rejection is scoped to the repository the step runs in, identified by its git common dir: `HEAD` and `refs/heads/*` updates are rejected in every worktree of that repository, including the main checkout and any linked worktree. The repository-scoped commit guard permits ref updates in throwaway repositories created below the step (temporary repositories used by test suites, other clones, nested repositories), but SDK shell prefix denials still block matching Git commands targeting those repositories. Commits in the guarded repository's own checkout or any of its linked worktrees remain rejected. A detected movement fails the step and cruise may restore the original branch reference without resetting the index or worktree.
 
-When `allow_commit` is omitted or `false`, cruise also appends an instruction telling the agent to leave edits uncommitted, not move `HEAD` or local branch refs in the working repository or its linked worktrees, and not bypass the commit guard even if the task requests it. This notice supplements Git enforcement; `allow_commit: true` leaves the prompt unchanged.
+When `allow_commit` is omitted or `false`, cruise also appends an instruction telling the agent to leave edits uncommitted, not move `HEAD` or local branch refs in the working repository or its linked worktrees, and not bypass the commit guard even if the task requests it. This notice supplements Git enforcement; `allow_commit: true` omits this commit-guard notice, but explicit `disallowed_tools` still adds its own restriction notice.
 
 Set `allow_commit: true` on the actual prompt, not a `group:` or `workflow_call:` invocation. The guard is implemented by injecting `core.hooksPath` and `CRUISE_GUARD_COMMON_DIR` through the step's child environment, which installs a `reference-transaction` hook that rejects ref updates only in the repository named by that variable. Only that rejection is repository-scoped: the injected hooks path applies to every git invocation below the step, in every repository, so a repository's own hooks (`pre-commit`, `commit-msg`, `pre-push`, ...) do not run under a guarded step, not even in an unrelated repository whose ref updates are allowed. The hook identifies the current repository from the `GIT_DIR` that git exports to hooks, following the `commondir` file for linked worktrees, and falls back to `git rev-parse --git-common-dir`. The guard is fail-closed: if the repository of a transaction cannot be resolved the transaction is rejected and the step fails with a commit guard violation, while a missing working directory or a directory outside a Git worktree is still a graceful no-op. It remains a best-effort same-user policy, not a security boundary: other repositories are not post-checked.
 
@@ -1238,7 +1327,7 @@ steps:
 - Each child receives the same input and `{prev.*}` values from before the
   block. Environment precedence is workflow < parallel block < child. Children
   can use `model`, `env`, `skip`, `when`, and `timeout`; prompt children may also
-  set `computer_use` and `permission` (the parent cannot), and `output_file` with distinct artifact names within the block. `prompt_file`
+  set `computer_use`, `permission`, and `disallowed_tools` (the parent cannot), and `output_file` with distinct artifact names within the block. `prompt_file`
   resolves relative to its config as usual. Command arrays remain sequential per
   child.
   A child prompt that reads an artifact produced by a sibling in the same block
@@ -1309,6 +1398,10 @@ steps:
 ```
 
 ### Post-PR Automation (`after-pr`)
+
+Prompt steps here, including `github-review` prompts, inherit workflow
+`disallowed_tools` and may add step restrictions. Native `squash-merge` is not
+a prompt and cannot carry a nonempty `disallowed_tools` list.
 
 On GitLab, the built-in `after-pr` steps detect `/-/merge_requests/` in `{pr.url}` and use `glab` (`glab mr update --ready`, `glab ci get --merge-request`, `glab ci trace`) instead of `gh`.
 
@@ -1392,7 +1485,7 @@ Declare flags in top-level `flags:` and attach one to a step with `flag: <name>`
 - **Default off:** every declared flag is off when absent.
 - **Set values:** `--flag NAME` enables one flag; `--flag NAME1,NAME2` enables a comma-separated selection, and repeated `--flag` options are allowed. Explicit `NAME=on|off|true|false` assignments set or clear individual values. Fresh single-session TTY execution prompts for declared flags unless that invocation supplies `-f/--flag`, with saved enabled values preselected (see [Workflow flags](#cruise-run)); unknown names are rejected.
 - **Resume:** saved session values are preserved; supplied `--flag` values override only the named flags.
-- **Union with skips:** flag-disabled steps are combined with the user-selected `skipped_steps`; a step is skipped if either applies.
+- **Union with skips:** flag-disabled steps are combined with the user-selected `skipped_steps`; a step is skipped if either applies. CLI, TUI, and WebUI skip selectors show flagged steps only when enabled. New sessions drop flag-disabled skip entries so enabling a flag later does not retain a hidden skip.
 
 The `skip` field accepts a static boolean (`true`/`false`) or a variable reference string. When a variable reference is given, the step is skipped if that variable's current value is `"true"`.
 
@@ -1596,7 +1689,7 @@ A `workflow_call` step is a pure delegation point. Only `skip`, `when`, `next`, 
 - `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).
 - `flag` is applied to every expanded step. A called workflow's own steps cannot use `flag:`.
 
-All other step fields (`prompt`, `prompt_file`, `command`, `model`, `instruction`, `plan`, `option`, `if`, `timeout`, `env`, `output_file`, `group`, `parallel`, `computer_use`, `permission`) and `allow_commit: true` are rejected at validation time, and the error names every offending field. An explicit `allow_commit: false` is equivalent to omission.
+All other step fields (`prompt`, `prompt_file`, `command`, `model`, `instruction`, `plan`, `option`, `if`, `timeout`, `env`, `output_file`, `group`, `parallel`, `computer_use`, `permission`, `disallowed_tools`) and `allow_commit: true` are rejected at validation time, and the error names every offending field. An explicit `allow_commit: false` is equivalent to omission.
 
 #### Nesting and cycle detection
 
@@ -1632,7 +1725,7 @@ Literal braces are escaped Rust-`format!`-style: `{{` -> `{` and `}}` -> `}` (e.
 
 ## Workspace Mode
 
-Fresh single-session CLI execution also offers the [workflow flag selector](#cruise-run) when the config declares flags and stdin is a TTY, unless that invocation supplies `-f/--flag`. This applies to Execute now from `cruise plan` or `cruise "task"`, later `cruise run [id]` after approval or background planning, and Run from `cruise list`. Suppression is per invocation: `cruise plan -f merge "task"` followed by Approve and later `cruise run <id>` without `-f` still prompts, with saved `merge` preselected so Enter preserves it. Resume, dry-run, batch, and non-TTY execution do not ask again.
+Execute now from `cruise plan` or `cruise "task"` selects flags before skip choices in the approval menu, unless `-f/--flag` was supplied, and forwards those values without a second execution-time prompt. Fresh single-session CLI execution also offers the [workflow flag selector](#cruise-run) when the config declares flags and stdin is a TTY, unless that invocation supplies `-f/--flag`. This applies to later `cruise run [id]` after approval or background planning, and Run from `cruise list`. Suppression is per invocation: `cruise plan -f merge "task"` followed by Approve and later `cruise run <id>` without `-f` still prompts, with saved `merge` preselected so Enter preserves it. Resume, dry-run, batch, and non-TTY execution do not ask again.
 
 When `cruise run` starts a new session, it prompts you to choose a workspace mode:
 

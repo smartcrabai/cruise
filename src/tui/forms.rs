@@ -97,8 +97,8 @@ impl Step {
         Self::Config,
         Self::Task,
         Self::Attachments,
-        Self::SkippedSteps,
         Self::Flags,
+        Self::SkippedSteps,
         Self::Workspace,
         Self::DirtyTree,
         Self::Launch,
@@ -1076,6 +1076,32 @@ mod tests {
         assert_eq!(form.step, Step::Launch);
     }
     #[test]
+    fn workflow_flags_precede_skips_in_forward_and_backward_navigation() {
+        let mut form = NewSessionForm::default();
+        form.set_flag_choices(vec![crate::flags::FlagChoice {
+            name: "e2e".to_string(),
+            description: None,
+        }]);
+        let steps = form.steps().collect::<Vec<_>>();
+        let flags = steps
+            .iter()
+            .position(|step| *step == Step::Flags)
+            .unwrap_or_else(|| panic!("flags step missing from workflow form"));
+        assert_eq!(steps[flags - 1], Step::Attachments);
+        assert_eq!(steps[flags + 1], Step::SkippedSteps);
+        assert_eq!(steps[flags + 2], Step::Workspace);
+        form.step = Step::Attachments;
+        assert!(form.advance());
+        assert_eq!(form.step, Step::Flags);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::SkippedSteps);
+        assert!(form.retreat());
+        assert_eq!(form.step, Step::Flags);
+        assert!(form.retreat());
+        assert_eq!(form.step, Step::Attachments);
+    }
+
+    #[test]
     fn workflow_flags_default_off_toggle_without_advancing_and_keep_saved_values() {
         let choice = |name: &str| crate::flags::FlagChoice {
             name: name.to_string(),
@@ -1091,7 +1117,7 @@ mod tests {
         assert!(form.request().flags.is_empty());
         assert!(form.validate_step().is_ok());
         assert!(form.advance());
-        assert_eq!(form.step, Step::Workspace);
+        assert_eq!(form.step, Step::SkippedSteps);
 
         form.step = Step::Flags;
         form.toggle_flag();
@@ -1121,7 +1147,7 @@ mod tests {
         assert_eq!(form.flag_values.get("app_e2e"), Some(&true));
 
         assert!(form.advance());
-        assert_eq!(form.step, Step::Workspace);
+        assert_eq!(form.step, Step::SkippedSteps);
     }
 
     #[test]
@@ -1196,8 +1222,8 @@ mod tests {
                 Step::Config,
                 Step::Task,
                 Step::Attachments,
-                Step::SkippedSteps,
                 Step::Flags,
+                Step::SkippedSteps,
                 Step::Workspace,
                 Step::Launch,
             ]

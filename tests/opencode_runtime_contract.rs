@@ -97,6 +97,7 @@ impl Fixture {
                     resume: None,
                     computer_use: false,
                     permission: PermissionMode::Full,
+                    tool_policy: cruise::tool_policy::ToolPolicy::default(),
                 }),
             )
             .await

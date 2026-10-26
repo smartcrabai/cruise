@@ -26,6 +26,7 @@ use types::ModelRef;
 
 #[derive(Default)]
 pub(crate) struct OpenCodeRunnerConfig {
+    pub tool_policy: crate::tool_policy::ToolPolicy,
     pub permission: PermissionMode,
     pub model_ref: Option<String>,
     pub cli_path: Option<PathBuf>,
