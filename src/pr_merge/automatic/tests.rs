@@ -747,13 +747,19 @@ async fn github_mergeability_rejection_reports_observed_values_without_merge() {
 }
 
 #[tokio::test]
-async fn github_unknown_mergeability_waits_for_expected_head_and_merges_once() {
+async fn github_pending_ci_with_unstable_mergeability_waits_for_current_head_success() {
     let fixture = Fixture::new();
-    let mut unknown = github_status(&fixture.head);
-    unknown["data"]["repository"]["pullRequest"]["mergeable"] = json!("UNKNOWN");
+    let mut pending = github_status(&fixture.head);
+    pending["data"]["repository"]["pullRequest"]["mergeable"] = json!("MERGEABLE");
+    pending["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("UNSTABLE");
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["state"] = json!("PENDING");
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["status"] =
+        json!("IN_PROGRESS");
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["conclusion"] =
+        Value::Null;
     fixture.configure_github_sequence(
         &github_open_identity(&fixture.head),
-        &[unknown, github_status(&fixture.head)],
+        &[pending, github_status(&fixture.head)],
         &json!([]),
     );
 
@@ -771,10 +777,23 @@ async fn github_unknown_mergeability_waits_for_expected_head_and_merges_once() {
 }
 
 #[tokio::test]
-async fn github_current_head_ci_failure_wins_over_unknown_mergeability() {
+async fn github_current_head_ci_failure_wins_over_unstable_mergeability() {
     let fixture = Fixture::new();
     let mut failed = github_status(&fixture.head);
-    failed["data"]["repository"]["pullRequest"]["mergeable"] = json!("UNKNOWN");
+    failed["data"]["repository"]["pullRequest"]["mergeable"] = json!("MERGEABLE");
+    failed["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("UNSTABLE");
+    failed["data"]["repository"]["pullRequest"]["statusCheckRollup"]["state"] = json!("PENDING");
+    failed["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["totalCount"] =
+        json!(2);
+    failed["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"]
+        .as_array_mut()
+        .unwrap_or_else(|| panic!("CI fixture nodes must be an array"))
+        .push(json!({
+            "__typename": "CheckRun",
+            "name": "ci/pending",
+            "status": "IN_PROGRESS",
+            "conclusion": null
+        }));
     failed["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["conclusion"] =
         json!("FAILURE");
     fixture.configure_github(&github_open_identity(&fixture.head), &failed, &json!([]));
@@ -800,11 +819,13 @@ async fn github_current_head_ci_failure_wins_over_unknown_mergeability() {
 }
 
 #[tokio::test]
-async fn github_stale_and_pending_ci_wait_for_current_head_success() {
+async fn github_stale_unstable_ci_waits_for_current_head_success() {
     let fixture = Fixture::new();
     let mut stale = github_status(&fixture.head);
     stale["data"]["repository"]["pullRequest"]["statusCheckRollup"]["commit"]["oid"] =
         json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    stale["data"]["repository"]["pullRequest"]["mergeable"] = json!("MERGEABLE");
+    stale["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("UNSTABLE");
     let mut pending = github_status(&fixture.head);
     pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["state"] = json!("PENDING");
     pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["status"] =
@@ -831,11 +852,15 @@ async fn github_stale_and_pending_ci_wait_for_current_head_success() {
 }
 
 #[tokio::test]
-async fn github_null_and_empty_ci_registration_waits_for_checks() {
+async fn github_null_and_empty_unstable_ci_registration_waits_for_checks() {
     let fixture = Fixture::new();
     let mut null_rollup = github_status(&fixture.head);
+    null_rollup["data"]["repository"]["pullRequest"]["mergeable"] = json!("MERGEABLE");
+    null_rollup["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("UNSTABLE");
     null_rollup["data"]["repository"]["pullRequest"]["statusCheckRollup"] = Value::Null;
     let mut empty_rollup = github_status(&fixture.head);
+    empty_rollup["data"]["repository"]["pullRequest"]["mergeable"] = json!("MERGEABLE");
+    empty_rollup["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("UNSTABLE");
     empty_rollup["data"]["repository"]["pullRequest"]["statusCheckRollup"]["state"] =
         json!("EXPECTED");
     empty_rollup["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["totalCount"] =
