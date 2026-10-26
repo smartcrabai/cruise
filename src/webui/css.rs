@@ -101,7 +101,7 @@ mod tests {
             panic!("generate");
         };
         assert!(css.contains("box-sizing"), "preflight missing");
-        assert!(css.contains(".h-screen"), "layout utility missing");
+        assert!(css.contains(".h-dvh"), "dynamic viewport utility missing");
         assert!(
             css.contains("prefers-color-scheme: dark"),
             "dark mode missing"

@@ -206,6 +206,13 @@ name = "subagent_model_jcode_cli"
 path = "tests/subagent_model_jcode_cli.rs"
 required-features = ["test-utils"]
 
+[[test]]
+harness = false
+name = "webui_responsive_bdd"
+path = "tests/webui_responsive_bdd.rs"
+# Requires the pinned browser package and Chromium, see tests/webui/README.md.
+test = false
+
 [profile.release]
 codegen-units = 1
 lto = true

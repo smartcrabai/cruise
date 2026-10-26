@@ -1,16 +1,16 @@
 export default function SessionDetail(props) {
   return (
-    <div id="session-detail" data-session-id={props.id} class="h-full flex flex-col">
+    <div id="session-detail" data-session-id={props.id} class="flex flex-col md:h-full">
       {props.header}
       {props.sync}
       <div id={`ask-panel-${props.id}`}>
         {props.askPanel}
       </div>
-      <pre id={`plan-progress-${props.id}`} class="px-6 py-2 text-xs font-mono whitespace-pre-wrap text-gray-500 dark:text-gray-400 max-h-40 overflow-auto"></pre>
-      <div id={`editor-${props.id}`} class="px-6">
+      <pre id={`plan-progress-${props.id}`} class="px-4 md:px-6 py-2 text-xs font-mono whitespace-pre-wrap text-gray-500 dark:text-gray-400 max-h-40 overflow-auto"></pre>
+      <div id={`editor-${props.id}`} class="px-4 md:px-6">
         {props.editor}
       </div>
-      <div id={`settings-${props.id}`} class="px-6">
+      <div id={`settings-${props.id}`} class="px-4 md:px-6">
         {props.settings}
       </div>
       <nav role="tablist" class="flex border-b border-gray-200 dark:border-gray-800">
@@ -63,7 +63,7 @@ export default function SessionDetail(props) {
           Log
         </button>
       </nav>
-      <div id={`tab-panel-${props.id}`} class="flex-1 min-h-0 overflow-auto">
+      <div id={`tab-panel-${props.id}`} class="md:flex-1 md:min-h-0 md:overflow-auto">
         {props.tabPanel}
       </div>
     </div>

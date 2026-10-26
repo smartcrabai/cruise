@@ -3,6 +3,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -20,6 +21,8 @@ struct Fixture {
     gh_identity_after: PathBuf,
     gh_status: PathBuf,
     gh_status_after: PathBuf,
+    gh_status_sequence: PathBuf,
+    gh_status_calls: PathBuf,
     gh_rules: PathBuf,
     gl_mr: PathBuf,
     gl_mr_after: PathBuf,
@@ -36,17 +39,7 @@ impl Fixture {
         let _process_lock = crate::test_support::lock_process();
         let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
         let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("{error}"));
-        git(&repo, &["init", "--quiet"]);
-        git(&repo, &["config", "user.email", "test@example.invalid"]);
-        git(&repo, &["config", "user.name", "Test User"]);
-        fs::write(repo.join("file.txt"), "test\n").unwrap_or_else(|error| panic!("{error}"));
-        git(&repo, &["add", "file.txt"]);
-        git(&repo, &["commit", "--quiet", "-m", "initial"]);
-        let head = String::from_utf8(git(&repo, &["rev-parse", "HEAD"]).stdout)
-            .unwrap_or_else(|error| panic!("{error}"))
-            .trim()
-            .to_string();
+        let head = initialize_test_repository(&repo);
         let bin = temp.path().join("bin");
         fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("{error}"));
         let log = temp.path().join("provider.log");
@@ -56,6 +49,8 @@ impl Fixture {
         let gh_identity_after = temp.path().join("gh_identity_after.json");
         let gh_status = temp.path().join("gh_status.json");
         let gh_status_after = temp.path().join("gh_status_after.json");
+        let gh_status_sequence = temp.path().join("gh_status_sequence.jsonl");
+        let gh_status_calls = temp.path().join("gh_status_calls");
         let gh_rules = temp.path().join("gh_rules.json");
         let gl_mr = temp.path().join("gl_mr.json");
         let gl_mr_after = temp.path().join("gl_mr_after.json");
@@ -83,6 +78,14 @@ impl Fixture {
             (
                 "FAKE_GH_STATUS_AFTER".to_string(),
                 gh_status_after.display().to_string(),
+            ),
+            (
+                "FAKE_GH_STATUS_SEQUENCE".to_string(),
+                gh_status_sequence.display().to_string(),
+            ),
+            (
+                "FAKE_GH_STATUS_CALLS".to_string(),
+                gh_status_calls.display().to_string(),
             ),
             ("FAKE_GH_RULES".to_string(), gh_rules.display().to_string()),
             ("FAKE_GL_MR".to_string(), gl_mr.display().to_string()),
@@ -116,6 +119,8 @@ impl Fixture {
             gh_identity_after,
             gh_status,
             gh_status_after,
+            gh_status_sequence,
+            gh_status_calls,
             gh_rules,
             gl_mr,
             gl_mr_after,
@@ -177,7 +182,23 @@ if [ "$1" = "api" ]; then
       esac
       case "$*" in
         *mergeQueueEntry*)
-          if [ -f "$FAKE_MERGED" ]; then cat "$FAKE_GH_STATUS_AFTER"; else cat "$FAKE_GH_STATUS"; fi
+          if [ -f "$FAKE_MERGED" ]; then
+            cat "$FAKE_GH_STATUS_AFTER"
+          elif [ -f "$FAKE_GH_STATUS_SEQUENCE" ]; then
+            calls=$(cat "$FAKE_GH_STATUS_CALLS" 2>/dev/null || printf '0')
+            calls=$((calls + 1))
+            printf '%s\n' "$calls" > "$FAKE_GH_STATUS_CALLS"
+            remaining=$calls
+            response=
+            while IFS= read -r item || [ -n "$item" ]; do
+              response=$item
+              remaining=$((remaining - 1))
+              [ "$remaining" -le 0 ] && break
+            done < "$FAKE_GH_STATUS_SEQUENCE"
+            printf '%s\n' "$response"
+          else
+            cat "$FAKE_GH_STATUS"
+          fi
           ;;
         *)
           if [ -f "$FAKE_MERGED" ]; then cat "$FAKE_GH_IDENTITY_AFTER"; else cat "$FAKE_GH_IDENTITY"; fi
@@ -246,6 +267,32 @@ esac
             &github_identity("MERGED", &self.head),
         );
         write_json(&self.gh_status_after, status);
+        for path in [&self.gh_status_sequence, &self.gh_status_calls] {
+            if path.exists() {
+                fs::remove_file(path).unwrap_or_else(|error| panic!("{error}"));
+            }
+        }
+    }
+
+    fn configure_github_sequence(&self, identity: &Value, statuses: &[Value], rules: &Value) {
+        let initial = statuses
+            .first()
+            .unwrap_or_else(|| panic!("GitHub status sequence must not be empty"));
+        self.configure_github(identity, initial, rules);
+        let sequence = statuses
+            .iter()
+            .map(|status| serde_json::to_string(status).unwrap_or_else(|error| panic!("{error}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&self.gh_status_sequence, format!("{sequence}\n"))
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn github_status_call_count(&self) -> usize {
+        fs::read_to_string(&self.gh_status_calls)
+            .ok()
+            .and_then(|calls| calls.trim().parse().ok())
+            .unwrap_or_default()
     }
 
     fn configure_gitlab(&self, mr: &Value, project: &Value) {
@@ -270,6 +317,20 @@ esac
     fn provider_log(&self) -> String {
         fs::read_to_string(&self.log).unwrap_or_default()
     }
+}
+
+fn initialize_test_repository(repo: &Path) -> String {
+    fs::create_dir_all(repo).unwrap_or_else(|error| panic!("{error}"));
+    git(repo, &["init", "--quiet"]);
+    git(repo, &["config", "user.email", "test@example.invalid"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("file.txt"), "test\n").unwrap_or_else(|error| panic!("{error}"));
+    git(repo, &["add", "file.txt"]);
+    git(repo, &["commit", "--quiet", "-m", "initial"]);
+    String::from_utf8(git(repo, &["rev-parse", "HEAD"]).stdout)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .trim()
+        .to_string()
 }
 
 fn git(directory: &Path, args: &[&str]) -> Output {
@@ -328,6 +389,29 @@ fn github_status(head: &str) -> Value {
             }
         } } }
     })
+}
+
+async fn run_github_with_timing(
+    fixture: &Fixture,
+    cancel_token: Option<&crate::cancellation::CancellationToken>,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<AutoSquashOutcome, AutoSquashError> {
+    let url = "https://github.com/acme/service/pull/7";
+    let request = fixture.request(url, cancel_token);
+    let reference = super::parse_provider_ref(url).unwrap_or_else(|error| panic!("{error}"));
+    super::perform_github_with_timing(&reference, &request, &fixture.head, timeout, poll_interval)
+        .await
+}
+
+async fn wait_for_github_status_calls(fixture: &Fixture, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.github_status_call_count() < expected {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|error| panic!("status query counter did not reach {expected}: {error}"));
 }
 
 fn github_open_identity(head: &str) -> Value {
@@ -555,12 +639,8 @@ async fn github_blocks_queue_and_squash_policy_without_merge() {
 }
 
 #[tokio::test]
-async fn github_blocks_stale_ci_and_review_requirements_without_merge() {
+async fn github_blocks_failed_ci_and_review_requirements_without_merge() {
     let fixture = Fixture::new();
-    let other_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let mut stale_ci = github_status(&fixture.head);
-    stale_ci["data"]["repository"]["pullRequest"]["statusCheckRollup"]["commit"]["oid"] =
-        json!(other_head);
     let mut failed_ci = github_status(&fixture.head);
     failed_ci["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["conclusion"] =
         json!("FAILURE");
@@ -569,12 +649,6 @@ async fn github_blocks_stale_ci_and_review_requirements_without_merge() {
     let mut approval_missing = github_status(&fixture.head);
     approval_missing["data"]["repository"]["pullRequest"]["reviewDecision"] = json!(null);
     let cases = [
-        (
-            "stale CI",
-            github_open_identity(&fixture.head),
-            stale_ci,
-            json!([]),
-        ),
         (
             "failed CI",
             github_open_identity(&fixture.head),
@@ -639,6 +713,328 @@ async fn github_blocks_drafts_conflicts_and_head_races() {
     for (reason, identity, status, rules) in cases {
         assert_github_rejected(&fixture, reason, &identity, &status, &rules).await;
     }
+}
+
+#[tokio::test]
+async fn github_mergeability_rejection_reports_observed_values_without_merge() {
+    for (mergeable, merge_state_status) in [("CONFLICTING", "DIRTY"), ("MERGEABLE", "UNSTABLE")] {
+        let fixture = Fixture::new();
+        let mut status = github_status(&fixture.head);
+        status["data"]["repository"]["pullRequest"]["mergeable"] = json!(mergeable);
+        status["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!(merge_state_status);
+        fixture.configure_github(&github_open_identity(&fixture.head), &status, &json!([]));
+
+        let result =
+            squash_merge(fixture.request("https://github.com/acme/service/pull/7", None)).await;
+        let reason = match result {
+            Err(AutoSquashError::Rejected(reason)) => reason,
+            other => panic!("{mergeable}/{merge_state_status}: {other:?}"),
+        };
+        assert!(
+            reason.contains(&format!("mergeable={mergeable}")),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(&format!("mergeStateStatus={merge_state_status}")),
+            "{reason}"
+        );
+        assert_eq!(
+            fixture.effect_lines(),
+            Vec::<String>::new(),
+            "{mergeable}/{merge_state_status} must not issue a merge"
+        );
+    }
+}
+
+#[tokio::test]
+async fn github_pending_ci_with_unstable_mergeability_waits_for_current_head_success() {
+    let fixture = Fixture::new();
+    let mut pending = github_status(&fixture.head);
+    pending["data"]["repository"]["pullRequest"]["mergeable"] = json!("MERGEABLE");
+    pending["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("UNSTABLE");
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["state"] = json!("PENDING");
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["status"] =
+        json!("IN_PROGRESS");
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["conclusion"] =
+        Value::Null;
+    fixture.configure_github_sequence(
+        &github_open_identity(&fixture.head),
+        &[pending, github_status(&fixture.head)],
+        &json!([]),
+    );
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_secs(2),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    assert_eq!(result, Ok(AutoSquashOutcome::Merged));
+    assert_eq!(fixture.github_status_call_count(), 2);
+    assert_eq!(fixture.effect_lines().len(), 1);
+}
+
+#[tokio::test]
+async fn github_current_head_ci_failure_wins_over_unstable_mergeability() {
+    let fixture = Fixture::new();
+    let mut failed = github_status(&fixture.head);
+    failed["data"]["repository"]["pullRequest"]["mergeable"] = json!("MERGEABLE");
+    failed["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("UNSTABLE");
+    failed["data"]["repository"]["pullRequest"]["statusCheckRollup"]["state"] = json!("PENDING");
+    failed["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["totalCount"] =
+        json!(2);
+    failed["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"]
+        .as_array_mut()
+        .unwrap_or_else(|| panic!("CI fixture nodes must be an array"))
+        .push(json!({
+            "__typename": "CheckRun",
+            "name": "ci/pending",
+            "status": "IN_PROGRESS",
+            "conclusion": null
+        }));
+    failed["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["conclusion"] =
+        json!("FAILURE");
+    fixture.configure_github(&github_open_identity(&fixture.head), &failed, &json!([]));
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_millis(500),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    let reason = match result {
+        Err(AutoSquashError::Rejected(reason)) => reason,
+        other => panic!("expected immediate current-head CI rejection, got {other:?}"),
+    };
+    assert!(
+        reason.contains("CI failed for the current pull request head"),
+        "{reason}"
+    );
+    assert_eq!(fixture.provider_log().matches("mergeQueueEntry").count(), 1);
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn github_stale_unstable_ci_waits_for_current_head_success() {
+    let fixture = Fixture::new();
+    let mut stale = github_status(&fixture.head);
+    stale["data"]["repository"]["pullRequest"]["statusCheckRollup"]["commit"]["oid"] =
+        json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    stale["data"]["repository"]["pullRequest"]["mergeable"] = json!("MERGEABLE");
+    stale["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("UNSTABLE");
+    let mut pending = github_status(&fixture.head);
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["state"] = json!("PENDING");
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["status"] =
+        json!("IN_PROGRESS");
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["conclusion"] =
+        Value::Null;
+    fixture.configure_github_sequence(
+        &github_open_identity(&fixture.head),
+        &[stale, pending, github_status(&fixture.head)],
+        &json!([]),
+    );
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_secs(2),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    assert_eq!(result, Ok(AutoSquashOutcome::Merged));
+    assert_eq!(fixture.github_status_call_count(), 3);
+    assert_eq!(fixture.effect_lines().len(), 1);
+}
+
+#[tokio::test]
+async fn github_null_and_empty_unstable_ci_registration_waits_for_checks() {
+    let fixture = Fixture::new();
+    let mut null_rollup = github_status(&fixture.head);
+    null_rollup["data"]["repository"]["pullRequest"]["mergeable"] = json!("MERGEABLE");
+    null_rollup["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("UNSTABLE");
+    null_rollup["data"]["repository"]["pullRequest"]["statusCheckRollup"] = Value::Null;
+    let mut empty_rollup = github_status(&fixture.head);
+    empty_rollup["data"]["repository"]["pullRequest"]["mergeable"] = json!("MERGEABLE");
+    empty_rollup["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("UNSTABLE");
+    empty_rollup["data"]["repository"]["pullRequest"]["statusCheckRollup"]["state"] =
+        json!("EXPECTED");
+    empty_rollup["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["totalCount"] =
+        json!(0);
+    empty_rollup["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"] =
+        json!([]);
+    fixture.configure_github_sequence(
+        &github_open_identity(&fixture.head),
+        &[null_rollup, empty_rollup, github_status(&fixture.head)],
+        &json!([]),
+    );
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_secs(2),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    assert_eq!(result, Ok(AutoSquashOutcome::Merged));
+    assert_eq!(fixture.github_status_call_count(), 3);
+    assert_eq!(fixture.effect_lines().len(), 1);
+}
+
+#[tokio::test]
+async fn github_repeated_unknown_times_out_with_latest_observed_values() {
+    let fixture = Fixture::new();
+    let mut unknown = github_status(&fixture.head);
+    unknown["data"]["repository"]["pullRequest"]["mergeable"] = json!("UNKNOWN");
+    fixture.configure_github(&github_open_identity(&fixture.head), &unknown, &json!([]));
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_millis(500),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    let reason = match result {
+        Err(AutoSquashError::Rejected(reason)) => reason,
+        other => panic!("expected bounded readiness timeout, got {other:?}"),
+    };
+    assert!(reason.contains("mergeable=UNKNOWN"), "{reason}");
+    assert!(reason.contains("mergeStateStatus=CLEAN"), "{reason}");
+    assert!(reason.contains("CI state=SUCCESS"), "{reason}");
+    assert!(
+        reason.contains(&format!("CI head={}", fixture.head)),
+        "{reason}"
+    );
+    assert!(fixture.provider_log().matches("mergeQueueEntry").count() > 1);
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn github_malformed_ci_state_is_not_retried() {
+    let fixture = Fixture::new();
+    let mut malformed = github_status(&fixture.head);
+    malformed["data"]["repository"]["pullRequest"]["statusCheckRollup"]["state"] =
+        json!("UNKNOWN_STATE");
+    fixture.configure_github_sequence(
+        &github_open_identity(&fixture.head),
+        &[malformed, github_status(&fixture.head)],
+        &json!([]),
+    );
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_secs(2),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    assert!(matches!(result, Err(AutoSquashError::Rejected(_))));
+    assert_eq!(fixture.github_status_call_count(), 1);
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn github_cancellation_during_readiness_wait_never_merges() {
+    let fixture = Fixture::new();
+    let mut unknown = github_status(&fixture.head);
+    unknown["data"]["repository"]["pullRequest"]["mergeable"] = json!("UNKNOWN");
+    fixture.configure_github_sequence(&github_open_identity(&fixture.head), &[unknown], &json!([]));
+    let cancellation = crate::cancellation::CancellationToken::new();
+    let running = run_github_with_timing(
+        &fixture,
+        Some(&cancellation),
+        Duration::from_secs(5),
+        Duration::from_millis(5),
+    );
+    tokio::pin!(running);
+
+    tokio::select! {
+        result = &mut running => panic!("readiness finished before retrying: {result:?}"),
+        () = wait_for_github_status_calls(&fixture, 2) => {}
+    }
+    cancellation.cancel();
+    let result = running.await;
+
+    assert_eq!(result, Err(AutoSquashError::Cancelled));
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn github_local_head_change_during_readiness_never_merges() {
+    let fixture = Fixture::new();
+    let alternate_head = {
+        let _process_lock = crate::test_support::lock_process();
+        git(
+            &fixture.repo,
+            &["commit", "--allow-empty", "--quiet", "-m", "alternate HEAD"],
+        );
+        let alternate_head = String::from_utf8(git(&fixture.repo, &["rev-parse", "HEAD"]).stdout)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .trim()
+            .to_string();
+        git(&fixture.repo, &["reset", "--hard", fixture.head.as_str()]);
+        alternate_head
+    };
+    let mut unknown = github_status(&fixture.head);
+    unknown["data"]["repository"]["pullRequest"]["mergeable"] = json!("UNKNOWN");
+    fixture.configure_github_sequence(&github_open_identity(&fixture.head), &[unknown], &json!([]));
+    let running = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_secs(5),
+        Duration::from_millis(5),
+    );
+    tokio::pin!(running);
+
+    tokio::select! {
+        result = &mut running => panic!("readiness finished before local HEAD changed: {result:?}"),
+        () = wait_for_github_status_calls(&fixture, 2) => {}
+    }
+    {
+        let _process_lock = crate::test_support::lock_process();
+        git(
+            &fixture.repo,
+            &["update-ref", "HEAD", alternate_head.as_str()],
+        );
+    }
+    let result = running.await;
+
+    let reason = match result {
+        Err(AutoSquashError::Rejected(reason)) => reason,
+        other => panic!("expected local HEAD rejection, got {other:?}"),
+    };
+    assert!(reason.contains("local HEAD changed"), "{reason}");
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn github_local_head_check_does_not_refresh_git_index() {
+    let fixture = Fixture::new();
+    let tracked_file =
+        fs::File::open(fixture.repo.join("file.txt")).unwrap_or_else(|error| panic!("{error}"));
+    tracked_file
+        .set_times(fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(2)))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let index_path = fixture.repo.join(".git/index");
+    let index_before = fs::read(&index_path).unwrap_or_else(|error| panic!("{error}"));
+    let url = "https://github.com/acme/service/pull/7";
+    let request = fixture.request(url, None);
+
+    let head = super::local_head(&request).await;
+
+    assert_eq!(head, Ok(fixture.head.clone()));
+    assert_eq!(
+        fs::read(index_path).unwrap_or_else(|error| panic!("{error}")),
+        index_before
+    );
 }
 
 #[tokio::test]
