@@ -73,7 +73,7 @@ suite. The plan does not authorize removing it to make a two-SDK model pass.
 
 ## Reproducible execution
 
-Use Node **22.22.0** on PATH and install Rust **1.99.1**. On Darwin arm64 or
+Use Node **22.23.3** on PATH and install Rust **1.99.1**. On Darwin arm64 or
 Linux x86_64, from the repository root:
 
 ```sh
@@ -88,7 +88,7 @@ passes. Existing Windows production test CI remains in place. This runner uses
 | Component | Pin |
 | --- | --- |
 | Quint | `@informalsystems/quint` **0.33.0**, `tests/formal/package.json` and npm lock, installed with `npm ci --ignore-scripts` |
-| Node | **22.22.0**, checked by setup and pinned in GitHub Actions |
+| Node | **22.23.3**, checked by setup and pinned in GitHub Actions |
 | Apalache | **0.62.1**, passed explicitly to Quint on a fresh OS-allocated loopback endpoint |
 | Alloy CLI | released **6.2.0**, `org.alloytools.alloy.dist.jar`, SHA-256 `6b8c1cb5bc93bedfc7c61435c4e1ab6e688a242dc702a394628d9a9801edb78d` |
 | JDK | Temurin **25.0.5+8-LTS**, runtime checked by setup; Darwin arm64 archive SHA-256 `36dc14d797aaff6d89aab302cd053fdba6207dfdcf772052fa7b023a94b0e857`; Linux x64 archive SHA-256 `68982529869257d0ee6b824ec5aa270ff8b118bb438670da0b97ebdab178d7fb` |

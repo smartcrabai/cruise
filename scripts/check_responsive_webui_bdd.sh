@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
-[[ $(node --version) == v22.22.0 ]] || { echo 'BLOCKED: Node 22.22.0 required' >&2; exit 1; }
+[[ $(node --version) == v22.23.3 ]] || { echo 'BLOCKED: Node 22.23.3 required' >&2; exit 1; }
 mkdir -p target/formal-reports
 RUN=$(mktemp -d "$ROOT/target/formal-reports/responsive-browser.XXXXXX")
 # Do not inherit a local debug override into the positive CI acceptance run.
