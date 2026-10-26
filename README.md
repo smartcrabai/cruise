@@ -2023,6 +2023,16 @@ Phases are emitted only when their work runs: skipped planning or disabled/unnee
 
 GitHub native squash-merge refusals for unconfirmed mergeability include the observed `mergeable` and `mergeStateStatus` values in the saved session failure, even when telemetry is disabled. When enabled, telemetry also records these values as `cruise.github.mergeable` and `cruise.github.merge_state_status` attributes on the `squash_merge` step span.
 
+The same span includes the final GitHub readiness observation:
+
+| Attribute | Value |
+|---|---|
+| `cruise.github.waiting_for` | `CI registration`, `current-head CI registration`, `current-head CI checks`, or `GitHub mergeability`; `none` when no pending reason was observed or readiness resolved |
+| `cruise.github.ci_state` | Observed `statusCheckRollup.state`; `unobserved` before a snapshot, or `unregistered` when absent |
+| `cruise.github.ci_head_matches` | Boolean comparing the observed CI rollup commit to the expected HEAD; `false` also covers a missing or not-yet-observed CI commit |
+
+The latest observation is retained locally and written once when the merge operation returns or its future is dropped, including outer step timeouts and cancellation. This avoids duplicate polling attributes exhausting the SDK's span attribute limit. A ready or already-merged result clears a previous wait reason; initial `none` / `unobserved` / `false` values do not prove that CI passed. Commit IDs are not exported.
+
 Skipped steps, including parallel children, do not emit step spans or operation observations. Step outcomes include postcondition failures such as `if.no-file-changes`; a later recovery can succeed without erasing the failed step. Cancelling the approval menu is recorded as cancelled while preserving the successful CLI exit; interrupting active planning or title generation still returns an error after draining that work. Choosing Execute now finishes planning before starting a separate execution root.
 
 Outcomes include `success`, `failed`, `error`, `cancelled`, `timeout`, and `paused`. Non-success operations have error status and a payload-free `error.type`, such as `command_exit`, `rate_limit`, `timeout`, or `cancelled`; existing backend retry classifications distinguish network, provider, and model failures. Recovered retries leave failed attempts visible without marking the final successful execution as failed. An Esc-paused exec stays resumable and exits successfully at the CLI, while its root outcome remains `paused`.
