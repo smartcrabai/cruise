@@ -642,6 +642,41 @@ async fn github_blocks_drafts_conflicts_and_head_races() {
 }
 
 #[tokio::test]
+async fn github_mergeability_rejection_reports_observed_values_without_merge() {
+    for (mergeable, merge_state_status) in [
+        ("UNKNOWN", "CLEAN"),
+        ("CONFLICTING", "DIRTY"),
+        ("MERGEABLE", "UNSTABLE"),
+    ] {
+        let fixture = Fixture::new();
+        let mut status = github_status(&fixture.head);
+        status["data"]["repository"]["pullRequest"]["mergeable"] = json!(mergeable);
+        status["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!(merge_state_status);
+        fixture.configure_github(&github_open_identity(&fixture.head), &status, &json!([]));
+
+        let result =
+            squash_merge(fixture.request("https://github.com/acme/service/pull/7", None)).await;
+        let reason = match result {
+            Err(AutoSquashError::Rejected(reason)) => reason,
+            other => panic!("{mergeable}/{merge_state_status}: {other:?}"),
+        };
+        assert!(
+            reason.contains(&format!("mergeable={mergeable}")),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(&format!("mergeStateStatus={merge_state_status}")),
+            "{reason}"
+        );
+        assert_eq!(
+            fixture.effect_lines(),
+            Vec::<String>::new(),
+            "{mergeable}/{merge_state_status} must not issue a merge"
+        );
+    }
+}
+
+#[tokio::test]
 async fn github_already_merged_same_head_is_idempotent_without_ci_or_write() {
     let fixture = Fixture::new();
     write_json(
