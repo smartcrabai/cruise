@@ -7567,7 +7567,9 @@ steps:
                 fragments,
             ),
             assert_subagent_invalid(
-                &format!("sdk: {sdk}\nsteps:\n  run:\n    prompt: hi\n    subagent_model: {entry}\n"),
+                &format!(
+                    "sdk: {sdk}\nsteps:\n  run:\n    prompt: hi\n    subagent_model: {entry}\n"
+                ),
                 fragments,
             ),
         ]

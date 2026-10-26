@@ -511,7 +511,10 @@ fn subagent_model_does_not_apply_to_session_title_generation() {
         .iter()
         .filter(|(_, _, input)| input.contains("generate_title"))
         .peekable();
-    assert!(titles.peek().is_some(), "title generation never reached Claude");
+    assert!(
+        titles.peek().is_some(),
+        "title generation never reached Claude"
+    );
     for (model, force, _) in titles {
         assert_eq!((model.as_str(), force.as_str()), ("", ""));
     }
