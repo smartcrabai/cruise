@@ -710,9 +710,16 @@ fn sdk_child_environment_keeps_workflow_env_and_forces_required_overrides() {
         None,
         None,
         true,
-        None,
-        None,
-        crate::config::PermissionMode::Full,
+        UserLaunchSettings {
+            disabled_tools: None,
+            pre_tool: None,
+            config_toml: None,
+        },
+        LaunchRestrictions {
+            permission: crate::config::PermissionMode::Full,
+            policy: &crate::tool_policy::ToolPolicy::default(),
+            gate_command: None,
+        },
     );
     assert_eq!(
         env.get(OsStr::new("CRUISE_GUARD_COMMON_DIR"))
@@ -745,9 +752,16 @@ fn launch_environment_preserves_the_workflow_disabled_tools_policy() {
         None,
         None,
         true,
-        None,
-        None,
-        crate::config::PermissionMode::Full,
+        UserLaunchSettings {
+            disabled_tools: None,
+            pre_tool: None,
+            config_toml: None,
+        },
+        LaunchRestrictions {
+            permission: crate::config::PermissionMode::Full,
+            policy: &crate::tool_policy::ToolPolicy::default(),
+            gate_command: None,
+        },
     );
 
     assert_eq!(
@@ -764,9 +778,16 @@ fn launch_environment_disables_computer_use_by_default() {
         None,
         None,
         false,
-        None,
-        None,
-        crate::config::PermissionMode::Full,
+        UserLaunchSettings {
+            disabled_tools: None,
+            pre_tool: None,
+            config_toml: None,
+        },
+        LaunchRestrictions {
+            permission: crate::config::PermissionMode::Full,
+            policy: &crate::tool_policy::ToolPolicy::default(),
+            gate_command: None,
+        },
     );
 
     assert_eq!(
@@ -783,9 +804,16 @@ fn launch_environment_merges_jcode_config_disabled_tools() {
         None,
         None,
         false,
-        None,
-        Some("[tools]\ndisabled = [\"bash\"]"),
-        crate::config::PermissionMode::Full,
+        UserLaunchSettings {
+            disabled_tools: None,
+            pre_tool: None,
+            config_toml: Some("[tools]\ndisabled = [\"bash\"]"),
+        },
+        LaunchRestrictions {
+            permission: crate::config::PermissionMode::Full,
+            policy: &crate::tool_policy::ToolPolicy::default(),
+            gate_command: None,
+        },
     );
 
     assert_eq!(
@@ -800,15 +828,20 @@ fn computer_use_disabled_tools_uses_workflow_then_process_then_config_precedence
     let config = "[tools]\ndisabled = [\"config-tool\"]";
 
     assert_eq!(
-        computer_use_disabled_tools(Some("workflow-tool"), Some("process-tool"), Some(config)),
+        computer_use_disabled_tools(
+            Some("workflow-tool"),
+            Some("process-tool"),
+            Some(config),
+            true
+        ),
         "workflow-tool,macos_computer_use"
     );
     assert_eq!(
-        computer_use_disabled_tools(None, Some("process-tool"), Some(config)),
+        computer_use_disabled_tools(None, Some("process-tool"), Some(config), true),
         "process-tool,macos_computer_use"
     );
     assert_eq!(
-        computer_use_disabled_tools(None, Some(""), Some(config)),
+        computer_use_disabled_tools(None, Some(""), Some(config), true),
         "macos_computer_use"
     );
 }
@@ -820,11 +853,12 @@ fn computer_use_disabled_tools_deduplicates_and_ignores_invalid_toml() {
             Some(" bash, macos_computer_use\nbash "),
             None,
             Some("not valid toml = ["),
+            true,
         ),
         "bash,macos_computer_use"
     );
     assert_eq!(
-        computer_use_disabled_tools(None, None, Some("not valid toml = [")),
+        computer_use_disabled_tools(None, None, Some("not valid toml = ["), true),
         "macos_computer_use"
     );
 }
@@ -840,9 +874,16 @@ fn launch_environment_leaves_disabled_tool_policy_unchanged_when_enabled() {
         None,
         None,
         true,
-        Some("process-tool"),
-        None,
-        crate::config::PermissionMode::Full,
+        UserLaunchSettings {
+            disabled_tools: Some("process-tool"),
+            pre_tool: None,
+            config_toml: None,
+        },
+        LaunchRestrictions {
+            permission: crate::config::PermissionMode::Full,
+            policy: &crate::tool_policy::ToolPolicy::default(),
+            gate_command: None,
+        },
     );
 
     assert_eq!(
@@ -855,9 +896,16 @@ fn launch_environment_leaves_disabled_tool_policy_unchanged_when_enabled() {
         None,
         None,
         true,
-        None,
-        None,
-        crate::config::PermissionMode::Full,
+        UserLaunchSettings {
+            disabled_tools: None,
+            pre_tool: None,
+            config_toml: None,
+        },
+        LaunchRestrictions {
+            permission: crate::config::PermissionMode::Full,
+            policy: &crate::tool_policy::ToolPolicy::default(),
+            gate_command: None,
+        },
     );
     assert!(!env.contains_key(OsStr::new(JCODE_DISABLED_TOOLS_ENV)));
 }
@@ -869,9 +917,16 @@ fn private_runtime_disables_auto_update_with_environment_override() {
         None,
         None,
         true,
-        None,
-        None,
-        crate::config::PermissionMode::Full,
+        UserLaunchSettings {
+            disabled_tools: None,
+            pre_tool: None,
+            config_toml: None,
+        },
+        LaunchRestrictions {
+            permission: crate::config::PermissionMode::Full,
+            policy: &crate::tool_policy::ToolPolicy::default(),
+            gate_command: None,
+        },
     );
     assert_eq!(
         env.get(OsStr::new(JCODE_CHECK_UPDATES_ENV))
@@ -1293,9 +1348,16 @@ fn explicit_provider_and_model_override_environment_defaults_at_launch() {
         Some("anthropic-api"),
         Some("claude-opus"),
         true,
-        None,
-        None,
-        crate::config::PermissionMode::Full,
+        UserLaunchSettings {
+            disabled_tools: None,
+            pre_tool: None,
+            config_toml: None,
+        },
+        LaunchRestrictions {
+            permission: crate::config::PermissionMode::Full,
+            policy: &crate::tool_policy::ToolPolicy::default(),
+            gate_command: None,
+        },
     );
     assert_eq!(
         env.get(OsStr::new(JCODE_PROVIDER_ENV))
@@ -1597,9 +1659,16 @@ fn env_with_permission(
         None,
         None,
         computer_use,
-        process,
-        config_toml,
-        permission,
+        UserLaunchSettings {
+            disabled_tools: process,
+            pre_tool: None,
+            config_toml,
+        },
+        LaunchRestrictions {
+            permission,
+            policy: &crate::tool_policy::ToolPolicy::default(),
+            gate_command: None,
+        },
     )
 }
 
@@ -1616,7 +1685,14 @@ fn launch_environment_read_only_disables_mutation_shell_and_computer_use() {
     tools.sort();
     assert_eq!(
         tools,
-        ["apply_patch", "bash", "edit", "macos_computer_use", "write"]
+        [
+            "apply_patch",
+            "bash",
+            "edit",
+            "macos_computer_use",
+            "replace",
+            "write"
+        ]
     );
 }
 
@@ -1632,6 +1708,26 @@ fn launch_environment_edit_disables_only_shell_and_computer_use() {
     let mut tools = disabled_list(&env);
     tools.sort();
     assert_eq!(tools, ["bash", "macos_computer_use"]);
+}
+
+#[test]
+fn launch_environment_read_only_disables_replace_even_with_computer_use() {
+    for computer_use in [false, true] {
+        let workflow = HashMap::from([(
+            JCODE_DISABLED_TOOLS_ENV.to_string(),
+            "user-tool".to_string(),
+        )]);
+        let env = env_with_permission(
+            &workflow,
+            computer_use,
+            None,
+            None,
+            crate::config::PermissionMode::ReadOnly,
+        );
+        let tools = disabled_list(&env);
+        assert_eq!(tools.iter().filter(|tool| *tool == "replace").count(), 1);
+        assert!(tools.iter().any(|tool| tool == "user-tool"));
+    }
 }
 
 #[test]
@@ -1690,7 +1786,14 @@ fn launch_environment_merges_permission_disabled_tools_without_dropping_user_pol
             .iter()
             .any(|t| t == "process-tool" || t == "config-tool")
     );
-    for tool in ["bash", "edit", "write", "apply_patch", "macos_computer_use"] {
+    for tool in [
+        "bash",
+        "edit",
+        "write",
+        "replace",
+        "apply_patch",
+        "macos_computer_use",
+    ] {
         assert_eq!(
             tools.iter().filter(|t| *t == tool).count(),
             1,
@@ -1732,9 +1835,16 @@ fn restricted_computer_use_merges_user_disabled_tools_with_mode_tools() {
         None,
         None,
         true,
-        Some("grep"),
-        None,
-        crate::config::PermissionMode::Edit,
+        UserLaunchSettings {
+            disabled_tools: Some("grep"),
+            pre_tool: None,
+            config_toml: None,
+        },
+        LaunchRestrictions {
+            permission: crate::config::PermissionMode::Edit,
+            policy: &crate::tool_policy::ToolPolicy::default(),
+            gate_command: None,
+        },
     );
     let value = env
         .get(OsStr::new(JCODE_DISABLED_TOOLS_ENV))
@@ -1745,4 +1855,322 @@ fn restricted_computer_use_merges_user_disabled_tools_with_mode_tools() {
     assert!(tools.contains(&"grep"));
     assert!(tools.contains(&"bash"));
     assert!(tools.contains(&COMPUTER_USE_TOOL));
+}
+
+#[test]
+fn configured_pre_tool_hooks_preserves_supported_values_and_filters_other_types() {
+    for config in [
+        None,
+        Some("not valid toml ["),
+        Some("[tools]\ndisabled = []"),
+        Some("hooks = 'not a table'"),
+        Some("[hooks]\nother = 'ignored'"),
+        Some("[hooks]\npre_tool = 42"),
+        Some("[hooks.pre_tool]\ncommand = 'unsupported'"),
+    ] {
+        assert!(configured_pre_tool_hooks(config).is_empty(), "{config:?}");
+    }
+    for (config, expected) in [
+        ("[hooks]\npre_tool = 'scalar'", vec!["scalar"]),
+        (
+            "[hooks]\npre_tool = ['first', 'second']",
+            vec!["first", "second"],
+        ),
+        (
+            "[hooks]\npre_tool = ['first', 42, false, {command = 'ignored'}, 'last']",
+            vec!["first", "last"],
+        ),
+    ] {
+        assert_eq!(
+            configured_pre_tool_hooks(Some(config)),
+            expected,
+            "{config}"
+        );
+    }
+}
+
+// Exercise the actual launch_client path without changing global process env.
+// The SDK runs this PATH-local stub as its api-bridge child. It only uses shell
+// builtins, starts no daemon, and exits immediately. The pinned SDK observes the
+// exit with try_wait rather than waiting for its 30-second startup deadline.
+#[cfg(unix)]
+fn assert_captured_launch_case(case: &str) {
+    let _process = crate::test_support::lock_process();
+    let executable = std::env::current_exe().unwrap_or_else(|error| panic!("{error}"));
+    let mut command = std::process::Command::new(executable);
+    command.args([
+        "--ignored",
+        "--exact",
+        "backend::jcode::tests::launch_client_captured_environment_probe",
+        "--nocapture",
+    ]);
+    command.env("CRUISE_TEST_JCODE_LAUNCH_CASE", case);
+    for name in [
+        JCODE_DISABLED_TOOLS_ENV,
+        "JCODE_HOOK_PRE_TOOL",
+        "JCODE_HOOKS_DISABLED",
+        "CRUISE_JCODE_SHELL_DENY",
+    ] {
+        command.env_remove(name);
+    }
+    if matches!(case, "workflow" | "process" | "computer-use-deny") {
+        command.env(JCODE_DISABLED_TOOLS_ENV, "process-tool");
+        command.env("JCODE_HOOK_PRE_TOOL", "process-hook");
+    }
+    let output = command.output().unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+        "{case}: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if case == "hooks-disabled-explicit" {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("JCODE_HOOKS_DISABLED") && stderr.contains("shell gate"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("commit guard remains active"), "{stderr}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_client_disabled_hooks_warning_does_not_claim_an_active_commit_guard() {
+    assert_captured_launch_case("hooks-disabled-explicit");
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_client_merges_pre_tool_hooks_with_source_precedence() {
+    for case in ["workflow", "process", "config"] {
+        assert_captured_launch_case(case);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_client_appends_gate_after_config_hook_array() {
+    assert_captured_launch_case("config-array");
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_client_single_gate_uses_scalar_hook() {
+    assert_captured_launch_case("single-gate");
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_client_restricted_or_empty_shell_policy_does_not_inject_gate() {
+    for case in ["empty-shell", "read-only", "edit"] {
+        assert_captured_launch_case(case);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_client_full_computer_use_merges_explicit_tool_denies() {
+    assert_captured_launch_case("computer-use-deny");
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_client_full_unrestricted_computer_use_keeps_environment_unchanged() {
+    assert_captured_launch_case("computer-use-unrestricted");
+}
+
+#[cfg(unix)]
+fn captured_launch_session_home(root: &std::path::Path) -> SessionHome {
+    let home_path = root.join("home");
+    fs::create_dir(&home_path).unwrap_or_else(|error| panic!("{error}"));
+    SessionHome {
+        source_home: root.join("source"),
+        storage_root: root.to_path_buf(),
+        storage_home: home_path.clone(),
+        expected_home: None,
+        sdk_home: home_path,
+        temporary_alias: None,
+        stable_alias_root: None,
+        fresh: true,
+        resume_session_found: false,
+        active_lock: None,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess-only captured launch probe"]
+fn launch_client_captured_environment_probe() {
+    use crate::tool_policy::{RuleSource, ShellRule, ToolPolicy};
+    use std::os::unix::fs::PermissionsExt;
+
+    let case = std::env::var("CRUISE_TEST_JCODE_LAUNCH_CASE")
+        .unwrap_or_else(|error| panic!("launch case missing: {error}"));
+    let root = tempfile::Builder::new()
+        .prefix("cl-")
+        .tempdir_in("/tmp")
+        .unwrap_or_else(|error| panic!("{error}"));
+    let home = captured_launch_session_home(root.path());
+    let stub = root.path().join("jcode");
+    fs::write(&stub, "#!/bin/sh\nprintf '%s' \"${JCODE_DISABLED_TOOLS-}\" > \"$CRUISE_TEST_JCODE_CAPTURE/disabled\"\nprintf '%s' \"${JCODE_HOOK_PRE_TOOL-}\" > \"$CRUISE_TEST_JCODE_CAPTURE/hook\"\nprintf '%s' \"${CRUISE_JCODE_SHELL_DENY-}\" > \"$CRUISE_TEST_JCODE_CAPTURE/rules\"\nexit 17\n")
+        .unwrap_or_else(|error| panic!("{error}"));
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let no_shell = matches!(
+        case.as_str(),
+        "empty-shell" | "read-only" | "edit" | "computer-use-deny" | "computer-use-unrestricted"
+    );
+    let mut config = JcodeRunnerConfig {
+        tool_policy: ToolPolicy {
+            deny_web: case == "computer-use-deny",
+            deny_subagent: case == "computer-use-deny",
+            shell_rules: if no_shell {
+                vec![]
+            } else {
+                vec![ShellRule {
+                    prefix: "git commit".into(),
+                    source: RuleSource::AllowCommit,
+                }]
+            },
+            ..Default::default()
+        },
+        computer_use: case.starts_with("computer-use"),
+        permission: match case.as_str() {
+            "read-only" => crate::config::PermissionMode::ReadOnly,
+            "edit" => crate::config::PermissionMode::Edit,
+            _ => crate::config::PermissionMode::Full,
+        },
+        env: HashMap::from([
+            ("PATH".into(), root.path().to_string_lossy().into_owned()),
+            (
+                "CRUISE_TEST_JCODE_CAPTURE".into(),
+                root.path().to_string_lossy().into_owned(),
+            ),
+        ]),
+        ..Default::default()
+    };
+    if case == "hooks-disabled-explicit" {
+        config.tool_policy = ToolPolicy::for_prompt_step(
+            &[crate::tool_policy::ToolRestriction::ShellPrefix(
+                "git commit".into(),
+            )],
+            &[],
+            true,
+            crate::config::PermissionMode::Full,
+        );
+        config.env.insert("JCODE_HOOKS_DISABLED".into(), "1".into());
+    }
+    if matches!(case.as_str(), "empty-shell" | "read-only" | "edit") {
+        config
+            .env
+            .insert("JCODE_HOOK_PRE_TOOL".into(), "retained-hook".into());
+    }
+    if case == "workflow" {
+        config
+            .env
+            .insert(JCODE_DISABLED_TOOLS_ENV.into(), "workflow-tool".into());
+        config
+            .env
+            .insert("JCODE_HOOK_PRE_TOOL".into(), "workflow-hook".into());
+    }
+    if matches!(
+        case.as_str(),
+        "workflow" | "process" | "config" | "computer-use-deny"
+    ) {
+        fs::write(
+            home.storage_home.join(JCODE_CONFIG_FILE),
+            "[tools]\ndisabled = ['config-tool']\n[hooks]\npre_tool = 'config-hook'\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+    } else if case == "config-array" {
+        fs::write(
+            home.storage_home.join(JCODE_CONFIG_FILE),
+            "[hooks]\npre_tool = ['config-first', 'config-second']\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+    }
+    assert!(
+        launch_client(&config, &home).is_err(),
+        "capture-only stub must not connect a runtime"
+    );
+    assert_captured_launch_environment(&case, &root, no_shell);
+}
+
+#[cfg(unix)]
+fn assert_captured_launch_environment(case: &str, root: &tempfile::TempDir, no_shell: bool) {
+    let capture = |name| {
+        fs::read_to_string(root.path().join(name))
+            .unwrap_or_else(|error| panic!("missing capture {name}: {error}"))
+    };
+    let disabled = capture("disabled");
+    let tools: Vec<_> = disabled.split(',').collect();
+    if case == "computer-use-unrestricted" {
+        assert!(
+            disabled.is_empty(),
+            "unrestricted computer use must not create a disabled list"
+        );
+    } else if case == "computer-use-deny" {
+        for tool in ["webfetch", "websearch", "browser", "swarm", "process-tool"] {
+            assert_eq!(
+                tools.iter().filter(|value| **value == tool).count(),
+                1,
+                "{case}: {disabled}"
+            );
+        }
+        assert!(!tools.contains(&COMPUTER_USE_TOOL));
+        assert!(!tools.contains(&"config-tool"));
+    }
+    let hook = capture("hook");
+    let rules = capture("rules");
+    if no_shell {
+        let expected_hook = match case {
+            "computer-use-unrestricted" => "",
+            "computer-use-deny" => "process-hook",
+            _ => "retained-hook",
+        };
+        assert_eq!(
+            hook, expected_hook,
+            "do not replace existing hooks in {case}"
+        );
+        assert!(rules.is_empty(), "no shell rules in {case}: {rules}");
+    } else {
+        let rules: serde_json::Value = serde_json::from_str(&rules)
+            .unwrap_or_else(|error| panic!("shell rules JSON: {error}"));
+        assert_eq!(rules[0]["prefix"], "git commit");
+        let existing: &[&str] = match case {
+            "workflow" => &["workflow-hook"],
+            "process" | "computer-use-deny" => &["process-hook"],
+            "config" => &["config-hook"],
+            "config-array" => &["config-first", "config-second"],
+            _ => &[],
+        };
+        if existing.is_empty() {
+            assert!(
+                !hook.trim_start().starts_with('['),
+                "single gate must stay a string: {hook}"
+            );
+            assert!(
+                hook.contains("internal jcode-pre-tool"),
+                "missing gate: {hook}"
+            );
+        } else {
+            let table: toml::Table = toml::from_str(&format!("hooks = {hook}"))
+                .unwrap_or_else(|error| panic!("hook TOML array: {error}"));
+            let hooks = table["hooks"]
+                .as_array()
+                .unwrap_or_else(|| panic!("hook array"));
+            assert_eq!(hooks.len(), existing.len() + 1);
+            for (actual, expected) in hooks.iter().zip(existing) {
+                assert_eq!(actual.as_str(), Some(*expected));
+            }
+            assert!(
+                hooks
+                    .last()
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|gate| gate.contains("internal jcode-pre-tool"))
+            );
+        }
+    }
 }

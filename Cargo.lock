@@ -882,6 +882,7 @@ dependencies = [
  "inquire",
  "jcode-sdk",
  "json5",
+ "jsonschema",
  "jsxrs",
  "libc",
  "notify-rust",

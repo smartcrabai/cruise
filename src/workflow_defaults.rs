@@ -139,6 +139,7 @@ struct DefaultsFile {
     force_exec: Option<bool>,
     computer_use: Option<bool>,
     permission: Option<PermissionMode>,
+    disallowed_tools: Option<Vec<crate::tool_policy::ToolRestriction>>,
     #[serde(default)]
     env: HashMap<String, String>,
     retry: Option<RetryConfig>,
@@ -179,6 +180,7 @@ pub struct WorkflowDefaults {
     force_exec: Option<bool>,
     computer_use: Option<Sourced<bool>>,
     permission: Option<Sourced<PermissionMode>>,
+    disallowed_tools: Option<Sourced<Vec<crate::tool_policy::ToolRestriction>>>,
     env: HashMap<String, String>,
     retry: Option<Sourced<RetryConfig>>,
     mcp_servers: IndexMap<String, Sourced<crate::config::McpServerConfig>>,
@@ -325,6 +327,8 @@ impl WorkflowDefaults {
         self.force_exec = file.force_exec.or(self.force_exec);
         self.computer_use = sourced(file.computer_use, path).or(self.computer_use.take());
         self.permission = sourced(file.permission, path).or(self.permission.take());
+        self.disallowed_tools =
+            sourced(file.disallowed_tools, path).or(self.disallowed_tools.take());
         self.retry = sourced(file.retry, path).or(self.retry.take());
         self.env.extend(file.env);
         for (name, server) in file.mcp_servers {
@@ -385,7 +389,7 @@ impl WorkflowDefaults {
             return Ok(());
         }
 
-        let conflicts: [(&str, Option<&Path>); 6] = [
+        let conflicts: [(&str, Option<&Path>); 7] = [
             (
                 "model",
                 self.model
@@ -422,6 +426,13 @@ impl WorkflowDefaults {
                     .map(|s| s.path.as_path()),
             ),
             (
+                "disallowed_tools",
+                self.disallowed_tools
+                    .as_ref()
+                    .filter(|_| config.disallowed_tools.is_none())
+                    .map(|s| s.path.as_path()),
+            ),
+            (
                 "permission",
                 self.permission
                     .as_ref()
@@ -441,6 +452,11 @@ impl WorkflowDefaults {
     }
 
     fn fill_fields(&self, config: &mut WorkflowConfig, presence: WorkflowConfigPresence) {
+        if config.disallowed_tools.is_none()
+            && let Some(value) = &self.disallowed_tools
+        {
+            config.disallowed_tools = Some(value.value.clone());
+        }
         if config.command.is_empty()
             && config.sdk.is_none()
             && let Some(backend) = &self.backend
@@ -1110,6 +1126,60 @@ mod tests {
         let mut config = workflow("command: [claude, -p]");
         applied(&env, &mut config);
         assert_eq!(config.model, Some(ModelSpec::Single("p/x".into())));
+    }
+
+    #[test]
+    fn disallowed_tools_defaults_respect_layer_priority_and_explicit_empty() {
+        let env = env();
+        write(&env.user_file, "disallowed_tools: [web]\n");
+        let user = applied_with_presence(&env, &workflow_yaml(""));
+        assert_eq!(
+            serde_json::to_value(&user).unwrap_or_else(|e| panic!("{e}"))["disallowed_tools"],
+            serde_json::json!(["web"])
+        );
+
+        write(&env.project_file, "disallowed_tools: [subagent]\n");
+        for (extra, expected) in [
+            ("", serde_json::json!(["subagent"])),
+            ("disallowed_tools: [web]", serde_json::json!(["web"])),
+            ("disallowed_tools: []", serde_json::json!([])),
+        ] {
+            let config = applied_with_presence(&env, &workflow_yaml(extra));
+            assert_eq!(
+                serde_json::to_value(config).unwrap_or_else(|e| panic!("{e}"))["disallowed_tools"],
+                expected,
+                "workflow override: {extra}"
+            );
+        }
+
+        write(&env.project_file, "disallowed_tools: []\n");
+        let config = applied_with_presence(&env, &workflow_yaml(""));
+        assert_eq!(
+            serde_json::to_value(config).unwrap_or_else(|e| panic!("{e}"))["disallowed_tools"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn disallowed_tools_backend_collision_only_checks_inherited_values() {
+        let env = env();
+        write(&env.project_file, "sdk: jcode\ndisallowed_tools: [web]\n");
+        let defaults =
+            WorkflowDefaults::load(Some(env.project.path())).unwrap_or_else(|e| panic!("{e}"));
+        let mut inherited = workflow("sdk: claude");
+        let Err(error) = defaults.apply_to_materialized_config(&mut inherited) else {
+            panic!("inherited restrictions must reject a backend mismatch");
+        };
+        let message = error.to_string();
+        for text in ["disallowed_tools", "default.yaml", "jcode", "claude"] {
+            assert!(message.contains(text), "{message}");
+        }
+        for extra in ["disallowed_tools: []", "disallowed_tools: [subagent]"] {
+            let config =
+                applied_with_presence(&env, &workflow_yaml(&format!("sdk: claude\n{extra}")));
+            let value = serde_json::to_value(config).unwrap_or_else(|e| panic!("{e}"));
+            assert!(value["disallowed_tools"].is_array());
+        }
     }
 
     #[test]

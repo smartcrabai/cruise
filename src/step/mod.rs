@@ -41,6 +41,7 @@ pub struct PromptStep {
     pub output_file: Option<String>,
     pub computer_use: Option<bool>,
     pub permission: Option<crate::config::PermissionMode>,
+    pub disallowed_tools: Vec<crate::tool_policy::ToolRestriction>,
 }
 
 /// Parameters for a command step.
@@ -124,6 +125,11 @@ impl TryFrom<StepConfig> for StepKind {
                 "computer_use is only supported on prompt steps".to_string(),
             ));
         }
+        if !config.disallowed_tools.is_empty() && !is_prompt_step {
+            return Err(CruiseError::InvalidStepConfig(
+                "disallowed_tools is only supported on prompt steps".to_string(),
+            ));
+        }
         if config.permission.is_some() && !is_prompt_step {
             return Err(CruiseError::InvalidStepConfig(
                 "permission is only supported on prompt steps".to_string(),
@@ -148,6 +154,7 @@ impl TryFrom<StepConfig> for StepKind {
                     output_file: None,
                     computer_use: config.computer_use,
                     permission: config.permission,
+                    disallowed_tools: config.disallowed_tools,
                 },
                 report_file: config.output_file,
             }));
@@ -167,6 +174,7 @@ impl TryFrom<StepConfig> for StepKind {
                 output_file: config.output_file,
                 computer_use: config.computer_use,
                 permission: config.permission,
+                disallowed_tools: config.disallowed_tools,
             }));
         }
 
@@ -559,5 +567,57 @@ mod tests {
             step.permission,
             Some(crate::config::PermissionMode::ReadOnly)
         );
+    }
+
+    #[test]
+    fn disallowed_tools_are_rejected_on_non_prompt_step_conversion() {
+        for yaml in [
+            "command: echo hello\ndisallowed_tools: [web]\n",
+            "option:\n  - selector: continue\ndisallowed_tools: [subagent]\n",
+            "parallel:\n  child:\n    prompt: hi\ndisallowed_tools: [web]\n",
+        ] {
+            let config: StepConfig = serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{e}"));
+            let Err(error) = StepKind::try_from(config) else {
+                panic!("non-prompt steps cannot carry tool restrictions: {yaml}");
+            };
+            assert!(error.to_string().contains("disallowed_tools"));
+        }
+    }
+
+    #[test]
+    fn consuming_prompt_and_review_conversion_preserves_restriction_order() {
+        use crate::tool_policy::ToolRestriction;
+
+        for review in [false, true] {
+            for restrictions in [
+                "",
+                "disallowed_tools: [subagent, web, 'shell:npm publish']\n",
+            ] {
+                let extra = if review {
+                    "github-review:\n  bots: [reviewer]\ntimeout: 30m\n"
+                } else {
+                    ""
+                };
+                let yaml = format!("prompt: review\n{extra}{restrictions}");
+                let config: StepConfig =
+                    serde_yaml::from_str(&yaml).unwrap_or_else(|error| panic!("{error}"));
+                let kind = StepKind::try_from(config).unwrap_or_else(|error| panic!("{error}"));
+                let prompt = match kind {
+                    StepKind::Prompt(prompt) => prompt,
+                    StepKind::GitHubReview(review) => review.prompt,
+                    _ => panic!("expected prompt or review"),
+                };
+                let expected = if restrictions.is_empty() {
+                    vec![]
+                } else {
+                    vec![
+                        ToolRestriction::Subagent,
+                        ToolRestriction::Web,
+                        ToolRestriction::ShellPrefix("npm publish".into()),
+                    ]
+                };
+                assert_eq!(prompt.disallowed_tools, expected);
+            }
+        }
     }
 }

@@ -1,5 +1,11 @@
 # Checkpoint contract verification
 
+For per-prompt `disallowed_tools`, implicit git denials and MCP filtering, see
+`TOOL_RESTRICTIONS.md` and run `bash scripts/check_tool_restrictions_specs.sh`.
+The dedicated `tool-restrictions-specs` native PR job runs Quint, all Alloy
+assertions and witnesses with receipt validation, production Cucumber scenarios,
+negative controls and affected Rust contracts using the shared pins below.
+
 For responsive WebUI drawer transitions, width persistence, real browser layout
 and htmx Gherkin, see `RESPONSIVE_WEBUI.md` and run
 `bash scripts/check_responsive_webui_specs.sh`. The dedicated secret-free

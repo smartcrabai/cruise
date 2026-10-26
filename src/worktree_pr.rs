@@ -391,6 +391,7 @@ async fn generate_pr_description(
                 resume: None,
                 computer_use: false,
                 permission: crate::config::PermissionMode::Full,
+                tool_policy: crate::tool_policy::ToolPolicy::default(),
             })
             .await
         {
@@ -464,6 +465,7 @@ async fn generate_pr_via_sdk_tool(
             resume: None,
             computer_use: false,
             permission: crate::config::PermissionMode::Full,
+            tool_policy: crate::tool_policy::ToolPolicy::default(),
         })
         .await
     {
@@ -1554,6 +1556,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             cleanup_after_pr: false,
             computer_use: false,
             permission: crate::config::PermissionMode::Full,
+            disallowed_tools: Vec::new(),
             steps: IndexMap::new(),
             after_pr: IndexMap::new(),
             invocations: HashMap::new(),

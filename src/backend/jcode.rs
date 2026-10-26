@@ -68,6 +68,7 @@ const ROOT_LOCK_FILE: &str = ".cruise-session-prune.lock";
 /// provider credentials.
 #[derive(Default)]
 pub(crate) struct JcodeRunnerConfig {
+    pub tool_policy: crate::tool_policy::ToolPolicy,
     pub(crate) permission: crate::config::PermissionMode,
     pub(crate) model: Option<String>,
     pub(crate) provider: Option<String>,
@@ -190,29 +191,64 @@ fn launch_client(
         inherit_logins: false,
         ..Default::default()
     };
-    let skip_user_lists =
-        config.computer_use && config.permission == crate::config::PermissionMode::Full;
+    let skip_user_lists = config.computer_use
+        && config.permission == crate::config::PermissionMode::Full
+        && !config.tool_policy.deny_web
+        && !config.tool_policy.deny_subagent;
     let process_disabled_tools = if skip_user_lists {
         None
     } else {
         std::env::var(JCODE_DISABLED_TOOLS_ENV).ok()
     };
-    let config_toml = if skip_user_lists
-        || config.env.contains_key(JCODE_DISABLED_TOOLS_ENV)
-        || process_disabled_tools.is_some()
+    let needs_gate = config.permission == crate::config::PermissionMode::Full
+        && !config.tool_policy.shell_rules.is_empty();
+    let process_pre_tool = std::env::var("JCODE_HOOK_PRE_TOOL").ok();
+    let config_toml = if !needs_gate
+        && (skip_user_lists
+            || config.env.contains_key(JCODE_DISABLED_TOOLS_ENV)
+            || process_disabled_tools.is_some())
     {
         None
     } else {
         fs::read_to_string(home.storage_home.join(JCODE_CONFIG_FILE)).ok()
     };
+    let gate_command = if needs_gate {
+        match std::env::current_exe() {
+            Ok(exe) => Some(format!(
+                "'{}' internal jcode-pre-tool",
+                exe.to_string_lossy().replace('\'', "'\\''")
+            )),
+            Err(error) => {
+                eprintln!(
+                    "cruise: warning: could not locate executable for jcode shell gate: {error}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if needs_gate
+        && (config.env.contains_key("JCODE_HOOKS_DISABLED")
+            || std::env::var_os("JCODE_HOOKS_DISABLED").is_some())
+    {
+        eprintln!("cruise: warning: JCODE_HOOKS_DISABLED disables the jcode shell gate");
+    }
     options.env = launch_environment(
         &config.env,
         config.provider.as_deref(),
         config.model.as_deref(),
         config.computer_use,
-        process_disabled_tools.as_deref(),
-        config_toml.as_deref(),
-        config.permission,
+        UserLaunchSettings {
+            disabled_tools: process_disabled_tools.as_deref(),
+            pre_tool: process_pre_tool.as_deref(),
+            config_toml: config_toml.as_deref(),
+        },
+        LaunchRestrictions {
+            permission: config.permission,
+            policy: &config.tool_policy,
+            gate_command: gate_command.as_deref(),
+        },
     );
     // jcode rejects symlink auth homes; keep the short alias only for SDK sockets.
     options.env.insert(
@@ -234,15 +270,33 @@ fn launch_client(
     })
 }
 
+#[derive(Clone, Copy)]
+struct UserLaunchSettings<'a> {
+    disabled_tools: Option<&'a str>,
+    pre_tool: Option<&'a str>,
+    config_toml: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
+struct LaunchRestrictions<'a> {
+    permission: crate::config::PermissionMode,
+    policy: &'a crate::tool_policy::ToolPolicy,
+    gate_command: Option<&'a str>,
+}
+
 fn launch_environment(
     workflow_env: &HashMap<String, String>,
     provider: Option<&str>,
     model: Option<&str>,
     computer_use: bool,
-    process_disabled_tools: Option<&str>,
-    config_toml: Option<&str>,
-    permission: crate::config::PermissionMode,
+    user: UserLaunchSettings<'_>,
+    restrictions: LaunchRestrictions<'_>,
 ) -> HashMap<OsString, OsString> {
+    let LaunchRestrictions {
+        permission,
+        policy,
+        gate_command,
+    } = restrictions;
     let mut env: HashMap<OsString, OsString> = workflow_env
         .iter()
         .filter(|(key, _)| key.as_str() != JCODE_HOME_ENV)
@@ -268,17 +322,30 @@ fn launch_environment(
         );
     }
     let restricted = permission != crate::config::PermissionMode::Full;
-    if restricted || !computer_use {
+    if restricted || !computer_use || policy.deny_web || policy.deny_subagent {
         let mut disabled_tools = computer_use_disabled_tools(
             workflow_env
                 .get(JCODE_DISABLED_TOOLS_ENV)
                 .map(String::as_str),
-            process_disabled_tools,
-            config_toml,
+            user.disabled_tools,
+            user.config_toml,
+            restricted || !computer_use,
         );
-        for tool in permission_disabled_tools(permission) {
-            if !disabled_tools.split(',').any(|existing| existing == *tool) {
-                disabled_tools.push(',');
+        let extra = [
+            (policy.deny_web, "webfetch"),
+            (policy.deny_web, "websearch"),
+            (policy.deny_web, "browser"),
+            (policy.deny_subagent, "swarm"),
+        ];
+        for tool in permission_disabled_tools(permission).iter().copied().chain(
+            extra
+                .into_iter()
+                .filter_map(|(deny, tool)| deny.then_some(tool)),
+        ) {
+            if !disabled_tools.split(',').any(|existing| existing == tool) {
+                if !disabled_tools.is_empty() {
+                    disabled_tools.push(',');
+                }
                 disabled_tools.push_str(tool);
             }
         }
@@ -287,13 +354,86 @@ fn launch_environment(
             OsString::from(disabled_tools),
         );
     }
+    if permission == crate::config::PermissionMode::Full
+        && !policy.shell_rules.is_empty()
+        && let Some(gate) = gate_command
+    {
+        let mut hooks = workflow_env
+            .get("JCODE_HOOK_PRE_TOOL")
+            .map(String::as_str)
+            .or(user.pre_tool)
+            .map_or_else(
+                || configured_pre_tool_hooks(user.config_toml),
+                parse_pre_tool_hooks,
+            );
+        let hook = if hooks.is_empty() {
+            gate.to_string()
+        } else {
+            hooks.push(gate.to_string());
+            toml::Value::Array(hooks.into_iter().map(toml::Value::String).collect()).to_string()
+        };
+        match serde_json::to_string(&policy.shell_rules) {
+            Ok(rules) => {
+                env.insert(OsString::from("JCODE_HOOK_PRE_TOOL"), OsString::from(hook));
+                env.insert(
+                    OsString::from("CRUISE_JCODE_SHELL_DENY"),
+                    OsString::from(rules),
+                );
+            }
+            Err(error) => {
+                eprintln!("cruise: warning: could not serialize jcode shell policy: {error}");
+            }
+        }
+    }
     env
+}
+
+fn parse_pre_tool_hooks(value: &str) -> Vec<String> {
+    if value.trim_start().starts_with('[')
+        && let Ok(table) = toml::from_str::<toml::Table>(&format!("hooks = {value}"))
+        && let Some(hooks) = table.get("hooks").and_then(toml::Value::as_array)
+    {
+        return hooks
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_string)
+            .collect();
+    }
+    if value.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![value.to_string()]
+    }
+}
+
+fn configured_pre_tool_hooks(config: Option<&str>) -> Vec<String> {
+    let Some(value) = config
+        .and_then(|value| toml::from_str::<toml::Table>(value).ok())
+        .and_then(|mut table| {
+            table
+                .get_mut("hooks")
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|hooks| hooks.remove("pre_tool"))
+        })
+    else {
+        return Vec::new();
+    };
+    match value {
+        toml::Value::String(value) => vec![value],
+        toml::Value::Array(values) => values
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Tools a permission mode removes on top of the user's disabled list.
 fn permission_disabled_tools(permission: crate::config::PermissionMode) -> &'static [&'static str] {
     match permission {
-        crate::config::PermissionMode::ReadOnly => &["bash", "edit", "write", "apply_patch"],
+        crate::config::PermissionMode::ReadOnly => {
+            &["bash", "edit", "write", "apply_patch", "replace"]
+        }
         crate::config::PermissionMode::Edit => &["bash"],
         crate::config::PermissionMode::Full => &[],
     }
@@ -303,6 +443,7 @@ fn computer_use_disabled_tools(
     workflow_value: Option<&str>,
     process_value: Option<&str>,
     config_toml: Option<&str>,
+    disable_computer_use: bool,
 ) -> String {
     let mut disabled_tools = workflow_value.or(process_value).map_or_else(
         || config_toml.map_or_else(Vec::new, configured_disabled_tools),
@@ -322,7 +463,7 @@ fn computer_use_disabled_tools(
             unique_tools.push(tool);
         }
     }
-    if !unique_tools.iter().any(|tool| tool == COMPUTER_USE_TOOL) {
+    if disable_computer_use && !unique_tools.iter().any(|tool| tool == COMPUTER_USE_TOOL) {
         unique_tools.push(COMPUTER_USE_TOOL.to_string());
     }
     unique_tools.join(",")
