@@ -347,10 +347,12 @@ enum GitHubReadiness {
 
 #[derive(Default)]
 struct GitHubReadinessObservation {
+    telemetry_context: Option<opentelemetry::Context>,
     mergeable: Option<String>,
     merge_state: Option<String>,
     check_state: Option<String>,
     check_commit_oid: Option<String>,
+    ci_head_matches: bool,
     reason: Option<&'static str>,
 }
 
@@ -364,6 +366,21 @@ impl GitHubReadinessObservation {
             self.check_commit_oid.as_deref().unwrap_or("unobserved"),
             self.reason.unwrap_or("readiness"),
         )
+    }
+}
+
+impl Drop for GitHubReadinessObservation {
+    fn drop(&mut self) {
+        let Some(context) = &self.telemetry_context else {
+            return;
+        };
+        crate::telemetry::record_github_readiness(
+            context,
+            self.mergeable.as_deref().zip(self.merge_state.as_deref()),
+            self.reason.unwrap_or("none"),
+            self.check_state.as_deref().unwrap_or("unobserved"),
+            self.ci_head_matches,
+        );
     }
 }
 
@@ -385,6 +402,7 @@ fn required_bool(value: &Value, key: &'static str) -> Result<bool, AutoSquashErr
 fn parse_github_metadata(
     pr: &Value,
     repository: &Value,
+    observation: &mut GitHubReadinessObservation,
 ) -> Result<GitHubMetadata, AutoSquashError> {
     let state = required_str(pr, "state")?.to_string();
     let is_draft = required_bool(pr, "isDraft")?;
@@ -425,7 +443,14 @@ fn parse_github_metadata(
         merge_state: required_str(pr, "mergeStateStatus")?.to_string(),
         review_decision,
     };
-    crate::telemetry::record_github_mergeability(&metadata.mergeable, &metadata.merge_state);
+    if observation.telemetry_context.is_some()
+        && (observation.mergeable.as_deref() != Some(metadata.mergeable.as_str())
+            || observation.merge_state.as_deref() != Some(metadata.merge_state.as_str()))
+    {
+        observation.mergeable = Some(metadata.mergeable.clone());
+        observation.merge_state = Some(metadata.merge_state.clone());
+    }
+    observation.reason = None;
     if metadata.state == "OPEN" {
         if is_draft {
             return Err(AutoSquashError::Rejected(
@@ -676,7 +701,10 @@ fn parse_github_ci_page(pr: &Value) -> Result<GitHubCiPage, AutoSquashError> {
     parse_github_ci_context_page(contexts, check_state, check_commit_oid, rollup_status)
 }
 
-fn parse_github_snapshot(value: &Value) -> Result<GitHubSnapshotPage, AutoSquashError> {
+fn parse_github_snapshot(
+    value: &Value,
+    observation: &mut GitHubReadinessObservation,
+) -> Result<GitHubSnapshotPage, AutoSquashError> {
     if value
         .get("errors")
         .and_then(Value::as_array)
@@ -698,7 +726,7 @@ fn parse_github_snapshot(value: &Value) -> Result<GitHubSnapshotPage, AutoSquash
         .ok_or_else(|| {
             AutoSquashError::Rejected("GitHub repository policy is unavailable".into())
         })?;
-    let metadata = parse_github_metadata(pr, repository)?;
+    let metadata = parse_github_metadata(pr, repository, observation)?;
     let ci = parse_github_ci_page(pr)?;
     Ok(GitHubSnapshotPage {
         snapshot: GitHubSnapshot {
@@ -818,21 +846,12 @@ async fn inspect_github(
             check_status: page_status,
             has_next_page: has_next,
             end_cursor,
-        } = parse_github_snapshot(&value)?;
-        if current.metadata.head_oid != expected_head {
-            return Err(AutoSquashError::Rejected(
-                "GitHub pull request head changed while status was being read".to_string(),
-            ));
-        }
-        if let Some(first) = &snapshot {
-            if first != &current {
-                return Err(AutoSquashError::Rejected(
-                    "GitHub pull request changed while status was being read".to_string(),
-                ));
+        } = parse_github_snapshot(&value, observation)?;
+        if snapshot.is_none() {
+            if observation.telemetry_context.is_none() {
+                observation.mergeable = Some(current.metadata.mergeable.clone());
+                observation.merge_state = Some(current.metadata.merge_state.clone());
             }
-        } else {
-            observation.mergeable = Some(current.metadata.mergeable.clone());
-            observation.merge_state = Some(current.metadata.merge_state.clone());
             observation.check_state = Some(
                 current
                     .check_state
@@ -845,7 +864,21 @@ async fn inspect_github(
                     .clone()
                     .unwrap_or_else(|| "unregistered".to_string()),
             );
-            observation.reason = None;
+            observation.ci_head_matches =
+                current.check_commit_oid.as_deref() == Some(expected_head);
+        }
+        if current.metadata.head_oid != expected_head {
+            return Err(AutoSquashError::Rejected(
+                "GitHub pull request head changed while status was being read".to_string(),
+            ));
+        }
+        if let Some(first) = &snapshot {
+            if first != &current {
+                return Err(AutoSquashError::Rejected(
+                    "GitHub pull request changed while status was being read".to_string(),
+                ));
+            }
+        } else {
             snapshot = Some(current);
         }
         node_count = node_count.saturating_add(page_names.len());
@@ -1293,14 +1326,17 @@ async fn github_merge_readiness(
 ) -> Result<GitHubReadiness, AutoSquashError> {
     let (state, remote_head) = github_identity(reference, request).await?;
     if remote_head != expected_head {
+        observation.reason = None;
         return Err(AutoSquashError::Rejected(
             "local HEAD does not match the GitHub pull request head".to_string(),
         ));
     }
     if state == "MERGED" {
+        observation.reason = None;
         return Ok(GitHubReadiness::AlreadyMerged);
     }
     if state != "OPEN" {
+        observation.reason = None;
         return Err(AutoSquashError::Rejected(
             "GitHub pull request is not open".to_string(),
         ));
@@ -1341,6 +1377,24 @@ async fn github_merge_readiness(
             )));
         }
     };
+    let (readiness, reason) = if !current_head_ci {
+        (
+            GitHubReadiness::Pending,
+            Some(if snapshot.context_total > 0 {
+                "current-head CI registration"
+            } else {
+                "CI registration"
+            }),
+        )
+    } else if check_status == GitHubCheckStatus::Pending {
+        (GitHubReadiness::Pending, Some("current-head CI checks"))
+    } else if mergeability_pending {
+        (GitHubReadiness::Pending, Some("GitHub mergeability"))
+    } else {
+        (GitHubReadiness::Ready, None)
+    };
+    observation.reason = reason;
+
     let rules = github_branch_rules(reference, &snapshot.metadata.base_branch, request).await?;
     let reviews_required =
         validate_github_rules(&rules, current_head_ci.then_some(check_names.as_slice()))?;
@@ -1358,23 +1412,7 @@ async fn github_merge_readiness(
         }
         None => {}
     }
-    if !current_head_ci {
-        observation.reason = Some(if snapshot.context_total > 0 {
-            "current-head CI registration"
-        } else {
-            "CI registration"
-        });
-        return Ok(GitHubReadiness::Pending);
-    }
-    if check_status == GitHubCheckStatus::Pending {
-        observation.reason = Some("current-head CI checks");
-        return Ok(GitHubReadiness::Pending);
-    }
-    if mergeability_pending {
-        observation.reason = Some("GitHub mergeability");
-        return Ok(GitHubReadiness::Pending);
-    }
-    Ok(GitHubReadiness::Ready)
+    Ok(readiness)
 }
 
 async fn perform_github(
@@ -1400,7 +1438,15 @@ async fn perform_github_with_timing(
     poll_interval: Duration,
 ) -> Result<AutoSquashOutcome, AutoSquashError> {
     let deadline = tokio::time::Instant::now() + readiness_timeout;
-    let mut observation = GitHubReadinessObservation::default();
+    let mut observation = GitHubReadinessObservation {
+        telemetry_context: crate::telemetry::capture_github_context(),
+        mergeable: None,
+        merge_state: None,
+        check_state: None,
+        check_commit_oid: None,
+        ci_head_matches: false,
+        reason: None,
+    };
     loop {
         check_cancel(request.cancel_token)?;
         let attempt = tokio::select! {

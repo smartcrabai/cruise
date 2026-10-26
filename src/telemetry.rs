@@ -342,20 +342,38 @@ pub fn record_error_type(error_type: &'static str) {
     }
 }
 
-/// Records GitHub's observed mergeability values on the current span.
-pub fn record_github_mergeability(mergeable: &str, merge_state_status: &str) {
+/// Captures the current span context only when telemetry is enabled.
+pub(crate) fn capture_github_context() -> Option<Context> {
+    ENABLED.load(Ordering::Acquire).then(Context::current)
+}
+
+/// Records the final GitHub readiness observation on its captured span.
+pub(crate) fn record_github_readiness(
+    context: &Context,
+    mergeability: Option<(&str, &str)>,
+    waiting_for: &'static str,
+    ci_state: &str,
+    ci_head_matches: bool,
+) {
     if !ENABLED.load(Ordering::Acquire) {
         return;
     }
-    let context = Context::current();
     let span = context.span();
+    if let Some((mergeable, merge_state_status)) = mergeability {
+        span.set_attribute(KeyValue::new(
+            "cruise.github.mergeable",
+            mergeable.to_owned(),
+        ));
+        span.set_attribute(KeyValue::new(
+            "cruise.github.merge_state_status",
+            merge_state_status.to_owned(),
+        ));
+    }
+    span.set_attribute(KeyValue::new("cruise.github.waiting_for", waiting_for));
+    span.set_attribute(KeyValue::new("cruise.github.ci_state", ci_state.to_owned()));
     span.set_attribute(KeyValue::new(
-        "cruise.github.mergeable",
-        mergeable.to_owned(),
-    ));
-    span.set_attribute(KeyValue::new(
-        "cruise.github.merge_state_status",
-        merge_state_status.to_owned(),
+        "cruise.github.ci_head_matches",
+        ci_head_matches,
     ));
 }
 
