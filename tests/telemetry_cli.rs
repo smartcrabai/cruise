@@ -2300,3 +2300,206 @@ fn unreachable_collector_does_not_fail_local_workflow() {
     let output = fixture.run(&borrowed_env(&otlp_env(&endpoint)), "unreachable-input");
     assert_success(&output);
 }
+
+struct MergeDiagnosticsCase {
+    cli: Fixture,
+    env: Vec<(String, String)>,
+    gh_log: PathBuf,
+    collector: Option<Collector>,
+}
+
+fn merge_diagnostics_case(telemetry_enabled: bool) -> MergeDiagnosticsCase {
+    let cli = Fixture::new(
+        "command: [cat]\ncreate_pr: true\nflags:\n  merge: {}\nsteps:\n  work:\n    command: \"printf changed > merge-diagnostic.txt\"\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n",
+    );
+    let bare = cli.root.path().join("origin.git");
+    cruise::test_support::run_git_ok(cli.root.path(), &["init", "--bare", "origin.git"]);
+    cruise::test_support::run_git_ok(
+        &cli.project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/service.git",
+        ],
+    );
+    let push_url = bare.to_string_lossy().into_owned();
+    cruise::test_support::run_git_ok(
+        &cli.project,
+        &["config", "remote.origin.pushurl", push_url.as_str()],
+    );
+
+    let collector = telemetry_enabled.then(Collector::start);
+    let fake_bin = cli.root.path().join("fake-gh/bin");
+    std::fs::create_dir_all(&fake_bin)
+        .unwrap_or_else(|error| panic!("create fake gh bin: {error}"));
+    let gh_log = cli.root.path().join("fake-gh.log");
+    let gh_script = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+if [ "$1" = "--version" ]; then
+  printf 'gh version 2.0.0\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  printf 'https://github.com/acme/service/pull/7\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  printf 'refusing unsafe PR merge\n' >&2
+  exit 97
+fi
+if [ "$1" = "api" ]; then
+  case "$*" in
+    *"/merge"*)
+      printf 'refusing unsafe GitHub merge write\n' >&2
+      exit 97
+      ;;
+  esac
+  head=$(git rev-parse HEAD) || exit 97
+  case "$*" in
+    *mergeable*)
+      printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"CONFLICTING","mergeStateStatus":"BEHIND","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"SUCCESS","commit":{"oid":"%s"},"contexts":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}}\n' "$head" "$head"
+      exit 0
+      ;;
+    *pullRequest*)
+      printf '{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"%s"}}}}\n' "$head"
+      exit 0
+      ;;
+  esac
+fi
+printf 'refusing unexpected fake gh command\n' >&2
+exit 97
+"#;
+    cruise::test_support::write_executable_script(&fake_bin.join("gh"), gh_script);
+    let search_path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut env = vec![
+        ("PATH".to_string(), search_path),
+        (
+            "FAKE_GH_LOG".to_string(),
+            gh_log.to_string_lossy().into_owned(),
+        ),
+    ];
+    if let Some(collector) = &collector {
+        env.extend(otlp_env(&collector.endpoint()));
+    }
+    MergeDiagnosticsCase {
+        cli,
+        env,
+        gh_log,
+        collector,
+    }
+}
+
+fn create_merge_diagnostics_session(fixture: &Fixture, env: &[(&str, &str)]) -> String {
+    let config = fixture.config.to_string_lossy().into_owned();
+    let plan = fixture
+        .cli_command(
+            &[
+                "plan",
+                "--config",
+                config.as_str(),
+                "--skip-planning",
+                "--flag",
+                "merge",
+                "merge diagnostics input",
+            ],
+            env,
+        )
+        .output()
+        .unwrap_or_else(|error| panic!("create merge diagnostics session: {error}"));
+    assert!(plan.status.success(), "plan failed: {}", output_text(&plan));
+
+    let manager = SessionManager::new(fixture.root.path().join("data/cruise"));
+    let sessions = manager
+        .list()
+        .unwrap_or_else(|error| panic!("list merge diagnostics sessions: {error}"));
+    assert_eq!(sessions.len(), 1, "unexpected sessions: {sessions:#?}");
+    sessions[0].id.clone()
+}
+
+#[test]
+fn rejected_squash_merge_persists_github_mergeability_and_exports_it() {
+    for telemetry_enabled in [false, true] {
+        let scenario = merge_diagnostics_case(telemetry_enabled);
+        let borrowed = borrowed_env(&scenario.env);
+        let fixture = &scenario.cli;
+        let gh_log = &scenario.gh_log;
+        let collector = scenario.collector.as_ref();
+
+        let session_id = create_merge_diagnostics_session(fixture, &borrowed);
+        let manager = SessionManager::new(fixture.root.path().join("data/cruise"));
+        let run = fixture
+            .cli_command(&["run", session_id.as_str()], &borrowed)
+            .output()
+            .unwrap_or_else(|error| panic!("run rejected squash merge: {error}"));
+        assert!(
+            !run.status.success(),
+            "non-mergeable pull request unexpectedly completed: {}",
+            output_text(&run)
+        );
+
+        let session = manager
+            .load(&session_id)
+            .unwrap_or_else(|error| panic!("load failed merge diagnostics session: {error}"));
+        let SessionPhase::Failed(phase_error) = &session.phase else {
+            panic!("expected failed session after merge readiness rejection: {session:#?}");
+        };
+        assert!(
+            phase_error.contains("mergeable=CONFLICTING"),
+            "saved phase error omitted actual mergeable value: {phase_error}"
+        );
+        assert!(
+            phase_error.contains("mergeStateStatus=BEHIND"),
+            "saved phase error omitted actual merge-state value: {phase_error}"
+        );
+        let gh_calls = std::fs::read_to_string(gh_log)
+            .unwrap_or_else(|error| panic!("read fake gh log: {error}"));
+        assert!(
+            gh_calls.contains("pr create"),
+            "fake gh was not used: {gh_calls}"
+        );
+        let unsafe_merge_calls = gh_calls
+            .lines()
+            .filter(|call| {
+                call.starts_with("pr merge")
+                    || (call.starts_with("api ")
+                        && (call.contains("/merge") || call.contains("--method PUT")))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            unsafe_merge_calls.is_empty(),
+            "fake gh received unsafe merge write call: {unsafe_merge_calls:?}"
+        );
+
+        if let Some(collector) = collector {
+            let requests = collector.wait_for_paths(&["/v1/traces"]);
+            let exported_spans = spans(&requests);
+            let merge = named_span(&exported_spans, "cruise.step", "cruise.step.name", "merge");
+            assert_eq!(
+                merge.status_code,
+                StatusCode::Error as i32,
+                "rejected merge step must be recorded as failed: {merge:#?}"
+            );
+            assert_eq!(
+                merge
+                    .attributes
+                    .get("cruise.github.mergeable")
+                    .map(String::as_str),
+                Some("CONFLICTING"),
+                "mergeable attribute must match the rejected response: {merge:#?}"
+            );
+            assert_eq!(
+                merge
+                    .attributes
+                    .get("cruise.github.merge_state_status")
+                    .map(String::as_str),
+                Some("BEHIND"),
+                "merge-state attribute must match the rejected response: {merge:#?}"
+            );
+        }
+    }
+}

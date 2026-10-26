@@ -362,6 +362,7 @@ fn parse_github_metadata(
         merge_state: required_str(pr, "mergeStateStatus")?.to_string(),
         review_decision,
     };
+    crate::telemetry::record_github_mergeability(&metadata.mergeable, &metadata.merge_state);
     if metadata.state == "OPEN" {
         if is_draft {
             return Err(AutoSquashError::Rejected(
@@ -379,9 +380,10 @@ fn parse_github_metadata(
             ));
         }
         if metadata.mergeable != "MERGEABLE" || metadata.merge_state != "CLEAN" {
-            return Err(AutoSquashError::Rejected(
-                "GitHub pull request is not confirmed mergeable".to_string(),
-            ));
+            return Err(AutoSquashError::Rejected(format!(
+                "GitHub pull request is not confirmed mergeable (mergeable={}, mergeStateStatus={})",
+                metadata.mergeable, metadata.merge_state
+            )));
         }
         if !squash_allowed {
             return Err(AutoSquashError::Rejected(
