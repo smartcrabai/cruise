@@ -882,7 +882,7 @@ dependencies = [
  "inquire",
  "jcode-sdk",
  "json5",
- "jsonschema",
+ "jsonschema 0.60.1",
  "jsxrs",
  "libc",
  "notify-rust",
@@ -896,7 +896,7 @@ dependencies = [
  "ratatui",
  "ratatui-textarea",
  "reedline",
- "reqwest 0.12.28",
+ "reqwest",
  "seher-claude-agent-sdk",
  "semver",
  "serde",
@@ -1414,6 +1414,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fraction"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e246562084dde8ebbcc943b261c406ce4f68e5032ec28029a251a47d6a295500"
+dependencies = [
+ "num",
+ "num-bigint",
+]
+
+[[package]]
 name = "from_variant"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1838,7 +1848,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -2207,7 +2216,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "jcode-applet-types"
 version = "0.1.0"
-source = "git+https://github.com/1jehuang/jcode?tag=v0.99.0#774613c90751b6a26ae9eb6a27be6aff3f210062"
+source = "git+https://github.com/1jehuang/jcode?tag=v0.99.1#7206efd0c1dbf49ef38d06b63f3a96a3a7cee611"
 dependencies = [
  "serde",
  "serde_json",
@@ -2216,7 +2225,7 @@ dependencies = [
 [[package]]
 name = "jcode-harness-api"
 version = "0.1.0"
-source = "git+https://github.com/1jehuang/jcode?tag=v0.99.0#774613c90751b6a26ae9eb6a27be6aff3f210062"
+source = "git+https://github.com/1jehuang/jcode?tag=v0.99.1#7206efd0c1dbf49ef38d06b63f3a96a3a7cee611"
 dependencies = [
  "jcode-applet-types",
  "jcode-session-types",
@@ -2230,7 +2239,7 @@ dependencies = [
 [[package]]
 name = "jcode-message-types"
 version = "0.1.0"
-source = "git+https://github.com/1jehuang/jcode?tag=v0.99.0#774613c90751b6a26ae9eb6a27be6aff3f210062"
+source = "git+https://github.com/1jehuang/jcode?tag=v0.99.1#7206efd0c1dbf49ef38d06b63f3a96a3a7cee611"
 dependencies = [
  "chrono",
  "serde",
@@ -2240,7 +2249,7 @@ dependencies = [
 [[package]]
 name = "jcode-provider-metadata"
 version = "0.1.0"
-source = "git+https://github.com/1jehuang/jcode?tag=v0.99.0#774613c90751b6a26ae9eb6a27be6aff3f210062"
+source = "git+https://github.com/1jehuang/jcode?tag=v0.99.1#7206efd0c1dbf49ef38d06b63f3a96a3a7cee611"
 dependencies = [
  "url",
 ]
@@ -2248,7 +2257,7 @@ dependencies = [
 [[package]]
 name = "jcode-sdk"
 version = "0.1.0"
-source = "git+https://github.com/1jehuang/jcode?tag=v0.99.0#774613c90751b6a26ae9eb6a27be6aff3f210062"
+source = "git+https://github.com/1jehuang/jcode?tag=v0.99.1#7206efd0c1dbf49ef38d06b63f3a96a3a7cee611"
 dependencies = [
  "anyhow",
  "jcode-applet-types",
@@ -2256,7 +2265,7 @@ dependencies = [
  "jcode-provider-metadata",
  "jcode-todo-policy",
  "jcode-transport",
- "jsonschema",
+ "jsonschema 0.49.9",
  "libc",
  "serde",
  "serde_json",
@@ -2269,7 +2278,7 @@ dependencies = [
 [[package]]
 name = "jcode-session-types"
 version = "0.1.0"
-source = "git+https://github.com/1jehuang/jcode?tag=v0.99.0#774613c90751b6a26ae9eb6a27be6aff3f210062"
+source = "git+https://github.com/1jehuang/jcode?tag=v0.99.1#7206efd0c1dbf49ef38d06b63f3a96a3a7cee611"
 dependencies = [
  "chrono",
  "jcode-message-types",
@@ -2280,7 +2289,7 @@ dependencies = [
 [[package]]
 name = "jcode-side-panel-types"
 version = "0.1.0"
-source = "git+https://github.com/1jehuang/jcode?tag=v0.99.0#774613c90751b6a26ae9eb6a27be6aff3f210062"
+source = "git+https://github.com/1jehuang/jcode?tag=v0.99.1#7206efd0c1dbf49ef38d06b63f3a96a3a7cee611"
 dependencies = [
  "serde",
 ]
@@ -2288,7 +2297,7 @@ dependencies = [
 [[package]]
 name = "jcode-task-types"
 version = "0.1.0"
-source = "git+https://github.com/1jehuang/jcode?tag=v0.99.0#774613c90751b6a26ae9eb6a27be6aff3f210062"
+source = "git+https://github.com/1jehuang/jcode?tag=v0.99.1#7206efd0c1dbf49ef38d06b63f3a96a3a7cee611"
 dependencies = [
  "chrono",
  "serde",
@@ -2298,7 +2307,7 @@ dependencies = [
 [[package]]
 name = "jcode-todo-policy"
 version = "0.1.0"
-source = "git+https://github.com/1jehuang/jcode?tag=v0.99.0#774613c90751b6a26ae9eb6a27be6aff3f210062"
+source = "git+https://github.com/1jehuang/jcode?tag=v0.99.1#7206efd0c1dbf49ef38d06b63f3a96a3a7cee611"
 dependencies = [
  "chrono",
  "jcode-task-types",
@@ -2309,7 +2318,7 @@ dependencies = [
 [[package]]
 name = "jcode-transport"
 version = "0.1.0"
-source = "git+https://github.com/1jehuang/jcode?tag=v0.99.0#774613c90751b6a26ae9eb6a27be6aff3f210062"
+source = "git+https://github.com/1jehuang/jcode?tag=v0.99.1#7206efd0c1dbf49ef38d06b63f3a96a3a7cee611"
 dependencies = [
  "hex",
  "sha2 0.10.9",
@@ -2320,7 +2329,7 @@ dependencies = [
 [[package]]
 name = "jcode-usage-types"
 version = "0.1.0"
-source = "git+https://github.com/1jehuang/jcode?tag=v0.99.0#774613c90751b6a26ae9eb6a27be6aff3f210062"
+source = "git+https://github.com/1jehuang/jcode?tag=v0.99.1#7206efd0c1dbf49ef38d06b63f3a96a3a7cee611"
 dependencies = [
  "serde",
  "serde_json",
@@ -2418,16 +2427,44 @@ dependencies = [
  "data-encoding",
  "email_address",
  "fancy-regex 0.19.2",
- "fraction",
+ "fraction 0.15.4",
  "getrandom 0.3.4",
  "idna",
  "itoa",
- "jsonschema-regex",
- "jsonschema-value",
+ "jsonschema-regex 0.49.9",
+ "jsonschema-value 0.49.9",
  "num-cmp",
  "num-traits",
  "percent-encoding",
- "referencing",
+ "referencing 0.49.9",
+ "regex",
+ "serde",
+ "serde_json",
+ "strum",
+ "unicode-general-category",
+ "uuid-simd",
+]
+
+[[package]]
+name = "jsonschema"
+version = "0.60.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65de752665c4a06528af6759955eecf60ba73ae7442d35349963a09c8031cd71"
+dependencies = [
+ "ahash",
+ "bytecount",
+ "data-encoding",
+ "email_address",
+ "fancy-regex 0.19.2",
+ "fraction 0.17.0",
+ "getrandom 0.3.4",
+ "itoa",
+ "jsonschema-regex 0.60.1",
+ "jsonschema-value 0.60.1",
+ "num-cmp",
+ "num-traits",
+ "percent-encoding",
+ "referencing 0.60.1",
  "regex",
  "serde",
  "serde_json",
@@ -2446,6 +2483,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonschema-regex"
+version = "0.60.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f8a848331614144c03e815fb931f238c9e342bd7ab501b29e35d647e7cd5688"
+dependencies = [
+ "regex-syntax",
+]
+
+[[package]]
 name = "jsonschema-value"
 version = "0.49.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2453,10 +2499,27 @@ checksum = "7ec7637f83e510868ae6ed625f7ebfbbde4554ee8ce49854caa5126a8b9b9ecb"
 dependencies = [
  "ahash",
  "bytecount",
- "fraction",
+ "fraction 0.15.4",
  "num-cmp",
  "num-traits",
  "serde_json",
+]
+
+[[package]]
+name = "jsonschema-value"
+version = "0.60.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a5a947ef798eeacacb43edf29b1d0ab64bdf5e2c9fbcaad10ee8663d922b544"
+dependencies = [
+ "ahash",
+ "bytecount",
+ "fraction 0.17.0",
+ "getrandom 0.3.4",
+ "memchr",
+ "num-cmp",
+ "num-traits",
+ "serde_json",
+ "zmij",
 ]
 
 [[package]]
@@ -3060,7 +3123,7 @@ dependencies = [
  "bytes",
  "http",
  "opentelemetry",
- "reqwest 0.13.5",
+ "reqwest",
 ]
 
 [[package]]
@@ -3077,7 +3140,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
- "reqwest 0.13.5",
+ "reqwest",
  "thiserror 2.0.21",
 ]
 
@@ -3901,6 +3964,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "referencing"
+version = "0.60.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "922268812b6f9e20b4ab0f1efe8e07036958eed7346ceddb31c777b5531fd11f"
+dependencies = [
+ "ahash",
+ "fluent-uri",
+ "getrandom 0.3.4",
+ "hashbrown 0.17.1",
+ "itoa",
+ "micromap",
+ "parking_lot",
+ "percent-encoding",
+ "serde_json",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3931,47 +4011,6 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reqwest"
-version = "0.12.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "futures-core",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "js-sys",
- "log",
- "percent-encoding",
- "pin-project-lite",
- "quinn",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sync_wrapper",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tower",
- "tower-http 0.6.11",
- "tower-service",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-streams",
- "web-sys",
- "webpki-roots 1.0.11",
-]
-
-[[package]]
-name = "reqwest"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
@@ -3995,15 +4034,19 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
 ]
 
@@ -5646,9 +5689,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-streams"
-version = "0.4.2"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
 dependencies = [
  "futures-util",
  "js-sys",

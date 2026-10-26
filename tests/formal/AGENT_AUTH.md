@@ -65,7 +65,7 @@ proof, liveness guarantee, or unbounded proof is claimed.
 
 ## Reproducible tools and exact commands
 
-From the repository root on macOS arm64 or Linux x86_64, put Node **22.22.0** on
+From the repository root on macOS arm64 or Linux x86_64, put Node **22.23.3** on
 PATH and install Rust **1.99.1**. Then run:
 
 ```sh
