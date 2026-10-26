@@ -1557,7 +1557,12 @@ async fn run_approve_loop(
                     config
                         .flags
                         .keys()
-                        .map(|name| (name.clone(), session.flags.get(name).copied().unwrap_or(false)))
+                        .map(|name| {
+                            (
+                                name.clone(),
+                                session.flags.get(name).copied().unwrap_or(false),
+                            )
+                        })
                         .collect()
                 } else {
                     cli_flags.to_vec()

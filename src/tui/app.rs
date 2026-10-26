@@ -3323,7 +3323,9 @@ impl TuiApp {
                 &request.flags,
             );
             if request_defaults.is_some() {
-                self.form.skipped.set_text(&request.skipped_steps.join(", "));
+                self.form
+                    .skipped
+                    .set_text(&request.skipped_steps.join(", "));
             }
         }
         if request.input.trim().is_empty() && request.attachments.is_empty() {
@@ -6323,63 +6325,110 @@ mod tests {
         }
         .save()
         .unwrap_or_else(|error| panic!("save history: {error}"));
-        let defaults = app.application
+        let defaults = app
+            .application
             .new_session_config_defaults(dir.path(), config.to_str(), None)
             .unwrap_or_else(|error| panic!("read history: {error}"));
         assert_eq!(defaults.default_skipped_steps, ["browser"]);
         app.skip_defaults_initialized = false;
         assert!(app.sync_config_defaults());
         assert!(app.skip_defaults_initialized);
-        assert!(app.form.selected_skipped_steps().is_empty());
+        assert_eq!(app.form.selected_skipped_steps(), Vec::<String>::new());
         app.form.step = Step::Flags;
         assert!(!app.handle_key(key(KeyCode::Char(' '))));
         assert!(app.skip_choices().iter().any(|(id, _)| id == "browser"));
-        assert!(app.form.selected_skipped_steps().is_empty());
+        assert_eq!(app.form.selected_skipped_steps(), Vec::<String>::new());
         app.form.step = Step::SkippedSteps;
         let backend = ratatui::backend::TestBackend::new(140, 40);
         let mut terminal = ratatui::Terminal::new(backend)
             .unwrap_or_else(|error| panic!("create terminal: {error}"));
-        terminal.draw(|frame| crate::tui::ui::draw(frame, &mut app))
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &mut app))
             .unwrap_or_else(|error| panic!("render skip choices: {error}"));
-        let screen = terminal.backend().buffer().content.chunks(140)
-            .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect::<String>())
-            .collect::<Vec<_>>().join("\n");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(140)
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(screen.contains("[ ] browser"), "{screen}");
         // Submit immediately, before any refresh can mask a history fallback.
-        let request = app.session_request().unwrap_or_else(|| panic!("valid request"));
-        assert!(request.skipped_steps.is_empty());
+        let request = app
+            .session_request()
+            .unwrap_or_else(|| panic!("valid request"));
+        assert_eq!(request.skipped_steps, Vec::<String>::new());
         // History still contains browser while refresh and off/on run.
         app.form.step = Step::Flags;
         app.refresh();
         for _ in 0..2 {
             assert!(!app.handle_key(key(KeyCode::Char(' '))));
             app.refresh();
-            assert!(app.form.selected_skipped_steps().is_empty());
+            assert_eq!(app.form.selected_skipped_steps(), Vec::<String>::new());
             assert!(!app.form.skipped_explicit);
         }
-        let state = app.application.create_session(request)
+        let state = app
+            .application
+            .create_session(request)
             .unwrap_or_else(|error| panic!("persist session: {error}"));
-        assert!(state.skipped_steps.is_empty());
-        let persisted = app.application.list_sessions()
+        assert_eq!(state.skipped_steps, Vec::<String>::new());
+        let persisted = app
+            .application
+            .list_sessions()
             .unwrap_or_else(|error| panic!("load sessions: {error}"));
-        assert!(persisted.iter().find(|s| s.id == state.id)
-            .unwrap_or_else(|| panic!("persisted session")).skipped_steps.is_empty());
+        assert_eq!(
+            persisted
+                .iter()
+                .find(|s| s.id == state.id)
+                .unwrap_or_else(|| panic!("persisted session"))
+                .skipped_steps,
+            Vec::<String>::new()
+        );
         let history = crate::new_session_history::NewSessionHistory::load()
             .unwrap_or_else(|error| panic!("load history: {error}"));
-        assert!(history.entries.first().unwrap_or_else(|| panic!("history entry"))
-            .skipped_steps.is_empty());
+        assert_eq!(
+            history
+                .entries
+                .first()
+                .unwrap_or_else(|| panic!("history entry"))
+                .skipped_steps,
+            Vec::<String>::new()
+        );
+        assert_flag_skip_defaults_follow_context_changes(&mut app, dir.path(), &config);
+    }
+
+    fn assert_flag_skip_defaults_follow_context_changes(
+        app: &mut TuiApp,
+        dir: &std::path::Path,
+        config: &std::path::Path,
+    ) {
         // A new configuration still initializes its own history defaults.
-        let other = dir.path().join("other.yaml");
-        std::fs::write(&other, "command: [echo]\nsteps:\n  build:\n    command: echo build\n")
-            .unwrap_or_else(|error| panic!("write other config: {error}"));
+        let other = dir.join("other.yaml");
+        std::fs::write(
+            &other,
+            "command: [echo]\nsteps:\n  build:\n    command: echo build\n",
+        )
+        .unwrap_or_else(|error| panic!("write other config: {error}"));
         crate::new_session_history::NewSessionHistory {
             entries: vec![crate::new_session_history::NewSessionHistoryEntry {
-                selected_at: String::new(), input: String::new(), requested_config_path: None,
-                working_dir: dir.path().to_string_lossy().into_owned(), repo: None,
-                resolved_config_key: crate::new_session_history::resolved_config_key_for_session(&other),
+                selected_at: String::new(),
+                input: String::new(),
+                requested_config_path: None,
+                working_dir: dir.to_string_lossy().into_owned(),
+                repo: None,
+                resolved_config_key: crate::new_session_history::resolved_config_key_for_session(
+                    &other,
+                ),
                 skipped_steps: vec!["build".into()],
             }],
-        }.save().unwrap_or_else(|error| panic!("save other history: {error}"));
+        }
+        .save()
+        .unwrap_or_else(|error| panic!("save other history: {error}"));
         app.form.config.set_text(&other.to_string_lossy());
         assert!(app.sync_config_defaults());
         assert_eq!(app.form.selected_skipped_steps(), ["build"]);
@@ -6389,7 +6438,7 @@ mod tests {
         assert!(app.sync_config_defaults());
         app.form.config.set_text(&other.to_string_lossy());
         assert!(app.sync_config_defaults());
-        assert!(app.form.selected_skipped_steps().is_empty());
+        assert_eq!(app.form.selected_skipped_steps(), Vec::<String>::new());
         assert!(app.form.skipped_explicit);
     }
 

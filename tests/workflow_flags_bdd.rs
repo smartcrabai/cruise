@@ -571,10 +571,7 @@ mod contracts {
     fn cancel_approval(w: &mut FlagWorld, selection: String) {
         let mut responses: Vec<(&str, &[u8])> = vec![("Publish as Issue", b"\r")];
         if selection == "skip" {
-            responses.extend([
-                ("Run E2E", &b" \r"[..]),
-                ("Steps to skip (", &b"\x1b"[..]),
-            ]);
+            responses.extend([("Run E2E", &b" \r"[..]), ("Steps to skip (", &b"\x1b"[..])]);
         } else {
             responses.push(("Run E2E", b" \x1b"));
         }

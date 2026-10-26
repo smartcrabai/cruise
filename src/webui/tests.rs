@@ -381,17 +381,27 @@ async fn webui_all_gated_flag_round_trip_does_not_restore_history_skips() {
     std::fs::write(&config, "command: [cat]\nflags:\n  e2e: {}\nsteps:\n  browser:\n    flag: e2e\n    command: 'true'\n")
         .unwrap_or_else(|error| panic!("write all-gated workflow: {error}"));
     let _state_home = crate::test_support::EnvGuard::set(
-        "XDG_STATE_HOME", harness.dir.path().join("state").as_os_str(),
+        "XDG_STATE_HOME",
+        harness.dir.path().join("state").as_os_str(),
     );
     crate::new_session_history::NewSessionHistory {
         entries: vec![crate::new_session_history::NewSessionHistoryEntry {
-            selected_at: String::new(), input: String::new(), requested_config_path: None,
-            working_dir: harness.dir.path().to_string_lossy().into_owned(), repo: None,
-            resolved_config_key: crate::new_session_history::resolved_config_key_for_session(&config),
+            selected_at: String::new(),
+            input: String::new(),
+            requested_config_path: None,
+            working_dir: harness.dir.path().to_string_lossy().into_owned(),
+            repo: None,
+            resolved_config_key: crate::new_session_history::resolved_config_key_for_session(
+                &config,
+            ),
             skipped_steps: vec!["browser".into()],
         }],
-    }.save().unwrap_or_else(|error| panic!("seed contrary history: {error}"));
-    let defaults = harness.state.application
+    }
+    .save()
+    .unwrap_or_else(|error| panic!("seed contrary history: {error}"));
+    let defaults = harness
+        .state
+        .application
         .new_session_config_defaults(harness.dir.path(), config.to_str(), None)
         .unwrap_or_else(|error| panic!("load defaults: {error}"));
     assert_eq!(defaults.default_skipped_steps, ["browser"]);
@@ -400,28 +410,41 @@ async fn webui_all_gated_flag_round_trip_does_not_restore_history_skips() {
         ("flag.e2e=off&stepIds=browser&runSteps=browser", false),
         ("flag.e2e=on", true),
     ] {
-        let (status, _, html) = get(&harness, &flag_steps_uri(&harness, &config, fields), &[]).await;
+        let (status, _, html) =
+            get(&harness, &flag_steps_uri(&harness, &config, fields), &[]).await;
         assert_eq!(status, StatusCode::OK, "{html}");
         if visible {
-            assert!(input_tag(&html, "runSteps", "browser").contains("checked"), "{html}");
+            assert!(
+                input_tag(&html, "runSteps", "browser").contains("checked"),
+                "{html}"
+            );
         } else {
             assert!(!html.contains("name=\"stepIds\""), "{html}");
         }
     }
     let body = format!(
         "input=all-gated-round-trip&baseDir={}&configPath={}&flag.e2e=on&stepIds=browser&runSteps=browser",
-        harness.dir.path().display(), config.display(),
+        harness.dir.path().display(),
+        config.display(),
     );
-    let request = Request::builder().method("POST").uri("/webui/sessions/draft")
+    let request = Request::builder()
+        .method("POST")
+        .uri("/webui/sessions/draft")
         .header("content-type", "application/x-www-form-urlencoded")
-        .body(Body::from(body)).unwrap_or_else(|error| panic!("create request: {error}"));
+        .body(Body::from(body))
+        .unwrap_or_else(|error| panic!("create request: {error}"));
     let (status, _, html) = send(&harness, request).await;
     assert_eq!(status, StatusCode::OK, "{html}");
-    let sessions = harness.state.application.list_sessions()
+    let sessions = harness
+        .state
+        .application
+        .list_sessions()
         .unwrap_or_else(|error| panic!("load created session: {error}"));
-    let session = sessions.iter().find(|s| s.input == "all-gated-round-trip")
+    let session = sessions
+        .iter()
+        .find(|s| s.input == "all-gated-round-trip")
         .unwrap_or_else(|| panic!("created session: {html}"));
-    assert!(session.skipped_steps.is_empty());
+    assert_eq!(session.skipped_steps, Vec::<String>::new());
     assert_eq!(session.flags.get("e2e"), Some(&true));
 }
 
