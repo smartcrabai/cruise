@@ -20,7 +20,7 @@ export default function Layout(props) {
         <div id="sidebar-resizer" role="separator" aria-orientation="vertical" tabindex="0" class="hidden md:block w-1 cursor-col-resize bg-gray-200 dark:bg-gray-800 hover:bg-blue-500"></div>
         <main id="main" class="flex-1 min-h-0 min-w-0 overflow-auto">{props.main}</main>
       </div>
-      <div id="toasts" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm w-[calc(100%-2rem)] pointer-events-none"></div>
+      <div id="toasts" class="fixed bottom-4 right-4 z-60 flex flex-col gap-2 max-w-sm w-[calc(100%-2rem)] pointer-events-none"></div>
       <div id="dialogs">{props.dialogs}</div>
       <div hx-sse:connect="/webui/events" hx-swap="none" hx-on:notify="app.notify(event)"></div>
     </>
