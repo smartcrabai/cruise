@@ -373,7 +373,99 @@ after-pr:
           done
           echo "CI remained pending after 30 polls." >&2
           exit 1 ;;
-        *) gh pr checks {pr.number} --watch ;;
+        *)
+          if ! expected_head=$(git rev-parse HEAD); then
+            printf 'Unable to read local HEAD before checking GitHub CI.\n' >&2
+            exit 1
+          fi
+          if ! repository=$(gh repo view --json nameWithOwner --jq .nameWithOwner); then
+            printf 'Unable to determine the GitHub repository for PR #%s.\n' {pr.number} >&2
+            exit 1
+          fi
+          owner=$(printf '%s\n' "$repository" | cut -d/ -f1)
+          name=$(printf '%s\n' "$repository" | cut -d/ -f2-)
+          if [ -z "$owner" ] || [ -z "$name" ]; then
+            printf 'Invalid GitHub repository name: %s\n' "$repository" >&2
+            exit 1
+          fi
+          query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{state contexts(first:1) {{totalCount}}}}}}}}}}}}'
+          deadline=$(( $(date +%s) + 540 ))
+          while :; do
+            if ! response=$(gh api graphql -f owner="$owner" -f name="$name" -F number={pr.number} -f head="$expected_head" -f query="$query"); then
+              printf 'GitHub CI query failed for PR #%s at expected HEAD %s.\n' {pr.number} "$expected_head" >&2
+              exit 1
+            fi
+            if ! printf '%s' "$response" | jq -e '(.errors // []) | length == 0' >/dev/null; then
+              printf 'GitHub CI query returned errors for PR #%s at expected HEAD %s.\n' {pr.number} "$expected_head" >&2
+              exit 1
+            fi
+            if ! pr_head=$(printf '%s' "$response" | jq -er '.data.repository.pullRequest.headRefOid | strings'); then
+              printf 'GitHub did not return the head for PR #%s.\n' {pr.number} >&2
+              exit 1
+            fi
+            if [ "$pr_head" != "$expected_head" ]; then
+              printf 'GitHub PR #%s head changed: expected %s, found %s.\n' {pr.number} "$expected_head" "$pr_head" >&2
+              exit 1
+            fi
+            if ! rollup_head=$(printf '%s' "$response" | jq -er '.data.repository.object.oid | strings'); then
+              printf 'GitHub did not return the expected commit object for PR #%s (HEAD %s).\n' {pr.number} "$expected_head" >&2
+              exit 1
+            fi
+            if [ "$rollup_head" != "$expected_head" ]; then
+              state=stale-rollup
+              check_count=0
+            else
+              if ! has_rollup=$(printf '%s' "$response" | jq -er '.data.repository.object | has("statusCheckRollup")'); then
+                printf 'GitHub omitted statusCheckRollup for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+                exit 1
+              fi
+              if [ "$has_rollup" != true ]; then
+                printf 'GitHub returned malformed statusCheckRollup data for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+                exit 1
+              fi
+              rollup=$(printf '%s' "$response" | jq -c '.data.repository.object.statusCheckRollup')
+              if [ "$rollup" = null ]; then
+                state=not-registered
+                check_count=0
+              else
+                if ! state=$(printf '%s' "$response" | jq -er '.data.repository.object.statusCheckRollup.state | strings'); then
+                  printf 'GitHub returned malformed CI state for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+                  exit 1
+                fi
+                if ! check_count=$(printf '%s' "$response" | jq -er '.data.repository.object.statusCheckRollup.contexts.totalCount | numbers'); then
+                  printf 'GitHub returned malformed CI check count for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+                  exit 1
+                fi
+                if [ "$check_count" -eq 0 ]; then
+                  state=no-checks
+                fi
+              fi
+            fi
+            if [ "$check_count" -gt 0 ]; then
+              case "$state" in
+                SUCCESS)
+                  printf 'GitHub CI passed for HEAD %s (%s checks).\n' "$expected_head" "$check_count"
+                  exit 0 ;;
+                FAILURE|ERROR)
+                  printf 'GitHub CI failed for PR #%s: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' {pr.number} "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
+                  exit 1 ;;
+                PENDING|EXPECTED) ;;
+                *)
+                  printf 'GitHub returned unknown CI state for PR #%s: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' {pr.number} "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
+                  exit 1 ;;
+              esac
+            fi
+            if ! now=$(date +%s); then
+              printf 'Unable to check the GitHub CI wait deadline for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+              exit 1
+            fi
+            if [ "$now" -ge "$deadline" ]; then
+              printf 'GitHub CI timed out: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
+              exit 1
+            fi
+            printf 'Waiting for GitHub CI: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count"
+            sleep 5
+          done ;;
       esac
   fix-ci-error:
     flag: [after_pr, merge]
