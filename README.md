@@ -600,6 +600,12 @@ On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cru
 
 5. **`cruise run`** -- Without an ID, picks a pending session (Planned, Running, Failed, or Suspended; prompts when several qualify), reuses (or creates) the git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, and executes the workflow. By default it creates a PR when the run leaves branch commits, then runs configured `after-pr` steps. In built-in workflows, `-f after_pr` enables that prelude without merging; `-f merge` enables the same prelude once plus the final native synchronous squash merge. If a successful run has no new branch commits, PR creation is skipped without error (existing branch commits are still eligible), and opted-in after-PR actions are skipped with a reason. Workflow-level `create_pr: false` skips automatic commit, push, PR creation, `after-pr`, and PR-based cleanup, while preserving the normal session, artifacts, and worktree; opted-in actions are skipped with a reason and merge never overrides the no-PR setting. Explicit `if.no-file-changes` failure/retry behavior is unchanged. An actual PR-creation failure still makes a `--repo` session `Failed`; a plain worktree session logs a warning and completes without a PR, skipping `after-pr`.
 
+GitHub built-in CI waits pin the local `HEAD` and require the PR head and CI rollup to match that commit. They poll every 5 seconds for up to 9 minutes within the existing 10-minute step timeout; unregistered or pending checks are not success.
+
+Native GitHub squash merge also waits for current-head CI registration/completion and GitHub's `UNKNOWN` mergeability to resolve, polling every 2 seconds for up to 10 minutes (a shorter step timeout still applies). This runtime check also protects existing saved workflow snapshots without rewriting them. Conflicts, current-head CI failures, changed heads, malformed responses, and unmet policy or review requirements still reject the merge; the final merge request remains single-shot and SHA-pinned.
+
+`MERGEABLE/UNSTABLE` is transient only while the pinned commit's CI is pending or not yet registered/current; it is never merge-ready. A current-head CI failure still rejects immediately, and green CI with a remaining `UNSTABLE` state is also rejected.
+
 PR-backed sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` can remove them. A normal session configured with `create_pr: false` retains its session, artifacts, and worktree without waiting for a PR.
 
 ### Model and Fallback Notices
@@ -1881,6 +1887,8 @@ Once a session ID is allocated, `cruise.execution` spans preparation through fin
 | `cruise.attempt` | One backend or shell attempt, with a 1-based `cruise.retry.attempt` and the selected backend/model |
 
 Phases are emitted only when their work runs: skipped planning or disabled/unneeded PR creation does not produce a successful placeholder phase. `cruise.retry` span events record backoff/fallback actions, fixed retry reasons, attempt numbers, and model switches. SDK fallback and the independent command/prompt rate-limit retry loops are instrumented without changing retry policy.
+
+GitHub native squash-merge refusals for unconfirmed mergeability include the observed `mergeable` and `mergeStateStatus` values in the saved session failure, even when telemetry is disabled. When enabled, telemetry also records these values as `cruise.github.mergeable` and `cruise.github.merge_state_status` attributes on the `squash_merge` step span.
 
 Skipped steps, including parallel children, do not emit step spans or operation observations. Step outcomes include postcondition failures such as `if.no-file-changes`; a later recovery can succeed without erasing the failed step. Cancelling the approval menu is recorded as cancelled while preserving the successful CLI exit; interrupting active planning or title generation still returns an error after draining that work. Choosing Execute now finishes planning before starting a separate execution root.
 

@@ -342,6 +342,23 @@ pub fn record_error_type(error_type: &'static str) {
     }
 }
 
+/// Records GitHub's observed mergeability values on the current span.
+pub fn record_github_mergeability(mergeable: &str, merge_state_status: &str) {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let context = Context::current();
+    let span = context.span();
+    span.set_attribute(KeyValue::new(
+        "cruise.github.mergeable",
+        mergeable.to_owned(),
+    ));
+    span.set_attribute(KeyValue::new(
+        "cruise.github.merge_state_status",
+        merge_state_status.to_owned(),
+    ));
+}
+
 /// Records a retry/fallback event and a low-cardinality retry counter.
 pub fn record_retry(
     action: &'static str,

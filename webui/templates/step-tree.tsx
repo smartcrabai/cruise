@@ -1,9 +1,9 @@
 export default function StepTree(props) {
   return <ul class="space-y-1 text-sm">
     {props.flags.map(flag => <li class="flex items-center gap-2">
-      <label class="flex items-center gap-2 text-gray-700 dark:text-gray-300">
+      <label class="flex flex-wrap items-center gap-2 text-gray-700 dark:text-gray-300">
         <span>{flag.name}</span>
-        <select name={"flag." + flag.name} class="rounded border border-gray-300 bg-white px-1 text-sm dark:border-gray-600 dark:bg-gray-800" hx-get="/webui/new/steps/flags" hx-trigger="change" hx-target="#step-tree" hx-include="closest form">
+        <select name={"flag." + flag.name} class="rounded border border-gray-300 bg-white px-1 text-base md:text-sm dark:border-gray-600 dark:bg-gray-800" hx-get="/webui/new/steps/flags" hx-trigger="change" hx-target="#step-tree" hx-include="closest form">
           {flag.on && <option value="on" selected>on</option>}
           {!flag.on && <option value="on">on</option>}
           {!flag.on && <option value="off" selected>off</option>}
