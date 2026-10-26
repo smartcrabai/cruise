@@ -3,7 +3,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -945,29 +945,71 @@ async fn github_cancellation_during_readiness_wait_never_merges() {
 #[tokio::test]
 async fn github_local_head_change_during_readiness_never_merges() {
     let fixture = Fixture::new();
-    let _process_lock = crate::test_support::lock_process();
+    let alternate_head = {
+        let _process_lock = crate::test_support::lock_process();
+        git(
+            &fixture.repo,
+            &["commit", "--allow-empty", "--quiet", "-m", "alternate HEAD"],
+        );
+        let alternate_head = String::from_utf8(git(&fixture.repo, &["rev-parse", "HEAD"]).stdout)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .trim()
+            .to_string();
+        git(&fixture.repo, &["reset", "--hard", fixture.head.as_str()]);
+        alternate_head
+    };
     let mut unknown = github_status(&fixture.head);
     unknown["data"]["repository"]["pullRequest"]["mergeable"] = json!("UNKNOWN");
-    fixture.configure_github(&github_open_identity(&fixture.head), &unknown, &json!([]));
-    let repo = fixture.repo.clone();
-    let change_head = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        fs::write(repo.join("file.txt"), "changed\n").unwrap_or_else(|error| panic!("{error}"));
-        git(&repo, &["add", "file.txt"]);
-        git(&repo, &["commit", "--quiet", "-m", "move local HEAD"]);
-    });
-
-    let result = run_github_with_timing(
+    fixture.configure_github_sequence(&github_open_identity(&fixture.head), &[unknown], &json!([]));
+    let running = run_github_with_timing(
         &fixture,
         None,
-        Duration::from_secs(2),
-        Duration::from_millis(100),
-    )
-    .await;
-    change_head.await.unwrap_or_else(|error| panic!("{error}"));
+        Duration::from_secs(5),
+        Duration::from_millis(5),
+    );
+    tokio::pin!(running);
 
-    assert!(matches!(result, Err(AutoSquashError::Rejected(_))));
+    tokio::select! {
+        result = &mut running => panic!("readiness finished before local HEAD changed: {result:?}"),
+        () = wait_for_github_status_calls(&fixture, 2) => {}
+    }
+    {
+        let _process_lock = crate::test_support::lock_process();
+        git(
+            &fixture.repo,
+            &["update-ref", "HEAD", alternate_head.as_str()],
+        );
+    }
+    let result = running.await;
+
+    let reason = match result {
+        Err(AutoSquashError::Rejected(reason)) => reason,
+        other => panic!("expected local HEAD rejection, got {other:?}"),
+    };
+    assert!(reason.contains("local HEAD changed"), "{reason}");
     assert_eq!(fixture.effect_lines(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn github_local_head_check_does_not_refresh_git_index() {
+    let fixture = Fixture::new();
+    let tracked_file =
+        fs::File::open(fixture.repo.join("file.txt")).unwrap_or_else(|error| panic!("{error}"));
+    tracked_file
+        .set_times(fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(2)))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let index_path = fixture.repo.join(".git/index");
+    let index_before = fs::read(&index_path).unwrap_or_else(|error| panic!("{error}"));
+    let url = "https://github.com/acme/service/pull/7";
+    let request = fixture.request(url, None);
+
+    let head = super::local_head(&request).await;
+
+    assert_eq!(head, Ok(fixture.head.clone()));
+    assert_eq!(
+        fs::read(index_path).unwrap_or_else(|error| panic!("{error}")),
+        index_before
+    );
 }
 
 #[tokio::test]

@@ -103,6 +103,10 @@ async fn run_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    // Prevent read-only Git status checks from refreshing the index during a concurrent commit.
+    if program == "git" && args.first().is_some_and(|arg| arg == "status") {
+        command.env("GIT_OPTIONAL_LOCKS", "0");
+    }
 
     let result = tokio::select! {
         biased;
