@@ -49,15 +49,37 @@ verify_flags() {
   (cd "$RUN" && node "$ROOT/scripts/formal/verify_quint.cjs" "$Q" "$ROOT/$MODEL" workflow_flags 8 "$RUN/counterexample.itf.json")
 }
 run_check quint-verify verify_flags
+# Separate model for this task. Keep the older run-boundary model intact.
+SKIP_MODEL=tests/formal/flag_skip_selection.qnt
+run_check skip-quint-typecheck "$Q" typecheck "$SKIP_MODEL"
+run_check skip-quint-test "$Q" test "$SKIP_MODEL" --backend typescript --seed 20261026 --out-itf "$RUN/skip_test_{test}_{seq}.itf.json"
+run_check skip-quint-simulation "$Q" run --seed 20261026 --max-samples 1000 --max-steps 8 --invariant safety --backend typescript --out-itf "$RUN/skip_simulation_{seq}.itf.json" "$SKIP_MODEL"
+verify_skip_selection() {
+  (cd "$RUN" && node "$ROOT/scripts/formal/verify_quint.cjs" "$Q" "$ROOT/$SKIP_MODEL" flag_skip_selection 8 "$RUN/skip-counterexample.itf.json")
+}
+run_check skip-quint-verify verify_skip_selection
 # The installed Alloy 6.2.0 help has no --expect CLI option. Use its documented
 # per-command expect 0/1 syntax and validate every result from the CLI receipt.
 run_check alloy java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --solver sat4j --type json --output "$RUN/alloy" tests/formal/workflow_flags.als
 run_check alloy-receipt node scripts/formal/check_alloy_receipt.cjs tests/formal/workflow_flags.als "$RUN/alloy/receipt.json"
+run_check skip-alloy java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --solver sat4j --type json --output "$RUN/skip-alloy" tests/formal/flag_skip_selection.als
+run_check skip-alloy-receipt node scripts/formal/check_alloy_receipt.cjs tests/formal/flag_skip_selection.als "$RUN/skip-alloy/receipt.json"
 run_check receipt-validator-tests node --test scripts/formal/check_alloy_receipt.test.cjs
+# Do not inherit the developer's cruise provider/model defaults or saved history.
+# Leave HOME, credentials and commit-guard variables untouched. Test fixtures
+# provide their own backends and use narrower XDG overrides where needed.
+export XDG_CONFIG_HOME="$RUN/xdg-config"
+export XDG_DATA_HOME="$RUN/xdg-data"
+export XDG_STATE_HOME="$RUN/xdg-state"
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+printf 'XDG_CONFIG_HOME=%q\nXDG_DATA_HOME=%q\nXDG_STATE_HOME=%q\n' \
+  "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" > "$RUN/test-environment.log"
 run_check workflow-flags-bdd cargo +1.99.1 test --locked --all-features --test workflow_flags_bdd
 run_check bdd-negative-controls node scripts/formal/check_workflow_flags_bdd_failures.cjs "$RUN"
-run_check flag-contracts cargo +1.99.1 test --locked --all-features --test flags_contract --test flags_cli
-run_check run-boundary-units cargo +1.99.1 test --locked --all-features --bin cruise-runtime workflow_flag_tests
+run_check flag-contracts cargo +1.99.1 test --locked --all-features --test flags_contract --test flags_cli --test flag_skip_list_cli
+# Application creation/history, shared pruning/group metadata, TUI navigation and
+# WebUI real routes plus approval helper tests live in these production targets.
+run_check production-units cargo +1.99.1 test --locked --all-features --lib --bin cruise-runtime
 printf 'Aggregate exit status: %s\n' "$status" | tee -a "$RUN/results.log"
 echo "Workflow flag reports: $RUN"
 exit "$status"

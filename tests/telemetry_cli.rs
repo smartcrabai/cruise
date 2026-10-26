@@ -54,7 +54,7 @@ impl Fixture {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
-            if name.starts_with("CRUISE_")
+            if (name.starts_with("CRUISE_") && name != "CRUISE_GUARD_COMMON_DIR")
                 || name.starts_with("OTEL_")
                 || name.starts_with("JCODE_")
             {
@@ -1270,7 +1270,10 @@ fn application_run_keeps_completed_domain_state_but_errors_root_for_failed_steps
     );
     for (name, _) in std::env::vars_os() {
         let name = name.to_string_lossy();
-        if name.starts_with("CRUISE_") || name.starts_with("OTEL_") || name.starts_with("JCODE_") {
+        if (name.starts_with("CRUISE_") && name != "CRUISE_GUARD_COMMON_DIR")
+            || name.starts_with("OTEL_")
+            || name.starts_with("JCODE_")
+        {
             child.env_remove(name.as_ref());
         }
     }
@@ -1309,7 +1312,10 @@ fn application_api_parallel_planning_keeps_session_traces_isolated() {
     );
     for (name, _) in std::env::vars_os() {
         let name = name.to_string_lossy();
-        if name.starts_with("CRUISE_") || name.starts_with("OTEL_") || name.starts_with("JCODE_") {
+        if (name.starts_with("CRUISE_") && name != "CRUISE_GUARD_COMMON_DIR")
+            || name.starts_with("OTEL_")
+            || name.starts_with("JCODE_")
+        {
             child.env_remove(name.as_ref());
         }
     }

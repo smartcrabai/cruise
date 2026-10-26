@@ -127,6 +127,355 @@ async fn send(harness: &Harness, request: Request<Body>) -> (StatusCode, String,
     )
 }
 
+const FLAG_CONFIG_YAML: &str = "command: [cat]
+flags:
+  e2e:
+    description: Run browser tests
+  docs: {}
+  after_pr: {}
+steps:
+  always:
+    command: 'true'
+  browser:
+    flag: e2e
+    command: 'true'
+  either:
+    flag: [e2e, docs]
+    command: 'true'
+  docs-only:
+    flag: docs
+    command: 'true'
+after-pr:
+  publish:
+    flag: after_pr
+    command: 'true'
+";
+
+fn flag_config(harness: &Harness) -> std::path::PathBuf {
+    let path = harness.dir.path().join("flags.yaml");
+    std::fs::write(&path, FLAG_CONFIG_YAML)
+        .unwrap_or_else(|error| panic!("write flag config: {error}"));
+    path
+}
+
+fn flag_steps_uri(harness: &Harness, config: &std::path::Path, fields: &str) -> String {
+    format!(
+        "/webui/new/steps/flags?baseDir={}&configPath={}&{fields}",
+        harness.dir.path().display(),
+        config.display(),
+    )
+}
+
+fn input_tag<'a>(html: &'a str, name: &str, value: &str) -> &'a str {
+    html.split('<')
+        .filter_map(|part| part.split_once('>').map(|(tag, _)| tag))
+        .find(|tag| {
+            tag.starts_with("input ")
+                && tag.contains(&format!("name=\"{name}\""))
+                && tag.contains(&format!("value=\"{value}\""))
+        })
+        .unwrap_or_else(|| panic!("missing input {name}={value}: {html}"))
+}
+
+#[tokio::test]
+async fn webui_flag_steps_route_filters_off_and_on_trees() {
+    let harness = harness();
+    let config = flag_config(&harness);
+    let (status, _, off) = get(&harness, &flag_steps_uri(&harness, &config, ""), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{off}");
+    input_tag(&off, "stepIds", "always");
+    for id in ["browser", "either", "docs-only", "publish"] {
+        assert!(
+            !off.contains(&format!("name=\"stepIds\" value=\"{id}\"")),
+            "{off}"
+        );
+    }
+
+    let (status, _, on) = get(
+        &harness,
+        &flag_steps_uri(
+            &harness,
+            &config,
+            "flag.e2e=on&flag.docs=off&flag.after_pr=on",
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{on}");
+    for id in ["always", "browser", "either", "publish"] {
+        input_tag(&on, "stepIds", id);
+    }
+    assert!(!on.contains("name=\"stepIds\" value=\"docs-only\""), "{on}");
+    assert!(on.contains("after PR"), "{on}");
+}
+
+#[tokio::test]
+async fn webui_config_change_restores_history_with_flags_off() {
+    let harness = harness();
+    let config = flag_config(&harness);
+    let _state_home = crate::test_support::EnvGuard::set(
+        "XDG_STATE_HOME",
+        harness.dir.path().join("state").as_os_str(),
+    );
+    crate::new_session_history::NewSessionHistory {
+        entries: vec![crate::new_session_history::NewSessionHistoryEntry {
+            selected_at: String::new(),
+            input: String::new(),
+            requested_config_path: None,
+            working_dir: harness.dir.path().to_string_lossy().into_owned(),
+            repo: None,
+            resolved_config_key: crate::new_session_history::resolved_config_key_for_session(
+                &config,
+            ),
+            skipped_steps: vec!["always".into(), "browser".into()],
+        }],
+    }
+    .save()
+    .unwrap_or_else(|error| panic!("seed history: {error}"));
+    // A config change is not a flag change. Stale flag and checkbox values
+    // from the old form must not replace the new config's history defaults.
+    let uri = format!(
+        "/webui/new/steps?baseDir={}&configPath={}&flag.e2e=on&stepIds=always&runSteps=always",
+        harness.dir.path().display(),
+        config.display(),
+    );
+    let (status, _, html) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(
+        !input_tag(&html, "runSteps", "always").contains("checked"),
+        "{html}"
+    );
+    for id in ["browser", "either", "docs-only", "publish"] {
+        assert!(
+            !html.contains(&format!("name=\"stepIds\" value=\"{id}\"")),
+            "{html}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn webui_flag_rows_precede_steps_and_rerender_the_containing_form() {
+    let harness = harness();
+    let config = flag_config(&harness);
+    // Use the existing config-change route as well as the flag-change route.
+    let uri = format!(
+        "/webui/new/steps?baseDir={}&configPath={}",
+        harness.dir.path().display(),
+        config.display()
+    );
+    let (status, _, html) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let first_step = html
+        .find("name=\"runSteps\"")
+        .unwrap_or_else(|| panic!("{html}"));
+    for name in ["e2e", "docs", "after_pr"] {
+        let marker = format!("name=\"flag.{name}\"");
+        let position = html.find(&marker).unwrap_or_else(|| panic!("{html}"));
+        assert!(
+            position < first_step,
+            "flags must precede skip choices: {html}"
+        );
+        let start = html[..position]
+            .rfind("<select")
+            .unwrap_or_else(|| panic!("{html}"));
+        let tag = html[start..].split('>').next().unwrap_or_default();
+        for attr in [
+            "hx-get=\"/webui/new/steps/flags\"",
+            "hx-trigger=\"change\"",
+            "hx-target=\"#step-tree\"",
+            "hx-include=\"closest form\"",
+        ] {
+            assert!(tag.contains(attr), "missing {attr}: {tag}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn webui_flag_rerender_preserves_explicit_skips_and_flag_choices() {
+    let harness = harness();
+    let config = flag_config(&harness);
+    let _state_home = crate::test_support::EnvGuard::set(
+        "XDG_STATE_HOME",
+        harness.dir.path().join("state").as_os_str(),
+    );
+    // Seed a contrary history default. An explicitly checked form must not
+    // silently reapply this skip when its calculated skipped list is empty.
+    harness
+        .state
+        .application
+        .create_session(NewSessionRequest {
+            input: "remember skipped always".to_string(),
+            base_dir: harness.dir.path().to_path_buf(),
+            config_path: Some(config.clone()),
+            config_yaml: None,
+            repo: None,
+            workspace_mode: WorkspaceMode::Worktree,
+            allow_dirty_working_tree: true,
+            attachments: Vec::new(),
+            skipped_steps: vec!["always".to_string()],
+            flags: BTreeMap::default(),
+        })
+        .unwrap_or_else(|error| panic!("seed skip history: {error}"));
+    // Normal recording deliberately forgets temporary working directories.
+    // Restore this isolated fixture's scope so the regression really exercises
+    // a nonempty history default, rather than merely an empty default.
+    let mut history = crate::new_session_history::NewSessionHistory::load_best_effort();
+    let entry = history
+        .entries
+        .first_mut()
+        .unwrap_or_else(|| panic!("missing history seed"));
+    entry.working_dir = harness.dir.path().to_string_lossy().into_owned();
+    history
+        .save()
+        .unwrap_or_else(|error| panic!("save scoped history: {error}"));
+    let defaults = harness
+        .state
+        .application
+        .new_session_config_defaults(harness.dir.path(), config.to_str(), None)
+        .unwrap_or_else(|error| panic!("read history defaults: {error}"));
+    assert_eq!(defaults.default_skipped_steps, ["always"]);
+    for (submitted, always_checked) in [
+        (
+            "stepIds=always&stepIds=browser&stepIds=either&runSteps=browser&runSteps=either",
+            false,
+        ),
+        (
+            "stepIds=always&stepIds=browser&stepIds=either&runSteps=always&runSteps=browser&runSteps=either",
+            true,
+        ),
+    ] {
+        let fields = format!("flag.e2e=on&flag.docs=off&flag.after_pr=off&{submitted}");
+        let (status, _, html) =
+            get(&harness, &flag_steps_uri(&harness, &config, &fields), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert_eq!(
+            input_tag(&html, "runSteps", "always").contains("checked"),
+            always_checked,
+            "{html}"
+        );
+        for id in ["browser", "either"] {
+            assert!(
+                input_tag(&html, "runSteps", id).contains("checked"),
+                "{html}"
+            );
+        }
+        for (name, choice) in [("e2e", "on"), ("docs", "off"), ("after_pr", "off")] {
+            let marker = format!("name=\"flag.{name}\"");
+            let select = html
+                .split(&marker)
+                .nth(1)
+                .and_then(|tail| tail.split("</select>").next())
+                .unwrap_or_else(|| panic!("missing {marker}: {html}"));
+            assert!(
+                select.contains(&format!("value=\"{choice}\" selected")),
+                "{select}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn webui_all_gated_flag_round_trip_does_not_restore_history_skips() {
+    let harness = harness();
+    let config = harness.dir.path().join("all-gated.yaml");
+    std::fs::write(&config, "command: [cat]\nflags:\n  e2e: {}\nsteps:\n  browser:\n    flag: e2e\n    command: 'true'\n")
+        .unwrap_or_else(|error| panic!("write all-gated workflow: {error}"));
+    let _state_home = crate::test_support::EnvGuard::set(
+        "XDG_STATE_HOME", harness.dir.path().join("state").as_os_str(),
+    );
+    crate::new_session_history::NewSessionHistory {
+        entries: vec![crate::new_session_history::NewSessionHistoryEntry {
+            selected_at: String::new(), input: String::new(), requested_config_path: None,
+            working_dir: harness.dir.path().to_string_lossy().into_owned(), repo: None,
+            resolved_config_key: crate::new_session_history::resolved_config_key_for_session(&config),
+            skipped_steps: vec!["browser".into()],
+        }],
+    }.save().unwrap_or_else(|error| panic!("seed contrary history: {error}"));
+    let defaults = harness.state.application
+        .new_session_config_defaults(harness.dir.path(), config.to_str(), None)
+        .unwrap_or_else(|error| panic!("load defaults: {error}"));
+    assert_eq!(defaults.default_skipped_steps, ["browser"]);
+    for (fields, visible) in [
+        ("flag.e2e=on&stepIds=browser&runSteps=browser", true),
+        ("flag.e2e=off&stepIds=browser&runSteps=browser", false),
+        ("flag.e2e=on", true),
+    ] {
+        let (status, _, html) = get(&harness, &flag_steps_uri(&harness, &config, fields), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        if visible {
+            assert!(input_tag(&html, "runSteps", "browser").contains("checked"), "{html}");
+        } else {
+            assert!(!html.contains("name=\"stepIds\""), "{html}");
+        }
+    }
+    let body = format!(
+        "input=all-gated-round-trip&baseDir={}&configPath={}&flag.e2e=on&stepIds=browser&runSteps=browser",
+        harness.dir.path().display(), config.display(),
+    );
+    let request = Request::builder().method("POST").uri("/webui/sessions/draft")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body)).unwrap_or_else(|error| panic!("create request: {error}"));
+    let (status, _, html) = send(&harness, request).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let sessions = harness.state.application.list_sessions()
+        .unwrap_or_else(|error| panic!("load created session: {error}"));
+    let session = sessions.iter().find(|s| s.input == "all-gated-round-trip")
+        .unwrap_or_else(|| panic!("created session: {html}"));
+    assert!(session.skipped_steps.is_empty());
+    assert_eq!(session.flags.get("e2e"), Some(&true));
+}
+
+#[tokio::test]
+async fn webui_settings_filter_skips_but_keep_current_step_options() {
+    let harness = harness();
+    let config = flag_config(&harness);
+    let session = harness
+        .state
+        .application
+        .create_session(NewSessionRequest {
+            input: "settings flags".to_string(),
+            base_dir: harness.dir.path().to_path_buf(),
+            config_path: Some(config),
+            config_yaml: None,
+            repo: None,
+            workspace_mode: WorkspaceMode::Worktree,
+            allow_dirty_working_tree: true,
+            attachments: Vec::new(),
+            skipped_steps: Vec::new(),
+            flags: BTreeMap::default(),
+        })
+        .unwrap_or_else(|error| panic!("create flag session: {error}"));
+    for enabled in [false, true] {
+        external_edit(&harness, &session.id, |stored| {
+            stored.flags.insert("e2e".to_string(), enabled);
+        });
+        let uri = format!("/webui/sessions/{}/settings", session.id);
+        let (status, _, html) = get(&harness, &uri, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        input_tag(&html, "stepIds", "always");
+        assert_eq!(
+            html.contains("name=\"stepIds\" value=\"browser\""),
+            enabled,
+            "{html}"
+        );
+        assert!(
+            !html.contains("name=\"stepIds\" value=\"docs-only\""),
+            "{html}"
+        );
+        let options = html
+            .split("name=\"currentStep\"")
+            .nth(1)
+            .and_then(|tail| tail.split("</select>").next())
+            .unwrap_or_else(|| panic!("missing currentStep: {html}"));
+        for id in ["always", "browser", "either", "docs-only"] {
+            assert!(
+                options.contains(&format!("<option value=\"{id}\"")),
+                "{options}"
+            );
+        }
+    }
+}
+
 #[test]
 fn publish_dialog_hides_trigger_checkbox_when_unsupported() {
     let harness = harness();
@@ -296,7 +645,8 @@ fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
         &caller.to_string_lossy(),
         Some("__builtin__"),
         Some(repo),
-        &[],
+        None,
+        &crate::flags::FlagValues::new(),
     )
     .unwrap_or_else(|error| panic!("render repo preview: {error}"));
     assert!(preview_html.contains("value=\"write-test-first\""));

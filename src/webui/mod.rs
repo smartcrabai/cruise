@@ -169,6 +169,7 @@ pub(crate) fn router(state: WebState) -> Router {
         .route("/webui/directories", get(handlers::directories))
         .route("/webui/configs", get(handlers::configs))
         .route("/webui/new/steps", get(handlers::new_steps))
+        .route("/webui/new/steps/flags", get(handlers::new_steps_for_flags))
         .route("/webui/repos", get(handlers::repos))
         .route("/webui/settings", get(handlers::settings_modal))
         .route("/webui/settings", post(handlers::save_settings))

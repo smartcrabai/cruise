@@ -1,0 +1,32 @@
+command: [echo]
+flags:
+  e2e:
+    description: Run E2E
+  docs: {}
+groups:
+  checks:
+    steps:
+      group-child:
+        command: echo child
+steps:
+  build:
+    command: touch build.txt
+  e2e-test:
+    flag: e2e
+    command: touch e2e.txt
+  docs-test:
+    flag: docs
+    command: touch docs.txt
+  either-test:
+    flag: [e2e, docs]
+    command: echo either
+  gated-review:
+    flag: [e2e, docs]
+    group: checks
+after-pr:
+  e2e-publish:
+    flag: e2e
+    command: echo publish
+  docs-publish:
+    flag: docs
+    command: echo docs
