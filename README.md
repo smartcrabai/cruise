@@ -604,6 +604,8 @@ GitHub built-in CI waits pin the local `HEAD` and require the PR head and CI rol
 
 Native GitHub squash merge also waits for current-head CI registration/completion and GitHub's `UNKNOWN` mergeability to resolve, polling every 2 seconds for up to 10 minutes (a shorter step timeout still applies). This runtime check also protects existing saved workflow snapshots without rewriting them. Conflicts, current-head CI failures, changed heads, malformed responses, and unmet policy or review requirements still reject the merge; the final merge request remains single-shot and SHA-pinned.
 
+`MERGEABLE/UNSTABLE` is transient only while the pinned commit's CI is pending or not yet registered/current; it is never merge-ready. A current-head CI failure still rejects immediately, and green CI with a remaining `UNSTABLE` state is also rejected.
+
 PR-backed sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` can remove them. A normal session configured with `create_pr: false` retains its session, artifacts, and worktree without waiting for a PR.
 
 ### Model and Fallback Notices
