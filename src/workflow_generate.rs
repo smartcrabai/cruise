@@ -37,6 +37,7 @@ pub(crate) async fn generate_yaml(
             .run(PromptRun {
                 prompt: &prompt,
                 model: model.as_ref(),
+                subagent_model: None,
                 max_retries: DEFAULT_RATE_LIMIT_RETRIES,
                 env: &config.env,
                 mcp_servers: &config.mcp_servers,
@@ -203,6 +204,8 @@ mod tests {
         let _sdk = EnvGuard::remove("CRUISE_SDK");
         let _model = EnvGuard::remove("CRUISE_MODEL");
         let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
+        let _subagent_model = EnvGuard::remove("CLAUDE_CODE_SUBAGENT_MODEL");
+        let _subagent_force = EnvGuard::remove("CLAUDE_CODE_SUBAGENT_MODEL_FORCE");
         for (name, text) in [("valid", VALID), ("broken", BROKEN)] {
             let frame = serde_json::json!({"type":"assistant","session_id":"mixed-yaml","message":{"role":"assistant","content":[{"type":"text","text":text}]}});
             fs::write(tmp.path().join(name), format!("{frame}\n"))?;
@@ -212,6 +215,7 @@ mod tests {
 case "$1" in --version) echo '2.0.0'; exit 0;; --cruise-exec-probe) exit 0;; esac
 d='{}'
 printf '%s\n' "$@" >> "$d/args"
+printf 'model=%s force=%s\n' "${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}" "${{CLAUDE_CODE_SUBAGENT_MODEL_FORCE-unset}}" >> "$d/subagent-env"
 read -r input
 printf '%s\n' "$input" >> "$d/prompts"
 if [ '{}' = true ] && [ ! -f "$d/attempted" ]; then
@@ -236,14 +240,14 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         )
         .await??;
         assert_eq!(control_output.trim_end(), VALID.trim_end());
-        for name in ["args", "prompts", "attempted"] {
+        for name in ["args", "prompts", "attempted", "subagent-env"] {
             let path = tmp.path().join(name);
             if path.exists() {
                 fs::remove_file(path)?;
             }
         }
         let config = WorkflowConfig::from_yaml(
-            "sdk: jcode\nplan_model: []\nmodel:\n  - sdk: claude\n    model: mixed-yaml-model\n  - unused/jcode\nsteps:\n  build:\n    command: echo hi\n",
+            "sdk: jcode\nsubagent_model: {sdk: claude, model: haiku}\nplan_model: []\nmodel:\n  - sdk: claude\n    model: mixed-yaml-model\n  - unused/jcode\nsteps:\n  build:\n    command: echo hi\n",
         )?;
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -251,6 +255,11 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         )
         .await??;
         assert_eq!(output.trim_end(), VALID.trim_end());
+        // Check the actual SDK subprocess, including every repair dispatch.
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("subagent-env"))?,
+            "model=unset force=unset\n".repeat(if repair { 2 } else { 1 })
+        );
         let args = fs::read_to_string(tmp.path().join("args"))?;
         assert_eq!(
             args.lines()

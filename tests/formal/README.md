@@ -1,5 +1,12 @@
 # Checkpoint contract verification
 
+For task-scoped `subagent_model` selection, backend configuration and exclusions,
+see `SUBAGENT_MODEL.md` and run `bash scripts/check_subagent_model_specs.sh`.
+The dedicated `subagent-model-specs` PR job runs pinned Quint verification,
+Alloy assertions and witnesses with receipt validation, production Gherkin and
+Rust CLI/API regression tests. Local evidence is in
+`SUBAGENT_MODEL_VERIFICATION.md`.
+
 For per-prompt `disallowed_tools`, implicit git denials and MCP filtering, see
 `TOOL_RESTRICTIONS.md` and run `bash scripts/check_tool_restrictions_specs.sh`.
 The dedicated `tool-restrictions-specs` native PR job runs Quint, all Alloy

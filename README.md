@@ -751,9 +751,9 @@ fresh snapshot session to use updated settings.
 
 - `env` and `mcp_servers` merge per key (higher layer wins).
 - `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
-- Other fields (`model`, `plan_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
+- Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
 - `description`, `steps`, `groups`, and `after-pr` are workflow-only and are a load error in `default.yaml`. Unknown keys are errors too.
-- If defaults name a backend (`command` / `sdk`) of a different kind than the workflow's own, validation fails when they would fill an unset backend-specific `model`, `plan_model`, or `retry`, add a missing `mcp_servers` entry, or fill an unset `computer_use`, `permission`, or `disallowed_tools` field, regardless of its value. Set the field in the workflow or remove it from `default.yaml`. The check runs before `CRUISE_SDK` overrides, which are not considered.
+- If defaults name a backend (`command` / `sdk`) of a different kind than the workflow's own, validation fails when they would fill an unset backend-specific `model`, `plan_model`, `subagent_model`, or `retry`, add a missing `mcp_servers` entry, or fill an unset `computer_use`, `permission`, or `disallowed_tools` field, regardless of its value. Set the field in the workflow or remove it from `default.yaml`. The check runs before `CRUISE_SDK` overrides, which are not considered.
 
 `pre_steps:` defines command-only steps (`command`, `env`, `timeout`, `skip`, `when`) inserted at the start of the workflow's `steps` as `pre/<name>`. They do not run in planning or `after-pr`. User steps come first, then project steps; a project step with the same name replaces the user one in place.
 
@@ -793,6 +793,7 @@ model: sonnet             # default model for all prompt steps (optional)
 # In SDK mode, arrays use the first model, then fall back in order.
 # model: [sonnet, opus, gpt-5.5]
 plan_model: opus          # model used for the built-in plan step (optional)
+# subagent_model: haiku   # SDK-only: one subagent model, string or {sdk: claude, model: haiku}
 languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
   plan: English           # language used by built-in planning prompts
@@ -902,6 +903,45 @@ At workflow level, `model` and `plan_model` may also be arrays. In SDK mode, the
 - Unset -- no explicit model is supplied. OpenCode uses its configured default. A jcode prompt fails with a setup
   error if it still has no effective model; Claude and `command:` retain their
   existing no-model behavior.
+
+#### Subagent model
+
+Set `subagent_model` at workflow level or on a prompt step to select the model
+for agents it spawns. A step value overrides the workflow value. It accepts a
+single nonblank string or `{sdk: claude, model: haiku}` (also `sdk: jcode`), not
+an array or fallback chain. Strings inherit the workflow SDK, defaulting to
+jcode, not the SDK of a fallback attempt. Only attempts whose SDK matches the
+resolved subagent SDK receive the setting; other attempts keep backend defaults.
+Validation rejects a setting with no applicable model candidate.
+
+```yaml
+sdk: claude
+model: sonnet
+subagent_model: haiku
+steps:
+  review:
+    prompt: Review the implementation, delegating checks as needed.
+    subagent_model: {sdk: claude, model: sonnet}
+```
+
+- Claude sets `CLAUDE_CODE_SUBAGENT_MODEL` and
+  `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`, fixing all subagents including Explore
+  and Plan. These injected values override same-named workflow/step `env:` keys.
+  Without `subagent_model`, Cruise leaves those environment keys unchanged.
+- jcode sets the session's swarm default before the prompt. A worker's explicit
+  `model` still takes precedence, so this is a default override, not a force.
+- OpenCode subagent models and `command:` backends are unsupported. A mixed-SDK
+  workflow may target a Claude/jcode candidate with an explicit SDK object.
+  Recognized `:effort` suffixes are rejected, even `:off`; unknown suffixes such
+  as `:free` remain part of the model ID. jcode requires a valid nonempty model.
+- Applies to workflow prompt steps, including groups, `after-pr`, parallel
+  prompt children, and `github-review`, plus planning's plan/fix/ask turns.
+  It does not apply to title generation, PR metadata, or `workflow generate`.
+  Non-prompt steps and group/workflow-call/parallel wrappers cannot set it.
+- A called workflow's top-level value is ignored in favor of the caller's
+  default; the callee's per-step overrides are retained.
+- Layered `default.yaml` supports it, but application `config.json` /
+  `config.yaml` defaults and `CRUISE_SUBAGENT_MODEL` overrides are not provided.
 
 #### `sdk: jcode` — the jcode SDK (default)
 

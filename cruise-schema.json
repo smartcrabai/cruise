@@ -62,6 +62,10 @@
       ],
       "description": "Model to use for plan generation steps; falls back to `model`. A jcode planning prompt must resolve to a model. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
     },
+    "subagent_model": {
+      "$ref": "#/$defs/SubagentModelEntry",
+      "description": "Default subagent model for workflow prompt steps and planning (plan/fix/ask). Step values override it. Strings inherit the workflow SDK (default jcode); objects apply only to matching SDK candidates. Only jcode and Claude are supported, not command backends. One nonblank model only, with no arrays, fallback chain, or recognized :effort suffix. Excludes title generation, PR metadata, and workflow generate."
+    },
     "interactive_planning": {
       "type": "boolean",
       "description": "Whether SDK-mode planning uses session tools to ask questions and submit or revise the plan instead of writing `plan.md` directly. Default: true. Applies to SDK backends, including the default `jcode`; it has no effect with a `command` backend, which always uses file-based planning."
@@ -163,6 +167,20 @@
         }
       ]
     },
+    "SubagentModelEntry": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "pattern": "\\S" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sdk", "model"],
+          "properties": {
+            "sdk": { "type": "string", "enum": ["jcode", "claude"] },
+            "model": { "type": "string", "minLength": 1, "pattern": "\\S" }
+          }
+        }
+      ]
+    },
     "FlagConfig": {
       "type": "object",
       "additionalProperties": false,
@@ -180,6 +198,10 @@
         "model": {
           "type": "string",
           "description": "Model to use for this step (overrides workflow-level model)"
+        },
+        "subagent_model": {
+          "$ref": "#/$defs/SubagentModelEntry",
+          "description": "Override the workflow subagent model for this prompt step. Strings inherit the workflow SDK, not a fallback candidate's SDK. Only matching jcode or Claude attempts receive it; recognized :effort suffixes are rejected."
         },
         "prompt": {
           "type": "string",
@@ -366,6 +388,22 @@
           }
         },
         {
+          "if": { "required": ["subagent_model"] },
+          "then": {
+            "oneOf": [
+              { "required": ["prompt"] },
+              { "required": ["prompt_file"] }
+            ],
+            "properties": {
+              "command": { "type": "null" },
+              "option": { "type": "null" },
+              "parallel": { "type": "null" },
+              "group": { "type": "null" },
+              "workflow_call": { "type": "null" }
+            }
+          }
+        },
+        {
           "if": { "required": ["disallowed_tools"], "properties": { "disallowed_tools": { "minItems": 1 } } },
           "then": {
             "oneOf": [
@@ -408,6 +446,7 @@
               "group": { "type": "null" },
               "workflow_call": { "type": "null" },
               "model": { "type": "null" },
+              "subagent_model": { "type": "null" },
               "instruction": { "type": "null" },
               "plan": { "type": "null" },
               "output_file": { "type": "null" },
@@ -442,6 +481,7 @@
           "if": { "required": ["group"] },
           "then": {
             "properties": {
+              "subagent_model": { "type": "null" },
               "prompt": { "type": "null" },
               "prompt_file": { "type": "null" },
               "command": { "type": "null" },
@@ -460,6 +500,7 @@
           "if": { "required": ["workflow_call"] },
           "then": {
             "properties": {
+              "subagent_model": { "type": "null" },
               "model": { "type": "null" },
               "prompt": { "type": "null" },
               "allow_commit": { "const": false },
@@ -485,6 +526,7 @@
           "then": {
             "required": ["flag"],
             "properties": {
+              "subagent_model": { "type": "null" },
               "squash-merge": { "const": true },
               "flag": {
                 "oneOf": [
@@ -531,6 +573,7 @@
         "prompt_file": { "$ref": "#/$defs/StepConfig/properties/prompt_file" },
         "command": { "allOf": [{ "$ref": "#/$defs/StepConfig/properties/command" }, { "minItems": 1 }] },
         "model": { "$ref": "#/$defs/StepConfig/properties/model" },
+        "subagent_model": { "$ref": "#/$defs/StepConfig/properties/subagent_model" },
         "env": { "$ref": "#/$defs/StepConfig/properties/env" },
         "skip": { "$ref": "#/$defs/StepConfig/properties/skip" },
         "when": { "$ref": "#/$defs/StepConfig/properties/when" },
@@ -551,6 +594,7 @@
           "if": { "required": ["command"] },
           "then": {
             "properties": {
+              "subagent_model": { "type": "null" },
               "computer_use": { "type": "null" },
               "disallowed_tools": { "maxItems": 0 },
               "permission": { "type": "null" }

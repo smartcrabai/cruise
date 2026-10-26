@@ -55,10 +55,11 @@ impl Fixture {
         cruise::test_support::write_executable_script(
             &self.path("bin/claude"),
             &format!(
-                "#!/bin/sh\nread -r user_frame\nprintf '%s\\n' claude >> {}\nprintf '%s\\n' \"$@\" >> {}\nprintf '%s\\n' \"$user_frame\" >> {}\nprintf '%s\\n' '{}'\nexit {}\n",
+                "#!/bin/sh\nread -r user_frame\nprintf '%s\\n' claude >> {}\nprintf '%s\\n' \"$@\" >> {}\nprintf '%s\\n' \"$user_frame\" >> {}\nprintf '%s\\t%s\\t%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-}}\" \"${{CLAUDE_CODE_SUBAGENT_MODEL_FORCE-}}\" \"$user_frame\" >> {}\nprintf '%s\\n' '{}'\nexit {}\n",
                 quote(&self.path("dispatch")),
                 quote(&self.path("claude-args")),
                 quote(&self.path("claude-input")),
+                quote(&self.path("claude-subagent")),
                 response,
                 i32::from(fail),
             ),
@@ -146,6 +147,17 @@ impl Fixture {
             args.windows(2).any(|pair| pair == ["--model", model]),
             "Claude model argument missing: {args:?}"
         );
+    }
+
+    fn subagent_requests(&self) -> Vec<(String, String, String)> {
+        self.recorded("claude-subagent")
+            .lines()
+            .map(|line| {
+                let fields: Vec<_> = line.splitn(3, '\t').collect();
+                assert_eq!(fields.len(), 3, "invalid fixture record: {line:?}");
+                (fields[0].into(), fields[1].into(), fields[2].into())
+            })
+            .collect()
     }
 }
 
@@ -402,5 +414,152 @@ fn same_model_different_sdk_is_not_deduplicated_during_real_fallback() {
     assert!(
         notice.contains("claude") && notice.contains("jcode"),
         "switch notice must distinguish both SDK owners: {notice}"
+    );
+}
+
+#[test]
+fn subagent_model_exec_step_override_forces_claude_over_conflicting_env() {
+    let fixture = Fixture::new();
+    fixture.workflow(
+        "sdk: claude\nmodel: sonnet\nsubagent_model: haiku\nenv:\n  CLAUDE_CODE_SUBAGENT_MODEL: stale-workflow-env\n  CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '0'\nsteps:\n  answer:\n    prompt: SUBAGENT_STEP_OVERRIDE\n    subagent_model: opus\n    env:\n      CLAUDE_CODE_SUBAGENT_MODEL: stale-step-env\n      CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '0'\n",
+    );
+    let output = fixture.run("exec");
+    assert!(output.status.success(), "{}", text(&output));
+    let requests = fixture.subagent_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!((&*requests[0].0, &*requests[0].1), ("opus", "1"));
+}
+
+#[test]
+fn subagent_model_exec_inherits_workflow_selection() {
+    let fixture = Fixture::new();
+    fixture.workflow("sdk: claude\nmodel: sonnet\nsubagent_model: haiku\nsteps:\n  answer:\n    prompt: SUBAGENT_WORKFLOW_DEFAULT\n");
+    let output = fixture.run("exec");
+    assert!(output.status.success(), "{}", text(&output));
+    let requests = fixture.subagent_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!((&*requests[0].0, &*requests[0].1), ("haiku", "1"));
+}
+
+#[test]
+fn subagent_model_sdk_qualified_selection_applies_to_matching_candidate() {
+    let fixture = Fixture::new();
+    fixture.workflow("sdk: jcode\nmodel: [{sdk: claude, model: sonnet}]\nsubagent_model: {sdk: claude, model: haiku}\nsteps:\n  answer:\n    prompt: SUBAGENT_QUALIFIED_SDK\n");
+    let output = fixture.run("exec");
+    assert!(output.status.success(), "{}", text(&output));
+    let requests = fixture.subagent_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!((&*requests[0].0, &*requests[0].1), ("haiku", "1"));
+    assert!(!fixture.path("jcode-args").exists());
+}
+
+#[test]
+fn subagent_model_command_backend_is_rejected_before_spawn() {
+    let fixture = Fixture::new();
+    fixture.workflow("command: [sh, '-c', 'printf spawned > \"$SUBAGENT_SPAWN_MARKER\"']\nsubagent_model: haiku\nsteps:\n  answer:\n    prompt: SUBAGENT_COMMAND_REJECTION\n");
+    let marker = fixture.path("command-spawned");
+    let marker_text = marker.to_string_lossy();
+    let output = fixture.run_with_env("exec", &[("SUBAGENT_SPAWN_MARKER", &marker_text)]);
+    assert!(!marker.exists(), "invalid command backend was spawned");
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("subagent_model"),
+        "{}",
+        text(&output)
+    );
+}
+
+#[test]
+fn subagent_model_omitted_preserves_explicit_claude_environment() {
+    let fixture = Fixture::new();
+    fixture.workflow("sdk: claude\nmodel: sonnet\nenv:\n  CLAUDE_CODE_SUBAGENT_MODEL: user-managed-model\n  CLAUDE_CODE_SUBAGENT_MODEL_FORCE: user-managed-force\nsteps:\n  answer:\n    prompt: SUBAGENT_ENV_COMPATIBILITY\n");
+    let output = fixture.run("exec");
+    assert!(output.status.success(), "{}", text(&output));
+    let requests = fixture.subagent_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        (&*requests[0].0, &*requests[0].1),
+        ("user-managed-model", "user-managed-force")
+    );
+}
+
+#[test]
+fn subagent_model_planning_uses_workflow_not_execution_step_override() {
+    let fixture = Fixture::new();
+    fixture.workflow("sdk: claude\nmodel: sonnet\nsubagent_model: haiku\nsteps:\n  answer:\n    prompt: SUBAGENT_EXEC_ONLY\n    subagent_model: opus\n");
+    let output = fixture.run("plan");
+    assert!(output.status.success(), "{}", text(&output));
+    let requests = fixture.subagent_requests();
+    let mut planning = requests
+        .iter()
+        .filter(|(_, _, input)| !input.contains("generate_title"))
+        .peekable();
+    assert!(planning.peek().is_some(), "planning never reached Claude");
+    for (model, force, _) in planning {
+        assert_eq!((model.as_str(), force.as_str()), ("haiku", "1"));
+    }
+}
+
+#[test]
+fn subagent_model_does_not_apply_to_session_title_generation() {
+    let fixture = Fixture::new();
+    fixture.workflow("sdk: claude\nmodel: sonnet\nsubagent_model: haiku\nsteps:\n  answer:\n    prompt: SUBAGENT_TITLE_EXCLUSION\n");
+    let output = fixture.run("plan");
+    assert!(output.status.success(), "{}", text(&output));
+    let requests = fixture.subagent_requests();
+    let mut titles = requests
+        .iter()
+        .filter(|(_, _, input)| input.contains("generate_title"))
+        .peekable();
+    assert!(
+        titles.peek().is_some(),
+        "title generation never reached Claude"
+    );
+    for (model, force, _) in titles {
+        assert_eq!((model.as_str(), force.as_str()), ("", ""));
+    }
+}
+
+#[test]
+fn subagent_model_group_prompt_inherits_workflow_default() {
+    let fixture = Fixture::new();
+    fixture.workflow("sdk: claude\nmodel: sonnet\nsubagent_model: haiku\ngroups:\n  review:\n    steps:\n      answer:\n        prompt: SUBAGENT_GROUP_DEFAULT\nsteps:\n  review-pass:\n    group: review\n");
+    let output = fixture.run("exec");
+    assert!(output.status.success(), "{}", text(&output));
+    let requests = fixture.subagent_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!((&*requests[0].0, &*requests[0].1), ("haiku", "1"));
+}
+
+#[test]
+fn subagent_model_parallel_prompt_child_overrides_workflow_default() {
+    let fixture = Fixture::new();
+    fixture.workflow("sdk: claude\nmodel: sonnet\nsubagent_model: haiku\nsteps:\n  checks:\n    parallel:\n      review:\n        prompt: SUBAGENT_PARALLEL_OVERRIDE\n        subagent_model: opus\n      command:\n        command: echo SUBAGENT_COMMAND_CHILD\n");
+    let output = fixture.run("exec");
+    assert!(output.status.success(), "{}", text(&output));
+    let requests = fixture.subagent_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!((&*requests[0].0, &*requests[0].1), ("opus", "1"));
+}
+
+#[test]
+fn subagent_model_is_not_leaked_to_a_different_sdk_attempt() {
+    let fixture = Fixture::new();
+    fixture.install_claude(true);
+    fixture.workflow("sdk: jcode\nmodel:\n  - sdk: claude\n    model: sonnet\n  - openai/fallback-test\nsubagent_model: openai/subagent-test\nretry:\n  base_delay_ms: 1\n  max_delay_ms: 1\nsteps:\n  answer:\n    prompt: SUBAGENT_SDK_ISOLATION\n");
+    let output = fixture.run("exec");
+    assert!(!output.status.success(), "{}", text(&output));
+    let requests = fixture.subagent_requests();
+    assert!(!requests.is_empty(), "Claude attempt was not made");
+    for (model, force, _) in requests {
+        assert_eq!((model.as_str(), force.as_str()), ("", ""));
+    }
+    assert!(
+        fixture
+            .recorded("dispatch")
+            .lines()
+            .any(|sdk| sdk == "jcode"),
+        "the cross-SDK fallback was not attempted: {}",
+        text(&output)
     );
 }

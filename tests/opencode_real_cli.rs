@@ -218,6 +218,7 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
     let request = |selection, resume, cancel_token| PromptRun {
         prompt: "Run the local acceptance tools, then return LOCAL_V2_SMOKE_OK",
         model: Some(selection),
+        subagent_model: None,
         max_retries: 0,
         env: &env,
         mcp_servers: &mcp,

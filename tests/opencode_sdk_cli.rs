@@ -799,6 +799,7 @@ impl Fixture {
         let request = PromptRun {
             prompt: "fixture prompt",
             model: model.as_ref(),
+            subagent_model: None,
             max_retries,
             env: &env,
             mcp_servers: &mcp_servers,
@@ -1806,6 +1807,7 @@ async fn missing_resume_target_is_not_replaced_with_a_new_conversation() {
         Executor::new(Some("opencode"), &[]).run(PromptRun {
             prompt: "resume input",
             model: Some(&cruise::config::ModelSpec::Single(MODEL.to_owned())),
+            subagent_model: None,
             max_retries: 2,
             env: &env,
             mcp_servers: &mcp,
@@ -1938,6 +1940,7 @@ pub(crate) async fn resume_fixture_with_model(
         Executor::new(Some("opencode"), &[]).run(PromptRun {
             prompt: "resume fixture",
             model: Some(&cruise::config::ModelSpec::Single(model.to_owned())),
+            subagent_model: None,
             max_retries: retries,
             env: &env,
             mcp_servers: &mcp_servers,
@@ -2088,6 +2091,7 @@ async fn executor_cancellation_awaits_admitted_handler_after_peer_disconnect() {
     let run = executor.run(PromptRun {
         prompt: "held handler",
         model: Some(&selection),
+        subagent_model: None,
         max_retries: 0,
         env: &env,
         mcp_servers: &mcp_servers,
@@ -2185,6 +2189,7 @@ async fn configured_fixture_run(
         executor.run(PromptRun {
             prompt: "configured fixture prompt",
             model: model.as_ref(),
+            subagent_model: None,
             max_retries: budget,
             env: &config.env,
             mcp_servers: &config.mcp_servers,

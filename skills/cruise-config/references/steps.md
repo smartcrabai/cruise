@@ -11,7 +11,7 @@ A pure `workflow_call:` call site (optionally with `skip`,
 executable steps, including under `after-pr`; it cannot be nested in a group.
 Every other step field on the call site is rejected: `model`, `prompt`,
 `prompt_file`, `instruction`, `plan`, `option`, `command`, `parallel`,
-`group`, `if`, `timeout`, `env`, `allow_commit`, `computer_use`, `permission`, `disallowed_tools`,
+`group`, `if`, `timeout`, `env`, `allow_commit`, `computer_use`, `permission`, `subagent_model`, `disallowed_tools`,
 `output_file`, and `squash-merge`.
 
 `parallel:` is a container step for concurrent prompt/command children (see below).
@@ -45,10 +45,22 @@ group call sites cannot set it either (see [groups.md](groups.md)).
 
 ## Prompt step (LLM call)
 
+`subagent_model` overrides the workflow's spawned-agent model for a `prompt`
+or `prompt_file` step, including group steps, `after-pr`, `github-review`, and
+parallel prompt children. It takes one nonblank string or `{sdk, model}` object,
+not an array, and supports only Claude/jcode without recognized `:effort`
+suffixes. Strings inherit the workflow SDK, even when the step's model candidates
+include another SDK; only matching-SDK attempts receive the value. A value with
+no applicable candidate is rejected. Command/option steps, parallel wrappers,
+group call sites, `workflow_call` call sites, and `squash-merge` cannot set it.
+Called workflows retain per-step values but not their top-level default.
+See [sdk.md](sdk.md) for backend enforcement and scope.
+
 ```yaml
 steps:
   planning:
     model: claude-opus-4-5     # Optional: per-step model override (jcode/Claude: "provider/model[:effort]"; OpenCode: "provider/model#variant")
+    # subagent_model: {sdk: claude, model: haiku} # Optional: Claude/jcode subagent override
     instruction: |             # Optional: message shown to the user before the step runs
       Describe the feature you want to build.
     prompt: |                  # Use either prompt or prompt_file

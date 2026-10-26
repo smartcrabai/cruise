@@ -260,6 +260,7 @@ mod contracts {
                 .run(PromptRun {
                     prompt: "SDK_BDD_RESUME_REQUEST",
                     model: Some(&model),
+                    subagent_model: None,
                     max_retries: 0,
                     env: &HashMap::new(),
                     mcp_servers: &Default::default(),
