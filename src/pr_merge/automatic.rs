@@ -345,7 +345,6 @@ enum GitHubReadiness {
     Pending,
 }
 
-#[derive(Default)]
 struct GitHubReadinessObservation {
     telemetry_context: Option<opentelemetry::Context>,
     mergeable: Option<String>,
@@ -357,6 +356,18 @@ struct GitHubReadinessObservation {
 }
 
 impl GitHubReadinessObservation {
+    fn new() -> Self {
+        Self {
+            telemetry_context: crate::telemetry::capture_github_context(),
+            mergeable: None,
+            merge_state: None,
+            check_state: None,
+            check_commit_oid: None,
+            ci_head_matches: false,
+            reason: None,
+        }
+    }
+
     fn timeout_message(&self) -> String {
         format!(
             "GitHub readiness timed out (mergeable={}, mergeStateStatus={}, CI state={}, CI head={}, waiting for={})",
@@ -1438,15 +1449,7 @@ async fn perform_github_with_timing(
     poll_interval: Duration,
 ) -> Result<AutoSquashOutcome, AutoSquashError> {
     let deadline = tokio::time::Instant::now() + readiness_timeout;
-    let mut observation = GitHubReadinessObservation {
-        telemetry_context: crate::telemetry::capture_github_context(),
-        mergeable: None,
-        merge_state: None,
-        check_state: None,
-        check_commit_oid: None,
-        ci_head_matches: false,
-        reason: None,
-    };
+    let mut observation = GitHubReadinessObservation::new();
     loop {
         check_cancel(request.cancel_token)?;
         let attempt = tokio::select! {
