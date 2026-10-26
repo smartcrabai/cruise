@@ -140,28 +140,56 @@ fn pre_tool_gate_denies_explicit_wrapper_prefixes_with_allow_commit() {
 
     for wrapper in ["env", "command"] {
         let policy = ToolPolicy::for_prompt_step(
-            &[ToolRestriction::ShellPrefix(wrapper.into())], &[], true, PermissionMode::Full,
+            &[ToolRestriction::ShellPrefix(wrapper.into())],
+            &[],
+            true,
+            PermissionMode::Full,
         );
-        let policy = serde_json::to_string(&policy.shell_rules)
-            .unwrap_or_else(|error| panic!("{error}"));
-        for command in [format!("KEY=value {wrapper} printf POLICY_BYPASS"), wrapper.into()] {
-            let output = gate("bash", Some(&policy), &json!({"command":command}).to_string());
+        let policy =
+            serde_json::to_string(&policy.shell_rules).unwrap_or_else(|error| panic!("{error}"));
+        for command in [
+            format!("KEY=value {wrapper} printf POLICY_BYPASS"),
+            wrapper.into(),
+        ] {
+            let output = gate(
+                "bash",
+                Some(&policy),
+                &json!({"command":command}).to_string(),
+            );
             assert_code(&output, 2);
             assert!(String::from_utf8_lossy(&output.stderr).contains("disallowed_tools"));
         }
-        assert_code(&gate("bash", Some(&policy), r#"{"command":"printf ok"}"#), 0);
+        assert_code(
+            &gate("bash", Some(&policy), r#"{"command":"printf ok"}"#),
+            0,
+        );
     }
 }
 
 #[test]
 fn pre_tool_gate_inspects_env_search_path_for_both_rule_sources() {
     for source in [RuleSource::DisallowedTools, RuleSource::AllowCommit] {
-        let reason = if source == RuleSource::DisallowedTools { "disallowed_tools" } else { "allow_commit" };
+        let reason = if source == RuleSource::DisallowedTools {
+            "disallowed_tools"
+        } else {
+            "allow_commit"
+        };
         let policy = rules("git push", source);
-        let output = gate("bash", Some(&policy), r#"{"command":"env -P /usr/bin git push"}"#);
+        let output = gate(
+            "bash",
+            Some(&policy),
+            r#"{"command":"env -P /usr/bin git push"}"#,
+        );
         assert_code(&output, 2);
         assert!(String::from_utf8_lossy(&output.stderr).contains(reason));
-        assert_code(&gate("bash", Some(&policy), r#"{"command":"env -P /usr/bin git status"}"#), 0);
+        assert_code(
+            &gate(
+                "bash",
+                Some(&policy),
+                r#"{"command":"env -P /usr/bin git status"}"#,
+            ),
+            0,
+        );
     }
 }
 
@@ -172,30 +200,49 @@ fn pre_tool_gate_retains_git_config_operands_for_both_policy_sources() {
 
     for explicit in [false, true] {
         let restrictions = if explicit {
-            vec![ToolRestriction::ShellPrefix("git -c core.hooksPath=".into())]
+            vec![ToolRestriction::ShellPrefix(
+                "git -c core.hooksPath=".into(),
+            )]
         } else {
             vec![]
         };
-        let policy = ToolPolicy::for_prompt_step(
-            &restrictions, &[], explicit, PermissionMode::Full,
-        );
-        let policy = serde_json::to_string(&policy.shell_rules)
-            .unwrap_or_else(|error| panic!("{error}"));
-        let reason = if explicit { "disallowed_tools" } else { "allow_commit is false" };
+        let policy =
+            ToolPolicy::for_prompt_step(&restrictions, &[], explicit, PermissionMode::Full);
+        let policy =
+            serde_json::to_string(&policy.shell_rules).unwrap_or_else(|error| panic!("{error}"));
+        let reason = if explicit {
+            "disallowed_tools"
+        } else {
+            "allow_commit is false"
+        };
         for command in [
             "git -C . -c core.hooksPath=/dev/null status",
             "git -c color.ui=false -c core.hooksPath=/dev/null status",
         ] {
-            let output = gate("bash", Some(&policy), &json!({"command":command}).to_string());
+            let output = gate(
+                "bash",
+                Some(&policy),
+                &json!({"command":command}).to_string(),
+            );
             assert_code(&output, 2);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(stderr.contains("`git -c core.hooksPath=`") && stderr.contains(reason), "{stderr}");
+            assert!(
+                stderr.contains("`git -c core.hooksPath=`") && stderr.contains(reason),
+                "{stderr}"
+            );
         }
         for command in [
             "git -C . -c color.ui=false status",
             "git -c color.ui=false -c advice.statusHints=false status",
         ] {
-            assert_code(&gate("bash", Some(&policy), &json!({"command":command}).to_string()), 0);
+            assert_code(
+                &gate(
+                    "bash",
+                    Some(&policy),
+                    &json!({"command":command}).to_string(),
+                ),
+                0,
+            );
         }
     }
 }

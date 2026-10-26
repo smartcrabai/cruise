@@ -1499,9 +1499,14 @@ after-pr:
         for (restriction_yaml, expected) in [
             ("", vec![]),
             ("disallowed_tools: []\n", vec![]),
-            ("disallowed_tools: [subagent, web]\n", vec![ToolRestriction::Subagent, ToolRestriction::Web]),
+            (
+                "disallowed_tools: [subagent, web]\n",
+                vec![ToolRestriction::Subagent, ToolRestriction::Web],
+            ),
         ] {
-            let workflow = compiled(&format!("sdk: jcode\n{restriction_yaml}steps:\n  run:\n    prompt: review\n"));
+            let workflow = compiled(&format!(
+                "sdk: jcode\n{restriction_yaml}steps:\n  run:\n    prompt: review\n"
+            ));
             assert_eq!(workflow.disallowed_tools, expected);
             assert_eq!(workflow.to_after_pr_compiled().disallowed_tools, expected);
         }

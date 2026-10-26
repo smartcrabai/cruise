@@ -589,15 +589,18 @@ mod tests {
         use crate::tool_policy::ToolRestriction;
 
         for review in [false, true] {
-            for restrictions in ["", "disallowed_tools: [subagent, web, 'shell:npm publish']\n"] {
+            for restrictions in [
+                "",
+                "disallowed_tools: [subagent, web, 'shell:npm publish']\n",
+            ] {
                 let extra = if review {
                     "github-review:\n  bots: [reviewer]\ntimeout: 30m\n"
                 } else {
                     ""
                 };
                 let yaml = format!("prompt: review\n{extra}{restrictions}");
-                let config: StepConfig = serde_yaml::from_str(&yaml)
-                    .unwrap_or_else(|error| panic!("{error}"));
+                let config: StepConfig =
+                    serde_yaml::from_str(&yaml).unwrap_or_else(|error| panic!("{error}"));
                 let kind = StepKind::try_from(config).unwrap_or_else(|error| panic!("{error}"));
                 let prompt = match kind {
                     StepKind::Prompt(prompt) => prompt,
@@ -607,7 +610,11 @@ mod tests {
                 let expected = if restrictions.is_empty() {
                     vec![]
                 } else {
-                    vec![ToolRestriction::Subagent, ToolRestriction::Web, ToolRestriction::ShellPrefix("npm publish".into())]
+                    vec![
+                        ToolRestriction::Subagent,
+                        ToolRestriction::Web,
+                        ToolRestriction::ShellPrefix("npm publish".into()),
+                    ]
                 };
                 assert_eq!(prompt.disallowed_tools, expected);
             }

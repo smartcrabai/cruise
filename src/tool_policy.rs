@@ -603,13 +603,22 @@ mod wrapper_regressions {
             } else {
                 vec![]
             };
-            let policy = ToolPolicy::for_prompt_step(
-                &restrictions, &[], explicit, PermissionMode::Full,
-            );
+            let policy =
+                ToolPolicy::for_prompt_step(&restrictions, &[], explicit, PermissionMode::Full);
             let rule = shell_command_violation("env -P /usr/bin git push", &policy.shell_rules)
                 .unwrap_or_else(|| panic!("env -P bypassed policy"));
-            assert_eq!(rule.source, if explicit { RuleSource::DisallowedTools } else { RuleSource::AllowCommit });
-            assert!(shell_command_violation("env -P /usr/bin git status", &policy.shell_rules).is_none());
+            assert_eq!(
+                rule.source,
+                if explicit {
+                    RuleSource::DisallowedTools
+                } else {
+                    RuleSource::AllowCommit
+                }
+            );
+            assert!(
+                shell_command_violation("env -P /usr/bin git status", &policy.shell_rules)
+                    .is_none()
+            );
         }
     }
 
@@ -1118,9 +1127,8 @@ mod tests {
             } else {
                 vec![]
             };
-            let policy = ToolPolicy::for_prompt_step(
-                &restrictions, &[], explicit, PermissionMode::Full,
-            );
+            let policy =
+                ToolPolicy::for_prompt_step(&restrictions, &[], explicit, PermissionMode::Full);
             for command in [
                 "git -C . -c core.hooksPath=/dev/null status",
                 "git -c color.ui=false -c core.hooksPath=/dev/null status",
@@ -1129,11 +1137,14 @@ mod tests {
                 let matched = shell_command_violation(command, &policy.shell_rules)
                     .unwrap_or_else(|| panic!("allowed {command}"));
                 assert_eq!(matched.prefix, "git -c core.hooksPath=");
-                assert_eq!(matched.source, if explicit {
-                    RuleSource::DisallowedTools
-                } else {
-                    RuleSource::AllowCommit
-                });
+                assert_eq!(
+                    matched.source,
+                    if explicit {
+                        RuleSource::DisallowedTools
+                    } else {
+                        RuleSource::AllowCommit
+                    }
+                );
             }
             for command in [
                 "git -C . -c color.ui=false status",
@@ -1141,7 +1152,10 @@ mod tests {
                 "git -C . -c core.hooksPathSuffix=/dev/null status",
                 "git status -c core.hooksPath=/dev/null",
             ] {
-                assert!(shell_command_violation(command, &policy.shell_rules).is_none(), "{command}");
+                assert!(
+                    shell_command_violation(command, &policy.shell_rules).is_none(),
+                    "{command}"
+                );
             }
         }
     }
@@ -1198,8 +1212,17 @@ mod tests {
         assert!(!prefix_matches(&[], "git"));
         assert!(!prefix_matches(&["git"], "git push"));
         assert!(prefix_matches(&["/usr/bin/git", "push"], "/bin/git push"));
-        assert!(prefix_matches(&["git", "-c", "core.hooksPath=/dev/null"], "git -c core.hooksPath="));
-        assert!(!prefix_matches(&["git", "-c", "core.hooksPath"], "git -c core.hooksPath="));
-        assert!(!prefix_matches(&["deploy", "target=prod", "now"], "deploy target= now"));
+        assert!(prefix_matches(
+            &["git", "-c", "core.hooksPath=/dev/null"],
+            "git -c core.hooksPath="
+        ));
+        assert!(!prefix_matches(
+            &["git", "-c", "core.hooksPath"],
+            "git -c core.hooksPath="
+        ));
+        assert!(!prefix_matches(
+            &["deploy", "target=prod", "now"],
+            "deploy target= now"
+        ));
     }
 }

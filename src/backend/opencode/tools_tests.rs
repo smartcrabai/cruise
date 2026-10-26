@@ -721,9 +721,8 @@ async fn tool_policy_effect_env_search_path_denies_before_admission() {
         } else {
             vec![]
         };
-        config.tool_policy = ToolPolicy::for_prompt_step(
-            &restrictions, &[], explicit, PermissionMode::Full,
-        );
+        config.tool_policy =
+            ToolPolicy::for_prompt_step(&restrictions, &[], explicit, PermissionMode::Full);
         let mut fixture = Fixture::new(&config, CancellationToken::new()).await;
         for (call, command, expected) in [
             ("push", "env -P /usr/bin git push", StatusCode::FORBIDDEN),
@@ -734,10 +733,17 @@ async fn tool_policy_effect_env_search_path_denies_before_admission() {
             })).await;
             assert_eq!(response.status(), expected, "{command}");
             if expected == StatusCode::FORBIDDEN {
-                assert!(!fixture.bridge.had_side_effects(), "denial must precede admission");
+                assert!(
+                    !fixture.bridge.had_side_effects(),
+                    "denial must precede admission"
+                );
             }
         }
-        fixture.bridge.stop().await.unwrap_or_else(|error| panic!("{error}"));
+        fixture
+            .bridge
+            .stop()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 }
 
@@ -748,41 +754,71 @@ async fn tool_policy_effect_git_config_operands_deny_before_admission() {
     for explicit in [false, true] {
         let mut config = runner(vec![], PermissionMode::Full);
         let restrictions = if explicit {
-            vec![ToolRestriction::ShellPrefix("git -c core.hooksPath=".into())]
+            vec![ToolRestriction::ShellPrefix(
+                "git -c core.hooksPath=".into(),
+            )]
         } else {
             vec![]
         };
-        config.tool_policy = ToolPolicy::for_prompt_step(
-            &restrictions, &[], explicit, PermissionMode::Full,
-        );
+        config.tool_policy =
+            ToolPolicy::for_prompt_step(&restrictions, &[], explicit, PermissionMode::Full);
         for tool in ["bash", "shell"] {
             let mut fixture = Fixture::new(&config, CancellationToken::new()).await;
             for (index, command) in [
                 "git -C . -c core.hooksPath=/dev/null status",
                 "git -c color.ui=false -c core.hooksPath=/dev/null status",
-            ].into_iter().enumerate() {
-                let response = fixture.request("effect", json!({
-                    "sessionID":"ses_tools", "callID":format!("hooks_{index}"),
-                    "tool":tool, "input":{"command":command}
-                })).await;
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let response = fixture
+                    .request(
+                        "effect",
+                        json!({
+                            "sessionID":"ses_tools", "callID":format!("hooks_{index}"),
+                            "tool":tool, "input":{"command":command}
+                        }),
+                    )
+                    .await;
                 assert_eq!(response.status(), StatusCode::FORBIDDEN, "{command}");
-                let body: Value = response.json().await.unwrap_or_else(|error| panic!("{error}"));
+                let body: Value = response
+                    .json()
+                    .await
+                    .unwrap_or_else(|error| panic!("{error}"));
                 assert!(body.get("error").is_some(), "structured rejection: {body}");
-                assert!(!fixture.bridge.had_side_effects(), "denial must precede admission");
+                assert!(
+                    !fixture.bridge.had_side_effects(),
+                    "denial must precede admission"
+                );
             }
             for (index, command) in [
                 "git -C . -c color.ui=false status",
                 "git -c color.ui=false -c advice.statusHints=false status",
-            ].into_iter().enumerate() {
-                let response = fixture.request("effect", json!({
-                    "sessionID":"ses_tools", "callID":format!("ordinary_{index}"),
-                    "tool":tool, "input":{"command":command}
-                })).await;
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let response = fixture
+                    .request(
+                        "effect",
+                        json!({
+                            "sessionID":"ses_tools", "callID":format!("ordinary_{index}"),
+                            "tool":tool, "input":{"command":command}
+                        }),
+                    )
+                    .await;
                 assert_eq!(response.status(), StatusCode::OK, "{command}");
-                let body: Value = response.json().await.unwrap_or_else(|error| panic!("{error}"));
+                let body: Value = response
+                    .json()
+                    .await
+                    .unwrap_or_else(|error| panic!("{error}"));
                 assert_eq!(body["accepted"], true);
             }
-            fixture.bridge.stop().await.unwrap_or_else(|error| panic!("{error}"));
+            fixture
+                .bridge
+                .stop()
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
         }
     }
 }

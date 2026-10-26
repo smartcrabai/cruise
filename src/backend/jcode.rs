@@ -232,9 +232,7 @@ fn launch_client(
         && (config.env.contains_key("JCODE_HOOKS_DISABLED")
             || std::env::var_os("JCODE_HOOKS_DISABLED").is_some())
     {
-        eprintln!(
-            "cruise: warning: JCODE_HOOKS_DISABLED disables the jcode shell gate"
-        );
+        eprintln!("cruise: warning: JCODE_HOOKS_DISABLED disables the jcode shell gate");
     }
     options.env = launch_environment(
         &config.env,
@@ -382,9 +380,9 @@ fn launch_environment(
                     OsString::from(rules),
                 );
             }
-            Err(error) => eprintln!(
-                "cruise: warning: could not serialize jcode shell policy: {error}"
-            ),
+            Err(error) => {
+                eprintln!("cruise: warning: could not serialize jcode shell policy: {error}");
+            }
         }
     }
     env

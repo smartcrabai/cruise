@@ -1872,10 +1872,20 @@ fn configured_pre_tool_hooks_preserves_supported_values_and_filters_other_types(
     }
     for (config, expected) in [
         ("[hooks]\npre_tool = 'scalar'", vec!["scalar"]),
-        ("[hooks]\npre_tool = ['first', 'second']", vec!["first", "second"]),
-        ("[hooks]\npre_tool = ['first', 42, false, {command = 'ignored'}, 'last']", vec!["first", "last"]),
+        (
+            "[hooks]\npre_tool = ['first', 'second']",
+            vec!["first", "second"],
+        ),
+        (
+            "[hooks]\npre_tool = ['first', 42, false, {command = 'ignored'}, 'last']",
+            vec!["first", "last"],
+        ),
     ] {
-        assert_eq!(configured_pre_tool_hooks(Some(config)), expected, "{config}");
+        assert_eq!(
+            configured_pre_tool_hooks(Some(config)),
+            expected,
+            "{config}"
+        );
     }
 }
 
@@ -1917,7 +1927,10 @@ fn assert_captured_launch_case(case: &str) {
     );
     if case == "hooks-disabled-explicit" {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("JCODE_HOOKS_DISABLED") && stderr.contains("shell gate"), "{stderr}");
+        assert!(
+            stderr.contains("JCODE_HOOKS_DISABLED") && stderr.contains("shell gate"),
+            "{stderr}"
+        );
         assert!(!stderr.contains("commit guard remains active"), "{stderr}");
     }
 }
@@ -1969,6 +1982,24 @@ fn launch_client_full_unrestricted_computer_use_keeps_environment_unchanged() {
 }
 
 #[cfg(unix)]
+fn captured_launch_session_home(root: &std::path::Path) -> SessionHome {
+    let home_path = root.join("home");
+    fs::create_dir(&home_path).unwrap_or_else(|error| panic!("{error}"));
+    SessionHome {
+        source_home: root.join("source"),
+        storage_root: root.to_path_buf(),
+        storage_home: home_path.clone(),
+        expected_home: None,
+        sdk_home: home_path,
+        temporary_alias: None,
+        stable_alias_root: None,
+        fresh: true,
+        resume_session_found: false,
+        active_lock: None,
+    }
+}
+
+#[cfg(unix)]
 #[test]
 #[ignore = "subprocess-only captured launch probe"]
 fn launch_client_captured_environment_probe() {
@@ -1981,20 +2012,7 @@ fn launch_client_captured_environment_probe() {
         .prefix("cl-")
         .tempdir_in("/tmp")
         .unwrap_or_else(|error| panic!("{error}"));
-    let home_path = root.path().join("home");
-    fs::create_dir(&home_path).unwrap_or_else(|error| panic!("{error}"));
-    let home = SessionHome {
-        source_home: root.path().join("source"),
-        storage_root: root.path().to_path_buf(),
-        storage_home: home_path.clone(),
-        expected_home: None,
-        sdk_home: home_path,
-        temporary_alias: None,
-        stable_alias_root: None,
-        fresh: true,
-        resume_session_found: false,
-        active_lock: None,
-    };
+    let home = captured_launch_session_home(root.path());
     let stub = root.path().join("jcode");
     fs::write(&stub, "#!/bin/sh\nprintf '%s' \"${JCODE_DISABLED_TOOLS-}\" > \"$CRUISE_TEST_JCODE_CAPTURE/disabled\"\nprintf '%s' \"${JCODE_HOOK_PRE_TOOL-}\" > \"$CRUISE_TEST_JCODE_CAPTURE/hook\"\nprintf '%s' \"${CRUISE_JCODE_SHELL_DENY-}\" > \"$CRUISE_TEST_JCODE_CAPTURE/rules\"\nexit 17\n")
         .unwrap_or_else(|error| panic!("{error}"));
@@ -2035,7 +2053,9 @@ fn launch_client_captured_environment_probe() {
     };
     if case == "hooks-disabled-explicit" {
         config.tool_policy = ToolPolicy::for_prompt_step(
-            &[crate::tool_policy::ToolRestriction::ShellPrefix("git commit".into())],
+            &[crate::tool_policy::ToolRestriction::ShellPrefix(
+                "git commit".into(),
+            )],
             &[],
             true,
             crate::config::PermissionMode::Full,

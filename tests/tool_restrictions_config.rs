@@ -286,7 +286,10 @@ fn schema_and_deserialization_agree_on_shell_prefix_whitespace() {
     for (restriction, canonical) in [
         ("shell:git push", Some("shell:git push")),
         ("shell:  git   push  ", Some("shell:git push")),
-        ("shell:/usr/bin/npm publish --tag=next @scope/pkg+test_1.0%20", Some("shell:/usr/bin/npm publish --tag=next @scope/pkg+test_1.0%20")),
+        (
+            "shell:/usr/bin/npm publish --tag=next @scope/pkg+test_1.0%20",
+            Some("shell:/usr/bin/npm publish --tag=next @scope/pkg+test_1.0%20"),
+        ),
         ("shell:", None),
         ("shell:   ", None),
         ("shell:git\tpush", None),
@@ -298,9 +301,17 @@ fn schema_and_deserialization_agree_on_shell_prefix_whitespace() {
     ] {
         for workflow_level in [true, false] {
             let mut document = json!({"sdk":"jcode", "steps":{"run":{"prompt":"review"}}});
-            let target = if workflow_level { &mut document } else { &mut document["steps"]["run"] };
+            let target = if workflow_level {
+                &mut document
+            } else {
+                &mut document["steps"]["run"]
+            };
             target["disallowed_tools"] = json!([restriction]);
-            assert_eq!(schema_validator().is_valid(&document), canonical.is_some(), "schema: {document}");
+            assert_eq!(
+                schema_validator().is_valid(&document),
+                canonical.is_some(),
+                "schema: {document}"
+            );
             let yaml = serde_yaml::to_string(&document).unwrap_or_else(|error| panic!("{error}"));
             let parsed = WorkflowConfig::from_yaml(&yaml);
             assert_eq!(parsed.is_ok(), canonical.is_some(), "parser: {document}");
@@ -308,7 +319,11 @@ fn schema_and_deserialization_agree_on_shell_prefix_whitespace() {
                 let config = parsed.unwrap_or_else(|error| panic!("{error}"));
                 validate_config(&config).unwrap_or_else(|error| panic!("{error}"));
                 let value = data(&config);
-                let target = if workflow_level { &value } else { &value["steps"]["run"] };
+                let target = if workflow_level {
+                    &value
+                } else {
+                    &value["steps"]["run"]
+                };
                 assert_eq!(target["disallowed_tools"], json!([canonical]));
                 let yaml = serde_yaml::to_string(&config).unwrap_or_else(|error| panic!("{error}"));
                 assert_eq!(data(&parse(&yaml)), value);
@@ -320,11 +335,17 @@ fn schema_and_deserialization_agree_on_shell_prefix_whitespace() {
 #[test]
 fn schema_and_runtime_agree_on_empty_and_nonempty_step_restrictions() {
     let dir = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
-    std::fs::write(dir.path().join("callee.yaml"), "steps:\n  inner:\n    prompt: review\n")
-        .unwrap_or_else(|error| panic!("{error}"));
+    std::fs::write(
+        dir.path().join("callee.yaml"),
+        "steps:\n  inner:\n    prompt: review\n",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
     for (name, step) in [
         ("command", json!({"command":"echo ok"})),
-        ("option", json!({"option":[{"selector":"done", "next":"end"}]})),
+        (
+            "option",
+            json!({"option":[{"selector":"done", "next":"end"}]}),
+        ),
         ("group", json!({"group":"shared"})),
         ("workflow_call", json!({"workflow_call":"./callee.yaml"})),
         ("parallel", json!({"parallel":{"child":{"prompt":"check"}}})),
@@ -337,22 +358,29 @@ fn schema_and_runtime_agree_on_empty_and_nonempty_step_restrictions() {
             let mut document = json!({
                 "sdk":"jcode",
                 "groups":{"shared":{"steps":{"inner":{"prompt":"review"}}}},
-                "flags":{"merge":{"description":"merge changes"}},
                 "steps":{"run":{"prompt":"review"}}
             });
             if name == "squash-merge" {
+                document["flags"] = json!({"merge":{"description":"merge changes"}});
                 document["after-pr"] = json!({"merge":step});
             } else {
                 document["steps"]["run"] = step;
             }
             let expected = !nonempty || name == "prompt";
-            assert_eq!(schema_validator().is_valid(&document), expected, "schema: {document}");
+            assert_eq!(
+                schema_validator().is_valid(&document),
+                expected,
+                "schema: {document}"
+            );
             let yaml = serde_yaml::to_string(&document).unwrap_or_else(|error| panic!("{error}"));
             let config = parse(&yaml);
             let result = if name == "workflow_call" {
                 resolve_workflow_calls_without_app_model_defaults(
-                    config, dir.path(), &WorkflowDefaults::default(),
-                ).and_then(|resolved| validate_config(&resolved))
+                    config,
+                    dir.path(),
+                    &WorkflowDefaults::default(),
+                )
+                .and_then(|resolved| validate_config(&resolved))
             } else {
                 validate_config(&config)
             };
