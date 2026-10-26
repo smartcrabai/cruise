@@ -54,7 +54,7 @@ impl Fixture {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
-            if name.starts_with("CRUISE_")
+            if (name.starts_with("CRUISE_") && name != "CRUISE_GUARD_COMMON_DIR")
                 || name.starts_with("OTEL_")
                 || name.starts_with("JCODE_")
             {
@@ -1270,7 +1270,10 @@ fn application_run_keeps_completed_domain_state_but_errors_root_for_failed_steps
     );
     for (name, _) in std::env::vars_os() {
         let name = name.to_string_lossy();
-        if name.starts_with("CRUISE_") || name.starts_with("OTEL_") || name.starts_with("JCODE_") {
+        if (name.starts_with("CRUISE_") && name != "CRUISE_GUARD_COMMON_DIR")
+            || name.starts_with("OTEL_")
+            || name.starts_with("JCODE_")
+        {
             child.env_remove(name.as_ref());
         }
     }
@@ -1309,7 +1312,10 @@ fn application_api_parallel_planning_keeps_session_traces_isolated() {
     );
     for (name, _) in std::env::vars_os() {
         let name = name.to_string_lossy();
-        if name.starts_with("CRUISE_") || name.starts_with("OTEL_") || name.starts_with("JCODE_") {
+        if (name.starts_with("CRUISE_") && name != "CRUISE_GUARD_COMMON_DIR")
+            || name.starts_with("OTEL_")
+            || name.starts_with("JCODE_")
+        {
             child.env_remove(name.as_ref());
         }
     }
@@ -2299,4 +2305,514 @@ fn unreachable_collector_does_not_fail_local_workflow() {
     let fixture = Fixture::new("steps:\n  local:\n    command: 'printf local-ok >/dev/null'\n");
     let output = fixture.run(&borrowed_env(&otlp_env(&endpoint)), "unreachable-input");
     assert_success(&output);
+}
+
+struct MergeCliCase {
+    cli: Fixture,
+    env: Vec<(String, String)>,
+    gh_log: PathBuf,
+    collector: Option<Collector>,
+}
+
+fn merge_cli_case(telemetry_enabled: bool, workflow_yaml: &str, gh_script: &str) -> MergeCliCase {
+    let cli = Fixture::new(workflow_yaml);
+    let bare = cli.root.path().join("origin.git");
+    cruise::test_support::run_git_ok(cli.root.path(), &["init", "--bare", "origin.git"]);
+    cruise::test_support::run_git_ok(
+        &cli.project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/service.git",
+        ],
+    );
+    let push_url = bare.to_string_lossy().into_owned();
+    cruise::test_support::run_git_ok(
+        &cli.project,
+        &["config", "remote.origin.pushurl", push_url.as_str()],
+    );
+
+    let collector = telemetry_enabled.then(Collector::start);
+    let fake_bin = cli.root.path().join("fake-gh/bin");
+    std::fs::create_dir_all(&fake_bin)
+        .unwrap_or_else(|error| panic!("create fake gh bin: {error}"));
+    let gh_log = cli.root.path().join("fake-gh.log");
+    cruise::test_support::write_executable_script(&fake_bin.join("gh"), gh_script);
+    let search_path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let env = vec![
+        ("PATH".to_string(), search_path),
+        (
+            "FAKE_GH_LOG".to_string(),
+            gh_log.to_string_lossy().into_owned(),
+        ),
+        (
+            "FAKE_GH_STATUS_COUNT".to_string(),
+            cli.root
+                .path()
+                .join("fake-gh-status-count")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "FAKE_GH_STATUS_SEQUENCE".to_string(),
+            cli.root
+                .path()
+                .join("fake-gh-status-sequence")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "FAKE_GH_WRITE_ATTEMPTS".to_string(),
+            cli.root
+                .path()
+                .join("fake-gh-write-attempts")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "FAKE_GH_SUCCESSFUL_WRITES".to_string(),
+            cli.root
+                .path()
+                .join("fake-gh-successful-writes")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "FAKE_GH_READY_HEAD".to_string(),
+            cli.root
+                .path()
+                .join("fake-gh-ready-head")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "FAKE_GH_MERGED".to_string(),
+            cli.root
+                .path()
+                .join("fake-gh-merged")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    ];
+    let mut env = env;
+    if let Some(collector) = &collector {
+        env.extend(otlp_env(&collector.endpoint()));
+    }
+    MergeCliCase {
+        cli,
+        env,
+        gh_log,
+        collector,
+    }
+}
+
+fn merge_diagnostics_case(telemetry_enabled: bool) -> MergeCliCase {
+    merge_cli_case(
+        telemetry_enabled,
+        "command: [cat]\ncreate_pr: true\nflags:\n  merge: {}\nsteps:\n  work:\n    command: \"printf changed > merge-diagnostic.txt\"\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n",
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+if [ "$1" = "--version" ]; then
+  printf 'gh version 2.0.0\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  printf 'https://github.com/acme/service/pull/7\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  printf 'refusing unsafe PR merge\n' >&2
+  exit 97
+fi
+if [ "$1" = "api" ]; then
+  case "$*" in
+    *"/merge"*)
+      printf 'refusing unsafe GitHub merge write\n' >&2
+      exit 97
+      ;;
+  esac
+  head=$(git rev-parse HEAD) || exit 97
+  case "$*" in
+    *mergeable*)
+      printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"CONFLICTING","mergeStateStatus":"BEHIND","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"SUCCESS","commit":{"oid":"%s"},"contexts":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}}\n' "$head" "$head"
+      exit 0
+      ;;
+    *pullRequest*)
+      printf '{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"%s"}}}}\n' "$head"
+      exit 0
+      ;;
+  esac
+fi
+printf 'refusing unexpected fake gh command\n' >&2
+exit 97
+"#,
+    )
+}
+
+fn merge_readiness_race_case() -> MergeCliCase {
+    merge_cli_case(
+        false,
+        "command: [cat]\ncreate_pr: true\nflags:\n  merge: {}\nsteps:\n  work:\n    command: \"printf changed > merge-readiness-race.txt\"\nafter-pr:\n  wait-ci:\n    command: \"gh pr checks {pr.number} --watch\"\n    timeout: \"10m\"\n  merge:\n    squash-merge: true\n    flag: merge\n",
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+if [ "$1" = "--version" ]; then
+  printf 'gh version 2.0.0\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  printf 'https://github.com/acme/service/pull/7\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "checks" ] && [ "$4" = "--watch" ]; then
+  printf 'All checks passed for old head\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  printf 'refusing unsafe PR merge\n' >&2
+  exit 97
+fi
+if [ "$1" = "api" ]; then
+  case "$*" in
+    *"/merge"*)
+      attempts=$(cat "$FAKE_GH_WRITE_ATTEMPTS" 2>/dev/null || printf '0')
+      attempts=$((attempts + 1))
+      printf '%s\n' "$attempts" > "$FAKE_GH_WRITE_ATTEMPTS" || exit 97
+      head=$(git rev-parse HEAD) || exit 97
+      ready_head=$(cat "$FAKE_GH_READY_HEAD" 2>/dev/null || true)
+      status_count=$(cat "$FAKE_GH_STATUS_COUNT" 2>/dev/null || printf '0')
+      if [ "$ready_head" != "$head" ] || [ "$attempts" -ne 1 ] || [ "$status_count" -lt 3 ]; then
+        printf 'rejected early or duplicate merge write\n' >&2
+        exit 97
+      fi
+      case " $* " in
+        *"sha=$head"*) ;;
+        *)
+          printf 'merge write did not pin the current HEAD\n' >&2
+          exit 97
+          ;;
+      esac
+      printf '1\n' > "$FAKE_GH_SUCCESSFUL_WRITES" || exit 97
+      printf 'MERGED\n' > "$FAKE_GH_MERGED" || exit 97
+      printf '{"merged":true}\n'
+      exit 0
+      ;;
+    *"/rules/branches/"*)
+      printf '[]\n'
+      exit 0
+      ;;
+    *statusCheckRollup*)
+      head=$(git rev-parse HEAD) || exit 97
+      count=$(cat "$FAKE_GH_STATUS_COUNT" 2>/dev/null || printf '0')
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FAKE_GH_STATUS_COUNT" || exit 97
+      if [ "$count" -eq 1 ]; then
+        rollup_head=0000000000000000000000000000000000000001
+        printf 'UNKNOWN %s %s\n' "$head" "$rollup_head" >> "$FAKE_GH_STATUS_SEQUENCE"
+        printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"SUCCESS","commit":{"oid":"%s"},"contexts":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"old-head-ci","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}}}\n' "$head" "$rollup_head"
+        exit 0
+      fi
+      if [ "$count" -eq 2 ]; then
+        printf 'MERGEABLE UNSTABLE %s %s\n' "$head" "$head" >> "$FAKE_GH_STATUS_SEQUENCE"
+        printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"UNSTABLE","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"PENDING","commit":{"oid":"%s"},"contexts":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"new-head-ci","status":"IN_PROGRESS","conclusion":null}]}}}}}}\n' "$head" "$head"
+        exit 0
+      fi
+      printf '%s\n' "$head" > "$FAKE_GH_READY_HEAD" || exit 97
+      printf 'MERGEABLE CLEAN %s %s\n' "$head" "$head" >> "$FAKE_GH_STATUS_SEQUENCE"
+      printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"SUCCESS","commit":{"oid":"%s"},"contexts":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"new-head-ci","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}}}\n' "$head" "$head"
+      exit 0
+      ;;
+    *graphql*)
+      head=$(git rev-parse HEAD) || exit 97
+      state=$(cat "$FAKE_GH_MERGED" 2>/dev/null || printf 'OPEN')
+      printf '{"data":{"repository":{"pullRequest":{"state":"%s","headRefOid":"%s"}}}}\n' "$state" "$head"
+      exit 0
+      ;;
+  esac
+fi
+printf 'refusing unexpected fake gh command\n' >&2
+exit 97
+"#,
+    )
+}
+
+fn create_merge_session(fixture: &Fixture, env: &[(&str, &str)]) -> String {
+    let config = fixture.config.to_string_lossy().into_owned();
+    let plan = fixture
+        .cli_command(
+            &[
+                "plan",
+                "--config",
+                config.as_str(),
+                "--skip-planning",
+                "--flag",
+                "merge",
+                "merge CLI input",
+            ],
+            env,
+        )
+        .output()
+        .unwrap_or_else(|error| panic!("create merge CLI session: {error}"));
+    assert!(plan.status.success(), "plan failed: {}", output_text(&plan));
+
+    let manager = SessionManager::new(fixture.root.path().join("data/cruise"));
+    let sessions = manager
+        .list()
+        .unwrap_or_else(|error| panic!("list merge CLI sessions: {error}"));
+    assert_eq!(sessions.len(), 1, "unexpected sessions: {sessions:#?}");
+    sessions[0].id.clone()
+}
+
+fn pin_inline_config_snapshot(fixture: &Fixture, session_id: &str) -> PathBuf {
+    let manager = SessionManager::new(fixture.root.path().join("data/cruise"));
+    let mut session = manager
+        .load(session_id)
+        .unwrap_or_else(|error| panic!("load session before snapshotting config: {error}"));
+    let yaml = std::fs::read_to_string(&fixture.config)
+        .unwrap_or_else(|error| panic!("read workflow before snapshotting: {error}"));
+    let snapshot_path = manager.sessions_dir().join(session_id).join("config.yaml");
+    std::fs::write(&snapshot_path, yaml)
+        .unwrap_or_else(|error| panic!("write legacy inline config snapshot: {error}"));
+    session.config = cruise::session_config::SessionConfigRef::inline_snapshot();
+    manager
+        .save(&session)
+        .unwrap_or_else(|error| panic!("save inline config snapshot reference: {error}"));
+    std::fs::remove_file(&fixture.config)
+        .unwrap_or_else(|error| panic!("remove live workflow after snapshotting: {error}"));
+    snapshot_path
+}
+
+#[test]
+fn rejected_squash_merge_persists_github_mergeability_and_exports_it() {
+    for telemetry_enabled in [false, true] {
+        let scenario = merge_diagnostics_case(telemetry_enabled);
+        let borrowed = borrowed_env(&scenario.env);
+        let fixture = &scenario.cli;
+        let gh_log = &scenario.gh_log;
+        let collector = scenario.collector.as_ref();
+
+        let session_id = create_merge_session(fixture, &borrowed);
+        let manager = SessionManager::new(fixture.root.path().join("data/cruise"));
+        let run = fixture
+            .cli_command(&["run", session_id.as_str()], &borrowed)
+            .output()
+            .unwrap_or_else(|error| panic!("run rejected squash merge: {error}"));
+        assert!(
+            !run.status.success(),
+            "non-mergeable pull request unexpectedly completed: {}",
+            output_text(&run)
+        );
+
+        let session = manager
+            .load(&session_id)
+            .unwrap_or_else(|error| panic!("load failed merge diagnostics session: {error}"));
+        let SessionPhase::Failed(phase_error) = &session.phase else {
+            panic!("expected failed session after merge readiness rejection: {session:#?}");
+        };
+        assert!(
+            phase_error.contains("mergeable=CONFLICTING"),
+            "saved phase error omitted actual mergeable value: {phase_error}"
+        );
+        assert!(
+            phase_error.contains("mergeStateStatus=BEHIND"),
+            "saved phase error omitted actual merge-state value: {phase_error}"
+        );
+        let gh_calls = std::fs::read_to_string(gh_log)
+            .unwrap_or_else(|error| panic!("read fake gh log: {error}"));
+        assert!(
+            gh_calls.contains("pr create"),
+            "fake gh was not used: {gh_calls}"
+        );
+        let unsafe_merge_calls = gh_calls
+            .lines()
+            .filter(|call| {
+                call.starts_with("pr merge")
+                    || (call.starts_with("api ")
+                        && (call.contains("/merge") || call.contains("--method PUT")))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            unsafe_merge_calls.is_empty(),
+            "fake gh received unsafe merge write call: {unsafe_merge_calls:?}"
+        );
+
+        if let Some(collector) = collector {
+            let requests = collector.wait_for_paths(&["/v1/traces"]);
+            let exported_spans = spans(&requests);
+            let merge = named_span(&exported_spans, "cruise.step", "cruise.step.name", "merge");
+            assert_eq!(
+                merge.status_code,
+                StatusCode::Error as i32,
+                "rejected merge step must be recorded as failed: {merge:#?}"
+            );
+            assert_eq!(
+                merge
+                    .attributes
+                    .get("cruise.github.mergeable")
+                    .map(String::as_str),
+                Some("CONFLICTING"),
+                "mergeable attribute must match the rejected response: {merge:#?}"
+            );
+            assert_eq!(
+                merge
+                    .attributes
+                    .get("cruise.github.merge_state_status")
+                    .map(String::as_str),
+                Some("BEHIND"),
+                "merge-state attribute must match the rejected response: {merge:#?}"
+            );
+        }
+    }
+}
+
+fn assert_expected_head_readiness(root: &std::path::Path) -> String {
+    const OLD_HEAD: &str = "0000000000000000000000000000000000000001";
+
+    let status_count = std::fs::read_to_string(root.join("fake-gh-status-count"))
+        .unwrap_or_else(|error| panic!("read fake status count: {error}"))
+        .trim()
+        .parse::<usize>()
+        .unwrap_or_else(|error| panic!("parse fake status count: {error}"));
+    assert_eq!(
+        status_count, 3,
+        "native readiness should observe stale CI, current-head pending CI, then green CI"
+    );
+    let status_sequence = std::fs::read_to_string(root.join("fake-gh-status-sequence"))
+        .unwrap_or_else(|error| panic!("read fake status sequence: {error}"));
+    let status_sequence: Vec<_> = status_sequence.lines().collect();
+    assert_eq!(
+        status_sequence.len(),
+        3,
+        "fake provider should observe exactly the three readiness phases: {status_sequence:?}"
+    );
+    assert!(
+        status_sequence[0].starts_with("UNKNOWN ") && status_sequence[0].ends_with(OLD_HEAD),
+        "the first native response should be UNKNOWN with stale old-head SUCCESS: {status_sequence:?}"
+    );
+    let expected_head = std::fs::read_to_string(root.join("fake-gh-ready-head"))
+        .unwrap_or_else(|error| panic!("read ready HEAD: {error}"))
+        .trim()
+        .to_string();
+    let pending_status = format!("MERGEABLE UNSTABLE {expected_head} {expected_head}");
+    assert_eq!(
+        status_sequence[1],
+        pending_status.as_str(),
+        "native readiness must wait through current-head pending CI: {status_sequence:?}"
+    );
+    let expected_status = format!("MERGEABLE CLEAN {expected_head} {expected_head}");
+    assert_eq!(
+        status_sequence[2],
+        expected_status.as_str(),
+        "native readiness should merge only after current-head green CI: {status_sequence:?}"
+    );
+    expected_head
+}
+
+fn assert_single_guarded_merge(scenario: &MergeCliCase, expected_head: &str) {
+    let root = scenario.cli.root.path();
+    assert_eq!(
+        std::fs::read_to_string(root.join("fake-gh-write-attempts"))
+            .unwrap_or_else(|error| panic!("read merge write attempts: {error}"))
+            .trim(),
+        "1",
+        "exactly one merge write should be attempted"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("fake-gh-successful-writes"))
+            .unwrap_or_else(|error| panic!("read successful merge writes: {error}"))
+            .trim(),
+        "1",
+        "the fake provider should accept exactly one guarded merge write"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("fake-gh-merged"))
+            .unwrap_or_else(|error| panic!("read fake merged state: {error}"))
+            .trim(),
+        "MERGED",
+        "the fake provider should confirm MERGED only after the guarded write"
+    );
+
+    let gh_calls = std::fs::read_to_string(&scenario.gh_log)
+        .unwrap_or_else(|error| panic!("read fake gh call log: {error}"));
+    let calls: Vec<_> = gh_calls.lines().collect();
+    let wait_ci = calls
+        .iter()
+        .position(|call| *call == "pr checks 7 --watch")
+        .unwrap_or_else(|| panic!("saved wait-ci snapshot was not run: {gh_calls}"));
+    let status_calls: Vec<_> = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| {
+            (call.contains("graphql") && call.contains("statusCheckRollup")).then_some(index)
+        })
+        .collect();
+    assert!(
+        status_calls.len() >= 2,
+        "native readiness did not issue a second status query: {gh_calls}"
+    );
+    let merge_writes: Vec<_> = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| {
+            (call.starts_with("api ") && call.contains("--method PUT") && call.contains("/merge"))
+                .then_some((index, *call))
+        })
+        .collect();
+    assert_eq!(
+        merge_writes.len(),
+        1,
+        "the fake gh log should contain one merge write: {gh_calls}"
+    );
+    assert!(
+        wait_ci < status_calls[0]
+            && status_calls[0] < status_calls[1]
+            && status_calls[1] < merge_writes[0].0,
+        "the merge write must follow the saved wait step and current-head readiness: {gh_calls}"
+    );
+    assert!(
+        merge_writes[0].1.contains(&format!("sha={expected_head}")),
+        "merge write was not pinned to the observed expected HEAD: {}",
+        merge_writes[0].1
+    );
+    assert!(
+        !calls.iter().any(|call| call.starts_with("pr merge ")),
+        "an unguarded gh pr merge was invoked: {gh_calls}"
+    );
+}
+
+#[test]
+fn saved_wait_ci_snapshot_cannot_bypass_expected_head_readiness() {
+    let scenario = merge_readiness_race_case();
+    let borrowed = borrowed_env(&scenario.env);
+    let fixture = &scenario.cli;
+    let session_id = create_merge_session(fixture, &borrowed);
+    let snapshot_path = pin_inline_config_snapshot(fixture, &session_id);
+    let saved_snapshot = std::fs::read_to_string(&snapshot_path)
+        .unwrap_or_else(|error| panic!("read saved wait-ci snapshot: {error}"));
+    let manager = SessionManager::new(fixture.root.path().join("data/cruise"));
+    let run = fixture
+        .cli_command(&["run", session_id.as_str()], &borrowed)
+        .output()
+        .unwrap_or_else(|error| panic!("run saved wait-ci snapshot: {error}"));
+    assert_success(&run);
+    assert_eq!(
+        std::fs::read_to_string(&snapshot_path)
+            .unwrap_or_else(|error| panic!("read saved snapshot after run: {error}")),
+        saved_snapshot,
+        "run must not rewrite the saved workflow snapshot"
+    );
+    let session = manager
+        .load(&session_id)
+        .unwrap_or_else(|error| panic!("load completed readiness session: {error}"));
+    assert_eq!(
+        session.phase,
+        SessionPhase::Completed,
+        "the session should complete only after the guarded merge: {session:#?}"
+    );
+    let expected_head = assert_expected_head_readiness(fixture.root.path());
+    assert_single_guarded_merge(&scenario, &expected_head);
 }

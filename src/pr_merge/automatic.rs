@@ -13,6 +13,8 @@ use tokio::process::Command;
 use crate::cancellation::CancellationToken;
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(120);
+const GITHUB_READINESS_TIMEOUT: Duration = Duration::from_mins(10);
+const GITHUB_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const GITHUB_STATUS_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!,$after:String){repository(owner:$owner,name:$repo){squashMergeAllowed pullRequest(number:$number){state isDraft headRefOid baseRefName mergeable mergeStateStatus reviewDecision mergeQueueEntry{id} autoMergeRequest{enabledAt} statusCheckRollup{state commit{oid} contexts(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}}}}";
 const GITHUB_IDENTITY_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state headRefOid}}}";
 
@@ -101,6 +103,10 @@ async fn run_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    // Prevent read-only Git status checks from refreshing the index during a concurrent commit.
+    if program == "git" && args.first().is_some_and(|arg| arg == "status") {
+        command.env("GIT_OPTIONAL_LOCKS", "0");
+    }
 
     let result = tokio::select! {
         biased;
@@ -290,18 +296,75 @@ struct GitHubMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GitHubSnapshot {
     metadata: GitHubMetadata,
-    check_state: String,
-    check_commit_oid: String,
+    check_state: Option<String>,
+    check_commit_oid: Option<String>,
     context_total: usize,
+    contexts_registered: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitHubCheckStatus {
+    Green,
+    Pending,
+    Failed,
+}
+
+impl GitHubCheckStatus {
+    fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Failed, _) | (_, Self::Failed) => Self::Failed,
+            (Self::Pending, _) | (_, Self::Pending) => Self::Pending,
+            _ => Self::Green,
+        }
+    }
 }
 
 struct GitHubCiPage {
-    check_state: String,
-    check_commit_oid: String,
+    check_state: Option<String>,
+    check_commit_oid: Option<String>,
     context_total: usize,
+    check_status: GitHubCheckStatus,
     check_names: Vec<String>,
+    contexts_registered: bool,
     has_next_page: bool,
     end_cursor: Option<String>,
+}
+
+struct GitHubSnapshotPage {
+    snapshot: GitHubSnapshot,
+    check_names: Vec<String>,
+    check_status: GitHubCheckStatus,
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitHubReadiness {
+    Ready,
+    AlreadyMerged,
+    Pending,
+}
+
+#[derive(Default)]
+struct GitHubReadinessObservation {
+    mergeable: Option<String>,
+    merge_state: Option<String>,
+    check_state: Option<String>,
+    check_commit_oid: Option<String>,
+    reason: Option<&'static str>,
+}
+
+impl GitHubReadinessObservation {
+    fn timeout_message(&self) -> String {
+        format!(
+            "GitHub readiness timed out (mergeable={}, mergeStateStatus={}, CI state={}, CI head={}, waiting for={})",
+            self.mergeable.as_deref().unwrap_or("unobserved"),
+            self.merge_state.as_deref().unwrap_or("unobserved"),
+            self.check_state.as_deref().unwrap_or("unobserved"),
+            self.check_commit_oid.as_deref().unwrap_or("unobserved"),
+            self.reason.unwrap_or("readiness"),
+        )
+    }
 }
 
 fn required_str<'a>(value: &'a Value, key: &'static str) -> Result<&'a str, AutoSquashError> {
@@ -362,6 +425,7 @@ fn parse_github_metadata(
         merge_state: required_str(pr, "mergeStateStatus")?.to_string(),
         review_decision,
     };
+    crate::telemetry::record_github_mergeability(&metadata.mergeable, &metadata.merge_state);
     if metadata.state == "OPEN" {
         if is_draft {
             return Err(AutoSquashError::Rejected(
@@ -378,11 +442,6 @@ fn parse_github_metadata(
                 "GitHub pull request already has auto-merge enabled".to_string(),
             ));
         }
-        if metadata.mergeable != "MERGEABLE" || metadata.merge_state != "CLEAN" {
-            return Err(AutoSquashError::Rejected(
-                "GitHub pull request is not confirmed mergeable".to_string(),
-            ));
-        }
         if !squash_allowed {
             return Err(AutoSquashError::Rejected(
                 "GitHub repository policy does not allow squash merging".to_string(),
@@ -392,11 +451,155 @@ fn parse_github_metadata(
     Ok(metadata)
 }
 
-fn parse_github_ci_page(rollup: &Value) -> Result<GitHubCiPage, AutoSquashError> {
-    let contexts = rollup
-        .get("contexts")
-        .filter(|node| node.is_object())
-        .ok_or_else(|| AutoSquashError::Rejected("GitHub CI checks are unavailable".into()))?;
+fn parse_github_rollup_state(state: &str) -> Result<GitHubCheckStatus, AutoSquashError> {
+    match state {
+        "SUCCESS" => Ok(GitHubCheckStatus::Green),
+        "PENDING" | "EXPECTED" => Ok(GitHubCheckStatus::Pending),
+        "ERROR" | "FAILURE" => Ok(GitHubCheckStatus::Failed),
+        _ => Err(AutoSquashError::Rejected(
+            "GitHub returned an unknown CI rollup state".to_string(),
+        )),
+    }
+}
+
+fn parse_github_ci_commit_oid(rollup: &Value) -> Result<Option<String>, AutoSquashError> {
+    match rollup.get("commit") {
+        Some(Value::Null) => Ok(None),
+        Some(commit) if commit.is_object() => match commit.get("oid") {
+            Some(Value::Null) => Ok(None),
+            Some(oid) => {
+                let oid = oid.as_str().filter(|oid| !oid.is_empty()).ok_or_else(|| {
+                    AutoSquashError::Rejected("GitHub CI head is malformed".into())
+                })?;
+                if !is_object_id(oid) {
+                    return Err(AutoSquashError::Rejected(
+                        "GitHub CI head is malformed".into(),
+                    ));
+                }
+                Ok(Some(oid.to_string()))
+            }
+            None => Err(AutoSquashError::Rejected(
+                "GitHub CI head is unavailable".into(),
+            )),
+        },
+        _ => Err(AutoSquashError::Rejected(
+            "GitHub CI head is unavailable".into(),
+        )),
+    }
+}
+
+fn unregistered_github_ci_page(
+    check_state: Option<String>,
+    check_commit_oid: Option<String>,
+    check_status: GitHubCheckStatus,
+) -> GitHubCiPage {
+    GitHubCiPage {
+        check_state,
+        check_commit_oid,
+        context_total: 0,
+        check_status,
+        check_names: Vec::new(),
+        contexts_registered: false,
+        has_next_page: false,
+        end_cursor: None,
+    }
+}
+
+fn parse_github_ci_check_nodes(
+    nodes: &[Value],
+) -> Result<(Vec<String>, GitHubCheckStatus), AutoSquashError> {
+    let mut check_names = Vec::with_capacity(nodes.len());
+    let mut check_status = GitHubCheckStatus::Green;
+    for node in nodes {
+        let status = match required_str(node, "__typename")? {
+            "CheckRun" => {
+                let status = required_str(node, "status")?;
+                let conclusion = node.get("conclusion").ok_or_else(|| {
+                    AutoSquashError::Rejected("GitHub CI conclusion is unavailable".into())
+                })?;
+                let conclusion = if conclusion.is_null() {
+                    None
+                } else {
+                    let conclusion = conclusion.as_str().ok_or_else(|| {
+                        AutoSquashError::Rejected("GitHub CI conclusion is malformed".into())
+                    })?;
+                    if !matches!(
+                        conclusion,
+                        "ACTION_REQUIRED"
+                            | "CANCELLED"
+                            | "FAILURE"
+                            | "NEUTRAL"
+                            | "SKIPPED"
+                            | "STALE"
+                            | "STARTUP_FAILURE"
+                            | "SUCCESS"
+                            | "TIMED_OUT"
+                    ) {
+                        return Err(AutoSquashError::Rejected(
+                            "GitHub returned an unknown CI conclusion".to_string(),
+                        ));
+                    }
+                    Some(conclusion)
+                };
+                let name = required_str(node, "name")?;
+                let status = match status {
+                    "QUEUED" | "IN_PROGRESS" | "WAITING" | "REQUESTED" | "PENDING" => {
+                        GitHubCheckStatus::Pending
+                    }
+                    "COMPLETED" => match conclusion {
+                        Some("SUCCESS" | "NEUTRAL" | "SKIPPED") => GitHubCheckStatus::Green,
+                        Some(_) => GitHubCheckStatus::Failed,
+                        None => {
+                            return Err(AutoSquashError::Rejected(
+                                "GitHub CI conclusion is unavailable".into(),
+                            ));
+                        }
+                    },
+                    _ => {
+                        return Err(AutoSquashError::Rejected(
+                            "GitHub returned an unknown CI check status".to_string(),
+                        ));
+                    }
+                };
+                check_names.push(name.to_string());
+                status
+            }
+            "StatusContext" => {
+                let state = required_str(node, "state")?;
+                let name = required_str(node, "context")?;
+                let status = match state {
+                    "SUCCESS" => GitHubCheckStatus::Green,
+                    "EXPECTED" | "PENDING" => GitHubCheckStatus::Pending,
+                    "ERROR" | "FAILURE" => GitHubCheckStatus::Failed,
+                    _ => {
+                        return Err(AutoSquashError::Rejected(
+                            "GitHub returned an unknown CI status".to_string(),
+                        ));
+                    }
+                };
+                check_names.push(name.to_string());
+                status
+            }
+            _ => {
+                return Err(AutoSquashError::Rejected(
+                    "GitHub returned an unknown CI check type".to_string(),
+                ));
+            }
+        };
+        check_status = check_status.combine(status);
+    }
+    Ok((check_names, check_status))
+}
+
+fn parse_github_ci_context_page(
+    contexts: &Value,
+    check_state: String,
+    check_commit_oid: Option<String>,
+    rollup_status: GitHubCheckStatus,
+) -> Result<GitHubCiPage, AutoSquashError> {
+    let contexts = contexts
+        .as_object()
+        .ok_or_else(|| AutoSquashError::Rejected("GitHub CI checks are malformed".to_string()))?;
     let nodes = contexts
         .get("nodes")
         .and_then(Value::as_array)
@@ -423,37 +626,57 @@ fn parse_github_ci_page(rollup: &Value) -> Result<GitHubCiPage, AutoSquashError>
             "GitHub CI pagination is incomplete".to_string(),
         ));
     }
-    let mut check_names = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        let name = match required_str(node, "__typename")? {
-            "CheckRun" => required_str(node, "name")?,
-            "StatusContext" => required_str(node, "context")?,
-            _ => {
-                return Err(AutoSquashError::Rejected(
-                    "GitHub returned an unknown CI check type".to_string(),
-                ));
-            }
-        };
-        check_names.push(name.to_string());
+    if context_total > 0 && check_commit_oid.is_none() {
+        return Err(AutoSquashError::Rejected(
+            "GitHub CI head is unavailable".into(),
+        ));
     }
+    let (check_names, node_status) = parse_github_ci_check_nodes(nodes)?;
     Ok(GitHubCiPage {
-        check_state: required_str(rollup, "state")?.to_string(),
-        check_commit_oid: rollup
-            .pointer("/commit/oid")
-            .and_then(Value::as_str)
-            .filter(|oid| !oid.is_empty())
-            .ok_or_else(|| AutoSquashError::Rejected("GitHub CI head is unavailable".into()))?
-            .to_string(),
+        check_state: Some(check_state),
+        check_commit_oid,
         context_total,
+        check_status: node_status.combine(rollup_status),
         check_names,
+        contexts_registered: true,
         has_next_page,
         end_cursor,
     })
 }
 
-fn parse_github_snapshot(
-    value: &Value,
-) -> Result<(GitHubSnapshot, Vec<String>, bool, Option<String>), AutoSquashError> {
+fn parse_github_ci_page(pr: &Value) -> Result<GitHubCiPage, AutoSquashError> {
+    let rollup = pr
+        .get("statusCheckRollup")
+        .ok_or_else(|| AutoSquashError::Rejected("GitHub CI status is unavailable".into()))?;
+    if rollup.is_null() {
+        return Ok(unregistered_github_ci_page(
+            None,
+            None,
+            GitHubCheckStatus::Green,
+        ));
+    }
+    if !rollup.is_object() {
+        return Err(AutoSquashError::Rejected(
+            "GitHub CI status is malformed".to_string(),
+        ));
+    }
+    let check_state = required_str(rollup, "state")?.to_string();
+    let rollup_status = parse_github_rollup_state(&check_state)?;
+    let check_commit_oid = parse_github_ci_commit_oid(rollup)?;
+    let contexts = rollup
+        .get("contexts")
+        .ok_or_else(|| AutoSquashError::Rejected("GitHub CI checks are unavailable".into()))?;
+    if contexts.is_null() {
+        return Ok(unregistered_github_ci_page(
+            Some(check_state),
+            check_commit_oid,
+            rollup_status,
+        ));
+    }
+    parse_github_ci_context_page(contexts, check_state, check_commit_oid, rollup_status)
+}
+
+fn parse_github_snapshot(value: &Value) -> Result<GitHubSnapshotPage, AutoSquashError> {
     if value
         .get("errors")
         .and_then(Value::as_array)
@@ -476,51 +699,20 @@ fn parse_github_snapshot(
             AutoSquashError::Rejected("GitHub repository policy is unavailable".into())
         })?;
     let metadata = parse_github_metadata(pr, repository)?;
-    let rollup = pr
-        .get("statusCheckRollup")
-        .filter(|node| node.is_object())
-        .ok_or_else(|| AutoSquashError::Rejected("GitHub CI status is unavailable".into()))?;
-    let ci = parse_github_ci_page(rollup)?;
-    let snapshot = GitHubSnapshot {
-        metadata,
-        check_state: ci.check_state,
-        check_commit_oid: ci.check_commit_oid,
-        context_total: ci.context_total,
-    };
-    Ok((snapshot, ci.check_names, ci.has_next_page, ci.end_cursor))
-}
-
-fn github_check_nodes_green(nodes: &[Value]) -> Result<(), AutoSquashError> {
-    if nodes.is_empty() {
-        return Ok(());
-    }
-    for node in nodes {
-        match required_str(node, "__typename")? {
-            "CheckRun" => {
-                let status = required_str(node, "status")?;
-                let conclusion = required_str(node, "conclusion")?;
-                if status != "COMPLETED" || !matches!(conclusion, "SUCCESS" | "NEUTRAL" | "SKIPPED")
-                {
-                    return Err(AutoSquashError::Rejected(
-                        "GitHub has a pending or unsuccessful CI check".to_string(),
-                    ));
-                }
-            }
-            "StatusContext" => {
-                if required_str(node, "state")? != "SUCCESS" {
-                    return Err(AutoSquashError::Rejected(
-                        "GitHub has a pending or unsuccessful CI status".to_string(),
-                    ));
-                }
-            }
-            _ => {
-                return Err(AutoSquashError::Rejected(
-                    "GitHub returned an unknown CI check type".to_string(),
-                ));
-            }
-        }
-    }
-    Ok(())
+    let ci = parse_github_ci_page(pr)?;
+    Ok(GitHubSnapshotPage {
+        snapshot: GitHubSnapshot {
+            metadata,
+            check_state: ci.check_state,
+            check_commit_oid: ci.check_commit_oid,
+            context_total: ci.context_total,
+            contexts_registered: ci.contexts_registered,
+        },
+        check_names: ci.check_names,
+        check_status: ci.check_status,
+        has_next_page: ci.has_next_page,
+        end_cursor: ci.end_cursor,
+    })
 }
 
 async fn github_graphql(
@@ -609,16 +801,29 @@ async fn github_identity(
 async fn inspect_github(
     reference: &ProviderRef,
     request: &AutoSquashRequest<'_>,
-) -> Result<(GitHubSnapshot, Vec<String>), AutoSquashError> {
+    expected_head: &str,
+    observation: &mut GitHubReadinessObservation,
+) -> Result<(GitHubSnapshot, Vec<String>, GitHubCheckStatus), AutoSquashError> {
     let mut cursor = None;
     let mut snapshot: Option<GitHubSnapshot> = None;
     let mut names = Vec::new();
     let mut node_count = 0usize;
+    let mut check_status = GitHubCheckStatus::Green;
     loop {
         let value =
             github_graphql(reference, GITHUB_STATUS_QUERY, cursor.as_deref(), request).await?;
-        let parsed = parse_github_snapshot(&value)?;
-        let (current, page_names, has_next, end_cursor) = parsed;
+        let GitHubSnapshotPage {
+            snapshot: current,
+            check_names: page_names,
+            check_status: page_status,
+            has_next_page: has_next,
+            end_cursor,
+        } = parse_github_snapshot(&value)?;
+        if current.metadata.head_oid != expected_head {
+            return Err(AutoSquashError::Rejected(
+                "GitHub pull request head changed while status was being read".to_string(),
+            ));
+        }
         if let Some(first) = &snapshot {
             if first != &current {
                 return Err(AutoSquashError::Rejected(
@@ -626,20 +831,26 @@ async fn inspect_github(
                 ));
             }
         } else {
+            observation.mergeable = Some(current.metadata.mergeable.clone());
+            observation.merge_state = Some(current.metadata.merge_state.clone());
+            observation.check_state = Some(
+                current
+                    .check_state
+                    .clone()
+                    .unwrap_or_else(|| "unregistered".to_string()),
+            );
+            observation.check_commit_oid = Some(
+                current
+                    .check_commit_oid
+                    .clone()
+                    .unwrap_or_else(|| "unregistered".to_string()),
+            );
+            observation.reason = None;
             snapshot = Some(current);
         }
-        let pr = value
-            .pointer("/data/repository/pullRequest")
-            .ok_or_else(|| {
-                AutoSquashError::Rejected("GitHub pull request data is unavailable".into())
-            })?;
-        let nodes = pr
-            .pointer("/statusCheckRollup/contexts/nodes")
-            .and_then(Value::as_array)
-            .ok_or_else(|| AutoSquashError::Rejected("GitHub CI checks are incomplete".into()))?;
-        github_check_nodes_green(nodes)?;
-        node_count = node_count.saturating_add(nodes.len());
+        node_count = node_count.saturating_add(page_names.len());
         names.extend(page_names);
+        check_status = check_status.combine(page_status);
         if !has_next {
             break;
         }
@@ -648,22 +859,12 @@ async fn inspect_github(
     let snapshot = snapshot.ok_or_else(|| {
         AutoSquashError::Rejected("GitHub pull request data is unavailable".into())
     })?;
-    if snapshot.context_total == 0 || node_count != snapshot.context_total {
+    if snapshot.contexts_registered && node_count != snapshot.context_total {
         return Err(AutoSquashError::Rejected(
             "GitHub CI checks are missing or incomplete".to_string(),
         ));
     }
-    if snapshot.check_commit_oid != snapshot.metadata.head_oid {
-        return Err(AutoSquashError::Rejected(
-            "GitHub CI does not apply to the current pull request head".to_string(),
-        ));
-    }
-    if snapshot.check_state != "SUCCESS" {
-        return Err(AutoSquashError::Rejected(
-            "GitHub CI has not passed for the current pull request head".to_string(),
-        ));
-    }
-    Ok((snapshot, names))
+    Ok((snapshot, names, check_status))
 }
 
 async fn github_branch_rules(
@@ -720,7 +921,7 @@ async fn github_branch_rules(
 }
 fn validate_github_required_status_checks(
     rule: &Value,
-    checked: &HashSet<&str>,
+    checked: Option<&HashSet<&str>>,
 ) -> Result<(), AutoSquashError> {
     let required = rule
         .pointer("/parameters/required_status_checks")
@@ -730,7 +931,7 @@ fn validate_github_required_status_checks(
         })?;
     for check in required {
         let context = required_str(check, "context")?;
-        if !checked.contains(context) {
+        if checked.is_some_and(|checked| !checked.contains(context)) {
             return Err(AutoSquashError::Rejected(
                 "a required GitHub CI check is missing from the current head".to_string(),
             ));
@@ -810,8 +1011,12 @@ fn validate_github_pull_request_rule(rule: &Value) -> Result<bool, AutoSquashErr
         || !required_reviewers.is_empty())
 }
 
-fn validate_github_rules(rules: &Value, check_names: &[String]) -> Result<bool, AutoSquashError> {
-    let checked: HashSet<&str> = check_names.iter().map(String::as_str).collect();
+fn validate_github_rules(
+    rules: &Value,
+    check_names: Option<&[String]>,
+) -> Result<bool, AutoSquashError> {
+    let checked: Option<HashSet<&str>> =
+        check_names.map(|names| names.iter().map(String::as_str).collect());
     let mut reviews_required = false;
     for page in rules.as_array().into_iter().flatten() {
         let entries = page
@@ -825,7 +1030,7 @@ fn validate_github_rules(rules: &Value, check_names: &[String]) -> Result<bool, 
                     ));
                 }
                 "required_status_checks" => {
-                    validate_github_required_status_checks(rule, &checked)?;
+                    validate_github_required_status_checks(rule, checked.as_ref())?;
                 }
                 "pull_request" => {
                     reviews_required |= validate_github_pull_request_rule(rule)?;
@@ -1084,7 +1289,8 @@ async fn github_merge_readiness(
     reference: &ProviderRef,
     request: &AutoSquashRequest<'_>,
     expected_head: &str,
-) -> Result<Option<AutoSquashOutcome>, AutoSquashError> {
+    observation: &mut GitHubReadinessObservation,
+) -> Result<GitHubReadiness, AutoSquashError> {
     let (state, remote_head) = github_identity(reference, request).await?;
     if remote_head != expected_head {
         return Err(AutoSquashError::Rejected(
@@ -1092,29 +1298,52 @@ async fn github_merge_readiness(
         ));
     }
     if state == "MERGED" {
-        return Ok(Some(AutoSquashOutcome::AlreadyMerged));
+        return Ok(GitHubReadiness::AlreadyMerged);
     }
     if state != "OPEN" {
         return Err(AutoSquashError::Rejected(
             "GitHub pull request is not open".to_string(),
         ));
     }
-    let (snapshot, check_names) = inspect_github(reference, request).await?;
-    if snapshot.metadata.head_oid != expected_head {
-        return Err(AutoSquashError::Rejected(
-            "GitHub pull request head changed while status was being read".to_string(),
-        ));
-    }
+    let (snapshot, check_names, check_status) =
+        inspect_github(reference, request, expected_head, observation).await?;
     if snapshot.metadata.state == "MERGED" {
-        return Ok(Some(AutoSquashOutcome::AlreadyMerged));
+        return Ok(GitHubReadiness::AlreadyMerged);
     }
     if snapshot.metadata.state != "OPEN" {
         return Err(AutoSquashError::Rejected(
             "GitHub pull request is not open".to_string(),
         ));
     }
+    let current_head_rollup =
+        snapshot.contexts_registered && snapshot.check_commit_oid.as_deref() == Some(expected_head);
+    let current_head_ci = current_head_rollup && snapshot.context_total > 0;
+    if current_head_rollup && check_status == GitHubCheckStatus::Failed {
+        return Err(AutoSquashError::Rejected(
+            "GitHub CI failed for the current pull request head".to_string(),
+        ));
+    }
+    let mergeability_pending = match (
+        snapshot.metadata.mergeable.as_str(),
+        snapshot.metadata.merge_state.as_str(),
+    ) {
+        ("MERGEABLE", "CLEAN") => false,
+        ("MERGEABLE", "UNSTABLE")
+            if !current_head_ci || check_status == GitHubCheckStatus::Pending =>
+        {
+            true
+        }
+        ("UNKNOWN", "CLEAN" | "UNKNOWN") => true,
+        _ => {
+            return Err(AutoSquashError::Rejected(format!(
+                "GitHub pull request is not confirmed mergeable (mergeable={}, mergeStateStatus={})",
+                snapshot.metadata.mergeable, snapshot.metadata.merge_state
+            )));
+        }
+    };
     let rules = github_branch_rules(reference, &snapshot.metadata.base_branch, request).await?;
-    let reviews_required = validate_github_rules(&rules, &check_names)?;
+    let reviews_required =
+        validate_github_rules(&rules, current_head_ci.then_some(check_names.as_slice()))?;
     match snapshot.metadata.review_decision.as_deref() {
         Some("APPROVED") => {}
         Some(_) => {
@@ -1129,7 +1358,23 @@ async fn github_merge_readiness(
         }
         None => {}
     }
-    Ok(None)
+    if !current_head_ci {
+        observation.reason = Some(if snapshot.context_total > 0 {
+            "current-head CI registration"
+        } else {
+            "CI registration"
+        });
+        return Ok(GitHubReadiness::Pending);
+    }
+    if check_status == GitHubCheckStatus::Pending {
+        observation.reason = Some("current-head CI checks");
+        return Ok(GitHubReadiness::Pending);
+    }
+    if mergeability_pending {
+        observation.reason = Some("GitHub mergeability");
+        return Ok(GitHubReadiness::Pending);
+    }
+    Ok(GitHubReadiness::Ready)
 }
 
 async fn perform_github(
@@ -1137,11 +1382,86 @@ async fn perform_github(
     request: &AutoSquashRequest<'_>,
     expected_head: &str,
 ) -> Result<AutoSquashOutcome, AutoSquashError> {
-    if let Some(outcome) = github_merge_readiness(reference, request, expected_head).await? {
-        return Ok(outcome);
+    perform_github_with_timing(
+        reference,
+        request,
+        expected_head,
+        GITHUB_READINESS_TIMEOUT,
+        GITHUB_READINESS_POLL_INTERVAL,
+    )
+    .await
+}
+
+async fn perform_github_with_timing(
+    reference: &ProviderRef,
+    request: &AutoSquashRequest<'_>,
+    expected_head: &str,
+    readiness_timeout: Duration,
+    poll_interval: Duration,
+) -> Result<AutoSquashOutcome, AutoSquashError> {
+    let deadline = tokio::time::Instant::now() + readiness_timeout;
+    let mut observation = GitHubReadinessObservation::default();
+    loop {
+        check_cancel(request.cancel_token)?;
+        let attempt = tokio::select! {
+            biased;
+            () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
+            attempt = tokio::time::timeout_at(deadline, async {
+                if local_head(request).await? != expected_head {
+                    return Err(AutoSquashError::Rejected(
+                        "local HEAD changed before the merge request".to_string(),
+                    ));
+                }
+                github_merge_readiness(reference, request, expected_head, &mut observation).await
+            }) => attempt,
+        };
+        let readiness = match attempt {
+            Ok(readiness) => readiness?,
+            Err(_) => return Err(AutoSquashError::Rejected(observation.timeout_message())),
+        };
+        match readiness {
+            GitHubReadiness::Ready => break,
+            GitHubReadiness::AlreadyMerged => return Ok(AutoSquashOutcome::AlreadyMerged),
+            GitHubReadiness::Pending => {
+                let pending_head = tokio::select! {
+                    biased;
+                    () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
+                    result = tokio::time::timeout_at(deadline, local_head(request)) => match result {
+                        Ok(result) => result?,
+                        Err(_) => return Err(AutoSquashError::Rejected(observation.timeout_message())),
+                    },
+                };
+                if pending_head != expected_head {
+                    return Err(AutoSquashError::Rejected(
+                        "local HEAD changed while GitHub readiness was pending".to_string(),
+                    ));
+                }
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(AutoSquashError::Rejected(observation.timeout_message()));
+                }
+                let wait = poll_interval.min(remaining);
+                tokio::select! {
+                    biased;
+                    () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
+                    () = tokio::time::sleep(wait) => {}
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(AutoSquashError::Rejected(observation.timeout_message()));
+                }
+            }
+        }
     }
     check_cancel(request.cancel_token)?;
-    if local_head(request).await? != expected_head {
+    let final_head = tokio::select! {
+        biased;
+        () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
+        result = tokio::time::timeout_at(deadline, local_head(request)) => match result {
+            Ok(result) => result?,
+            Err(_) => return Err(AutoSquashError::Rejected(observation.timeout_message())),
+        },
+    };
+    if final_head != expected_head {
         return Err(AutoSquashError::Rejected(
             "local HEAD changed before the merge request".to_string(),
         ));

@@ -321,7 +321,7 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
         return Ok(());
     }
     operation.finish_result(&plan_result);
-    if matches!(plan_result?, PlanDisposition::ExecuteNow) {
+    if let PlanDisposition::ExecuteNow { flags } = plan_result? {
         eprintln!(
             "\n{} Executing session {}...",
             style("->").cyan(),
@@ -336,18 +336,18 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
-            flags: args.flags,
+            flags,
         };
         return crate::run_cmd::run(run_args).await;
     }
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum PlanDisposition {
     Completed,
     Cancelled,
-    ExecuteNow,
+    ExecuteNow { flags: Vec<(String, bool)> },
 }
 
 async fn run_created_plan(
@@ -412,6 +412,7 @@ async fn run_created_plan(
         args.rate_limit_retries,
         noninteractive,
         &mut resume,
+        &args.flags,
     )
     .await
 }
@@ -1251,6 +1252,17 @@ struct FlatNode {
     expanded_step_ids: Vec<String>,
 }
 
+fn skip_prompt_nodes(
+    config: &WorkflowConfig,
+    flags: &crate::flags::FlagValues,
+) -> Result<Vec<FlatNode>> {
+    let main = crate::flags::skip_candidates(&list_skippable_steps(config)?, flags);
+    let after_pr = crate::flags::skip_candidates(&list_skippable_after_pr_steps(config)?, flags);
+    let mut flat = flatten_nodes(&main, "");
+    flat.extend(flatten_nodes(&after_pr, "[after-pr] "));
+    Ok(flat)
+}
+
 impl fmt::Display for FlatNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.label)
@@ -1326,20 +1338,17 @@ fn flat_node_default_indices(flat: &[FlatNode], previously_skipped: &[String]) -
 pub(crate) fn select_steps_to_skip(
     config: &WorkflowConfig,
     previously_skipped: &[String],
+    flags: &crate::flags::FlagValues,
 ) -> Result<Option<Vec<String>>> {
-    let main_nodes = list_skippable_steps(config)?;
-    let after_pr_nodes = list_skippable_after_pr_steps(config)?;
-    if main_nodes.is_empty() && after_pr_nodes.is_empty() {
+    let flat = skip_prompt_nodes(config, flags)?;
+    if flat.is_empty() {
         return Ok(Some(vec![]));
     }
-
-    let mut flat = flatten_nodes(&main_nodes, "");
-    flat.extend(flatten_nodes(&after_pr_nodes, "[after-pr] "));
     let defaults = flat_node_default_indices(&flat, previously_skipped);
 
     crate::platform::reclaim_terminal_foreground();
     match inquire::MultiSelect::new("Steps to skip (Space to toggle, Enter to confirm):", flat)
-        .with_help_message("No selection = run all steps")
+        .with_help_message("No selection = no additional steps skipped")
         .with_default(&defaults)
         .prompt()
     {
@@ -1355,11 +1364,8 @@ pub(crate) fn select_steps_to_skip(
 fn select_skipped_steps_with_history(
     session: &SessionState,
     config: &WorkflowConfig,
+    flags: &crate::flags::FlagValues,
 ) -> Result<Option<Vec<String>>> {
-    if config.steps.is_empty() {
-        return Ok(Some(vec![]));
-    }
-
     let key = session
         .config
         .stable_identity(session.repo.as_deref(), &session.id);
@@ -1376,7 +1382,7 @@ fn select_skipped_steps_with_history(
         .map(|entry| entry.skipped_steps.clone())
         .unwrap_or_default();
 
-    let skipped_steps = select_steps_to_skip(config, &previously_skipped)?;
+    let skipped_steps = select_steps_to_skip(config, &previously_skipped, flags)?;
     if let Some(steps) = &skipped_steps {
         history.record_skip_selection_for_scope(scope, &key, steps.clone());
         history.save_best_effort();
@@ -1405,6 +1411,7 @@ async fn run_approve_loop(
     rate_limit_retries: usize,
     noninteractive: bool,
     resume: &mut Option<crate::model_selection::SdkSessionId>,
+    cli_flags: &[(String, bool)],
 ) -> Result<PlanDisposition> {
     let working_dir = session
         .worktree_path
@@ -1485,10 +1492,21 @@ async fn run_approve_loop(
         match selected {
             "Approve" | "Execute now" => {
                 let execute_now = selected == "Execute now";
-                let Some(skipped_steps) = select_skipped_steps_with_history(session, config)?
+                let flags = if cli_flags.is_empty() {
+                    let Some(values) = crate::run_cmd::select_flag_values(config, &session.flags)?
+                    else {
+                        continue;
+                    };
+                    values
+                } else {
+                    session.flags.clone()
+                };
+                let Some(skipped_steps) =
+                    select_skipped_steps_with_history(session, config, &flags)?
                 else {
                     continue;
                 };
+                session.flags = flags;
                 session.skipped_steps = skipped_steps;
                 drop(review);
                 let mut approval_interrupted = false;
@@ -1536,7 +1554,21 @@ async fn run_approve_loop(
                     );
                     return Ok(PlanDisposition::Completed);
                 }
-                return Ok(PlanDisposition::ExecuteNow);
+                let flags = if cli_flags.is_empty() {
+                    config
+                        .flags
+                        .keys()
+                        .map(|name| {
+                            (
+                                name.clone(),
+                                session.flags.get(name).copied().unwrap_or(false),
+                            )
+                        })
+                        .collect()
+                } else {
+                    cli_flags.to_vec()
+                };
+                return Ok(PlanDisposition::ExecuteNow { flags });
             }
             "Fix" => {
                 let text = match prompt_multiline("Describe the changes needed:")? {
@@ -2784,6 +2816,85 @@ steps:
         );
     }
 
+    fn flag_skip_prompt_config() -> WorkflowConfig {
+        WorkflowConfig::from_yaml(
+            r"
+command: [echo]
+flags:
+  e2e: {}
+  docs: {}
+groups:
+  checks:
+    steps:
+      first:
+        command: echo first
+steps:
+  build:
+    command: echo build
+  e2e-test:
+    flag: e2e
+    command: echo e2e
+  review:
+    flag: docs
+    group: checks
+after-pr:
+  notify:
+    flag: docs
+    command: echo notify
+",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    #[test]
+    fn skip_prompt_only_offers_steps_enabled_by_selected_flags() {
+        let config = flag_skip_prompt_config();
+        let off = skip_prompt_nodes(&config, &crate::flags::FlagValues::new())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            off.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["build"]
+        );
+        let on = skip_prompt_nodes(
+            &config,
+            &crate::flags::FlagValues::from([("e2e".into(), true)]),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            on.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["build", "e2e-test"]
+        );
+    }
+
+    #[test]
+    fn skip_prompt_preserves_enabled_group_expansion_and_after_pr_label() {
+        let flat = skip_prompt_nodes(
+            &flag_skip_prompt_config(),
+            &crate::flags::FlagValues::from([("docs".into(), true)]),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            flat.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["build", "review", "  first", "[after-pr] notify"]
+        );
+        assert_eq!(
+            collect_expanded_ids(flat),
+            ["build", "review/first", "notify"]
+        );
+    }
+
+    #[test]
+    fn skip_prompt_has_no_candidates_when_all_steps_are_flag_disabled() {
+        let config = WorkflowConfig::from_yaml(
+            "command: [echo]\nflags:\n  e2e: {}\nsteps:\n  e2e-test:\n    flag: e2e\n    command: echo e2e\n",
+        ).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            skip_prompt_nodes(&config, &crate::flags::FlagValues::new())
+                .unwrap_or_else(|e| panic!("{e:?}"))
+                .is_empty()
+        );
+    }
+
     #[test]
     fn test_select_skipped_steps_with_history_returns_some_for_empty_config() {
         // Given: a workflow with no executable steps
@@ -2793,7 +2904,8 @@ steps:
             .unwrap_or_else(|e| panic!("{e:?}"));
 
         // When: step skipping is requested
-        let result = select_skipped_steps_with_history(&session, &config);
+        let result =
+            select_skipped_steps_with_history(&session, &config, &crate::flags::FlagValues::new());
 
         // Then: the empty confirmed selection is distinct from cancellation
         assert_eq!(
@@ -3196,6 +3308,8 @@ steps:
         // writes a plan
         let _guard = lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        // Loading a file-backed workflow also reads user application settings.
+        let _home = crate::test_support::set_fake_home(tmp.path());
         let (manager, mut session) = make_regenerate_success_fixture("20260701090001", &tmp);
         session.phase = SessionPhase::Draft;
         manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -3214,6 +3328,8 @@ steps:
         // Given: an AwaitingInput session (blocked on an SDK ask_user answer)
         let _guard = lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        // Loading a file-backed workflow also reads user application settings.
+        let _home = crate::test_support::set_fake_home(tmp.path());
         let (manager, mut session) = make_regenerate_success_fixture("20260701090002", &tmp);
         session.phase = SessionPhase::AwaitingInput;
         manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -3232,6 +3348,8 @@ steps:
         // Given: a session already in AwaitingApproval (regenerating before approval)
         let _guard = lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        // Loading a file-backed workflow also reads user application settings.
+        let _home = crate::test_support::set_fake_home(tmp.path());
         let (manager, mut session) = make_regenerate_success_fixture("20260701090003", &tmp);
         session.phase = SessionPhase::AwaitingApproval;
         manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -3251,6 +3369,8 @@ steps:
         // NOT silently un-approve it back to AwaitingApproval.
         let _guard = lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        // Loading a file-backed workflow also reads user application settings.
+        let _home = crate::test_support::set_fake_home(tmp.path());
         let (manager, mut session) = make_regenerate_success_fixture("20260701090004", &tmp);
         session.phase = SessionPhase::Planned;
         manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
@@ -3273,6 +3393,8 @@ steps:
         // Given: a session carrying a stale plan_error from a prior failed attempt
         let _guard = lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        // Loading a file-backed workflow also reads user application settings.
+        let _home = crate::test_support::set_fake_home(tmp.path());
         let (manager, mut session) = make_regenerate_success_fixture("20260701090005", &tmp);
         session.phase = SessionPhase::AwaitingApproval;
         session.plan_error = Some("previous planning attempt failed".to_string());
@@ -3295,6 +3417,8 @@ steps:
         // Given: a session with a stale title from a previous plan
         let _guard = lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        // Loading a file-backed workflow also reads user application settings.
+        let _home = crate::test_support::set_fake_home(tmp.path());
         let (manager, mut session) = make_regenerate_success_fixture("20260701090006", &tmp);
         session.phase = SessionPhase::AwaitingApproval;
         session.title = Some("Old stale title".to_string());

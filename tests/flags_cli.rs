@@ -414,6 +414,7 @@ steps:
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut transcript = Vec::new();
         let mut response_index = 0;
+        let mut response_start = 0;
         let mut cursor_queries = 0;
         let mut status = None;
         loop {
@@ -442,7 +443,9 @@ steps:
             }
             cursor_queries = queries;
             if let Some((marker, response)) = responses.get(response_index)
-                && text.contains(marker)
+                && transcript[response_start..]
+                    .windows(marker.len())
+                    .any(|bytes| bytes == marker.as_bytes())
             {
                 input
                     .write_all(response)
@@ -451,6 +454,7 @@ steps:
                     .flush()
                     .unwrap_or_else(|error| panic!("flush prompt response: {error}"));
                 response_index += 1;
+                response_start = transcript.len();
             }
             if status.is_none() {
                 status = child
@@ -576,6 +580,91 @@ steps:
     }
 
     #[test]
+    fn plan_cancelling_skip_selection_does_not_retain_pending_flags() {
+        let mut f = Fixture::new();
+        f.repo = f.root.path().join("plain");
+        std::fs::create_dir(&f.repo).unwrap_or_else(|error| panic!("create directory: {error}"));
+        let config = f.config.to_string_lossy();
+        let (success, text) = cli_in_pty(
+            &f,
+            &["plan", "--skip-planning", "--config", &config, "test plan"],
+            &[
+                ("Publish as Issue", b"\r"),
+                ("Run E2E", b" \r"),
+                ("Steps to skip (", b"\x1b"),
+                ("Publish as Issue", b"\r"),
+                ("Run E2E", b"\r"),
+                ("Steps to skip (", b"\r"),
+            ],
+        );
+        assert!(success, "{text}");
+        let manager = cruise::session::SessionManager::new(f.root.path().join("data/cruise"));
+        let sessions = manager
+            .list()
+            .unwrap_or_else(|error| panic!("list sessions: {error}"));
+        assert_eq!(sessions.len(), 1, "{text}");
+        // The second approval accepts untouched defaults. The first attempt's
+        // e2e=true must not survive cancelling its skip selection.
+        assert_eq!(
+            sessions[0].flags,
+            cruise::flags::FlagValues::from([("docs".into(), false), ("e2e".into(), false)]),
+            "{text}"
+        );
+        assert!(sessions[0].skipped_steps.is_empty(), "{text}");
+        assert!(!f.repo.join("build.txt").exists(), "{text}");
+    }
+
+    #[test]
+    fn plan_execute_now_selects_flags_before_skip_steps() {
+        let mut f = Fixture::new();
+        // Stop at workspace selection without creating branches or refs.
+        f.repo = f.root.path().join("plain");
+        std::fs::create_dir(&f.repo).unwrap_or_else(|error| panic!("create directory: {error}"));
+        let config = f.config.to_string_lossy();
+        let (success, text) = cli_in_pty(
+            &f,
+            &["plan", "--skip-planning", "--config", &config, "test plan"],
+            &[
+                ("Publish as Issue", b"\x1b[B\x1b[B\x1b[B\r"),
+                ("Run E2E", b" \r"),
+                ("Steps to skip (", b"\r"),
+                ("Use current branch", b"\x1b"),
+            ],
+        );
+        assert!(!success, "{text}");
+        assert!(
+            text.contains("workspace") && text.contains("cancel"),
+            "{text}"
+        );
+        let flag_prompt = text.find(FLAG_PROMPT).unwrap_or_else(|| panic!("{text}"));
+        let skip_prompt = text
+            .find("Steps to skip (")
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(flag_prompt < skip_prompt, "{text}");
+        assert!(!text[skip_prompt..].contains(FLAG_PROMPT), "{text}");
+        let workspace_prompt = text[skip_prompt..]
+            .find("Use current branch")
+            .map_or_else(|| panic!("{text}"), |offset| skip_prompt + offset);
+        let skip_start = text
+            .find("Steps to skip (Space to toggle, Enter to confirm)")
+            .unwrap_or_else(|| panic!("{text}"));
+        let skip_output = &text[skip_start..workspace_prompt];
+        assert!(skip_output.contains("e2e-test"), "{text}");
+        assert!(!skip_output.contains("docs-test"), "{text}");
+        let manager = cruise::session::SessionManager::new(f.root.path().join("data/cruise"));
+        let sessions = manager
+            .list()
+            .unwrap_or_else(|error| panic!("list sessions: {error}"));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].phase, cruise::session::SessionPhase::Planned);
+        assert_eq!(
+            sessions[0].flags,
+            cruise::flags::FlagValues::from([("docs".into(), false), ("e2e".into(), true)])
+        );
+        assert!(!f.repo.join("build.txt").exists(), "{text}");
+    }
+
+    #[test]
     fn plan_execute_now_forwards_explicit_flags_without_an_extra_flag_prompt() {
         let mut f = Fixture::new();
         // Planning supports nongit directories. Cancel at workspace selection,
@@ -596,7 +685,7 @@ steps:
             ],
             &[
                 ("Publish as Issue", b"\x1b[B\x1b[B\x1b[B\r"),
-                ("No selection = run all steps", b"\r"),
+                ("Steps to skip (", b"\r"),
                 ("Use current branch", b"\x1b"),
             ],
         );

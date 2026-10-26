@@ -61,6 +61,9 @@ pub struct SkippableStepNode {
     /// Child nodes for group parent steps. Empty for regular steps and
     /// for child nodes (which are leaves).
     pub children: Vec<SkippableStepNode>,
+    /// Flag-disabled nodes are excluded from skip candidates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flag: Option<crate::config::StringOrVec>,
 }
 
 /// Build a tree of skippable steps from a [`WorkflowConfig`].
@@ -131,18 +134,21 @@ fn list_skippable_step_map(
                         id: expanded_id.clone(),
                         expanded_step_ids: vec![expanded_id],
                         children: Vec::new(),
+                        flag: step_config.flag.clone(),
                     })
                     .collect();
                 Ok(SkippableStepNode {
                     id: step_name.clone(),
                     expanded_step_ids: expanded_ids,
                     children,
+                    flag: step_config.flag.clone(),
                 })
             } else {
                 Ok(SkippableStepNode {
                     id: step_name.clone(),
                     expanded_step_ids: vec![step_name.clone()],
                     children: Vec::new(),
+                    flag: step_config.flag.clone(),
                 })
             }
         })
@@ -1022,6 +1028,90 @@ steps:
         assert_eq!(nodes[1].id, "step2");
         assert_eq!(nodes[1].expanded_step_ids, vec!["step2"]);
         assert!(nodes[1].children.is_empty());
+    }
+
+    fn flag_metadata_config() -> WorkflowConfig {
+        parsed(
+            r"
+command: [echo]
+flags:
+  e2e: {}
+  docs: {}
+groups:
+  checks:
+    steps:
+      first:
+        command: echo first
+      second:
+        command: echo second
+steps:
+  build:
+    command: echo build
+  single:
+    flag: e2e
+    command: echo single
+  either:
+    flag: [e2e, docs]
+    command: echo either
+  review:
+    flag: [e2e, docs]
+    group: checks
+after-pr:
+  notify:
+    flag: docs
+    command: echo notify
+  post-review:
+    flag: docs
+    group: checks
+",
+        )
+    }
+
+    #[test]
+    fn skippable_step_tree_serializes_single_and_list_flags() {
+        let nodes =
+            list_skippable_steps(&flag_metadata_config()).unwrap_or_else(|e| panic!("{e:?}"));
+        let json = serde_json::to_value(nodes).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(json[1]["flag"], serde_json::json!("e2e"));
+        assert_eq!(json[2]["flag"], serde_json::json!(["e2e", "docs"]));
+    }
+
+    #[test]
+    fn skippable_step_tree_omits_flag_for_ungated_steps() {
+        let nodes =
+            list_skippable_steps(&flag_metadata_config()).unwrap_or_else(|e| panic!("{e:?}"));
+        let json = serde_json::to_value(nodes).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(json[0].get("flag").is_none());
+    }
+
+    #[test]
+    fn skippable_group_tree_serializes_call_site_flag_on_parent_and_children() {
+        let nodes =
+            list_skippable_steps(&flag_metadata_config()).unwrap_or_else(|e| panic!("{e:?}"));
+        let json = serde_json::to_value(nodes).unwrap_or_else(|e| panic!("{e:?}"));
+        let group = &json[3];
+        assert_eq!(group["flag"], serde_json::json!(["e2e", "docs"]));
+        for child in group["children"]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing group children"))
+        {
+            assert_eq!(child["flag"], group["flag"]);
+        }
+    }
+
+    #[test]
+    fn skippable_after_pr_tree_serializes_flags_for_steps_and_group_children() {
+        let nodes = list_skippable_after_pr_steps(&flag_metadata_config())
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let json = serde_json::to_value(nodes).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(json[0]["flag"], serde_json::json!("docs"));
+        assert_eq!(json[1]["flag"], serde_json::json!("docs"));
+        for child in json[1]["children"]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing group children"))
+        {
+            assert_eq!(child["flag"], serde_json::json!("docs"));
+        }
     }
 
     #[test]

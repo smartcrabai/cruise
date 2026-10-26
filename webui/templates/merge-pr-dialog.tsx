@@ -1,7 +1,7 @@
 export default function MergePrDialog(props) {
   return (
-    <div id={`dialog-merge-pr-${props.id}`} class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <form role="dialog" aria-modal="true" hx-post={props.canMerge ? props.submitUrl : undefined} hx-swap="none" hx-disable="this" class="bg-white dark:bg-gray-900 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 p-6 max-w-md w-full space-y-4">
+    <div id={`dialog-merge-pr-${props.id}`} class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <form role="dialog" aria-modal="true" hx-post={props.canMerge ? props.submitUrl : undefined} hx-swap="none" hx-disable="this" class="bg-white dark:bg-gray-900 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 p-6 max-w-md w-full max-h-full overflow-y-auto space-y-4">
         <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Merge pull request</h2>
         <dl class="text-sm text-gray-700 dark:text-gray-300 space-y-1">
           <div>State: <span class="font-mono">{props.state}</span></div>

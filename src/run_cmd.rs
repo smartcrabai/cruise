@@ -282,20 +282,22 @@ impl std::fmt::Display for FlagPromptChoice<'_> {
     }
 }
 
-fn prompt_flag_values(
+pub(crate) fn select_flag_values(
     config: &crate::config::WorkflowConfig,
     current: &crate::flags::FlagValues,
-) -> Result<crate::flags::FlagValues> {
+) -> Result<Option<crate::flags::FlagValues>> {
     let choices = crate::flags::choices(config);
     if choices.is_empty() {
-        return Ok(current.clone());
+        return Ok(Some(current.clone()));
     }
     #[cfg(test)]
     if let Some(enabled) = test_flag_selection() {
-        return Ok(crate::flags::apply_enabled(current, &choices, &enabled));
+        return Ok(Some(crate::flags::apply_enabled(
+            current, &choices, &enabled,
+        )));
     }
     if !stdin_is_terminal() {
-        return Ok(current.clone());
+        return Ok(Some(current.clone()));
     }
 
     let _guard = crate::option_handler::prompt_lock_guard();
@@ -323,13 +325,21 @@ fn prompt_flag_values(
                 .into_iter()
                 .map(|choice| choice.0.name.clone())
                 .collect();
-            Ok(crate::flags::apply_enabled(current, &choices, &enabled))
+            Ok(Some(crate::flags::apply_enabled(
+                current, &choices, &enabled,
+            )))
         }
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Err(
-            CruiseError::Other("workflow flag selection cancelled".to_string()),
-        ),
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
         Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
     }
+}
+
+fn prompt_flag_values(
+    config: &crate::config::WorkflowConfig,
+    current: &crate::flags::FlagValues,
+) -> Result<crate::flags::FlagValues> {
+    select_flag_values(config, current)?
+        .ok_or_else(|| CruiseError::Other("workflow flag selection cancelled".into()))
 }
 
 fn should_prompt_flags(
@@ -4800,6 +4810,34 @@ steps:
 
         fn fresh_session() -> SessionState {
             make_current_branch_session("20261024000000", Path::new("/repo"), "flags", "main")
+        }
+
+        #[test]
+        fn approval_selector_without_declared_flags_confirms_current_values() {
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let _process = ProcessStateGuard::new(tmp.path());
+            let config = crate::config::WorkflowConfig::from_yaml("command: [echo]\nsteps: {}\n")
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            let current = FlagValues::from([("legacy".into(), true)]);
+            assert_eq!(
+                select_flag_values(&config, &current).unwrap_or_else(|e| panic!("{e:?}")),
+                Some(current)
+            );
+        }
+
+        #[test]
+        fn approval_selector_without_a_tty_confirms_sparse_saved_values() {
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let mut process = ProcessStateGuard::new(tmp.path());
+            process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "0");
+            process.remove_env(SELECTION_ENV);
+            let config = crate::config::WorkflowConfig::from_yaml(CONFIG)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            let current = FlagValues::from([("docs".into(), true)]);
+            assert_eq!(
+                select_flag_values(&config, &current).unwrap_or_else(|e| panic!("{e:?}")),
+                Some(current)
+            );
         }
 
         #[test]

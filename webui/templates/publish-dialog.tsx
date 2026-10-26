@@ -1,7 +1,7 @@
 export default function PublishDialog(props) {
   return (
-    <div id={`dialog-publish-${props.id}`} class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <form role="dialog" aria-modal="true" hx-post={props.submitUrl} hx-swap="none" hx-disable="this" class="bg-white dark:bg-gray-900 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 p-6 max-w-sm w-full space-y-4">
+    <div id={`dialog-publish-${props.id}`} class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <form role="dialog" aria-modal="true" hx-post={props.submitUrl} hx-swap="none" hx-disable="this" class="bg-white dark:bg-gray-900 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 p-6 max-w-sm w-full max-h-full overflow-y-auto space-y-4">
         <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Publish as {props.supportsTrigger ? "GitHub Issue" : "Issue"}</h2>
         <p class="text-sm text-gray-500 dark:text-gray-400">Publish session {props.id}'s plan.md as {props.supportsTrigger ? "a GitHub issue" : "an issue"}, unchanged, and delete the local session. This cannot be undone.</p>
         {props.supportsTrigger && <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">

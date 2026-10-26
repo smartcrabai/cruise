@@ -310,6 +310,8 @@ pub struct TuiApp {
     pub history_summary: Option<crate::application::NewSessionHistorySummary>,
     pub config_sources: Vec<crate::resolver::ConfigCandidate>,
     pub config_defaults: Option<crate::application::NewSessionConfigDefaults>,
+    skip_defaults_context: Option<(PathBuf, String, String, bool)>,
+    skip_defaults_initialized: bool,
     #[cfg(test)]
     test_process_lock: Option<crate::test_support::ProcessLock>,
 }
@@ -378,6 +380,8 @@ impl TuiApp {
             history_summary,
             config_sources: Vec::new(),
             config_defaults: None,
+            skip_defaults_context: None,
+            skip_defaults_initialized: false,
             #[cfg(test)]
             test_process_lock: None,
         };
@@ -473,7 +477,21 @@ impl TuiApp {
         true
     }
 
+    fn sync_skip_defaults_context(&mut self) {
+        let context = (
+            self.config_base_dir(),
+            self.form.config.text().trim().to_string(),
+            self.form.repository.text().trim().to_string(),
+            self.form.source == SourceKind::GitHub,
+        );
+        if self.skip_defaults_context.as_ref() != Some(&context) {
+            self.skip_defaults_context = Some(context);
+            self.skip_defaults_initialized = false;
+        }
+    }
+
     fn sync_config_defaults(&mut self) -> bool {
+        self.sync_skip_defaults_context();
         let base_dir = self.config_base_dir();
         let config = self.form.config.text();
         let config = config.trim();
@@ -497,10 +515,14 @@ impl TuiApp {
             .new_session_config_defaults(&base_dir, config, repository)
         {
             Ok(defaults) => {
-                self.form
-                    .apply_default_skips(&defaults.default_skipped_steps);
+                if !self.skip_defaults_initialized {
+                    self.form
+                        .apply_default_skips(&defaults.default_skipped_steps);
+                    self.skip_defaults_initialized = true;
+                }
                 self.form.set_flag_choices(defaults.flags.clone());
                 self.config_defaults = Some(defaults);
+                self.prune_flag_disabled_skips();
                 true
             }
             Err(error) => {
@@ -513,6 +535,7 @@ impl TuiApp {
     }
 
     fn refresh_config_context(&mut self) {
+        self.sync_skip_defaults_context();
         let base_dir = self.config_base_dir();
         if !self.refresh_config_sources(&base_dir) {
             return;
@@ -1687,7 +1710,7 @@ impl TuiApp {
     /// known and typed as comma-separated ids otherwise.
     fn step_is_text(&self) -> bool {
         self.form.step.is_text()
-            || (self.form.step == Step::SkippedSteps && self.skip_choices().is_empty())
+            || (self.form.step == Step::SkippedSteps && !self.has_skip_choices())
     }
     fn is_form_editor_key(&self, key: KeyEvent) -> bool {
         if self.modal.is_some()
@@ -1946,6 +1969,7 @@ impl TuiApp {
             self.toggle_skip_choice();
         } else if self.form.step == Step::Flags {
             self.form.toggle_flag();
+            self.prune_flag_disabled_skips();
         } else if self.form.step.is_choice() {
             self.choose(1);
         }
@@ -2109,6 +2133,12 @@ impl TuiApp {
         candidates
     }
 
+    pub(super) fn has_skip_choices(&self) -> bool {
+        self.config_defaults.as_ref().is_some_and(|defaults| {
+            !defaults.steps.is_empty() || !defaults.after_pr_steps.is_empty()
+        })
+    }
+
     /// Skippable steps of the resolved workflow as `(label, expanded ids)`.
     pub(super) fn skip_choices(&self) -> Vec<(String, Vec<String>)> {
         fn visit(
@@ -2122,17 +2152,34 @@ impl TuiApp {
         }
         let mut choices = Vec::new();
         if let Some(defaults) = self.config_defaults.as_ref() {
-            visit(&defaults.steps, &mut choices);
-            visit(&defaults.after_pr_steps, &mut choices);
+            for nodes in [&defaults.steps, &defaults.after_pr_steps] {
+                visit(
+                    &crate::flags::skip_candidates(nodes, &self.form.flag_values),
+                    &mut choices,
+                );
+            }
         }
         choices
+    }
+
+    fn prune_flag_disabled_skips(&mut self) {
+        if let Some(defaults) = self.config_defaults.as_ref() {
+            let skipped = crate::flags::drop_disabled_skips(
+                self.form.selected_skipped_steps(),
+                defaults.steps.iter().chain(&defaults.after_pr_steps),
+                &self.form.flag_values,
+            );
+            self.form.skipped.set_text(&skipped.join(", "));
+        }
     }
 
     fn toggle_skip_choice(&mut self) {
         let choices = self.skip_choices();
         if choices.is_empty() {
-            self.form.skipped_explicit = true;
-            self.form.mark_changed();
+            if !self.has_skip_choices() {
+                self.form.skipped_explicit = true;
+                self.form.mark_changed();
+            }
             return;
         }
         self.skip_cursor %= choices.len();
@@ -3240,13 +3287,15 @@ impl TuiApp {
     }
 
     fn session_request(&mut self) -> Option<crate::application::NewSessionRequest> {
+        self.sync_skip_defaults_context();
         if let Err(error) = self.form.validate() {
             self.set_error(error);
             return None;
         }
         let mut request = self.form.request();
-        if !self.form.skipped_explicit
-            && request.skipped_steps.is_empty()
+        let mut request_defaults = None;
+        if !self.skip_defaults_initialized
+            && !self.form.skipped_explicit
             && (request.repo.is_none() || request.config_path.is_some())
         {
             let base = request.base_dir.clone();
@@ -3259,7 +3308,24 @@ impl TuiApp {
                 self.application
                     .new_session_config_defaults(&base, config.as_deref(), repo)
             {
-                request.skipped_steps = defaults.default_skipped_steps;
+                request
+                    .skipped_steps
+                    .clone_from(&defaults.default_skipped_steps);
+                self.form.apply_default_skips(&request.skipped_steps);
+                self.skip_defaults_initialized = true;
+                request_defaults = Some(defaults);
+            }
+        }
+        if let Some(defaults) = request_defaults.as_ref().or(self.config_defaults.as_ref()) {
+            request.skipped_steps = crate::flags::drop_disabled_skips(
+                request.skipped_steps,
+                defaults.steps.iter().chain(&defaults.after_pr_steps),
+                &request.flags,
+            );
+            if request_defaults.is_some() {
+                self.form
+                    .skipped
+                    .set_text(&request.skipped_steps.join(", "));
             }
         }
         if request.input.trim().is_empty() && request.attachments.is_empty() {
@@ -5652,7 +5718,14 @@ mod tests {
         assert!(!app.handle_key(key(KeyCode::Tab)));
         assert_eq!(app.form.step, Step::Attachments);
         assert!(!app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)));
-        assert_eq!(app.form.step, Step::SkippedSteps);
+        assert_eq!(
+            app.form.step,
+            if app.form.flag_choices.is_empty() {
+                Step::SkippedSteps
+            } else {
+                Step::Flags
+            }
+        );
         assert!(!app.handle_key(key(KeyCode::BackTab)));
         assert_eq!(app.form.step, Step::Attachments);
         assert!(!app.handle_key(key(KeyCode::Esc)));
@@ -5699,7 +5772,14 @@ mod tests {
         app.modal = None;
         type_text(&mut app, "shot.png");
         assert!(!app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)));
-        assert_eq!(app.form.step, Step::SkippedSteps);
+        assert_eq!(
+            app.form.step,
+            if app.form.flag_choices.is_empty() {
+                Step::SkippedSteps
+            } else {
+                Step::Flags
+            }
+        );
     }
 
     #[test]
@@ -5798,10 +5878,11 @@ mod tests {
         );
         assert_eq!(
             app.form.selected_skipped_steps(),
-            vec![expected_step.to_string()]
+            Vec::<String>::new(),
+            "history defaults for a flag-disabled step must be pruned"
         );
         assert!(
-            app.skip_choices()
+            !app.skip_choices()
                 .iter()
                 .any(|(label, _)| label == expected_step)
         );
@@ -6015,13 +6096,16 @@ mod tests {
 
     #[test]
     fn valid_config_path_is_resolved_before_leaving_config_step() {
+        let _lock = lock_process();
+        let fake_home = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
         let config_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let config_path = config_dir.path().join("custom.yaml");
         write_workflow(&config_path, "custom_step");
         let expected_key =
             crate::new_session_history::resolved_config_key_for_session(&config_path);
 
-        let mut app = app();
+        let mut app = app_without_lock();
         app.view = View::NewSession;
         app.form.step = Step::Config;
         app.form.config.set_text(&config_path.to_string_lossy());
@@ -6075,12 +6159,296 @@ mod tests {
         ));
     }
 
+    fn flag_skip_app(
+        always_enabled: bool,
+    ) -> (
+        TuiApp,
+        tempfile::TempDir,
+        Vec<crate::test_support::EnvGuard>,
+    ) {
+        let dir = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create flag skip fixture: {error}"));
+        let config = dir.path().join("cruise.yaml");
+        let base_step = if always_enabled {
+            "  build:\n    command: echo build\n"
+        } else {
+            ""
+        };
+        std::fs::write(
+            &config,
+            format!(
+                "command: [echo]\nflags:\n  e2e:\n    description: Run E2E\nsteps:\n{base_step}  browser:\n    command: echo browser\n    flag: e2e\nafter-pr:\n  publish:\n    command: echo publish\n    flag: e2e\n"
+            ),
+        )
+        .unwrap_or_else(|error| panic!("write flag skip workflow: {error}"));
+        let mut app = app();
+        let mut guards = crate::test_support::set_fake_home(dir.path());
+        guards.push(crate::test_support::EnvGuard::remove("CRUISE_MODEL"));
+        guards.push(crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL"));
+        app.view = View::NewSession;
+        app.form.working_dir.set_text(&dir.path().to_string_lossy());
+        app.form.config.set_text(&config.to_string_lossy());
+        app.form.input.set_text("test flags");
+        app.form.step = Step::Config;
+        app.refresh();
+        assert!(app.config_defaults.is_some(), "{:?}", app.last_error);
+        assert_eq!(app.form.flag_choices.len(), 1);
+        (app, dir, guards)
+    }
+
+    #[test]
+    fn flag_skip_choices_follow_flags_for_main_and_after_pr_steps() {
+        let (mut app, _dir, _guards) = flag_skip_app(true);
+        assert_eq!(
+            app.skip_choices(),
+            vec![("build".into(), vec!["build".into()])]
+        );
+        app.form.step = Step::Flags;
+        assert!(!app.handle_key(key(KeyCode::Char(' '))));
+        let choices = app.skip_choices();
+        assert!(choices.iter().any(|(_, ids)| ids == &["browser"]));
+        assert!(choices.iter().any(|(_, ids)| ids == &["publish"]));
+        assert_eq!(app.form.step, Step::Flags);
+        assert!(!app.handle_key(key(KeyCode::Char(' '))));
+        assert_eq!(
+            app.skip_choices(),
+            vec![("build".into(), vec!["build".into()])]
+        );
+    }
+
+    #[test]
+    fn flag_skip_all_disabled_is_an_empty_list_not_text_input() {
+        let (mut app, _dir, _guards) = flag_skip_app(false);
+        app.form.step = Step::SkippedSteps;
+        assert_eq!(app.skip_choices(), Vec::<(String, Vec<String>)>::new());
+        assert!(!app.step_is_text());
+        assert!(!app.handle_key(key(KeyCode::Char(' '))));
+        assert!(!app.handle_key(key(KeyCode::Char('j'))));
+        assert_eq!(app.form.skipped.text(), "");
+        assert!(!app.form.skipped_explicit);
+        assert_eq!(app.form.step, Step::SkippedSteps);
+    }
+
+    #[test]
+    fn flag_skip_toggling_off_prunes_ids_without_changing_explicitness() {
+        for explicit in [false, true] {
+            let (mut app, _dir, _guards) = flag_skip_app(true);
+            app.form.step = Step::Flags;
+            assert!(!app.handle_key(key(KeyCode::Char(' '))));
+            app.form
+                .skipped
+                .set_text("build, browser, publish, unknown");
+            app.form.skipped_explicit = explicit;
+            assert!(!app.handle_key(key(KeyCode::Char(' '))));
+            assert_eq!(app.form.selected_skipped_steps(), vec!["build", "unknown"]);
+            assert_eq!(app.form.skipped_explicit, explicit);
+            assert_eq!(app.form.flag_values.get("e2e"), Some(&false));
+        }
+    }
+
+    #[test]
+    fn flag_skip_request_sanitizes_explicit_ids_using_selected_flags() {
+        let (mut app, _dir, _guards) = flag_skip_app(true);
+        app.form.skipped_explicit = true;
+        app.form
+            .skipped
+            .set_text("build, browser, publish, unknown");
+        let request = app
+            .session_request()
+            .unwrap_or_else(|| panic!("valid session request"));
+        assert_eq!(request.skipped_steps, vec!["build", "unknown"]);
+        app.form.flag_values.insert("e2e".into(), true);
+        let request = app
+            .session_request()
+            .unwrap_or_else(|| panic!("valid session request"));
+        assert_eq!(
+            request.skipped_steps,
+            vec!["build", "browser", "publish", "unknown"]
+        );
+    }
+
+    #[test]
+    fn flag_skip_request_sanitizes_history_defaults_without_marking_explicit() {
+        let (mut app, dir, _guards) = flag_skip_app(true);
+        let fake_home =
+            tempfile::TempDir::new().unwrap_or_else(|error| panic!("create fake home: {error}"));
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        let config = dir.path().join("cruise.yaml");
+        crate::new_session_history::NewSessionHistory {
+            entries: vec![crate::new_session_history::NewSessionHistoryEntry {
+                selected_at: String::new(),
+                input: String::new(),
+                requested_config_path: None,
+                working_dir: dir.path().to_string_lossy().into_owned(),
+                repo: None,
+                resolved_config_key: crate::new_session_history::resolved_config_key_for_session(
+                    &config,
+                ),
+                skipped_steps: vec!["build".into(), "browser".into(), "publish".into()],
+            }],
+        }
+        .save()
+        .unwrap_or_else(|error| panic!("save flag skip history: {error}"));
+        assert!(!app.form.skipped_explicit);
+        assert_eq!(app.form.selected_skipped_steps(), Vec::<String>::new());
+        // Exercise the submission fallback before this context has initialized.
+        app.skip_defaults_initialized = false;
+        let request = app
+            .session_request()
+            .unwrap_or_else(|| panic!("valid session request"));
+        assert_eq!(request.skipped_steps, vec!["build"]);
+        assert!(!app.form.skipped_explicit);
+        app.form.flag_values.insert("e2e".into(), true);
+        let request = app
+            .session_request()
+            .unwrap_or_else(|| panic!("valid session request"));
+        assert_eq!(request.skipped_steps, vec!["build"]);
+        assert!(!app.form.skipped_explicit);
+    }
+
+    #[test]
+    fn flag_skip_initialized_empty_selection_survives_submit_refresh_and_context_changes() {
+        let (mut app, dir, _guards) = flag_skip_app(false);
+        let config = dir.path().join("cruise.yaml");
+        crate::new_session_history::NewSessionHistory {
+            entries: vec![crate::new_session_history::NewSessionHistoryEntry {
+                selected_at: String::new(),
+                input: String::new(),
+                requested_config_path: None,
+                working_dir: dir.path().to_string_lossy().into_owned(),
+                repo: None,
+                resolved_config_key: crate::new_session_history::resolved_config_key_for_session(
+                    &config,
+                ),
+                skipped_steps: vec!["browser".into()],
+            }],
+        }
+        .save()
+        .unwrap_or_else(|error| panic!("save history: {error}"));
+        let defaults = app
+            .application
+            .new_session_config_defaults(dir.path(), config.to_str(), None)
+            .unwrap_or_else(|error| panic!("read history: {error}"));
+        assert_eq!(defaults.default_skipped_steps, ["browser"]);
+        app.skip_defaults_initialized = false;
+        assert!(app.sync_config_defaults());
+        assert!(app.skip_defaults_initialized);
+        assert_eq!(app.form.selected_skipped_steps(), Vec::<String>::new());
+        app.form.step = Step::Flags;
+        assert!(!app.handle_key(key(KeyCode::Char(' '))));
+        assert!(app.skip_choices().iter().any(|(id, _)| id == "browser"));
+        assert_eq!(app.form.selected_skipped_steps(), Vec::<String>::new());
+        app.form.step = Step::SkippedSteps;
+        let backend = ratatui::backend::TestBackend::new(140, 40);
+        let mut terminal = ratatui::Terminal::new(backend)
+            .unwrap_or_else(|error| panic!("create terminal: {error}"));
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &mut app))
+            .unwrap_or_else(|error| panic!("render skip choices: {error}"));
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(140)
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("[ ] browser"), "{screen}");
+        // Submit immediately, before any refresh can mask a history fallback.
+        let request = app
+            .session_request()
+            .unwrap_or_else(|| panic!("valid request"));
+        assert_eq!(request.skipped_steps, Vec::<String>::new());
+        // History still contains browser while refresh and off/on run.
+        app.form.step = Step::Flags;
+        app.refresh();
+        for _ in 0..2 {
+            assert!(!app.handle_key(key(KeyCode::Char(' '))));
+            app.refresh();
+            assert_eq!(app.form.selected_skipped_steps(), Vec::<String>::new());
+            assert!(!app.form.skipped_explicit);
+        }
+        let state = app
+            .application
+            .create_session(request)
+            .unwrap_or_else(|error| panic!("persist session: {error}"));
+        assert_eq!(state.skipped_steps, Vec::<String>::new());
+        let persisted = app
+            .application
+            .list_sessions()
+            .unwrap_or_else(|error| panic!("load sessions: {error}"));
+        assert_eq!(
+            persisted
+                .iter()
+                .find(|s| s.id == state.id)
+                .unwrap_or_else(|| panic!("persisted session"))
+                .skipped_steps,
+            Vec::<String>::new()
+        );
+        let history = crate::new_session_history::NewSessionHistory::load()
+            .unwrap_or_else(|error| panic!("load history: {error}"));
+        assert_eq!(
+            history
+                .entries
+                .first()
+                .unwrap_or_else(|| panic!("history entry"))
+                .skipped_steps,
+            Vec::<String>::new()
+        );
+        assert_flag_skip_defaults_follow_context_changes(&mut app, dir.path(), &config);
+    }
+
+    fn assert_flag_skip_defaults_follow_context_changes(
+        app: &mut TuiApp,
+        dir: &std::path::Path,
+        config: &std::path::Path,
+    ) {
+        // A new configuration still initializes its own history defaults.
+        let other = dir.join("other.yaml");
+        std::fs::write(
+            &other,
+            "command: [echo]\nsteps:\n  build:\n    command: echo build\n",
+        )
+        .unwrap_or_else(|error| panic!("write other config: {error}"));
+        crate::new_session_history::NewSessionHistory {
+            entries: vec![crate::new_session_history::NewSessionHistoryEntry {
+                selected_at: String::new(),
+                input: String::new(),
+                requested_config_path: None,
+                working_dir: dir.to_string_lossy().into_owned(),
+                repo: None,
+                resolved_config_key: crate::new_session_history::resolved_config_key_for_session(
+                    &other,
+                ),
+                skipped_steps: vec!["build".into()],
+            }],
+        }
+        .save()
+        .unwrap_or_else(|error| panic!("save other history: {error}"));
+        app.form.config.set_text(&other.to_string_lossy());
+        assert!(app.sync_config_defaults());
+        assert_eq!(app.form.selected_skipped_steps(), ["build"]);
+        app.form.skipped_explicit = true;
+        app.form.skipped.set_text("");
+        app.form.config.set_text(&config.to_string_lossy());
+        assert!(app.sync_config_defaults());
+        app.form.config.set_text(&other.to_string_lossy());
+        assert!(app.sync_config_defaults());
+        assert_eq!(app.form.selected_skipped_steps(), Vec::<String>::new());
+        assert!(app.form.skipped_explicit);
+    }
+
     #[test]
     fn skipped_step_question_toggles_choices_with_space() {
         let mut app = app();
         app.handle_action(Action::NewSession);
         let step = |id: &str| crate::workflow::SkippableStepNode {
             id: id.to_string(),
+            flag: None,
             expanded_step_ids: vec![id.to_string()],
             children: Vec::new(),
         };

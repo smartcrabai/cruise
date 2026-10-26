@@ -77,7 +77,7 @@ impl Fixture {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
         for (name, _) in std::env::vars_os() {
             let name = name.to_string_lossy();
-            if name.starts_with("CRUISE_")
+            if (name.starts_with("CRUISE_") && name != "CRUISE_GUARD_COMMON_DIR")
                 || name.starts_with("JCODE_")
                 || name.starts_with("OTEL_")
                 || name.starts_with("CLAUDE_")

@@ -184,13 +184,16 @@ fn settings_html(state: &WebState, id: &str, open: bool) -> Result<String> {
     );
     let (steps_vm, step_options) = match defaults {
         Ok(defaults) => {
-            let mut tree = super::pages::step_tree_vm(
+            let all_steps = super::pages::step_tree_vm(
                 &defaults.steps,
                 &defaults.after_pr_steps,
                 &session.skipped_steps,
             );
+            let steps = crate::flags::skip_candidates(&defaults.steps, &session_flags);
+            let after_pr = crate::flags::skip_candidates(&defaults.after_pr_steps, &session_flags);
+            let mut tree = super::pages::step_tree_vm(&steps, &after_pr, &session.skipped_steps);
             tree.flags = super::pages::flag_rows(&defaults.flags, &session_flags);
-            let options = tree
+            let options = all_steps
                 .steps
                 .iter()
                 .map(|step| super::view::ConfigOptionVm {
@@ -337,7 +340,27 @@ pub(crate) async fn new_steps(State(state): State<WebState>, Query(params): Para
             &params.text("baseDir"),
             params.get("configPath"),
             params.opt("repo").as_deref(),
-            &[],
+            None,
+            &crate::flags::FlagValues::new(),
+        )
+    })
+}
+
+pub(crate) async fn new_steps_for_flags(
+    State(state): State<WebState>,
+    Query(params): Params,
+) -> Response {
+    let params = Fields::from(params);
+    let flags = flag_values(&params).unwrap_or_default();
+    let skipped = skipped_steps(&params);
+    fragment(&state, "Steps", || {
+        super::pages::step_tree_html(
+            &state,
+            &params.text("baseDir"),
+            params.get("configPath"),
+            params.opt("repo").as_deref(),
+            Some(&skipped),
+            &flags,
         )
     })
 }
@@ -1198,5 +1221,30 @@ mod tests {
     #[test]
     fn encode_query_percent_encodes_path_separators() {
         assert_eq!(encode_query("/tmp/a b.png"), "%2Ftmp%2Fa%20b.png");
+    }
+
+    #[test]
+    fn flag_rerender_fields_distinguish_explicit_skips_from_all_checked() {
+        let fields = Fields::from(vec![
+            ("stepIds".to_string(), "always".to_string()),
+            ("stepIds".to_string(), "browser".to_string()),
+            ("runSteps".to_string(), "browser".to_string()),
+            ("flag.e2e".to_string(), "on".to_string()),
+        ]);
+        assert_eq!(super::skipped_steps(&fields), ["always"]);
+        assert_eq!(
+            super::flag_values(&fields).and_then(|flags| flags.get("e2e").copied()),
+            Some(true)
+        );
+
+        let all_checked = Fields::from(vec![
+            ("stepIds".to_string(), "always".to_string()),
+            ("stepIds".to_string(), "browser".to_string()),
+            ("runSteps".to_string(), "always".to_string()),
+            ("runSteps".to_string(), "browser".to_string()),
+        ]);
+        assert!(all_checked.get("stepIds").is_some());
+        assert_eq!(super::skipped_steps(&all_checked), Vec::<String>::new());
+        assert!(Fields::default().get("stepIds").is_none());
     }
 }

@@ -2,17 +2,17 @@ import PhaseBadge from "./phase-badge";
 
 export default function SessionHeader(props) {
   return (
-    <header id={`session-header-${props.id}`} class="px-6 pt-6 pb-4 border-b border-gray-200 dark:border-gray-800 space-y-3">
-      <div class="flex items-center gap-3">
-        <h2 class="text-lg font-semibold font-mono text-gray-900 dark:text-gray-100">{props.title}</h2>
+    <header id={`session-header-${props.id}`} class="px-4 pt-4 md:px-6 md:pt-6 pb-4 border-b border-gray-200 dark:border-gray-800 space-y-3">
+      <div class="flex flex-wrap items-center gap-3">
+        <h2 class="text-lg font-semibold font-mono min-w-0 break-all text-gray-900 dark:text-gray-100">{props.title}</h2>
         <PhaseBadge badge={props.badge} />
       </div>
       {props.currentStep && <div class="text-sm text-gray-500 dark:text-gray-400">Step: <span class="font-medium text-gray-800 dark:text-gray-200">{props.currentStep}</span></div>}
-      {props.input && <p class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{props.input}</p>}
-      {props.prIsLink && <a href={props.prUrl} target="_blank" rel="noopener noreferrer" class="text-blue-600 dark:text-blue-400 hover:text-blue-500">{props.prUrl}</a>}
-      {props.prUrl && !props.prIsLink && <span class="text-sm text-gray-600 dark:text-gray-400">{props.prUrl}</span>}
-      {props.phaseError && <div role="alert" class="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-sm text-red-700 dark:text-red-300">Run failed: {props.phaseError}</div>}
-      {props.planError && <div role="alert" class="rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-sm text-red-700 dark:text-red-300">Planning failed: {props.planError}</div>}
+      {props.input && <p class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words">{props.input}</p>}
+      {props.prIsLink && <a href={props.prUrl} target="_blank" rel="noopener noreferrer" class="break-all text-blue-600 dark:text-blue-400 hover:text-blue-500">{props.prUrl}</a>}
+      {props.prUrl && !props.prIsLink && <span class="break-all text-sm text-gray-600 dark:text-gray-400">{props.prUrl}</span>}
+      {props.phaseError && <div role="alert" class="break-words rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-sm text-red-700 dark:text-red-300">Run failed: {props.phaseError}</div>}
+      {props.planError && <div role="alert" class="break-words rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-sm text-red-700 dark:text-red-300">Planning failed: {props.planError}</div>}
       <div class="flex gap-2 flex-wrap">
         {props.actions.showApprove && <button type="button" hx-post={`${props.baseUrl}/approve`} hx-target="#session-detail" hx-swap="none" hx-disable="this" class="px-4 py-2 bg-green-700 text-white rounded text-sm hover:bg-green-600">Approve</button>}
         {props.actions.showGeneratePlan && <button type="button" hx-post={`${props.baseUrl}/generate`} hx-target="#session-detail" hx-swap="none" hx-disable="this" class="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">Generate Plan</button>}

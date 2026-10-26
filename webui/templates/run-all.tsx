@@ -1,6 +1,6 @@
 export default function RunAll(props) {
   return (
-    <div id="run-all-view" class="h-full flex flex-col p-6 max-w-2xl mx-auto">
+    <div id="run-all-view" class="flex flex-col md:h-full p-4 md:p-6 max-w-2xl mx-auto">
       <div class="flex items-center justify-between mb-6">
         <h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100">Run All</h2>
         {props.active ? <button type="button" hx-post="/webui/run-all/cancel" hx-swap="none" class="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded">Cancel</button> : <a href="/" hx-get="/" hx-target="#main" hx-push-url="true" class="px-3 py-1.5 text-sm bg-blue-600 text-white hover:bg-blue-700 rounded">Done</a>}
@@ -21,7 +21,7 @@ export default function RunAll(props) {
 
       <pre id="run-all-log" class="mb-4 text-xs font-mono bg-white dark:bg-gray-950 text-gray-700 dark:text-gray-300 p-4 rounded overflow-auto whitespace-pre-wrap leading-relaxed max-h-80">{props.log}</pre>
 
-      <div id="run-all-results" class="flex-1 overflow-y-auto space-y-1">
+      <div id="run-all-results" class="md:flex-1 md:overflow-y-auto space-y-1">
         {props.resultsEmpty && <p class="text-xs text-gray-500 dark:text-gray-400">No results yet.</p>}
         {props.results.map(result => <div class="flex items-start gap-2 px-3 py-2 rounded bg-gray-50/50 dark:bg-gray-900/50"><div class="flex-1 min-w-0"><p class="text-sm text-gray-700 dark:text-gray-300 truncate">{result.title}</p>{result.error && <p class="text-xs text-red-600 dark:text-red-400 mt-0.5 truncate">{result.error}</p>}</div><span class={result.failed ? "inline-flex px-2 py-0.5 rounded text-xs font-medium bg-red-100/50 dark:bg-red-900/50 text-red-700 dark:text-red-300" : "inline-flex px-2 py-0.5 rounded text-xs font-medium bg-gray-100/50 dark:bg-gray-800/50 text-gray-600 dark:text-gray-400"}>{result.phase}</span></div>)}
       </div>

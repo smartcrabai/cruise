@@ -2,6 +2,7 @@
   color: #374151;
   font-size: 0.875rem;
   line-height: 1.714;
+  overflow-wrap: break-word;
 }
 
 .prose h1,
@@ -285,5 +286,42 @@ dialog::backdrop {
   }
   .cruise-tab[aria-selected="true"] {
     color: #60a5fa;
+  }
+}
+
+/* Sidebar: a resizable column from md up (app.js sets --sidebar-width) and an
+   off-canvas drawer below it (app.js toggles #app[data-sidebar-open]). */
+#sidebar {
+  width: var(--sidebar-width, 288px);
+}
+
+@media (width < 48rem) {
+  #main {
+    isolation: isolate;
+  }
+  #sidebar {
+    position: fixed;
+    inset-block: 0;
+    left: 0;
+    z-index: 40;
+    width: min(18rem, 85vw);
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 150ms ease, visibility 0s linear 150ms;
+  }
+  #app[data-sidebar-open="true"] #sidebar {
+    transform: none;
+    visibility: visible;
+    transition: transform 150ms ease;
+  }
+  .prose table {
+    display: block;
+    overflow-x: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #app[data-sidebar-open] #sidebar {
+    transition: none;
   }
 }
