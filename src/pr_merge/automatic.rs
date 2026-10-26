@@ -1328,6 +1328,11 @@ async fn github_merge_readiness(
         snapshot.metadata.merge_state.as_str(),
     ) {
         ("MERGEABLE", "CLEAN") => false,
+        ("MERGEABLE", "UNSTABLE")
+            if !current_head_ci || check_status == GitHubCheckStatus::Pending =>
+        {
+            true
+        }
         ("UNKNOWN", "CLEAN" | "UNKNOWN") => true,
         _ => {
             return Err(AutoSquashError::Rejected(format!(

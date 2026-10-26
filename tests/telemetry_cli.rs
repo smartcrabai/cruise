@@ -2478,7 +2478,8 @@ if [ "$1" = "api" ]; then
       printf '%s\n' "$attempts" > "$FAKE_GH_WRITE_ATTEMPTS" || exit 97
       head=$(git rev-parse HEAD) || exit 97
       ready_head=$(cat "$FAKE_GH_READY_HEAD" 2>/dev/null || true)
-      if [ "$ready_head" != "$head" ] || [ "$attempts" -ne 1 ]; then
+      status_count=$(cat "$FAKE_GH_STATUS_COUNT" 2>/dev/null || printf '0')
+      if [ "$ready_head" != "$head" ] || [ "$attempts" -ne 1 ] || [ "$status_count" -lt 3 ]; then
         printf 'rejected early or duplicate merge write\n' >&2
         exit 97
       fi
@@ -2507,6 +2508,11 @@ if [ "$1" = "api" ]; then
         rollup_head=0000000000000000000000000000000000000001
         printf 'UNKNOWN %s %s\n' "$head" "$rollup_head" >> "$FAKE_GH_STATUS_SEQUENCE"
         printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"SUCCESS","commit":{"oid":"%s"},"contexts":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"old-head-ci","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}}}\n' "$head" "$rollup_head"
+        exit 0
+      fi
+      if [ "$count" -eq 2 ]; then
+        printf 'MERGEABLE UNSTABLE %s %s\n' "$head" "$head" >> "$FAKE_GH_STATUS_SEQUENCE"
+        printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"UNSTABLE","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"PENDING","commit":{"oid":"%s"},"contexts":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"new-head-ci","status":"IN_PROGRESS","conclusion":null}]}}}}}}\n' "$head" "$head"
         exit 0
       fi
       printf '%s\n' "$head" > "$FAKE_GH_READY_HEAD" || exit 97
@@ -2665,16 +2671,17 @@ fn assert_expected_head_readiness(root: &std::path::Path) -> String {
         .trim()
         .parse::<usize>()
         .unwrap_or_else(|error| panic!("parse fake status count: {error}"));
-    assert!(
-        status_count >= 2,
-        "native readiness did not poll through stale old-head CI: {status_count}"
+    assert_eq!(
+        status_count, 3,
+        "native readiness should observe stale CI, current-head pending CI, then green CI"
     );
     let status_sequence = std::fs::read_to_string(root.join("fake-gh-status-sequence"))
         .unwrap_or_else(|error| panic!("read fake status sequence: {error}"));
     let status_sequence: Vec<_> = status_sequence.lines().collect();
-    assert!(
-        !status_sequence.is_empty(),
-        "fake provider returned no native status sequence"
+    assert_eq!(
+        status_sequence.len(),
+        3,
+        "fake provider should observe exactly the three readiness phases: {status_sequence:?}"
     );
     assert!(
         status_sequence[0].starts_with("UNKNOWN ") && status_sequence[0].ends_with(OLD_HEAD),
@@ -2684,10 +2691,17 @@ fn assert_expected_head_readiness(root: &std::path::Path) -> String {
         .unwrap_or_else(|error| panic!("read ready HEAD: {error}"))
         .trim()
         .to_string();
+    let pending_status = format!("MERGEABLE UNSTABLE {expected_head} {expected_head}");
+    assert_eq!(
+        status_sequence[1],
+        pending_status.as_str(),
+        "native readiness must wait through current-head pending CI: {status_sequence:?}"
+    );
     let expected_status = format!("MERGEABLE CLEAN {expected_head} {expected_head}");
-    assert!(
-        status_sequence.contains(&expected_status.as_str()),
-        "native readiness never observed green checks on the expected HEAD: {status_sequence:?}"
+    assert_eq!(
+        status_sequence[2],
+        expected_status.as_str(),
+        "native readiness should merge only after current-head green CI: {status_sequence:?}"
     );
     expected_head
 }
