@@ -132,7 +132,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
-      - name: Workflow flags Quint, Alloy receipts and production Gherkin
+      - name: Execution and skip-selection Quint, Alloy receipts and production Gherkin
         run: bash scripts/check_workflow_flags_specs.sh
 
       - name: Upload workflow flag specification evidence

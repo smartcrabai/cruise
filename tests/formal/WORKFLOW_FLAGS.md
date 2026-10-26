@@ -3,16 +3,19 @@
 ## Authority and traceability
 
 This suite implements the 2026-10-24 planning-to-execution task in `plan.md`,
-sections 1, 2.1, 2.2, 2.4, 2.5 and 2.6. It does not add a prompt to approval,
-TUI/WebUI, history, background planning workers or batch execution. Selection
-is per execution invocation, not a new persisted confirmation bit.
+sections 1, 2.1, 2.2, 2.4, 2.5 and 2.6. Approval-time flag selection is a
+separate UI boundary outside these execution models, as are TUI/WebUI, history,
+background planning workers and batch selection. Execute now forwards its
+approval-time choices as explicit CLI assignments, using the modeled
+`cliAuthority` suppression path rather than prompting again at execution start.
+Selection is per invocation, not a new persisted confirmation bit.
 
 | Contract from the plan | Production authority | Quint / Alloy | Executed production checks |
 | --- | --- | --- | --- |
 | Ask once only for a fresh, single, non-dry, TTY invocation with declarations and no explicit CLI assignment | `run_cmd::should_prompt_flags`, `prompt_flag_values`, `run_single_loaded` | `promptGate` / `PromptGate`, suppression tests and witnesses | Gherkin interactive, explicit CLI, nonterminal, dry-run and real interrupted/resumed scenarios; `workflow_flag_tests` covers batch and no declarations |
 | Saved enabled flags are the initial selection; Enter keeps them | `prompt_flag_values` default indices | `keepDefaultsTest`, `selectionTest`, `SelectionWitness` | Gherkin Enter retains saved defaults |
 | A selection writes true/false for every declared key, retaining undeclared keys including explicit off | `flags::apply_enabled` | `explicitSelection` / `ExplicitSelection`, empty-selection test/witness, sparse saved input domain | Gherkin selected/empty state assertions plus `flags_contract` tests |
-| Any `-f`, including explicit off, wins and suppresses selection | `run_single_loaded` CLI merge, `plan_cmd` ExecuteNow forwarding, `exec_cmd::run_resolved` forwarding | `cliAuthority` / `CliAuthority`, `explicitOffTest` / `ExplicitOffWitness` | Gherkin explicit CLI; `flags_cli` PTY cases for exec, ExecuteNow and force_exec plan/root/background paths |
+| Any `-f`, including explicit off, wins and suppresses execution-start selection; Execute now forwards approval-time choices as explicit CLI assignments | `run_single_loaded` CLI merge, `plan_cmd` ExecuteNow forwarding, `exec_cmd::run_resolved` forwarding | `cliAuthority` / `CliAuthority`, `explicitOffTest` / `ExplicitOffWitness` | Gherkin explicit CLI; `flags_cli` PTY cases for exec, ExecuteNow and force_exec plan/root/background paths |
 | Reject invalid config, unusable plan, retry/compile/resume failures before asking | prepare ordering in `run_single_loaded` | abstract `valid` preflight gate and rejection test/witness | `flags_cli::run_without_usable_plan_fails_before_flag_selection`; unit selected-flags preflight validation test |
 | Cancellation leaves planned session unchanged and disposes owned ephemeral exec | `prompt_flag_values`, `run_with_operation`, `dispose_exec_session_if_owned` | `persistence` / `Persistence`, cancellation tests and witnesses | Gherkin byte-for-byte state preservation, no shell effects, diagnostic and directory cleanup assertions |
 | Persist selected values through existing workspace save, then pass them to engine | `run_single_loaded` workspace save and engine flag_values | `persistence` / `Persistence`, selection test/witness | Gherkin checks `state.json` and actual shell files; unit integration checks |

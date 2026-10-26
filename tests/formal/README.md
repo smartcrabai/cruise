@@ -17,6 +17,12 @@ Alloy checks and production CLI Gherkin, see `AGENT_AUTH.md` and run
 `bash scripts/check_agent_auth_specs.sh`. Its dedicated `agent-auth-specs` PR CI
 job uses the same pinned toolchain and validates every Alloy receipt command.
 
+For flag-dependent skip candidates and flags-before-skips approval, see
+`FLAG_SKIP_SELECTION.md` and `FLAG_SKIP_SELECTION_VERIFICATION.md`. The same
+`bash scripts/check_workflow_flags_specs.sh` command now requires the separate
+skip-selection Quint/Alloy models, production approval Gherkin and UI/application
+regressions in the existing `workflow-flags-specs` PR job.
+
 For the CLI planning-to-execution workflow-flag boundary, see
 `WORKFLOW_FLAGS.md` and run `bash scripts/check_workflow_flags_specs.sh`.
 Its dedicated PR CI job runs Quint, Alloy receipt checks, real PTY Gherkin,

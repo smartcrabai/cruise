@@ -25,6 +25,7 @@ mod contracts {
         before: Vec<u8>,
         success: bool,
         transcript: String,
+        responses: Vec<(String, Vec<u8>)>,
     }
 
     struct Reap(Box<dyn portable_pty::Child + Send + Sync>);
@@ -77,7 +78,10 @@ mod contracts {
             if !terminal {
                 let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
                 for (key, _) in std::env::vars_os() {
-                    if key.to_string_lossy().starts_with("CRUISE_") || key == "HERDR_ENV" {
+                    if (key.to_string_lossy().starts_with("CRUISE_")
+                        && key != "CRUISE_GUARD_COMMON_DIR")
+                        || key == "HERDR_ENV"
+                    {
                         command.env_remove(key);
                     }
                 }
@@ -108,7 +112,10 @@ mod contracts {
             command.args(args);
             command.cwd(&self.repo);
             for (key, _) in std::env::vars_os() {
-                if key.to_string_lossy().starts_with("CRUISE_") || key == "HERDR_ENV" {
+                if (key.to_string_lossy().starts_with("CRUISE_")
+                    && key != "CRUISE_GUARD_COMMON_DIR")
+                    || key == "HERDR_ENV"
+                {
                     command.env_remove(key);
                 }
             }
@@ -141,6 +148,8 @@ mod contracts {
             let deadline = Instant::now() + Duration::from_secs(30);
             let mut bytes = Vec::new();
             let mut sent = false;
+            let mut response_index = 0;
+            let mut response_start = 0;
             let mut interrupted = false;
             let mut queries = 0;
             let mut status = None;
@@ -164,6 +173,16 @@ mod contracts {
                         .unwrap_or_else(|e| panic!("cursor reply: {e}"));
                 }
                 queries = count;
+                if let Some((marker, keys)) = self.responses.get(response_index)
+                    && text[response_start..].contains(marker)
+                {
+                    input
+                        .write_all(keys)
+                        .unwrap_or_else(|e| panic!("script response: {e}"));
+                    input.flush().unwrap_or_else(|e| panic!("flush: {e}"));
+                    response_index += 1;
+                    response_start = text.len();
+                }
                 if !sent
                     && text.contains("Run E2E")
                     && let Some(keys) = response
@@ -189,6 +208,13 @@ mod contracts {
             }
             self.success = status.is_some_and(|s| s.success());
             self.transcript = String::from_utf8_lossy(&bytes).into_owned();
+            assert_eq!(
+                response_index,
+                self.responses.len(),
+                "unreached PTY responses: {}",
+                self.transcript
+            );
+            self.responses.clear();
             if response.is_some() {
                 assert!(sent, "selection never reached: {}", self.transcript);
             }
@@ -396,6 +422,260 @@ mod contracts {
         assert_eq!(w.state_bytes(), w.before);
     }
 
+    #[given("an isolated approval workflow with gated skip candidates")]
+    fn approval_fixture(w: &mut FlagWorld) {
+        w.root = Some(tempfile::tempdir().unwrap_or_else(|e| panic!("approval tempdir: {e}")));
+        w.repo = w.root().join("plain");
+        std::fs::create_dir(&w.repo).unwrap_or_else(|e| panic!("plain directory: {e}"));
+        w.config = w.root().join("workflow.yaml");
+        std::fs::write(
+            &w.config,
+            include_str!("fixtures/workflow_flags_specs/skip-selection.yaml"),
+        )
+        .unwrap_or_else(|e| panic!("approval workflow: {e}"));
+    }
+
+    #[given("approval history previously skipped enabled and disabled gated steps")]
+    fn history_fixture(w: &mut FlagWorld) {
+        // Production deliberately ignores OS temporary directories in history.
+        // A disposable home child exercises real scoped persistence instead.
+        w.root = Some(
+            tempfile::Builder::new()
+                .prefix(".cruise-bdd-history-")
+                .tempdir_in(
+                    std::env::var_os("HOME")
+                        .unwrap_or_else(|| panic!("home for persistent-scope fixture")),
+                )
+                .unwrap_or_else(|e| panic!("history fixture: {e}")),
+        );
+        w.repo = w.root().join("plain");
+        std::fs::create_dir(&w.repo).unwrap_or_else(|e| panic!("history working directory: {e}"));
+        w.config = w.root().join("workflow.yaml");
+        std::fs::write(
+            &w.config,
+            include_str!("fixtures/workflow_flags_specs/skip-selection.yaml"),
+        )
+        .unwrap_or_else(|e| panic!("history workflow: {e}"));
+        let history = serde_json::json!({"entries": [{
+            "working_dir": w.repo,
+            "resolved_config_key": w.config,
+            "skipped_steps": ["e2e-test", "docs-test", "docs-publish"]
+        }]});
+        let directory = w.root().join("state/cruise");
+        std::fs::create_dir_all(&directory).unwrap_or_else(|e| panic!("history directory: {e}"));
+        std::fs::write(
+            directory.join("history.json"),
+            serde_json::to_vec(&history).unwrap_or_else(|e| panic!("history JSON: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("seed real history: {e}"));
+    }
+
+    #[when("I approve e2e while accepting its remembered skip")]
+    fn approve_remembered(w: &mut FlagWorld) {
+        approve(
+            w,
+            &[
+                ("Publish as Issue", b"\r"),
+                ("Run E2E", b" \r"),
+                ("Steps to skip (", b"\r"),
+            ],
+            false,
+        );
+    }
+
+    #[then("only the enabled remembered skip is saved in the session and real history")]
+    fn remembered_saved(w: &mut FlagWorld) {
+        let state = approved_state(w);
+        assert_eq!(state.skipped_steps, vec!["e2e-test"], "{}", w.transcript);
+        assert_eq!(state.flags.get("e2e"), Some(&true));
+        assert_eq!(state.flags.get("docs"), Some(&false));
+        let history: cruise::new_session_history::NewSessionHistory = serde_json::from_slice(
+            &std::fs::read(w.root().join("state/cruise/history.json"))
+                .unwrap_or_else(|e| panic!("read production history: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("parse production history: {e}"));
+        let key = w.config.to_string_lossy();
+        let directory = w.repo.to_string_lossy();
+        let entry = history
+            .entries
+            .iter()
+            .find(|entry| entry.resolved_config_key == key && entry.working_dir == directory)
+            .unwrap_or_else(|| panic!("real scoped history entry"));
+        assert_eq!(
+            entry.skipped_steps,
+            vec!["e2e-test"],
+            "hidden historical skips must be removed"
+        );
+        no_effects(w);
+    }
+
+    fn approve(w: &mut FlagWorld, responses: &[(&str, &[u8])], explicit: bool) {
+        w.responses = responses
+            .iter()
+            .map(|(s, b)| ((*s).into(), b.to_vec()))
+            .collect();
+        let config = w.config.to_string_lossy().into_owned();
+        let mut args = vec!["plan", "--skip-planning", "--config", &config];
+        if explicit {
+            args.extend(["-f", "docs,e2e=off"]);
+        }
+        args.push("BDD approval");
+        w.run(&args, true, None);
+    }
+
+    #[when("I approve with every flag off")]
+    fn approve_off(w: &mut FlagWorld) {
+        approve(
+            w,
+            &[
+                ("Publish as Issue", b"\r"),
+                ("Run E2E", b"\r"),
+                ("Steps to skip (", b"\r"),
+            ],
+            false,
+        );
+    }
+
+    #[when("I execute now after selecting e2e")]
+    fn execute_selected(w: &mut FlagWorld) {
+        approve(
+            w,
+            &[
+                ("Publish as Issue", b"\x1b[B\x1b[B\x1b[B\r"),
+                ("Run E2E", b" \r"),
+                ("Steps to skip (", b"\r"),
+                ("Use current branch", b"\x1b"),
+            ],
+            false,
+        );
+    }
+
+    #[when("I execute now with explicit docs and e2e off")]
+    fn execute_explicit(w: &mut FlagWorld) {
+        approve(
+            w,
+            &[
+                ("Publish as Issue", b"\x1b[B\x1b[B\x1b[B\r"),
+                ("Steps to skip (", b"\r"),
+                ("Use current branch", b"\x1b"),
+            ],
+            true,
+        );
+    }
+
+    #[when(regex = r"^I cancel the (flag|skip) approval selection then accept untouched defaults$")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "Cucumber capture arguments are owned"
+    )]
+    fn cancel_approval(w: &mut FlagWorld, selection: String) {
+        let mut responses: Vec<(&str, &[u8])> = vec![("Publish as Issue", b"\r")];
+        if selection == "skip" {
+            responses.extend([("Run E2E", &b" \r"[..]), ("Steps to skip (", &b"\x1b"[..])]);
+        } else {
+            responses.push(("Run E2E", b" \x1b"));
+        }
+        responses.extend([
+            ("Publish as Issue", &b"\r"[..]),
+            ("Run E2E", &b"\r"[..]),
+            ("Steps to skip (", &b"\r"[..]),
+        ]);
+        approve(w, &responses, false);
+    }
+
+    fn approved_state(w: &FlagWorld) -> SessionState {
+        let sessions = w
+            .manager()
+            .list()
+            .unwrap_or_else(|e| panic!("approval sessions: {e}"));
+        assert_eq!(sessions.len(), 1, "{}", w.transcript);
+        sessions
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("approved session"))
+    }
+
+    #[then(regex = r"^the approval skip candidates reflect (off|e2e|docs) flags$")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "Cucumber capture arguments are owned"
+    )]
+    fn candidates(w: &mut FlagWorld, enabled: String) {
+        let start = w
+            .transcript
+            .find("Steps to skip (Space")
+            .unwrap_or_else(|| panic!("skip prompt: {}", w.transcript));
+        let rest = &w.transcript[start..];
+        let end = rest.find("Use current branch").unwrap_or(rest.len());
+        let skips = &rest[..end];
+        assert!(skips.contains("build"), "{}", w.transcript);
+        for (name, visible) in [
+            ("e2e-test", enabled == "e2e"),
+            ("docs-test", enabled == "docs"),
+            ("either-test", enabled != "off"),
+            ("gated-review", enabled != "off"),
+            ("group-child", enabled != "off"),
+            ("e2e-publish", enabled == "e2e"),
+            ("docs-publish", enabled == "docs"),
+        ] {
+            assert_eq!(
+                skips.contains(name),
+                visible,
+                "candidate {name}: {}",
+                w.transcript
+            );
+        }
+    }
+
+    #[then("approval asks flags before skips and execution does not ask again")]
+    fn approval_order(w: &mut FlagWorld) {
+        let flags = w
+            .transcript
+            .find(PROMPT)
+            .unwrap_or_else(|| panic!("flags prompt: {}", w.transcript));
+        let skips = w
+            .transcript
+            .find("Steps to skip (Space")
+            .unwrap_or_else(|| panic!("skip prompt: {}", w.transcript));
+        assert!(flags < skips, "{}", w.transcript);
+        assert!(!w.transcript[skips..].contains(PROMPT), "{}", w.transcript);
+    }
+
+    #[then(regex = r"^the approved session records (off|e2e|docs) flags without hidden skips$")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "Cucumber capture arguments are owned"
+    )]
+    fn approval_saved(w: &mut FlagWorld, enabled: String) {
+        let state = approved_state(w);
+        assert_eq!(state.phase, SessionPhase::Planned);
+        for name in ["e2e", "docs"] {
+            assert_eq!(
+                state.flags.get(name),
+                Some(&(name == enabled)),
+                "{}",
+                w.transcript
+            );
+        }
+        assert!(state.skipped_steps.is_empty(), "{}", w.transcript);
+        no_effects(w);
+    }
+
+    #[then("execution reached workspace selection and was cancelled")]
+    fn workspace_cancel(w: &mut FlagWorld) {
+        assert!(!w.success, "{}", w.transcript);
+        assert!(
+            w.transcript.contains("workspace") && w.transcript.contains("cancel"),
+            "{}",
+            w.transcript
+        );
+    }
+
+    #[then("approval completed successfully")]
+    fn approval_success(w: &mut FlagWorld) {
+        assert!(w.success, "{}", w.transcript);
+    }
+
     pub async fn main() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -406,7 +686,7 @@ mod contracts {
                 .unwrap_or_else(|e| panic!("parse feature: {e}"));
         assert_eq!(
             feature.scenarios.len(),
-            9,
+            15,
             "scenario inventory must not silently become empty"
         );
         let writer = FlagWorld::cucumber()

@@ -790,7 +790,7 @@ fn step_hint(app: &TuiApp) -> String {
             }
         }
         Step::Config => format!("↑↓ select · type path · Tab complete · Enter next · {BACK}"),
-        Step::SkippedSteps if app.skip_choices().is_empty() => {
+        Step::SkippedSteps if !app.has_skip_choices() => {
             format!("Comma-separated step ids · Enter next · {BACK}")
         }
         Step::SkippedSteps => format!("↑↓ move · Space toggle · Enter next · {BACK}"),
@@ -932,8 +932,18 @@ fn render_flag_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 }
 fn render_skip_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let choices = app.skip_choices();
-    if choices.is_empty() {
+    if !app.has_skip_choices() {
         render_step_editor(frame, app, area, &app.form.skipped);
+        return;
+    }
+    if choices.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "No skippable steps for the selected flags",
+                muted(app),
+            ))),
+            area,
+        );
         return;
     }
     let selected = app
@@ -2147,10 +2157,21 @@ mod tests {
         assert!(view.contains("Input    normal task text"));
     }
 
+    fn rendered_hermetic_config_view_with(
+        width: u16,
+        configure: impl FnOnce(&mut TuiApp),
+    ) -> String {
+        let _lock = lock_process();
+        let fake_home = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        rendered_lines_with_lock(width, 24, true, View::NewSession, None, None, configure)
+            .join("\n")
+    }
+
     #[test]
     fn config_step_shows_auto_and_cli_candidates_at_minimum_and_wide_sizes() {
         for width in [80, 120] {
-            let view = rendered_view_with(width, 24, true, View::NewSession, |app| {
+            let view = rendered_hermetic_config_view_with(width, |app| {
                 let config_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
                 std::fs::write(
                     config_dir.path().join("cruise.yaml"),
@@ -2236,7 +2257,7 @@ mod tests {
 
     #[test]
     fn config_candidate_list_scrolls_to_the_selected_late_entry() {
-        let view = rendered_view_with(80, 24, true, View::NewSession, |app| {
+        let view = rendered_hermetic_config_view_with(80, |app| {
             let config_dir = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
             let cruise_dir = config_dir.path().join(".cruise");
             std::fs::create_dir_all(&cruise_dir).unwrap_or_else(|error| panic!("{error}"));
@@ -2937,6 +2958,7 @@ mod tests {
         let view = rendered_view_with(80, 24, false, View::NewSession, |app| {
             let step = |id: &str| crate::workflow::SkippableStepNode {
                 id: id.to_string(),
+                flag: None,
                 expanded_step_ids: vec![id.to_string()],
                 children: Vec::new(),
             };
@@ -2956,6 +2978,35 @@ mod tests {
         assert!(view.contains("  [ ] build"));
         assert!(view.contains("▸ [x] review"));
         assert!(view.contains("Space toggle"));
+    }
+
+    #[test]
+    fn skipped_step_question_explains_when_selected_flags_hide_every_step() {
+        let config = crate::config::WorkflowConfig::from_yaml(
+            "command: [echo]\nflags:\n  e2e: {}\nsteps:\n  browser-test:\n    flag: e2e\n    command: echo browser\n",
+        )
+        .unwrap_or_else(|error| panic!("parse workflow: {error}"));
+        let view = rendered_view_with(120, 24, false, View::NewSession, |app| {
+            app.config_defaults = Some(crate::application::NewSessionConfigDefaults {
+                steps: crate::workflow::list_skippable_steps(&config)
+                    .unwrap_or_else(|error| panic!("list steps: {error}")),
+                after_pr_steps: Vec::new(),
+                default_skipped_steps: Vec::new(),
+                resolved_config_key: "test".to_string(),
+                flags: crate::flags::choices(&config),
+            });
+            app.form.step = Step::SkippedSteps;
+        });
+        assert!(!view.contains("browser-test"), "{view}");
+        assert!(!view.contains("Comma-separated step ids"), "{view}");
+        // The explanation is semantic, not an exact wording contract.
+        let explanation = view.to_ascii_lowercase();
+        assert!(
+            explanation.lines().any(|line| {
+                line.contains("no ") && line.contains("step") && line.contains("flag")
+            }),
+            "missing explanation of the empty flag-filtered list: {view}"
+        );
     }
 
     #[test]
