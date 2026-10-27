@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   responsive-webui-specs:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 40
     env:
       CARGO_TERM_COLOR: always
