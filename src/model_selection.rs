@@ -79,7 +79,11 @@ pub(crate) fn availability(
                 if object.disabled_during.is_empty() {
                     continue;
                 }
-                let sdk = object.sdk.as_deref().and_then(Sdk::from_name).unwrap_or(base);
+                let sdk = object
+                    .sdk
+                    .as_deref()
+                    .and_then(Sdk::from_name)
+                    .unwrap_or(base);
                 let model = crate::retry::ModelReferenceFormat::for_sdk(sdk)
                     .split(&object.model)
                     .0
@@ -258,11 +262,18 @@ mod tests {
         );
         assert_eq!(
             resolve_candidates(Some(&selected), Sdk::Jcode),
-            [ModelCandidate { sdk: Sdk::Jcode, model: Some(overridden.to_owned()) }]
+            [ModelCandidate {
+                sdk: Sdk::Jcode,
+                model: Some(overridden.to_owned())
+            }]
         );
-        let availability = availability(Some(&selected), Sdk::Jcode)
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert!(availability.disabled_by(Sdk::Jcode, overridden, 0).is_none());
+        let availability =
+            availability(Some(&selected), Sdk::Jcode).unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            availability
+                .disabled_by(Sdk::Jcode, overridden, 0)
+                .is_none()
+        );
     }
 
     #[test]

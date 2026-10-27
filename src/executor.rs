@@ -649,7 +649,8 @@ async fn run_sdk_with_fallback(
                 "all configured models are unavailable: '{}' is disabled during `{window}` and no other candidate is usable (remaining candidates are disabled or cooling down)",
                 engine.model().unwrap_or_default()
             ),
-            _ => "all configured models are unavailable (candidates are disabled or cooling down)".to_owned(),
+            _ => "all configured models are unavailable (candidates are disabled or cooling down)"
+                .to_owned(),
         };
         return Err(CruiseError::Other(message));
     }
@@ -2888,8 +2889,14 @@ mod tests {
             Err(error) => error.to_string(),
             Ok(_) => panic!("mixed unavailable candidates must fail"),
         };
-        assert!(error.contains("all configured models are unavailable"), "{error}");
-        assert!(!error.contains("all configured models are cooling down"), "{error}");
+        assert!(
+            error.contains("all configured models are unavailable"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("all configured models are cooling down"),
+            "{error}"
+        );
         assert!(!error.contains("after retryable failures"), "{error}");
         assert_eq!(recorded(&notices), [] as [String; 0]);
     }
