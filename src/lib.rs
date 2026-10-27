@@ -24,6 +24,7 @@ pub mod github_review;
 pub mod graph;
 pub mod issue_publish;
 pub mod metadata;
+pub mod model_schedule;
 pub mod model_selection;
 pub mod new_session_draft;
 pub mod new_session_history;

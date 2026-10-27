@@ -1659,8 +1659,18 @@ fn print_dry_run_config(config: &WorkflowConfig) {
                     match entry {
                         crate::config::ModelEntry::String(model) => println!("  - {model}"),
                         crate::config::ModelEntry::SdkModel(entry) => {
-                            println!("  - sdk: {}", entry.sdk);
-                            println!("    model: {}", entry.model);
+                            if let Some(sdk) = &entry.sdk {
+                                println!("  - sdk: {sdk}");
+                                println!("    model: {}", entry.model);
+                            } else {
+                                println!("  - model: {}", entry.model);
+                            }
+                            if !entry.disabled_during.is_empty() {
+                                println!("    disabled_during:");
+                                for window in &entry.disabled_during {
+                                    println!("      - {window}");
+                                }
+                            }
                         }
                     }
                 }

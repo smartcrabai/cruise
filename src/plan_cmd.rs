@@ -2294,7 +2294,7 @@ plan_model:
             let sdk = crate::model_selection::Sdk::Jcode;
             let candidates = crate::model_selection::resolve_candidates(spec, sdk);
             let mut engine = crate::retry::FallbackEngine::new_candidates(
-                crate::retry::ModelReferenceFormat::LegacyEffort,
+                crate::model_selection::ModelAvailability::default(),
                 crate::retry::policy_for_config(config.retry.clone()),
                 candidates[0].sdk,
                 sdk,
