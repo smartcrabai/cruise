@@ -19,7 +19,7 @@ These are bounded safety checks, not unbounded proof, liveness, a formal refinem
 
 ## Reproducible execution
 
-Use Node **22.23.3**, Rust **1.99.1** and run from the repository root:
+Use Node **24.22.0**, Rust **1.99.1** and run from the repository root:
 
 ```sh
 bash scripts/check_responsive_webui_specs.sh
