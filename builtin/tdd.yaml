@@ -38,7 +38,7 @@ groups:
               This is a read-only analysis step. The following batch contract is mandatory:
 
               Make NO workspace file changes. Do not create, edit, delete, or move any file in the repository. Do not stage, commit, stash, or move Git `HEAD`.
-              - Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it.
+              - Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it. Do NOT install or start test-only services in any read-only analyzer phase.
               - Git inspection is read-only. Because up to five of these prompts run concurrently in the same working directory, use `git --no-optional-locks <subcommand>` for `status` / `diff` / `stash list`-style inspection to avoid `.git/index.lock` contention. NEVER run `git stash create`, `git add`, `git commit`, `git checkout`, or `git restore`.
               - Output only; the report IS the deliverable.
 
@@ -96,7 +96,7 @@ groups:
               This is a read-only analysis step. The following batch contract is mandatory:
 
               Make NO workspace file changes. Do not create, edit, delete, or move any file in the repository. Do not stage, commit, stash, or move Git `HEAD`.
-              - Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it.
+              - Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it. Do NOT install or start test-only services in any read-only analyzer phase.
               - Git inspection is read-only. Because up to five of these prompts run concurrently in the same working directory, use `git --no-optional-locks <subcommand>` for `status` / `diff` / `stash list`-style inspection to avoid `.git/index.lock` contention. NEVER run `git stash create`, `git add`, `git commit`, `git checkout`, or `git restore`.
               - Output only; the report IS the deliverable.
 
@@ -155,7 +155,7 @@ groups:
 
               Make NO workspace file changes. Do not create, edit, delete, or move any file in the repository. Do not stage, commit, stash, or move Git `HEAD`.
 
-              Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it.
+              Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it. Do NOT install or start test-only services in any read-only analyzer phase.
 
               Git inspection is read-only. Because up to five of these prompts run concurrently in the same working directory, use `git --no-optional-locks <subcommand>` for `status` / `diff` / `stash list`-style inspection to avoid `.git/index.lock` contention. NEVER run `git stash create`, `git add`, `git commit`, `git checkout`, or `git restore`.
 
@@ -251,7 +251,7 @@ groups:
 
               Make NO workspace file changes. Do not create, edit, delete, or move any file in the repository. Do not stage, commit, stash, or move Git `HEAD`.
 
-              Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it.
+              Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it. Do NOT install or start test-only services in any read-only analyzer phase.
 
               Git inspection is read-only. Because up to five of these prompts run concurrently in the same working directory, use `git --no-optional-locks <subcommand>` for `status` / `diff` / `stash list`-style inspection to avoid `.git/index.lock` contention. NEVER run `git stash create`, `git add`, `git commit`, `git checkout`, or `git restore`.
 
@@ -381,7 +381,7 @@ groups:
               ## Read-only contract
 
               - Make NO workspace file changes. Do not create, edit, delete, or move any file in the repository. Do not stage, commit, stash, or move Git `HEAD`.
-              - Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it.
+              - Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it. Do NOT install or start test-only services in any read-only analyzer phase.
               - Git inspection is read-only. Because up to five of these prompts run concurrently in the same working directory, use `git --no-optional-locks <subcommand>` for `status` / `diff` / `stash list`-style inspection to avoid `.git/index.lock` contention. NEVER run `git stash create`, `git add`, `git commit`, `git checkout`, or `git restore`.
               - Output only; the report IS the deliverable.
 
@@ -466,7 +466,7 @@ groups:
 
           Make NO workspace file changes. Do not create, edit, delete, or move any file in the repository. Do not stage, commit, stash, or move Git `HEAD`.
 
-          Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it.
+          Do NOT run the build, type checker, test suite, or any formatter. Verification happens once, later, in the apply step. Report what needs verifying instead of verifying it. Do NOT install or start test-only services in any read-only analyzer phase.
 
           Git inspection is read-only. Because up to five of these prompts run concurrently in the same working directory, use `git --no-optional-locks <subcommand>` for `status` / `diff` / `stash list`-style inspection to avoid `.git/index.lock` contention. NEVER run `git stash create`, `git add`, `git commit`, `git checkout`, or `git restore`.
 
@@ -550,14 +550,14 @@ groups:
 
           Before editing each work item, re-verify its current file:line, root cause, expected-versus-actual behavior, and causal evidence against current files. If the evidence no longer holds, record that finding as `resolved` with the current evidence and make no edit for that item. Do not overwrite unrelated user changes. Keep edits limited to the work item's root cause.
 
-          Add or update tests only when they defend the corrected observable contract. Never change an expected-output assertion merely to match the implementation without higher-authority contract evidence. Do not add tests for a work item that is not in the consolidated worklist. Do not run a formatter or linter; the single combined verification invocation below is the only check command.
+          Add or update tests only when they defend the corrected observable contract. Never change an expected-output assertion merely to match the implementation without higher-authority contract evidence. Do not add tests for a work item that is not in the consolidated worklist. Preserve the repository's selected test tools and setup, and verify every applicable in-scope contract with real project paths and required test services; missing runtime or service capability is blocked, not a mock or pretend pass. Do not run a formatter or linter; the single combined verification invocation below is the only check command.
 
           ## Procedure
 
           1. Read the fresh consolidated worklist and the unified ledger before editing. The ledger path is `$(dirname {plan})/cruise-findings-ledger.md`, outside the workspace, per session, and is written only by this step.
           2. The ledger is stale when it is absent, its `head:` differs from current HEAD, or its `snapshot:` no longer resolves (`git cat-file -e`). For a stale ledger, ignore prior states and start the iteration at `1`. For a fresh ledger, carry its states and prior evidence forward; when a current root cause matches a prior finding, reuse that finding ID exactly. Finding IDs are stable across loop iterations and are never renumbered.
           3. Re-verify every `W<n>` item immediately before its edit. Mark evidence-gone items `resolved` without editing. Apply the remaining items in the supplied dependency order. If a work item is genuinely blocked, do not improvise a fix; record the blocker and leave that item `persists`.
-          4. After all edits, choose one combined build or type-check plus relevant-test command that covers every `verification owed` requirement in the worklist. Run that command EXACTLY ONCE over the combined result. This is the only build, type-check, or test invocation in this step: do not run checks before editing, between work items, per item, or a second time afterward. Skip the invocation entirely when no edit was applied, because `EMPTY WORKLIST` and a worklist whose every item resolved without editing leave nothing to verify; report `none - no workspace files changed` as the command in that case.
+          4. After all edits, choose one combined build or type-check plus relevant-test command that covers every `verification owed` requirement in the worklist, using existing project tools or the ordinary test stack appropriate to each in-scope behavior. Include real-service tests and both Pact consumer/provider verification sides when required; Pact contracts are not general functional E2E. Run that command EXACTLY ONCE over the combined result. This is the only build, type-check, or test invocation in this step: do not run checks before editing, between work items, per item, or a second time afterward. If a required Docker-compatible runtime or PTY/test runtime is unavailable, report that exact blocker rather than substituting a host production DB, mocks, or a smoke check. Skip the invocation entirely when no edit was applied, because `EMPTY WORKLIST` and a worklist whose every item resolved without editing leave nothing to verify; report `none - no workspace files changed` as the command in that case.
           5. If that one verification result proves that an applied change breaks behavior, revert that change only, record the item as `wont-fix` with the concrete failure evidence, and do not rerun verification. Do not silently revert unrelated valid changes. Report any remaining unverified or blocked item rather than claiming success.
           6. After the verification run, obtain the tree snapshot with `git stash create`. If it prints nothing, use current HEAD as `snapshot:`. Then write the ledger in its exact format below. The ledger update is the only non-workspace file write authorized by this prompt.
 
@@ -607,6 +607,8 @@ groups:
 
           - command: `<the one exact build/type-check/test command invoked>`
           - result: `<pass or fail, relevant output, and affected work items>`
+          - tools and versions: `<each runner/runtime used, or none>`
+          - evidence or blocker: `<assertion-bearing results or exact missing prerequisite; distinguish Pact contract checks from functional E2E>`
 
           ## Ledger
 
@@ -633,7 +635,15 @@ steps:
       2. Read relevant production code and existing tests. Reuse project conventions and helpers.
       3. Add only missing tests. Each test must fail on one plausible contract regression.
       4. Add one entry-point integration test when the plan changes a CLI, API, UI, worker, plugin, or multi-module data path. Add more only when the plan names distinct paths.
-      5. Run the project build or type checker. Test execution may stay red only because planned production behavior is absent. Report the exact expected failure.
+      5. Run the project build or type checker and the selected relevant test command. Test execution may stay red only because planned production behavior is absent. Report the exact expected failure; if a required service or runtime is unavailable, report the blocker and do not substitute a mock or weaker check.
+
+      ## Ordinary test-stack recommendations
+
+      Inspect manifests, existing tests, CI, and actual product/service boundaries before selecting a test stack. Existing appropriate tools, versions, commands, setup, and CI always win. Recommend only a missing capability required by real in-scope behavior, use stack-supported tools, and pin compatible versions before introducing them. These defaults apply without `browser_e2e` or `app_e2e`; do not add unrelated suites or dependencies. Do not install or start test-only services during any read-only analyzer phase.
+      - External database/dependency service: use a stack-supported Testcontainers library for a disposable real service only when needed (`https://testcontainers.com/`; Rust: `https://rust.testcontainers.org/`). Do not add a DB assertion framework; skip in-process/embedded databases and no-DB tasks. Pin compatible library and images, wait for readiness, use dynamic mapped connection details, run real app migrations and isolated seed data, and clean up only test-owned resources. Missing required Docker-compatible runtime is blocked, never a host production DB, mocks, or pretend pass.
+      - CLI/TUI: for an actual CLI executable on a supported Bash/host, use Bats-core (Bash Automated Testing System; `https://github.com/bats-core/bats-core`) for persistent tests of the real executable, meaningful exit status, stdout/stderr, and side effects. Bats `run` returns success after capture, so explicitly assert `$status`; `run` alone is not a pass. For an actual TUI, use Bats to orchestrate a real PTY-capable interaction harness (reuse one, e.g. Expect), send keys, assert terminal screen/state transitions, and inspect rendered terminal/image evidence when applicable. Pipe/noninteractive stdout or `--help` smoke is not TUI E2E. Missing suitable PTY/runtime is blocked; do not force unsupported native Windows Bash.
+      - Web HTTP APIs: for a real local app/API, store `.hurl` tests and run `hurl --test` (`https://hurl.dev/`) against real endpoints, asserting substantive responses and relevant state/effects. Reuse project setup, isolation, and local test auth; no live credentials or external production services. Schema/parser-only or mocked HTTP checks are insufficient; use Testcontainers for DB dependencies when appropriate.
+      - Backend HTTP/message integrations: use Pact (`https://docs.pact.io/`; `https://docs.pact.io/getting_started/what_is_pact_good_for`) only for identified, controllable, stack-supported consumer/provider boundaries. Generate contracts through actual client code, verify against the real provider with explicit provider states, and record both sides. Consumer mocks or pact-file generation alone are not completed verification. Pact is a protocol contract check, not general functional/DB E2E or a replacement for real-path checks; controlled protocol doubles are valid contract tests, not mock-only E2E. Do not require Broker/PactFlow/cloud infrastructure or secrets.
 
       ## Assertion rules
 
@@ -659,7 +669,10 @@ steps:
       ## Required output
 
       ## Test Contract Map
-      - Plan item → test file and assertion
+      - Plan item → test file and assertion, with its selected runner and command
+
+      ## Test Stack
+      - For each in-scope path: existing or selected tool/version, setup and exact test command, prerequisites, and observed evidence or exact blocker; identify Pact contract verification separately from functional E2E.
 
       ## Changes
       - Tests added or changed
@@ -687,12 +700,12 @@ steps:
 
       ## Procedure
 
-      1. Read {plan} fully and map each item to the relevant failing test and production path.
-      2. Read existing implementation patterns and all callers of exported or changed symbols. Reuse them; create no second convention.
+      1. Read {plan} fully and map each item to the relevant failing test, selected test stack, and production path.
+      2. Read existing implementation patterns, test setup/commands, and all callers of exported or changed symbols. Reuse them; create no second convention.
       3. Implement the smallest complete production change. No speculative options, fallbacks, abstractions, compatibility aliases, or unrelated cleanup.
       4. Wire behavior from the real entry point. Definitions referenced only by tests are incomplete.
       5. Remove obsolete code, exports, and branches replaced by the implementation.
-      6. Run the project build or type checker, then relevant tests. Fix source until both pass.
+      6. Run the project build or type checker, then the exact relevant test command(s) from the repository's existing or selected test stack. Use real project paths and required test services; report exact commands, tool/runtime versions, assertion evidence, and any missing prerequisite. A required service or runtime that cannot be provisioned is blocked, never a substitute mock or pretend pass.
       7. Check every plan item after tests pass. Passing tests do not excuse an uncovered plan item.
 
       ## Test-change gate
@@ -730,9 +743,9 @@ steps:
 
       ## Build Result
       - Command and result
-
       ## Test Result
-      - Command and result
+
+      - Exact relevant test command(s), tools/versions, and assertion-bearing result or exact blocker
     if:
       no-file-changes: failed
   formal-methods:
@@ -797,8 +810,9 @@ steps:
       - Native Android visual confirmation: use mobile-mcp. Persistent E2E: Espresso for Android Views, Compose UI Test for Compose, and UI Automator for system-UI or cross-app flows.
       - React Native/Expo mobile iOS and Android visual confirmation: use agent-device CLI or a connected MCP. Persistent E2E: Detox with Jest (`detox build`/`detox test` configurations). Expo requires its own native build with Detox integration, never Expo Go; pin compatible Expo SDK, embedded React Native, New Architecture, and Detox versions. Preserve prebuild/config-plugin-generated native workflows; do not rely on manual-only generated-file changes. Use iOS Simulator and a supported Android runtime as applicable; do not require blanket physical iOS device coverage. Unsupported Detox setup/compatibility is blocked, never a reason to silently switch runners.
       - Electron visual confirmation: interact with the real Electron application and capture screenshots via Playwright Electron API. Persistent E2E: Playwright Test with Electron API. The API is experimental, so confirm version compatibility. A renderer in an ordinary browser is not a native Electron pass; stubbing an OS-native dialog is not coverage of the real OS dialog.
+      - Tauri: classify an actual native app (WebView + Rust/IPC), not an ordinary browser or Electron frontend. Only when suitable visual tooling is absent, recommend [tauri-plugin-mcp](https://github.com/P3GLEG/tauri-plugin-mcp) for real-app input/screenshots plus actual image inspection. Only when suitable saved E2E tooling is absent, recommend [tauri-webdriver](https://github.com/Choochmeque/tauri-webdriver) with companion [tauri-plugin-webdriver](https://github.com/Choochmeque/tauri-plugin-webdriver) and a real WebDriver client/test runner (reuse existing, otherwise a compatible option such as WebdriverIO/Selenium); the server alone is not a test suite. Pin compatible versions/Git revisions and confirm host, Tauri, WebView, and client compatibility. Plugins are dev/test only: exclude automation endpoints from production builds and use local, isolated test sessions. Persist substantive assertions through relevant real frontend→Rust IPC/native behavior. Capture coverage limits for mocks/synthetic/untrusted events; plugin defaults stub JS alert/confirm/prompt and do not evidence real native dialogs.
 
-      Windows/Linux native applications and other native platforms without recommendations are not excluded. Reuse appropriate existing tooling for each capability. If only visual interaction/screenshot or saved E2E capability exists, complete the reachable work and report the missing capability under this no-new-tooling policy; do not claim both deliverables. When no appropriate tooling exists, do not recommend or introduce new platform tooling or a suite; report this limitation honestly, not as excluded/not applicable. If established tooling exists but its compatible host, runtime, or server is unavailable, report the exact blocker; do not reclassify the target as excluded/not applicable. This does not exclude applicable browser/Electron checks on supported hosts or Linux web CI.
+      Windows/Linux native apps and other targets/capabilities without an applicable listed framework recommendation are not excluded. Reuse appropriate existing tooling for each capability. If only visual interaction/screenshot or saved E2E capability exists, complete the reachable work and report the missing capability; do not claim both deliverables. When no appropriate tooling exists, do not recommend or introduce new platform tooling or a suite for an unlisted target; report the limitation honestly, not as excluded/not applicable. Tauri is now an explicitly listed cross-platform recommendation and may be introduced for a genuinely missing capability on macOS, Windows, or Linux only after confirming pinned compatibility in its docs. Other unlisted native targets remain existing-tools-only; do not blanket-enable unsupported targets or force a new platform matrix. If established tooling exists but its compatible host, runtime, or server is unavailable, report the exact blocker; do not reclassify the target as excluded/not applicable. This does not exclude applicable browser/Electron checks on supported hosts or Linux web CI.
 
       Run each applicable target's E2E suite and checks needed to diagnose failures. Fix genuine application defects without weakening assertions, then rerun affected checks. Wire suites into provider-native CI on compatible hosts when reproducible and available, without secrets; never report another platform's run as coverage for a target. If no applicable application target exists, report not applicable with repository evidence. If an applicable target's required simulator, emulator, OS, device, host, tool/server, or visual capability cannot be provisioned, report the exact blocker and never claim a pass.
   verify-review-pass:
