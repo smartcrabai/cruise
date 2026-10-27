@@ -182,7 +182,7 @@ after-pr:
     command: git push
   wait-ci:
     flag: [after_pr, merge]
-    timeout: 10m
+    timeout: 30m
     command: |-
       case "{pr.url}" in
         */-/merge_requests/*)
@@ -224,7 +224,7 @@ after-pr:
             exit 1
           fi
           query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{state contexts(first:1) {{totalCount}}}}}}}}}}}}'
-          deadline=$(( $(date +%s) + 540 ))
+          deadline=$(( $(date +%s) + 1740 ))
           while :; do
             if ! response=$(gh api graphql -f owner="$owner" -f name="$name" -F number={pr.number} -f head="$expected_head" -f query="$query"); then
               printf 'GitHub CI query failed for PR #%s at expected HEAD %s.\n' {pr.number} "$expected_head" >&2

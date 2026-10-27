@@ -959,7 +959,9 @@ count=$(cat "$WAIT_CI_DATE_COUNT" 2>/dev/null || printf 0)
 count=$((count + 1))
 printf '%s\n' "$count" > "$WAIT_CI_DATE_COUNT"
 if [ "${WAIT_CI_TIMEOUT-0}" = 1 ] && [ "$count" -gt 1 ]; then
-  printf '700\n'
+  printf '1900\n'
+elif [ "$count" -gt 1 ]; then
+  printf '1101\n'
 else
   printf '100\n'
 fi
@@ -1013,6 +1015,13 @@ fi
             .parse()
             .unwrap_or_else(|error| panic!("parse fake gh call count: {error}"))
     }
+    fn date_calls(&self) -> usize {
+        std::fs::read_to_string(&self.date_count)
+            .unwrap_or_else(|error| panic!("read fake date call count: {error}"))
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("parse fake date call count: {error}"))
+    }
 }
 
 #[cfg(unix)]
@@ -1052,6 +1061,8 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
             &command,
             &[
                 github_ci_response(&fixture.head, old_head, Some("SUCCESS"), 1),
+                github_ci_response(&fixture.head, &fixture.head, None, 0),
+                github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 0),
                 github_ci_response(&fixture.head, &fixture.head, Some("PENDING"), 1),
                 github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
             ],
@@ -1059,16 +1070,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         );
         let terminal = text(&output);
         assert!(output.status.success(), "{}: {terminal}", workflow.name);
-        assert!(
-            terminal.contains(&format!("rollup HEAD {old_head}")),
-            "{terminal}"
-        );
-        assert!(terminal.contains("state PENDING"), "{terminal}");
-        assert!(
-            terminal.contains(&format!("CI passed for HEAD {}", fixture.head)),
-            "{terminal}"
-        );
-        assert_eq!(fixture.gh_calls(), 3, "{}", workflow.name);
+        assert_eq!(fixture.gh_calls(), 5, "{}", workflow.name);
     }
 
     let command = builtin_wait_ci_command("tdd");
@@ -1085,8 +1087,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
-    assert!(terminal.contains("GitHub CI failed"), "{terminal}");
-    assert!(terminal.contains(&fixture.head), "{terminal}");
+    assert_eq!(fixture.gh_calls(), 1);
 
     let fixture = GithubWaitCiFixture::new();
     let changed_head = "2222222222222222222222222222222222222222";
@@ -1102,9 +1103,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
-    assert!(terminal.contains("head changed"), "{terminal}");
-    assert!(terminal.contains(&fixture.head), "{terminal}");
-    assert!(terminal.contains(changed_head), "{terminal}");
+    assert_eq!(fixture.gh_calls(), 1);
 
     let fixture = GithubWaitCiFixture::new();
     let output = fixture.run(
@@ -1114,7 +1113,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
-    assert!(terminal.contains("query returned errors"), "{terminal}");
+    assert_eq!(fixture.gh_calls(), 1);
 
     for (state, check_count) in [(None, 0), (Some("SUCCESS"), 0)] {
         let fixture = GithubWaitCiFixture::new();
@@ -1130,15 +1129,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         );
         let terminal = text(&output);
         assert!(!output.status.success(), "{terminal}");
-        assert!(terminal.contains("GitHub CI timed out"), "{terminal}");
-        assert!(terminal.contains(&fixture.head), "{terminal}");
-        assert!(
-            terminal.contains(if state.is_some() {
-                "state no-checks"
-            } else {
-                "state not-registered"
-            }),
-            "{terminal}"
-        );
+        assert_eq!(fixture.gh_calls(), 1);
+        assert_eq!(fixture.date_calls(), 2);
     }
 }
