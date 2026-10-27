@@ -48,9 +48,71 @@ pub fn resolve_entry(entry: &ModelEntry, sdk: Sdk) -> ModelCandidate {
     ModelCandidate {
         sdk: match entry {
             ModelEntry::String(_) => sdk,
-            ModelEntry::SdkModel(entry) => Sdk::from_name(&entry.sdk).unwrap_or(sdk),
+            ModelEntry::SdkModel(entry) => {
+                entry.sdk.as_deref().and_then(Sdk::from_name).unwrap_or(sdk)
+            }
         },
         model: Some(entry.model().to_owned()),
+    }
+}
+
+/// User-declared unavailability keyed by SDK and effort-independent model identity.
+#[derive(Default, Clone)]
+pub(crate) struct ModelAvailability {
+    entries: Vec<(Sdk, String, ScheduledWindows)>,
+}
+
+type ScheduledWindows = Vec<(String, crate::model_schedule::TimeWindow)>;
+
+pub(crate) fn availability(
+    spec: Option<&ModelSpec>,
+    base: Sdk,
+) -> crate::error::Result<ModelAvailability> {
+    let mut availability = ModelAvailability::default();
+    if let Some(spec) = spec {
+        spec.validate("model")?;
+        if let ModelSpec::Multiple(entries) = spec {
+            for entry in entries {
+                let ModelEntry::SdkModel(object) = entry else {
+                    continue;
+                };
+                if object.disabled_during.is_empty() {
+                    continue;
+                }
+                let sdk = object
+                    .sdk
+                    .as_deref()
+                    .and_then(Sdk::from_name)
+                    .unwrap_or(base);
+                let model = crate::retry::ModelReferenceFormat::for_sdk(sdk)
+                    .split(&object.model)
+                    .0
+                    .to_owned();
+                let windows = object
+                    .disabled_during
+                    .iter()
+                    .map(|raw| {
+                        crate::model_schedule::parse_time_window(raw)
+                            .map(|window| (raw.clone(), window))
+                    })
+                    .collect::<crate::error::Result<Vec<_>>>()?;
+                availability.entries.push((sdk, model, windows));
+            }
+        }
+    }
+    Ok(availability)
+}
+
+impl ModelAvailability {
+    pub(crate) fn disabled_by(&self, sdk: Sdk, model: &str, unix_secs: i64) -> Option<&str> {
+        let format = crate::retry::ModelReferenceFormat::for_sdk(sdk);
+        let base = format.split(model).0;
+        self.entries
+            .iter()
+            .filter(|(owner, candidate, _)| *owner == sdk && candidate == base)
+            .flat_map(|(_, _, windows)| windows)
+            .find(|(_, window)| window.contains(unix_secs))
+            .map(|(raw, _)| raw.as_str())
     }
 }
 
@@ -145,6 +207,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn disabled_window_step_effort_override_preserves_object_and_fallbacks() {
+        for (sdk, primary, overridden) in [
+            (
+                Sdk::Jcode,
+                "test-window-step/model:low",
+                "test-window-step/model:high",
+            ),
+            (
+                Sdk::OpenCode,
+                "provider/test-window-step:free:low",
+                "provider/test-window-step:free:high",
+            ),
+            (
+                Sdk::OpenCode,
+                "provider/test-window-step:free#fast",
+                "provider/test-window-step:free#careful",
+            ),
+        ] {
+            let workflow: ModelSpec = serde_json::from_value(serde_json::json!([
+                {"model": primary, "disabled_during": ["00:00-24:00"]},
+                {"sdk": "claude", "model": "test-window-step/spare"}
+            ]))
+            .unwrap_or_else(|error| panic!("disabled_during fixture must deserialize: {error}"));
+            let selected = step_model_spec(Some(&workflow), Some(overridden), sdk)
+                .unwrap_or_else(|| panic!("matching base identity retains the workflow spec"));
+            let mut expected =
+                serde_json::to_value(&workflow).unwrap_or_else(|error| panic!("{error}"));
+            expected[0]["model"] = serde_json::json!(overridden);
+            assert_eq!(
+                serde_json::to_value(&selected).unwrap_or_else(|error| panic!("{error}")),
+                expected
+            );
+            let candidates = resolve_candidates(Some(&selected), sdk);
+            assert_eq!(candidates[0].sdk, sdk);
+            assert_eq!(candidates[0].model.as_deref(), Some(overridden));
+            assert_eq!(candidates[1].sdk, Sdk::Claude);
+        }
+    }
+
+    #[test]
+    fn disabled_window_same_base_cross_sdk_override_does_not_inherit() {
+        let workflow: ModelSpec = serde_json::from_value(serde_json::json!([
+            {"sdk": "claude", "model": "test-window-cross-sdk/model:low", "disabled_during": ["00:00-24:00"]},
+            "test-window-cross-sdk/spare"
+        ]))
+        .unwrap_or_else(|error| panic!("disabled_during fixture must deserialize: {error}"));
+        let overridden = "test-window-cross-sdk/model:high";
+        let selected = step_model_spec(Some(&workflow), Some(overridden), Sdk::Jcode)
+            .unwrap_or_else(|| panic!("step override must select a standalone model"));
+        assert_eq!(
+            serde_json::to_value(&selected).unwrap_or_else(|error| panic!("{error}")),
+            serde_json::json!(overridden)
+        );
+        assert_eq!(
+            resolve_candidates(Some(&selected), Sdk::Jcode),
+            [ModelCandidate {
+                sdk: Sdk::Jcode,
+                model: Some(overridden.to_owned())
+            }]
+        );
+        let availability =
+            availability(Some(&selected), Sdk::Jcode).unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            availability
+                .disabled_by(Sdk::Jcode, overridden, 0)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn resolve_entry_uses_workflow_sdk_for_strings_and_explicit_sdk_for_objects() {
         let string = ModelEntry::String("worker".to_owned());
         let object: ModelEntry = serde_yaml::from_str("{sdk: claude, model: haiku}")
@@ -171,8 +303,9 @@ mod tests {
             }
         );
         let unknown = ModelEntry::SdkModel(crate::config::SdkModel {
-            sdk: "unknown".to_owned(),
+            sdk: Some("unknown".to_owned()),
             model: " worker:free ".to_owned(),
+            disabled_during: Vec::new(),
         });
         let string = ModelEntry::String(unknown.model().to_owned());
         for sdk in [Sdk::Jcode, Sdk::Claude, Sdk::OpenCode] {

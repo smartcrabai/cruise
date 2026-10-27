@@ -23,7 +23,7 @@ steps:
 
 ## Model fields are plain model references
 
-Workflow and app-config `model` and `plan_model` arrays may mix strings with strict `{sdk, model}` objects:
+Workflow and app-config `model` and `plan_model` arrays may mix strings with strict `{model, sdk?, disabled_during?}` objects:
 
 ```yaml
 model:
@@ -33,9 +33,31 @@ model:
   - openrouter/z-ai/glm-5.3-flash:high
 ```
 
-String entries always inherit the workflow's effective SDK, not the preceding object's SDK. Without `sdk` or `command`, that SDK is jcode. Objects select `jcode`, `claude`, or the existing `opencode` backend for that entry only. `openai/` and `openrouter/` remain model-provider prefixes. Each object requires both nonblank fields and rejects unknown keys. Standalone model objects and per-step SDK fields are not supported. The JSON equivalent uses the same array of strings and objects, and saving preserves their original forms.
+String entries always inherit the workflow's effective SDK, not the preceding object's SDK. Without `sdk` or `command`, that SDK is jcode. Objects with `sdk` select `jcode`, `claude`, or the existing `opencode` backend for that entry only; objects without `sdk` inherit the workflow SDK. `openai/` and `openrouter/` remain model-provider prefixes. Each object requires a nonblank `model` and at least one of nonblank `sdk` or nonempty `disabled_during`, rejects explicit null SDKs, and rejects unknown keys. Standalone model objects and per-step SDK fields are not supported. The JSON equivalent uses the same array of strings and objects, and saving preserves their original forms.
 
-Any SDK object conflicts with `command`, including fallback and `plan_model` entries. String-only command arrays still use only the primary. `CRUISE_MODEL` and `CRUISE_PLAN_MODEL` replace whole lists, while `CRUISE_SDK` changes string inheritance without changing explicit objects. Explicit string-only `retry.fallback_chains` take precedence. Cooldown and candidate identity distinguish SDKs even for identical model names. Only the owning SDK receives the caller's saved resume ID. Another SDK starts without it, and returning to the original owner may reuse that original ID and its retained storage. Newly emitted IDs from failed attempts are not forwarded to subsequent attempts. All applicable candidates must support the request: computer use requires jcode, jcode accepts only stdio MCP, and OpenCode rejects SSE. A step model override does not inherit an unrelated global fallback list.
+Any model object conflicts with `command`, including fallback and `plan_model` entries. String-only command arrays still use only the primary. `CRUISE_MODEL` and `CRUISE_PLAN_MODEL` replace whole lists, while `CRUISE_SDK` changes inheritance for strings and objects without `sdk`, without changing explicit SDK overrides. Explicit string-only `retry.fallback_chains` take precedence. Cooldown and candidate identity distinguish SDKs even for identical model names. Only the owning SDK receives the caller's saved resume ID. Another SDK starts without it, and returning to the original owner may reuse that original ID and its retained storage. Newly emitted IDs from failed attempts are not forwarded to subsequent attempts. All applicable candidates must support the request: computer use requires jcode, jcode accepts only stdio MCP, and OpenCode rejects SSE. A step model override does not inherit an unrelated global fallback list.
+
+### User-declared unavailable windows
+
+`disabled_during` on a `model` or `plan_model` array object is a nonempty list of windows. It is supported through workflow, application-config, and layered defaults without requiring an explicit SDK on the object:
+
+```yaml
+sdk: opencode
+model:
+  - model: opencode-go/deepseek-v4.1-flash
+    disabled_during: ["mon-fri 01:00-04:00", "mon-fri 06:00-10:00"]
+  - opencode-go/kimi-k2.6
+```
+
+This is a user-chosen schedule, not a provider pricing preset. Equivalent fixed-offset windows are `mon-fri 10:00-13:00 +09:00` and `mon-fri 15:00-19:00 +09:00`.
+
+- Grammar: `[days ]HH:MM-HH:MM[ offset]`. Weekdays `mon`..`sun` are case-insensitive; use comma lists and inclusive wrapping ranges, such as `sat,sun`, `mon,wed-fri`, and `fri-mon`. No days means daily.
+- UTC is the default. Explicit `UTC`, `Z`, and fixed `+HH:MM` / `-HH:MM` offsets with absolute value at most `14:00` are accepted. IANA zones, DST, and local system time are not supported.
+- Starts are `00:00`..`23:59`; ends are `00:01`..`24:00`. Endpoints are half-open, equal endpoints are invalid, and `00:00-24:00` covers all day. An earlier end crosses midnight. Days identify the start day, so `fri 22:00-02:00` includes Saturday 01:00 only as Friday's tail.
+- Any matching window disables the candidate. Checks run at each prompt start, including planning/title/workflow generation and step reruns, and at retry candidate switches. A streaming turn is never interrupted. A disabled single candidate or an entirely disabled/cooling-down list fails without launching a backend.
+- Window exclusions apply independently of retry policy, retry budget, and cooldowns. Skipping them consumes no retry budget and registers no cooldown. Capability validation still includes all candidates regardless of time.
+- Identity is resolved SDK plus base model, shared by effort/native-variant references and matching string entries in explicit retry chains. Such chains remain string-only and take precedence for ordering, not availability.
+- A step model override inherits the workflow list and its windows only when its resolved SDK and base model both match the primary candidate. Changing only effort preserves inheritance when the SDK also matches. Other overrides do not inherit the list. `subagent_model` rejects windows and still requires `sdk` in object form. Standalone model objects, per-step window fields, and window objects in `retry.fallback_chains` are unsupported. Environment model overrides replace the list and its windows.
 
 In all SDK backends, `model` / `plan_model` / per-step `model` carry the same precedence as command mode (step `model` > top-level `model` / `plan_model`). Workflow-level `model` and `plan_model` may be arrays: the first entry is primary and the remaining entries are an implicit fallback chain. Arrays with fallback entries enable model fallback automatically; explicit `retry.fallback_chains` entries for a primary model take precedence. A 429 retries the current model while its retry budget and delay permit, while a 5xx, an HTTP 4xx other than 429, 401, 403, 407, and 408, or a network failure switches immediately to a usable fallback when `--rate-limit-retries` is above zero and no visible text was streamed. Such a 4xx is never resent to the same model — an identical request would fail identically — so it either switches or surfaces as-is; 401, 403, and 407 are auth or permission failures another model cannot fix and fail the step at once, and a 408 is treated as a network failure, so it switches to a usable fallback first exactly like a 5xx and is resent to the same model only when no usable fallback is left, visible text was already streamed, or `--rate-limit-retries` is `0`. Models skipped after a 429, a 5xx, or a network failure (a 408 included) are cooled down for 30 minutes in the current process, and so are models the provider named as missing (`400 model_not_supported`, `404 model_not_found`); only a model left behind by a plain client-error switch is not. Each scalar value is a model reference:
 

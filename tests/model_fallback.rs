@@ -40,6 +40,67 @@ impl ResolutionEnv {
     }
 }
 
+#[test]
+fn scheduled_candidates_survive_app_defaults_resolution_compile_and_after_pr() {
+    for extension in ["json", "yaml"] {
+        for from_defaults in [false, true] {
+            let env = ResolutionEnv::new();
+            let model = serde_json::json!([
+                {"model": "exec/main:high", "disabled_during": ["Mon-Fri 01:00-04:00", "06:00-10:00 +09:00"]},
+                {"sdk": "claude", "model": "exec/tail", "disabled_during": ["00:00-24:00"]}
+            ]);
+            let plan_model = serde_json::json!([
+                {"sdk": "claude", "model": "plan/main", "disabled_during": ["fri 22:00-02:00 -05:30"]},
+                {"model": "plan/tail", "disabled_during": ["sat,sun 00:00-24:00"]}
+            ]);
+            let input = serde_json::json!({"model": model, "planModel": plan_model});
+            let app_dir = env.temp.path().join("config/cruise");
+            std::fs::create_dir_all(&app_dir)
+                .unwrap_or_else(|error| panic!("schedule fixture operation failed: {error}"));
+            let content = if extension == "yaml" {
+                serde_yaml::to_string(&input)
+                    .unwrap_or_else(|error| panic!("schedule fixture operation failed: {error}"))
+            } else {
+                input.to_string()
+            };
+            std::fs::write(app_dir.join(format!("config.{extension}")), content)
+                .unwrap_or_else(|error| panic!("schedule fixture operation failed: {error}"));
+            let project = env.temp.path().join("project");
+            std::fs::create_dir_all(project.join(".cruise"))
+                .unwrap_or_else(|error| panic!("schedule fixture operation failed: {error}"));
+            if from_defaults {
+                // Defaults must win over app configuration without dropping raw schedules.
+                std::fs::write(
+                    project.join(".cruise/default.yaml"),
+                    format!("model: {model}\nplan_model: {plan_model}\n"),
+                )
+                .unwrap_or_else(|error| panic!("schedule fixture operation failed: {error}"));
+                let app = serde_json::json!({"model": "app-loser", "plan_model": "app-plan-loser"});
+                std::fs::write(app_dir.join(format!("config.{extension}")), app.to_string())
+                    .unwrap_or_else(|error| panic!("schedule fixture operation failed: {error}"));
+            }
+            let defaults = WorkflowDefaults::load(Some(&project))
+                .unwrap_or_else(|error| panic!("schedule fixture operation failed: {error}"));
+            let config = resolve_workflow_calls_with_defaults(
+                WorkflowConfig::from_yaml("steps:\n  main:\n    prompt: execute\nafter_pr:\n  review:\n    prompt: review\n").unwrap_or_else(|error| panic!("schedule fixture operation failed: {error}")),
+                &project,
+                &defaults,
+            ).unwrap_or_else(|error| panic!("schedule fixture operation failed: {error}"));
+            cruise::config::validate_config(&config)
+                .unwrap_or_else(|error| panic!("schedule fixture operation failed: {error}"));
+            assert_eq!(model_value(&config.model), model);
+            assert_eq!(model_value(&config.plan_model), plan_model);
+            let compiled = workflow::compile(config)
+                .unwrap_or_else(|error| panic!("schedule fixture operation failed: {error}"));
+            assert_eq!(model_value(&compiled.model), model);
+            assert_eq!(model_value(&compiled.plan_model), plan_model);
+            let after_pr = compiled.to_after_pr_compiled();
+            assert_eq!(model_value(&after_pr.model), model);
+            assert_eq!(model_value(&after_pr.plan_model), plan_model);
+        }
+    }
+}
+
 fn model_value(value: &impl serde::Serialize) -> serde_json::Value {
     serde_json::to_value(value).unwrap_or_else(|error| panic!("serialize model selection: {error}"))
 }

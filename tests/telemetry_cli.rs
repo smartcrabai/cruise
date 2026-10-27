@@ -2142,6 +2142,79 @@ fn failed_exec_exports_error_status_without_error_text() {
 }
 
 #[test]
+fn scheduled_startup_fallback_exports_time_window_reason_not_cooldown() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        "sdk: claude\nmodel:\n  - model: telemetry-scheduled-primary\n    disabled_during: ['00:00-24:00']\n  - telemetry-available-spare\nsteps:\n  answer:\n    prompt: SCHEDULE_TELEMETRY\n",
+    );
+    let bin = fixture.root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("create bin: {error}"));
+    cruise::test_support::write_executable_script(
+        &bin.join("claude"),
+        r#"#!/bin/sh
+read -r user_frame
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"schedule-telemetry"}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"schedule-telemetry","result":"done"}'
+"#,
+    );
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let mut env = otlp_env(&collector.endpoint());
+    env.push((
+        "PATH".into(),
+        std::env::join_paths(paths)
+            .unwrap_or_else(|error| panic!("join PATH: {error}"))
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    let output = fixture.run(&borrowed_env(&env), "schedule telemetry input");
+    assert_success(&output);
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported = spans(&requests);
+    let events: Vec<_> = exported
+        .iter()
+        .flat_map(|span| &span.events)
+        .filter(|event| event.name == "cruise.retry")
+        .collect();
+    assert_eq!(
+        events.len(),
+        1,
+        "one startup fallback event expected: {events:?}"
+    );
+    let event = events[0];
+    for (key, value) in [
+        ("cruise.retry.action", "fallback"),
+        ("cruise.retry.reason", "model_time_window"),
+        ("cruise.retry.from_model", "telemetry-scheduled-primary"),
+        ("cruise.retry.to_model", "telemetry-available-spare"),
+    ] {
+        assert_eq!(
+            event.attributes.get(key).map(String::as_str),
+            Some(value),
+            "{event:?}"
+        );
+    }
+    let counts = retry_count_points(&requests);
+    assert_eq!(counts.iter().map(|point| point.value).sum::<i64>(), 1);
+    for point in counts {
+        assert_eq!(
+            point.attributes,
+            HashMap::from([
+                ("cruise.retry.action".to_owned(), "fallback".to_owned()),
+                (
+                    "cruise.retry.reason".to_owned(),
+                    "model_time_window".to_owned()
+                ),
+            ]),
+            "time windows must not be exported as cooldowns"
+        );
+    }
+}
+
+#[test]
 fn command_rate_limit_retry_exports_attempts_and_bounded_retry_telemetry() {
     let collector = Collector::start();
     let fixture = Fixture::new(
