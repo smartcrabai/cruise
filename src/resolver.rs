@@ -13,6 +13,8 @@ pub enum ConfigSource {
     Local(PathBuf),
     /// Selected from `~/.config/cruise/workflows/`.
     UserDir(PathBuf),
+    /// Caller-provided YAML with local dependencies relative to its base directory.
+    Inline,
     /// Using the built-in default, either as the fallback or by explicit selection.
     Builtin,
     /// A named built-in workflow other than the default.
@@ -27,6 +29,7 @@ impl ConfigSource {
                 "config: (builtin {})",
                 crate::builtin_workflows::DEFAULT_BUILTIN_NAME
             ),
+            Self::Inline => "config: (inline)".to_string(),
             Self::NamedBuiltin(name) => format!("config: (builtin {name})"),
             Self::Explicit(p) | Self::EnvVar(p) | Self::Local(p) | Self::UserDir(p) => {
                 format!("config: {}", p.display())
@@ -34,20 +37,20 @@ impl ConfigSource {
         }
     }
 
-    /// Returns the path to the config file, or `None` for the built-in default.
+    /// Returns the config file path, or `None` for inline and embedded sources.
     #[must_use]
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
             Self::Explicit(p) | Self::EnvVar(p) | Self::Local(p) | Self::UserDir(p) => Some(p),
-            Self::Builtin | Self::NamedBuiltin(_) => None,
+            Self::Inline | Self::Builtin | Self::NamedBuiltin(_) => None,
         }
     }
 }
 /// Resolve a workflow config from its source, including `workflow_call` and
 /// `prompt_file` references, against its source directory.
 ///
-/// File-backed sources are reloaded from their source path; the supplied `yaml` is
-/// parsed for the built-in source, where `base_dir` supplies the relative-path base.
+/// File-backed sources are reloaded from their source path. Inline YAML uses
+/// `base_dir` for local references, while built-ins resolve embedded resources.
 ///
 /// # Errors
 ///
@@ -59,13 +62,29 @@ pub fn resolve_workflow_config(
     project_dir: Option<&std::path::Path>,
 ) -> Result<crate::config::WorkflowConfig> {
     let defaults = crate::workflow_defaults::WorkflowDefaults::load(project_dir)?;
-    match source.path() {
-        Some(path) => {
+    match source {
+        ConfigSource::Builtin | ConfigSource::NamedBuiltin(_) => {
+            let name = match source {
+                ConfigSource::NamedBuiltin(name) => name,
+                _ => crate::builtin_workflows::DEFAULT_BUILTIN_NAME,
+            };
+            crate::workflow_call::resolve_embedded_workflow_with_defaults(
+                yaml,
+                &format!("{name}.yaml"),
+                &defaults,
+            )
+        }
+        ConfigSource::Inline => {
+            crate::workflow_call::resolve_workflow_calls_from_yaml_with_defaults(
+                yaml, base_dir, &defaults,
+            )
+        }
+        ConfigSource::Explicit(path)
+        | ConfigSource::EnvVar(path)
+        | ConfigSource::Local(path)
+        | ConfigSource::UserDir(path) => {
             crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(path, &defaults)
         }
-        None => crate::workflow_call::resolve_workflow_calls_from_yaml_with_defaults(
-            yaml, base_dir, &defaults,
-        ),
     }
 }
 

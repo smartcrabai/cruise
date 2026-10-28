@@ -5,6 +5,12 @@ description: Use when creating or editing a cruise YAML config file (cruise.yaml
 
 cruise is a workflow orchestrator that drives coding agent CLIs like `claude -p` via a YAML config. This skill documents the config file format.
 
+Workflow composition keeps string `workflow_call` references and supports required
+callee `inputs` with string-valued caller `with` mappings. See
+[steps.md](references/steps.md#workflow-call-inputs) for complete caller/callee
+examples and [variables.md](references/variables.md#load-time-workflow-inputs)
+for lexical scope, explicit forwarding, and preserved runtime escapes.
+
 ## When to use
 
 - Creating a new `cruise.yaml` / `.cruise.yaml` / `cruise.yml` / `.cruise.yml`
@@ -24,6 +30,15 @@ Config files are resolved in this priority order:
 6. Built-in `tdd` (`builtin/tdd.yaml` in the source tree, embedded at build time: test-first steps + verify-review group (parallel read-only analyzers → consolidate → apply) + after-PR automation; uses the fallback `jcode` backend only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied) — selected by `-c __builtin__` or `-c builtin:tdd`.
 
 The fixed built-in catalog and selector order is `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`. All six declare `after_pr` and `merge`, off when absent. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. `-f after_pr` enables the prelude without merge; `-f merge` runs the same prelude once and adds the final native synchronous squash merge. `research` stays read-only with `create_pr: false`, so merge never creates a PR or overrides its no-PR policy.
+
+The shared six-step after-PR prelude is embedded with the binary and is not an
+extra catalog workflow. Built-ins never fall back to local shared files, while
+ordinary local YAML and inline YAML retain source-relative/base-directory
+resolution. Eject materializes dependencies into standalone YAML without host
+models, environment overrides, or defaults, preserves omitted root fields, and
+refuses overwrites. Package artifacts and new builtin/repository/inline snapshots
+also retain resolved content. Existing snapshots and step IDs are unchanged,
+and file-backed sessions keep their live-reload contract.
 
 `research` provides bounded read-only research with independent review and a cited report. `security` performs scoped, parallel security audits, triages findings, repairs confirmed safe defects, and independently verifies the results. `add-tests` inventories production behavior and real user-flow coverage before implementation and reports evidence-backed coverage/gap IDs; it does not impose numeric coverage quotas.
 

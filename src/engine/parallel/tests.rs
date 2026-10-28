@@ -96,6 +96,41 @@ impl Fixture {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn parallel_instruction_requires_nonempty_runtime_input_before_prompt_execution() {
+    let _lock = crate::test_support::lock_process();
+    for input in ["", "supplied input"] {
+        let mut fixture = Fixture::new(
+            r"
+command: [sh, -c, 'touch executor.started; cat >/dev/null; printf result']
+steps:
+  checks:
+    parallel:
+      agent:
+        prompt: 'Inspect {input}'
+        instruction: 'Please supply input'
+",
+        );
+        fixture.vars.set_input(input.to_string());
+        let result = fixture.run(None, None).await;
+        if input.is_empty() {
+            assert!(
+                matches!(result, Err(CruiseError::InvalidStepConfig(ref message))
+                    if message.contains("checks/agent")
+                        && message.contains("supply input")
+                        && message.contains("preceding sequential instruction step")),
+                "empty input must fail before terminal input or execution: {result:?}"
+            );
+            assert!(!fixture.root.path().join("executor.started").exists());
+        } else {
+            assert_eq!(result.unwrap_or_else(|error| panic!("{error}")).failed, 0);
+            assert!(fixture.root.path().join("executor.started").exists());
+            assert_eq!(fixture.outputs()["agent"]["output"], "result");
+        }
+    }
+}
+
 // Commands use POSIX shell syntax (`;`, `[ -f ]`, `>&2`) that cmd.exe cannot run.
 #[cfg(unix)]
 #[tokio::test]

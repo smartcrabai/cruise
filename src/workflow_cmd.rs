@@ -117,7 +117,7 @@ pub fn eject(name: &str, project: bool) -> Result<()> {
     Ok(())
 }
 
-/// Copy a built-in workflow to `<destination_dir>/<name>.yaml` without overwriting.
+/// Materialize a built-in workflow to `<destination_dir>/<name>.yaml` without overwriting.
 ///
 /// # Errors
 ///
@@ -125,16 +125,15 @@ pub fn eject(name: &str, project: bool) -> Result<()> {
 pub fn eject_builtin(name: &str, destination_dir: &Path) -> Result<PathBuf> {
     let workflow = find_builtin(name)
         .ok_or_else(|| CruiseError::Other(format!("unknown built-in workflow: {name}")))?;
+    let yaml =
+        crate::workflow_call::materialize_embedded_workflow(&format!("{}.yaml", workflow.name))?;
     std::fs::create_dir_all(destination_dir)?;
     let path = destination_dir.join(format!("{}.yaml", workflow.name));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&path)?;
-    if let Err(e) = file
-        .write_all(workflow.yaml.as_bytes())
-        .and_then(|()| file.flush())
-    {
+    if let Err(e) = file.write_all(yaml.as_bytes()).and_then(|()| file.flush()) {
         drop(file);
         let _ = std::fs::remove_file(&path);
         return Err(e.into());
@@ -356,15 +355,26 @@ mod tests {
     }
 
     #[test]
-    fn eject_builtin_copies_each_catalog_workflow_to_new_destination() {
+    fn eject_builtin_materializes_each_catalog_workflow_for_independent_loading() {
         let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         for workflow in BUILTIN_WORKFLOWS {
             let dest = tmp.path().join(workflow.name);
             let path = eject_builtin(workflow.name, &dest).unwrap_or_else(|e| panic!("{e:?}"));
             assert_eq!(path, dest.join(format!("{}.yaml", workflow.name)));
+            let config = crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(
+                &path,
+                &crate::workflow_defaults::WorkflowDefaults::default(),
+            )
+            .unwrap_or_else(|e| panic!("{} cannot load independently: {e:?}", workflow.name));
+            crate::config::validate_config(&config).unwrap_or_else(|e| panic!("{e:?}"));
+            let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(compiled.after_pr.len(), 7);
             assert_eq!(
-                std::fs::read_to_string(&path).unwrap_or_default(),
-                workflow.yaml
+                compiled
+                    .after_pr
+                    .last()
+                    .map(|(id, step)| (id.as_str(), step.squash_merge)),
+                Some(("squash-merge", Some(true)))
             );
         }
     }

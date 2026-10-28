@@ -360,6 +360,40 @@ fn new_session_rejects_config_path_and_inline_yaml_together_without_publishing_s
     );
 }
 
+fn assert_inline_snapshot_survives_dependency_changes(
+    manager: &SessionManager,
+    application: &CruiseApplication,
+    id: &str,
+    dependency: &Path,
+    snapshot_bytes: &[u8],
+) {
+    let snapshot = manager.sessions_dir().join(id).join("config.yaml");
+    for replacement in [Some("steps:\n  changed:\n    prompt: changed\n"), None] {
+        if let Some(yaml) = replacement {
+            fs::write(dependency, yaml).unwrap_or_else(|error| panic!("{error}"));
+        } else {
+            fs::remove_file(dependency).unwrap_or_else(|error| panic!("{error}"));
+        }
+        let reloaded = manager
+            .load_config(&manager.load(id).unwrap_or_else(|error| panic!("{error}")))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            reloaded.steps["inline/local-follow-up"].prompt.as_deref(),
+            Some("persisted local {input}")
+        );
+        let graph = application
+            .session_dag(id)
+            .unwrap_or_else(|error| panic!("load graph: {error}"))
+            .unwrap_or_else(|| panic!("application returned no graph"));
+        assert!(graph.nodes.contains_key("inline/local-follow-up"));
+        assert!(!graph.nodes.contains_key("inline/changed"));
+        assert_eq!(
+            fs::read(&snapshot).unwrap_or_else(|error| panic!("{error}")),
+            snapshot_bytes
+        );
+    }
+}
+
 #[test]
 fn inline_yaml_is_saved_as_an_inline_snapshot_and_is_not_reclassified_as_builtin() {
     let _env_lock = ENV_LOCK
@@ -372,6 +406,11 @@ fn inline_yaml_is_saved_as_an_inline_snapshot_and_is_not_reclassified_as_builtin
     fs::create_dir_all(temp.path().join("xdg-state").join("cruise"))
         .unwrap_or_else(|error| panic!("history directory: {error}"));
     let _xdg_state = EnvGuard::set("XDG_STATE_HOME", temp.path().join("xdg-state").as_os_str());
+    let _xdg_config = EnvGuard::set(
+        "XDG_CONFIG_HOME",
+        temp.path().join("xdg-config").as_os_str(),
+    );
+    let _cruise_config = EnvGuard::remove("CRUISE_CONFIG");
     let base_dir = temp.path().join("repo");
     fs::create_dir_all(&base_dir).unwrap_or_else(|error| panic!("base dir: {error}"));
     fs::write(
@@ -379,7 +418,19 @@ fn inline_yaml_is_saved_as_an_inline_snapshot_and_is_not_reclassified_as_builtin
         "command: [local]\nsteps:\n  local:\n    command: \"true\"\n",
     )
     .unwrap_or_else(|error| panic!("local config: {error}"));
-    let inline_yaml = "command: [inline]\nsteps:\n  inline:\n    command: \"true\"\n";
+    let dependency = base_dir.join("_shared/after-pr.yaml");
+    fs::create_dir_all(
+        dependency
+            .parent()
+            .unwrap_or_else(|| panic!("dependency has no parent")),
+    )
+    .unwrap_or_else(|error| panic!("shared directory: {error}"));
+    fs::write(
+        &dependency,
+        "inputs: [message]\nsteps:\n  local-follow-up:\n    prompt: '{inputs.message}'\n",
+    )
+    .unwrap_or_else(|error| panic!("local dependency: {error}"));
+    let inline_yaml = "command: [inline]\nsteps:\n  inline:\n    workflow_call: ./_shared/after-pr.yaml\n    with:\n      message: 'persisted local {input}'\n";
 
     let state = application
         .create_session(request_from_value(request_value(
@@ -407,6 +458,28 @@ fn inline_yaml_is_saved_as_an_inline_snapshot_and_is_not_reclassified_as_builtin
         )
         .unwrap_or_else(|error| panic!("load inline snapshot: {error}"));
     assert_eq!(loaded.command, vec!["inline".to_string()]);
+    assert_eq!(
+        loaded.steps["inline/local-follow-up"].prompt.as_deref(),
+        Some("persisted local {input}")
+    );
+    let snapshot_bytes = fs::read(&snapshot).unwrap_or_else(|error| panic!("{error}"));
+    let persisted: serde_yaml::Value =
+        serde_yaml::from_slice(&snapshot_bytes).unwrap_or_else(|error| panic!("{error}"));
+    assert!(persisted.get("inputs").is_none());
+    let persisted_step = &persisted["steps"]["inline/local-follow-up"];
+    for field in ["with", "workflow_call", "prompt_file"] {
+        assert!(
+            persisted_step.get(field).is_none(),
+            "snapshot retains {field}"
+        );
+    }
+    assert_inline_snapshot_survives_dependency_changes(
+        &manager,
+        &application,
+        &state.id,
+        &dependency,
+        &snapshot_bytes,
+    );
 
     let history = application
         .history()
@@ -418,6 +491,49 @@ fn inline_yaml_is_saved_as_an_inline_snapshot_and_is_not_reclassified_as_builtin
         .unwrap_or_else(|| panic!("inline selection was not recorded"));
     assert_ne!(entry.resolved_config_key, "__builtin__");
     assert!(!entry.resolved_config_key.contains("config.yaml"));
+}
+
+#[test]
+fn existing_builtin_snapshot_keeps_saved_after_pr_step_ids() {
+    let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+    let manager = SessionManager::new(temp.path().join("data"));
+    let id = "20260921020002";
+    let mut value = state_value(id, temp.path(), &builtin_snapshot_ref());
+    value["current_step"] = json!("resolve-conflict");
+    value["skipped_steps"] = json!(["wait-ci"]);
+    write_state(&manager, id, &value);
+    write_session_snapshot(
+        &manager,
+        "20260921020002",
+        "steps:\n  work:\n    command: 'true'\nafter-pr:\n  resolve-conflict:\n    prompt: saved conflict prompt\n  wait-ci:\n    command: 'true'\n",
+    );
+    let snapshot_path = manager.sessions_dir().join(id).join("config.yaml");
+    let before = fs::read(&snapshot_path).unwrap_or_else(|error| panic!("{error}"));
+    let state = manager.load(id).unwrap_or_else(|error| panic!("{error}"));
+    let config = manager
+        .load_config(&state)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(state.current_step.as_deref(), Some("resolve-conflict"));
+    assert_eq!(state.skipped_steps, vec!["wait-ci"]);
+    assert!(config.after_pr.contains_key("resolve-conflict"));
+    assert!(config.after_pr.contains_key("wait-ci"));
+    let compiled = cruise::workflow::compile(config)
+        .unwrap_or_else(|error| panic!("compile saved snapshot: {error}"))
+        .to_after_pr_compiled();
+    let graph = cruise::graph::build_graph(&compiled, 1)
+        .unwrap_or_else(|error| panic!("build saved after-pr graph: {error}"));
+    assert!(graph.nodes.contains_key("resolve-conflict"));
+    assert!(graph.nodes.contains_key("wait-ci"));
+    manager
+        .save(&state)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let saved = read_state_json(&manager, id);
+    assert_eq!(saved["current_step"], value["current_step"]);
+    assert_eq!(saved["skipped_steps"], value["skipped_steps"]);
+    assert_eq!(
+        fs::read(snapshot_path).unwrap_or_else(|error| panic!("{error}")),
+        before
+    );
 }
 
 #[test]

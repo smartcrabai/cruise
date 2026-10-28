@@ -41,6 +41,7 @@ impl SessionConfigRef {
     /// when a clone-relative path cannot be represented.
     pub fn from_source(source: &ConfigSource, clone_root: Option<&Path>) -> Result<Self> {
         match source {
+            ConfigSource::Inline => Ok(Self::InlineSnapshot),
             ConfigSource::Builtin => Ok(Self::BuiltinSnapshot {
                 name: Some(crate::builtin_workflows::DEFAULT_BUILTIN_NAME.to_string()),
             }),

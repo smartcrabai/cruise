@@ -259,15 +259,16 @@ fn build_package(
         .map_err(|e| WorkflowPackageError::InvalidWorkflow(e.to_string()))?;
     crate::config::validate_config(&config)
         .map_err(|e| WorkflowPackageError::InvalidWorkflow(e.to_string()))?;
-    let self_contained = config
-        .steps
-        .values()
-        .chain(config.after_pr.values())
-        .chain(config.groups.values().flat_map(|g| g.steps.values()))
-        .all(|s| s.workflow_call.is_none() && s.prompt_file.is_none());
+    let self_contained = config.inputs.is_empty()
+        && config
+            .steps
+            .values()
+            .chain(config.after_pr.values())
+            .chain(config.groups.values().flat_map(|g| g.steps.values()))
+            .all(materialized_step);
     if !self_contained {
         return Err(WorkflowPackageError::InvalidWorkflow(
-            "workflow still has unresolved workflow_call or prompt_file".to_string(),
+            "workflow still has unresolved inputs, with, workflow_call or prompt_file".to_string(),
         ));
     }
     let yaml = serde_yaml::to_string(&config)
@@ -288,6 +289,16 @@ fn build_package(
         preview,
         replace_existing,
     })
+}
+
+fn materialized_step(step: &crate::config::StepConfig) -> bool {
+    step.workflow_call.is_none()
+        && step.prompt_file.is_none()
+        && step.with.is_none()
+        && step
+            .parallel
+            .as_ref()
+            .is_none_or(|children| children.values().all(materialized_step))
 }
 
 fn check_no_collision(dir: &Path, name: &str) -> Result<(), WorkflowPackageError> {

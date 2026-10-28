@@ -4,6 +4,41 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const DEFAULT_PR_LANGUAGE: &str = "English";
+
+fn deserialize_input_names<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<serde_yaml::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| match value {
+            serde_yaml::Value::String(name) => Ok(name),
+            _ => Err(serde::de::Error::custom("input names must be strings")),
+        })
+        .collect()
+}
+
+fn deserialize_call_arguments<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<IndexMap<String, String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Option::<IndexMap<String, serde_yaml::Value>>::deserialize(deserializer)?;
+    values
+        .map(|values| {
+            values
+                .into_iter()
+                .map(|(key, value)| match value {
+                    serde_yaml::Value::String(value) => Ok((key, value)),
+                    _ => Err(serde::de::Error::custom(format!(
+                        "with argument '{key}' must be a string"
+                    ))),
+                })
+                .collect()
+        })
+        .transpose()
+}
 pub const DEFAULT_PLAN_LANGUAGE: &str = "English";
 
 /// Default global budgeted graph-transition ceiling ("G") when neither an
@@ -51,6 +86,13 @@ pub enum PermissionMode {
     reason = "workflow configuration flags represent independent settings"
 )]
 pub struct WorkflowConfig {
+    /// Required string arguments supplied by a `workflow_call`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_input_names",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub inputs: Vec<String>,
     /// LLM invocation command (e.g. `["claude", "--model", "{model}", "-p"]`).
     ///
     /// Mutually exclusive with `sdk` (validated by [`validate_sdk`]). Defaults
@@ -468,6 +510,15 @@ pub struct StepConfig {
     /// Reference to another cruise workflow YAML file to inline at compile/load time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_call: Option<String>,
+
+    /// Lexically scoped arguments for a `workflow_call`, resolved at load time.
+    #[serde(
+        default,
+        rename = "with",
+        deserialize_with = "deserialize_call_arguments",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub with: Option<IndexMap<String, String>>,
 
     /// Path or supported GitHub blob/raw URL whose contents become `prompt`.
     /// Absolute, `~`-prefixed, or relative to the directory of the config file
@@ -1101,6 +1152,19 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
 ///
 /// Returns an error if any validation check fails.
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
+    if let Some(input) = config.inputs.first() {
+        return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+            "root workflow missing input '{input}'"
+        )));
+    }
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        validate_call_argument_placement(name, step)?;
+    }
     validate_sdk(config)?;
     validate_mcp_servers(config)?;
     validate_flags(config)?;
@@ -1118,6 +1182,20 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     validate_timeouts(config)?;
     validate_when(config)?;
     validate_retry(config)?;
+    Ok(())
+}
+
+fn validate_call_argument_placement(name: &str, step: &StepConfig) -> crate::error::Result<()> {
+    if step.with.is_some() && step.workflow_call.is_none() {
+        return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+            "step '{name}' uses with without workflow_call"
+        )));
+    }
+    if let Some(children) = &step.parallel {
+        for (name, child) in children {
+            validate_call_argument_placement(name, child)?;
+        }
+    }
     Ok(())
 }
 
@@ -1569,7 +1647,7 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
             || child.workflow_call.is_some()
             || child.next.is_some()
             || child.if_condition.is_some()
-            || child.instruction.is_some()
+            || (child.instruction.is_some() && child.command.is_some())
             || child.plan.is_some()
             || child.allow_commit
             || (child.computer_use.is_some() && child.command.is_some())
@@ -1579,7 +1657,7 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
         {
             return Err(CruiseError::InvalidStepConfig(format!(
                 "parallel child '{path}' requires exactly one of prompt, prompt_file, or command; \
-                 only model, env, skip, when, timeout, computer_use, disallowed_tools, permission and subagent_model (prompt children only), \
+                 only model, env, skip, when, timeout, instruction, computer_use, disallowed_tools, permission and subagent_model (prompt children only), \
                  and output_file (prompt children only) may accompany it"
             )));
         }
@@ -2775,8 +2853,9 @@ steps:
 
     #[test]
     fn builtin_workflow_does_not_use_github_review() {
-        let config =
-            WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = crate::workflow_call::materialize_embedded_workflow("tdd.yaml")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(config.after_pr.values().all(|s| s.github_review.is_none()));
     }
 
@@ -7393,8 +7472,9 @@ steps:
     fn test_validate_mixed_conditional_cycles_builtin_config_ok() {
         // Given: the built-in default workflow (its review loop is safely
         // confined inside groups.verify-review with max_retries)
-        let config =
-            WorkflowConfig::from_yaml(BUILTIN_CONFIG_YAML).unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = crate::workflow_call::materialize_embedded_workflow("tdd.yaml")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
 
         // When/Then: the mixed-cycle validator accepts it
         assert!(

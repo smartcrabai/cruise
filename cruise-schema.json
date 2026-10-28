@@ -11,6 +11,12 @@
       "type": "string",
       "description": "Human-readable description displayed alongside the file name in config selectors"
     },
+    "inputs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+      "description": "Workflow-only required string input names supplied by workflow_call.with. No defaults or optional inputs. A root workflow cannot declare nonempty inputs; forbidden in default.yaml."
+    },
     "command": {
       "type": "array",
       "items": {
@@ -316,6 +322,11 @@
           "type": "string",
           "description": "Reference to another cruise workflow YAML file or supported GitHub URL to inline"
         },
+        "with": {
+          "type": ["object", "null"],
+          "additionalProperties": { "type": "string" },
+          "description": "Arguments for workflow_call only. Keys must exactly match the callee inputs; values are strings, including empty strings, with no implicit coercion. Omission or null means no arguments."
+        },
         "prompt_file": {
           "type": ["string", "null"],
           "description": "Path to a file whose contents are used as the prompt. Absolute, ~-prefixed, config-file-relative, or supported GitHub blob/raw URL (a bare file name = same directory). YAML `~` or null denotes the local home directory. Mutually exclusive with prompt."
@@ -356,6 +367,10 @@
         }
       },
       "allOf": [
+        {
+          "if": { "required": ["with"], "properties": { "with": { "type": "object" } } },
+          "then": { "required": ["workflow_call"] }
+        },
         {
           "not": {
             "required": ["prompt", "prompt_file"]
@@ -578,6 +593,7 @@
       "properties": {
         "prompt": { "$ref": "#/$defs/StepConfig/properties/prompt" },
         "prompt_file": { "$ref": "#/$defs/StepConfig/properties/prompt_file" },
+        "instruction": { "$ref": "#/$defs/StepConfig/properties/instruction" },
         "command": { "allOf": [{ "$ref": "#/$defs/StepConfig/properties/command" }, { "minItems": 1 }] },
         "model": { "$ref": "#/$defs/StepConfig/properties/model" },
         "subagent_model": { "$ref": "#/$defs/StepConfig/properties/subagent_model" },
@@ -589,7 +605,8 @@
         "permission": { "$ref": "#/$defs/StepConfig/properties/permission" },
         "disallowed_tools": { "$ref": "#/$defs/StepConfig/properties/disallowed_tools" },
         "output_file": { "$ref": "#/$defs/StepConfig/properties/output_file" },
-        "allow_commit": { "const": false }
+        "allow_commit": { "const": false },
+        "with": { "type": "null" }
       },
       "oneOf": [
         { "required": ["prompt"] },
@@ -601,6 +618,7 @@
           "if": { "required": ["command"] },
           "then": {
             "properties": {
+              "instruction": { "type": "null" },
               "subagent_model": { "type": "null" },
               "computer_use": { "type": "null" },
               "disallowed_tools": { "maxItems": 0 },

@@ -1375,7 +1375,7 @@ steps:
 - Each child receives the same input and `{prev.*}` values from before the
   block. Environment precedence is workflow < parallel block < child. Children
   can use `model`, `env`, `skip`, `when`, and `timeout`; prompt children may also
-  set `computer_use`, `permission`, and `disallowed_tools` (the parent cannot), and `output_file` with distinct artifact names within the block. `prompt_file`
+  set `instruction`, `computer_use`, `permission`, and `disallowed_tools` (the parent cannot), and `output_file` with distinct artifact names within the block. Parallel instructions are noninteractive and require nonempty runtime input. Supply input or use a preceding sequential instruction step, otherwise execution returns an error without opening an input editor. `instruction` is rejected on command children. `prompt_file`
   resolves relative to its config as usual. Command arrays remain sequential per
   child.
   A child prompt that reads an artifact produced by a sibling in the same block
@@ -1404,7 +1404,7 @@ steps:
   block as one step.
 - Parallel blocks also work inside `groups`, `after-pr`, and called workflows.
   Children must be prompt/command steps; child `next`, `if`, `option`,
-  `instruction`, `plan`, `group`, `workflow_call`, nested `parallel`, `flag`, and
+  `plan`, `group`, `workflow_call`, nested `parallel`, `flag`, and
   `allow_commit: true` are rejected. Configure flow control on the parent (including `flag`) and
   perform commits in a subsequent sequential step.
 
@@ -1719,6 +1719,58 @@ steps:
 
 The referenced file is a regular cruise config. Its top-level execution settings (`command`, `sdk`, `model`, `env`, `computer_use`, etc.) are ignored -- only its `steps` are imported. The parent's settings apply to the expanded steps, while per-step overrides inside the called workflow are preserved.
 
+#### Required string inputs
+
+A complete callee, `workflows/review.yaml`:
+
+```yaml
+inputs: [review_prompt, label]
+steps:
+  review:
+    prompt: "{inputs.review_prompt}"
+  announce:
+    env:
+      REVIEW_LABEL: "{inputs.label}"
+    command: 'printf "%s\n" "$REVIEW_LABEL"'
+```
+
+Its complete caller, `cruise.yaml`:
+
+```yaml
+create_pr: false
+steps:
+  shared-review:
+    workflow_call: ./workflows/review.yaml
+    with:
+      review_prompt: "Review the changes for {input}, using {plan}."
+      label: "review"
+```
+
+`inputs` is an optional list of unique names matching `[A-Za-z_][A-Za-z0-9_]*`.
+Every declared input is required. `with` is a string-valued mapping: empty strings
+are valid, but numbers, booleans, arrays, and objects are not converted to strings.
+Missing or extra arguments and undeclared input references fail before execution.
+Omitting `with` or setting it to `null` passes no arguments. Even an empty mapping
+is allowed only on a `workflow_call` step. A directly loaded root cannot declare
+nonempty `inputs`, and `inputs` is forbidden in user/project `default.yaml`.
+There are no input defaults, optional inputs, or CLI input arguments.
+
+`{inputs.name}` binds at config-load time in prompt text (including loaded
+`prompt_file` contents), instruction, command strings/array elements, env values,
+and nested call `with` values, including parallel prompt/command children.
+It does not parameterize paths, step names, transitions, flags, or models.
+`prompt_file` paths resolve relative to their declaring source before binding.
+Each callee has a lexical scope: parents and siblings do not implicitly share
+inputs. Forward explicitly, for example `with: {label: "{inputs.label}"}` on a
+nested call whose callee declares `label`.
+
+Inserted values are not rescanned in the same binding pass. Runtime tokens such
+as `{input}`, `{plan}`, `{prev.*}`, `{pr.*}`, and `{file:...}` remain for normal
+execution-time evaluation. Escapes are preserved at load time: `{{inputs.label}}`
+is not an input lookup and becomes the literal `{inputs.label}` at runtime.
+The existing `{{...}}` and `}}` brace rules still apply. Inputs are template
+fragments, not a secret store or an automatic shell-quoting mechanism.
+
 #### Supported sources
 
 | Source | Example |
@@ -1729,9 +1781,35 @@ The referenced file is a regular cruise config. Its top-level execution settings
 
 GitHub workflows are fetched via `gh api` at config-load time. Relative paths inside a GitHub-hosted workflow resolve from the remote directory, so nested references work across repositories.
 
+Installed built-ins resolve their shared dependencies from embedded resources,
+never from a same-named local file. Loading `builtin/*.yaml` as ordinary local
+files instead resolves dependencies relative to those files. Inline YAML uses
+its supplied base directory for local dependencies, not the embedded registry.
+The shared after-PR resource is internal and is not a catalog entry or a new
+public `workflow_call` source syntax.
+
+All six built-ins call the same six-step after-PR prelude in order:
+`pr-ready` → `sync-base` → `resolve-conflict` → `push-after-sync` → `wait-ci` →
+`fix-ci-error`. Each root supplies its workflow-specific conflict and CI prompts
+through `with`. The `follow-up` call's `flag: [after_pr, merge]` gates all six
+steps; the callee has no flags. New sessions use IDs such as
+`follow-up/wait-ci`, with internal transitions prefixed to that same call.
+Native `squash-merge` stays the final direct root after-PR step, gated only by
+`merge`. Both flags remain off by default, and `research` retains
+`create_pr: false`.
+
+`cruise workflow eject <name> [--to user|project]` writes a self-contained,
+editable workflow with calls and file-backed prompts materialized. It preserves
+root field omission and does not bake in host models, environment overrides, or
+user/project defaults. Existing files are never overwritten. Installed packages
+and new builtin/repository/inline session snapshots likewise retain resolved
+content without `inputs`, `with`, `workflow_call`, or `prompt_file` metadata.
+Existing snapshots and saved step IDs are not migrated. File-backed sessions
+retain their existing live-reload behavior.
+
 #### Call-site fields
 
-A `workflow_call` step is a pure delegation point. Only `skip`, `when`, `next`, and `flag` may be set alongside `workflow_call`:
+A `workflow_call` step is a pure delegation point. Only `with`, `skip`, `when`, `next`, and `flag` may be set alongside `workflow_call`:
 
 - `skip` and `when` are applied to the **first** expanded step.
 - `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).

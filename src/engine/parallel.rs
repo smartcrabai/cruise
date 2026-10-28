@@ -212,6 +212,11 @@ async fn run_child_inner(
     let result = async {
         let success = match StepKind::try_from(child.clone())? {
             StepKind::Prompt(step) => {
+                if step.instruction.is_some() && vars.input_is_empty() {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "parallel prompt child '{name}' with an instruction requires nonempty runtime input; supply input or use a preceding sequential instruction step"
+                    )));
+                }
                 run_prompt_step(
                     &mut vars,
                     ctx.compiled,

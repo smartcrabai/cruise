@@ -196,6 +196,69 @@ fn add_defaults_name_to_repo_for_root_workflow_and_does_not_run_it() {
 }
 
 #[test]
+fn installed_input_bearing_dependencies_remain_usable_without_upstream() {
+    let fx = Fixture::new();
+    fx.publish(
+        SHA_1,
+        "create_pr: false\nsteps:\n  follow-up:\n    workflow_call: ./_shared/after-pr.yaml\n    with:\n      message: 'installed {input}'\n",
+        "unused\n",
+    );
+    let shared = fx.root.path().join("bin/files").join(SHA_1).join("_shared");
+    std::fs::create_dir_all(&shared).unwrap_or_else(|error| panic!("{error}"));
+    std::fs::write(
+        shared.join("after-pr.yaml"),
+        "inputs: [message]\nsteps:\n  report:\n    prompt_file: ../prompts/p.md\n",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    std::fs::write(
+        fx.root
+            .path()
+            .join("bin/files")
+            .join(SHA_1)
+            .join("prompts/p.md"),
+        "Bound dependency: {inputs.message}\n",
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    fx.install("bound");
+
+    // Remove all remote contents, not just the root, before consuming the artifact.
+    std::fs::remove_dir_all(fx.root.path().join("bin/files"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let yaml = read(&fx.yaml("bound"));
+    let artifact: serde_yaml::Value =
+        serde_yaml::from_str(&yaml).unwrap_or_else(|error| panic!("{error}"));
+    assert!(artifact.get("inputs").is_none());
+    let step = &artifact["steps"]["follow-up/report"];
+    for field in ["workflow_call", "with", "prompt_file"] {
+        assert!(step.get(field).is_none(), "installed step retains {field}");
+    }
+    let config = cruise::workflow_call::resolve_workflow_calls_without_app_model_defaults(
+        cruise::config::WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|error| panic!("{error}")),
+        fx.workflows(),
+        &cruise::workflow_defaults::WorkflowDefaults::default(),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        config.steps["follow-up/report"].prompt.as_deref(),
+        Some("Bound dependency: installed {input}\n")
+    );
+    let out = fx.cruise(&[
+        "exec",
+        "--dry-run",
+        "-c",
+        fx.yaml("bound")
+            .to_str()
+            .unwrap_or_else(|| panic!("package path is not UTF-8")),
+        "package-portability",
+    ]);
+    assert!(
+        out.status.success(),
+        "installed package unusable: {}",
+        text(&out)
+    );
+}
+
+#[test]
 fn add_rejects_unsafe_name() {
     let fx = Fixture::new();
     let out = fx.cruise(&["workflow", "add", "org/repo", "--name", "../x", "--yes"]);

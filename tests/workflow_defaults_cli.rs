@@ -837,11 +837,17 @@ fn removed_builtin_names_are_rejected_by_cli() {
 fn builtin_wait_ci_command(name: &str) -> String {
     let workflow = cruise::builtin_workflows::find_builtin(name)
         .unwrap_or_else(|| panic!("missing builtin workflow {name}"));
-    let config = cruise::config::WorkflowConfig::from_yaml(workflow.yaml)
-        .unwrap_or_else(|error| panic!("parse builtin workflow {name}: {error}"));
+    let source_dir = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let config = cruise::resolver::resolve_workflow_config(
+        workflow.yaml,
+        &cruise::resolver::ConfigSource::NamedBuiltin(workflow.name),
+        source_dir.path(),
+        None,
+    )
+    .unwrap_or_else(|error| panic!("load builtin workflow {name}: {error}"));
     let command = config
         .after_pr
-        .get("wait-ci")
+        .get("follow-up/wait-ci")
         .and_then(|step| step.command.as_ref())
         .unwrap_or_else(|| panic!("{name} has no wait-ci command"));
     let mut variables = cruise::variable::VariableStore::new(String::new());
