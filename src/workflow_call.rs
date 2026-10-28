@@ -84,7 +84,7 @@ pub fn resolve_workflow_calls_with_defaults(
 ) -> Result<WorkflowConfig> {
     let base_dir = base_dir.into();
     let mut stack = CallStack::default();
-    let config = resolve_workflow_calls_inner(config, &base_dir, &mut stack)?;
+    let config = resolve_root_workflow_calls_inner(config, &base_dir, &mut stack)?;
     finish_resolved_config(
         WorkflowConfigResolution::from_materialized(config),
         defaults,
@@ -112,7 +112,7 @@ pub fn resolve_workflow_calls_without_app_model_defaults(
 ) -> Result<WorkflowConfig> {
     let base_dir = base_dir.into();
     let mut stack = CallStack::default();
-    let config = resolve_workflow_calls_inner(config, &base_dir, &mut stack)?;
+    let config = resolve_root_workflow_calls_inner(config, &base_dir, &mut stack)?;
     finish_resolved_config(
         WorkflowConfigResolution::from_materialized(config),
         defaults,
@@ -131,7 +131,8 @@ pub(crate) fn resolve_workflow_calls_from_yaml_with_defaults(
     let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
     let mut stack = CallStack::default();
-    resolution.config = resolve_workflow_calls_inner(resolution.config, &base_dir, &mut stack)?;
+    resolution.config =
+        resolve_root_workflow_calls_inner(resolution.config, &base_dir, &mut stack)?;
     finish_resolved_config(resolution, defaults, true)
 }
 
@@ -147,6 +148,123 @@ pub fn resolve_github_workflow_for_install(
     reference: &GitHubWorkflowRef,
 ) -> Result<WorkflowConfig> {
     load_github_workflow(reference, &mut CallStack::default())
+}
+
+/// Resolve a builtin resource with runtime defaults and environment overrides.
+///
+/// # Errors
+/// Returns an error for invalid resources, arguments, dependency graphs or defaults.
+pub(crate) fn resolve_embedded_workflow_with_defaults(
+    yaml: &str,
+    resource_key: &str,
+    defaults: &WorkflowDefaults,
+) -> Result<WorkflowConfig> {
+    let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
+        .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
+    resolution.config = load_embedded_workflow_yaml(
+        resource_key,
+        yaml,
+        &mut CallStack::default(),
+        &IndexMap::new(),
+        "root",
+    )?;
+    finish_resolved_config(resolution, defaults, true)
+}
+
+/// Produce portable builtin YAML without applying machine defaults or overrides.
+/// Root field omission is preserved because omission controls defaults precedence.
+///
+/// # Errors
+/// Returns an error if a resource cannot be parsed, resolved or serialized.
+pub(crate) fn materialize_embedded_workflow(resource_key: &str) -> Result<String> {
+    let yaml = embedded_yaml(resource_key)?;
+    let config = load_embedded_workflow(
+        resource_key,
+        &mut CallStack::default(),
+        &IndexMap::new(),
+        "root",
+    )?;
+    let mut root: serde_yaml::Value = serde_yaml::from_str(yaml)
+        .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
+    let mapping = root.as_mapping_mut().ok_or_else(|| {
+        CruiseError::InvalidStepConfig("workflow root must be a mapping".to_string())
+    })?;
+    let materialized = serde_yaml::to_value(&config)
+        .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
+    for key in ["steps", "groups", "after-pr"] {
+        let key = serde_yaml::Value::String(key.to_string());
+        if mapping.contains_key(&key) {
+            mapping.insert(key.clone(), materialized[&key].clone());
+        }
+    }
+    mapping.remove(serde_yaml::Value::String("inputs".to_string()));
+    serde_yaml::to_string(&root).map_err(|error| CruiseError::ConfigParseError(error.to_string()))
+}
+
+fn embedded_yaml(key: &str) -> Result<&'static str> {
+    crate::builtin_workflows::find_builtin_resource(key).ok_or_else(|| {
+        CruiseError::InvalidStepConfig(format!("missing embedded workflow resource '{key}'"))
+    })
+}
+
+fn embedded_relative_key(parent: &str, relative: &str) -> Result<String> {
+    if relative.starts_with('/') || relative.contains(':') || relative.starts_with('~') {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "invalid embedded resource reference '{relative}' from '{parent}'"
+        )));
+    }
+    let mut parts: Vec<&str> = parent.split('/').collect();
+    parts.pop();
+    for part in relative.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "embedded resource '{relative}' escapes resource root from '{parent}'"
+                    )));
+                }
+            }
+            part => parts.push(part),
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+fn load_embedded_workflow(
+    key: &str,
+    stack: &mut CallStack,
+    inputs: &IndexMap<String, String>,
+    site: &str,
+) -> Result<WorkflowConfig> {
+    load_embedded_workflow_yaml(key, embedded_yaml(key)?, stack, inputs, site)
+}
+
+fn load_embedded_workflow_yaml(
+    key: &str,
+    yaml: &str,
+    stack: &mut CallStack,
+    inputs: &IndexMap<String, String>,
+    site: &str,
+) -> Result<WorkflowConfig> {
+    if stack.embedded.iter().any(|active| active == key) {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "workflow_call '{site}' cycle at embedded resource '{key}'"
+        )));
+    }
+    let mut config = WorkflowConfig::from_yaml(yaml)
+        .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
+    stack.embedded.push(key.to_string());
+    stack
+        .sources
+        .push(WorkflowSource::Embedded(key.to_string()));
+    let result = (|| {
+        bind_workflow_inputs(&mut config, Path::new(key), stack, inputs, site)?;
+        resolve_workflow_calls_inner(config, Path::new(key), stack)
+    })();
+    stack.embedded.pop();
+    stack.sources.pop();
+    result
 }
 
 fn finish_resolved_config(
@@ -222,9 +340,27 @@ fn parse_github_url(url: &str, field: &str) -> Result<GitHubWorkflowRef> {
 struct CallStack {
     local: Vec<PathBuf>,
     github: Vec<GitHubWorkflowRef>,
+    embedded: Vec<String>,
+    sources: Vec<WorkflowSource>,
+}
+
+/// Provenance is explicit: embedded references never consult the host filesystem.
+enum WorkflowSource {
+    Local,
+    GitHub,
+    Embedded(String),
 }
 
 fn load_local_workflow(path: &Path, stack: &mut CallStack) -> Result<WorkflowConfig> {
+    load_local_workflow_with_inputs(path, stack, &IndexMap::new(), "root")
+}
+
+fn load_local_workflow_with_inputs(
+    path: &Path,
+    stack: &mut CallStack,
+    inputs: &IndexMap<String, String>,
+    site: &str,
+) -> Result<WorkflowConfig> {
     let canonical = path.canonicalize().map_err(|e| {
         CruiseError::Other(format!(
             "failed to resolve workflow_call file '{}': {e}",
@@ -240,15 +376,162 @@ fn load_local_workflow(path: &Path, stack: &mut CallStack) -> Result<WorkflowCon
     }
 
     stack.local.push(canonical.clone());
+    stack.sources.push(WorkflowSource::Local);
     let yaml = std::fs::read_to_string(&canonical)?;
-    let config = WorkflowConfig::from_yaml(&yaml)
+    let mut config = WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
     let base_dir = canonical
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    bind_workflow_inputs(&mut config, &base_dir, stack, inputs, site)?;
     let resolved = resolve_workflow_calls_inner(config, &base_dir, stack);
     stack.local.pop();
+    stack.sources.pop();
     resolved
+}
+
+fn resolve_root_workflow_calls_inner(
+    mut config: WorkflowConfig,
+    base_dir: &Path,
+    stack: &mut CallStack,
+) -> Result<WorkflowConfig> {
+    bind_workflow_inputs(&mut config, base_dir, stack, &IndexMap::new(), "root")?;
+    resolve_workflow_calls_inner(config, base_dir, stack)
+}
+
+fn bind_workflow_inputs(
+    config: &mut WorkflowConfig,
+    base_dir: &Path,
+    stack: &CallStack,
+    inputs: &IndexMap<String, String>,
+    site: &str,
+) -> Result<()> {
+    let mut declared = HashSet::new();
+    for name in &config.inputs {
+        let mut chars = name.chars();
+        if !chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !declared.insert(name.as_str())
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "workflow_call '{site}' has invalid or duplicate input '{name}'"
+            )));
+        }
+        if !inputs.contains_key(name) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "workflow_call '{site}' missing input '{name}' at {}",
+                base_dir.display()
+            )));
+        }
+    }
+    for name in inputs.keys() {
+        if !declared.contains(name.as_str()) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "workflow_call '{site}' has undeclared input argument '{name}' at {}",
+                base_dir.display()
+            )));
+        }
+    }
+    for value in config.command.iter_mut().chain(config.env.values_mut()) {
+        if let std::borrow::Cow::Owned(bound) =
+            crate::variable::bind_input_template(value, |input| {
+                inputs.get(input).map(String::as_str).ok_or_else(|| {
+                    CruiseError::InvalidStepConfig(format!(
+                        "workflow_call '{site}' references undeclared input '{input}' at {}",
+                        base_dir.display()
+                    ))
+                })
+            })?
+        {
+            *value = bound;
+        }
+    }
+    for (name, step) in config.steps.iter_mut().chain(&mut config.after_pr).chain(
+        config
+            .groups
+            .values_mut()
+            .flat_map(|group| &mut group.steps),
+    ) {
+        bind_step_inputs(name, step, base_dir, stack, inputs, site)?;
+    }
+    config.inputs.clear();
+    Ok(())
+}
+
+fn bind_step_inputs(
+    name: &str,
+    step: &mut StepConfig,
+    base_dir: &Path,
+    stack: &CallStack,
+    inputs: &IndexMap<String, String>,
+    site: &str,
+) -> Result<()> {
+    if step.with.is_some() && step.workflow_call.is_none() {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "step '{name}' uses with without workflow_call"
+        )));
+    }
+    if step.workflow_call.is_some() {
+        validate_call_site(name, step)?;
+    }
+    if let Some(WorkflowSource::Embedded(parent)) = stack.sources.last()
+        && !step.prompt_file.as_deref().is_some_and(is_github_url)
+    {
+        if let Some(path) = step.prompt_file.take() {
+            if step.prompt.is_some() || path.trim().is_empty() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "invalid prompt_file for step '{name}'"
+                )));
+            }
+            let key = embedded_relative_key(parent, &path)?;
+            step.prompt = Some(embedded_yaml(&key)?.to_string());
+        }
+    } else {
+        inline_prompt_file(name, step, base_dir)?;
+    }
+    let bind = |value: &mut String| -> Result<()> {
+        if let std::borrow::Cow::Owned(bound) = crate::variable::bind_input_template(
+            value,
+            |input| {
+                inputs.get(input).map(String::as_str).ok_or_else(|| CruiseError::InvalidStepConfig(format!("workflow_call '{site}', step '{name}' references undeclared input '{input}' at {}", base_dir.display())))
+            },
+        )? {
+            *value = bound;
+        }
+        Ok(())
+    };
+    for value in [&mut step.prompt, &mut step.instruction]
+        .into_iter()
+        .flatten()
+    {
+        bind(value)?;
+    }
+    if let Some(command) = &mut step.command {
+        match command {
+            crate::config::StringOrVec::Single(value) => bind(value)?,
+            crate::config::StringOrVec::Multiple(values) => {
+                for value in values {
+                    bind(value)?;
+                }
+            }
+        }
+    }
+    for value in step.env.values_mut() {
+        bind(value)?;
+    }
+    if let Some(arguments) = &mut step.with {
+        for value in arguments.values_mut() {
+            bind(value)?;
+        }
+    }
+    if let Some(children) = &mut step.parallel {
+        for (child_name, child) in children {
+            bind_step_inputs(child_name, child, base_dir, stack, inputs, site)?;
+        }
+    }
+    Ok(())
 }
 
 fn resolve_workflow_calls_inner(
@@ -278,15 +561,8 @@ fn resolve_step_map(
     let mut resolved = IndexMap::new();
 
     for (step_name, step) in steps {
-        let mut step = step;
         crate::config::validate_parallel_step(&step_name, &step)?;
         if step.workflow_call.is_none() {
-            inline_prompt_file(&step_name, &mut step, base_dir)?;
-            if let Some(children) = &mut step.parallel {
-                for (child_name, child) in children {
-                    inline_prompt_file(&format!("{step_name}/{child_name}"), child, base_dir)?;
-                }
-            }
             insert_unique(&mut resolved, step_name, step)?;
             continue;
         }
@@ -304,6 +580,8 @@ fn resolve_step_map(
             })?,
             base_dir,
             stack,
+            step.with.as_ref().unwrap_or(&IndexMap::new()),
+            &step_name,
         )?;
         let expanded = expand_called_workflow(&step_name, &step, callee)?;
         for (expanded_name, expanded_step) in expanded {
@@ -434,14 +712,24 @@ fn load_called_workflow(
     workflow_call: &str,
     base_dir: &Path,
     stack: &mut CallStack,
+    inputs: &IndexMap<String, String>,
+    site: &str,
 ) -> Result<WorkflowConfig> {
+    if is_github_url(workflow_call) {
+        let reference = parse_github_workflow_url(workflow_call)?;
+        return load_github_workflow_with_inputs(&reference, stack, inputs, site);
+    }
+    if let Some(WorkflowSource::Embedded(parent)) = stack.sources.last() {
+        let key = embedded_relative_key(parent, workflow_call)?;
+        return load_embedded_workflow(&key, stack, inputs, site);
+    }
     if let Some(reference) = resolve_github_workflow_ref(workflow_call, base_dir, "workflow_call")?
     {
-        return load_github_workflow(&reference, stack);
+        return load_github_workflow_with_inputs(&reference, stack, inputs, site);
     }
 
     let path = base_dir.join(workflow_call);
-    load_local_workflow(&path, stack)
+    load_local_workflow_with_inputs(&path, stack, inputs, site)
 }
 
 fn github_relative_workflow_url(base_dir: &str, workflow_call: &str) -> String {
@@ -467,6 +755,15 @@ fn load_github_workflow(
     reference: &GitHubWorkflowRef,
     stack: &mut CallStack,
 ) -> Result<WorkflowConfig> {
+    load_github_workflow_with_inputs(reference, stack, &IndexMap::new(), "root")
+}
+
+fn load_github_workflow_with_inputs(
+    reference: &GitHubWorkflowRef,
+    stack: &mut CallStack,
+    inputs: &IndexMap<String, String>,
+    site: &str,
+) -> Result<WorkflowConfig> {
     if stack.github.contains(reference) {
         return Err(CruiseError::InvalidStepConfig(format!(
             "workflow_call cycle detected at GitHub workflow '{}', ref '{}'",
@@ -483,11 +780,14 @@ fn load_github_workflow(
             resolved_reference.path, resolved_reference.git_ref
         )));
     }
-    let config = WorkflowConfig::from_yaml(&yaml)
+    let mut config = WorkflowConfig::from_yaml(&yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
     let remote_base = github_workflow_base_url(&resolved_reference);
+    stack.sources.push(WorkflowSource::GitHub);
+    bind_workflow_inputs(&mut config, Path::new(&remote_base), stack, inputs, site)?;
     let resolved = resolve_workflow_calls_inner(config, Path::new(&remote_base), stack);
     stack.github.pop();
+    stack.sources.pop();
     resolved
 }
 

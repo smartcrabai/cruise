@@ -3,6 +3,62 @@ use std::path::PathBuf;
 
 use crate::error::{CruiseError, Result};
 
+enum BraceToken<'a> {
+    Escape(char),
+    Reference(&'a str),
+    Invalid(&'static str),
+}
+
+/// Scan one brace token, retaining its original byte range for partial binding.
+fn next_brace_token<'a>(
+    template: &'a str,
+    cursor: &mut usize,
+) -> Option<(usize, usize, BraceToken<'a>)> {
+    let start = *cursor + template[*cursor..].find(['{', '}'])?;
+    let brace = template.as_bytes()[start];
+    let (end, token) = if template.as_bytes().get(start + 1) == Some(&brace) {
+        (start + 2, BraceToken::Escape(char::from(brace)))
+    } else if brace == b'}' {
+        (start + 1, BraceToken::Invalid("lone `}`"))
+    } else if let Some(offset) = template[start + 1..].find('}') {
+        let end = start + 1 + offset;
+        (end + 1, BraceToken::Reference(&template[start + 1..end]))
+    } else {
+        (template.len(), BraceToken::Invalid("unclosed `{`"))
+    };
+    *cursor = end;
+    Some((start, end, token))
+}
+
+/// Bind only load-time input tokens without consuming runtime brace escapes.
+/// Inserted fragments are deliberately never scanned again in this pass.
+pub(crate) fn bind_input_template<'a, 'b>(
+    template: &'a str,
+    mut lookup: impl FnMut(&str) -> Result<&'b str>,
+) -> Result<std::borrow::Cow<'a, str>> {
+    let mut cursor = 0;
+    let mut copied = 0;
+    let mut output = None::<String>;
+    while let Some((start, end, token)) = next_brace_token(template, &mut cursor) {
+        if let BraceToken::Reference(reference) = token
+            && let Some(name) = reference.strip_prefix("inputs.")
+        {
+            let replacement = lookup(name)?;
+            let result = output.get_or_insert_with(|| String::with_capacity(template.len()));
+            result.push_str(&template[copied..start]);
+            result.push_str(replacement);
+            copied = end;
+        }
+    }
+    Ok(match output {
+        Some(mut result) => {
+            result.push_str(&template[copied..]);
+            std::borrow::Cow::Owned(result)
+        }
+        None => std::borrow::Cow::Borrowed(template),
+    })
+}
+
 /// Resolve a Rust-style brace template, calling `lookup` for each `{name}` placeholder.
 ///
 /// - `{{` and `}}` escape to literal `{` and `}`.
@@ -14,55 +70,23 @@ pub(crate) fn resolve_template_with_lookup(
     mut lookup: impl FnMut(&str) -> Result<String>,
 ) -> Result<String> {
     let mut result = String::new();
-    let mut chars = template.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '{' => {
-                // Escaped opening brace: `{{` -> `{`.
-                if chars.peek() == Some(&'{') {
-                    chars.next();
-                    result.push('{');
-                    continue;
-                }
-
-                // Collect the variable name up to the closing brace.
-                let mut var_name = String::new();
-                let mut closed = false;
-
-                for inner_ch in chars.by_ref() {
-                    if inner_ch == '}' {
-                        closed = true;
-                        break;
-                    }
-                    var_name.push(inner_ch);
-                }
-
-                if !closed {
-                    return Err(CruiseError::InvalidTemplateSyntax(format!(
-                        "unclosed `{{` in `{template}`"
-                    )));
-                }
-                if var_name.is_empty() {
-                    return Err(CruiseError::EmptyVariableReference);
-                }
-                result.push_str(&lookup(&var_name)?);
+    let mut cursor = 0;
+    let mut copied = 0;
+    while let Some((start, end, token)) = next_brace_token(template, &mut cursor) {
+        result.push_str(&template[copied..start]);
+        match token {
+            BraceToken::Escape(brace) => result.push(brace),
+            BraceToken::Reference("") => return Err(CruiseError::EmptyVariableReference),
+            BraceToken::Reference(name) => result.push_str(&lookup(name)?),
+            BraceToken::Invalid(reason) => {
+                return Err(CruiseError::InvalidTemplateSyntax(format!(
+                    "{reason} in `{template}`"
+                )));
             }
-            '}' => {
-                // Escaped closing brace: `}}` -> `}`.
-                if chars.peek() == Some(&'}') {
-                    chars.next();
-                    result.push('}');
-                } else {
-                    return Err(CruiseError::InvalidTemplateSyntax(format!(
-                        "lone `}}` in `{template}`"
-                    )));
-                }
-            }
-            _ => result.push(ch),
         }
+        copied = end;
     }
-
+    result.push_str(&template[copied..]);
     Ok(result)
 }
 

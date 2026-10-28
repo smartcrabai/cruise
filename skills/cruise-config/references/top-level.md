@@ -1,5 +1,12 @@
 # Top-level structure
 
+`inputs: [task, label]` optionally declares a called workflow's required string
+inputs. Names must be unique and match `[A-Za-z_][A-Za-z0-9_]*`. There are no
+defaults, optional inputs, or CLI input flags. A root loaded directly cannot
+declare nonempty inputs because it has no caller. `inputs` is workflow-only and
+is rejected in user/project `default.yaml`. Callers supply the exact declared
+names through `workflow_call` plus `with`; see [steps.md](steps.md#workflow-call-inputs).
+
 `model` and `plan_model` accept a single string or an ordered array mixing strings and `{sdk: claude, model: claude-sonnet-5-5:medium}` objects. Strings inherit the effective workflow SDK, defaulting to jcode, and each object overrides only its own candidate. This also works in application `config.json` / `config.yaml` and layered `default.yaml`; `planModel` is an application-config alias. Objects are array-only, require exactly nonblank `sdk` and `model`, and cannot coexist with `command` anywhere in either list. String-only command arrays retain first-entry behavior. Environment model overrides replace the whole list. See `sdk.md` for fallback precedence, SDK-owned resume IDs, and capability validation across candidates.
 
 ```yaml

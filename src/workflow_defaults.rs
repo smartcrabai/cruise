@@ -84,7 +84,14 @@ pub(crate) fn missing_jcode_model_error() -> CruiseError {
 }
 
 /// Top-level keys that only make sense in a workflow.
-const WORKFLOW_ONLY_KEYS: [&str; 5] = ["description", "steps", "groups", "after-pr", "create_pr"];
+const WORKFLOW_ONLY_KEYS: [&str; 6] = [
+    "description",
+    "steps",
+    "groups",
+    "after-pr",
+    "create_pr",
+    "inputs",
+];
 
 /// Path of the user defaults file (`<config_dir>/default.yaml`), when a config
 /// directory can be determined.

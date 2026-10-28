@@ -66,7 +66,20 @@ Rules: only directly in `after-pr` (not in `steps`, groups, or `parallel` childr
 
 ## Opt-in native synchronous squash merge
 
-Every built-in has an explicit, default-off `merge` flag. The built-in after-PR prelude uses `flag: [after_pr, merge]` on its regular steps, so either flag runs it; the native final action is gated only by `merge`. `-f merge` therefore runs the prelude even when `after_pr` is off, and the prelude runs once. `-f after_pr` alone never merges. No PR is created or merged when the workflow has `create_pr: false` (including `research`), uses `exec`/current-branch mode, or has no commits eligible for PR creation; opted-in actions are skipped with a reason. The merge flag does not override read-only or no-PR policy.
+Every built-in has an explicit, default-off `merge` flag. The built-in after-PR prelude uses `flag: [after_pr, merge]` on its `follow-up` workflow call, propagated to all six expanded steps, so either flag runs it; the native final action is gated only by `merge`. `-f merge` therefore runs the prelude even when `after_pr` is off, and the prelude runs once. `-f after_pr` alone never merges. No PR is created or merged when the workflow has `create_pr: false` (including `research`), uses `exec`/current-branch mode, or has no commits eligible for PR creation; opted-in actions are skipped with a reason. The merge flag does not override read-only or no-PR policy.
+
+All six built-ins share the ordered prelude `pr-ready` → `sync-base` →
+`resolve-conflict` → `push-after-sync` → `wait-ci` → `fix-ci-error`. Each caller
+passes its own full conflict/CI repair prompts via `with`; the shared callee has
+no flags. New expanded IDs are `follow-up/pr-ready`, etc. Internal retry and
+file-change transitions stay inside that call. The native `squash-merge` remains
+the final direct root step, never inside the callee. Existing session snapshots
+and saved IDs are not migrated.
+
+Installed binaries resolve this internal shared resource from embedded data,
+without filesystem fallback. Direct local loads of `builtin/*.yaml` use normal
+relative files. Ejected workflows are self-contained and contain the expanded
+steps, not shared-resource dependencies, so they work outside the source tree.
 
 The native action is a direct final step in `after-pr`, never a prompt or command:
 
@@ -101,4 +114,3 @@ Regular transition rules (`next` / `skip` / `when.exists` / `if.file-changed`) w
 ## Related: `cleanup_after_pr`
 
 To automatically delete the local git worktree and branch after the PR has been created, set `cleanup_after_pr: true` at the top level. This runs after all after-PR steps complete. A fatal after-PR error or unconfirmed native merge outcome retains the session and worktree and prevents cleanup; warning-only failures from ordinary after-PR steps with native merge off do not by themselves prevent cleanup. See [top-level.md](top-level.md#cleanup_after_pr) for details.
-

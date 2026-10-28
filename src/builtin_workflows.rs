@@ -51,10 +51,24 @@ pub fn find_builtin(name: &str) -> Option<&'static BuiltinWorkflow> {
     BUILTIN_WORKFLOWS.iter().find(|w| w.name == name)
 }
 
+/// Look up an embedded YAML resource by its normalized, resource-root-relative key.
+///
+/// Shared resources are implementation dependencies, not selectable workflows.
+/// Callers must normalize relative references before looking them up. Unknown keys
+/// deliberately do not fall back to the host filesystem.
+#[must_use]
+pub(crate) fn find_builtin_resource(key: &str) -> Option<&'static str> {
+    if key == "_shared/after-pr.yaml" {
+        return Some(include_str!("../builtin/_shared/after-pr.yaml"));
+    }
+    let name = key.strip_suffix(".yaml")?;
+    find_builtin(name).map(|workflow| workflow.yaml)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BUILTIN_CONFIG_YAML, WorkflowConfig, validate_config};
+    use crate::resolver::{ConfigSource, resolve_workflow_config};
 
     #[test]
     fn builtin_catalog_has_unique_names_descriptions_and_valid_yaml() {
@@ -76,16 +90,45 @@ mod tests {
                 "{} lacks description",
                 w.name
             );
-            let config = WorkflowConfig::from_yaml(w.yaml)
-                .unwrap_or_else(|e| panic!("{} failed to parse: {e:?}", w.name));
-            validate_config(&config).unwrap_or_else(|e| panic!("{} invalid: {e:?}", w.name));
+            let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+            let config = resolve_workflow_config(
+                w.yaml,
+                &ConfigSource::NamedBuiltin(w.name),
+                dir.path(),
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{} failed to load: {e:?}", w.name));
+            crate::config::validate_config(&config)
+                .unwrap_or_else(|e| panic!("{} invalid: {e:?}", w.name));
         }
     }
 
     #[test]
-    fn tdd_builtin_yaml_matches_embedded_config() {
+    fn default_and_named_tdd_have_the_same_executable_steps() {
         let tdd = find_builtin(DEFAULT_BUILTIN_NAME).unwrap_or_else(|| panic!("tdd missing"));
-        assert_eq!(tdd.yaml, BUILTIN_CONFIG_YAML);
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
+        let load = |yaml, source| {
+            resolve_workflow_config(yaml, &source, dir.path(), None)
+                .unwrap_or_else(|e| panic!("{e:?}"))
+        };
+        let default = crate::workflow::compile(load(
+            crate::config::BUILTIN_CONFIG_YAML,
+            ConfigSource::Builtin,
+        ))
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let named = crate::workflow::compile(load(
+            tdd.yaml,
+            ConfigSource::NamedBuiltin(DEFAULT_BUILTIN_NAME),
+        ))
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            serde_yaml::to_value(&default.steps).unwrap_or_else(|e| panic!("{e:?}")),
+            serde_yaml::to_value(&named.steps).unwrap_or_else(|e| panic!("{e:?}"))
+        );
+        assert_eq!(
+            serde_yaml::to_value(&default.after_pr).unwrap_or_else(|e| panic!("{e:?}")),
+            serde_yaml::to_value(&named.after_pr).unwrap_or_else(|e| panic!("{e:?}"))
+        );
     }
 
     #[test]

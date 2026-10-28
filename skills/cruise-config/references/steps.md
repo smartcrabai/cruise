@@ -6,7 +6,7 @@ selection), `parallel` (concurrent prompt/command children), or native
 `squash-merge` (a synchronous squash action valid only as the final direct step
 in `after-pr`). A step that only holds `group:` (a group call) is the exception
 — see [groups.md](groups.md).
-A pure `workflow_call:` call site (optionally with `skip`,
+A pure `workflow_call:` call site (optionally with `with`, `skip`,
 `when`, `next`, or `flag`) is also accepted during config loading and expanded into
 executable steps, including under `after-pr`; it cannot be nested in a group.
 Every other step field on the call site is rejected: `model`, `prompt`,
@@ -199,8 +199,8 @@ still run sequentially. Command children have no interactive stdin.
 Each child gets a private copy of the incoming variables. Environment precedence:
 workflow < parent block < child. Children support `prompt`/`prompt_file` or
 `command`, plus `model`, `env`, `skip`, `when`, and `timeout`. Prompt children
-may also set `permission`, `disallowed_tools`, and `output_file`, but artifact names must be distinct within the block. Workflow restrictions and implicit Git denials apply to each prompt child. Child names must
-be non-empty and contain no `/`. Child `next`, `if`, `option`, `instruction`,
+may also set `instruction`, `permission`, `disallowed_tools`, and `output_file`, but artifact names must be distinct within the block. Parallel instructions are noninteractive and require nonempty runtime input. Supply input or use a preceding sequential instruction step, otherwise execution returns an error without opening an input editor. `instruction` is rejected on command children. Workflow restrictions and implicit Git denials apply to each prompt child. Child names must
+be non-empty and contain no `/`. Child `next`, `if`, `option`,
 `plan`, `group`, `workflow_call`, nested `parallel`, `flag`, `squash-merge`,
 and `allow_commit: true` are rejected. Parent fields: `parallel`, `env`, `skip`,
 `flag`, `when`, `next`, `if`, and `timeout`. An empty block (`parallel: {}`)
@@ -275,8 +275,40 @@ steps:
 | `env` | object | Per-step environment variables |
 | `group` | string | Group invocation (see [groups.md](groups.md)) |
 | `workflow_call` | string | Workflow file or supported GitHub URL to inline |
+| `with` | string-valued object \| null | Required callee input arguments, only on `workflow_call`. Empty strings are valid; other value types are rejected. Omission/null passes no arguments; even `{}` is invalid on a non-call step. |
 | `fail-if-no-file-changes` | — | Rejected as an unknown field; use `if.no-file-changes: failed` instead (see [flow-control.md](flow-control.md)) |
 
 Step fields are strict: `StepConfig` denies unknown fields, so a misspelled or
 obsolete step key is a load error. The same holds for the `retry:` block. The
 top-level workflow object is *not* strict — see [top-level.md](top-level.md).
+
+### Workflow call inputs
+
+Complete callee `shared/review.yaml`:
+
+```yaml
+inputs: [task]
+steps:
+  review:
+    prompt: "Review {inputs.task} against {plan}."
+```
+
+Complete caller `cruise.yaml`:
+
+```yaml
+create_pr: false
+steps:
+  review:
+    workflow_call: ./shared/review.yaml
+    with:
+      task: "{input}"
+```
+
+All declared inputs are required and argument names must match exactly. Missing,
+extra, or undeclared input references are load errors. The old string
+`workflow_call` syntax without arguments still works for callees without inputs.
+Nested calls must forward parent inputs explicitly through their own `with`.
+Callees cannot declare groups or gate their own steps with flags. Calls inside
+groups remain forbidden. Call-site `flag` gates every expanded step, `skip` and
+`when` apply to the first, and `next` applies to the last unless it has its own.
+See [variables.md](variables.md#load-time-workflow-inputs) for binding and escapes.

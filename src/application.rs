@@ -465,7 +465,7 @@ fn create_session_inner(
         .map(|path| crate::new_session_history::expand_tilde(&path))
         .filter(|path| !path.trim().is_empty());
     let (yaml, source, config_ref) = if let Some(raw) = request.config_yaml.as_deref() {
-        let source = crate::resolver::ConfigSource::Builtin;
+        let source = crate::resolver::ConfigSource::Inline;
         (raw.to_string(), source, SessionConfigRef::inline_snapshot())
     } else {
         let (yaml, source) =

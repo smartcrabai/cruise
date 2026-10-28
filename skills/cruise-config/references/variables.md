@@ -5,6 +5,26 @@ Variables can be referenced as `{name}` inside `prompt` (including content loade
 Availability depends on the execution phase and step type. Referencing an undefined
 variable is an error.
 
+## Load-time workflow inputs
+
+`{inputs.name}` is a separate config-load namespace, not a runtime variable.
+Declare required names in the callee's top-level `inputs` and supply strings in
+the call site's `with`. Scope is lexical: no implicit parent/sibling inheritance.
+Forward explicitly with `with: {child_name: "{inputs.parent_name}"}`.
+
+Binding applies to prompt text, loaded `prompt_file` contents, instruction,
+command strings and array elements, env values, and nested `with` values,
+including parallel prompt/command children. Paths, IDs, transitions, flag names,
+and models are not parameterized. A prompt file is read relative to its declaring
+source before its body is bound.
+
+Inserted strings are not rescanned in the same binding pass. `{input}`, `{plan}`,
+`{prev.*}`, `{pr.*}`, and `{file:...}` remain for normal runtime expansion.
+Load-time binding preserves escapes: `{{inputs.x}}` is not an input lookup and
+becomes literal `{inputs.x}` after one runtime pass. Ordinary `{{...}}` and `}}`
+escapes are preserved too. Inputs provide neither secret storage nor automatic
+shell quoting. See [steps.md](steps.md#workflow-call-inputs) for complete examples.
+
 ## Variable list
 
 | Variable | Description |
