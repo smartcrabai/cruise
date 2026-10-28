@@ -278,8 +278,37 @@ pub enum ModelEntry {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SdkModel {
-    pub sdk: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sdk: Option<String>,
     pub model: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_disabled_during",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub disabled_during: Vec<String>,
+}
+
+fn deserialize_present_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_disabled_during<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error> {
+    let windows = Vec::<String>::deserialize(deserializer)?;
+    if windows.is_empty() {
+        return Err(serde::de::Error::custom(
+            "disabled_during must not be empty",
+        ));
+    }
+    Ok(windows)
 }
 
 impl ModelEntry {
@@ -357,11 +386,24 @@ impl ModelSpec {
         if let Self::Multiple(entries) = self {
             for (index, entry) in entries.iter().enumerate() {
                 if let ModelEntry::SdkModel(entry) = entry {
-                    validate_sdk_name(&entry.sdk, &format!("{field}[{index}].sdk"))?;
+                    if let Some(sdk) = &entry.sdk {
+                        validate_sdk_name(sdk, &format!("{field}[{index}].sdk"))?;
+                    } else if entry.disabled_during.is_empty() {
+                        return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                            "`{field}[{index}]` object must set `sdk` or `disabled_during`; use a plain string otherwise"
+                        )));
+                    }
                     if entry.model.trim().is_empty() {
                         return Err(crate::error::CruiseError::InvalidStepConfig(format!(
                             "`{field}[{index}].model` must not be blank"
                         )));
+                    }
+                    for (window_index, window) in entry.disabled_during.iter().enumerate() {
+                        crate::model_schedule::parse_time_window(window).map_err(|error| {
+                            crate::error::CruiseError::InvalidStepConfig(format!(
+                                "`{field}[{index}].disabled_during[{window_index}]`: {error}"
+                            ))
+                        })?;
                     }
                 }
             }
@@ -372,6 +414,11 @@ impl ModelSpec {
     #[must_use]
     pub fn has_sdk_overrides(&self) -> bool {
         matches!(self, Self::Multiple(entries) if entries.iter().any(|entry| matches!(entry, ModelEntry::SdkModel(_))))
+    }
+
+    #[must_use]
+    pub fn has_time_windows(&self) -> bool {
+        matches!(self, Self::Multiple(entries) if entries.iter().any(|entry| matches!(entry, ModelEntry::SdkModel(entry) if !entry.disabled_during.is_empty())))
     }
 }
 
@@ -1787,6 +1834,11 @@ pub fn validate_sdk(config: &WorkflowConfig) -> crate::error::Result<()> {
         if let Some(spec) = spec {
             spec.validate(field)?;
             if !config.command.is_empty() && spec.has_sdk_overrides() {
+                if spec.has_time_windows() {
+                    return Err(CruiseError::InvalidStepConfig(format!(
+                        "`command` cannot be combined with `disabled_during` on `{field}` candidates; time windows require an SDK backend"
+                    )));
+                }
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "`command` cannot be combined with SDK-qualified `{field}` candidates"
                 )));
@@ -2119,13 +2171,20 @@ pub(crate) fn validate_subagent_model_entry(
     use crate::error::CruiseError;
     use crate::model_selection::{Sdk, resolve_entry};
     if let ModelEntry::SdkModel(entry) = entry {
-        let sdk = entry.sdk.as_str();
+        let sdk = entry.sdk.as_deref().ok_or_else(|| {
+            CruiseError::InvalidStepConfig(format!("`{field}.sdk` is required in object form"))
+        })?;
+        if !entry.disabled_during.is_empty() {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "`{field}` does not support `disabled_during`"
+            )));
+        }
         if !SUPPORTED_SDKS.contains(&sdk) && !REMOVED_SDKS.iter().any(|(name, _)| *name == sdk) {
             return Err(CruiseError::InvalidStepConfig(format!(
                 "unknown `{field}.sdk` value '{sdk}'; expected one of: jcode, claude"
             )));
         }
-        validate_sdk_name(&entry.sdk, &format!("{field}.sdk"))?;
+        validate_sdk_name(sdk, &format!("{field}.sdk"))?;
     }
     let candidate = resolve_entry(entry, base);
     let model = candidate.model.as_deref().unwrap_or_default();

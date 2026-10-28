@@ -165,10 +165,17 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["sdk", "model"],
+          "required": ["model"],
+          "anyOf": [{ "required": ["sdk"] }, { "required": ["disabled_during"] }],
           "properties": {
             "sdk": { "type": "string", "enum": ["jcode", "claude", "opencode"] },
-            "model": { "type": "string", "minLength": 1, "pattern": "\\S" }
+            "model": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "disabled_during": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
+              "description": "User-declared unavailable windows: [days ]HH:MM-HH:MM[ offset]. Days are case-insensitive mon..sun, comma lists or inclusive ranges (including fri-mon); omitted days mean daily. Offset defaults to UTC; UTC, Z, and fixed +/-HH:MM offsets up to 14:00 are supported, not IANA zones or DST. Intervals are start-inclusive and end-exclusive; starts are 00:00..23:59, ends are 00:01..24:00, equal endpoints are invalid, and overnight days refer to the start day. Runtime parsing is authoritative. SDK backend only; omitted sdk inherits the workflow SDK."
+            }
           }
         }
       ]

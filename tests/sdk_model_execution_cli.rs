@@ -83,6 +83,15 @@ impl Fixture {
     }
 
     fn run_with_env(&self, subcommand: &str, overrides: &[(&str, &str)]) -> Output {
+        self.run_with_options(subcommand, overrides, &[])
+    }
+
+    fn run_with_options(
+        &self,
+        subcommand: &str,
+        overrides: &[(&str, &str)],
+        args: &[&str],
+    ) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
         // Child-local isolation allows tests to run concurrently without changing
         // this test process's environment or the coordinator's build environment.
@@ -115,7 +124,8 @@ impl Fixture {
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
             .env("GIT_CONFIG_COUNT", "0")
             .env("NO_COLOR", "1")
-            .arg(subcommand);
+            .arg(subcommand)
+            .args(args);
         if subcommand == "plan" {
             command.arg("--no-interactive-planning");
         }
@@ -196,6 +206,121 @@ fn legacy_claude_string_model_is_a_successful_fake_cli_harness_control() {
         text(&output)
     );
     assert!(!fixture.path("jcode-args").exists());
+}
+
+#[test]
+fn disabled_primary_is_never_spawned_and_exec_reports_only_the_usable_model() {
+    let fixture = Fixture::new();
+    fixture.workflow("sdk: claude\nmodel:\n  - sdk: jcode\n    model: scheduled-primary-cli\n    disabled_during: ['00:00-24:00']\n  - scheduled-spare-cli\nsteps:\n  answer:\n    prompt: SCHEDULE_EXEC_PROMPT\n");
+    let output = fixture.run("exec");
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(fixture.recorded("dispatch"), "claude\n");
+    fixture.assert_claude_model("scheduled-spare-cli");
+    assert!(!fixture.path("jcode-args").exists());
+    let terminal = text(&output);
+    let notice = terminal
+        .lines()
+        .find(|line| line.contains("Fallback:") && line.contains("disabled during"))
+        .unwrap_or_else(|| panic!("missing time-window switch notice: {terminal}"));
+    for fragment in [
+        "scheduled-primary-cli",
+        "scheduled-spare-cli",
+        "00:00-24:00",
+    ] {
+        assert!(notice.contains(fragment), "{notice}");
+    }
+    assert!(
+        terminal.contains("Model: scheduled-spare-cli"),
+        "{terminal}"
+    );
+    assert!(
+        !terminal.contains("Model: scheduled-primary-cli"),
+        "{terminal}"
+    );
+}
+
+#[test]
+fn all_disabled_exec_fails_before_any_sdk_subprocess_even_without_retry_policy() {
+    for models in [
+        "  - model: scheduled-only-cli\n    disabled_during: ['00:00-24:00']\n",
+        "  - model: scheduled-only-cli\n    disabled_during: ['00:00-24:00']\n  - sdk: jcode\n    model: scheduled-other-cli\n    disabled_during: ['00:00-24:00']\n",
+    ] {
+        let fixture = Fixture::new();
+        fixture.workflow(&format!(
+            "sdk: claude\nmodel:\n{models}steps:\n  answer:\n    prompt: SCHEDULE_BLOCKED_PROMPT\n"
+        ));
+        let output = fixture.run("exec");
+        assert!(!output.status.success(), "{}", text(&output));
+        assert!(
+            !fixture.path("dispatch").exists(),
+            "disabled backend was spawned"
+        );
+        let terminal = text(&output);
+        for fragment in [
+            "all configured models are unavailable",
+            "scheduled-only-cli",
+            "disabled during",
+            "00:00-24:00",
+            "no other candidate is usable",
+        ] {
+            assert!(
+                terminal.contains(fragment),
+                "missing {fragment:?}: {terminal}"
+            );
+        }
+    }
+}
+
+#[test]
+fn planning_and_title_generation_skip_their_disabled_candidate_not_execution_models() {
+    let fixture = Fixture::new();
+    fixture.workflow("sdk: claude\nmodel: execution-only-cli\nplan_model:\n  - sdk: jcode\n    model: scheduled-planner-cli\n    disabled_during: ['00:00-24:00']\n  - available-planner-cli\nsteps:\n  answer:\n    prompt: SCHEDULE_PLAN_PROMPT\n");
+    let output = fixture.run("plan");
+    assert!(output.status.success(), "{}", text(&output));
+    let dispatch = fixture.recorded("dispatch");
+    assert!(
+        !dispatch.is_empty() && dispatch.lines().all(|sdk| sdk == "claude"),
+        "{dispatch}"
+    );
+    fixture.assert_claude_model("available-planner-cli");
+    let args = fixture.recorded("claude-args");
+    assert!(!args.contains("execution-only-cli"), "{args}");
+    assert!(!args.contains("scheduled-planner-cli"), "{args}");
+    assert!(!fixture.path("jcode-args").exists());
+    let input = fixture.recorded("claude-input");
+    assert!(
+        input.contains("SDK_DISPATCH_REQUEST"),
+        "planning request missing: {input}"
+    );
+    assert!(
+        input.contains("generate_title"),
+        "title request missing: {input}"
+    );
+}
+
+#[test]
+fn dry_run_displays_raw_windows_with_and_without_an_explicit_sdk() {
+    let fixture = Fixture::new();
+    fixture.workflow("sdk: claude\nmodel:\n  - model: dry-run-worker\n    disabled_during: ['Mon-Fri 01:00-04:00', '06:00-10:00 +09:00']\nplan_model:\n  - sdk: jcode\n    model: dry-run-planner\n    disabled_during: ['fri 22:00-02:00 -05:30']\nsteps:\n  answer:\n    prompt: SCHEDULE_DRY_RUN\n");
+    let output = fixture.run_with_options("exec", &[], &["--dry-run"]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(!fixture.path("dispatch").exists());
+    let terminal = text(&output);
+    for fragment in [
+        "dry-run-worker",
+        "dry-run-planner",
+        "disabled_during:",
+        "Mon-Fri 01:00-04:00",
+        "06:00-10:00 +09:00",
+        "fri 22:00-02:00 -05:30",
+        "sdk: jcode",
+    ] {
+        assert!(
+            terminal.contains(fragment),
+            "missing {fragment:?}: {terminal}"
+        );
+    }
+    assert!(!terminal.contains("sdk: None"), "{terminal}");
 }
 
 #[test]

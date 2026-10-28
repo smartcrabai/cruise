@@ -400,6 +400,7 @@ fn inline_yaml_is_saved_as_an_inline_snapshot_and_is_not_reclassified_as_builtin
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let _xdg_config = EnvGuard::set("XDG_CONFIG_HOME", temp.path().join("config").as_os_str());
     let manager = SessionManager::new(temp.path().join("data"));
     let application = CruiseApplication::new(manager.clone());
     fs::create_dir_all(temp.path().join("xdg-state").join("cruise"))
@@ -759,6 +760,7 @@ fn explicit_empty_config_selection_reselects_auto_file_instead_of_creating_a_bui
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let _xdg_config = EnvGuard::set("XDG_CONFIG_HOME", temp.path().join("config").as_os_str());
     let manager = SessionManager::new(temp.path().join("data"));
     let id = "20260921070001";
     let base_dir = temp.path().join("repo");

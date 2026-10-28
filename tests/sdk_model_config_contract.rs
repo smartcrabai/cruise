@@ -23,11 +23,13 @@ fn base() -> Value {
     json!({"steps": {"implement": {"prompt": "implement"}}})
 }
 
-fn candidate_forms() -> [Value; 3] {
+fn candidate_forms() -> [Value; 5] {
     [
         json!(["openai/gpt-6.1-sol:medium", {"sdk": "claude", "model": "claude-sonnet-5-5:medium"}, "openrouter/z-ai/glm-5.3-flash:high"]),
         json!([{"sdk": "claude", "model": "claude-first:high"}, "openai/next"]),
         json!([{"sdk": "jcode", "model": "provider/main"}, {"sdk": "claude", "model": "same-name"}]),
+        json!([{"model": "provider/main", "disabled_during": ["Mon-Fri 01:00-04:00", "06:00-10:00 +09:00"]}, "provider/next"]),
+        json!(["provider/main", {"sdk": "claude", "model": "scheduled", "disabled_during": ["00:00-24:00"]}]),
     ]
 }
 
@@ -143,8 +145,8 @@ fn app_json_and_yaml_roundtrips_lists_and_plan_model_alias_without_normalizing_e
     }
 }
 
-fn invalid_entries() -> [Value; 18] {
-    [
+fn invalid_entries() -> Vec<Value> {
+    vec![
         json!({}),
         json!({"sdk": "claude"}),
         json!({"model": "provider/model"}),
@@ -163,6 +165,13 @@ fn invalid_entries() -> [Value; 18] {
         json!(42),
         json!(null),
         json!(["nested"]),
+        json!({"model": "provider/model", "disabled_during": []}),
+        json!({"sdk": "jcode", "model": "provider/model", "disabled_during": []}),
+        json!({"model": "provider/model", "disabled_during": ["bad"]}),
+        json!({"model": "provider/model", "disabled_during": "00:00-24:00"}),
+        json!({"model": "provider/model", "disabled_during": [null]}),
+        json!({"sdk": null, "model": "provider/model", "disabled_during": ["00:00-24:00"]}),
+        json!({"model": "provider/model", "disabled_during": null}),
     ]
 }
 
@@ -535,6 +544,94 @@ fn app_retired_candidate_sdks_preserve_migration_guidance_in_json_and_yaml() {
                 };
                 assert_retired_sdk_diagnostic(&error, sdk);
             }
+        }
+    }
+}
+
+#[test]
+fn invalid_time_windows_report_candidate_and_window_paths() {
+    for field in ["model", "plan_model"] {
+        let mut value = base();
+        value[field] = json!(["provider/main", {"model": "provider/next", "disabled_during": ["mon-xyz 01:00-04:00"]}]);
+        let config = workflow(&value);
+        let error = validation_error(&config);
+        assert!(
+            error.contains(&format!("{field}[1].disabled_during[0]")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn command_time_window_diagnostic_is_specific_even_without_sdk_override() {
+    for field in ["model", "plan_model"] {
+        for candidates in [
+            json!([{"model": "primary", "disabled_during": ["00:00-24:00"]}, "next"]),
+            json!(["primary", {"model": "next", "disabled_during": ["00:00-24:00"]}]),
+        ] {
+            let mut value = base();
+            value[field] = candidates;
+            validate_config(&workflow(&value))
+                .unwrap_or_else(|error| panic!("valid schedule fixture rejected: {error}"));
+            value["command"] = json!(["custom-agent"]);
+            let error = validation_error(&workflow(&value));
+            for fragment in ["command", "disabled_during", field, "SDK backend"] {
+                assert!(error.contains(fragment), "missing {fragment}: {error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn subagent_objects_reject_windows_and_still_require_sdk_at_both_levels() {
+    for step_level in [false, true] {
+        for (entry, fragment) in [
+            (
+                json!({"sdk": "jcode", "model": "provider/small", "disabled_during": ["00:00-24:00"]}),
+                "does not support `disabled_during`",
+            ),
+            (
+                json!({"model": "provider/small", "disabled_during": ["00:00-24:00"]}),
+                "sdk",
+            ),
+            (json!({"model": "provider/small"}), "sdk"),
+        ] {
+            let mut value = base();
+            if step_level {
+                value["steps"]["implement"]["subagent_model"] = entry;
+            } else {
+                value["subagent_model"] = entry;
+            }
+            let error = validation_error(&workflow(&value));
+            assert!(error.contains("subagent_model"), "{error}");
+            assert!(error.contains(fragment), "{error}");
+        }
+    }
+}
+
+#[test]
+fn always_disabled_candidates_still_participate_in_capability_validation() {
+    for field in ["model", "plan_model"] {
+        for primary in [false, true] {
+            let scheduled = json!({"sdk": "claude", "model": "incompatible", "disabled_during": ["00:00-24:00"]});
+            let mut value = base();
+            value[field] = if primary {
+                json!([scheduled, "safe"])
+            } else {
+                json!(["safe", scheduled])
+            };
+            validate_config(&workflow(&value))
+                .unwrap_or_else(|error| panic!("valid schedule fixture rejected: {error}"));
+            value["computer_use"] = json!(true);
+            assert!(validation_error(&workflow(&value)).contains("computer_use"));
+
+            value["computer_use"] = json!(false);
+            value["sdk"] = json!("claude");
+            value[field][usize::from(!primary)]["sdk"] = json!("jcode");
+            value["mcp_servers"] =
+                json!({"remote": {"type": "http", "url": "https://example.invalid/mcp"}});
+            let error = validation_error(&workflow(&value));
+            assert!(error.contains("mcp_servers"), "{error}");
         }
     }
 }

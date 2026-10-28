@@ -34,7 +34,7 @@ source target/formal-tools/env.sh
 Q="$ROOT/tests/formal/node_modules/.bin/quint"
 MODEL=tests/formal/workflow_flags.qnt
 # shellcheck disable=SC2016
-run_check versions bash -c '[[ $(node --version) == v22.23.3 ]] && node --version && [[ $("$1" --version) == 0.33.0 ]] && "$1" --version && java -version && java -XshowSettings:properties -version 2>&1 | grep -E "java.runtime.version = 25\\.0\\.5\\+8-LTS" && rustc +1.99.1 --version' _ "$Q"
+run_check versions bash -c '[[ $(node --version) == v24.22.0 ]] && node --version && [[ $("$1" --version) == 0.33.0 ]] && "$1" --version && java -version && java -XshowSettings:properties -version 2>&1 | grep -E "java.runtime.version = 25\\.0\\.5\\+8-LTS" && rustc +1.99.1 --version' _ "$Q"
 run_check alloy-version java -jar target/formal-tools/alloy-6.2.0.jar version
 for command in typecheck test run verify; do
   run_check "quint-$command-help" "$Q" "$command" --help

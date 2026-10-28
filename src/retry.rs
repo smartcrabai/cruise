@@ -33,6 +33,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::backend::effort::split_thinking_suffix;
 use crate::config::RetryConfig;
+use crate::model_selection::ModelAvailability;
 
 /// Fallback-chain key used when no model-specific chain matches.
 pub(crate) const DEFAULT_CHAIN_KEY: &str = "default";
@@ -942,6 +943,12 @@ fn expand_entry(entry: &str, base: Option<&str>, effort: Option<&str>) -> Option
     ))
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum Unavailable {
+    CoolingDown,
+    TimeWindow(String),
+}
+
 /// Per-run retry state: which model the next attempt uses, what is left of the
 /// fallback chain, and how much of the retry budget the current model spent.
 pub(crate) struct FallbackEngine {
@@ -957,11 +964,13 @@ pub(crate) struct FallbackEngine {
     total: usize,
     /// Retries the run may spend in total, for notices.
     budget: usize,
-    /// A cooldown-driven model replacement made before the first attempt,
+    /// An availability-driven model replacement made before the first attempt,
     /// waiting to be reported.
     startup_switch: Option<(String, String)>,
-    /// No configured model is currently usable because the primary and every
-    /// fallback candidate are cooling down.
+    availability: ModelAvailability,
+    /// Why the primary was unavailable before the first attempt.
+    startup_reason: Option<Unavailable>,
+    /// No configured model is usable because all are disabled or cooling down.
     startup_blocked: bool,
 }
 
@@ -987,11 +996,19 @@ impl FallbackEngine {
         } else {
             crate::model_selection::Sdk::Jcode
         };
-        Self::new_candidates(format, policy, sdk, sdk, model_ref, &[], max_retries)
+        Self::new_candidates(
+            ModelAvailability::default(),
+            policy,
+            sdk,
+            sdk,
+            model_ref,
+            &[],
+            max_retries,
+        )
     }
 
     pub(crate) fn new_candidates(
-        _format: ModelReferenceFormat,
+        availability: ModelAvailability,
         policy: Option<Arc<RetryPolicy>>,
         sdk: crate::model_selection::Sdk,
         base_sdk: crate::model_selection::Sdk,
@@ -1024,17 +1041,27 @@ impl FallbackEngine {
             total: 0,
             budget: 0,
             startup_switch: None,
+            availability,
+            startup_reason: None,
             startup_blocked: false,
         };
-        if engine.policy.is_some()
-            && let Some(current) = engine.model.clone()
-            && RetryPolicy::is_sdk_cooling(format, sdk, &current)
-        {
-            if let Some(next) = engine.take_candidate() {
-                engine.model = Some(next.clone());
-                engine.startup_switch = Some((current, next));
-            } else {
-                engine.startup_blocked = true;
+        if let Some(current) = engine.model.clone() {
+            let reason = engine
+                .availability
+                .disabled_by(sdk, &current, unix_seconds())
+                .map(|window| Unavailable::TimeWindow(window.to_owned()))
+                .or_else(|| {
+                    (engine.policy.is_some() && RetryPolicy::is_sdk_cooling(format, sdk, &current))
+                        .then_some(Unavailable::CoolingDown)
+                });
+            if let Some(reason) = reason {
+                engine.startup_reason = Some(reason);
+                if let Some(next) = engine.take_candidate() {
+                    engine.model = Some(next.clone());
+                    engine.startup_switch = Some((current, next));
+                } else {
+                    engine.startup_blocked = true;
+                }
             }
         }
         // One budget per model, so `max_retries` retries of the primary plus,
@@ -1060,13 +1087,17 @@ impl FallbackEngine {
         std::iter::once(self.sdk).chain(self.chain.iter().map(|(sdk, _)| *sdk))
     }
 
-    /// The cooldown-driven `(from, to)` replacement made at construction, if
+    /// The availability-driven `(from, to)` replacement made at construction, if
     /// any. Yielded once, for the caller to report.
     pub(crate) fn take_startup_switch(&mut self) -> Option<(String, String)> {
         self.startup_switch.take()
     }
 
-    /// Whether the run must stop rather than reuse a cooling model.
+    pub(crate) fn startup_reason(&self) -> Option<&Unavailable> {
+        self.startup_reason.as_ref()
+    }
+
+    /// Whether the run must stop rather than reuse an unavailable model.
     #[must_use]
     pub(crate) fn startup_blocked(&self) -> bool {
         self.startup_blocked
@@ -1222,11 +1253,16 @@ impl FallbackEngine {
         })
     }
 
-    /// Next chain entry that is not cooling down.
+    /// Next chain entry that is neither disabled nor cooling down.
     fn take_candidate(&mut self) -> Option<String> {
         self.policy.as_ref()?;
         while let Some((sdk, candidate)) = self.chain.pop_front() {
-            if !RetryPolicy::is_sdk_cooling(self.format, sdk, &candidate) {
+            if !RetryPolicy::is_sdk_cooling(self.format, sdk, &candidate)
+                && self
+                    .availability
+                    .disabled_by(sdk, &candidate, unix_seconds())
+                    .is_none()
+            {
                 self.sdk = sdk;
                 return Some(candidate);
             }
@@ -1242,10 +1278,68 @@ impl FallbackEngine {
     }
 }
 
+fn unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model_selection::{ModelCandidate, Sdk};
+
+    #[test]
+    fn disabled_window_startup_reason_and_policy_independence() {
+        let spec: crate::config::ModelSpec = serde_json::from_value(serde_json::json!([
+            {"model": "test-retry-window/primary:high", "disabled_during": ["00:00-24:00"]},
+            "test-retry-window/spare"
+        ]))
+        .unwrap_or_else(|error| panic!("schedule fixture: {error}"));
+        let availability = crate::model_selection::availability(Some(&spec), Sdk::Jcode)
+            .unwrap_or_else(|error| panic!("schedule availability: {error}"));
+        let candidates = crate::model_selection::resolve_candidates(Some(&spec), Sdk::Jcode);
+        let mut engine = FallbackEngine::new_candidates(
+            availability.clone(),
+            Some(Arc::new(RetryPolicy::new(policy(&[])))),
+            Sdk::Jcode,
+            Sdk::Jcode,
+            candidates[0].model.as_deref(),
+            &candidates[1..],
+            0,
+        );
+        assert!(
+            matches!(engine.startup_reason(), Some(Unavailable::TimeWindow(raw)) if raw == "00:00-24:00")
+        );
+        assert_eq!(
+            engine.take_startup_switch(),
+            Some((
+                "test-retry-window/primary:high".to_owned(),
+                "test-retry-window/spare".to_owned()
+            ))
+        );
+        assert!(!engine.startup_blocked());
+        assert!(!RetryPolicy::is_cooling(
+            ModelReferenceFormat::LegacyEffort,
+            "test-retry-window/primary"
+        ));
+        let engine = FallbackEngine::new_candidates(
+            availability,
+            None,
+            Sdk::Jcode,
+            Sdk::Jcode,
+            candidates[0].model.as_deref(),
+            &[],
+            0,
+        );
+        assert!(engine.startup_blocked());
+        assert!(matches!(
+            engine.startup_reason(),
+            Some(Unavailable::TimeWindow(_))
+        ));
+    }
 
     #[test]
     fn opencode_common_effort_chain_precedence_and_wildcards() {
@@ -1303,7 +1397,7 @@ mod tests {
             model: Some(model.into()),
         });
         let mut engine = FallbackEngine::new_candidates(
-            ModelReferenceFormat::OpenCode,
+            ModelAvailability::default(),
             Some(Arc::new(RetryPolicy::new(policy(&[])))),
             Sdk::OpenCode,
             Sdk::OpenCode,
@@ -1510,7 +1604,7 @@ mod tests {
         });
         for workflow in [Sdk::OpenCode, Sdk::Jcode] {
             let engine = FallbackEngine::new_candidates(
-                ModelReferenceFormat::for_sdk(workflow),
+                ModelAvailability::default(),
                 Some(Arc::new(RetryPolicy::new(policy(&[])))),
                 Sdk::Claude,
                 workflow,
@@ -1534,7 +1628,7 @@ mod tests {
     fn cooldown_identity_survives_workflow_sdk_changes() {
         let policy = Some(Arc::new(RetryPolicy::new(policy(&[]))));
         let mut first = FallbackEngine::new_candidates(
-            ModelReferenceFormat::OpenCode,
+            ModelAvailability::default(),
             policy.clone(),
             Sdk::Jcode,
             Sdk::OpenCode,
@@ -1549,7 +1643,7 @@ mod tests {
             RetryAction::GiveUp
         );
         let later = FallbackEngine::new_candidates(
-            ModelReferenceFormat::LegacyEffort,
+            ModelAvailability::default(),
             policy,
             Sdk::Jcode,
             Sdk::Claude,
@@ -1570,7 +1664,7 @@ mod tests {
         ] {
             let config = policy(&[(key, &["entry/other:high", "entry/other:low"])]);
             let engine = FallbackEngine::new_candidates(
-                ModelReferenceFormat::LegacyEffort,
+                ModelAvailability::default(),
                 Some(Arc::new(RetryPolicy::new(config))),
                 Sdk::OpenCode,
                 Sdk::Claude,
@@ -1600,7 +1694,7 @@ mod tests {
         ];
         let policy = Some(Arc::new(RetryPolicy::new(policy(&[]))));
         let mut engine = FallbackEngine::new_candidates(
-            ModelReferenceFormat::LegacyEffort,
+            ModelAvailability::default(),
             policy.clone(),
             Sdk::Jcode,
             Sdk::Jcode,
@@ -1627,7 +1721,7 @@ mod tests {
             model
         ));
         let later = FallbackEngine::new_candidates(
-            ModelReferenceFormat::LegacyEffort,
+            ModelAvailability::default(),
             policy,
             Sdk::Claude,
             Sdk::Claude,
@@ -1655,7 +1749,7 @@ mod tests {
             (&plan, Sdk::Jcode, "plan-tail"),
         ] {
             let mut engine = FallbackEngine::new_candidates(
-                ModelReferenceFormat::LegacyEffort,
+                ModelAvailability::default(),
                 default.clone(),
                 Sdk::Jcode,
                 Sdk::Jcode,
@@ -1685,7 +1779,7 @@ mod tests {
                 &["explicit-tail"],
             )]))));
             let mut engine = FallbackEngine::new_candidates(
-                ModelReferenceFormat::LegacyEffort,
+                ModelAvailability::default(),
                 explicit,
                 Sdk::Claude,
                 Sdk::Jcode,
