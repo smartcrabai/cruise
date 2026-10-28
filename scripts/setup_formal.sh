@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TOOLS="$ROOT/target/formal-tools"
 mkdir -p "$TOOLS"
-if [[ $(node --version) != v24.22.0 ]]; then
-  echo 'Node 24.22.0 is required (CI uses actions/setup-node).' >&2
+if [[ $(node --version) != v26.12.0 ]]; then
+  echo 'Node 26.12.0 is required (CI uses actions/setup-node).' >&2
   exit 1
 fi
 sha256() {
