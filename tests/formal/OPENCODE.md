@@ -77,7 +77,7 @@ not proved by the abstract `alive` flag.
 ## Reproducible tools and commands
 
 Reuse the existing formal setup and lockfiles, without adding a production
-Node/Java dependency. Node **22.23.3**, Quint **0.33.0** (npm lock), Apalache
+Node/Java dependency. Node **26.12.0**, Quint **0.33.0** (npm lock), Apalache
 **0.62.1**, Temurin JDK **25.0.5+8-LTS**, Alloy **6.2.0**, Rust **1.99.1** and
 Cucumber **0.23.0** are selected. `scripts/setup_formal.sh` validates the released
 Alloy JAR SHA256

@@ -33,7 +33,7 @@ source target/formal-tools/env.sh
 Q="$ROOT/tests/formal/node_modules/.bin/quint"
 MODEL=tests/formal/agent_auth.qnt
 # shellcheck disable=SC2016
-run_check versions bash -c '[[ $(node --version) == v22.23.3 ]] && node --version && java -version && java -XshowSettings:properties -version 2>&1 | grep -E "java.runtime.version = 25\\.0\\.5\\+8-LTS"'
+run_check versions bash -c '[[ $(node --version) == v26.12.0 ]] && node --version && java -version && java -XshowSettings:properties -version 2>&1 | grep -E "java.runtime.version = 25\\.0\\.5\\+8-LTS"'
 run_check quint-version "$Q" --version
 run_check rust-version rustc +1.99.1 --version
 run_check alloy-version java -jar target/formal-tools/alloy-6.2.0.jar version

@@ -70,7 +70,7 @@ The engine checks budget before incrementing counters, uses checked additions, s
 
 ## Pins and real commands
 
-Run from the repository root with Node **22.23.3** on PATH and Rust **1.99.1** installed. Run Cargo-based checks sequentially when they share `CARGO_TARGET_DIR`: concurrent default-feature, all-feature and A/B smoke builds can replace the sibling CLI binaries that integration tests execute. CI jobs have separate runner filesystems, and the existing production job runs tests before the smoke build.
+Run from the repository root with Node **26.12.0** on PATH and Rust **1.99.1** installed. Run Cargo-based checks sequentially when they share `CARGO_TARGET_DIR`: concurrent default-feature, all-feature and A/B smoke builds can replace the sibling CLI binaries that integration tests execute. CI jobs have separate runner filesystems, and the existing production job runs tests before the smoke build.
 
 ```sh
 bash scripts/check_formal.sh

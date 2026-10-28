@@ -83,7 +83,7 @@ updates. Safety is not assumed as a fact to constrain away counterexamples.
 Use the existing install setup, no second dependency scheme:
 
 ```sh
-# Prerequisites on PATH: Node 22.23.3, Rust 1.99.1, curl, tar, POSIX PTY.
+# Prerequisites on PATH: Node 26.12.0, Rust 1.99.1, curl, tar, POSIX PTY.
 bash scripts/check_workflow_flags_specs.sh
 ```
 
