@@ -64,7 +64,7 @@ of the Rust implementation. No external model availability is assumed.
 ## Reproducible tooling and exact commands
 
 Reuse the existing shared pins rather than adding a second installation stack:
-Node **24.22.0**, Quint **0.33.0** (`tests/formal/package-lock.json`), Apalache
+Node **26.12.0**, Quint **0.33.0** (`tests/formal/package-lock.json`), Apalache
 **0.62.1**, Alloy **6.2.0**, Temurin JDK **25.0.5+8-LTS**, Rust **1.99.1**,
 and Cucumber **0.23.0** (`Cargo.lock`). The shared `setup_formal.sh` verifies
 Alloy SHA256 `6b8c1cb5bc93bedfc7c61435c4e1ab6e688a242dc702a394628d9a9801edb78d`

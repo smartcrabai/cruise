@@ -25,7 +25,7 @@ Cucumber scenarios are in `tests/features/tool_restrictions.feature`, definition
 
 ## Reproducible execution and pins
 
-From the repository root, with Node **24.22.0** on PATH and Rust **1.99.1** installed:
+From the repository root, with Node **26.12.0** on PATH and Rust **1.99.1** installed:
 
 ```sh
 bash scripts/check_tool_restrictions_specs.sh
