@@ -367,7 +367,14 @@ fn duplicate_input_declarations_are_rejected() {
 
 #[test]
 fn invalid_input_names_are_rejected() {
-    for name in ["", "1label", "has-dash", "has.dot", "has space", "日本語"] {
+    for name in [
+        "",
+        "1label",
+        "has-dash",
+        "has.dot",
+        "has space",
+        "\u{65e5}\u{672c}\u{8a9e}",
+    ] {
         let quoted = serde_json::to_string(name).unwrap_or_else(|error| panic!("quote: {error}"));
         let (_dir, root) = call_fixture(
             &format!("inputs: [{quoted}]\nsteps:\n  review:\n    prompt: inspect\n"),

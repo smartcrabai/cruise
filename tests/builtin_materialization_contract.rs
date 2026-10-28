@@ -169,6 +169,85 @@ fn verify_builtin_repair_policy(project: &Path) {
     }
 }
 
+fn verify_ejected_builtins(root: &Path, project: &Path, config_dir: &Path) {
+    // A cwd-local dependency is deliberately invalid. Embedded resolution must ignore it.
+    write(&project.join("_shared/after-pr.yaml"), "not: [valid\n");
+    for builtin in BUILTIN_WORKFLOWS {
+        let path = artifact(root, builtin.name);
+        let config =
+            resolve_workflow_calls_from_path_with_defaults(&path, &WorkflowDefaults::default())
+                .unwrap();
+        assert!(
+            config.model.is_none(),
+            "{} captured a host model",
+            builtin.name
+        );
+        assert!(!config.env.contains_key("HOST_ONLY"));
+        assert!(
+            config.interactive_planning,
+            "{} captured host defaults",
+            builtin.name
+        );
+        assert_eq!(config.create_pr, builtin.name != "research");
+        validate_config(&config).unwrap();
+    }
+    // User defaults apply to omitted fields, project defaults win over user defaults,
+    // and explicit root values (notably research's no-PR) remain authoritative.
+    for project_override in [false, true] {
+        write(
+            &config_dir.join("default.yaml"),
+            "model: user/portable\ninteractive_planning: false\nforce_exec: true\nenv:\n  LAYER: user\n  USER_ONLY: retained\n",
+        );
+        if project_override {
+            write(
+                &project.join(".cruise/default.yaml"),
+                "model: project/portable\ninteractive_planning: true\nforce_exec: false\nenv:\n  LAYER: project\n",
+            );
+        }
+        for builtin in BUILTIN_WORKFLOWS {
+            let embedded = resolve_workflow_config(
+                builtin.yaml,
+                &ConfigSource::NamedBuiltin(builtin.name),
+                project,
+                Some(project),
+            )
+            .unwrap();
+            let path = artifact(root, builtin.name);
+            let defaults = WorkflowDefaults::load(Some(project)).unwrap();
+            let ejected = resolve_workflow_calls_from_path_with_defaults(&path, &defaults).unwrap();
+            assert_eq!(ejected.interactive_planning, project_override);
+            assert_eq!(
+                ejected.env.get("LAYER").map(String::as_str),
+                Some(if project_override { "project" } else { "user" })
+            );
+            assert_eq!(
+                ejected.env.get("USER_ONLY").map(String::as_str),
+                Some("retained")
+            );
+            assert_eq!(
+                ejected.model.as_ref().and_then(|model| model.primary()),
+                Some(if project_override {
+                    "project/portable"
+                } else {
+                    "user/portable"
+                })
+            );
+            // Compare parsed execution semantics, not YAML bytes or serializer spelling.
+            assert_eq!(
+                serde_yaml::to_value(&ejected).unwrap(),
+                serde_yaml::to_value(&embedded).unwrap(),
+                "{} changed defaults precedence",
+                builtin.name
+            );
+            assert_eq!(
+                ejected.force_exec,
+                !project_override || !matches!(builtin.name, "tdd" | "research")
+            );
+            validate_config(&embedded).unwrap();
+        }
+    }
+}
+
 fn worker(root: &Path, phase: &str) {
     let project = root.join("project");
     let config_dir = root.join("config/cruise");
@@ -223,87 +302,7 @@ fn worker(root: &Path, phase: &str) {
                 assert_after_pr_contract(config);
             }
         }
-        "verify" => {
-            // A cwd-local dependency is deliberately invalid. Embedded resolution must ignore it.
-            write(&project.join("_shared/after-pr.yaml"), "not: [valid\n");
-            for builtin in BUILTIN_WORKFLOWS {
-                let path = artifact(root, builtin.name);
-                let config = resolve_workflow_calls_from_path_with_defaults(
-                    &path,
-                    &WorkflowDefaults::default(),
-                )
-                .unwrap();
-                assert!(
-                    config.model.is_none(),
-                    "{} captured a host model",
-                    builtin.name
-                );
-                assert!(!config.env.contains_key("HOST_ONLY"));
-                assert!(
-                    config.interactive_planning,
-                    "{} captured host defaults",
-                    builtin.name
-                );
-                assert_eq!(config.create_pr, builtin.name != "research");
-                validate_config(&config).unwrap();
-            }
-            // User defaults apply to omitted fields, project defaults win over user defaults,
-            // and explicit root values (notably research's no-PR) remain authoritative.
-            for project_override in [false, true] {
-                write(
-                    &config_dir.join("default.yaml"),
-                    "model: user/portable\ninteractive_planning: false\nforce_exec: true\nenv:\n  LAYER: user\n  USER_ONLY: retained\n",
-                );
-                if project_override {
-                    write(
-                        &project.join(".cruise/default.yaml"),
-                        "model: project/portable\ninteractive_planning: true\nforce_exec: false\nenv:\n  LAYER: project\n",
-                    );
-                }
-                for builtin in BUILTIN_WORKFLOWS {
-                    let embedded = resolve_workflow_config(
-                        builtin.yaml,
-                        &ConfigSource::NamedBuiltin(builtin.name),
-                        &project,
-                        Some(&project),
-                    )
-                    .unwrap();
-                    let path = artifact(root, builtin.name);
-                    let defaults = WorkflowDefaults::load(Some(&project)).unwrap();
-                    let ejected =
-                        resolve_workflow_calls_from_path_with_defaults(&path, &defaults).unwrap();
-                    assert_eq!(ejected.interactive_planning, project_override);
-                    assert_eq!(
-                        ejected.env.get("LAYER").map(String::as_str),
-                        Some(if project_override { "project" } else { "user" })
-                    );
-                    assert_eq!(
-                        ejected.env.get("USER_ONLY").map(String::as_str),
-                        Some("retained")
-                    );
-                    assert_eq!(
-                        ejected.model.as_ref().and_then(|model| model.primary()),
-                        Some(if project_override {
-                            "project/portable"
-                        } else {
-                            "user/portable"
-                        })
-                    );
-                    // Compare parsed execution semantics, not YAML bytes or serializer spelling.
-                    assert_eq!(
-                        serde_yaml::to_value(&ejected).unwrap(),
-                        serde_yaml::to_value(&embedded).unwrap(),
-                        "{} changed defaults precedence",
-                        builtin.name
-                    );
-                    assert_eq!(
-                        ejected.force_exec,
-                        !project_override || !matches!(builtin.name, "tdd" | "research")
-                    );
-                    validate_config(&embedded).unwrap();
-                }
-            }
-        }
+        "verify" => verify_ejected_builtins(root, &project, &config_dir),
         _ => panic!("unknown worker phase"),
     }
 }
