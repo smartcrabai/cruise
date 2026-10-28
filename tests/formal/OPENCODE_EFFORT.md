@@ -95,7 +95,7 @@ against production Rust rather than copying those algorithms into a model.
 ## Pins and exact commands
 
 Existing reproducible dependencies are reused without adding another toolchain:
-Node **26.12.0**, npm **10.9.4**, Quint **0.33.0** in
+Node **26.12.0**, npm **11.x** (bundled with Node 26.12.0), Quint **0.33.0** in
 `tests/formal/package{,-lock}.json`, Apalache **0.62.1** selected explicitly by
 `scripts/formal/verify_quint.cjs`, Temurin **25.0.5+8-LTS**, Alloy **6.2.0**,
 Rust/Cargo **1.99.1**, Cucumber **0.23.0** in `Cargo.toml` and `Cargo.lock`.

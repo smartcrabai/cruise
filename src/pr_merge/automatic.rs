@@ -911,11 +911,41 @@ async fn inspect_github(
     Ok((snapshot, names, check_status))
 }
 
+/// Active GitHub branch rules, or the one known plan restriction that prevents listing them.
+enum GitHubBranchRules {
+    Available(Value),
+    UnavailableOnPlan,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubBranchRulesApiError<'a> {
+    #[serde(borrow)]
+    message: &'a str,
+    #[serde(borrow)]
+    status: &'a str,
+}
+
+fn github_branch_rules_unavailable_on_plan(stdout: &[u8]) -> bool {
+    // gh --paginate --slurp wraps the failed page body; also accept a bare body.
+    let error =
+        if let Ok([error]) = serde_json::from_slice::<[GitHubBranchRulesApiError<'_>; 1]>(stdout) {
+            error
+        } else {
+            let Ok(error) = serde_json::from_slice::<GitHubBranchRulesApiError<'_>>(stdout) else {
+                return false;
+            };
+            error
+        };
+    error.status == "403"
+        && error.message
+            == "Upgrade to GitHub Pro or make this repository public to enable this feature."
+}
+
 async fn github_branch_rules(
     reference: &ProviderRef,
     branch: &str,
     request: &AutoSquashRequest<'_>,
-) -> Result<Value, AutoSquashError> {
+) -> Result<GitHubBranchRules, AutoSquashError> {
     let ProviderRef::GitHub {
         hostname,
         owner,
@@ -949,6 +979,9 @@ async fn github_branch_rules(
     .await
     .map_err(|error| run_error(error, "gh"))?;
     if !successful(&output) {
+        if github_branch_rules_unavailable_on_plan(&output.stdout) {
+            return Ok(GitHubBranchRules::UnavailableOnPlan);
+        }
         return Err(AutoSquashError::CommandFailed(
             "unable to inspect active GitHub branch rules".to_string(),
         ));
@@ -961,8 +994,9 @@ async fn github_branch_rules(
             "GitHub active branch rules are unavailable".to_string(),
         ));
     }
-    Ok(rules)
+    Ok(GitHubBranchRules::Available(rules))
 }
+
 fn validate_github_required_status_checks(
     rule: &Value,
     checked: Option<&HashSet<&str>>,
@@ -1406,9 +1440,15 @@ async fn github_merge_readiness(
     };
     observation.reason = reason;
 
-    let rules = github_branch_rules(reference, &snapshot.metadata.base_branch, request).await?;
-    let reviews_required =
-        validate_github_rules(&rules, current_head_ci.then_some(check_names.as_slice()))?;
+    let branch_rules =
+        github_branch_rules(reference, &snapshot.metadata.base_branch, request).await?;
+    let reviews_required = match branch_rules {
+        GitHubBranchRules::Available(rules) => {
+            validate_github_rules(&rules, current_head_ci.then_some(check_names.as_slice()))?
+        }
+        // The synchronous merge endpoint remains authoritative for rules this plan cannot list.
+        GitHubBranchRules::UnavailableOnPlan => false,
+    };
     match snapshot.metadata.review_decision.as_deref() {
         Some("APPROVED") => {}
         Some(_) => {
