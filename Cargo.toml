@@ -131,7 +131,7 @@ url = "2.5"
 uuid = { version = "1.23.3", features = ["v4"] }
 walkdir = "2.5.0"
 xz2 = { version = "0.1", features = ["static"] }
-zip = { version = "2.4", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
