@@ -113,13 +113,15 @@ pub(super) fn acquire(
     validate_staging_dir(staging)?;
     let current = parse_stable_version(current_version)?;
     let services = service_urls()?;
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(180))
-        .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(30))
-        .timeout_write(Duration::from_secs(30))
-        .redirects(0)
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(180)))
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_per_read(Some(Duration::from_secs(30)))
+        .timeout_per_write(Some(Duration::from_secs(30)))
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .build()
+        .into();
     let (tag, version, manifest) = latest_release_manifest(&agent, &services)?;
     let Some(selected) = select_update_archive(&manifest, &tag, &version, &current, target)? else {
         return Ok(None);
@@ -485,7 +487,7 @@ fn get_bounded(
     let response = open_response(agent, url, trust, accept)?;
     let expected_length = checked_content_length(&response, limit)?;
     let mut bytes = Vec::new();
-    let size = copy_limited(response.into_reader(), &mut bytes, limit, None)?;
+    let size = copy_limited(response.into_body().into_reader(), &mut bytes, limit, None)?;
     if expected_length.is_some_and(|expected| expected != size) {
         return Err(invalid("release response ended before its Content-Length"));
     }
@@ -505,7 +507,7 @@ fn download_archive(
     *created = true;
     let mut digest = Sha256::new();
     let size = copy_limited(
-        response.into_reader(),
+        response.into_body().into_reader(),
         &mut file,
         MAX_ARCHIVE_SIZE,
         Some(&mut digest),
@@ -552,18 +554,24 @@ fn copy_limited<R: Read, W: Write>(
     Ok(size)
 }
 
-fn content_length(response: &ureq::Response) -> Result<Option<u64>> {
+fn content_length(response: &ureq::http::Response<ureq::Body>) -> Result<Option<u64>> {
     response
-        .header("Content-Length")
+        .headers()
+        .get(ureq::http::header::CONTENT_LENGTH)
         .map(|value| {
             value
-                .parse::<u64>()
-                .map_err(|_| invalid("release response has an invalid Content-Length"))
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| invalid("release response has an invalid Content-Length"))
         })
         .transpose()
 }
 
-fn checked_content_length(response: &ureq::Response, limit: u64) -> Result<Option<u64>> {
+fn checked_content_length(
+    response: &ureq::http::Response<ureq::Body>,
+    limit: u64,
+) -> Result<Option<u64>> {
     let length = content_length(response)?;
     if length.is_some_and(|length| length > limit) {
         return Err(invalid("release response exceeds its size limit"));
@@ -576,25 +584,25 @@ fn open_response(
     url: &Url,
     trust: UrlTrust<'_>,
     accept: &str,
-) -> Result<ureq::Response> {
+) -> Result<ureq::http::Response<ureq::Body>> {
     let mut current = url.clone();
     for redirects in 0..=MAX_REDIRECTS {
         validate_url(&current, trust)?;
-        let response = match agent
+        let response = agent
             .get(current.as_str())
-            .set("Accept", accept)
-            .set("User-Agent", "cruise-native-updater")
+            .header("Accept", accept)
+            .header("User-Agent", "cruise-native-updater")
             .call()
-        {
-            Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-            Err(error) => return Err(invalid(&format!("release request failed: {error}"))),
-        };
-        if (300..400).contains(&response.status()) {
+            .map_err(|error| invalid(&format!("release request failed: {error}")))?;
+        let status = response.status().as_u16();
+        if (300..400).contains(&status) {
             if redirects == MAX_REDIRECTS {
                 return Err(invalid("release server exceeded the redirect limit"));
             }
             let location = response
-                .header("Location")
+                .headers()
+                .get(ureq::http::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
                 .ok_or_else(|| invalid("release redirect has no Location header"))?;
             current = current
                 .join(location)
@@ -602,11 +610,8 @@ fn open_response(
             validate_url(&current, trust)?;
             continue;
         }
-        if response.status() != 200 {
-            return Err(invalid(&format!(
-                "release server returned HTTP {}",
-                response.status()
-            )));
+        if status != 200 {
+            return Err(invalid(&format!("release server returned HTTP {status}")));
         }
         return Ok(response);
     }
