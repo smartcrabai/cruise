@@ -205,7 +205,16 @@ if [ "$1" = "api" ]; then
           ;;
       esac
       ;;
-    *rules/branches/*) cat "$FAKE_GH_RULES" ;;
+    *rules/branches/*)
+      if [ "${FAKE_GH_RULES_DIRECT_ERROR:-}" = "1" ]; then
+        cat "$FAKE_GH_RULES"
+      else
+        printf '['
+        cat "$FAKE_GH_RULES"
+        printf ']\n'
+      fi
+      if [ "${FAKE_GH_RULES_ERROR:-}" = "1" ]; then exit 1; fi
+      ;;
     *) exit 64 ;;
   esac
 else
@@ -451,7 +460,105 @@ async fn github_merge_uses_squash_and_atomic_head_guard_once() {
             fixture.head
         )
     );
-    assert!(fixture.provider_log().contains("rules/branches/main"));
+}
+
+#[tokio::test]
+async fn github_allows_the_exact_plan_limited_branch_rules_error() {
+    let mut fixture = Fixture::new();
+    let mut status = github_status(&fixture.head);
+    status["data"]["repository"]["pullRequest"]["reviewDecision"] = json!(null);
+    for direct_body in [false, true] {
+        if fixture.merged.exists() {
+            fs::remove_file(&fixture.merged).unwrap_or_else(|error| panic!("{error}"));
+        }
+        if fixture.effects.exists() {
+            fs::remove_file(&fixture.effects).unwrap_or_else(|error| panic!("{error}"));
+        }
+        fixture.configure_github(&github_open_identity(&fixture.head), &status, &json!([]));
+        fixture
+            .env
+            .insert("FAKE_GH_RULES_ERROR".to_string(), "1".to_string());
+        if direct_body {
+            fixture
+                .env
+                .insert("FAKE_GH_RULES_DIRECT_ERROR".to_string(), "1".to_string());
+        } else {
+            fixture.env.remove("FAKE_GH_RULES_DIRECT_ERROR");
+        }
+        write_json(
+            &fixture.gh_rules,
+            &json!({
+                "message": "Upgrade to GitHub Pro or make this repository public to enable this feature.",
+                "status": "403"
+            }),
+        );
+
+        let result =
+            squash_merge(fixture.request("https://github.com/acme/service/pull/7", None)).await;
+
+        assert_eq!(
+            result,
+            Ok(AutoSquashOutcome::Merged),
+            "direct body: {direct_body}"
+        );
+        let effects = fixture.effect_lines();
+        assert_eq!(effects.len(), 1);
+        assert_eq!(
+            effects[0],
+            format!(
+                "api --hostname github.com --method PUT repos/acme/service/pulls/7/merge -f sha={} -f merge_method=squash",
+                fixture.head
+            )
+        );
+    }
+}
+
+#[tokio::test]
+async fn github_rejects_other_or_malformed_branch_rules_errors_without_merge() {
+    let mut fixture = Fixture::new();
+    fixture
+        .env
+        .insert("FAKE_GH_RULES_ERROR".to_string(), "1".to_string());
+    let cases = [
+        (
+            "generic 403",
+            r#"{"message":"Resource not accessible by integration","status":"403"}"#,
+        ),
+        (
+            "wrong status",
+            r#"{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":"404"}"#,
+        ),
+        (
+            "missing status",
+            r#"{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature."}"#,
+        ),
+        (
+            "malformed 403",
+            r#"{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":"403""#,
+        ),
+    ];
+    for (reason, response) in cases {
+        fixture.configure_github(
+            &github_open_identity(&fixture.head),
+            &github_status(&fixture.head),
+            &json!([]),
+        );
+        fs::write(&fixture.gh_rules, response)
+            .unwrap_or_else(|error| panic!("writing {reason} fixture: {error}"));
+
+        let result =
+            squash_merge(fixture.request("https://github.com/acme/service/pull/7", None)).await;
+
+        assert!(
+            matches!(result, Err(AutoSquashError::CommandFailed(_))),
+            "{reason}: {result:?}"
+        );
+        assert_eq!(
+            fixture.effect_lines(),
+            Vec::<String>::new(),
+            "{reason} must reject before merge"
+        );
+    }
 }
 
 #[tokio::test]
