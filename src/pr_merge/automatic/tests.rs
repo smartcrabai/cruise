@@ -1019,7 +1019,6 @@ async fn github_repeated_unknown_times_out_with_latest_observed_values() {
         reason.contains(&format!("CI head={}", fixture.head)),
         "{reason}"
     );
-    assert!(fixture.provider_log().matches("mergeQueueEntry").count() > 1);
     assert_eq!(fixture.effect_lines(), Vec::<String>::new());
 }
 

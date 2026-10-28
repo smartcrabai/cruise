@@ -927,15 +927,15 @@ struct GitHubBranchRulesApiError<'a> {
 
 fn github_branch_rules_unavailable_on_plan(stdout: &[u8]) -> bool {
     // gh --paginate --slurp wraps the failed page body; also accept a bare body.
-    let error = match serde_json::from_slice::<[GitHubBranchRulesApiError<'_>; 1]>(stdout) {
-        Ok([error]) => error,
-        Err(_) => {
+    let error =
+        if let Ok([error]) = serde_json::from_slice::<[GitHubBranchRulesApiError<'_>; 1]>(stdout) {
+            error
+        } else {
             let Ok(error) = serde_json::from_slice::<GitHubBranchRulesApiError<'_>>(stdout) else {
                 return false;
             };
             error
-        }
-    };
+        };
     error.status == "403"
         && error.message
             == "Upgrade to GitHub Pro or make this repository public to enable this feature."
