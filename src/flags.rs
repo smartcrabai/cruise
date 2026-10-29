@@ -328,3 +328,238 @@ after-pr:
         );
     }
 }
+
+/// The execution graph as displayed: flag-disabled steps are hidden.
+/// Legacy unversioned checkpoints are displayed without filtering because their topology cannot be safely projected.
+#[must_use]
+pub fn enabled_graph(
+    graph: &crate::graph::ExecutionGraph,
+    compiled: &CompiledWorkflow,
+    values: &FlagValues,
+) -> crate::graph::ExecutionGraph {
+    let hidden = graph
+        .nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            compiled
+                .steps
+                .get(&node.step_name)
+                .filter(|step| is_disabled(step.flag.as_ref(), values))
+                .map(|_| id.as_str())
+        })
+        .collect();
+    graph.without_nodes(&hidden)
+}
+
+#[cfg(test)]
+mod enabled_graph_tests {
+    use super::*;
+    use crate::graph::{EdgeCounter, ExecutionGraph, TransitionReason, build_graph};
+
+    fn fixture(yaml: &str) -> (CompiledWorkflow, ExecutionGraph) {
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+        let graph = build_graph(&compiled, 3).unwrap_or_else(|e| panic!("{e:?}"));
+        (compiled, graph)
+    }
+
+    const LINE: &str = "flags:\n  e2e: {}\nsteps:\n  a:\n    command: 'true'\n  x:\n    flag: e2e\n    command: 'true'\n  b:\n    command: 'true'\n";
+
+    fn target<'a>(
+        graph: &'a ExecutionGraph,
+        node: &str,
+        reason: TransitionReason,
+    ) -> Option<&'a str> {
+        graph.nodes[node]
+            .successors
+            .iter()
+            .find(|edge| edge.reason == reason)
+            .unwrap_or_else(|| panic!("missing edge {reason:?}"))
+            .target
+            .as_deref()
+    }
+
+    #[test]
+    fn disabled_middle_reconnects_both_edges_and_predecessors() {
+        let (compiled, graph) = fixture(LINE);
+        let projected = enabled_graph(&graph, &compiled, &FlagValues::new());
+        assert!(!projected.nodes.contains_key("x"));
+        assert_eq!(
+            target(&projected, "a", TransitionReason::Sequential),
+            Some("b")
+        );
+        assert_eq!(
+            target(&projected, "a", TransitionReason::SkipFallback),
+            Some("b")
+        );
+        assert_eq!(projected.predecessors["b"], ["a"]);
+    }
+
+    #[test]
+    fn consecutive_disabled_nodes_are_bypassed() {
+        let (compiled, graph) = fixture(
+            "flags:\n  f: {}\nsteps:\n  a: {command: 'true'}\n  x: {command: 'true', flag: f}\n  y: {command: 'true', flag: f}\n  b: {command: 'true'}\n",
+        );
+        let projected = enabled_graph(&graph, &compiled, &FlagValues::new());
+        assert_eq!(
+            projected
+                .nodes
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(
+            target(&projected, "a", TransitionReason::Sequential),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn disabled_last_node_becomes_terminal() {
+        let (compiled, graph) = fixture(
+            "flags:\n  f: {}\nsteps:\n  a: {command: 'true'}\n  x: {command: 'true', flag: f}\n",
+        );
+        let projected = enabled_graph(&graph, &compiled, &FlagValues::new());
+        assert_eq!(target(&projected, "a", TransitionReason::Sequential), None);
+    }
+
+    #[test]
+    fn disabled_jump_target_and_payload_are_rewritten() {
+        let (compiled, graph) = fixture(
+            "flags:\n  f: {}\nsteps:\n  a:\n    command: 'true'\n    if:\n      fail: x\n      file-changed: x\n  x: {command: 'true', flag: f}\n  b: {command: 'true'}\n",
+        );
+        let projected = enabled_graph(&graph, &compiled, &FlagValues::new());
+        for reason in [
+            TransitionReason::IfFailGoto { target: "b".into() },
+            TransitionReason::IfFileChanged { target: "b".into() },
+        ] {
+            assert_eq!(target(&projected, "a", reason), Some("b"));
+        }
+    }
+
+    #[test]
+    fn disabled_final_conditional_jump_becomes_terminal_preserving_reason() {
+        let (compiled, graph) = fixture(
+            "flags:\n  f: {}\nsteps:\n  a:\n    command: 'true'\n    if:\n      fail: x\n      file-changed: x\n  x: {command: 'true', flag: f}\n",
+        );
+        let projected = enabled_graph(&graph, &compiled, &FlagValues::new());
+        assert!(!projected.nodes.contains_key("x"));
+        for reason in [
+            TransitionReason::IfFailGoto { target: "x".into() },
+            TransitionReason::IfFileChanged { target: "x".into() },
+        ] {
+            assert_eq!(target(&projected, "a", reason), None);
+        }
+    }
+
+    #[test]
+    fn enabled_or_ungated_graph_is_unchanged() {
+        let (compiled, graph) = fixture(LINE);
+        assert_eq!(
+            enabled_graph(&graph, &compiled, &FlagValues::from([("e2e".into(), true)])),
+            graph
+        );
+        let (compiled, graph) = fixture("steps:\n  a: {command: 'true'}\n  b: {command: 'true'}\n");
+        assert_eq!(enabled_graph(&graph, &compiled, &FlagValues::new()), graph);
+    }
+
+    #[test]
+    fn list_flags_use_any_enabled_and_absent_is_off() {
+        let (compiled, graph) = fixture(
+            "flags:\n  e2e: {}\n  docs: {}\nsteps:\n  a: {command: 'true', flag: [e2e, docs]}\n  b: {command: 'true'}\n",
+        );
+        assert_eq!(
+            enabled_graph(
+                &graph,
+                &compiled,
+                &FlagValues::from([("docs".into(), true)])
+            ),
+            graph
+        );
+        assert!(
+            !enabled_graph(&graph, &compiled, &FlagValues::new())
+                .nodes
+                .contains_key("a")
+        );
+    }
+
+    #[test]
+    fn disabled_group_removes_all_expanded_steps() {
+        let (compiled, graph) = fixture(
+            "flags:\n  docs: {}\ngroups:\n  checks:\n    steps:\n      first: {command: 'true'}\n      second: {command: 'true'}\nsteps:\n  review: {group: checks, flag: docs}\n  b: {command: 'true'}\n",
+        );
+        assert!(graph.nodes.contains_key("review/first"));
+        let projected = enabled_graph(&graph, &compiled, &FlagValues::new());
+        assert!(!projected.nodes.contains_key("review/first"));
+        assert!(!projected.nodes.contains_key("review/second"));
+        assert!(projected.nodes.contains_key("b"));
+    }
+
+    #[test]
+    fn counters_merge_and_hidden_sources_are_discarded() {
+        let (compiled, mut graph) = fixture(LINE);
+        graph.state.edge_counts.insert(
+            ("a".into(), "x".into()),
+            EdgeCounter {
+                traversals: 3,
+                budgeted_traversals: 2,
+            },
+        );
+        graph.state.edge_counts.insert(
+            ("a".into(), "b".into()),
+            EdgeCounter {
+                traversals: 4,
+                budgeted_traversals: 1,
+            },
+        );
+        graph.state.edge_counts.insert(
+            ("x".into(), "b".into()),
+            EdgeCounter {
+                traversals: 5,
+                budgeted_traversals: 3,
+            },
+        );
+        let projected = enabled_graph(&graph, &compiled, &FlagValues::new());
+        assert_eq!(projected.state.edge_counts.len(), 1);
+        assert_eq!(
+            projected.state.edge_counts[&(String::from("a"), String::from("b"))],
+            EdgeCounter {
+                traversals: 7,
+                budgeted_traversals: 3
+            }
+        );
+    }
+
+    #[test]
+    fn hidden_current_resolves_to_next_enabled_node() {
+        let (compiled, mut graph) = fixture(LINE);
+        graph.state.current = Some("x".into());
+        assert_eq!(
+            enabled_graph(&graph, &compiled, &FlagValues::new())
+                .state
+                .current
+                .as_deref(),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn legacy_graph_is_unchanged() {
+        let (compiled, mut graph) = fixture(LINE);
+        graph.version = 0;
+        assert_eq!(enabled_graph(&graph, &compiled, &FlagValues::new()), graph);
+    }
+
+    #[test]
+    fn all_disabled_nodes_produce_empty_graph() {
+        let (compiled, graph) = fixture(
+            "flags:\n  f: {}\nsteps:\n  a: {command: 'true', flag: f}\n  b: {command: 'true', flag: f}\n",
+        );
+        assert!(
+            enabled_graph(&graph, &compiled, &FlagValues::new())
+                .nodes
+                .is_empty()
+        );
+    }
+}

@@ -402,6 +402,23 @@ fn error_style(app: &TuiApp) -> Style {
 }
 
 fn render_dag(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let warning = app
+        .active_session()
+        .and_then(|session| app.graph_filter_warnings.get(&session.id));
+    let area = if let Some(warning) = warning {
+        let paragraph = Paragraph::new(warning.as_str())
+            .style(error_style(app))
+            .wrap(Wrap { trim: false });
+        let height = u16::try_from(paragraph.line_count(area.width))
+            .unwrap_or(u16::MAX)
+            .min(area.height);
+        let sections =
+            Layout::vertical([Constraint::Length(height), Constraint::Min(0)]).split(area);
+        frame.render_widget(paragraph, sections[0]);
+        sections[1]
+    } else {
+        area
+    };
     let Some(dag) = app.active_dag() else {
         frame.render_widget(
             Paragraph::new("\n  Graph unavailable. Check the session workflow configuration.")
@@ -411,6 +428,15 @@ fn render_dag(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         );
         return;
     };
+    render_dag_graph(frame, app, area, dag);
+}
+
+fn render_dag_graph(
+    frame: &mut Frame<'_>,
+    app: &TuiApp,
+    area: Rect,
+    dag: &crate::graph::ExecutionGraph,
+) {
     let split = Layout::horizontal([Constraint::Length(32), Constraint::Min(1)])
         .spacing(1)
         .split(area);
@@ -457,8 +483,23 @@ fn render_dag(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         lines.push(Line::from(Span::styled("TRANSITIONS", label(app))));
         for successor in &node.successors {
             lines.push(Line::from(format!(
-                "  {:?}  →  {}{}",
-                successor.reason,
+                "  {}  →  {}{}",
+                if successor.target.is_none() {
+                    match &successor.reason {
+                        crate::graph::TransitionReason::IfFileChanged { .. } => {
+                            "IfFileChanged".to_string()
+                        }
+                        crate::graph::TransitionReason::IfFailGoto { .. } => {
+                            "IfFailGoto".to_string()
+                        }
+                        crate::graph::TransitionReason::GroupRetry { .. } => {
+                            "GroupRetry".to_string()
+                        }
+                        reason => format!("{reason:?}"),
+                    }
+                } else {
+                    format!("{:?}", successor.reason)
+                },
                 successor.target.as_deref().unwrap_or("end"),
                 successor
                     .target
@@ -1551,6 +1592,100 @@ mod tests {
     use super::super::app::SessionsFocus;
     use super::*;
     use crate::session::SessionState;
+
+    #[test]
+    fn graph_warning_is_scoped_to_selected_session_and_wraps_above_graph() {
+        let (_temp, mut app) = ask_plan_app();
+        app.graph_filter_warnings.insert(
+            "session-a".to_string(),
+            "Warning: graph filtering unavailable for this session".to_string(),
+        );
+        let backend = ratatui::backend::TestBackend::new(30, 12);
+        let mut terminal =
+            ratatui::Terminal::new(backend).unwrap_or_else(|error| panic!("{error}"));
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_dag(frame, &app, area);
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        let output = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(30)
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(output.contains("Warning: graph filtering"), "{output}");
+        assert!(output.contains("unavailable for this session"), "{output}");
+        assert!(output.contains("Graph unavailable"), "{output}");
+
+        app.selected = 1;
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_dag(frame, &app, area);
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        let output = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(!output.contains("Warning: graph filtering"), "{output}");
+    }
+
+    #[test]
+    fn disabled_final_conditional_targets_render_as_end_without_hidden_name() {
+        let config = crate::config::WorkflowConfig::from_yaml(
+            "flags:\n  f: {}\nsteps:\n  a:\n    command: 'true'\n    if:\n      fail: hidden_final\n      file-changed: hidden_final\n  hidden_final: {command: 'true', flag: f}\n",
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|error| panic!("{error:?}"));
+        let graph =
+            crate::graph::build_graph(&compiled, 3).unwrap_or_else(|error| panic!("{error:?}"));
+        let graph =
+            crate::flags::enabled_graph(&graph, &compiled, &crate::flags::FlagValues::new());
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let application = crate::application::CruiseApplication::new(
+            crate::session::SessionManager::new(temp.path().to_path_buf()),
+        );
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (log_tx, _) = tokio::sync::mpsc::channel(4);
+        let app =
+            TuiApp::new_for_test_with_lock(application, event_tx, log_tx, Some(lock_process()));
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut terminal =
+            ratatui::Terminal::new(backend).unwrap_or_else(|error| panic!("{error}"));
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_dag_graph(frame, &app, area, &graph);
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        let output = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(120)
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(output.contains("IfFailGoto  →  end"), "{output}");
+        assert!(output.contains("IfFileChanged  →  end"), "{output}");
+        assert!(!output.contains("hidden_final"), "{output}");
+    }
 
     fn rendered_lines_with(
         width: u16,

@@ -449,6 +449,40 @@ async fn webui_all_gated_flag_round_trip_does_not_restore_history_skips() {
 }
 
 #[tokio::test]
+async fn webui_dag_tab_tracks_external_flag_changes() {
+    let harness = harness();
+    let config = flag_config(&harness);
+    let session = harness
+        .state
+        .application
+        .create_session(NewSessionRequest {
+            input: "dag flags".to_string(),
+            base_dir: harness.dir.path().to_path_buf(),
+            config_path: Some(config),
+            config_yaml: None,
+            repo: None,
+            workspace_mode: WorkspaceMode::Worktree,
+            allow_dirty_working_tree: true,
+            attachments: Vec::new(),
+            skipped_steps: Vec::new(),
+            flags: BTreeMap::default(),
+        })
+        .unwrap_or_else(|error| panic!("create flag session: {error}"));
+
+    for enabled in [false, true, false] {
+        external_edit(&harness, &session.id, |stored| {
+            stored.flags.insert("e2e".to_string(), enabled);
+        });
+        let uri = format!("/webui/sessions/{}/tab/dag", session.id);
+        let (status, _, html) = get(&harness, &uri, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert!(html.contains("always"), "{html}");
+        assert_eq!(html.contains("browser"), enabled, "{html}");
+        assert!(!html.contains("docs-only"), "{html}");
+    }
+}
+
+#[tokio::test]
 async fn webui_settings_filter_skips_but_keep_current_step_options() {
     let harness = harness();
     let config = flag_config(&harness);

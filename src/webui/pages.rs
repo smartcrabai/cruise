@@ -192,11 +192,10 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
             let vm = super::view::TabDagVm {
                 id: id.to_string(),
                 mermaid_source: dag.as_ref().map(super::dag_mermaid::build_mermaid_source),
-                message: if dag.is_some() {
-                    None
-                } else {
-                    Some("No Graph available.".to_string())
-                },
+                message: dag.as_ref().map_or_else(
+                    || Some("No Graph available.".to_string()),
+                    |dag| dag.warning.clone(),
+                ),
             };
             state.templates.render("tab-dag", &vm)
         }
