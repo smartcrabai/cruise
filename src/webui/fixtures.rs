@@ -257,6 +257,12 @@ fn tab_fixtures() -> Vec<(&'static str, Value)> {
             value(&TabInfoVm {
                 id: "s1".to_string(),
                 config_source: "builtin".to_string(),
+                flags: vec![FlagRowVm {
+                    name: "e2e".to_string(),
+                    description: "Run end-to-end tests".to_string(),
+                    on: true,
+                }],
+                flags_note: Some("None".to_string()),
                 location_label: "Base dir".to_string(),
                 location: "/tmp/x".to_string(),
                 worktree_branch: Some("cruise/s1".to_string()),

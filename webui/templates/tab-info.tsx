@@ -6,6 +6,16 @@ export default function TabInfo(props) {
         <dd class="break-all font-mono text-gray-700 dark:text-gray-300 mt-0.5">{props.configSource}</dd>
       </div>
       <div>
+        <dt class="text-xs uppercase tracking-wide">Flags</dt>
+        <dd class="mt-0.5 space-y-0.5">
+          {props.flags.map(flag => <div class="flex flex-wrap items-baseline gap-2">
+            <span class="font-mono text-gray-700 dark:text-gray-300">{flag.name}={flag.on ? "on" : "off"}</span>
+            {flag.description && <span class="text-xs">{flag.description}</span>}
+          </div>)}
+          {props.flagsNote && <span class="text-gray-700 dark:text-gray-300">{props.flagsNote}</span>}
+        </dd>
+      </div>
+      <div>
         <dt class="text-xs uppercase tracking-wide">{props.locationLabel}</dt>
         <dd class="break-all font-mono text-gray-700 dark:text-gray-300 mt-0.5">{props.location}</dd>
       </div>
