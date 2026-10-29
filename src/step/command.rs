@@ -483,12 +483,13 @@ mod tests {
             .unwrap_or_else(|error| panic!("create invocation-count temp directory: {error}"));
         let count = root.path().join("invocations");
         let env = HashMap::from([("COUNT_FILE".to_owned(), count.display().to_string())]);
-        let result = run_command(
-            "printf x >> \"$COUNT_FILE\"; printf '%s\\n' 'CRUISE_CI_DIAGNOSTIC_V1 github graphql_error PENDING true 429' >&2; exit 1",
-            1, &env, None, None, None, None,
-        )
-        .await
-        .unwrap_or_else(|error| panic!("run command for CI diagnostic count: {error:?}"));
+        #[cfg(unix)]
+        let command = "printf x >> \"$COUNT_FILE\"; printf '%s\\n' 'CRUISE_CI_DIAGNOSTIC_V1 github graphql_error PENDING true 429' >&2; exit 1";
+        #[cfg(windows)]
+        let command = r#"<nul set /p "=x" >> "%COUNT_FILE%" & echo CRUISE_CI_DIAGNOSTIC_V1 github graphql_error PENDING true 429 >&2 & exit /b 1"#;
+        let result = run_command(command, 1, &env, None, None, None, None)
+            .await
+            .unwrap_or_else(|error| panic!("run command for CI diagnostic count: {error:?}"));
         assert!(!result.success);
         assert_eq!(
             std::fs::read_to_string(count)
