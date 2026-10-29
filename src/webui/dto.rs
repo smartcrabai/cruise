@@ -171,7 +171,13 @@ pub(crate) fn build_dag_dto(
     current_step_is_node_id: bool,
     skipped_steps: &[String],
 ) -> std::result::Result<DagDto, String> {
-    build_graph_dto(Some(compiled), dag, current_step, current_step_is_node_id, skipped_steps)
+    build_graph_dto(
+        Some(compiled),
+        dag,
+        current_step,
+        current_step_is_node_id,
+        skipped_steps,
+    )
 }
 
 fn build_graph_dto(
@@ -214,16 +220,16 @@ fn build_graph_dto(
             edge.target.is_none()
                 && match edge.reason {
                     crate::graph::TransitionReason::IfNoFileChangesFail => false,
-                    crate::graph::TransitionReason::SkipFallback => {
-                        compiled.and_then(|workflow| workflow.steps.get(&node.step_name)).is_some_and(|step| {
+                    crate::graph::TransitionReason::SkipFallback => compiled
+                        .and_then(|workflow| workflow.steps.get(&node.step_name))
+                        .is_some_and(|step| {
                             step.when.is_some()
                                 || matches!(
                                     step.skip,
                                     Some(SkipCondition::Static(true) | SkipCondition::Variable(_))
                                 )
                                 || skipped_steps.contains(&node.step_name)
-                        })
-                    }
+                        }),
                     _ => true,
                 }
         });
@@ -238,13 +244,21 @@ fn build_graph_dto(
             let Some(&is_terminal) = terminals.get(name.as_str()) else {
                 continue;
             };
-            steps.push(DagStepDto { name: name.clone(), kind: step_kind(config), is_terminal });
+            steps.push(DagStepDto {
+                name: name.clone(),
+                kind: step_kind(config),
+                is_terminal,
+            });
         }
     } else {
         let mut names: Vec<_> = terminals.into_iter().collect();
         names.sort_by_key(|(name, _)| *name);
         for (name, is_terminal) in names {
-            steps.push(DagStepDto { name: name.to_string(), kind: "unknown".to_string(), is_terminal });
+            steps.push(DagStepDto {
+                name: name.to_string(),
+                kind: "unknown".to_string(),
+                is_terminal,
+            });
         }
     }
     let mut edges = Vec::new();
@@ -383,27 +397,30 @@ pub(crate) fn dag_dto_for_session(
     let display = application
         .session_display_dag_with_warning(session_id)
         .map_err(|error| CruiseError::Other(error.to_string()))?;
-    display.map(|(dag, warning)| {
-        let compiled = if warning.is_none() {
-            Some(crate::workflow::compile(application.session_config(&session)?)?)
-        } else {
-            None
-        };
-        let skips = compiled.as_ref().map_or_else(Vec::new, |compiled| {
-            crate::flags::preflight_skips(compiled, &session.flags, &session.skipped_steps)
-        });
-        let mut dto = build_graph_dto(
-            compiled.as_ref(),
-            &dag,
-            session.current_step.as_deref(),
-            session.current_step_is_node_id,
-            &skips,
-        )
-        .map_err(CruiseError::Other)?;
-        dto.warning = warning;
-        Ok(dto)
-    })
-    .transpose()
+    display
+        .map(|(dag, warning)| {
+            let compiled = if warning.is_none() {
+                Some(crate::workflow::compile(
+                    application.session_config(&session)?,
+                )?)
+            } else {
+                None
+            };
+            let skips = compiled.as_ref().map_or_else(Vec::new, |compiled| {
+                crate::flags::preflight_skips(compiled, &session.flags, &session.skipped_steps)
+            });
+            let mut dto = build_graph_dto(
+                compiled.as_ref(),
+                &dag,
+                session.current_step.as_deref(),
+                session.current_step_is_node_id,
+                &skips,
+            )
+            .map_err(CruiseError::Other)?;
+            dto.warning = warning;
+            Ok(dto)
+        })
+        .transpose()
 }
 
 #[cfg(test)]

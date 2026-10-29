@@ -954,7 +954,8 @@ impl TuiApp {
             }
             DetailTab::Dag => {
                 if !self.dag_cache.contains_key(&id)
-                    && let Ok(Some((dag, warning))) = self.application.session_display_dag_with_warning(&id)
+                    && let Ok(Some((dag, warning))) =
+                        self.application.session_display_dag_with_warning(&id)
                 {
                     self.graph_filter_warnings.remove(&id);
                     if let Some(warning) = warning {

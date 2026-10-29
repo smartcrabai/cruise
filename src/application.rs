@@ -2402,11 +2402,20 @@ impl CruiseApplication {
             return Ok(None);
         };
         let state = self.manager.load(id)?;
-        match self.manager.load_config(&state).and_then(crate::workflow::compile) {
-            Ok(compiled) => Ok(Some((crate::flags::enabled_graph(&graph, &compiled, &state.flags), None))),
+        match self
+            .manager
+            .load_config(&state)
+            .and_then(crate::workflow::compile)
+        {
+            Ok(compiled) => Ok(Some((
+                crate::flags::enabled_graph(&graph, &compiled, &state.flags),
+                None,
+            ))),
             Err(error) if state.has_dag || self.manager.dag_path(id).exists() => Ok(Some((
                 graph,
-                Some(format!("Flag filtering unavailable; showing persisted graph read-only: {error}")),
+                Some(format!(
+                    "Flag filtering unavailable; showing persisted graph read-only: {error}"
+                )),
             ))),
             Err(error) => Err(error),
         }
@@ -4557,7 +4566,11 @@ mod tests {
         );
         manager.create(&state).unwrap();
         let config_path = manager.sessions_dir().join(&id).join("config.yaml");
-        std::fs::write(&config_path, "command: [echo]\nsteps:\n  a: {command: 'true'}\n").unwrap();
+        std::fs::write(
+            &config_path,
+            "command: [echo]\nsteps:\n  a: {command: 'true'}\n",
+        )
+        .unwrap();
         let app = CruiseApplication::new(manager.clone());
         let graph = app.session_dag(&id).unwrap().unwrap();
         let path = manager.dag_path(&id);

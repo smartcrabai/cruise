@@ -476,7 +476,9 @@ fn render_dag_graph(
                         crate::graph::TransitionReason::IfFailGoto { .. } => {
                             "IfFailGoto".to_string()
                         }
-                        crate::graph::TransitionReason::GroupRetry { .. } => "GroupRetry".to_string(),
+                        crate::graph::TransitionReason::GroupRetry { .. } => {
+                            "GroupRetry".to_string()
+                        }
                         reason => format!("{reason:?}"),
                     }
                 } else {
@@ -1596,7 +1598,11 @@ mod tests {
             .buffer()
             .content
             .chunks(30)
-            .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect::<String>())
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(output.contains("Warning: graph filtering"), "{output}");
@@ -1626,8 +1632,7 @@ mod tests {
             "flags:\n  f: {}\nsteps:\n  a:\n    command: 'true'\n    if:\n      fail: hidden_final\n      file-changed: hidden_final\n  hidden_final: {command: 'true', flag: f}\n",
         )
         .unwrap_or_else(|error| panic!("{error:?}"));
-        let compiled =
-            crate::workflow::compile(config).unwrap_or_else(|error| panic!("{error:?}"));
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|error| panic!("{error:?}"));
         let graph =
             crate::graph::build_graph(&compiled, 3).unwrap_or_else(|error| panic!("{error:?}"));
         let graph =
@@ -1654,7 +1659,11 @@ mod tests {
             .buffer()
             .content
             .chunks(120)
-            .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect::<String>())
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(output.contains("IfFailGoto  →  end"), "{output}");
