@@ -448,12 +448,13 @@ impl GitHubMergeDiagnostic {
     }
 
     fn message(self) -> String {
+        use fmt::Write as _;
         let mut fields = format!("reason={}", self.reason.code());
         if let Some(status) = self.http_status {
-            fields.push_str(&format!(", HTTP={status}"));
+            let _ = write!(fields, ", HTTP={status}");
         }
         if let Some(code) = self.exit_code {
-            fields.push_str(&format!(", exit={code}"));
+            let _ = write!(fields, ", exit={code}");
         }
         format!(
             "GitHub rejected the squash merge request ({fields}): {}",
@@ -1685,6 +1686,15 @@ async fn perform_github_with_timing(
     }
     check_cancel(request.cancel_token)?;
 
+    run_github_merge(reference, request, expected_head, &mut observation).await
+}
+
+async fn run_github_merge(
+    reference: &ProviderRef,
+    request: &AutoSquashRequest<'_>,
+    expected_head: &str,
+    observation: &mut GitHubReadinessObservation,
+) -> Result<AutoSquashOutcome, AutoSquashError> {
     let args = github_merge_args(reference, expected_head)?;
     let merge_result = run_process(
         "gh",
@@ -1716,13 +1726,12 @@ async fn perform_github_with_timing(
         merge_uncertain,
     )
     .await;
-    match result {
-        Err(AutoSquashError::CommandFailed(_)) if diagnostic.is_some() => {
-            let diagnostic = diagnostic.expect("diagnostic was checked");
+    match (result, diagnostic) {
+        (Err(AutoSquashError::CommandFailed(_)), Some(diagnostic)) => {
             observation.merge_diagnostic = Some(diagnostic);
             Err(AutoSquashError::CommandFailed(diagnostic.message()))
         }
-        result => result,
+        (result, _) => result,
     }
 }
 

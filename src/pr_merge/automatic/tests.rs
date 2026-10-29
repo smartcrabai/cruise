@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use super::{AutoSquashError, AutoSquashOutcome, AutoSquashRequest, squash_merge};
 
 struct Fixture {
-    _temp: TempDir,
+    temp: TempDir,
     repo: PathBuf,
     bin: PathBuf,
     log: PathBuf,
@@ -109,7 +109,7 @@ impl Fixture {
             );
         }
         let fixture = Self {
-            _temp: temp,
+            temp,
             repo,
             bin,
             log,
@@ -1235,8 +1235,8 @@ async fn github_refusal_fixture(
         &github_status(&fixture.head),
         &json!([]),
     );
-    let response_path = fixture._temp.path().join("response.bin");
-    fs::write(&response_path, response).unwrap();
+    let response_path = fixture.temp.path().join("response.bin");
+    fs::write(&response_path, response).unwrap_or_else(|error| panic!("{error}"));
     fixture.env.insert(
         "FAKE_GH_RESPONSE".into(),
         response_path.display().to_string(),
@@ -1288,7 +1288,7 @@ async fn github_refusal_canonical_reasons_are_safe_and_not_inferred_from_status(
         assert!(error.contains(&format!("HTTP={status}")), "{error}");
         assert!(error.contains("exit=1"), "{error}");
         assert!(!error.contains("header-secret"), "{error}");
-        assert!(fixture.effect_lines().is_empty());
+        assert_eq!(fixture.effect_lines(), Vec::<String>::new());
         assert_eq!(
             fixture
                 .provider_log()
@@ -1334,7 +1334,7 @@ async fn github_refusal_untrusted_and_boundary_responses_are_unclassified() {
         assert!(error.contains("reason=unclassified"), "{error}");
         assert!(error.contains("exit=1"), "{error}");
         assert!(!error.contains(secret), "{error}");
-        assert!(fixture.effect_lines().is_empty());
+        assert_eq!(fixture.effect_lines(), Vec::<String>::new());
     }
 }
 
@@ -1343,9 +1343,11 @@ async fn github_refusal_confirmation_takes_priority_over_provider_response() {
     let response = b"HTTP/2 409\r\n\r\n{\"message\":\"Head branch was modified. Review and try the merge again.\"}";
     let (fixture, result) = github_refusal_fixture(response, Some("MERGED")).await;
     assert!(result.is_ok(), "{result:?}");
-    assert!(fixture.effect_lines().is_empty());
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
     let (_, result) = github_refusal_fixture(response, Some("CLOSED")).await;
-    let error = result.expect_err("closed PR must not merge");
+    let Err(error) = result else {
+        panic!("closed PR must not merge: {result:?}");
+    };
     assert!(
         !error.to_string().contains("reason=head_changed"),
         "{error}"
