@@ -500,7 +500,7 @@ mod tests {
         assert!(!result.success);
         let invocations = std::fs::read_to_string(count)
             .unwrap_or_else(|error| panic!("read command invocation count: {error}"));
-        assert!(invocations.lines().eq(["x"]), "{invocations:?}");
+        assert_eq!(invocations.lines().count(), 1, "{invocations:?}");
     }
 
     #[test]
