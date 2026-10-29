@@ -479,7 +479,8 @@ mod tests {
 
     #[tokio::test]
     async fn ci_diagnostic_check_count_does_not_trigger_rate_limit_retry() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create invocation-count temp directory: {error}"));
         let count = root.path().join("invocations");
         let env = HashMap::from([("COUNT_FILE".to_owned(), count.display().to_string())]);
         let result = run_command(
@@ -487,9 +488,13 @@ mod tests {
             1, &env, None, None, None, None,
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("run command for CI diagnostic count: {error:?}"));
         assert!(!result.success);
-        assert_eq!(std::fs::read_to_string(count).unwrap(), "x");
+        assert_eq!(
+            std::fs::read_to_string(count)
+                .unwrap_or_else(|error| panic!("read command invocation count: {error}")),
+            "x"
+        );
     }
 
     #[test]

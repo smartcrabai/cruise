@@ -368,12 +368,12 @@ mod enabled_graph_tests {
     fn target<'a>(
         graph: &'a ExecutionGraph,
         node: &str,
-        reason: TransitionReason,
+        reason: &TransitionReason,
     ) -> Option<&'a str> {
         graph.nodes[node]
             .successors
             .iter()
-            .find(|edge| edge.reason == reason)
+            .find(|edge| &edge.reason == reason)
             .unwrap_or_else(|| panic!("missing edge {reason:?}"))
             .target
             .as_deref()
@@ -385,11 +385,11 @@ mod enabled_graph_tests {
         let projected = enabled_graph(&graph, &compiled, &FlagValues::new());
         assert!(!projected.nodes.contains_key("x"));
         assert_eq!(
-            target(&projected, "a", TransitionReason::Sequential),
+            target(&projected, "a", &TransitionReason::Sequential),
             Some("b")
         );
         assert_eq!(
-            target(&projected, "a", TransitionReason::SkipFallback),
+            target(&projected, "a", &TransitionReason::SkipFallback),
             Some("b")
         );
         assert_eq!(projected.predecessors["b"], ["a"]);
@@ -410,7 +410,7 @@ mod enabled_graph_tests {
             ["a", "b"]
         );
         assert_eq!(
-            target(&projected, "a", TransitionReason::Sequential),
+            target(&projected, "a", &TransitionReason::Sequential),
             Some("b")
         );
     }
@@ -421,7 +421,7 @@ mod enabled_graph_tests {
             "flags:\n  f: {}\nsteps:\n  a: {command: 'true'}\n  x: {command: 'true', flag: f}\n",
         );
         let projected = enabled_graph(&graph, &compiled, &FlagValues::new());
-        assert_eq!(target(&projected, "a", TransitionReason::Sequential), None);
+        assert_eq!(target(&projected, "a", &TransitionReason::Sequential), None);
     }
 
     #[test]
@@ -434,7 +434,7 @@ mod enabled_graph_tests {
             TransitionReason::IfFailGoto { target: "b".into() },
             TransitionReason::IfFileChanged { target: "b".into() },
         ] {
-            assert_eq!(target(&projected, "a", reason), Some("b"));
+            assert_eq!(target(&projected, "a", &reason), Some("b"));
         }
     }
 
@@ -449,7 +449,7 @@ mod enabled_graph_tests {
             TransitionReason::IfFailGoto { target: "x".into() },
             TransitionReason::IfFileChanged { target: "x".into() },
         ] {
-            assert_eq!(target(&projected, "a", reason), None);
+            assert_eq!(target(&projected, "a", &reason), None);
         }
     }
 

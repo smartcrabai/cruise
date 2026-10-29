@@ -2327,7 +2327,7 @@ steps:
 fn invalid_ci_markers_export_no_untrusted_fields() {
     let collector = Collector::start();
     let fixture = Fixture::new(
-        r#"steps:
+        r"steps:
   invalid-ci:
     command: |
       printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V1 github private-reason-secret FAILURE false 3' >&2
@@ -2335,7 +2335,7 @@ fn invalid_ci_markers_export_no_untrusted_fields() {
       printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 3 leaked-field-secret' >&2
       printf '%s\n' 'invalid-marker-stderr-secret' >&2
       exit 9
-"#,
+",
     );
     let output = fixture.run(
         &borrowed_env(&otlp_env(&collector.endpoint())),
@@ -2380,11 +2380,17 @@ fn builtin_wait_ci_exports_graphql_failure_reason_without_raw_response() {
     let command = builtin_wait_ci_command("tdd")
         .replace('{', "{{")
         .replace('}', "}}");
-    let command = command
-        .lines()
-        .map(|line| format!("      {line}\n"))
-        .collect::<String>();
-    let fixture = Fixture::new(&format!("steps:\n  wait-ci:\n    command: |\n{command}"));
+    let line_count = command.lines().count();
+    let mut config = String::with_capacity(
+        "steps:\n  wait-ci:\n    command: |\n".len() + command.len() + line_count * 7,
+    );
+    config.push_str("steps:\n  wait-ci:\n    command: |\n");
+    for line in command.lines() {
+        config.push_str("      ");
+        config.push_str(line);
+        config.push('\n');
+    }
+    let fixture = Fixture::new(&config);
     let fake_bin = fixture.root.path().join("fake-gh/bin");
     std::fs::create_dir_all(&fake_bin)
         .unwrap_or_else(|error| panic!("create fake gh directory: {error}"));
@@ -2501,13 +2507,13 @@ fn failed_signal_exports_numeric_signal_status() {
 fn loop_protection_exports_bounded_traversal_diagnostics() {
     let collector = Collector::start();
     let fixture = Fixture::new(
-        r#"max_retries: 2
+        r"max_retries: 2
 steps:
   repeat:
     command: 'printf loop-output-secret >/dev/null'
     if:
       no-file-changes: retry
-"#,
+",
     );
     let output = fixture.run(
         &borrowed_env(&otlp_env(&collector.endpoint())),
