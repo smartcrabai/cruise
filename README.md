@@ -636,6 +636,8 @@ GitHub built-in CI waits pin the local `HEAD` and require the PR head and CI rol
 
 Native GitHub squash merge also waits for current-head CI registration/completion and GitHub's `UNKNOWN` mergeability to resolve, polling every 2 seconds for up to 10 minutes (a shorter step timeout still applies). This runtime check also protects existing saved workflow snapshots without rewriting them. Conflicts, current-head CI failures, changed heads, malformed responses, and unmet policy or review requirements still reject the merge; the final merge request remains single-shot and SHA-pinned.
 
+A refused final merge records only a fixed reason and available HTTP status and command exit code, after confirming the PR remains open at the expected head. Confirmed merges and other confirmation errors take precedence over refusal diagnostics.
+
 `MERGEABLE/UNSTABLE` is transient only while the pinned commit's CI is pending or not yet registered/current; it is never merge-ready. A current-head CI failure still rejects immediately, and green CI with a remaining `UNSTABLE` state is also rejected.
 
 PR-backed sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` can remove them. A normal session configured with `create_pr: false` retains its session, artifacts, and worktree without waiting for a PR.
@@ -2162,6 +2164,8 @@ The same span includes the final GitHub readiness observation:
 | `cruise.github.ci_head_matches` | Boolean comparing the observed CI rollup commit to the expected HEAD; `false` also covers a missing or not-yet-observed CI commit |
 
 The latest observation is retained locally and written once when the merge operation returns or its future is dropped, including outer step timeouts and cancellation. This avoids duplicate polling attributes exhausting the SDK's span attribute limit. A ready or already-merged result clears a previous wait reason; initial `none` / `unobserved` / `false` values do not prove that CI passed. Commit IDs are not exported.
+
+When a GitHub squash merge command completes unsuccessfully and the pull request is confirmed still open at the expected head, the saved failure includes a fixed refusal reason and any available HTTP status and command exit code. The same span records `cruise.github.merge_refusal_reason` and, when available, numeric `cruise.github.merge_http_status` and `cruise.github.merge_exit_code`. Reasons are `merge_not_performed`, `head_changed`, `base_changed`, `squash_disabled`, `merge_in_progress`, or `unclassified`. The last means the response did not match a recognized canonical message, not that a cause was inferred from the status. Raw provider messages and response headers are not saved or exported. These attributes are not metric labels.
 
 Skipped steps, including parallel children, do not emit step spans or operation observations. Step outcomes include postcondition failures such as `if.no-file-changes`; a later recovery can succeed without erasing the failed step. Cancelling the approval menu is recorded as cancelled while preserving the successful CLI exit; interrupting active planning or title generation still returns an error after draining that work. Choosing Execute now finishes planning before starting a separate execution root.
 

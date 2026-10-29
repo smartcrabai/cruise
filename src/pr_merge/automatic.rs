@@ -345,6 +345,124 @@ enum GitHubReadiness {
     Pending,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum GitHubMergeRefusalReason {
+    MergeNotPerformed,
+    HeadChanged,
+    BaseChanged,
+    SquashDisabled,
+    MergeInProgress,
+    Unclassified,
+}
+
+impl GitHubMergeRefusalReason {
+    fn from_message(message: &str) -> Self {
+        if message.chars().count() > 512 {
+            return Self::Unclassified;
+        }
+        let normalized = message.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+        let normalized = normalized.trim();
+        match normalized {
+            "Pull Request is not mergeable" => Self::MergeNotPerformed,
+            "Head branch was modified. Review and try the merge again." => Self::HeadChanged,
+            "Base branch was modified. Review and try the merge again." => Self::BaseChanged,
+            "Squash merges are not allowed on this repository." => Self::SquashDisabled,
+            "Merge already in progress" => Self::MergeInProgress,
+            _ => Self::Unclassified,
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::MergeNotPerformed => "merge_not_performed",
+            Self::HeadChanged => "head_changed",
+            Self::BaseChanged => "base_changed",
+            Self::SquashDisabled => "squash_disabled",
+            Self::MergeInProgress => "merge_in_progress",
+            Self::Unclassified => "unclassified",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::MergeNotPerformed => "Pull request is not mergeable.",
+            Self::HeadChanged => "Head branch changed before the merge could be completed.",
+            Self::BaseChanged => "Base branch changed before the merge could be completed.",
+            Self::SquashDisabled => "Squash merges are disabled for this repository.",
+            Self::MergeInProgress => "A merge is already in progress.",
+            Self::Unclassified => "The refusal reason could not be classified.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GitHubMergeDiagnostic {
+    http_status: Option<u16>,
+    exit_code: Option<i32>,
+    reason: GitHubMergeRefusalReason,
+}
+
+impl GitHubMergeDiagnostic {
+    fn from_output(output: &Output) -> Self {
+        let mut diagnostic = Self {
+            http_status: None,
+            exit_code: output.status.code(),
+            reason: GitHubMergeRefusalReason::Unclassified,
+        };
+        let bytes = &output.stdout;
+        // Status can still be useful when the remainder is oversized or invalid UTF-8.
+        if let Some(line) = bytes[..bytes.len().min(64 * 1024)]
+            .split(|byte| *byte == b'\n')
+            .next()
+            && let Ok(line) = std::str::from_utf8(line)
+        {
+            let mut parts = line.split_whitespace();
+            if matches!(parts.next(), Some("HTTP/1.1" | "HTTP/2" | "HTTP/2.0"))
+                && let Some(status) = parts.next()
+                && status.len() == 3
+                && status.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                diagnostic.http_status = status.parse().ok();
+            }
+        }
+        if bytes.len() > 64 * 1024 {
+            return diagnostic;
+        }
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return diagnostic;
+        };
+        let body = if diagnostic.http_status.is_some() {
+            text.split_once("\r\n\r\n")
+                .or_else(|| text.split_once("\n\n"))
+                .map(|(_, body)| body)
+        } else {
+            Some(text)
+        };
+        if let Some(body) = body
+            && let Ok(value) = serde_json::from_str::<Value>(body)
+            && let Some(message) = value.get("message").and_then(Value::as_str)
+        {
+            diagnostic.reason = GitHubMergeRefusalReason::from_message(message);
+        }
+        diagnostic
+    }
+
+    fn message(self) -> String {
+        use fmt::Write as _;
+        let mut fields = format!("reason={}", self.reason.code());
+        if let Some(status) = self.http_status {
+            let _ = write!(fields, ", HTTP={status}");
+        }
+        if let Some(code) = self.exit_code {
+            let _ = write!(fields, ", exit={code}");
+        }
+        format!(
+            "GitHub rejected the squash merge request ({fields}): {}",
+            self.reason.description()
+        )
+    }
+}
+
 struct GitHubReadinessObservation {
     telemetry_context: Option<opentelemetry::Context>,
     mergeable: Option<String>,
@@ -353,6 +471,7 @@ struct GitHubReadinessObservation {
     check_commit_oid: Option<String>,
     ci_head_matches: bool,
     reason: Option<&'static str>,
+    merge_diagnostic: Option<GitHubMergeDiagnostic>,
 }
 
 impl GitHubReadinessObservation {
@@ -365,6 +484,7 @@ impl GitHubReadinessObservation {
             check_commit_oid: None,
             ci_head_matches: false,
             reason: None,
+            merge_diagnostic: None,
         }
     }
 
@@ -392,6 +512,14 @@ impl Drop for GitHubReadinessObservation {
             self.check_state.as_deref().unwrap_or("unobserved"),
             self.ci_head_matches,
         );
+        if let Some(diagnostic) = self.merge_diagnostic {
+            crate::telemetry::record_github_merge_refusal(
+                context,
+                diagnostic.reason.code(),
+                diagnostic.http_status,
+                diagnostic.exit_code,
+            );
+        }
     }
 }
 
@@ -1139,6 +1267,7 @@ fn github_merge_args(
         "api".to_string(),
         "--hostname".to_string(),
         hostname.clone(),
+        "--include".to_string(),
         "--method".to_string(),
         "PUT".to_string(),
         format!("repos/{owner}/{repo}/pulls/{number}/merge"),
@@ -1557,6 +1686,15 @@ async fn perform_github_with_timing(
     }
     check_cancel(request.cancel_token)?;
 
+    run_github_merge(reference, request, expected_head, &mut observation).await
+}
+
+async fn run_github_merge(
+    reference: &ProviderRef,
+    request: &AutoSquashRequest<'_>,
+    expected_head: &str,
+    observation: &mut GitHubReadinessObservation,
+) -> Result<AutoSquashOutcome, AutoSquashError> {
     let args = github_merge_args(reference, expected_head)?;
     let merge_result = run_process(
         "gh",
@@ -1566,24 +1704,35 @@ async fn perform_github_with_timing(
         request.cancel_token,
     )
     .await;
-    let (merge_succeeded, merge_uncertain) = match merge_result {
-        Ok(output) => (successful(&output), false),
+    let (merge_succeeded, merge_uncertain, diagnostic) = match merge_result {
+        Ok(output) => {
+            let succeeded = successful(&output);
+            let diagnostic = (!succeeded).then(|| GitHubMergeDiagnostic::from_output(&output));
+            (succeeded, false, diagnostic)
+        }
         Err(ProcessError::CancelledBeforeStart) => return Err(AutoSquashError::Cancelled),
         Err(ProcessError::Cancelled) => {
             return Err(AutoSquashError::Unconfirmed(
                 "cancellation occurred after the merge request was sent".to_string(),
             ));
         }
-        Err(ProcessError::Failed | ProcessError::TimedOut) => (false, true),
+        Err(ProcessError::Failed | ProcessError::TimedOut) => (false, true, None),
     };
-    confirm_github(
+    let result = confirm_github(
         reference,
         request,
         expected_head,
         merge_succeeded,
         merge_uncertain,
     )
-    .await
+    .await;
+    match (result, diagnostic) {
+        (Err(AutoSquashError::CommandFailed(_)), Some(diagnostic)) => {
+            observation.merge_diagnostic = Some(diagnostic);
+            Err(AutoSquashError::CommandFailed(diagnostic.message()))
+        }
+        (result, _) => result,
+    }
 }
 
 async fn confirm_github(
