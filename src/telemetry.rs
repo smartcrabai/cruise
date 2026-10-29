@@ -377,6 +377,32 @@ pub(crate) fn record_github_readiness(
     ));
 }
 
+/// Records only the classified GitHub merge refusal and numeric process metadata.
+pub(crate) fn record_github_merge_refusal(
+    context: &Context,
+    reason: &'static str,
+    http_status: Option<u16>,
+    exit_code: Option<i32>,
+) {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let span = context.span();
+    span.set_attribute(KeyValue::new("cruise.github.merge_refusal_reason", reason));
+    if let Some(status) = http_status {
+        span.set_attribute(KeyValue::new(
+            "cruise.github.merge_http_status",
+            i64::from(status),
+        ));
+    }
+    if let Some(code) = exit_code {
+        span.set_attribute(KeyValue::new(
+            "cruise.github.merge_exit_code",
+            i64::from(code),
+        ));
+    }
+}
+
 /// Records a retry/fallback event and a low-cardinality retry counter.
 pub fn record_retry(
     action: &'static str,

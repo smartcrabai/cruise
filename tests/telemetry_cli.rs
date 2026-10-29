@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use cruise::application::{
     ApplicationEvent, ApplicationEventSink, CruiseApplication, NewSessionRequest, PlanRequest,
@@ -1764,11 +1764,9 @@ fn skip_planning_foreground_and_background_omit_planning_telemetry() {
     );
     assert_ne!(roots[0].trace_id, roots[1].trace_id);
     assert!(roots.iter().all(|root| root.parent_span_id.is_empty()));
-    assert!(
-        roots
-            .iter()
-            .all(|root| root.attributes.contains_key("cruise.session.id"))
-    );
+    assert!(roots
+        .iter()
+        .all(|root| root.attributes.contains_key("cruise.session.id")));
     assert!(
         exported_spans.iter().all(|span| {
             span.name != "cruise.agent"
@@ -1837,11 +1835,10 @@ fn failed_repo_clone_keeps_plan_root_and_preallocated_session_id() {
     assert_eq!(root.parent_span_id, [0_u8; 0]);
     assert_eq!(root.status_code, StatusCode::Error as i32);
     assert!(root.attributes.contains_key("error.type"));
-    assert!(
-        root.attributes
-            .get("cruise.session.id")
-            .is_some_and(|id| !id.is_empty())
-    );
+    assert!(root
+        .attributes
+        .get("cruise.session.id")
+        .is_some_and(|id| !id.is_empty()));
     assert!(
         !fixture
             .root
@@ -2611,6 +2608,166 @@ printf 'refusing unexpected fake gh command\n' >&2
 exit 97
 "#,
     )
+}
+
+fn merge_write_refusal_case(telemetry_enabled: bool, message: &str) -> MergeCliCase {
+    let script = r##"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+if [ "$1" = "--version" ]; then echo 'gh version 2.0.0'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then echo 'https://github.com/acme/service/pull/7'; exit 0; fi
+if [ "$1" = "api" ]; then
+  case "$*" in
+    *"/merge"*)
+      echo attempt >> "$FAKE_GH_WRITE_ATTEMPTS"
+      printf 'HTTP/1.1 405 Method Not Allowed\r\nX-Secret: header-secret-8241\r\n\r\n{"message":"%s"}\n' "$FAKE_REFUSAL_MESSAGE"
+      echo 'stderr-secret-8241' >&2
+      exit 1 ;;
+    *"/rules/branches/"*) echo '[]'; exit 0 ;;
+    *statusCheckRollup*)
+      head=$(git rev-parse HEAD) || exit 97
+      printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"SUCCESS","commit":{"oid":"%s"},"contexts":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}}}\n' "$head" "$head"
+      exit 0 ;;
+    *graphql*)
+      head=$(git rev-parse HEAD) || exit 97
+      printf '{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"%s"}}}}\n' "$head"
+      exit 0 ;;
+  esac
+fi
+echo 'unexpected fake gh command' >&2
+exit 97
+"##;
+    let mut scenario = merge_cli_case(
+        telemetry_enabled,
+        "command: [cat]\ncreate_pr: true\nflags:\n  merge: {}\nsteps:\n  work:\n    command: \"printf changed > merge-refusal.txt\"\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n",
+        script,
+    );
+    scenario
+        .env
+        .push(("FAKE_REFUSAL_MESSAGE".into(), message.into()));
+    scenario
+        .env
+        .push(("FAKE_SECRET_SENTINEL".into(), "env-secret-8241".into()));
+    scenario
+}
+
+#[test]
+fn github_merge_write_refusal_is_safe_and_observable() {
+    for (telemetry, message, reason) in [
+        (
+            false,
+            "Pull Request is not mergeable",
+            "merge_not_performed",
+        ),
+        (true, "Pull Request is not mergeable", "merge_not_performed"),
+        (
+            true,
+            "Pull Request is not mergeable provider-secret-8241",
+            "unclassified",
+        ),
+    ] {
+        let scenario = merge_write_refusal_case(telemetry, message);
+        let env = borrowed_env(&scenario.env);
+        let session_id = create_merge_session(&scenario.cli, &env);
+        let run = scenario
+            .cli
+            .cli_command(&["run", &session_id], &env)
+            .output()
+            .unwrap_or_else(|error| panic!("run refusal scenario: {error}"));
+        assert!(
+            !run.status.success(),
+            "refused merge unexpectedly succeeded: {}",
+            output_text(&run)
+        );
+        let manager = SessionManager::new(scenario.cli.root.path().join("data/cruise"));
+        let session = manager.load(&session_id).unwrap();
+        let SessionPhase::Failed(error) = &session.phase else {
+            panic!("expected failed session: {session:#?}")
+        };
+        for expected in [reason, "405", "1"] {
+            assert!(
+                error.contains(expected),
+                "missing {expected} in saved failure: {error}"
+            );
+        }
+        let calls = std::fs::read_to_string(&scenario.gh_log).unwrap();
+        let writes: Vec<_> = calls
+            .lines()
+            .filter(|line| line.starts_with("api ") && line.contains("/merge"))
+            .collect();
+        assert_eq!(writes.len(), 1, "expected one merge write: {calls}");
+        assert!(
+            writes[0].contains("--include"),
+            "missing response status: {calls}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(scenario.cli.root.path().join("fake-gh-write-attempts"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        assert!(!scenario.cli.root.path().join("fake-gh-merged").exists());
+        assert!(
+            !calls.lines().any(|line| line.starts_with("pr merge")),
+            "unexpected queued merge: {calls}"
+        );
+        let mut outputs = vec![error.as_bytes().to_vec(), output_text(&run).into_bytes()];
+        if let Some(collector) = &scenario.collector {
+            let requests = collector.wait_for_paths(&["/v1/traces"]);
+            let exported = spans(&requests);
+            let merge = named_span(&exported, "cruise.step", "cruise.step.name", "merge");
+            assert_eq!(merge.status_code, StatusCode::Error as i32);
+            assert_eq!(
+                merge.attributes.get("error.type").map(String::as_str),
+                Some("squash_merge_failed")
+            );
+            assert_eq!(
+                merge
+                    .attributes
+                    .get("cruise.github.merge_refusal_reason")
+                    .map(String::as_str),
+                Some(reason)
+            );
+            assert_eq!(
+                merge.int_attributes.get("cruise.github.merge_http_status"),
+                Some(&405)
+            );
+            assert_eq!(
+                merge.int_attributes.get("cruise.github.merge_exit_code"),
+                Some(&1)
+            );
+            assert_eq!(
+                merge
+                    .attributes
+                    .get("cruise.github.mergeable")
+                    .map(String::as_str),
+                Some("MERGEABLE")
+            );
+            assert_eq!(
+                merge
+                    .attributes
+                    .get("cruise.github.merge_state_status")
+                    .map(String::as_str),
+                Some("CLEAN")
+            );
+            outputs.extend(requests.into_iter().map(|request| request.body));
+        }
+        for output in outputs {
+            for secret in [
+                "header-secret-8241",
+                "stderr-secret-8241",
+                "env-secret-8241",
+                "provider-secret-8241",
+            ] {
+                assert!(
+                    !output
+                        .windows(secret.len())
+                        .any(|window| window == secret.as_bytes()),
+                    "secret {secret} leaked"
+                );
+            }
+        }
+    }
 }
 
 fn create_merge_session(fixture: &Fixture, env: &[(&str, &str)]) -> String {

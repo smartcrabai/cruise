@@ -153,14 +153,23 @@ if [ "$1" = "api" ]; then
   args="$*"
   shift
   if [ "$1" = "--hostname" ]; then shift 2; fi
+  if [ "$1" = "--include" ]; then shift; fi
   if [ "$1" = "--method" ]; then
     [ "$2" = "PUT" ] || exit 64
     shift 2
+    if [ "$1" = "--include" ]; then shift; fi
     [ "$1" = "${FAKE_GH_MERGE_PATH:-repos/acme/service/pulls/7/merge}" ] || exit 64
     shift
+    if [ "$1" = "--include" ]; then shift; fi
     [ "$1" = "-f" ] && [ "$2" = "sha=$FAKE_EXPECTED_HEAD" ] || exit 64
     shift 2
+    if [ "$1" = "--include" ]; then shift; fi
     [ "$1" = "-f" ] && [ "$2" = "merge_method=squash" ] || exit 64
+    if [ -n "${FAKE_GH_RESPONSE:-}" ]; then
+      cat "$FAKE_GH_RESPONSE"
+      [ "${FAKE_GH_CONFIRM_AFTER:-0}" = "1" ] && touch "$FAKE_MERGED"
+      exit "${FAKE_GH_EXIT:-1}"
+    fi
     if [ "${FAKE_GH_MERGE_STATUS:-200}" = "405" ]; then
       printf '%s\n' 'HTTP 405: merge unavailable' >&2
       exit 1
@@ -456,7 +465,7 @@ async fn github_merge_uses_squash_and_atomic_head_guard_once() {
     assert_eq!(
         effects[0],
         format!(
-            "api --hostname github.com --method PUT repos/acme/service/pulls/7/merge -f sha={} -f merge_method=squash",
+            "api --hostname github.com --include --method PUT repos/acme/service/pulls/7/merge -f sha={} -f merge_method=squash",
             fixture.head
         )
     );
@@ -506,7 +515,7 @@ async fn github_allows_the_exact_plan_limited_branch_rules_error() {
         assert_eq!(
             effects[0],
             format!(
-                "api --hostname github.com --method PUT repos/acme/service/pulls/7/merge -f sha={} -f merge_method=squash",
+                "api --hostname github.com --include --method PUT repos/acme/service/pulls/7/merge -f sha={} -f merge_method=squash",
                 fixture.head
             )
         );
@@ -1213,6 +1222,133 @@ async fn github_rest_405_rejects_synchronous_merge_without_a_queued_effect() {
         fixture
             .provider_log()
             .contains("repos/acme/service/pulls/7/merge")
+    );
+}
+
+async fn github_refusal_fixture(
+    response: &[u8],
+    after: Option<&str>,
+) -> (Fixture, Result<AutoSquashOutcome, AutoSquashError>) {
+    let mut fixture = Fixture::new();
+    fixture.configure_github(
+        &github_open_identity(&fixture.head),
+        &github_status(&fixture.head),
+        &json!([]),
+    );
+    let response_path = fixture._temp.path().join("response.bin");
+    fs::write(&response_path, response).unwrap();
+    fixture.env.insert(
+        "FAKE_GH_RESPONSE".into(),
+        response_path.display().to_string(),
+    );
+    if let Some(state) = after {
+        write_json(
+            &fixture.gh_identity_after,
+            &github_identity(state, &fixture.head),
+        );
+        fixture
+            .env
+            .insert("FAKE_GH_CONFIRM_AFTER".into(), "1".into());
+    }
+    let result =
+        squash_merge(fixture.request("https://github.com/acme/service/pull/7", None)).await;
+    (fixture, result)
+}
+
+#[tokio::test]
+async fn github_refusal_canonical_reasons_are_safe_and_not_inferred_from_status() {
+    for (status, message, reason) in [
+        (405, "Pull Request is not mergeable", "merge_not_performed"),
+        (
+            409,
+            "Head branch was modified. Review and try the merge again.",
+            "head_changed",
+        ),
+        (
+            405,
+            "Base branch was modified. Review and try the merge again.",
+            "base_changed",
+        ),
+        (
+            405,
+            "Squash merges are not allowed on this repository.",
+            "squash_disabled",
+        ),
+        (409, "Merge already in progress", "merge_in_progress"),
+    ] {
+        let response = format!(
+            "HTTP/2 {status}\r\nX-Secret: header-secret\r\n\r\n{}",
+            json!({"message": message})
+        );
+        let (fixture, result) = github_refusal_fixture(response.as_bytes(), None).await;
+        let Err(AutoSquashError::CommandFailed(error)) = result else {
+            panic!("unexpected result: {result:?}")
+        };
+        assert!(error.contains(&format!("reason={reason}")), "{error}");
+        assert!(error.contains(&format!("HTTP={status}")), "{error}");
+        assert!(error.contains("exit=1"), "{error}");
+        assert!(!error.contains("header-secret"), "{error}");
+        assert!(fixture.effect_lines().is_empty());
+        assert_eq!(
+            fixture
+                .provider_log()
+                .lines()
+                .filter(|line| line.contains("pulls/7/merge"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn github_refusal_http_2_0_include_response_is_classified() {
+    let response = b"HTTP/2.0 409 Conflict\r\nContent-Type: application/json\r\n\r\n{\"message\":\"Head branch was modified. Review and try the merge again.\"}";
+    let (_, result) = github_refusal_fixture(response, None).await;
+    let Err(AutoSquashError::CommandFailed(error)) = result else {
+        panic!("unexpected result: {result:?}")
+    };
+    assert!(error.contains("HTTP=409"), "{error}");
+    assert!(error.contains("reason=head_changed"), "{error}");
+}
+
+#[tokio::test]
+async fn github_refusal_untrusted_and_boundary_responses_are_unclassified() {
+    let secret = "Bearer secret-token https://private.example/path";
+    let cases = vec![
+        format!(
+            "HTTP/1.1 405 Nope\nX-Secret: {secret}\n\n{}",
+            json!({"message": format!("Pull Request is not mergeable {secret}")})
+        )
+        .into_bytes(),
+        b"HTTP/2 409\r\n\r\nnot-json".to_vec(),
+        b"".to_vec(),
+        b"HTTP/2 405\n\n\xff".to_vec(),
+        format!("HTTP/2 405\n\n{}", json!({"message": "a".repeat(513)})).into_bytes(),
+        format!("HTTP/2 405\n\n{}", "a".repeat(65537)).into_bytes(),
+    ];
+    for response in cases {
+        let (fixture, result) = github_refusal_fixture(&response, None).await;
+        let Err(AutoSquashError::CommandFailed(error)) = result else {
+            panic!("unexpected result: {result:?}")
+        };
+        assert!(error.contains("reason=unclassified"), "{error}");
+        assert!(error.contains("exit=1"), "{error}");
+        assert!(!error.contains(secret), "{error}");
+        assert!(fixture.effect_lines().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn github_refusal_confirmation_takes_priority_over_provider_response() {
+    let response = b"HTTP/2 409\r\n\r\n{\"message\":\"Head branch was modified. Review and try the merge again.\"}";
+    let (fixture, result) = github_refusal_fixture(response, Some("MERGED")).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(fixture.effect_lines().is_empty());
+    let (_, result) = github_refusal_fixture(response, Some("CLOSED")).await;
+    let error = result.expect_err("closed PR must not merge");
+    assert!(
+        !error.to_string().contains("reason=head_changed"),
+        "{error}"
     );
 }
 
