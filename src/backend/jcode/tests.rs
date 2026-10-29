@@ -158,6 +158,7 @@ fn spawn_turn(
     let (temp, mut home) = session_home();
     let worker = std::thread::spawn(move || {
         let mut session_id = None;
+        let mut failure_recorded = false;
         let result = run_client_turn(
             &client,
             &config,
@@ -165,6 +166,7 @@ fn spawn_turn(
             &tx,
             &mut home,
             &mut session_id,
+            &mut failure_recorded,
         );
         (result, session_id, temp)
     });
@@ -2232,8 +2234,9 @@ fn launch_client_captured_environment_probe() {
         )
         .unwrap_or_else(|error| panic!("{error}"));
     }
+    let mut failure_recorded = false;
     assert!(
-        launch_client(&config, &home).is_err(),
+        launch_client(&config, &home, &mut failure_recorded).is_err(),
         "capture-only stub must not connect a runtime"
     );
     assert_captured_launch_environment(&case, &root, no_shell);

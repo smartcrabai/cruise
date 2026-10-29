@@ -32,7 +32,6 @@ struct OperationMetrics {
     duration: Histogram<f64>,
     retry_count: Counter<u64>,
 }
-
 struct ErrorTypeState(AtomicBool);
 
 /// Process-level telemetry handle. Dropping it flushes and shuts down its providers.
@@ -389,6 +388,20 @@ pub fn record_error_type(error_type: &'static str) {
             .span()
             .set_attribute(KeyValue::new("error.type", error_type));
     }
+}
+
+pub(crate) fn capture_jcode_context() -> Option<Context> {
+    ENABLED.load(Ordering::Acquire).then(Context::current)
+}
+
+pub(crate) fn record_jcode_failure(stage: &'static str, reason: &'static str) {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let context = Context::current();
+    let span = context.span();
+    span.set_attribute(KeyValue::new("cruise.agent.failure_stage", stage));
+    span.set_attribute(KeyValue::new("cruise.agent.failure_reason", reason));
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CiDiagnostic {

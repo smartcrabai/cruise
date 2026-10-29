@@ -2173,6 +2173,15 @@ Outcomes include `success`, `failed`, `error`, `cancelled`, `timeout`, and `paus
 
 Failed shell attempts include numeric `cruise.command.exit_code` or, on Unix when terminated by a signal, `cruise.command.signal`. The terminal failed result also annotates its step span; a recovered rate-limit attempt does not annotate the successful step.
 
+Jcode failures add fixed diagnostics to the affected `cruise.attempt` span:
+
+| Attribute | Meaning |
+|---|---|
+| `cruise.agent.failure_stage` | The bounded stage where the failure was detected, such as SDK launch, API event handling, or turn-stop handling |
+| `cruise.agent.failure_reason` | A fixed allowlisted reason for typed SDK/API/turn failures; unknown cases remain `unknown` rather than inferring HTTP status, authentication, or provider-internal causes |
+
+These attributes are trace-only, not metric labels. Raw SDK error messages, stop messages, prompts, and output are not exported.
+
 The built-in `follow-up/wait-ci` command additionally reports bounded, allowlisted diagnostics:
 
 | Attribute | Meaning |

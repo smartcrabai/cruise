@@ -118,7 +118,9 @@ pub(crate) fn parse_model_ref(model_ref: Option<&str>) -> Result<ModelRef> {
 /// caller before a tool handler can block waiting for user input.
 pub(crate) fn stream_agent(config: JcodeRunnerConfig, prompt: String) -> Receiver<StreamChunk> {
     let (tx, rx) = sync_channel(0);
+    let context = crate::telemetry::capture_jcode_context();
     std::thread::spawn(move || {
+        let _context_guard = context.map(opentelemetry::Context::attach);
         let terminal = match run_attempt(&config, &prompt, &tx) {
             Ok(terminal) => terminal,
             Err(message) => StreamChunk::Error(message),
@@ -143,18 +145,40 @@ fn run_attempt(
     let _guard = lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut failure_recorded = false;
     let mut home = prepare_session_home(
         source_home,
         &session_key,
         config.resume_session_id.as_deref(),
         &config.mcp_servers,
-    )?;
+    )
+    .inspect_err(|_error| {
+        record_failure(
+            &mut failure_recorded,
+            "session",
+            "session_home_prepare_failed",
+        );
+    })?;
     let mut session_id = None;
-    let run_result = match launch_client(config, &home) {
+    let run_result = match launch_client(config, &home, &mut failure_recorded) {
         Ok(client) => {
-            let result = run_client_turn(&client, config, prompt, tx, &mut home, &mut session_id);
+            let result = run_client_turn(
+                &client,
+                config,
+                prompt,
+                tx,
+                &mut home,
+                &mut session_id,
+                &mut failure_recorded,
+            );
+            if result.is_err() {
+                record_failure(&mut failure_recorded, "session", "session_operation_failed");
+            }
             drop(client);
             let cleanup_result = clear_private_daemon(&home.storage_home);
+            if cleanup_result.is_err() {
+                record_failure(&mut failure_recorded, "cleanup", "runtime_cleanup_failed");
+            }
             match (result, cleanup_result) {
                 (Ok(terminal), Ok(())) => Ok(terminal),
                 (Err(message), Ok(())) => Err(message),
@@ -166,10 +190,20 @@ fn run_attempt(
                 )),
             }
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            record_failure(&mut failure_recorded, "launch", "sdk_launch_failed");
+            Err(error)
+        }
     };
     let finalize_result =
         finish_session_home(&mut home, session_id.as_deref(), config.keep_session_home);
+    if finalize_result.is_err() {
+        record_failure(
+            &mut failure_recorded,
+            "cleanup",
+            "session_home_finalize_failed",
+        );
+    }
     match (run_result, finalize_result) {
         (Ok(terminal), Ok(())) => Ok(terminal),
         (Err(message), Ok(())) => Err(message),
@@ -183,11 +217,16 @@ fn run_attempt(
 fn launch_client(
     config: &JcodeRunnerConfig,
     home: &SessionHome,
+    failure_recorded: &mut bool,
 ) -> std::result::Result<JcodeClient, String> {
     #[cfg(unix)]
-    validate_sdk_socket_paths(&home.sdk_home)?;
-    clear_private_daemon(&home.storage_home)
-        .map_err(|error| format!("could not clean up stale private jcode runtime: {error}"))?;
+    validate_sdk_socket_paths(&home.sdk_home).inspect_err(|_error| {
+        record_failure(failure_recorded, "launch", "launch_setup_failed");
+    })?;
+    clear_private_daemon(&home.storage_home).map_err(|error| {
+        record_failure(failure_recorded, "cleanup", "stale_runtime_cleanup_failed");
+        format!("could not clean up stale private jcode runtime: {error}")
+    })?;
     let mut options = LaunchOptions {
         jcode_home: Some(home.sdk_home.clone()),
         working_dir: config.cwd.clone(),
@@ -269,8 +308,68 @@ fn launch_client(
         } else {
             ""
         };
+        record_sdk_failure(failure_recorded, "launch", &error);
         format!("could not start the jcode SDK runtime{hint}: {error}")
     })
+}
+
+fn sdk_failure_reason(kind: &jcode_sdk::ErrorKind) -> &'static str {
+    match kind {
+        jcode_sdk::ErrorKind::ConnectFailed => "sdk_connect_failed",
+        jcode_sdk::ErrorKind::HandshakeFailed => "sdk_handshake_failed",
+        jcode_sdk::ErrorKind::Timeout => "sdk_timeout",
+        jcode_sdk::ErrorKind::Disconnected => "sdk_disconnected",
+        jcode_sdk::ErrorKind::UnexpectedReply => "sdk_unexpected_reply",
+        jcode_sdk::ErrorKind::Harness(code) => match code {
+            jcode_sdk::api::ErrorCode::UnsupportedVersion => "sdk_harness_unsupported_version",
+            jcode_sdk::api::ErrorCode::UnknownRequest => "sdk_harness_unknown_request",
+            jcode_sdk::api::ErrorCode::UnknownSession => "sdk_harness_unknown_session",
+            jcode_sdk::api::ErrorCode::InvalidRequest => "sdk_harness_invalid_request",
+            jcode_sdk::api::ErrorCode::Internal => "sdk_harness_internal",
+        },
+        jcode_sdk::ErrorKind::Transport => "sdk_transport",
+        jcode_sdk::ErrorKind::LaunchFailed => "sdk_launch_failed",
+        jcode_sdk::ErrorKind::JcodeNotFound => "sdk_jcode_not_found",
+        jcode_sdk::ErrorKind::StartupFailed => "sdk_startup_failed",
+        jcode_sdk::ErrorKind::StartupTimeout => "sdk_startup_timeout",
+        jcode_sdk::ErrorKind::InvalidInstanceHome => "sdk_invalid_instance_home",
+        jcode_sdk::ErrorKind::InvalidOption => "sdk_invalid_option",
+        jcode_sdk::ErrorKind::UnsupportedTransport => "sdk_unsupported_transport",
+        jcode_sdk::ErrorKind::EventBufferOverflow => "sdk_event_buffer_overflow",
+    }
+}
+
+// Cleanup and finalization must not replace the first observed failure.
+fn record_failure(recorded: &mut bool, stage: &'static str, reason: &'static str) {
+    if !*recorded {
+        *recorded = true;
+        crate::telemetry::record_jcode_failure(stage, reason);
+    }
+}
+
+fn record_sdk_failure(recorded: &mut bool, stage: &'static str, error: &jcode_sdk::Error) {
+    record_failure(recorded, stage, sdk_failure_reason(&error.kind));
+}
+
+fn turn_stop_failure_reason(reason: TurnStopReason) -> &'static str {
+    match reason {
+        TurnStopReason::Interrupted => "turn_interrupted",
+        TurnStopReason::Failure => "turn_failure",
+        TurnStopReason::Crash => "turn_crash",
+        TurnStopReason::ProviderGuardrail => "turn_provider_guardrail",
+        TurnStopReason::LimitReached => "turn_limit_reached",
+        TurnStopReason::Unknown => "turn_unknown",
+    }
+}
+
+fn api_error_failure_reason(code: jcode_sdk::api::ErrorCode) -> &'static str {
+    match code {
+        jcode_sdk::api::ErrorCode::UnsupportedVersion => "harness_unsupported_version",
+        jcode_sdk::api::ErrorCode::UnknownRequest => "harness_unknown_request",
+        jcode_sdk::api::ErrorCode::UnknownSession => "harness_unknown_session",
+        jcode_sdk::api::ErrorCode::InvalidRequest => "harness_invalid_request",
+        jcode_sdk::api::ErrorCode::Internal => "harness_internal",
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -505,14 +604,17 @@ fn run_client_turn(
     tx: &SyncSender<StreamChunk>,
     home: &mut SessionHome,
     session_id: &mut Option<String>,
+    failure_recorded: &mut bool,
 ) -> std::result::Result<StreamChunk, String> {
     if !client.supports("sessions") {
+        record_failure(failure_recorded, "session", "sdk_sessions_unsupported");
         return Err(
             "the jcode harness does not support sessions; upgrade jcode to 0.88.0 or newer"
                 .to_string(),
         );
     }
     if !config.tools.is_empty() && !client.supports("session_tools") {
+        record_failure(failure_recorded, "session", "sdk_session_tools_unsupported");
         return Err(
             "the jcode harness does not support session tools; upgrade jcode to 0.88.0 or newer"
                 .to_string(),
@@ -525,19 +627,38 @@ fn run_client_turn(
     let session = match config.resume_session_id.as_deref() {
         Some(id) => match client.attach_session(id) {
             Ok(session) => session,
-            Err(error) if !home.resume_session_found && error.code() == "unknown_session" => client
-                .create_session(working_dir)
-                .map_err(|error| error.to_string())?,
-            Err(error) => return Err(error.to_string()),
+            Err(error)
+                if !home.resume_session_found
+                    && matches!(
+                        &error.kind,
+                        jcode_sdk::ErrorKind::Harness(jcode_sdk::api::ErrorCode::UnknownSession)
+                    ) =>
+            {
+                client.create_session(working_dir).map_err(|error| {
+                    record_sdk_failure(failure_recorded, "session", &error);
+                    error.to_string()
+                })?
+            }
+            Err(error) => {
+                record_sdk_failure(failure_recorded, "session", &error);
+                return Err(error.to_string());
+            }
         },
-        None => client
-            .create_session(working_dir)
-            .map_err(|error| error.to_string())?,
+        None => client.create_session(working_dir).map_err(|error| {
+            record_sdk_failure(failure_recorded, "session", &error);
+            error.to_string()
+        })?,
     };
     *session_id = Some(session.session_id.clone());
-    write_session_id(home, &session.session_id).map_err(|error| error.to_string())?;
+    write_session_id(home, &session.session_id).map_err(|error| {
+        record_failure(failure_recorded, "session", "session_state_persist_failed");
+        error.to_string()
+    })?;
     tx.send(StreamChunk::Session(session.session_id.clone()))
-        .map_err(|_| "jcode output stream was closed".to_string())?;
+        .map_err(|_| {
+            record_failure(failure_recorded, "stream", "output_stream_closed");
+            "jcode output stream was closed".to_string()
+        })?;
 
     if !config.tools.is_empty() {
         let custom = config
@@ -553,7 +674,14 @@ fn run_client_turn(
                     parameters,
                 })
             })
-            .collect::<std::result::Result<Vec<_>, String>>()?;
+            .collect::<std::result::Result<Vec<_>, String>>()
+            .inspect_err(|_error| {
+                record_failure(
+                    failure_recorded,
+                    "configuration",
+                    "tool_configuration_invalid",
+                );
+            })?;
         client
             .configure_tools(
                 &session.session_id,
@@ -562,14 +690,20 @@ fn run_client_turn(
                     ..Default::default()
                 },
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                record_sdk_failure(failure_recorded, "configuration", &error);
+                error.to_string()
+            })?;
     }
 
     let runtime = if config.model.is_some() || config.subagent_model.is_some() {
         Some(
             client
                 .get_runtime_info(&session.session_id)
-                .map_err(|error| error.to_string())?,
+                .map_err(|error| {
+                    record_sdk_failure(failure_recorded, "configuration", &error);
+                    error.to_string()
+                })?,
         )
     } else {
         None
@@ -579,12 +713,18 @@ fn run_client_turn(
             model_switch_request(config.provider.as_deref(), model, &runtime.routes);
         client
             .set_model(&session.session_id, &model_request)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                record_sdk_failure(failure_recorded, "configuration", &error);
+                error.to_string()
+            })?;
     }
     if let Some(effort) = config.effort {
         client
             .set_reasoning_effort(&session.session_id, effort.as_str())
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                record_sdk_failure(failure_recorded, "configuration", &error);
+                error.to_string()
+            })?;
     }
 
     if let (Some(model), Some(runtime)) = (config.subagent_model.as_deref(), runtime.as_ref()) {
@@ -596,14 +736,20 @@ fn run_client_turn(
                 jcode_sdk::api::RuntimeCommand::Agents,
                 vec!["swarm".to_string(), model_request],
             )
-            .map_err(|error| format!("failed to set the jcode subagent model: {error}"))?;
+            .map_err(|error| {
+                record_sdk_failure(failure_recorded, "configuration", &error);
+                format!("failed to set the jcode subagent model: {error}")
+            })?;
     }
 
     // Subscribe before sending so early text and tool events cannot be missed.
     let events = client.events(Some(&session.session_id));
     client
         .send_message(&session.session_id, prompt, Vec::new(), None)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            record_sdk_failure(failure_recorded, "send", &error);
+            error.to_string()
+        })?;
 
     let mut text = TextCollector::default();
     let mut stopped = None;
@@ -616,15 +762,18 @@ fn run_client_turn(
                 .is_some_and(CancellationToken::is_cancelled)
         {
             cancel_deadline = Some(Instant::now() + CANCEL_SETTLE_TIMEOUT);
-            client
-                .cancel(&session.session_id)
-                .map_err(|error| error.to_string())?;
+            client.cancel(&session.session_id).map_err(|error| {
+                record_sdk_failure(failure_recorded, "send", &error);
+                error.to_string()
+            })?;
         }
         if cancel_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            record_failure(failure_recorded, "stream", "session_cancel_timeout");
             return Err("jcode did not stop after the session cancellation request".to_string());
         }
         let Some(event) = events.next_timeout(Duration::from_millis(50)) else {
             if client.is_closed() {
+                record_failure(failure_recorded, "stream", "sdk_disconnected");
                 return Err("jcode harness disconnected before the turn finished".to_string());
             }
             continue;
@@ -637,7 +786,10 @@ fn run_client_turn(
             } => {
                 text.append(message_id, &delta);
                 if tx.send(StreamChunk::Delta(delta)).is_err() {
-                    let _ = client.cancel(&session.session_id);
+                    record_failure(failure_recorded, "stream", "output_stream_closed");
+                    if let Err(error) = client.cancel(&session.session_id) {
+                        record_sdk_failure(failure_recorded, "cleanup", &error);
+                    }
                     return Err(
                         "jcode output stream was closed; the active session was cancelled"
                             .to_string(),
@@ -669,11 +821,19 @@ fn run_client_turn(
                 };
                 client
                     .submit_tool_result(&tool_session, &call_id, &output, error)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| {
+                        record_sdk_failure(failure_recorded, "send", &error);
+                        error.to_string()
+                    })?;
             }
             ApiEvent::TurnStopped {
                 reason, message, ..
             } => {
+                record_failure(
+                    failure_recorded,
+                    "turn_stop",
+                    turn_stop_failure_reason(reason),
+                );
                 stopped = Some((reason, message));
             }
             ApiEvent::TurnDone { .. } => {
@@ -685,6 +845,11 @@ fn run_client_turn(
                 });
             }
             ApiEvent::Error { code, message } => {
+                record_failure(
+                    failure_recorded,
+                    "api_event",
+                    api_error_failure_reason(code),
+                );
                 if let Some((reason, stop_message)) = stopped {
                     let detail = if stop_message.trim().is_empty() {
                         message.clone()
