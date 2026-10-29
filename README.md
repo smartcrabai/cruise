@@ -2171,6 +2171,22 @@ Skipped steps, including parallel children, do not emit step spans or operation 
 
 Outcomes include `success`, `failed`, `error`, `cancelled`, `timeout`, and `paused`. Non-success operations have error status and a payload-free `error.type`, such as `command_exit`, `rate_limit`, `timeout`, or `cancelled`; existing backend retry classifications distinguish network, provider, and model failures. Recovered retries leave failed attempts visible without marking the final successful execution as failed. An Esc-paused exec stays resumable and exits successfully at the CLI, while its root outcome remains `paused`.
 
+Failed shell attempts include numeric `cruise.command.exit_code` or, on Unix when terminated by a signal, `cruise.command.signal`. The terminal failed result also annotates its step span; a recovered rate-limit attempt does not annotate the successful step.
+
+The built-in `follow-up/wait-ci` command additionally reports bounded, allowlisted diagnostics:
+
+| Attribute | Meaning |
+|---|---|
+| `cruise.ci.provider` | `github` or `gitlab` |
+| `cruise.ci.failure_reason` | Fixed cause: `local_head_error`, `repository_query_error`, `repository_invalid`, `api_error`, `graphql_error`, `pr_head_missing`, `head_mismatch`, `rollup_head_missing`, `malformed_rollup`, `invalid_ci_state`, `invalid_check_count`, `ci_failed`, `unknown_state`, `clock_error`, or `timeout` |
+| `cruise.ci.state` | Last observed allowlisted CI state, a registration state, or `unknown` / `unobserved`; never arbitrary provider text |
+| `cruise.ci.head_matches` | Whether the observed GitHub PR head matches local HEAD; omitted when unobserved. A matching PR head does not prove the rollup is current |
+| `cruise.ci.check_count` | Observed numeric check count when available |
+
+These command-reported fields use an internal bounded stderr marker; malformed markers are ignored, and raw output, provider errors, commit IDs, PR URLs, and job traces are not exported. They appear on failed command attempts and the terminal failed step, not as metric labels. Saved workflow snapshots and previously ejected workflows retain their old command: create a new snapshot or update the ejected workflow to obtain the new CI reasons.
+
+Errors classified as `loop_protection` annotate each result-based enclosing span with `cruise.loop.from`, `cruise.loop.to`, `cruise.loop.max_retries`, `cruise.loop.traversals` (accepted budgeted traversals of that edge, before the refused transition), and `cruise.loop.skipped_step_count`. Step IDs follow the existing step-name privacy policy; full edge tables, skipped-step lists, and exception messages are not exported. The retry budget and workflow behavior are unchanged.
+
 Metrics are `cruise.operation.count` and `cruise.operation.duration` (seconds), labeled only by `cruise.operation` and `cruise.outcome`, plus `cruise.retry.count`, labeled only by `cruise.retry.action` and `cruise.retry.reason`. Session/workflow/model identifiers are trace-only, not metric labels. OTLP logs, token usage, and cost are not exported.
 
 Prompt/input text, agent output, command bodies, working paths, exception messages, and authentication headers are not included in telemetry payloads. Session IDs, workflow file names, step/model names, and explicitly supplied resource attributes are exported; keep secrets out of those values.
