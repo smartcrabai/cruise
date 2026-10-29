@@ -321,6 +321,7 @@ struct SpanRecord {
     end_time_unix_nano: u64,
     attributes: HashMap<String, String>,
     int_attributes: HashMap<String, i64>,
+    bool_attributes: HashMap<String, bool>,
     resource_attributes: HashMap<String, String>,
     events: Vec<EventRecord>,
     status_code: i32,
@@ -350,6 +351,7 @@ fn spans(requests: &[CapturedRequest]) -> Vec<SpanRecord> {
                         start_time_unix_nano: span.start_time_unix_nano,
                         end_time_unix_nano: span.end_time_unix_nano,
                         attributes: string_attributes(&span.attributes),
+                        bool_attributes: bool_attributes(&span.attributes),
                         int_attributes: int_attributes(&span.attributes),
                         resource_attributes: resource_attributes.clone(),
                         events: span
@@ -395,6 +397,23 @@ fn int_attributes(
             let value = attribute.value.as_ref()?.value.as_ref()?;
             match value {
                 opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(value) => {
+                    Some((attribute.key.clone(), *value))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn bool_attributes(
+    attributes: &[opentelemetry_proto::tonic::common::v1::KeyValue],
+) -> HashMap<String, bool> {
+    attributes
+        .iter()
+        .filter_map(|attribute| {
+            let value = attribute.value.as_ref()?.value.as_ref()?;
+            match value {
+                opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(value) => {
                     Some((attribute.key.clone(), *value))
                 }
                 _ => None,
@@ -534,6 +553,30 @@ fn output_text(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn builtin_wait_ci_command(name: &str) -> String {
+    let workflow = cruise::builtin_workflows::find_builtin(name)
+        .unwrap_or_else(|| panic!("missing builtin workflow {name}"));
+    let source_dir = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let config = cruise::resolver::resolve_workflow_config(
+        workflow.yaml,
+        &cruise::resolver::ConfigSource::NamedBuiltin(workflow.name),
+        source_dir.path(),
+        None,
+    )
+    .unwrap_or_else(|error| panic!("load builtin workflow {name}: {error}"));
+    let command = config
+        .after_pr
+        .get("follow-up/wait-ci")
+        .and_then(|step| step.command.as_ref())
+        .unwrap_or_else(|| panic!("{name} has no wait-ci command"));
+    let mut variables = cruise::variable::VariableStore::new(String::new());
+    variables.set_named_value("pr.number", "42".to_owned());
+    variables.set_named_value("pr.url", "https://github.com/owner/repo/pull/42".to_owned());
+    variables
+        .resolve(&command.as_slice().join("\n"))
+        .unwrap_or_else(|error| panic!("resolve {name} wait-ci command: {error}"))
 }
 
 fn named_span<'a>(
@@ -2093,6 +2136,11 @@ fn failed_exec_exports_error_status_without_error_text() {
         Some("command_exit"),
         "nonzero command must use a fixed classification: {failing:#?}"
     );
+    assert_eq!(
+        failing.int_attributes.get("cruise.command.exit_code"),
+        Some(&7),
+        "failed process exit code must remain numeric: {failing:#?}"
+    );
     for span in [workflow, failing] {
         assert!(
             matches!(
@@ -2273,6 +2321,249 @@ steps:
     );
     let root_path = fixture.root.path().to_string_lossy().into_owned();
     assert_payload_omits(&requests, &[root_path.as_str()]);
+}
+
+#[test]
+fn invalid_ci_markers_export_no_untrusted_fields() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        r#"steps:
+  invalid-ci:
+    command: |
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V1 github private-reason-secret FAILURE false 3' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V1 github ci_failed private-state-secret false 3' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 3 leaked-field-secret' >&2
+      printf '%s\n' 'invalid-marker-stderr-secret' >&2
+      exit 9
+"#,
+    );
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "invalid-marker-input-secret",
+    );
+    assert!(
+        !output.status.success(),
+        "invalid marker fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let spans = spans(&requests);
+    let failed = named_span(&spans, "cruise.step", "cruise.step.name", "invalid-ci");
+    assert_eq!(
+        failed.int_attributes.get("cruise.command.exit_code"),
+        Some(&9)
+    );
+    assert!(
+        failed
+            .attributes
+            .keys()
+            .chain(failed.int_attributes.keys())
+            .chain(failed.bool_attributes.keys())
+            .all(|key| !key.starts_with("cruise.ci.")),
+        "malformed marker added CI attributes: {failed:#?}"
+    );
+    assert_payload_omits(
+        &requests,
+        &[
+            "invalid-marker-input-secret",
+            "private-reason-secret",
+            "private-state-secret",
+            "leaked-field-secret",
+            "invalid-marker-stderr-secret",
+        ],
+    );
+}
+
+#[test]
+fn builtin_wait_ci_exports_graphql_failure_reason_without_raw_response() {
+    let collector = Collector::start();
+    let command = builtin_wait_ci_command("tdd")
+        .replace('{', "{{")
+        .replace('}', "}}");
+    let command = command
+        .lines()
+        .map(|line| format!("      {line}\n"))
+        .collect::<String>();
+    let fixture = Fixture::new(&format!("steps:\n  wait-ci:\n    command: |\n{command}"));
+    let fake_bin = fixture.root.path().join("fake-gh/bin");
+    std::fs::create_dir_all(&fake_bin)
+        .unwrap_or_else(|error| panic!("create fake gh directory: {error}"));
+    cruise::test_support::write_executable_script(
+        &fake_bin.join("gh"),
+        r#"#!/bin/sh
+if [ "$1" = repo ]; then
+  printf '123/true\n'
+  exit 0
+fi
+if [ "$1" = api ] && [ "$2" = graphql ]; then
+  printf '{"errors":[{"message":"private-provider-response-secret"}]}\n'
+  exit 0
+fi
+printf 'unexpected fake gh invocation with secret details\n' >&2
+exit 97
+"#,
+    );
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let mut env = otlp_env(&collector.endpoint());
+    env.push((
+        "PATH".into(),
+        std::env::join_paths(paths)
+            .unwrap_or_else(|error| panic!("join fake gh PATH: {error}"))
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-input-secret");
+    assert!(
+        !output.status.success(),
+        "GraphQL failure fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let spans = spans(&requests);
+    let wait_ci = named_span(&spans, "cruise.step", "cruise.step.name", "wait-ci");
+    let attempt = spans
+        .iter()
+        .find(|span| span.name == "cruise.attempt" && span.parent_span_id == wait_ci.span_id)
+        .unwrap_or_else(|| panic!("wait-ci command attempt was not exported: {spans:#?}"));
+    for span in [wait_ci, attempt] {
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.provider")
+                .map(String::as_str),
+            Some("github"),
+            "{span:#?}"
+        );
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.failure_reason")
+                .map(String::as_str),
+            Some("graphql_error"),
+            "{span:#?}"
+        );
+    }
+    assert_eq!(
+        wait_ci.attributes.get("error.type").map(String::as_str),
+        Some("command_exit")
+    );
+    let exit_code = wait_ci
+        .int_attributes
+        .get("cruise.command.exit_code")
+        .copied()
+        .unwrap_or_else(|| panic!("failed built-in wait-ci did not export its exit code"));
+    assert_eq!(
+        attempt.int_attributes.get("cruise.command.exit_code"),
+        Some(&exit_code),
+        "failed built-in wait-ci attempt had a different numeric exit code: {attempt:#?}"
+    );
+    assert_payload_omits(
+        &requests,
+        &[
+            "builtin-wait-ci-input-secret",
+            "private-provider-response-secret",
+            "unexpected fake gh invocation with secret details",
+        ],
+    );
+}
+
+#[test]
+fn failed_signal_exports_numeric_signal_status() {
+    let collector = Collector::start();
+    let fixture = Fixture::new("steps:\n  terminated:\n    command: 'kill -TERM $$'\n");
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "signal-input-secret",
+    );
+    assert!(
+        !output.status.success(),
+        "signal fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let spans = spans(&requests);
+    let terminated = named_span(&spans, "cruise.step", "cruise.step.name", "terminated");
+    assert_eq!(
+        terminated.int_attributes.get("cruise.command.signal"),
+        Some(&i64::from(libc::SIGTERM))
+    );
+    assert!(
+        !terminated
+            .int_attributes
+            .contains_key("cruise.command.exit_code"),
+        "signal termination should not have an exit code: {terminated:#?}"
+    );
+    assert_payload_omits(&requests, &["signal-input-secret", "kill -TERM $$"]);
+}
+
+#[test]
+fn loop_protection_exports_bounded_traversal_diagnostics() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        r#"max_retries: 2
+steps:
+  repeat:
+    command: 'printf loop-output-secret >/dev/null'
+    if:
+      no-file-changes: retry
+"#,
+    );
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "loop-input-secret",
+    );
+    assert!(
+        !output.status.success(),
+        "loop fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let spans = spans(&requests);
+    let loop_span = spans
+        .iter()
+        .find(|span| span.attributes.contains_key("cruise.loop.from"))
+        .unwrap_or_else(|| panic!("no loop-protection span exported: {spans:#?}"));
+    assert_eq!(
+        loop_span.attributes.get("error.type").map(String::as_str),
+        Some("loop_protection")
+    );
+    assert_eq!(
+        loop_span
+            .attributes
+            .get("cruise.loop.from")
+            .map(String::as_str),
+        Some("repeat")
+    );
+    assert_eq!(
+        loop_span
+            .attributes
+            .get("cruise.loop.to")
+            .map(String::as_str),
+        Some("repeat")
+    );
+    assert_eq!(
+        loop_span.int_attributes.get("cruise.loop.max_retries"),
+        Some(&2)
+    );
+    assert_eq!(
+        loop_span.int_attributes.get("cruise.loop.traversals"),
+        Some(&2)
+    );
+    assert_eq!(
+        loop_span
+            .int_attributes
+            .get("cruise.loop.skipped_step_count"),
+        Some(&0)
+    );
+    assert_payload_omits(
+        &requests,
+        &[
+            "loop-input-secret",
+            "loop-output-secret",
+            "loop protection: edge repeat -> repeat exceeded max retries 2",
+        ],
+    );
 }
 
 #[test]

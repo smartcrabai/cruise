@@ -20,15 +20,60 @@ steps:
   wait-ci:
     timeout: 30m
     command: |-
+      ci_diagnostic() {{
+        diagnostic_state=$state
+        case "$diagnostic_state" in
+          unobserved|SUCCESS|FAILURE|ERROR|PENDING|EXPECTED|stale-rollup|not-registered|no-checks|success|failed|canceled|cancelled|skipped|running|pending|created|waiting_for_resource|preparing|scheduled|manual|unknown) ;;
+          *) diagnostic_state=unknown ;;
+        esac
+        diagnostic_head_matches=$head_matches
+        case "$diagnostic_head_matches" in
+          true|false|unknown) ;;
+          *) diagnostic_head_matches=unknown ;;
+        esac
+        diagnostic_check_count=$check_count
+        case "$diagnostic_check_count" in
+          ''|*[!0-9]*) diagnostic_check_count=unknown ;;
+          *) if [ "${{#diagnostic_check_count}}" -gt 18 ]; then diagnostic_check_count=unknown; fi ;;
+        esac
+        printf 'CRUISE_CI_DIAGNOSTIC_V1 %s %s %s %s %s\n' "$provider" "$1" "$diagnostic_state" "$diagnostic_head_matches" "$diagnostic_check_count" >&2
+      }}
       case "{pr.url}" in
         */-/merge_requests/*)
+          provider=gitlab
+          state=unobserved
+          head_matches=unknown
+          check_count=unknown
           attempt=0
           while [ "$attempt" -lt 30 ]; do
-            status=$(glab ci get --merge-request {pr.number} --output json | jq -r '.status')
+            if response=$(glab ci get --merge-request {pr.number} --output json); then
+              query_status=0
+            else
+              query_status=$?
+            fi
+            if status=$(printf '%s' "$response" | jq -r '.status'); then
+              status_parse_status=0
+            else
+              status_parse_status=$?
+            fi
+            case "$status" in
+              success|failed|canceled|cancelled|skipped|running|pending|created|waiting_for_resource|preparing|scheduled|manual) state=$status ;;
+              *) state=unknown ;;
+            esac
             case "$status" in
               success) exit 0 ;;
               running|pending|created|waiting_for_resource|preparing|scheduled) ;;
               *)
+                if [ "$query_status" -ne 0 ]; then
+                  diagnostic_reason=api_error
+                elif [ "$status_parse_status" -ne 0 ] || [ -z "$status" ] || [ "$status" = null ]; then
+                  diagnostic_reason=invalid_ci_state
+                elif [ "$status" = failed ]; then
+                  diagnostic_reason=ci_failed
+                else
+                  diagnostic_reason=unknown_state
+                fi
+                ci_diagnostic "$diagnostic_reason"
                 log="$(git rev-parse --git-dir)/cruise-ci-traces.log"
                 : > "$log"
                 glab ci get --merge-request {pr.number} --status=failed --with-job-details --output json \
@@ -42,21 +87,33 @@ steps:
             sleep 15
             attempt=$((attempt + 1))
           done
+          if [ "$query_status" -ne 0 ]; then
+            ci_diagnostic api_error
+          else
+            ci_diagnostic timeout
+          fi
           echo "CI remained pending after 30 polls." >&2
           exit 1 ;;
         *)
+          provider=github
+          state=unobserved
+          head_matches=unknown
+          check_count=unknown
           if ! expected_head=$(git rev-parse HEAD); then
             printf 'Unable to read local HEAD before checking GitHub CI.\n' >&2
+            ci_diagnostic local_head_error
             exit 1
           fi
           if ! repository=$(gh repo view --json nameWithOwner --jq .nameWithOwner); then
             printf 'Unable to determine the GitHub repository for PR #%s.\n' {pr.number} >&2
+            ci_diagnostic repository_query_error
             exit 1
           fi
           owner=$(printf '%s\n' "$repository" | cut -d/ -f1)
           name=$(printf '%s\n' "$repository" | cut -d/ -f2-)
           if [ -z "$owner" ] || [ -z "$name" ]; then
             printf 'Invalid GitHub repository name: %s\n' "$repository" >&2
+            ci_diagnostic repository_invalid
             exit 1
           fi
           query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{state contexts(first:1) {{totalCount}}}}}}}}}}}}'
@@ -64,22 +121,29 @@ steps:
           while :; do
             if ! response=$(gh api graphql -f owner="$owner" -f name="$name" -F number={pr.number} -f head="$expected_head" -f query="$query"); then
               printf 'GitHub CI query failed for PR #%s at expected HEAD %s.\n' {pr.number} "$expected_head" >&2
+              ci_diagnostic api_error
               exit 1
             fi
             if ! printf '%s' "$response" | jq -e '(.errors // []) | length == 0' >/dev/null; then
               printf 'GitHub CI query returned errors for PR #%s at expected HEAD %s.\n' {pr.number} "$expected_head" >&2
+              ci_diagnostic graphql_error
               exit 1
             fi
             if ! pr_head=$(printf '%s' "$response" | jq -er '.data.repository.pullRequest.headRefOid | strings'); then
               printf 'GitHub did not return the head for PR #%s.\n' {pr.number} >&2
+              ci_diagnostic pr_head_missing
               exit 1
             fi
             if [ "$pr_head" != "$expected_head" ]; then
+              head_matches=false
               printf 'GitHub PR #%s head changed: expected %s, found %s.\n' {pr.number} "$expected_head" "$pr_head" >&2
+              ci_diagnostic head_mismatch
               exit 1
             fi
+            head_matches=true
             if ! rollup_head=$(printf '%s' "$response" | jq -er '.data.repository.object.oid | strings'); then
               printf 'GitHub did not return the expected commit object for PR #%s (HEAD %s).\n' {pr.number} "$expected_head" >&2
+              ci_diagnostic rollup_head_missing
               exit 1
             fi
             if [ "$rollup_head" != "$expected_head" ]; then
@@ -88,10 +152,12 @@ steps:
             else
               if ! has_rollup=$(printf '%s' "$response" | jq -er '.data.repository.object | has("statusCheckRollup")'); then
                 printf 'GitHub omitted statusCheckRollup for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+                ci_diagnostic malformed_rollup
                 exit 1
               fi
               if [ "$has_rollup" != true ]; then
                 printf 'GitHub returned malformed statusCheckRollup data for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+                ci_diagnostic malformed_rollup
                 exit 1
               fi
               rollup=$(printf '%s' "$response" | jq -c '.data.repository.object.statusCheckRollup')
@@ -101,10 +167,14 @@ steps:
               else
                 if ! state=$(printf '%s' "$response" | jq -er '.data.repository.object.statusCheckRollup.state | strings'); then
                   printf 'GitHub returned malformed CI state for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+                  state=unknown
+                  ci_diagnostic invalid_ci_state
                   exit 1
                 fi
                 if ! check_count=$(printf '%s' "$response" | jq -er '.data.repository.object.statusCheckRollup.contexts.totalCount | numbers'); then
                   printf 'GitHub returned malformed CI check count for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+                  check_count=unknown
+                  ci_diagnostic invalid_check_count
                   exit 1
                 fi
                 if [ "$check_count" -eq 0 ]; then
@@ -119,19 +189,23 @@ steps:
                   exit 0 ;;
                 FAILURE|ERROR)
                   printf 'GitHub CI failed for PR #%s: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' {pr.number} "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
+                  ci_diagnostic ci_failed
                   exit 1 ;;
                 PENDING|EXPECTED) ;;
                 *)
                   printf 'GitHub returned unknown CI state for PR #%s: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' {pr.number} "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
+                  ci_diagnostic unknown_state
                   exit 1 ;;
               esac
             fi
             if ! now=$(date +%s); then
               printf 'Unable to check the GitHub CI wait deadline for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+              ci_diagnostic clock_error
               exit 1
             fi
             if [ "$now" -ge "$deadline" ]; then
               printf 'GitHub CI timed out: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
+              ci_diagnostic timeout
               exit 1
             fi
             printf 'Waiting for GitHub CI: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count"

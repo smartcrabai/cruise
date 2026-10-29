@@ -3,6 +3,8 @@ use std::time::{Duration, Instant};
 
 use command_group::{AsyncCommandGroup as _, AsyncGroupChild};
 use opentelemetry::trace::FutureExt as OtelFutureExt;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -15,6 +17,8 @@ pub(crate) type StepLogCallback<'a> = dyn Fn(&str, &str) + Send + Sync + 'a;
 pub struct CommandResult {
     pub success: bool,
     pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
 }
 
 /// Execute commands sequentially, stopping on failure or cancellation.
@@ -30,6 +34,8 @@ pub(crate) async fn run_commands<S: std::hash::BuildHasher>(
     let mut last_result = CommandResult {
         success: true,
         stderr: String::new(),
+        exit_code: None,
+        signal: None,
     };
     for cmd in cmds {
         last_result = run_command(
@@ -78,7 +84,18 @@ async fn run_command<S: std::hash::BuildHasher>(
             attempt.finish("success");
             return Ok(result);
         }
-        let rate_limited = is_rate_limited(&result.stderr);
+        let attempt_context = attempt.context();
+        crate::telemetry::record_command_failure(
+            &attempt_context,
+            result.exit_code,
+            result.signal,
+            &result.stderr,
+        );
+        let rate_limited = result
+            .stderr
+            .lines()
+            .filter(|line| !line.starts_with("CRUISE_CI_DIAGNOSTIC_V1 "))
+            .any(is_rate_limited);
         if rate_limited && attempts < max_retries {
             attempt.set_error_type("rate_limit");
             attempts += 1;
@@ -105,6 +122,12 @@ async fn run_command<S: std::hash::BuildHasher>(
         } else {
             "command_exit"
         });
+        crate::telemetry::record_command_failure(
+            &opentelemetry::Context::current(),
+            result.exit_code,
+            result.signal,
+            &result.stderr,
+        );
         crate::telemetry::record_error_type("command_exit");
         attempt.finish("error");
         return Ok(result);
@@ -249,6 +272,17 @@ async fn execute_command_cancel<S: std::hash::BuildHasher>(
     Ok(CommandResult {
         success: status.success(),
         stderr,
+        exit_code: status.code(),
+        signal: {
+            #[cfg(unix)]
+            {
+                status.signal()
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        },
     })
 }
 
@@ -441,6 +475,21 @@ mod tests {
         assert!(!is_rate_limited("Normal error message"));
         assert!(!is_rate_limited(""));
         assert!(!is_rate_limited("compilation error"));
+    }
+
+    #[tokio::test]
+    async fn ci_diagnostic_check_count_does_not_trigger_rate_limit_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let count = root.path().join("invocations");
+        let env = HashMap::from([("COUNT_FILE".to_owned(), count.display().to_string())]);
+        let result = run_command(
+            "printf x >> \"$COUNT_FILE\"; printf '%s\\n' 'CRUISE_CI_DIAGNOSTIC_V1 github graphql_error PENDING true 429' >&2; exit 1",
+            1, &env, None, None, None, None,
+        )
+        .await
+        .unwrap();
+        assert!(!result.success);
+        assert_eq!(std::fs::read_to_string(count).unwrap(), "x");
     }
 
     #[test]

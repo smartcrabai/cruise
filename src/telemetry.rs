@@ -262,7 +262,6 @@ impl Operation {
         self.finish_inner(outcome);
     }
 
-    /// Finishes the operation using a safe outcome and error category from a result.
     pub fn finish_result<T>(mut self, result: &crate::error::Result<T>) {
         let outcome = match result {
             Ok(_) => "success",
@@ -271,6 +270,24 @@ impl Operation {
             Err(crate::error::CruiseError::StepPaused) => "paused",
             Err(error) => {
                 self.set_error_type(error.telemetry_type());
+                if let crate::error::CruiseError::LoopProtection {
+                    from,
+                    to,
+                    max_retries,
+                    edge_counts,
+                    skipped_steps,
+                } = error
+                    && let Some(context) = self.context.as_ref()
+                {
+                    record_loop_protection(
+                        context,
+                        from,
+                        to,
+                        *max_retries,
+                        edge_counts,
+                        skipped_steps,
+                    );
+                }
                 "error"
             }
         };
@@ -319,6 +336,38 @@ impl Operation {
         );
     }
 }
+fn record_loop_protection(
+    context: &Context,
+    from: &str,
+    to: &str,
+    max_retries: usize,
+    edge_counts: &[(String, String, usize)],
+    skipped_steps: &[String],
+) {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let span = context.span();
+    span.set_attribute(KeyValue::new("cruise.loop.from", from.to_owned()));
+    span.set_attribute(KeyValue::new("cruise.loop.to", to.to_owned()));
+    span.set_attribute(KeyValue::new(
+        "cruise.loop.max_retries",
+        i64::try_from(max_retries).unwrap_or(i64::MAX),
+    ));
+    if let Some((_, _, traversals)) = edge_counts
+        .iter()
+        .find(|(edge_from, edge_to, _)| edge_from.as_str() == from && edge_to.as_str() == to)
+    {
+        span.set_attribute(KeyValue::new(
+            "cruise.loop.traversals",
+            i64::try_from(*traversals).unwrap_or(i64::MAX),
+        ));
+    }
+    span.set_attribute(KeyValue::new(
+        "cruise.loop.skipped_step_count",
+        i64::try_from(skipped_steps.len()).unwrap_or(i64::MAX),
+    ));
+}
 
 fn claim_error_type(context: &Context) -> bool {
     context.get::<ErrorTypeState>().is_none_or(|state| {
@@ -340,6 +389,135 @@ pub fn record_error_type(error_type: &'static str) {
             .span()
             .set_attribute(KeyValue::new("error.type", error_type));
     }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CiDiagnostic {
+    provider: &'static str,
+    reason: &'static str,
+    state: &'static str,
+    head_matches: Option<bool>,
+    check_count: Option<i64>,
+}
+
+pub(crate) fn record_command_failure(
+    context: &Context,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    stderr: &str,
+) {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let span = context.span();
+    if let Some(exit_code) = exit_code {
+        span.set_attribute(KeyValue::new(
+            "cruise.command.exit_code",
+            i64::from(exit_code),
+        ));
+    }
+    if let Some(signal) = signal {
+        span.set_attribute(KeyValue::new("cruise.command.signal", i64::from(signal)));
+    }
+    if let Some(diagnostic) = last_ci_diagnostic(stderr) {
+        span.set_attribute(KeyValue::new("cruise.ci.provider", diagnostic.provider));
+        span.set_attribute(KeyValue::new("cruise.ci.failure_reason", diagnostic.reason));
+        span.set_attribute(KeyValue::new("cruise.ci.state", diagnostic.state));
+        if let Some(head_matches) = diagnostic.head_matches {
+            span.set_attribute(KeyValue::new("cruise.ci.head_matches", head_matches));
+        }
+        if let Some(check_count) = diagnostic.check_count {
+            span.set_attribute(KeyValue::new("cruise.ci.check_count", check_count));
+        }
+    }
+}
+
+fn last_ci_diagnostic(stderr: &str) -> Option<CiDiagnostic> {
+    stderr.lines().rev().find_map(parse_ci_diagnostic_line)
+}
+
+fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
+    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V1";
+
+    if line.len() > 256 || !line.is_ascii() || !line.starts_with(PREFIX) {
+        return None;
+    }
+    let mut fields = line.split_ascii_whitespace();
+    if fields.next()? != PREFIX {
+        return None;
+    }
+    let provider = match fields.next()? {
+        "github" => "github",
+        "gitlab" => "gitlab",
+        _ => return None,
+    };
+    let reason = match fields.next()? {
+        "local_head_error" => "local_head_error",
+        "repository_query_error" => "repository_query_error",
+        "repository_invalid" => "repository_invalid",
+        "api_error" => "api_error",
+        "graphql_error" => "graphql_error",
+        "pr_head_missing" => "pr_head_missing",
+        "head_mismatch" => "head_mismatch",
+        "rollup_head_missing" => "rollup_head_missing",
+        "malformed_rollup" => "malformed_rollup",
+        "invalid_ci_state" => "invalid_ci_state",
+        "invalid_check_count" => "invalid_check_count",
+        "ci_failed" => "ci_failed",
+        "unknown_state" => "unknown_state",
+        "clock_error" => "clock_error",
+        "timeout" => "timeout",
+        _ => return None,
+    };
+    let state = match fields.next()? {
+        "unobserved" => "unobserved",
+        "SUCCESS" => "SUCCESS",
+        "FAILURE" => "FAILURE",
+        "ERROR" => "ERROR",
+        "PENDING" => "PENDING",
+        "EXPECTED" => "EXPECTED",
+        "stale-rollup" => "stale-rollup",
+        "not-registered" => "not-registered",
+        "no-checks" => "no-checks",
+        "success" => "success",
+        "failed" => "failed",
+        "canceled" => "canceled",
+        "cancelled" => "cancelled",
+        "skipped" => "skipped",
+        "running" => "running",
+        "pending" => "pending",
+        "created" => "created",
+        "waiting_for_resource" => "waiting_for_resource",
+        "preparing" => "preparing",
+        "scheduled" => "scheduled",
+        "manual" => "manual",
+        "unknown" => "unknown",
+        _ => return None,
+    };
+    let head_matches = match fields.next()? {
+        "true" => Some(true),
+        "false" => Some(false),
+        "unknown" => None,
+        _ => return None,
+    };
+    let check_count = match fields.next()? {
+        "unknown" => None,
+        value if value.bytes().all(|byte| byte.is_ascii_digit()) && !value.is_empty() => {
+            Some(value.parse::<i64>().ok()?)
+        }
+        _ => return None,
+    };
+    if fields.next().is_some() {
+        return None;
+    }
+
+    Some(CiDiagnostic {
+        provider,
+        reason,
+        state,
+        head_matches,
+        check_count,
+    })
 }
 
 /// Captures the current span context only when telemetry is enabled.
@@ -561,7 +739,10 @@ impl Error for InitError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Context, ErrorTypeState, claim_error_type, is_enabled, workflow_identity};
+    use super::{
+        CiDiagnostic, Context, ErrorTypeState, claim_error_type, is_enabled, last_ci_diagnostic,
+        parse_ci_diagnostic_line, workflow_identity,
+    };
     use crate::session_config::SessionConfigRef;
     use std::{borrow::Cow, path::PathBuf, sync::atomic::AtomicBool};
 
@@ -577,6 +758,70 @@ mod tests {
         assert!(is_enabled(Some("true"), None));
     }
 
+    #[test]
+    fn ci_diagnostic_parser_accepts_only_bounded_whitelisted_fields() {
+        let valid = "CRUISE_CI_DIAGNOSTIC_V1 github head_mismatch FAILURE false 4";
+        assert_eq!(
+            parse_ci_diagnostic_line(valid),
+            Some(CiDiagnostic {
+                provider: "github",
+                reason: "head_mismatch",
+                state: "FAILURE",
+                head_matches: Some(false),
+                check_count: Some(4),
+            })
+        );
+        assert_eq!(
+            parse_ci_diagnostic_line(
+                "CRUISE_CI_DIAGNOSTIC_V1 gitlab api_error unknown unknown unknown"
+            ),
+            Some(CiDiagnostic {
+                provider: "gitlab",
+                reason: "api_error",
+                state: "unknown",
+                head_matches: None,
+                check_count: None,
+            })
+        );
+
+        for invalid in [
+            " CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 1",
+            "CRUISE_CI_DIAGNOSTIC_V1 secret-provider ci_failed FAILURE false 1",
+            "CRUISE_CI_DIAGNOSTIC_V1 github arbitrary-reason FAILURE false 1",
+            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed private-state false 1",
+            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE secret 1",
+            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false -1",
+            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false +1",
+            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 9223372036854775808",
+            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 1 leaked-value",
+        ] {
+            assert_eq!(parse_ci_diagnostic_line(invalid), None, "{invalid:?}");
+        }
+        assert_eq!(
+            parse_ci_diagnostic_line(&format!("{valid} {}", "x".repeat(256))),
+            None
+        );
+    }
+
+    #[test]
+    fn ci_diagnostic_parser_uses_last_valid_line_without_exporting_neighbors() {
+        let stderr = concat!(
+            "raw command error with private details\n",
+            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 2\n",
+            "CRUISE_CI_DIAGNOSTIC_V1 github leaked FAILURE false 7\n",
+            "CRUISE_CI_DIAGNOSTIC_V1 gitlab graphql_error failed unknown 0\n",
+        );
+        assert_eq!(
+            last_ci_diagnostic(stderr),
+            Some(CiDiagnostic {
+                provider: "gitlab",
+                reason: "graphql_error",
+                state: "failed",
+                head_matches: None,
+                check_count: Some(0),
+            })
+        );
+    }
     #[test]
     fn workflow_identity_exports_only_safe_names() {
         let file = SessionConfigRef::File {
