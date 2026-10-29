@@ -193,6 +193,8 @@ cruise "implement the feature"
 
 The `ssh` subcommand reserves the exact legacy input `ssh`; to plan a task whose
 entire text is `ssh`, use `cruise plan "ssh"`.
+The hidden `mcp-bridge` entry point likewise reserves the exact input
+`mcp-bridge`; use `cruise plan "mcp-bridge"` to plan that task.
 
 On macOS and Linux, the CLI and TUI send best-effort desktop notifications for
 **Action required**, **Plan ready**, **Completed**, and **Failed** workflow events.
@@ -465,7 +467,7 @@ Options:
 ```
 Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. A transient session is recorded while the workflow runs, then automatically removed when it reaches a terminal phase. Sessions paused for input (`Running`) or interrupted with Ctrl+C (`Suspended`) are kept and can be resumed with `cruise run <id>`; exec sessions are excluded from `cruise run` automatic selection and `cruise run --all`. Existing uncommitted changes are allowed; cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is still required.
 
-When `force_exec: true` is set in the workflow config, the legacy positional form `cruise "task"` (except the exact input `ssh`, which is reserved for the `ssh` subcommand), `cruise plan "task"`, and `cruise --plan "task"` use the current-directory execution path without planning, worktree, or PR creation. `--no-force-exec`, `--repo`, `--grill`, and image attachments opt out; `--skip-planning` and `--no-interactive-planning` do not. Background `--plan` runs foreground because there is no plan worker for direct execution. Both `exec` and these `force_exec` entry points use the same fresh-run flag selector on TTY stdin unless `-f/--flag` is supplied; dry runs and piped input (including `--plan stdin`) do not prompt. Resuming a retained exec session by ID keeps its saved flags without prompting.
+When `force_exec: true` is set in the workflow config, the legacy positional form `cruise "task"` (except the exact inputs `ssh` and `mcp-bridge`, which are reserved for their subcommands), `cruise plan "task"`, and `cruise --plan "task"` use the current-directory execution path without planning, worktree, or PR creation. `--no-force-exec`, `--repo`, `--grill`, and image attachments opt out; `--skip-planning` and `--no-interactive-planning` do not. Background `--plan` runs foreground because there is no plan worker for direct execution. Both `exec` and these `force_exec` entry points use the same fresh-run flag selector on TTY stdin unless `-f/--flag` is supplied; dry runs and piped input (including `--plan stdin`) do not prompt. Resuming a retained exec session by ID keeps its saved flags without prompting.
 
 #### `cruise --plan`
 
@@ -1117,7 +1119,7 @@ Model catalog caches are copied into that private home; path-bound external cred
 
 `submit_plan` and `update_plan` only write the plan and return; Cruise's existing approval flow happens after the model turn and does not hold an SDK tool callback open.
 
-**Upgrade note:** After upgrading from an MCP-bridge release, remove the stale `mcpServers.cruise` entry from the source `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json` when `JCODE_HOME` is unset). Cruise strips it from each private session copy and leaves the source configuration unchanged.
+**Upgrade note:** After upgrading from an MCP-bridge release, remove the stale `mcpServers.cruise` entry from the source `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json` when `JCODE_HOME` is unset). Cruise strips it from each private session copy and leaves the source configuration unchanged. Until the entry is removed, jcode sessions outside Cruise will continue to launch it. Cruise exits with migration instructions on stderr instead of treating it as legacy plan input, so jcode reports the `cruise` MCP server as failed.
 
 The backend exposes Cruise session tools through jcode's session-tools support.
 

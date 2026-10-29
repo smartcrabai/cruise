@@ -130,7 +130,7 @@ Cruise resolves the process `JCODE_HOME` as its source home, falling back to `~/
 
 `submit_plan` and `update_plan` only write the plan and return; approval remains Cruise's normal post-turn flow rather than a blocking SDK callback.
 
-**Upgrade note:** After upgrading from an MCP-bridge release, remove the stale `mcpServers.cruise` entry from the source `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json` when `JCODE_HOME` is unset). Cruise strips it from each private session copy and leaves the source configuration unchanged.
+**Upgrade note:** After upgrading from an MCP-bridge release, remove the stale `mcpServers.cruise` entry from the source `$JCODE_HOME/mcp.json` (or `~/.jcode/mcp.json` when `JCODE_HOME` is unset). Cruise strips it from each private session copy and leaves the source configuration unchanged. Until the entry is removed, jcode sessions outside Cruise will continue to launch it. Cruise exits with migration instructions on stderr instead of treating it as legacy plan input, so jcode reports the `cruise` MCP server as failed.
 
 The backend exposes Cruise session tools through jcode's session-tools support. Restricted `permission` modes force `macos_computer_use` off and disable the jcode tool `bash`. `read-only` additionally disables `edit`, `write`, `apply_patch`, and `replace`.
 
