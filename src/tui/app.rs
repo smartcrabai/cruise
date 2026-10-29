@@ -3608,7 +3608,7 @@ mod tests {
     }
 
     struct PersistedTuiFixture {
-        _temp: TempDir,
+        temp: TempDir,
         manager: crate::session::SessionManager,
         app: TuiApp,
     }
@@ -3653,17 +3653,13 @@ mod tests {
             logs_sender,
             Some(crate::test_support::lock_process()),
         );
-        PersistedTuiFixture {
-            _temp: temp,
-            manager,
-            app,
-        }
+        PersistedTuiFixture { temp, manager, app }
     }
 
     #[test]
     fn info_loads_declared_flag_choices_in_order() {
         let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
-        let path = fixture._temp.path().join("flags.yaml");
+        let path = fixture.temp.path().join("flags.yaml");
         std::fs::write(&path, "command: [echo]\nflags:\n  e2e: {}\n  docs: {}\nsteps:\n  run:\n    command: echo hello\n")
             .unwrap_or_else(|error| panic!("{error}"));
         fixture.app.refresh();
@@ -3685,12 +3681,15 @@ mod tests {
     #[test]
     fn info_recovers_from_config_failure_on_refresh() {
         let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
-        let path = fixture._temp.path().join("flags.yaml");
+        let path = fixture.temp.path().join("flags.yaml");
         fixture.app.refresh();
         fixture.app.sessions[0].config =
             crate::session_config::SessionConfigRef::File { path: path.clone() };
-        fixture.manager.save(&fixture.app.sessions[0]).unwrap();
-        fixture.app.tab = DetailTab::Info;
+        fixture
+            .manager
+            .save(&fixture.app.sessions[0])
+            .unwrap_or_else(|error| panic!("failed to save session: {error}"));
+        fixture.app.set_detail_tab(DetailTab::Info);
         fixture.app.load_tab_data();
         let id = test_session_id(1);
         assert!(matches!(
@@ -3718,21 +3717,27 @@ mod tests {
     #[test]
     fn info_refreshes_choices_after_file_edit_without_session_change() {
         let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
-        let path = fixture._temp.path().join("flags.yaml");
+        let path = fixture.temp.path().join("flags.yaml");
         std::fs::write(
             &path,
             "command: [echo]\nflags:\n  e2e: {}\nsteps:\n  run:\n    command: echo hello\n",
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("failed to write config: {error}"));
         fixture.app.refresh();
         fixture.app.sessions[0].config =
             crate::session_config::SessionConfigRef::File { path: path.clone() };
-        fixture.manager.save(&fixture.app.sessions[0]).unwrap();
-        fixture.app.tab = DetailTab::Info;
+        fixture
+            .manager
+            .save(&fixture.app.sessions[0])
+            .unwrap_or_else(|error| panic!("failed to save session: {error}"));
+        fixture.app.set_detail_tab(DetailTab::Info);
         fixture.app.load_tab_data();
         let id = test_session_id(1);
         assert_eq!(
-            fixture.app.flag_choices_cache[&id].as_ref().unwrap()[0].name,
+            fixture.app.flag_choices_cache[&id]
+                .as_ref()
+                .unwrap_or_else(|| panic!("config failed to load"))[0]
+                .name,
             "e2e"
         );
         let before = fixture.app.sessions[0].clone();
@@ -3740,12 +3745,15 @@ mod tests {
             &path,
             "command: [echo]\nflags:\n  docs: {}\nsteps:\n  run:\n    command: echo hello\n",
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("failed to write config: {error}"));
         fixture.app.refresh();
         assert_eq!(fixture.app.sessions[0], before);
         fixture.app.load_tab_data();
         assert_eq!(
-            fixture.app.flag_choices_cache[&id].as_ref().unwrap()[0].name,
+            fixture.app.flag_choices_cache[&id]
+                .as_ref()
+                .unwrap_or_else(|| panic!("config failed to load"))[0]
+                .name,
             "docs"
         );
     }

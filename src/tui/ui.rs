@@ -2286,7 +2286,13 @@ mod tests {
             "{view}"
         );
         assert!(!view.contains("obsolete"));
-        assert!(view.find("Source   ").unwrap() < view.find("Flags    ").unwrap());
+        assert!(
+            view.find("Source   ")
+                .unwrap_or_else(|| panic!("missing Source row"))
+                < view
+                    .find("Flags    ")
+                    .unwrap_or_else(|| panic!("missing Flags row"))
+        );
     }
 
     #[test]
