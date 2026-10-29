@@ -177,9 +177,8 @@ A step-level `model:` overrides the top-level `model:` for that step only. In
 SDK mode, workflow-level model arrays use the first entry as the primary and
 the remaining entries as fallbacks. Arrays with fallback entries automatically
 enable model fallback; an explicit `retry.fallback_chains` entry for a primary
-model wins over its array tail. Rate limits retry the current model while its
-retry budget and delay permit, then switch to the next usable fallback when
-one exists. 5xx, HTTP 4xx other than 429, 401, 403, 407, and 408, and
+model wins over its array tail. Rate limits switch immediately to the next usable fallback
+and retry the current model only when none exists. 5xx, HTTP 4xx other than 429, 401, 403, 407, and 408, and
 network failures switch immediately to a usable fallback when
 `--rate-limit-retries` is above zero and no visible text was streamed; such a
 4xx is never resent to the same model, so it switches or fails as-is. 401,
@@ -360,8 +359,8 @@ and 408, and network failures become retryable too,
 the backoff switches to `base_delay_ms` doubling to an 8s ceiling, and those
 failures switch immediately to the next usable fallback when
 `--rate-limit-retries` is above zero and no visible text was streamed. A 429
-retries the current model while its retry budget and delay permit, then
-switches to the next usable fallback when one exists. A retryable 4xx only
+does the same, with no `Retry-After` wait, and retries the current model only
+when no usable fallback exists. A retryable 4xx only
 ever switches -- never a same-model retry -- and surfaces the original error
 when no usable fallback is left. What it implies about the model decides the
 cooldown: a refused request skips its model without cooling it, since a client

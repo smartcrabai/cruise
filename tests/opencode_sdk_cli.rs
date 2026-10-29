@@ -2634,7 +2634,12 @@ async fn malformed_required_event_fails_instead_of_reporting_success() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn safe_provider_failures_use_retry_and_fallback_without_corrupting_model_ids() {
     let _lock = lock_process();
-    for status in [429, 404] {
+    // A failed primary is cooled down process-wide, so each status needs its
+    // own primary identity.
+    for (status, primary, id) in [
+        (429, MODEL, "team/model:2026"),
+        (404, "fixture/team/model:2027#precise", "team/model:2027"),
+    ] {
         let fixture = Fixture::new(Scenario::ProviderFailure {
             status,
             side_effect: false,
@@ -2642,7 +2647,7 @@ async fn safe_provider_failures_use_retry_and_fallback_without_corrupting_model_
         .await;
         let _guards = fixture.guards();
         let outcome = fixture
-            .execute(Some(MODEL), 2)
+            .execute(Some(primary), 2)
             .await
             .unwrap_or_else(|error| panic!("safe provider {status}: {error}"));
         assert_eq!(outcome.result.output, ANSWER);
@@ -2657,16 +2662,9 @@ async fn safe_provider_failures_use_retry_and_fallback_without_corrupting_model_
         assert_eq!(models.len(), 2);
         assert_eq!(
             models[0],
-            &json!({"providerID":"fixture","id":"team/model:2026","variant":"precise"})
+            &json!({"providerID":"fixture","id":id,"variant":"precise"})
         );
-        assert_eq!(
-            models[1],
-            &if status == 429 {
-                json!({"providerID":"fixture","id":"team/model:2026","variant":"precise"})
-            } else {
-                json!({"providerID":"fixture","id":"fallback"})
-            }
-        );
+        assert_eq!(models[1], &json!({"providerID":"fixture","id":"fallback"}));
         fixture.assert_stopped();
     }
 }

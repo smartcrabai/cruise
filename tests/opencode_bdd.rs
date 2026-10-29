@@ -321,6 +321,11 @@ mod contracts {
                 } => token.cancel(),
             }
             run.await
+        } else if w.case.starts_with("safe-") {
+            // A rate limit now cools the primary down process-wide; a unique
+            // primary identity keeps it from leaking into the next scenario.
+            let primary = format!("fixture/{}", w.case);
+            fixture.execute(Some(&primary), 2).await
         } else {
             fixture.execute(Some(MODEL), 2).await
         });

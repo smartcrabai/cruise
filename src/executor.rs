@@ -2340,7 +2340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_spends_the_model_budget_then_switches_immediately() {
+    async fn fallback_switches_immediately_on_rate_limit_without_retrying_the_primary() {
         let models = recorder();
         let models_sink = Arc::clone(&models);
         let notices = recorder();
@@ -2372,14 +2372,10 @@ mod tests {
         .unwrap_or_else(|e| panic!("expected the fallback model to answer: {e}"));
 
         assert_eq!(outcome.result.output, "ok");
-        // The primary model spends its own budget before the chain is used.
+        // The rate-limited primary is not re-sent: the spare answers at once.
         assert_eq!(
             recorded(&models),
-            [
-                "test-executor-budget/primary",
-                "test-executor-budget/primary",
-                "test-executor-budget/spare"
-            ]
+            ["test-executor-budget/primary", "test-executor-budget/spare"]
         );
         let notices = recorded(&notices);
         let fallback = notices
@@ -2520,7 +2516,6 @@ mod tests {
             recorded(&models),
             [
                 "test-executor-no-sink/primary",
-                "test-executor-no-sink/primary",
                 "test-executor-no-sink/spare"
             ]
         );
@@ -2623,20 +2618,11 @@ mod tests {
         assert_eq!(outcome.result.output, "next model");
         assert_eq!(
             recorded(&attempts),
-            [
-                "test-primary/model",
-                "test-primary/model",
-                ":high",
-                "test-next/model",
-            ]
+            ["test-primary/model", ":high", "test-next/model",]
         );
         assert_eq!(
             recorded(&started),
-            [
-                "test-primary/model",
-                "test-primary/model",
-                "test-next/model",
-            ],
+            ["test-primary/model", "test-next/model",],
             "the effort-only fallback must not start a runner"
         );
     }
@@ -2761,7 +2747,6 @@ mod tests {
         assert_eq!(
             recorded(&models),
             [
-                "test-executor-no-callback/primary",
                 "test-executor-no-callback/primary",
                 "test-executor-no-callback/spare"
             ]
@@ -2986,7 +2971,7 @@ mod tests {
         .await
         .unwrap_or_else(|error| panic!("skipping must preserve spare retry budget: {error}"));
         assert_eq!(outcome.result.output, "spare retry succeeded");
-        assert_eq!(attempts, [primary, primary, spare, spare]);
+        assert_eq!(attempts, [primary, spare, spare]);
         let unrestricted = ModelSpec::Single(blocked.to_owned());
         req.model = Some(&unrestricted);
         run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |_, model| {
