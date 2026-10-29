@@ -12,9 +12,9 @@
 //! - **Policy** — 4xx (except 429, 401, 403, 407 and 408), 5xx and network
 //!   failures become retryable too ([`classify_retryable`]), the backoff
 //!   becomes `min(base_delay_ms * 2^(attempt-1), 8s)` with jitter (a server
-//!   `Retry-After` hint wins), and a model that has spent its retry budget is
-//!   swapped for the next entry of its fallback chain — with no delay, a fresh
-//!   budget, and never after the turn already streamed visible text. A
+//!   `Retry-After` hint wins), and a failing model is swapped at once for the
+//!   next usable entry of its fallback chain (a rate-limited model is cooled
+//!   down first) — with no delay, a fresh budget, and never after the turn already streamed visible text. A
 //!   [`RetryClass::ClientError`] only switches and leaves no cooldown behind,
 //!   while a [`RetryClass::ModelMissing`] switches *and* cools the model down
 //!   so later turns stop re-selecting a model the provider does not have;
@@ -1139,24 +1139,23 @@ impl FallbackEngine {
             );
         }
 
-        // Every class but a rate limit uses a fallback immediately when one is
-        // available: another model is the only thing that can help. If
-        // switching is disabled or no candidate is usable, retain the policy's
-        // same-model retry behavior instead of making `model_fallback: false`
-        // silently disable all retries.
-        if !matches!(class, RetryClass::RateLimit)
-            && self.max_retries > 0
+        // Every class uses a fallback immediately when one is available:
+        // another model is the only thing that can help, and a rate-limited
+        // model is already cooling down. If switching is disabled or no
+        // candidate is usable, retain the policy's same-model retry behavior
+        // instead of making `model_fallback: false` silently disable all
+        // retries.
+        if self.max_retries > 0
             && !streamed
             && let Some(action) = self.switch(class, message)
         {
             return (action, Some(class));
         }
 
-        // Rate limits retry the same model first. Server/network failures reach
-        // this path only when no usable fallback can be selected, or when the
-        // turn already streamed visible text. A refused request and a missing
-        // model never do: the same request to the same model returns the same
-        // status.
+        // Failures reach this path only when no usable fallback can be
+        // selected, or when the turn already streamed visible text. A refused
+        // request and a missing model never do: the same request to the same
+        // model returns the same status.
         if !matches!(class, RetryClass::ClientError | RetryClass::ModelMissing)
             && self.attempts < self.max_retries
             && let Some(delay) = self.delay_for(message, self.attempts + 1)
@@ -1174,16 +1173,6 @@ impl FallbackEngine {
             );
         }
 
-        // Budget spent or the next delay would exceed `max_delay_ms`: move to
-        // the next chain model, with no delay and a fresh budget. Replay
-        // safety: a turn whose text the user already saw is never re-run on
-        // another model.
-        if self.max_retries > 0
-            && !streamed
-            && let Some(action) = self.switch(class, message)
-        {
-            return (action, Some(class));
-        }
         if self.policy.is_some()
             && class.cools_down()
             && let Some(model) = self.model.as_deref()
@@ -2315,7 +2304,7 @@ mod tests {
     // --- engine ---------------------------------------------------------------
 
     #[test]
-    fn retry_spends_the_model_budget_before_switching_chains() {
+    fn retry_rate_limit_switches_immediately_and_cools_the_model_down() {
         let config = policy(&[(
             "test-a/model-429",
             &["test-b/model-429", "test-c/model-429"],
@@ -2323,30 +2312,89 @@ mod tests {
         let mut engine = engine(config, "test-a/model-429", 1);
         assert_eq!(engine.model(), Some("test-a/model-429"));
 
-        // The primary model is retried on its own budget first.
-        assert!(matches!(
-            engine
-                .next_with_class(Failure::Limited("HTTP status 429"), false)
-                .0,
-            RetryAction::Backoff { attempt: 1, .. }
-        ));
-        assert_eq!(engine.model(), Some("test-a/model-429"));
-
-        // Budget spent: switch, immediately, with a fresh budget.
-        assert_eq!(
-            engine
-                .next_with_class(Failure::Limited("HTTP status 429"), false)
-                .0,
-            RetryAction::Switch {
-                from: Some("test-a/model-429".to_string()),
-                to: "test-b/model-429".to_string(),
-                detail: "429".to_string(),
-                attempt: 2,
-                of: 5,
-            }
+        // No same-model Backoff first: the first 429 moves to the spare.
+        let (action, class) = engine.next_with_class(Failure::Limited("HTTP status 429"), false);
+        assert_eq!(class, Some(RetryClass::RateLimit));
+        assert!(
+            matches!(
+                &action,
+                RetryAction::Switch { from, to, attempt: 1, .. }
+                    if from.as_deref() == Some("test-a/model-429") && to == "test-b/model-429"
+            ),
+            "unexpected action: {action:?}"
         );
         assert_eq!(engine.model(), Some("test-b/model-429"));
         assert_eq!(engine.attempts, 0, "the new model gets a fresh budget");
+        assert!(RetryPolicy::is_cooling(
+            ModelReferenceFormat::LegacyEffort,
+            "test-a/model-429"
+        ));
+    }
+
+    #[test]
+    fn retry_rate_limit_with_long_retry_after_switches_without_a_delay() {
+        let config = policy(&[("test-ra/primary", &["test-ra/spare"])]);
+        let mut engine = engine(config, "test-ra/primary", 3);
+        let (action, _) = engine.next_with_class(Failure::Limited("429; retry-after: 60"), false);
+        assert!(
+            matches!(&action, RetryAction::Switch { to, .. } if to == "test-ra/spare"),
+            "unexpected action: {action:?}"
+        );
+    }
+
+    #[test]
+    fn retry_rate_limit_chain_advances_past_each_limited_model() {
+        let config = policy(&[("test-chain/a", &["test-chain/b", "test-chain/c"])]);
+        let mut engine = engine(config, "test-chain/a", 1);
+        for expected in ["test-chain/b", "test-chain/c"] {
+            let (action, _) = engine.next_with_class(Failure::Limited("429"), false);
+            assert!(
+                matches!(&action, RetryAction::Switch { to, .. } if to == expected),
+                "unexpected action: {action:?}"
+            );
+        }
+        // Terminal model: the old same-model budget, then the failure.
+        assert!(matches!(
+            engine.next_with_class(Failure::Limited("429"), false).0,
+            RetryAction::Backoff { .. }
+        ));
+        assert_eq!(
+            engine.next_with_class(Failure::Limited("429"), false).0,
+            RetryAction::GiveUp
+        );
+        assert_eq!(engine.model(), Some("test-chain/c"));
+    }
+
+    #[test]
+    fn retry_rate_limit_skips_cooling_candidates() {
+        RetryPolicy::start_cooldown(ModelReferenceFormat::LegacyEffort, "test-skip/cooling");
+        let config = policy(&[(
+            "test-skip/primary",
+            &["test-skip/cooling", "test-skip/open"],
+        )]);
+        let mut engine = engine(config, "test-skip/primary", 2);
+        let (action, _) = engine.next_with_class(Failure::Limited("429"), false);
+        assert!(
+            matches!(&action, RetryAction::Switch { to, .. } if to == "test-skip/open"),
+            "unexpected action: {action:?}"
+        );
+    }
+
+    #[test]
+    fn retry_rate_limit_keeps_retry_after_backoff_when_no_candidate_is_usable() {
+        RetryPolicy::start_cooldown(ModelReferenceFormat::LegacyEffort, "test-skip2/cooling");
+        let config = policy(&[("test-skip2/primary", &["test-skip2/cooling"])]);
+        let mut engine = engine(config, "test-skip2/primary", 2);
+        let (action, _) = engine.next_with_class(Failure::Limited("429; retry-after: 60"), false);
+        assert!(
+            matches!(
+                action,
+                RetryAction::Backoff { delay, class: RetryClass::RateLimit, attempt: 1, .. }
+                    if delay == Duration::from_secs(60)
+            ),
+            "unexpected action: {action:?}"
+        );
+        assert_eq!(engine.model(), Some("test-skip2/primary"));
     }
 
     #[test]
@@ -2354,10 +2402,6 @@ mod tests {
         let config = policy(&[("test-d/primary", &["test-d/spare"])]);
         let mut engine = engine(config, "test-d/primary", 1);
 
-        assert!(matches!(
-            engine.next_with_class(Failure::Limited("429"), false).0,
-            RetryAction::Backoff { .. }
-        ));
         assert!(matches!(
             engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Switch { .. }
@@ -2900,10 +2944,6 @@ mod tests {
         );
         assert!(matches!(
             first.next_with_class(Failure::Limited("429"), false).0,
-            RetryAction::Backoff { .. }
-        ));
-        assert!(matches!(
-            first.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Switch { .. }
         ));
 
@@ -2958,10 +2998,6 @@ mod tests {
             Some("test-j/primary"),
             1,
         );
-        assert!(matches!(
-            engine.next_with_class(Failure::Limited("429"), false).0,
-            RetryAction::Backoff { .. }
-        ));
         assert!(matches!(
             engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Switch { .. }
