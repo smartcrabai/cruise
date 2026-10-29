@@ -122,6 +122,7 @@ pub struct DagDto {
     pub steps: Vec<DagStepDto>,
     pub edges: Vec<DagEdgeDto>,
     pub current_step: Option<String>,
+    pub warning: Option<String>,
 }
 
 pub(crate) fn step_kind(config: &crate::config::StepConfig) -> String {
@@ -170,15 +171,34 @@ pub(crate) fn build_dag_dto(
     current_step_is_node_id: bool,
     skipped_steps: &[String],
 ) -> std::result::Result<DagDto, String> {
-    let start_step = dag
-        .step_name_for_node(&dag.start)
-        .ok_or_else(|| {
-            format!(
-                "start node '{}' does not map to any workflow step",
-                dag.start
-            )
-        })?
-        .to_string();
+    build_graph_dto(
+        Some(compiled),
+        dag,
+        current_step,
+        current_step_is_node_id,
+        skipped_steps,
+    )
+}
+
+fn build_graph_dto(
+    compiled: Option<&crate::workflow::CompiledWorkflow>,
+    dag: &crate::graph::ExecutionGraph,
+    current_step: Option<&str>,
+    current_step_is_node_id: bool,
+    skipped_steps: &[String],
+) -> std::result::Result<DagDto, String> {
+    let start_step = if dag.nodes.is_empty() {
+        String::new()
+    } else {
+        dag.step_name_for_node(&dag.start)
+            .ok_or_else(|| {
+                format!(
+                    "start node '{}' does not map to any workflow step",
+                    dag.start
+                )
+            })?
+            .to_string()
+    };
     let current_step = dag
         .state
         .current
@@ -188,7 +208,10 @@ pub(crate) fn build_dag_dto(
             if current_step_is_node_id {
                 dag.step_name_for_node(step).map(str::to_owned)
             } else {
-                Some(step.to_string())
+                dag.nodes
+                    .values()
+                    .any(|node| node.step_name == step)
+                    .then(|| step.to_string())
             }
         });
     let mut terminals = std::collections::HashMap::new();
@@ -197,16 +220,16 @@ pub(crate) fn build_dag_dto(
             edge.target.is_none()
                 && match edge.reason {
                     crate::graph::TransitionReason::IfNoFileChangesFail => false,
-                    crate::graph::TransitionReason::SkipFallback => {
-                        compiled.steps.get(&node.step_name).is_some_and(|step| {
+                    crate::graph::TransitionReason::SkipFallback => compiled
+                        .and_then(|workflow| workflow.steps.get(&node.step_name))
+                        .is_some_and(|step| {
                             step.when.is_some()
                                 || matches!(
                                     step.skip,
                                     Some(SkipCondition::Static(true) | SkipCondition::Variable(_))
                                 )
                                 || skipped_steps.contains(&node.step_name)
-                        })
-                    }
+                        }),
                     _ => true,
                 }
         });
@@ -216,15 +239,27 @@ pub(crate) fn build_dag_dto(
             .or_insert(is_terminal);
     }
     let mut steps = Vec::new();
-    for (name, config) in &compiled.steps {
-        let Some(&is_terminal) = terminals.get(name.as_str()) else {
-            continue;
-        };
-        steps.push(DagStepDto {
-            name: name.clone(),
-            kind: step_kind(config),
-            is_terminal,
-        });
+    if let Some(compiled) = compiled {
+        for (name, config) in &compiled.steps {
+            let Some(&is_terminal) = terminals.get(name.as_str()) else {
+                continue;
+            };
+            steps.push(DagStepDto {
+                name: name.clone(),
+                kind: step_kind(config),
+                is_terminal,
+            });
+        }
+    } else {
+        let mut names: Vec<_> = terminals.into_iter().collect();
+        names.sort_by_key(|(name, _)| *name);
+        for (name, is_terminal) in names {
+            steps.push(DagStepDto {
+                name: name.to_string(),
+                kind: "unknown".to_string(),
+                is_terminal,
+            });
+        }
     }
     let mut edges = Vec::new();
     for node in dag.nodes.values() {
@@ -255,6 +290,7 @@ pub(crate) fn build_dag_dto(
         steps,
         edges,
         current_step,
+        warning: None,
     })
 }
 
@@ -358,31 +394,91 @@ pub(crate) fn dag_dto_for_session(
     let session = application
         .read_session(session_id)
         .map_err(|error| CruiseError::Other(error.to_string()))?;
-    let compiled = crate::workflow::compile(
-        application
-            .session_config(&session)
-            .map_err(|error| CruiseError::Other(error.to_string()))?,
-    )
-    .map_err(|error| CruiseError::Other(error.to_string()))?;
-    let dag = application
-        .session_dag(session_id)
+    let display = application
+        .session_display_dag_with_warning(session_id)
         .map_err(|error| CruiseError::Other(error.to_string()))?;
-    dag.map(|dag| {
-        build_dag_dto(
-            &compiled,
-            &dag,
-            session.current_step.as_deref(),
-            session.current_step_is_node_id,
-            &crate::flags::preflight_skips(&compiled, &session.flags, &session.skipped_steps),
-        )
-        .map_err(CruiseError::Other)
-    })
-    .transpose()
+    display
+        .map(|(dag, warning)| {
+            let compiled = if warning.is_none() {
+                Some(crate::workflow::compile(
+                    application.session_config(&session)?,
+                )?)
+            } else {
+                None
+            };
+            let skips = compiled.as_ref().map_or_else(Vec::new, |compiled| {
+                crate::flags::preflight_skips(compiled, &session.flags, &session.skipped_steps)
+            });
+            let mut dto = build_graph_dto(
+                compiled.as_ref(),
+                &dag,
+                session.current_step.as_deref(),
+                session.current_step_is_node_id,
+                &skips,
+            )
+            .map_err(CruiseError::Other)?;
+            dto.warning = warning;
+            Ok(dto)
+        })
+        .transpose()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projected_last_disabled_step_makes_preceding_step_terminal() {
+        let config = crate::config::WorkflowConfig::from_yaml(
+            "flags:\n  f: {}\nsteps:\n  a: {command: 'true'}\n  x: {command: 'true', flag: f}\n",
+        )
+        .unwrap();
+        let compiled = crate::workflow::compile(config).unwrap();
+        let graph = crate::graph::build_graph(&compiled, 3).unwrap();
+        let projected = crate::flags::enabled_graph(&graph, &compiled, &Default::default());
+        let dto = build_dag_dto(&compiled, &projected, None, false, &[]).unwrap();
+        assert!(
+            dto.steps
+                .iter()
+                .find(|step| step.name == "a")
+                .unwrap()
+                .is_terminal
+        );
+    }
+
+    #[test]
+    fn projected_graph_dto_and_mermaid_reconnect_hidden_steps() {
+        let config = crate::config::WorkflowConfig::from_yaml(
+            "flags:\n  hidden: {}\nsteps:\n  a:\n    command: 'true'\n  x:\n    flag: hidden\n    command: 'true'\n  b:\n    command: 'true'\n",
+        )
+        .unwrap_or_else(|error| panic!("valid graph fixture: {error}"));
+        let compiled = crate::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("compiled fixture: {error}"));
+        let graph = crate::graph::build_graph(&compiled, 3)
+            .unwrap_or_else(|error| panic!("fixed topology: {error}"));
+        let projected = crate::flags::enabled_graph(&graph, &compiled, &Default::default());
+        let dto = build_dag_dto(&compiled, &projected, None, false, &[])
+            .unwrap_or_else(|error| panic!("graph DTO: {error}"));
+
+        assert_eq!(
+            dto.steps
+                .iter()
+                .map(|step| step.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(dto.edges.iter().any(|edge| edge.from == "a"
+            && edge.to.as_deref() == Some("b")
+            && edge.reason == "sequential"));
+        assert!(
+            dto.edges
+                .iter()
+                .all(|edge| edge.from != "x" && edge.to.as_deref() != Some("x"))
+        );
+        let mermaid = crate::webui::dag_mermaid::build_mermaid_source(&dto);
+        assert!(!mermaid.contains("[\"x\"]"), "{mermaid}");
+        assert!(mermaid.contains("s0_a --> s1_b"), "{mermaid}");
+    }
 
     #[test]
     fn graph_dto_preserves_cycles_and_accepted_counts() {

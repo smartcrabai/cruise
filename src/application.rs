@@ -2374,6 +2374,53 @@ impl CruiseApplication {
             .map(Some)
     }
 
+    /// Session graph as displayed, with flag-disabled steps hidden. Legacy
+    /// unversioned checkpoints are displayed without filtering.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session, graph, or workflow cannot be loaded.
+    pub fn session_display_dag(&self, id: &str) -> Result<Option<crate::graph::ExecutionGraph>> {
+        match self.session_display_dag_with_warning(id)? {
+            Some((_, Some(warning))) => Err(CruiseError::Other(warning)),
+            Some((graph, None)) => Ok(Some(graph)),
+            None => Ok(None),
+        }
+    }
+
+    /// Display a checkpoint even if its configuration is unavailable, without modifying it.
+    /// Legacy unversioned checkpoints are displayed without filtering.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session or graph cannot be loaded.
+    pub fn session_display_dag_with_warning(
+        &self,
+        id: &str,
+    ) -> Result<Option<(crate::graph::ExecutionGraph, Option<String>)>> {
+        let Some(graph) = self.session_dag(id)? else {
+            return Ok(None);
+        };
+        let state = self.manager.load(id)?;
+        match self
+            .manager
+            .load_config(&state)
+            .and_then(crate::workflow::compile)
+        {
+            Ok(compiled) => Ok(Some((
+                crate::flags::enabled_graph(&graph, &compiled, &state.flags),
+                None,
+            ))),
+            Err(error) if state.has_dag || self.manager.dag_path(id).exists() => Ok(Some((
+                graph,
+                Some(format!(
+                    "Flag filtering unavailable; showing persisted graph read-only: {error}"
+                )),
+            ))),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Read the most recent session log lines.
     ///
     /// # Errors
@@ -4470,6 +4517,72 @@ mod tests {
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn session_display_dag_hides_disabled_steps_without_changing_raw_graph() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let id = SessionManager::new_session_id();
+        let state = SessionState::new(
+            id.clone(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "display graph".to_string(),
+        );
+        manager.create(&state).unwrap();
+        std::fs::write(
+            manager.sessions_dir().join(&id).join("config.yaml"),
+            "command: [echo]\nflags:\n  optional: {}\nsteps:\n  a:\n    command: 'true'\n  x:\n    flag: optional\n    command: 'true'\n  b:\n    command: 'true'\n",
+        )
+        .unwrap();
+        let app = CruiseApplication::new(manager.clone());
+        let raw = app.session_dag(&id).unwrap().unwrap();
+        assert_eq!(raw.nodes.len(), 3);
+        assert!(raw.nodes.values().any(|node| node.step_name == "x"));
+        crate::graph::persistence::save_graph(&raw, &manager.dag_path(&id)).unwrap();
+        let checkpoint = std::fs::read(manager.dag_path(&id)).unwrap();
+
+        let display = app.session_display_dag(&id).unwrap().unwrap();
+        let names: Vec<_> = display
+            .nodes
+            .values()
+            .map(|node| node.step_name.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(app.session_dag(&id).unwrap().unwrap(), raw);
+        assert_eq!(std::fs::read(manager.dag_path(&id)).unwrap(), checkpoint);
+    }
+
+    #[test]
+    fn session_display_dag_falls_back_to_checkpoint_when_config_is_invalid() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let id = SessionManager::new_session_id();
+        let state = SessionState::new(
+            id.clone(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "display graph".to_string(),
+        );
+        manager.create(&state).unwrap();
+        let config_path = manager.sessions_dir().join(&id).join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "command: [echo]\nsteps:\n  a: {command: 'true'}\n",
+        )
+        .unwrap();
+        let app = CruiseApplication::new(manager.clone());
+        let graph = app.session_dag(&id).unwrap().unwrap();
+        let path = manager.dag_path(&id);
+        crate::graph::persistence::save_graph(&graph, &path).unwrap();
+        let checkpoint = std::fs::read(&path).unwrap();
+        std::fs::write(&config_path, "invalid: [").unwrap();
+
+        let (display, warning) = app.session_display_dag_with_warning(&id).unwrap().unwrap();
+        assert_eq!(display, graph);
+        assert!(warning.unwrap().contains("Flag filtering unavailable"));
+        assert_eq!(std::fs::read(&path).unwrap(), checkpoint);
+    }
 
     fn isolate_application_config(home: &std::path::Path) -> Vec<crate::test_support::EnvGuard> {
         let mut guards = crate::test_support::set_fake_home(home);

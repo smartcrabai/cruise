@@ -282,6 +282,7 @@ pub struct TuiApp {
     pub plan_cache: HashMap<String, String>,
     pub(crate) sidebar_plan_available: HashSet<String>,
     pub dag_cache: HashMap<String, crate::graph::ExecutionGraph>,
+    pub graph_filter_warnings: HashMap<String, String>,
     pub ask_responses: HashMap<String, VecDeque<String>>,
     ask_active: std::collections::HashSet<String>,
     pub plan_scroll: usize,
@@ -351,6 +352,7 @@ impl TuiApp {
             plan_cache: HashMap::new(),
             sidebar_plan_available: HashSet::new(),
             dag_cache: HashMap::new(),
+            graph_filter_warnings: HashMap::new(),
             focus: SessionsFocus::Sidebar,
             info_scroll: 0,
             plan_scroll: 0,
@@ -610,6 +612,7 @@ impl TuiApp {
                     {
                         self.plan_cache.remove(&state.id);
                         self.dag_cache.remove(&state.id);
+                        self.graph_filter_warnings.remove(&state.id);
                     }
                 }
                 self.sessions = sessions;
@@ -678,6 +681,7 @@ impl TuiApp {
         if self.sessions[index] != state {
             self.plan_cache.remove(session_id);
             self.dag_cache.remove(session_id);
+            self.graph_filter_warnings.remove(session_id);
             self.logs.remove(session_id);
             self.sessions[index] = state;
         }
@@ -701,6 +705,8 @@ impl TuiApp {
         self.plan_cache
             .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
         self.dag_cache
+            .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
+        self.graph_filter_warnings
             .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
         self.logs
             .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
@@ -948,8 +954,13 @@ impl TuiApp {
             }
             DetailTab::Dag => {
                 if !self.dag_cache.contains_key(&id)
-                    && let Ok(Some(dag)) = self.application.session_dag(&id)
+                    && let Ok(Some((dag, warning))) =
+                        self.application.session_display_dag_with_warning(&id)
                 {
+                    self.graph_filter_warnings.remove(&id);
+                    if let Some(warning) = warning {
+                        self.graph_filter_warnings.insert(id.clone(), warning);
+                    }
                     self.dag_cache.insert(id, dag);
                 }
             }
@@ -3092,6 +3103,7 @@ impl TuiApp {
         }
         if dag {
             self.dag_cache.remove(id);
+            self.graph_filter_warnings.remove(id);
             self.dag_selected = 0;
         }
         if log {

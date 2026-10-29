@@ -170,6 +170,7 @@ mod tests {
         DagDto {
             start_step: start_step.to_string(),
             current_step: current_step.map(str::to_owned),
+            warning: None,
             steps: steps
                 .iter()
                 .map(|name| DagStepDto {
