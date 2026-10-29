@@ -45,6 +45,10 @@ jobs:
           cache-on-failure: true
       - name: Quint, Alloy receipts and real browser Gherkin
         run: bash scripts/check_responsive_webui_specs.sh
+      - name: Production graph flag browser test
+        run: |
+          cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+          node tests/webui/graph-flags.mjs
       - name: Upload specification evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
