@@ -1198,6 +1198,51 @@ fn suspended_session_can_be_resumed_through_the_pty() {
 }
 
 #[test]
+fn graph_flag_off_hides_gated_node_and_on_shows_it() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let id = fixture.seed_planned_session();
+    let yaml = "command: [echo]\nflags:\n  optional: {}\nsteps:\n  before_node: {command: 'true'}\n  gated_node: {command: 'true', flag: optional}\n  after_node: {command: 'true'}\n";
+    std::fs::write(fixture.root.path().join(format!("{id}.yaml")), yaml)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let workflow =
+        cruise::config::WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
+    let compiled = cruise::workflow::compile(workflow).unwrap_or_else(|error| panic!("{error}"));
+    let graph = cruise::graph::build_graph(&compiled, 0).unwrap_or_else(|error| panic!("{error}"));
+    cruise::graph::persistence::save_graph(&graph, &fixture.manager.dag_path(&id))
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    for enabled in [false, true] {
+        let mut state = fixture
+            .manager
+            .load(&id)
+            .unwrap_or_else(|error| panic!("{error}"));
+        state.flags.insert("optional".into(), enabled);
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut tui = fixture.start(120, 30, true);
+        tui.send(b"[");
+        let screen = tui.wait_for_screen(START_TIMEOUT, |screen| {
+            screen.contains("Selected node")
+                && screen.contains("before_node")
+                && screen.contains("after_node")
+        });
+        assert_eq!(
+            screen.contains("gated_node"),
+            enabled,
+            "flag {enabled}:\n{screen}"
+        );
+        tui.send(b"q");
+        let (status, transcript) = tui.finish();
+        assert!(status.success(), "cruise failed in PTY: {transcript}");
+    }
+}
+
+#[test]
 fn run_all_displays_model_notice_in_the_tui_log_view() {
     if !tui_available() {
         return;

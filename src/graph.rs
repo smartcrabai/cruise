@@ -393,6 +393,82 @@ pub fn build_graph(compiled: &CompiledWorkflow, max_retries: usize) -> Result<Ex
 }
 
 impl ExecutionGraph {
+    /// Display-only projection that removes `hidden` nodes and reroutes edges
+    /// into them along their skip fallback, as execution does. Never persist,
+    /// validate or resume from the result.
+    #[must_use]
+    pub fn without_nodes(&self, hidden: &HashSet<&str>) -> Self {
+        if self.version != CHECKPOINT_VERSION || hidden.is_empty() {
+            return self.clone();
+        }
+
+        let resolve = |id: &str| -> Option<NodeId> {
+            let mut current = id;
+            let mut visited = HashSet::new();
+            while hidden.contains(current) {
+                if !visited.insert(current) {
+                    return None;
+                }
+                current = self
+                    .nodes
+                    .get(current)?
+                    .successors
+                    .iter()
+                    .find(|edge| edge.reason == TransitionReason::SkipFallback)?
+                    .target
+                    .as_deref()?;
+            }
+            Some(current.to_string())
+        };
+
+        let mut graph = self.clone();
+        graph.nodes.retain(|id, _| !hidden.contains(id.as_str()));
+        for node in graph.nodes.values_mut() {
+            for edge in &mut node.successors {
+                if edge.target.as_deref().is_some_and(|id| hidden.contains(id)) {
+                    edge.target = edge.target.as_deref().and_then(resolve);
+                    if let Some(target) = edge.target.as_ref() {
+                        let step_name = self
+                            .nodes
+                            .get(target)
+                            .map_or(target, |node| &node.step_name);
+                        match &mut edge.reason {
+                            TransitionReason::IfFileChanged { target }
+                            | TransitionReason::IfFailGoto { target }
+                            | TransitionReason::GroupRetry { target } => {
+                                target.clone_from(step_name);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(start) = resolve(&self.start) {
+            graph.start = start;
+        }
+        graph.state.current = self.state.current.as_deref().and_then(resolve);
+        graph.state.edge_counts.clear();
+        for ((from, to), counts) in &self.state.edge_counts {
+            if hidden.contains(from.as_str()) {
+                continue;
+            }
+            if let Some(to) = resolve(to) {
+                let combined = graph
+                    .state
+                    .edge_counts
+                    .entry((from.clone(), to))
+                    .or_default();
+                combined.traversals = combined.traversals.saturating_add(counts.traversals);
+                combined.budgeted_traversals = combined
+                    .budgeted_traversals
+                    .saturating_add(counts.budgeted_traversals);
+            }
+        }
+        graph.rebuild_indexes();
+        graph
+    }
+
     /// Rebuild derived topology indexes after decoding a checkpoint written by
     /// an earlier graph version that did not persist them.
     pub(crate) fn rebuild_indexes(&mut self) {
