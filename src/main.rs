@@ -111,6 +111,12 @@ fn main() {
     ) {
         std::process::exit(tool_policy::run_jcode_pre_tool_gate());
     }
+    // Removed bridge registrations must fail before runtime initialization.
+    if matches!(&cli.command, Some(cli::Commands::McpBridge(_))) {
+        let mcp_json = backend::jcode::resolve_source_home(None).join("mcp.json");
+        eprintln!("cruise: {}", cli::removed_mcp_bridge_message(&mcp_json));
+        std::process::exit(1);
+    }
     runtime_main(cli);
 }
 
@@ -179,6 +185,9 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::JcodePreTool,
         })) => unreachable!("jcode pre-tool gate exits before runtime initialization"),
+        Some(cli::Commands::McpBridge(_)) => {
+            unreachable!("removed mcp-bridge exits before runtime initialization")
+        }
         None if plan.is_some() => {
             Box::pin(plan_cmd::launch_background_plan(
                 &plan.unwrap_or_default(),

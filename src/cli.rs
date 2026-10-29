@@ -76,6 +76,16 @@ pub enum Commands {
     Workflow(WorkflowCommand),
     #[command(hide = true)]
     Internal(InternalArgs),
+    /// Removed MCP bridge, kept so stale jcode registrations fail instead of planning.
+    #[command(name = "mcp-bridge", hide = true, disable_help_flag = true)]
+    McpBridge(LegacyMcpBridgeArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct LegacyMcpBridgeArgs {
+    /// Arguments of the removed bridge, ignored.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+    pub ignored: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -436,6 +446,13 @@ pub enum SshTtyMode {
     Auto,
     Always,
     Never,
+}
+
+pub(crate) fn removed_mcp_bridge_message(mcp_json: &std::path::Path) -> String {
+    format!(
+        "`cruise mcp-bridge` was removed in Cruise 0.2.9 and no longer serves MCP; Cruise tools now run as jcode SDK session tools. Remove the stale `mcpServers.cruise` entry from {}. To plan a task named `mcp-bridge`, run `cruise plan mcp-bridge`.",
+        mcp_json.display()
+    )
 }
 
 pub fn parse_cli() -> Cli {
@@ -879,6 +896,45 @@ mod tests {
             _ => panic!("expected explicit plan subcommand"),
         }
         assert!(Cli::try_parse_from(["cruise", "ssh"]).is_err());
+    }
+
+    #[test]
+    fn removed_mcp_bridge_is_a_hidden_subcommand() {
+        let cli = Cli::try_parse_from(["cruise", "mcp-bridge"]).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(cli.command, Some(Commands::McpBridge(_))));
+        assert_eq!(cli.input, None);
+        assert_eq!(
+            Cli::command()
+                .find_subcommand("mcp-bridge")
+                .map(clap::Command::is_hide_set),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn removed_mcp_bridge_accepts_legacy_flags() {
+        let cli = Cli::try_parse_from(["cruise", "mcp-bridge", "--socket", "/tmp/x.sock"])
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(cli.command, Some(Commands::McpBridge(_))));
+        assert_eq!(cli.input, None);
+    }
+
+    #[test]
+    fn removed_mcp_bridge_message_includes_source_and_migration() {
+        let message = removed_mcp_bridge_message(std::path::Path::new("/x/mcp.json"));
+        assert!(message.contains("/x/mcp.json"));
+        assert!(message.contains("mcpServers.cruise"));
+        assert!(message.contains("cruise plan mcp-bridge"));
+        assert!(message.contains("jcode SDK session tools"));
+    }
+
+    #[test]
+    fn explicit_plan_can_use_mcp_bridge_as_task() {
+        let cli = Cli::parse_from(["cruise", "plan", "mcp-bridge"]);
+        match cli.command {
+            Some(Commands::Plan(args)) => assert_eq!(args.input.as_deref(), Some("mcp-bridge")),
+            _ => panic!("expected explicit plan subcommand"),
+        }
     }
 
     #[test]

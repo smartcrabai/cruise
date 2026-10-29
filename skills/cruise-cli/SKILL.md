@@ -60,7 +60,7 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Just capture an idea now, plan later | `cruise draft "task"` |
 | Execute or resume a non-exec session (Planned, Running, Failed, or Suspended; prompts when multiple) | `cruise run` |
 | Execute a specific session | `cruise run <session-id>` |
-| Run a config right here, no plan/worktree/PR | `cruise exec "task"` (or `cruise "task"` with `force_exec: true`; use `cruise plan "ssh"` when the task text is exactly `ssh`) |
+| Run a config right here, no plan/worktree/PR | `cruise exec "task"` (or `cruise "task"` with `force_exec: true`; use `cruise plan "ssh"` or `cruise plan "mcp-bridge"` when the task text is exactly `ssh` or `mcp-bridge`, respectively) |
 | Execute every Planned or Suspended session back-to-back (live dashboard on TTY for non-dry runs) | `cruise run --all` |
 | Run all planned or suspended sessions with bounded concurrency (one run) | `cruise run --all --parallelism 4` |
 | Manage sessions interactively in the full keyboard client | `cruise` |
@@ -137,7 +137,7 @@ Only move the pointer after the fixed sibling’s `--version` succeeds. Archive 
 
 The remote host owns its XDG session/config/state directories, jcode authentication, worktrees, and repository clones. Local and remote session lists are separate. No local config, image, repository, credential, or environment variable is uploaded implicitly. In particular, `--config`, `--image`, and `--cwd` paths must exist or be meaningful on the remote host. The WebUI does not act as a remote session browser.
 
-> **Legacy shortcut:** `cruise "task"` with positional input and no subcommand is treated as `cruise plan "task"`. The `ssh` subcommand reserves the exact legacy input `ssh`; use `cruise plan "ssh"` for that task. Piping (`echo "task" | cruise`) feeds the task on stdin.
+> **Legacy shortcut:** `cruise "task"` with positional input and no subcommand is treated as `cruise plan "task"`. The `ssh` subcommand reserves the exact legacy input `ssh`; use `cruise plan "ssh"` for that task. The hidden `mcp-bridge` entry point likewise reserves the exact input `mcp-bridge`; use `cruise plan "mcp-bridge"` for that task. Piping (`echo "task" | cruise`) feeds the task on stdin.
 
 ## The session lifecycle, step by step
 
