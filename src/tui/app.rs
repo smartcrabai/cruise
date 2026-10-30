@@ -3730,6 +3730,9 @@ mod tests {
             .manager
             .save(&fixture.app.sessions[0])
             .unwrap_or_else(|error| panic!("failed to save session: {error}"));
+        // save updates the persisted timestamp, so synchronize before comparing
+        // the session across the config-only edit below.
+        fixture.app.refresh();
         fixture.app.set_detail_tab(DetailTab::Info);
         fixture.app.load_tab_data();
         let id = test_session_id(1);
