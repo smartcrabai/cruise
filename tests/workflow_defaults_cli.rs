@@ -835,6 +835,11 @@ fn removed_builtin_names_are_rejected_by_cli() {
 
 #[cfg(unix)]
 fn builtin_wait_ci_command(name: &str) -> String {
+    builtin_wait_ci_command_for_url(name, "https://github.com/owner/repo/pull/42")
+}
+
+#[cfg(unix)]
+fn builtin_wait_ci_command_for_url(name: &str, pr_url: &str) -> String {
     let workflow = cruise::builtin_workflows::find_builtin(name)
         .unwrap_or_else(|| panic!("missing builtin workflow {name}"));
     let source_dir = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
@@ -852,10 +857,53 @@ fn builtin_wait_ci_command(name: &str) -> String {
         .unwrap_or_else(|| panic!("{name} has no wait-ci command"));
     let mut variables = cruise::variable::VariableStore::new(String::new());
     variables.set_named_value("pr.number", "42".to_owned());
-    variables.set_named_value("pr.url", "https://github.com/owner/repo/pull/42".to_owned());
+    variables.set_named_value("pr.url", pr_url.to_owned());
     variables
         .resolve(&command.as_slice().join("\n"))
         .unwrap_or_else(|error| panic!("resolve {name} wait-ci command: {error}"))
+}
+
+#[cfg(unix)]
+fn wait_ci_marker(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .find(|line| line.starts_with("CRUISE_CI_DIAGNOSTIC_V1 "))
+        .unwrap_or_else(|| panic!("missing wait-ci diagnostic marker: {}", text(output)))
+        .to_owned()
+}
+
+#[cfg(unix)]
+fn run_gitlab_wait_ci_command(command: &str, status_response: &str, status_exit: i32) -> Output {
+    let root = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create repo: {error}"));
+    cruise::test_support::init_git_repo(&repo);
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("create fake bin: {error}"));
+    cruise::test_support::write_executable_script(
+        &bin.join("glab"),
+        r#"#!/bin/sh
+case "$*" in
+  *--status=failed*) printf '{"id":1,"jobs":[]}\n'; exit 0 ;;
+  *) printf '%s\n' "$WAIT_CI_STATUS_RESPONSE"; exit "$WAIT_CI_STATUS_EXIT" ;;
+esac
+"#,
+    );
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(paths)
+        .unwrap_or_else(|error| panic!("join fake command PATH: {error}"));
+    Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(repo)
+        .env("PATH", path)
+        .env("WAIT_CI_STATUS_RESPONSE", status_response)
+        .env("WAIT_CI_STATUS_EXIT", status_exit.to_string())
+        .output()
+        .unwrap_or_else(|error| panic!("run builtin GitLab wait-ci command: {error}"))
 }
 
 #[cfg(unix)]
@@ -913,6 +961,10 @@ fi
 count=$(cat "$WAIT_CI_GH_COUNT" 2>/dev/null || printf 0)
 count=$((count + 1))
 printf '%s\n' "$count" > "$WAIT_CI_GH_COUNT"
+if [ "${WAIT_CI_GH_API_FAILURE-0}" = 1 ]; then
+  printf 'fake GitHub API failure\n' >&2
+  exit 95
+fi
 response="$WAIT_CI_RESPONSES/$count.json"
 if [ ! -f "$response" ]; then
   printf 'no fake GitHub response for poll %s\n' "$count" >&2
@@ -986,6 +1038,20 @@ fi
     }
 
     fn run(&self, command: &str, responses: &[serde_json::Value], timeout: bool) -> Output {
+        self.run_with_api_error(command, responses, timeout, false)
+    }
+
+    fn run_api_error(&self, command: &str) -> Output {
+        self.run_with_api_error(command, &[], false, true)
+    }
+
+    fn run_with_api_error(
+        &self,
+        command: &str,
+        responses: &[serde_json::Value],
+        timeout: bool,
+        api_error: bool,
+    ) -> Output {
         let _ = std::fs::remove_file(&self.gh_count);
         let _ = std::fs::remove_file(&self.date_count);
         for (index, response) in responses.iter().enumerate() {
@@ -1010,6 +1076,7 @@ fi
             .env("WAIT_CI_DATE_COUNT", &self.date_count)
             .env("WAIT_CI_RESPONSES", &self.responses)
             .env("WAIT_CI_TIMEOUT", if timeout { "1" } else { "0" })
+            .env("WAIT_CI_GH_API_FAILURE", if api_error { "1" } else { "0" })
             .output()
             .unwrap_or_else(|error| panic!("run builtin wait-ci command: {error}"))
     }
@@ -1093,6 +1160,10 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
+    assert_eq!(
+        wait_ci_marker(&output),
+        "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE true 1"
+    );
     assert_eq!(fixture.gh_calls(), 1);
 
     let fixture = GithubWaitCiFixture::new();
@@ -1109,6 +1180,10 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
+    assert_eq!(
+        wait_ci_marker(&output),
+        "CRUISE_CI_DIAGNOSTIC_V1 github head_mismatch unobserved false unknown"
+    );
     assert_eq!(fixture.gh_calls(), 1);
 
     let fixture = GithubWaitCiFixture::new();
@@ -1119,6 +1194,20 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
+    assert_eq!(
+        wait_ci_marker(&output),
+        "CRUISE_CI_DIAGNOSTIC_V1 github graphql_error unobserved unknown unknown"
+    );
+    assert!(!terminal.contains("query rejected"), "{terminal}");
+    assert_eq!(fixture.gh_calls(), 1);
+    let fixture = GithubWaitCiFixture::new();
+    let output = fixture.run_api_error(&command);
+    let terminal = text(&output);
+    assert!(!output.status.success(), "{terminal}");
+    assert_eq!(
+        wait_ci_marker(&output),
+        "CRUISE_CI_DIAGNOSTIC_V1 github api_error unobserved unknown unknown"
+    );
     assert_eq!(fixture.gh_calls(), 1);
 
     for (state, check_count) in [(None, 0), (Some("SUCCESS"), 0)] {
@@ -1138,4 +1227,39 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         assert_eq!(fixture.gh_calls(), 1);
         assert_eq!(fixture.date_calls(), 2);
     }
+}
+#[cfg(unix)]
+#[test]
+fn builtin_gitlab_wait_ci_markers_classify_failure_and_untrusted_responses() {
+    let command =
+        builtin_wait_ci_command_for_url("tdd", "https://gitlab.com/owner/repo/-/merge_requests/42");
+
+    let output = run_gitlab_wait_ci_command(&command, r#"{"status":"failed"}"#, 0);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert_eq!(
+        wait_ci_marker(&output),
+        "CRUISE_CI_DIAGNOSTIC_V1 gitlab ci_failed failed unknown unknown"
+    );
+
+    let output = run_gitlab_wait_ci_command(&command, "", 1);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert_eq!(
+        wait_ci_marker(&output),
+        "CRUISE_CI_DIAGNOSTIC_V1 gitlab api_error unknown unknown unknown"
+    );
+
+    let output = run_gitlab_wait_ci_command(&command, "not-json", 0);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert_eq!(
+        wait_ci_marker(&output),
+        "CRUISE_CI_DIAGNOSTIC_V1 gitlab invalid_ci_state unknown unknown unknown"
+    );
+
+    let output = run_gitlab_wait_ci_command(&command, r#"{"status":"secret raw status"}"#, 0);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert_eq!(
+        wait_ci_marker(&output),
+        "CRUISE_CI_DIAGNOSTIC_V1 gitlab unknown_state unknown unknown unknown"
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("secret raw status"));
 }

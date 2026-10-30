@@ -4520,7 +4520,8 @@ mod tests {
 
     #[test]
     fn session_display_dag_hides_disabled_steps_without_changing_raw_graph() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create session DAG test directory: {error}"));
         let manager = SessionManager::new(temp.path().join("sessions"));
         let id = SessionManager::new_session_id();
         let state = SessionState::new(
@@ -4529,33 +4530,53 @@ mod tests {
             crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "display graph".to_string(),
         );
-        manager.create(&state).unwrap();
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("create session DAG test session: {error}"));
         std::fs::write(
             manager.sessions_dir().join(&id).join("config.yaml"),
             "command: [echo]\nflags:\n  optional: {}\nsteps:\n  a:\n    command: 'true'\n  x:\n    flag: optional\n    command: 'true'\n  b:\n    command: 'true'\n",
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("write session DAG test config: {error}"));
         let app = CruiseApplication::new(manager.clone());
-        let raw = app.session_dag(&id).unwrap().unwrap();
+        let raw = app
+            .session_dag(&id)
+            .unwrap_or_else(|error| panic!("load raw session DAG: {error}"))
+            .unwrap_or_else(|| panic!("raw session DAG should exist"));
         assert_eq!(raw.nodes.len(), 3);
         assert!(raw.nodes.values().any(|node| node.step_name == "x"));
-        crate::graph::persistence::save_graph(&raw, &manager.dag_path(&id)).unwrap();
-        let checkpoint = std::fs::read(manager.dag_path(&id)).unwrap();
+        crate::graph::persistence::save_graph(&raw, &manager.dag_path(&id))
+            .unwrap_or_else(|error| panic!("save raw session DAG checkpoint: {error}"));
+        let checkpoint = std::fs::read(manager.dag_path(&id))
+            .unwrap_or_else(|error| panic!("read raw session DAG checkpoint: {error}"));
 
-        let display = app.session_display_dag(&id).unwrap().unwrap();
+        let display = app
+            .session_display_dag(&id)
+            .unwrap_or_else(|error| panic!("load displayed session DAG: {error}"))
+            .unwrap_or_else(|| panic!("displayed session DAG should exist"));
         let names: Vec<_> = display
             .nodes
             .values()
             .map(|node| node.step_name.as_str())
             .collect();
         assert_eq!(names, ["a", "b"]);
-        assert_eq!(app.session_dag(&id).unwrap().unwrap(), raw);
-        assert_eq!(std::fs::read(manager.dag_path(&id)).unwrap(), checkpoint);
+        assert_eq!(
+            app.session_dag(&id)
+                .unwrap_or_else(|error| panic!("reload raw session DAG: {error}"))
+                .unwrap_or_else(|| panic!("raw session DAG should still exist")),
+            raw
+        );
+        assert_eq!(
+            std::fs::read(manager.dag_path(&id))
+                .unwrap_or_else(|error| panic!("reread raw session DAG checkpoint: {error}")),
+            checkpoint
+        );
     }
 
     #[test]
     fn session_display_dag_falls_back_to_checkpoint_when_config_is_invalid() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create session DAG test directory: {error}"));
         let manager = SessionManager::new(temp.path().join("sessions"));
         let id = SessionManager::new_session_id();
         let state = SessionState::new(
@@ -4564,24 +4585,43 @@ mod tests {
             crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "display graph".to_string(),
         );
-        manager.create(&state).unwrap();
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("create session DAG test session: {error}"));
         let config_path = manager.sessions_dir().join(&id).join("config.yaml");
         std::fs::write(
             &config_path,
             "command: [echo]\nsteps:\n  a: {command: 'true'}\n",
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("write valid session DAG test config: {error}"));
         let app = CruiseApplication::new(manager.clone());
-        let graph = app.session_dag(&id).unwrap().unwrap();
+        let graph = app
+            .session_dag(&id)
+            .unwrap_or_else(|error| panic!("load checkpoint session DAG: {error}"))
+            .unwrap_or_else(|| panic!("checkpoint session DAG should exist"));
         let path = manager.dag_path(&id);
-        crate::graph::persistence::save_graph(&graph, &path).unwrap();
-        let checkpoint = std::fs::read(&path).unwrap();
-        std::fs::write(&config_path, "invalid: [").unwrap();
+        crate::graph::persistence::save_graph(&graph, &path)
+            .unwrap_or_else(|error| panic!("save session DAG checkpoint: {error}"));
+        let checkpoint = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("read session DAG checkpoint: {error}"));
+        std::fs::write(&config_path, "invalid: [")
+            .unwrap_or_else(|error| panic!("write invalid session DAG test config: {error}"));
 
-        let (display, warning) = app.session_display_dag_with_warning(&id).unwrap().unwrap();
+        let (display, warning) = app
+            .session_display_dag_with_warning(&id)
+            .unwrap_or_else(|error| panic!("load displayed session DAG with warning: {error}"))
+            .unwrap_or_else(|| panic!("displayed session DAG should exist"));
         assert_eq!(display, graph);
-        assert!(warning.unwrap().contains("Flag filtering unavailable"));
-        assert_eq!(std::fs::read(&path).unwrap(), checkpoint);
+        assert!(
+            warning
+                .unwrap_or_else(|| panic!("invalid config should produce a warning"))
+                .contains("Flag filtering unavailable")
+        );
+        assert_eq!(
+            std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("reread session DAG checkpoint: {error}")),
+            checkpoint
+        );
     }
 
     fn isolate_application_config(home: &std::path::Path) -> Vec<crate::test_support::EnvGuard> {

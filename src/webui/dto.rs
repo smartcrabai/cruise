@@ -164,6 +164,7 @@ pub(crate) fn transition_reason(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_dag_dto(
     compiled: &crate::workflow::CompiledWorkflow,
     dag: &crate::graph::ExecutionGraph,
@@ -178,6 +179,38 @@ pub(crate) fn build_dag_dto(
         current_step_is_node_id,
         skipped_steps,
     )
+}
+
+fn terminal_steps<'a>(
+    compiled: Option<&crate::workflow::CompiledWorkflow>,
+    dag: &'a crate::graph::ExecutionGraph,
+    skipped_steps: &[String],
+) -> std::collections::HashMap<&'a str, bool> {
+    let mut terminals = std::collections::HashMap::new();
+    for node in dag.nodes.values() {
+        let is_terminal = node.successors.iter().any(|edge| {
+            edge.target.is_none()
+                && match edge.reason {
+                    crate::graph::TransitionReason::IfNoFileChangesFail => false,
+                    crate::graph::TransitionReason::SkipFallback => compiled
+                        .and_then(|workflow| workflow.steps.get(&node.step_name))
+                        .is_some_and(|step| {
+                            step.when.is_some()
+                                || matches!(
+                                    step.skip,
+                                    Some(SkipCondition::Static(true) | SkipCondition::Variable(_))
+                                )
+                                || skipped_steps.contains(&node.step_name)
+                        }),
+                    _ => true,
+                }
+        });
+        terminals
+            .entry(node.step_name.as_str())
+            .and_modify(|terminal| *terminal |= is_terminal)
+            .or_insert(is_terminal);
+    }
+    terminals
 }
 
 fn build_graph_dto(
@@ -214,30 +247,7 @@ fn build_graph_dto(
                     .then(|| step.to_string())
             }
         });
-    let mut terminals = std::collections::HashMap::new();
-    for node in dag.nodes.values() {
-        let is_terminal = node.successors.iter().any(|edge| {
-            edge.target.is_none()
-                && match edge.reason {
-                    crate::graph::TransitionReason::IfNoFileChangesFail => false,
-                    crate::graph::TransitionReason::SkipFallback => compiled
-                        .and_then(|workflow| workflow.steps.get(&node.step_name))
-                        .is_some_and(|step| {
-                            step.when.is_some()
-                                || matches!(
-                                    step.skip,
-                                    Some(SkipCondition::Static(true) | SkipCondition::Variable(_))
-                                )
-                                || skipped_steps.contains(&node.step_name)
-                        }),
-                    _ => true,
-                }
-        });
-        terminals
-            .entry(node.step_name.as_str())
-            .and_modify(|terminal| *terminal |= is_terminal)
-            .or_insert(is_terminal);
-    }
+    let terminals = terminal_steps(compiled, dag, skipped_steps);
     let mut steps = Vec::new();
     if let Some(compiled) = compiled {
         for (name, config) in &compiled.steps {
@@ -432,16 +442,20 @@ mod tests {
         let config = crate::config::WorkflowConfig::from_yaml(
             "flags:\n  f: {}\nsteps:\n  a: {command: 'true'}\n  x: {command: 'true', flag: f}\n",
         )
-        .unwrap();
-        let compiled = crate::workflow::compile(config).unwrap();
-        let graph = crate::graph::build_graph(&compiled, 3).unwrap();
-        let projected = crate::flags::enabled_graph(&graph, &compiled, &Default::default());
-        let dto = build_dag_dto(&compiled, &projected, None, false, &[]).unwrap();
+        .unwrap_or_else(|error| panic!("valid graph fixture: {error}"));
+        let compiled = crate::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("compiled fixture: {error}"));
+        let graph = crate::graph::build_graph(&compiled, 3)
+            .unwrap_or_else(|error| panic!("fixed topology: {error}"));
+        let projected =
+            crate::flags::enabled_graph(&graph, &compiled, &std::collections::BTreeMap::default());
+        let dto = build_dag_dto(&compiled, &projected, None, false, &[])
+            .unwrap_or_else(|error| panic!("graph DTO: {error}"));
         assert!(
             dto.steps
                 .iter()
                 .find(|step| step.name == "a")
-                .unwrap()
+                .unwrap_or_else(|| panic!("projected graph omitted step a"))
                 .is_terminal
         );
     }
@@ -456,7 +470,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("compiled fixture: {error}"));
         let graph = crate::graph::build_graph(&compiled, 3)
             .unwrap_or_else(|error| panic!("fixed topology: {error}"));
-        let projected = crate::flags::enabled_graph(&graph, &compiled, &Default::default());
+        let projected =
+            crate::flags::enabled_graph(&graph, &compiled, &std::collections::BTreeMap::default());
         let dto = build_dag_dto(&compiled, &projected, None, false, &[])
             .unwrap_or_else(|error| panic!("graph DTO: {error}"));
 

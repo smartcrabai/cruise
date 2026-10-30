@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use jcode_sdk::api::{
+    API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, ServerFrame, read_frame, write_frame,
+};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 use cruise::application::{
@@ -22,6 +26,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point};
 use opentelemetry_proto::tonic::trace::v1::status::StatusCode;
 use prost::Message;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -321,6 +326,7 @@ struct SpanRecord {
     end_time_unix_nano: u64,
     attributes: HashMap<String, String>,
     int_attributes: HashMap<String, i64>,
+    bool_attributes: HashMap<String, bool>,
     resource_attributes: HashMap<String, String>,
     events: Vec<EventRecord>,
     status_code: i32,
@@ -350,6 +356,7 @@ fn spans(requests: &[CapturedRequest]) -> Vec<SpanRecord> {
                         start_time_unix_nano: span.start_time_unix_nano,
                         end_time_unix_nano: span.end_time_unix_nano,
                         attributes: string_attributes(&span.attributes),
+                        bool_attributes: bool_attributes(&span.attributes),
                         int_attributes: int_attributes(&span.attributes),
                         resource_attributes: resource_attributes.clone(),
                         events: span
@@ -395,6 +402,23 @@ fn int_attributes(
             let value = attribute.value.as_ref()?.value.as_ref()?;
             match value {
                 opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(value) => {
+                    Some((attribute.key.clone(), *value))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn bool_attributes(
+    attributes: &[opentelemetry_proto::tonic::common::v1::KeyValue],
+) -> HashMap<String, bool> {
+    attributes
+        .iter()
+        .filter_map(|attribute| {
+            let value = attribute.value.as_ref()?.value.as_ref()?;
+            match value {
+                opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(value) => {
                     Some((attribute.key.clone(), *value))
                 }
                 _ => None,
@@ -512,6 +536,353 @@ fn assert_payload_omits(requests: &[CapturedRequest], secrets: &[&str]) {
         );
     }
 }
+fn shell_quote(path: &std::path::Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+fn install_jcode_runtime(fixture: &Fixture) -> PathBuf {
+    let bin = fixture.root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("create fake jcode bin: {error}"));
+    let runtime_log = fixture.root.path().join("jcode-runtime.log");
+    let runtime =
+        std::env::current_exe().unwrap_or_else(|error| panic!("test executable: {error}"));
+    cruise::test_support::write_executable_script(
+        &bin.join("jcode"),
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = --no-update ] && [ \"$2\" = api-bridge ] && [ \"$3\" = --api-socket ] || exit 91\nexport CRUISE_TEST_JCODE_RUNTIME=1\nexport CRUISE_TEST_JCODE_SOCKET=\"$4\"\nexec {} --ignored --exact fixture_jcode_runtime --nocapture > {} 2>&1\n",
+            shell_quote(&runtime),
+            shell_quote(&runtime_log),
+        ),
+    );
+    bin
+}
+
+fn run_jcode_cli(
+    collector: &Collector,
+    yaml: &str,
+    scenario: &str,
+    input: &str,
+) -> (Output, Vec<CapturedRequest>) {
+    let fixture = Fixture::new(yaml);
+    let bin = install_jcode_runtime(&fixture);
+    let mut env = otlp_env(&collector.endpoint());
+    env.push((
+        "PATH".into(),
+        std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .unwrap_or_else(|error| panic!("join fake jcode PATH: {error}"))
+        .to_string_lossy()
+        .into_owned(),
+    ));
+    env.push((
+        "JCODE_HOME".into(),
+        fixture
+            .root
+            .path()
+            .join("jcode-home")
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    env.push(("CRUISE_TEST_JCODE_SCENARIO".into(), scenario.into()));
+    env.push((
+        "CRUISE_TEST_JCODE_RECORD".into(),
+        fixture
+            .root
+            .path()
+            .join("jcode-runtime-record")
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    let output = fixture.run(&borrowed_env(&env), input);
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    (output, requests)
+}
+
+fn jcode_event(value: Value) -> ApiEvent {
+    serde_json::from_value(value).unwrap_or_else(|error| panic!("decode fake jcode event: {error}"))
+}
+
+fn send_jcode_reply<W: Write>(frame: &ClientFrame, event: ApiEvent, writer: &mut W) {
+    write_frame(
+        writer,
+        &ServerFrame {
+            v: API_VERSION_MAJOR,
+            reply_to: Some(frame.id),
+            event,
+        },
+    )
+    .unwrap_or_else(|error| panic!("write fake jcode reply: {error}"));
+}
+
+fn send_jcode_event<W: Write>(event: ApiEvent, writer: &mut W) {
+    write_frame(
+        writer,
+        &ServerFrame {
+            v: API_VERSION_MAJOR,
+            reply_to: None,
+            event,
+        },
+    )
+    .unwrap_or_else(|error| panic!("write fake jcode event: {error}"));
+}
+
+fn record_jcode_launch() -> usize {
+    let path = std::env::var_os("CRUISE_TEST_JCODE_RECORD")
+        .unwrap_or_else(|| panic!("missing fake jcode record path"));
+    let prior = std::fs::read_to_string(&path).unwrap_or_default();
+    let launch = prior.lines().count();
+    let mut record = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|error| panic!("open fake jcode record: {error}"));
+    writeln!(record, "launch").unwrap_or_else(|error| panic!("record fake jcode launch: {error}"));
+    launch
+}
+
+#[test]
+#[ignore = "subprocess-only fake jcode runtime"]
+fn fixture_jcode_runtime() {
+    if std::env::var("CRUISE_TEST_JCODE_RUNTIME").as_deref() != Ok("1") {
+        return;
+    }
+    let socket_path = std::env::var_os("CRUISE_TEST_JCODE_SOCKET")
+        .unwrap_or_else(|| panic!("missing fake jcode socket"));
+    let listener = UnixListener::bind(socket_path)
+        .unwrap_or_else(|error| panic!("bind fake jcode socket: {error}"));
+    listener
+        .set_nonblocking(true)
+        .unwrap_or_else(|error| panic!("set fake jcode socket nonblocking: {error}"));
+    let scenario = std::env::var("CRUISE_TEST_JCODE_SCENARIO")
+        .unwrap_or_else(|error| panic!("missing fake jcode scenario: {error}"));
+    let launch = record_jcode_launch();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while let Some(socket) = accept_fake_jcode_connection(&listener, deadline) {
+        serve_fake_jcode_connection(socket, &scenario, launch);
+    }
+}
+
+fn accept_fake_jcode_connection(listener: &UnixListener, deadline: Instant) -> Option<UnixStream> {
+    while Instant::now() < deadline {
+        match listener.accept() {
+            Ok((socket, _)) => {
+                socket
+                    .set_nonblocking(false)
+                    .unwrap_or_else(|error| panic!("set fake jcode socket blocking: {error}"));
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap_or_else(|error| panic!("set fake jcode read timeout: {error}"));
+                return Some(socket);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("accept fake jcode socket: {error}"),
+        }
+    }
+    None
+}
+
+fn serve_fake_jcode_connection(mut socket: UnixStream, scenario: &str, launch: usize) {
+    let mut reader = std::io::BufReader::new(
+        socket
+            .try_clone()
+            .unwrap_or_else(|error| panic!("clone fake jcode socket: {error}")),
+    );
+    while let Ok(frame) = read_frame::<_, ClientFrame>(&mut reader) {
+        handle_fake_jcode_request(&frame, scenario, launch, &mut socket);
+    }
+}
+
+fn handle_fake_jcode_request(
+    frame: &ClientFrame,
+    scenario: &str,
+    launch: usize,
+    socket: &mut UnixStream,
+) {
+    match &frame.request {
+        ApiRequest::Hello { .. } => send_jcode_reply(
+            frame,
+            jcode_event(json!({
+                "ev": "hello_ok",
+                "version": API_VERSION_MAJOR,
+                "server": "cruise-telemetry-fixture/1",
+                "capabilities": ["sessions", "session_tools"]
+            })),
+            socket,
+        ),
+        ApiRequest::Ping => {
+            send_jcode_reply(frame, jcode_event(json!({"ev": "pong"})), socket);
+        }
+        ApiRequest::GetRuntimeInfo { session_id } => {
+            let routes = [
+                "telemetry-diagnostic",
+                "telemetry-parallel",
+                "telemetry-primary",
+                "telemetry-fallback",
+            ]
+            .into_iter()
+            .map(|model| {
+                json!({
+                    "model": model,
+                    "provider": "fixture-provider",
+                    "api_method": "openai-compatible:fixture-route",
+                    "available": true,
+                    "detail": "test route"
+                })
+            })
+            .collect::<Vec<_>>();
+            send_jcode_reply(
+                frame,
+                jcode_event(json!({
+                    "ev": "runtime_info",
+                    "session_id": session_id,
+                    "routes": routes
+                })),
+                socket,
+            );
+        }
+        ApiRequest::CreateSession { .. } => send_jcode_reply(
+            frame,
+            jcode_event(json!({
+                "ev": "attached",
+                "session": {
+                    "user_connected": false,
+                    "edit_stats": null,
+                    "parent_session_id": null,
+                    "agent_label": null,
+                    "swarm_status": null,
+                    "session_id": format!("telemetry-fixture-{launch}"),
+                    "working_dir": null,
+                    "title": null,
+                    "status": "idle",
+                    "transcript_bytes": null,
+                    "saved": false,
+                    "updated_at_ms": null,
+                    "last_active_at_ms": null,
+                    "archived": false,
+                    "archived_at_ms": null,
+                    "save_label": null
+                }
+            })),
+            socket,
+        ),
+        ApiRequest::SetModel { .. }
+        | ApiRequest::ConfigureTools { .. }
+        | ApiRequest::SetReasoningEffort { .. } => {
+            send_jcode_reply(frame, ApiEvent::Ok, socket);
+        }
+        ApiRequest::SendMessage { session_id, .. } => {
+            handle_fake_jcode_message(frame, session_id, scenario, launch, socket);
+        }
+        ApiRequest::Cancel { .. } => {
+            send_jcode_reply(frame, jcode_event(json!({"ev": "ok"})), socket);
+        }
+        request => panic!("unexpected fake jcode request: {request:?}"),
+    }
+}
+
+fn handle_fake_jcode_message(
+    frame: &ClientFrame,
+    session_id: &str,
+    scenario: &str,
+    launch: usize,
+    socket: &mut UnixStream,
+) {
+    let serialized = serde_json::to_string(&frame.request)
+        .unwrap_or_else(|error| panic!("serialize fake jcode request: {error}"));
+    send_jcode_event(
+        jcode_event(json!({"ev": "message_accepted", "session_id": session_id})),
+        socket,
+    );
+    if let Some(event) = fake_jcode_failure_event(scenario, &serialized, launch, session_id) {
+        send_jcode_event(event, socket);
+    } else {
+        send_fake_jcode_success(session_id, socket);
+    }
+}
+
+fn fake_jcode_failure_event(
+    scenario: &str,
+    serialized_request: &str,
+    launch: usize,
+    session_id: &str,
+) -> Option<ApiEvent> {
+    let (kind, secret) = match scenario {
+        "invalid-request" => ("invalid", "JCODE_DIAGNOSTIC_SECRET_ERROR"),
+        "parallel" if serialized_request.contains("JCODE_PARALLEL_INVALID_PROMPT_SECRET") => {
+            ("invalid", "JCODE_PARALLEL_INVALID_MESSAGE_SECRET")
+        }
+        "parallel" if serialized_request.contains("JCODE_PARALLEL_GUARDRAIL_PROMPT_SECRET") => {
+            ("guardrail", "JCODE_PARALLEL_GUARDRAIL_MESSAGE_SECRET")
+        }
+        "fallback" if launch == 0 => ("fallback", "JCODE_DIAGNOSTIC_SECRET_FALLBACK"),
+        _ => return None,
+    };
+    Some(jcode_event(match kind {
+        "invalid" => json!({
+            "ev": "error",
+            "code": "invalid_request",
+            "message": secret
+        }),
+        "guardrail" => json!({
+            "ev": "turn_stopped",
+            "session_id": session_id,
+            "reason": "provider_guardrail",
+            "message": secret,
+            "provider_stop_reason": null
+        }),
+        "fallback" => json!({
+            "ev": "error",
+            "code": "internal",
+            "message": format!("HTTP 404 model not found {secret}")
+        }),
+        _ => unreachable!("only fixed fake jcode scenarios reach this mapping"),
+    }))
+}
+
+fn send_fake_jcode_success(session_id: &str, socket: &mut UnixStream) {
+    for event in [
+        json!({
+            "ev": "text_delta",
+            "session_id": session_id,
+            "text": "JCODE_FIXTURE_SUCCESS",
+            "message_id": "fixture-message"
+        }),
+        json!({
+            "ev": "text_done",
+            "session_id": session_id,
+            "message_id": "fixture-message"
+        }),
+        json!({
+            "ev": "turn_done",
+            "session_id": session_id,
+            "pending_soft_interrupts": null
+        }),
+    ] {
+        send_jcode_event(jcode_event(event), socket);
+    }
+}
+
+fn assert_jcode_diagnostic(attempt: &SpanRecord, stage: &str, reason: &str) {
+    assert_eq!(
+        attempt
+            .attributes
+            .get("cruise.agent.failure_stage")
+            .map(String::as_str),
+        Some(stage),
+        "failure stage: {attempt:#?}"
+    );
+    assert_eq!(
+        attempt
+            .attributes
+            .get("cruise.agent.failure_reason")
+            .map(String::as_str),
+        Some(reason),
+        "failure reason: {attempt:#?}"
+    );
+}
 
 fn otlp_env(endpoint: &str) -> Vec<(String, String)> {
     vec![
@@ -534,6 +905,30 @@ fn output_text(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn builtin_wait_ci_command(name: &str) -> String {
+    let workflow = cruise::builtin_workflows::find_builtin(name)
+        .unwrap_or_else(|| panic!("missing builtin workflow {name}"));
+    let source_dir = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let config = cruise::resolver::resolve_workflow_config(
+        workflow.yaml,
+        &cruise::resolver::ConfigSource::NamedBuiltin(workflow.name),
+        source_dir.path(),
+        None,
+    )
+    .unwrap_or_else(|error| panic!("load builtin workflow {name}: {error}"));
+    let command = config
+        .after_pr
+        .get("follow-up/wait-ci")
+        .and_then(|step| step.command.as_ref())
+        .unwrap_or_else(|| panic!("{name} has no wait-ci command"));
+    let mut variables = cruise::variable::VariableStore::new(String::new());
+    variables.set_named_value("pr.number", "42".to_owned());
+    variables.set_named_value("pr.url", "https://github.com/owner/repo/pull/42".to_owned());
+    variables
+        .resolve(&command.as_slice().join("\n"))
+        .unwrap_or_else(|error| panic!("resolve {name} wait-ci command: {error}"))
 }
 
 fn named_span<'a>(
@@ -2093,6 +2488,11 @@ fn failed_exec_exports_error_status_without_error_text() {
         Some("command_exit"),
         "nonzero command must use a fixed classification: {failing:#?}"
     );
+    assert_eq!(
+        failing.int_attributes.get("cruise.command.exit_code"),
+        Some(&7),
+        "failed process exit code must remain numeric: {failing:#?}"
+    );
     for span in [workflow, failing] {
         assert!(
             matches!(
@@ -2273,6 +2673,255 @@ steps:
     );
     let root_path = fixture.root.path().to_string_lossy().into_owned();
     assert_payload_omits(&requests, &[root_path.as_str()]);
+}
+
+#[test]
+fn invalid_ci_markers_export_no_untrusted_fields() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        r"steps:
+  invalid-ci:
+    command: |
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V1 github private-reason-secret FAILURE false 3' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V1 github ci_failed private-state-secret false 3' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 3 leaked-field-secret' >&2
+      printf '%s\n' 'invalid-marker-stderr-secret' >&2
+      exit 9
+",
+    );
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "invalid-marker-input-secret",
+    );
+    assert!(
+        !output.status.success(),
+        "invalid marker fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let spans = spans(&requests);
+    let failed = named_span(&spans, "cruise.step", "cruise.step.name", "invalid-ci");
+    assert_eq!(
+        failed.int_attributes.get("cruise.command.exit_code"),
+        Some(&9)
+    );
+    assert!(
+        failed
+            .attributes
+            .keys()
+            .chain(failed.int_attributes.keys())
+            .chain(failed.bool_attributes.keys())
+            .all(|key| !key.starts_with("cruise.ci.")),
+        "malformed marker added CI attributes: {failed:#?}"
+    );
+    assert_payload_omits(
+        &requests,
+        &[
+            "invalid-marker-input-secret",
+            "private-reason-secret",
+            "private-state-secret",
+            "leaked-field-secret",
+            "invalid-marker-stderr-secret",
+        ],
+    );
+}
+
+#[test]
+fn builtin_wait_ci_exports_graphql_failure_reason_without_raw_response() {
+    let collector = Collector::start();
+    let command = builtin_wait_ci_command("tdd")
+        .replace('{', "{{")
+        .replace('}', "}}");
+    let line_count = command.lines().count();
+    let mut config = String::with_capacity(
+        "steps:\n  wait-ci:\n    command: |\n".len() + command.len() + line_count * 7,
+    );
+    config.push_str("steps:\n  wait-ci:\n    command: |\n");
+    for line in command.lines() {
+        config.push_str("      ");
+        config.push_str(line);
+        config.push('\n');
+    }
+    let fixture = Fixture::new(&config);
+    let fake_bin = fixture.root.path().join("fake-gh/bin");
+    std::fs::create_dir_all(&fake_bin)
+        .unwrap_or_else(|error| panic!("create fake gh directory: {error}"));
+    cruise::test_support::write_executable_script(
+        &fake_bin.join("gh"),
+        r#"#!/bin/sh
+if [ "$1" = repo ]; then
+  printf '123/true\n'
+  exit 0
+fi
+if [ "$1" = api ] && [ "$2" = graphql ]; then
+  printf '{"errors":[{"message":"private-provider-response-secret"}]}\n'
+  exit 0
+fi
+printf 'unexpected fake gh invocation with secret details\n' >&2
+exit 97
+"#,
+    );
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let mut env = otlp_env(&collector.endpoint());
+    env.push((
+        "PATH".into(),
+        std::env::join_paths(paths)
+            .unwrap_or_else(|error| panic!("join fake gh PATH: {error}"))
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-input-secret");
+    assert!(
+        !output.status.success(),
+        "GraphQL failure fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let spans = spans(&requests);
+    let wait_ci = named_span(&spans, "cruise.step", "cruise.step.name", "wait-ci");
+    let attempt = spans
+        .iter()
+        .find(|span| span.name == "cruise.attempt" && span.parent_span_id == wait_ci.span_id)
+        .unwrap_or_else(|| panic!("wait-ci command attempt was not exported: {spans:#?}"));
+    for span in [wait_ci, attempt] {
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.provider")
+                .map(String::as_str),
+            Some("github"),
+            "{span:#?}"
+        );
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.failure_reason")
+                .map(String::as_str),
+            Some("graphql_error"),
+            "{span:#?}"
+        );
+    }
+    assert_eq!(
+        wait_ci.attributes.get("error.type").map(String::as_str),
+        Some("command_exit")
+    );
+    let exit_code = wait_ci
+        .int_attributes
+        .get("cruise.command.exit_code")
+        .copied()
+        .unwrap_or_else(|| panic!("failed built-in wait-ci did not export its exit code"));
+    assert_eq!(
+        attempt.int_attributes.get("cruise.command.exit_code"),
+        Some(&exit_code),
+        "failed built-in wait-ci attempt had a different numeric exit code: {attempt:#?}"
+    );
+    assert_payload_omits(
+        &requests,
+        &[
+            "builtin-wait-ci-input-secret",
+            "private-provider-response-secret",
+            "unexpected fake gh invocation with secret details",
+        ],
+    );
+}
+
+#[test]
+fn failed_signal_exports_numeric_signal_status() {
+    let collector = Collector::start();
+    let fixture = Fixture::new("steps:\n  terminated:\n    command: 'kill -TERM $$'\n");
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "signal-input-secret",
+    );
+    assert!(
+        !output.status.success(),
+        "signal fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let spans = spans(&requests);
+    let terminated = named_span(&spans, "cruise.step", "cruise.step.name", "terminated");
+    assert_eq!(
+        terminated.int_attributes.get("cruise.command.signal"),
+        Some(&i64::from(libc::SIGTERM))
+    );
+    assert!(
+        !terminated
+            .int_attributes
+            .contains_key("cruise.command.exit_code"),
+        "signal termination should not have an exit code: {terminated:#?}"
+    );
+    assert_payload_omits(&requests, &["signal-input-secret", "kill -TERM $$"]);
+}
+
+#[test]
+fn loop_protection_exports_bounded_traversal_diagnostics() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        r"max_retries: 2
+steps:
+  repeat:
+    command: 'printf loop-output-secret >/dev/null'
+    if:
+      no-file-changes: retry
+",
+    );
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "loop-input-secret",
+    );
+    assert!(
+        !output.status.success(),
+        "loop fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let spans = spans(&requests);
+    let loop_span = spans
+        .iter()
+        .find(|span| span.attributes.contains_key("cruise.loop.from"))
+        .unwrap_or_else(|| panic!("no loop-protection span exported: {spans:#?}"));
+    assert_eq!(
+        loop_span.attributes.get("error.type").map(String::as_str),
+        Some("loop_protection")
+    );
+    assert_eq!(
+        loop_span
+            .attributes
+            .get("cruise.loop.from")
+            .map(String::as_str),
+        Some("repeat")
+    );
+    assert_eq!(
+        loop_span
+            .attributes
+            .get("cruise.loop.to")
+            .map(String::as_str),
+        Some("repeat")
+    );
+    assert_eq!(
+        loop_span.int_attributes.get("cruise.loop.max_retries"),
+        Some(&2)
+    );
+    assert_eq!(
+        loop_span.int_attributes.get("cruise.loop.traversals"),
+        Some(&2)
+    );
+    assert_eq!(
+        loop_span
+            .int_attributes
+            .get("cruise.loop.skipped_step_count"),
+        Some(&0)
+    );
+    assert_payload_omits(
+        &requests,
+        &[
+            "loop-input-secret",
+            "loop-output-secret",
+            "loop protection: edge repeat -> repeat exceeded max retries 2",
+        ],
+    );
 }
 
 #[test]
@@ -3057,4 +3706,199 @@ fn saved_wait_ci_snapshot_cannot_bypass_expected_head_readiness() {
     );
     let expected_head = assert_expected_head_readiness(fixture.root.path());
     assert_single_guarded_merge(&scenario, &expected_head);
+}
+#[test]
+fn jcode_cli_exports_typed_api_failure_diagnostics_without_sdk_text() {
+    let collector = Collector::start();
+    let yaml = "sdk: jcode\nmodel: openai-api/telemetry-diagnostic\nsteps:\n  answer:\n    prompt: JCODE_DIAGNOSTIC_SECRET_PROMPT\n";
+    let (output, requests) = run_jcode_cli(
+        &collector,
+        yaml,
+        "invalid-request",
+        "JCODE_DIAGNOSTIC_SECRET_INPUT",
+    );
+    assert!(!output.status.success(), "{}", output_text(&output));
+
+    let exported = spans(&requests);
+    let attempts = exported
+        .iter()
+        .filter(|span| span.name == "cruise.attempt")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        attempts.len(),
+        1,
+        "expected one failed jcode attempt: {exported:#?}"
+    );
+    assert_jcode_diagnostic(attempts[0], "api_event", "harness_invalid_request");
+    assert_payload_omits(
+        &requests,
+        &[
+            "JCODE_DIAGNOSTIC_SECRET_PROMPT",
+            "JCODE_DIAGNOSTIC_SECRET_INPUT",
+            "JCODE_DIAGNOSTIC_SECRET_ERROR",
+        ],
+    );
+}
+
+#[test]
+fn jcode_cli_parallel_failures_keep_diagnostics_with_their_attempts() {
+    let collector = Collector::start();
+    let yaml = r"
+sdk: jcode
+model: openai-api/telemetry-parallel
+steps:
+  failures:
+    parallel:
+      invalid:
+        prompt: JCODE_PARALLEL_INVALID_PROMPT_SECRET
+      guardrail:
+        prompt: JCODE_PARALLEL_GUARDRAIL_PROMPT_SECRET
+";
+    let (output, requests) =
+        run_jcode_cli(&collector, yaml, "parallel", "JCODE_PARALLEL_INPUT_SECRET");
+    assert!(!output.status.success(), "{}", output_text(&output));
+
+    let exported = spans(&requests);
+    let attempts = exported
+        .iter()
+        .filter(|span| span.name == "cruise.attempt")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        attempts.len(),
+        2,
+        "expected both parallel jcode attempts: {exported:#?}"
+    );
+    let mut observed = Vec::new();
+    for attempt in attempts {
+        let mut step = exported
+            .iter()
+            .find(|span| span.span_id == attempt.parent_span_id)
+            .unwrap_or_else(|| panic!("attempt parent span missing: {attempt:#?}"));
+        while step.name != "cruise.step" {
+            step = exported
+                .iter()
+                .find(|span| span.span_id == step.parent_span_id)
+                .unwrap_or_else(|| panic!("attempt has no step ancestor: {attempt:#?}"));
+        }
+        let step_name = step.attributes.get("cruise.step.name").map_or_else(
+            || panic!("parallel attempt step has no name: {step:#?}"),
+            String::as_str,
+        );
+        if step_name.ends_with("invalid") {
+            assert_jcode_diagnostic(attempt, "api_event", "harness_invalid_request");
+            observed.push("invalid");
+        } else if step_name.ends_with("guardrail") {
+            assert_jcode_diagnostic(attempt, "turn_stop", "turn_provider_guardrail");
+            observed.push("guardrail");
+        } else {
+            panic!("unexpected parallel failure step {step_name:?}: {attempt:#?}");
+        }
+    }
+    observed.sort_unstable();
+    assert_eq!(observed, vec!["guardrail", "invalid"]);
+    assert_payload_omits(
+        &requests,
+        &[
+            "JCODE_PARALLEL_INVALID_PROMPT_SECRET",
+            "JCODE_PARALLEL_GUARDRAIL_PROMPT_SECRET",
+            "JCODE_PARALLEL_INVALID_MESSAGE_SECRET",
+            "JCODE_PARALLEL_GUARDRAIL_MESSAGE_SECRET",
+            "JCODE_DIAGNOSTIC_SECRET_SECONDARY_ERROR",
+            "JCODE_PARALLEL_INPUT_SECRET",
+        ],
+    );
+}
+
+#[test]
+fn jcode_cli_fallback_keeps_primary_diagnostic_off_successful_attempt() {
+    let collector = Collector::start();
+    let yaml = r"
+sdk: jcode
+model:
+  - openai-api/telemetry-primary
+  - openai-api/telemetry-fallback
+steps:
+  answer:
+    prompt: JCODE_FALLBACK_SECRET_PROMPT
+";
+    let (output, requests) =
+        run_jcode_cli(&collector, yaml, "fallback", "JCODE_FALLBACK_SECRET_INPUT");
+    assert_success(&output);
+
+    let exported = spans(&requests);
+    let attempts = exported
+        .iter()
+        .filter(|span| span.name == "cruise.attempt")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        attempts.len(),
+        2,
+        "expected failed primary and successful fallback: {exported:#?}"
+    );
+    assert!(
+        attempts[0]
+            .attributes
+            .contains_key("cruise.agent.failure_stage")
+            && attempts[0]
+                .attributes
+                .contains_key("cruise.agent.failure_reason"),
+        "primary failure diagnostic missing: {:#?}",
+        attempts[0]
+    );
+    assert_eq!(
+        attempts[0]
+            .attributes
+            .get("cruise.agent.failure_stage")
+            .map(String::as_str),
+        Some("api_event"),
+        "primary failure stage: {:#?}",
+        attempts[0]
+    );
+    assert_eq!(
+        attempts[0]
+            .attributes
+            .get("cruise.agent.failure_reason")
+            .map(String::as_str),
+        Some("harness_internal"),
+        "primary failure reason: {:#?}",
+        attempts[0]
+    );
+    assert!(
+        !attempts[1]
+            .attributes
+            .contains_key("cruise.agent.failure_stage")
+            && !attempts[1]
+                .attributes
+                .contains_key("cruise.agent.failure_reason"),
+        "successful fallback must not inherit the primary failure: {:#?}",
+        attempts[1]
+    );
+    assert_eq!(
+        attempts[1].status_code,
+        StatusCode::Ok as i32,
+        "fallback attempt should remain successful: {:#?}",
+        attempts[1]
+    );
+    let execution = named_span(
+        &exported,
+        "cruise.execution",
+        "cruise.execution.kind",
+        "exec",
+    );
+    assert_eq!(execution.status_code, StatusCode::Ok as i32);
+    assert_eq!(
+        execution
+            .attributes
+            .get("cruise.outcome")
+            .map(String::as_str),
+        Some("success")
+    );
+    assert_payload_omits(
+        &requests,
+        &[
+            "JCODE_FALLBACK_SECRET_PROMPT",
+            "JCODE_FALLBACK_SECRET_INPUT",
+            "JCODE_DIAGNOSTIC_SECRET_FALLBACK",
+        ],
+    );
 }
