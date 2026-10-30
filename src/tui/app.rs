@@ -282,6 +282,8 @@ pub struct TuiApp {
     pub plan_cache: HashMap<String, String>,
     pub(crate) sidebar_plan_available: HashSet<String>,
     pub dag_cache: HashMap<String, crate::graph::ExecutionGraph>,
+    /// Declared flags per session; None when the session config failed to load.
+    pub flag_choices_cache: HashMap<String, Option<Vec<crate::flags::FlagChoice>>>,
     pub graph_filter_warnings: HashMap<String, String>,
     pub ask_responses: HashMap<String, VecDeque<String>>,
     ask_active: std::collections::HashSet<String>,
@@ -352,6 +354,7 @@ impl TuiApp {
             plan_cache: HashMap::new(),
             sidebar_plan_available: HashSet::new(),
             dag_cache: HashMap::new(),
+            flag_choices_cache: HashMap::new(),
             graph_filter_warnings: HashMap::new(),
             focus: SessionsFocus::Sidebar,
             info_scroll: 0,
@@ -594,6 +597,7 @@ impl TuiApp {
         self.history_summary = self.application.new_session_history_summary().ok();
         match self.application.list_sessions() {
             Ok(mut sessions) => {
+                self.flag_choices_cache.clear();
                 let selected_id = self.active_session().map(|session| session.id.clone());
                 for state in &mut sessions {
                     if let Ok(reconciled) = self.application.reconcile_session(&state.id) {
@@ -612,6 +616,7 @@ impl TuiApp {
                     {
                         self.plan_cache.remove(&state.id);
                         self.dag_cache.remove(&state.id);
+                        self.flag_choices_cache.remove(&state.id);
                         self.graph_filter_warnings.remove(&state.id);
                     }
                 }
@@ -681,6 +686,7 @@ impl TuiApp {
         if self.sessions[index] != state {
             self.plan_cache.remove(session_id);
             self.dag_cache.remove(session_id);
+            self.flag_choices_cache.remove(session_id);
             self.graph_filter_warnings.remove(session_id);
             self.logs.remove(session_id);
             self.sessions[index] = state;
@@ -705,6 +711,8 @@ impl TuiApp {
         self.plan_cache
             .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
         self.dag_cache
+            .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
+        self.flag_choices_cache
             .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
         self.graph_filter_warnings
             .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
@@ -975,7 +983,15 @@ impl TuiApp {
                     self.logs.insert(id, lines);
                 }
             }
-            DetailTab::Info => {}
+            DetailTab::Info => {
+                if !self.flag_choices_cache.contains_key(&id) {
+                    let choices = self
+                        .active_session()
+                        .and_then(|session| self.application.session_config(session).ok())
+                        .map(|config| crate::flags::choices(&config));
+                    self.flag_choices_cache.insert(id, choices);
+                }
+            }
         }
     }
 
@@ -3103,6 +3119,7 @@ impl TuiApp {
         }
         if dag {
             self.dag_cache.remove(id);
+            self.flag_choices_cache.remove(id);
             self.graph_filter_warnings.remove(id);
             self.dag_selected = 0;
         }
@@ -3591,7 +3608,7 @@ mod tests {
     }
 
     struct PersistedTuiFixture {
-        _temp: TempDir,
+        temp: TempDir,
         manager: crate::session::SessionManager,
         app: TuiApp,
     }
@@ -3636,11 +3653,130 @@ mod tests {
             logs_sender,
             Some(crate::test_support::lock_process()),
         );
-        PersistedTuiFixture {
-            _temp: temp,
-            manager,
-            app,
-        }
+        PersistedTuiFixture { temp, manager, app }
+    }
+
+    #[test]
+    fn info_loads_declared_flag_choices_in_order() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        let path = fixture.temp.path().join("flags.yaml");
+        std::fs::write(&path, "command: [echo]\nflags:\n  e2e: {}\n  docs: {}\nsteps:\n  run:\n    command: echo hello\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+        fixture.app.refresh();
+        fixture.app.sessions[0].config = crate::session_config::SessionConfigRef::File { path };
+        fixture.app.tab = DetailTab::Info;
+        fixture.app.load_tab_data();
+        let choices = fixture.app.flag_choices_cache[&test_session_id(1)]
+            .as_ref()
+            .unwrap_or_else(|| panic!("config failed to load"));
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["e2e", "docs"]
+        );
+    }
+
+    #[test]
+    fn info_recovers_from_config_failure_on_refresh() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        let path = fixture.temp.path().join("flags.yaml");
+        fixture.app.refresh();
+        fixture.app.sessions[0].config =
+            crate::session_config::SessionConfigRef::File { path: path.clone() };
+        fixture
+            .manager
+            .save(&fixture.app.sessions[0])
+            .unwrap_or_else(|error| panic!("failed to save session: {error}"));
+        fixture.app.set_detail_tab(DetailTab::Info);
+        fixture.app.load_tab_data();
+        let id = test_session_id(1);
+        assert!(matches!(
+            fixture.app.flag_choices_cache.get(&id),
+            Some(None)
+        ));
+        std::fs::write(
+            &path,
+            "command: [echo]\nflags:\n  e2e: {}\nsteps:\n  run:\n    command: echo hello\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        fixture.app.load_tab_data();
+        assert!(matches!(
+            fixture.app.flag_choices_cache.get(&id),
+            Some(None)
+        ));
+        fixture.app.refresh();
+        fixture.app.load_tab_data();
+        assert_eq!(
+            fixture.app.flag_choices_cache[&id].as_ref().map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn info_refreshes_choices_after_file_edit_without_session_change() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        let path = fixture.temp.path().join("flags.yaml");
+        std::fs::write(
+            &path,
+            "command: [echo]\nflags:\n  e2e: {}\nsteps:\n  run:\n    command: echo hello\n",
+        )
+        .unwrap_or_else(|error| panic!("failed to write config: {error}"));
+        fixture.app.refresh();
+        fixture.app.sessions[0].config =
+            crate::session_config::SessionConfigRef::File { path: path.clone() };
+        fixture
+            .manager
+            .save(&fixture.app.sessions[0])
+            .unwrap_or_else(|error| panic!("failed to save session: {error}"));
+        // save updates the persisted timestamp, so synchronize before comparing
+        // the session across the config-only edit below.
+        fixture.app.refresh();
+        fixture.app.set_detail_tab(DetailTab::Info);
+        fixture.app.load_tab_data();
+        let id = test_session_id(1);
+        assert_eq!(
+            fixture.app.flag_choices_cache[&id]
+                .as_ref()
+                .unwrap_or_else(|| panic!("config failed to load"))[0]
+                .name,
+            "e2e"
+        );
+        let before = fixture.app.sessions[0].clone();
+        std::fs::write(
+            &path,
+            "command: [echo]\nflags:\n  docs: {}\nsteps:\n  run:\n    command: echo hello\n",
+        )
+        .unwrap_or_else(|error| panic!("failed to write config: {error}"));
+        fixture.app.refresh();
+        assert_eq!(fixture.app.sessions[0], before);
+        fixture.app.load_tab_data();
+        assert_eq!(
+            fixture.app.flag_choices_cache[&id]
+                .as_ref()
+                .unwrap_or_else(|| panic!("config failed to load"))[0]
+                .name,
+            "docs"
+        );
+    }
+
+    #[test]
+    fn info_flag_choices_are_evicted_when_selection_changes() {
+        let mut fixture = persisted_fixture(&[
+            (1, crate::session::SessionPhase::Planned),
+            (2, crate::session::SessionPhase::Planned),
+        ]);
+        fixture.app.refresh();
+        fixture.app.selected = 0;
+        let first_id = fixture.app.sessions[0].id.clone();
+        fixture
+            .app
+            .flag_choices_cache
+            .insert(first_id.clone(), None);
+        fixture.app.selected = 1;
+        fixture.app.evict_inactive_caches();
+        assert!(!fixture.app.flag_choices_cache.contains_key(&first_id));
     }
 
     fn pending_option(request_id: &str) -> crate::application::PendingPrompt {

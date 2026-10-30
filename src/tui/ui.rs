@@ -297,6 +297,21 @@ fn render_info(
     );
 }
 
+fn flag_summary(app: &TuiApp, session: &crate::session::SessionState) -> String {
+    match app.flag_choices_cache.get(&session.id) {
+        Some(Some(choices)) if !choices.is_empty() => choices
+            .iter()
+            .map(|choice| {
+                let on = session.flags.get(&choice.name).copied().unwrap_or(false);
+                format!("{}={}", choice.name, if on { "on" } else { "off" })
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(None) => "unavailable".to_string(),
+        _ => "—".to_string(),
+    }
+}
+
 fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Vec<Line<'a>> {
     let mut lines = vec![
         labeled_line(app, "ID       ", Span::raw(session.id.as_str())),
@@ -313,6 +328,7 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
             ),
         ),
         labeled_line(app, "Source   ", Span::raw(session.config.display_label())),
+        labeled_line(app, "Flags    ", Span::raw(flag_summary(app, session))),
         labeled_line(
             app,
             "Directory",
@@ -2247,6 +2263,72 @@ mod tests {
         assert_eq!(marker.bg, Color::Reset);
         assert!(row_text(&buffer, 120, row).contains("▸ "));
         assert!(row_text(&buffer, 120, row).contains("Completed"));
+    }
+
+    #[test]
+    fn info_tab_shows_declared_flags_in_order_with_sparse_values_off() {
+        let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let config = temp.path().join("workflow.yaml");
+        std::fs::write(&config, "command: [echo]\nflags:\n  e2e: {}\n  docs: {}\n  lint: {}\nsteps:\n  run:\n    command: echo hello\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let view = rendered_view_with(120, 24, false, View::Sessions, |app| {
+            let mut state = sidebar_session("flags", SessionPhase::Planned);
+            state.config = crate::session_config::SessionConfigRef::File { path: config };
+            state.flags.insert("e2e".to_string(), true);
+            state.flags.insert("lint".to_string(), false);
+            state.flags.insert("obsolete".to_string(), true);
+            app.sessions = vec![state];
+            app.selected = 0;
+            app.tab = DetailTab::Info;
+        });
+        assert!(
+            view.contains("Flags    e2e=on, docs=off, lint=off"),
+            "{view}"
+        );
+        assert!(!view.contains("obsolete"));
+        assert!(
+            view.find("Source   ")
+                .unwrap_or_else(|| panic!("missing Source row"))
+                < view
+                    .find("Flags    ")
+                    .unwrap_or_else(|| panic!("missing Flags row"))
+        );
+    }
+
+    #[test]
+    fn info_tab_shows_dash_when_config_declares_no_flags() {
+        let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let config = temp.path().join("workflow.yaml");
+        std::fs::write(
+            &config,
+            "command: [echo]\nsteps:\n  run:\n    command: echo hello\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let view = rendered_view_with(120, 24, false, View::Sessions, |app| {
+            let mut state = sidebar_session("no-flags", SessionPhase::Planned);
+            state.config = crate::session_config::SessionConfigRef::File { path: config };
+            app.sessions = vec![state];
+            app.selected = 0;
+            app.tab = DetailTab::Info;
+        });
+        assert!(view.contains("Flags    —"), "{view}");
+    }
+
+    #[test]
+    fn info_tab_shows_unavailable_when_config_cannot_be_loaded() {
+        let temp = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let view = rendered_view_with(120, 24, false, View::Sessions, |app| {
+            let mut state = sidebar_session("missing-config", SessionPhase::Planned);
+            state.config = crate::session_config::SessionConfigRef::File {
+                path: temp.path().join("missing.yaml"),
+            };
+            state.flags.insert("stale".to_string(), true);
+            app.sessions = vec![state];
+            app.selected = 0;
+            app.tab = DetailTab::Info;
+        });
+        assert!(view.contains("Flags    unavailable"), "{view}");
+        assert!(!view.contains("stale=on"));
     }
 
     #[test]

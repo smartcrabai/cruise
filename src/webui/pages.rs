@@ -202,11 +202,17 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
         "plan" => partials::plan_tab_html(state, id),
         "log" => partials::log_tab_html(state, id, None),
         _ => {
-            let session = super::dto::session_dto(
-                &state.application,
-                state.application.reconcile_session(id)?,
-                true,
-            );
+            let session_state = state.application.reconcile_session(id)?;
+            let flags = state
+                .application
+                .session_config(&session_state)
+                .map(|config| flag_rows(&crate::flags::choices(&config), &session_state.flags));
+            let (flags, flags_note) = match flags {
+                Ok(rows) if rows.is_empty() => (rows, Some("None".to_string())),
+                Ok(rows) => (rows, None),
+                Err(_) => (Vec::new(), Some("Unavailable".to_string())),
+            };
+            let session = super::dto::session_dto(&state.application, session_state, true);
             let pr_is_link = session
                 .pr_url
                 .as_deref()
@@ -214,6 +220,8 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
             let vm = TabInfoVm {
                 id: id.to_string(),
                 config_source: session.config_source.clone(),
+                flags,
+                flags_note,
                 location_label: if session.repo.is_some() {
                     "Repository".to_string()
                 } else {

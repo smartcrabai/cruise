@@ -916,6 +916,89 @@ async fn session_tabs_render_their_contract_ids() {
     }
 }
 
+#[tokio::test]
+async fn info_tab_shows_declared_flags_in_order_with_saved_values() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let config = flag_config(&harness);
+    let mut stored = harness
+        .manager
+        .load(&session.id)
+        .unwrap_or_else(|e| panic!("{e}"));
+    stored.config = crate::session_config::SessionConfigRef::File { path: config };
+    stored.flags = BTreeMap::from([
+        ("e2e".to_string(), true),
+        ("docs".to_string(), false),
+        ("obsolete".to_string(), true),
+    ]);
+    harness
+        .manager
+        .save(&stored)
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let uri = format!("/webui/sessions/{}/tab/info", session.id);
+    let (status, _, body) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let e2e = body.find("e2e=on").unwrap_or_else(|| panic!("{body}"));
+    let docs = body.find("docs=off").unwrap_or_else(|| panic!("{body}"));
+    let after_pr = body
+        .find("after_pr=off")
+        .unwrap_or_else(|| panic!("{body}"));
+    assert!(e2e < docs && docs < after_pr, "{body}");
+    assert!(body.contains("Run browser tests"), "{body}");
+    assert!(!body.contains("obsolete"), "{body}");
+}
+
+#[tokio::test]
+async fn info_tab_shows_none_for_no_declared_flags() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let uri = format!("/webui/sessions/{}/tab/info", session.id);
+    let (status, _, body) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let flags = body
+        .split_once(">Flags</dt>")
+        .unwrap_or_else(|| panic!("{body}"))
+        .1;
+    let field = flags
+        .split_once("</dd>")
+        .unwrap_or_else(|| panic!("{body}"))
+        .0;
+    assert!(field.contains("None"), "{body}");
+}
+
+#[tokio::test]
+async fn info_tab_shows_unavailable_when_session_config_is_missing() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let mut stored = harness
+        .manager
+        .load(&session.id)
+        .unwrap_or_else(|e| panic!("{e}"));
+    stored.config = crate::session_config::SessionConfigRef::File {
+        path: harness.dir.path().join("missing.yaml"),
+    };
+    stored.flags.insert("obsolete".to_string(), true);
+    harness
+        .manager
+        .save(&stored)
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let uri = format!("/webui/sessions/{}/tab/info", session.id);
+    let (status, _, body) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let flags = body
+        .split_once(">Flags</dt>")
+        .unwrap_or_else(|| panic!("{body}"))
+        .1;
+    let field = flags
+        .split_once("</dd>")
+        .unwrap_or_else(|| panic!("{body}"))
+        .0;
+    assert!(field.contains("Unavailable"), "{body}");
+    assert!(!field.contains("obsolete"), "{body}");
+}
+
 #[test]
 fn header_omits_input_paragraph_for_input_as_plan_session() {
     let harness = harness();

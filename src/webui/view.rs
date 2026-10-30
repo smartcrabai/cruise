@@ -177,6 +177,10 @@ pub(crate) struct SessionDetailVm {
 pub(crate) struct TabInfoVm {
     pub(crate) id: String,
     pub(crate) config_source: String,
+    /// Declared workflow flags with this session's values; absent values are off.
+    pub(crate) flags: Vec<FlagRowVm>,
+    /// Displayed when there are no declared flags or the config is unavailable.
+    pub(crate) flags_note: Option<String>,
     /// "Repository" when the session targets a remote repo, else "Base dir".
     pub(crate) location_label: String,
     pub(crate) location: String,
