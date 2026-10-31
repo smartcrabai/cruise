@@ -54,7 +54,7 @@ PATH="$PWD/target/formal-tools/node/bin:$PATH" bash scripts/check_opencode_specs
 ```
 
 The local pinned Node directory was already available. In CI, the existing
-checksum-pinned `actions/setup-node` action selects Node 26.12.0 instead.
+checksum-pinned `actions/setup-node` action selects Node 26.12.1 instead.
 All checks returned zero, aggregate status **0**. Full command log and raw results:
 `target/formal-reports/opencode.Arrv3o/{commands.log,results.log}`.
 
