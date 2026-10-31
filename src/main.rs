@@ -181,7 +181,13 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         }
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::SyncBase { pr_number, url },
-        })) => worktree_pr::sync_base(&pr_number, url.as_deref()),
+        })) => match worktree_pr::sync_base(&pr_number, url.as_deref()) {
+            Ok(()) => Ok(()),
+            Err((failure, error)) => {
+                eprintln!("CRUISE_SYNC_BASE_DIAGNOSTIC_V1 {}", failure.marker_value());
+                Err(error)
+            }
+        },
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::JcodePreTool,
         })) => unreachable!("jcode pre-tool gate exits before runtime initialization"),

@@ -32,7 +32,7 @@ struct OperationMetrics {
     duration: Histogram<f64>,
     retry_count: Counter<u64>,
 }
-struct ErrorTypeState(AtomicBool);
+struct ErrorTypeState(OnceLock<&'static str>);
 
 /// Process-level telemetry handle. Dropping it flushes and shuts down its providers.
 #[must_use = "keep the telemetry handle alive until application work is complete"]
@@ -229,7 +229,7 @@ impl Operation {
             context: Some(
                 parent
                     .with_span(span)
-                    .with_value(ErrorTypeState(AtomicBool::new(false))),
+                    .with_value(ErrorTypeState(OnceLock::new())),
             ),
             started_at: Some(started_at),
             finished: false,
@@ -249,7 +249,7 @@ impl Operation {
         let Some(context) = self.context.as_ref() else {
             return;
         };
-        if claim_error_type(context) {
+        if claim_error_type(context, error_type) {
             context
                 .span()
                 .set_attribute(KeyValue::new("error.type", error_type));
@@ -303,20 +303,30 @@ impl Operation {
         };
 
         let span = context.span();
-        if outcome != "success" && claim_error_type(context) {
-            let error_type = match outcome {
+        let error_type = if outcome == "success" {
+            None
+        } else {
+            let fallback = match outcome {
                 "cancelled" => "cancelled",
                 "timeout" => "timeout",
                 "paused" => "paused",
                 _ => "step_failed",
             };
-            span.set_attribute(KeyValue::new("error.type", error_type));
-        }
+            if claim_error_type(context, fallback) {
+                span.set_attribute(KeyValue::new("error.type", fallback));
+            }
+            Some(
+                context
+                    .get::<ErrorTypeState>()
+                    .and_then(|state| state.0.get().copied())
+                    .unwrap_or(fallback),
+            )
+        };
         span.set_attribute(KeyValue::new("cruise.outcome", outcome));
-        if outcome == "success" {
-            span.set_status(opentelemetry::trace::Status::Ok);
+        if let Some(error_type) = error_type {
+            span.set_status(opentelemetry::trace::Status::error(error_type));
         } else {
-            span.set_status(opentelemetry::trace::Status::error(""));
+            span.set_status(opentelemetry::trace::Status::Ok);
         }
         span.end();
 
@@ -368,13 +378,10 @@ fn record_loop_protection(
     ));
 }
 
-fn claim_error_type(context: &Context) -> bool {
-    context.get::<ErrorTypeState>().is_none_or(|state| {
-        state
-            .0
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    })
+fn claim_error_type(context: &Context, error_type: &'static str) -> bool {
+    context
+        .get::<ErrorTypeState>()
+        .is_none_or(|state| state.0.set(error_type).is_ok())
 }
 
 /// Sets `error.type` on the current span without exposing error text.
@@ -383,7 +390,7 @@ pub fn record_error_type(error_type: &'static str) {
         return;
     }
     let context = Context::current();
-    if claim_error_type(&context) {
+    if claim_error_type(&context, error_type) {
         context
             .span()
             .set_attribute(KeyValue::new("error.type", error_type));
@@ -410,6 +417,7 @@ struct CiDiagnostic {
     state: &'static str,
     head_matches: Option<bool>,
     check_count: Option<i64>,
+    http_status: Option<i64>,
 }
 
 pub(crate) fn record_command_failure(
@@ -442,6 +450,12 @@ pub(crate) fn record_command_failure(
         if let Some(check_count) = diagnostic.check_count {
             span.set_attribute(KeyValue::new("cruise.ci.check_count", check_count));
         }
+        if let Some(http_status) = diagnostic.http_status {
+            span.set_attribute(KeyValue::new("cruise.ci.http_status", http_status));
+        }
+    }
+    if let Some(reason) = last_sync_base_diagnostic(stderr) {
+        span.set_attribute(KeyValue::new("cruise.sync_base.failure_reason", reason));
     }
 }
 
@@ -450,7 +464,7 @@ fn last_ci_diagnostic(stderr: &str) -> Option<CiDiagnostic> {
 }
 
 fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
-    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V1";
+    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V2";
 
     if line.len() > 256 || !line.is_ascii() || !line.starts_with(PREFIX) {
         return None;
@@ -520,6 +534,17 @@ fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
         }
         _ => return None,
     };
+    let http_status = match fields.next()? {
+        "unknown" => None,
+        value if value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_digit()) => {
+            let status = value.parse::<i64>().ok()?;
+            if !(100..=599).contains(&status) {
+                return None;
+            }
+            Some(status)
+        }
+        _ => return None,
+    };
     if fields.next().is_some() {
         return None;
     }
@@ -530,7 +555,35 @@ fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
         state,
         head_matches,
         check_count,
+        http_status,
     })
+}
+
+fn last_sync_base_diagnostic(stderr: &str) -> Option<&'static str> {
+    stderr
+        .lines()
+        .rev()
+        .find_map(parse_sync_base_diagnostic_line)
+}
+
+fn parse_sync_base_diagnostic_line(line: &str) -> Option<&'static str> {
+    const PREFIX: &str = "CRUISE_SYNC_BASE_DIAGNOSTIC_V1";
+
+    if line.len() > 256 || !line.is_ascii() || !line.starts_with(PREFIX) {
+        return None;
+    }
+    let mut fields = line.split_ascii_whitespace();
+    if fields.next()? != PREFIX {
+        return None;
+    }
+    let field = fields.next()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    crate::worktree_pr::SyncBaseFailure::ALL
+        .into_iter()
+        .map(crate::worktree_pr::SyncBaseFailure::marker_value)
+        .find(|value| *value == field)
 }
 
 /// Captures the current span context only when telemetry is enabled.
@@ -754,10 +807,11 @@ impl Error for InitError {}
 mod tests {
     use super::{
         CiDiagnostic, Context, ErrorTypeState, claim_error_type, is_enabled, last_ci_diagnostic,
-        parse_ci_diagnostic_line, workflow_identity,
+        last_sync_base_diagnostic, parse_ci_diagnostic_line, parse_sync_base_diagnostic_line,
+        workflow_identity,
     };
     use crate::session_config::SessionConfigRef;
-    use std::{borrow::Cow, path::PathBuf, sync::atomic::AtomicBool};
+    use std::{borrow::Cow, path::PathBuf, sync::OnceLock};
 
     #[test]
     fn sdk_disabled_overrides_explicit_opt_in() {
@@ -773,7 +827,7 @@ mod tests {
 
     #[test]
     fn ci_diagnostic_parser_accepts_only_bounded_whitelisted_fields() {
-        let valid = "CRUISE_CI_DIAGNOSTIC_V1 github head_mismatch FAILURE false 4";
+        let valid = "CRUISE_CI_DIAGNOSTIC_V2 github head_mismatch FAILURE false 4 503";
         assert_eq!(
             parse_ci_diagnostic_line(valid),
             Some(CiDiagnostic {
@@ -782,11 +836,12 @@ mod tests {
                 state: "FAILURE",
                 head_matches: Some(false),
                 check_count: Some(4),
+                http_status: Some(503),
             })
         );
         assert_eq!(
             parse_ci_diagnostic_line(
-                "CRUISE_CI_DIAGNOSTIC_V1 gitlab api_error unknown unknown unknown"
+                "CRUISE_CI_DIAGNOSTIC_V2 gitlab api_error unknown unknown unknown unknown"
             ),
             Some(CiDiagnostic {
                 provider: "gitlab",
@@ -794,19 +849,25 @@ mod tests {
                 state: "unknown",
                 head_matches: None,
                 check_count: None,
+                http_status: None,
             })
         );
 
         for invalid in [
-            " CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 1",
-            "CRUISE_CI_DIAGNOSTIC_V1 secret-provider ci_failed FAILURE false 1",
-            "CRUISE_CI_DIAGNOSTIC_V1 github arbitrary-reason FAILURE false 1",
-            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed private-state false 1",
-            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE secret 1",
-            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false -1",
-            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false +1",
-            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 9223372036854775808",
-            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 1 leaked-value",
+            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 1",
+            " CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 500",
+            "CRUISE_CI_DIAGNOSTIC_V2 secret-provider ci_failed FAILURE false 1 500",
+            "CRUISE_CI_DIAGNOSTIC_V2 github arbitrary-reason FAILURE false 1 500",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed private-state false 1 500",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE secret 1 500",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false -1 500",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false +1 500",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 9223372036854775808 500",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 099",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 600",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 abc",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 1000",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 500 extra",
         ] {
             assert_eq!(parse_ci_diagnostic_line(invalid), None, "{invalid:?}");
         }
@@ -820,9 +881,9 @@ mod tests {
     fn ci_diagnostic_parser_uses_last_valid_line_without_exporting_neighbors() {
         let stderr = concat!(
             "raw command error with private details\n",
-            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 2\n",
-            "CRUISE_CI_DIAGNOSTIC_V1 github leaked FAILURE false 7\n",
-            "CRUISE_CI_DIAGNOSTIC_V1 gitlab graphql_error failed unknown 0\n",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 2 500\n",
+            "CRUISE_CI_DIAGNOSTIC_V2 github leaked FAILURE false 7 500\n",
+            "CRUISE_CI_DIAGNOSTIC_V2 gitlab graphql_error failed unknown 0 unknown\n",
         );
         assert_eq!(
             last_ci_diagnostic(stderr),
@@ -832,9 +893,46 @@ mod tests {
                 state: "failed",
                 head_matches: None,
                 check_count: Some(0),
+                http_status: None,
             })
         );
     }
+
+    #[test]
+    fn sync_base_diagnostic_parser_accepts_only_allowlisted_reason() {
+        assert_eq!(
+            parse_sync_base_diagnostic_line("CRUISE_SYNC_BASE_DIAGNOSTIC_V1 merge_conflict"),
+            Some("merge_conflict")
+        );
+        let stderr = concat!(
+            "private human-readable sync error\n",
+            "CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed\n",
+            "CRUISE_SYNC_BASE_DIAGNOSTIC_V1 private-reason\n",
+            "CRUISE_SYNC_BASE_DIAGNOSTIC_V1 merge_failed\n",
+        );
+        assert_eq!(last_sync_base_diagnostic(stderr), Some("merge_failed"));
+        for invalid in [
+            " CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed",
+            "CRUISE_SYNC_BASE_DIAGNOSTIC_V1 unknown",
+            "CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed leaked",
+            "CRUISE_SYNC_BASE_DIAGNOSTIC_V1",
+            "CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed\u{e9}",
+        ] {
+            assert_eq!(
+                parse_sync_base_diagnostic_line(invalid),
+                None,
+                "{invalid:?}"
+            );
+        }
+        assert_eq!(
+            parse_sync_base_diagnostic_line(&format!(
+                "CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed{}",
+                "x".repeat(230)
+            )),
+            None
+        );
+    }
+
     #[test]
     fn workflow_identity_exports_only_safe_names() {
         let file = SessionConfigRef::File {
@@ -874,12 +972,18 @@ mod tests {
 
     #[test]
     fn error_type_is_first_write_wins_per_context() {
-        let context = Context::new().with_value(ErrorTypeState(AtomicBool::new(false)));
-        assert!(claim_error_type(&context));
-        assert!(!claim_error_type(&context));
+        let context = Context::new().with_value(ErrorTypeState(OnceLock::new()));
+        assert!(claim_error_type(&context, "command_exit"));
+        assert!(!claim_error_type(&context, "step_failed"));
+        assert_eq!(
+            context
+                .get::<ErrorTypeState>()
+                .and_then(|state| state.0.get().copied()),
+            Some("command_exit")
+        );
 
-        let child = context.with_value(ErrorTypeState(AtomicBool::new(false)));
-        assert!(claim_error_type(&child));
-        assert!(!claim_error_type(&context));
+        let child = context.with_value(ErrorTypeState(OnceLock::new()));
+        assert!(claim_error_type(&child, "cancelled"));
+        assert!(!claim_error_type(&context, "timeout"));
     }
 }

@@ -36,7 +36,12 @@ steps:
           ''|*[!0-9]*) diagnostic_check_count=unknown ;;
           *) if [ "${{#diagnostic_check_count}}" -gt 18 ]; then diagnostic_check_count=unknown; fi ;;
         esac
-        printf 'CRUISE_CI_DIAGNOSTIC_V1 %s %s %s %s %s\n' "$provider" "$1" "$diagnostic_state" "$diagnostic_head_matches" "$diagnostic_check_count" >&2
+        diagnostic_http_status=$http_status
+        case "$diagnostic_http_status" in
+          [12345][0123456789][0123456789]) ;;
+          *) diagnostic_http_status=unknown ;;
+        esac
+        printf 'CRUISE_CI_DIAGNOSTIC_V2 %s %s %s %s %s %s\n' "$provider" "$1" "$diagnostic_state" "$diagnostic_head_matches" "$diagnostic_check_count" "$diagnostic_http_status" >&2
       }}
       case "{pr.url}" in
         */-/merge_requests/*)
@@ -44,12 +49,21 @@ steps:
           state=unobserved
           head_matches=unknown
           check_count=unknown
+          http_status=unknown
           attempt=0
+          diagnostic_stderr="$(git rev-parse --git-dir)/cruise-ci-query.stderr"
           while [ "$attempt" -lt 30 ]; do
-            if response=$(glab ci get --merge-request {pr.number} --output json); then
+            if response=$(glab ci get --merge-request {pr.number} --output json 2>"$diagnostic_stderr"); then
               query_status=0
             else
               query_status=$?
+            fi
+            cat "$diagnostic_stderr" >&2
+            if [ "$query_status" -ne 0 ]; then
+              http_status=$(sed -n -e 's/.*: \([12345][0123456789][0123456789]\) .*/\1/p' -e 's/^\([12345][0123456789][0123456789]\) [A-Z].*/\1/p' "$diagnostic_stderr" | sed -n '1p')
+              if [ -z "$http_status" ]; then http_status=unknown; fi
+            else
+              http_status=unknown
             fi
             if status=$(printf '%s' "$response" | jq -r '.status'); then
               status_parse_status=0
@@ -99,6 +113,7 @@ steps:
           state=unobserved
           head_matches=unknown
           check_count=unknown
+          http_status=unknown
           if ! expected_head=$(git rev-parse HEAD); then
             printf 'Unable to read local HEAD before checking GitHub CI.\n' >&2
             ci_diagnostic local_head_error
@@ -118,8 +133,17 @@ steps:
           fi
           query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{state contexts(first:1) {{totalCount}}}}}}}}}}}}'
           deadline=$(( $(date +%s) + 1740 ))
+          diagnostic_stderr="$(git rev-parse --git-dir)/cruise-ci-query.stderr"
           while :; do
-            if ! response=$(gh api graphql -f owner="$owner" -f name="$name" -F number={pr.number} -f head="$expected_head" -f query="$query"); then
+            if response=$(gh api graphql -f owner="$owner" -f name="$name" -F number={pr.number} -f head="$expected_head" -f query="$query" 2>"$diagnostic_stderr"); then
+              query_status=0
+            else
+              query_status=$?
+            fi
+            cat "$diagnostic_stderr" >&2
+            if [ "$query_status" -ne 0 ]; then
+              http_status=$(sed -n 's/.*HTTP \([12345][0123456789][0123456789]\).*/\1/p' "$diagnostic_stderr" | sed -n '1p')
+              if [ -z "$http_status" ]; then http_status=unknown; fi
               printf 'GitHub CI query failed for PR #%s at expected HEAD %s.\n' {pr.number} "$expected_head" >&2
               ci_diagnostic api_error
               exit 1

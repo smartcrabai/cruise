@@ -1034,6 +1034,37 @@ pub(crate) fn parse_pr_metadata(output: &str) -> (String, String) {
     (String::new(), String::new())
 }
 
+/// Allowlisted sync-base failure cause, emitted as a telemetry marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncBaseFailure {
+    BaseRefQueryError,
+    BaseRefInvalid,
+    FetchFailed,
+    MergeConflict,
+    MergeFailed,
+}
+
+impl SyncBaseFailure {
+    pub const ALL: [Self; 5] = [
+        Self::BaseRefQueryError,
+        Self::BaseRefInvalid,
+        Self::FetchFailed,
+        Self::MergeConflict,
+        Self::MergeFailed,
+    ];
+
+    #[must_use]
+    pub const fn marker_value(self) -> &'static str {
+        match self {
+            Self::BaseRefQueryError => "base_ref_query_error",
+            Self::BaseRefInvalid => "base_ref_invalid",
+            Self::FetchFailed => "fetch_failed",
+            Self::MergeConflict => "merge_conflict",
+            Self::MergeFailed => "merge_failed",
+        }
+    }
+}
+
 /// Merge the base branch of PR `pr_number` into the current branch.
 ///
 /// A `pr_url` containing `/-/merge_requests/` is a GitLab merge request and is
@@ -1041,16 +1072,24 @@ pub(crate) fn parse_pr_metadata(output: &str) -> (String, String) {
 ///
 /// # Errors
 ///
-/// Returns an error when the base ref cannot be resolved or is invalid, or
-/// when `git fetch` / `git merge` fails (including merge conflicts).
-pub fn sync_base(pr_number: &str, pr_url: Option<&str>) -> Result<()> {
+/// Returns the classified failure with an error when the base ref cannot be
+/// resolved or is invalid, or when `git fetch` / `git merge` fails (including
+/// merge conflicts).
+pub fn sync_base(
+    pr_number: &str,
+    pr_url: Option<&str>,
+) -> std::result::Result<(), (SyncBaseFailure, CruiseError)> {
     sync_base_with(pr_number, pr_url, |program, args| {
         std::process::Command::new(program).args(args).output()
     })
 }
 
 /// Same as [`sync_base`] with an injectable command runner `(program, args)`.
-pub(crate) fn sync_base_with<F>(pr_number: &str, pr_url: Option<&str>, mut runner: F) -> Result<()>
+pub(crate) fn sync_base_with<F>(
+    pr_number: &str,
+    pr_url: Option<&str>,
+    mut runner: F,
+) -> std::result::Result<(), (SyncBaseFailure, CruiseError)>
 where
     F: FnMut(&str, &[&str]) -> std::io::Result<std::process::Output>,
 {
@@ -1077,14 +1116,24 @@ where
 
     let is_gitlab_mr = pr_url.is_some_and(|url| url.contains("/-/merge_requests/"));
     let base = if is_gitlab_mr {
-        let view = run("glab", &["mr", "view", pr_number, "--output", "json"])?;
-        let json: serde_json::Value = serde_json::from_slice(&view.stdout)
-            .map_err(|e| CruiseError::Other(format!("invalid `glab mr view` JSON: {e}")))?;
-        json.get("target_branch")
+        let view = run("glab", &["mr", "view", pr_number, "--output", "json"])
+            .map_err(|error| (SyncBaseFailure::BaseRefQueryError, error))?;
+        let json: serde_json::Value = serde_json::from_slice(&view.stdout).map_err(|error| {
+            (
+                SyncBaseFailure::BaseRefQueryError,
+                CruiseError::Other(format!("invalid `glab mr view` JSON: {error}")),
+            )
+        })?;
+        let Some(target_branch) = json
+            .get("target_branch")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string()
+        else {
+            return Err((
+                SyncBaseFailure::BaseRefQueryError,
+                CruiseError::Other("invalid base ref: ``".to_string()),
+            ));
+        };
+        target_branch.trim().to_string()
     } else {
         let view = run(
             "gh",
@@ -1097,19 +1146,45 @@ where
                 "-q",
                 ".baseRefName",
             ],
-        )?;
+        )
+        .map_err(|error| (SyncBaseFailure::BaseRefQueryError, error))?;
         String::from_utf8(view.stdout)
-            .map_err(|e| CruiseError::Other(format!("base ref is not valid UTF-8: {e}")))?
+            .map_err(|error| {
+                (
+                    SyncBaseFailure::BaseRefQueryError,
+                    CruiseError::Other(format!("base ref is not valid UTF-8: {error}")),
+                )
+            })?
             .trim()
             .to_string()
     };
     if base.is_empty() || base.starts_with('-') {
-        return Err(CruiseError::Other(format!("invalid base ref: `{base}`")));
+        return Err((
+            SyncBaseFailure::BaseRefInvalid,
+            CruiseError::Other(format!("invalid base ref: `{base}`")),
+        ));
     }
-    run("git", &["check-ref-format", "--branch", &base])
-        .map_err(|e| CruiseError::Other(format!("invalid base ref `{base}`: {e}")))?;
-    run("git", &["fetch", "origin", &base])?;
-    run("git", &["merge", &format!("origin/{base}"), "--no-edit"])?;
+    run("git", &["check-ref-format", "--branch", &base]).map_err(|error| {
+        (
+            SyncBaseFailure::BaseRefInvalid,
+            CruiseError::Other(format!("invalid base ref `{base}`: {error}")),
+        )
+    })?;
+    run("git", &["fetch", "origin", &base])
+        .map_err(|error| (SyncBaseFailure::FetchFailed, error))?;
+
+    let merge = run("git", &["merge", &format!("origin/{base}"), "--no-edit"]);
+    if let Err(error) = merge {
+        let has_unmerged_paths = run("git", &["diff", "--name-only", "--diff-filter=U"])
+            .is_ok_and(|output| !output.stdout.is_empty());
+        let failure = if has_unmerged_paths {
+            SyncBaseFailure::MergeConflict
+        } else {
+            SyncBaseFailure::MergeFailed
+        };
+        return Err((failure, error));
+    }
+
     Ok(())
 }
 
@@ -1237,7 +1312,10 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     /// returning the result and the recorded calls.
     fn run_scripted(
         responses: Vec<std::io::Result<std::process::Output>>,
-    ) -> (Result<()>, Vec<Call>) {
+    ) -> (
+        std::result::Result<(), (SyncBaseFailure, CruiseError)>,
+        Vec<Call>,
+    ) {
         run_scripted_url(None, responses)
     }
 
@@ -1245,7 +1323,10 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     fn run_scripted_url(
         pr_url: Option<&str>,
         responses: Vec<std::io::Result<std::process::Output>>,
-    ) -> (Result<()>, Vec<Call>) {
+    ) -> (
+        std::result::Result<(), (SyncBaseFailure, CruiseError)>,
+        Vec<Call>,
+    ) {
         let mut calls: Vec<Call> = Vec::new();
         let mut queue = responses.into_iter();
         let result = sync_base_with("42", pr_url, |program, args| {
@@ -1267,11 +1348,32 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         )
     }
 
-    fn assert_other(result: &Result<()>) {
-        assert!(
-            matches!(result, Err(CruiseError::Other(_))),
-            "expected CruiseError::Other, got {result:?}"
+    fn assert_failure(
+        result: &std::result::Result<(), (SyncBaseFailure, CruiseError)>,
+        expected: SyncBaseFailure,
+    ) {
+        match result {
+            Err((failure, CruiseError::Other(_))) => assert_eq!(*failure, expected),
+            other => panic!("expected {expected:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_base_failure_marker_values_are_stable() {
+        assert_eq!(
+            SyncBaseFailure::BaseRefQueryError.marker_value(),
+            "base_ref_query_error"
         );
+        assert_eq!(
+            SyncBaseFailure::BaseRefInvalid.marker_value(),
+            "base_ref_invalid"
+        );
+        assert_eq!(SyncBaseFailure::FetchFailed.marker_value(), "fetch_failed");
+        assert_eq!(
+            SyncBaseFailure::MergeConflict.marker_value(),
+            "merge_conflict"
+        );
+        assert_eq!(SyncBaseFailure::MergeFailed.marker_value(), "merge_failed");
     }
 
     #[test]
@@ -1334,38 +1436,59 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             Some("https://gitlab.com/g/p/-/merge_requests/42"),
             vec![Ok(output(0, br#"{"iid":42}"#))],
         );
-        assert_other(&result);
+        assert_failure(&result, SyncBaseFailure::BaseRefQueryError);
         assert_eq!(calls.len(), 1);
     }
 
     #[test]
     fn sync_base_merge_failure_includes_stdout_conflict_output() {
-        let (result, _calls) = run_scripted(vec![
+        let (result, calls) = run_scripted(vec![
             Ok(output(0, b"main\n")),
             Ok(output(0, b"")),
             Ok(output(0, b"")),
             Ok(output(1, b"CONFLICT (content): Merge conflict in a.txt\n")),
+            Ok(output(0, b"a.txt\n")),
         ]);
+        assert_failure(&result, SyncBaseFailure::MergeConflict);
         match result {
-            Err(CruiseError::Other(message)) => assert!(message.contains("CONFLICT"), "{message}"),
+            Err((_, CruiseError::Other(message))) => {
+                assert!(message.contains("CONFLICT"), "{message}");
+            }
             other => panic!("expected CruiseError::Other, got {other:?}"),
         }
+        assert_eq!(
+            calls.last(),
+            Some(&call("git", &["diff", "--name-only", "--diff-filter=U"]))
+        );
+    }
+
+    #[test]
+    fn sync_base_classifies_unmerged_paths_as_merge_conflict() {
+        let (result, calls) = run_scripted(vec![
+            Ok(output(0, b"main\n")),
+            Ok(output(0, b"")),
+            Ok(output(0, b"")),
+            Ok(output(1, b"")),
+            Ok(output(0, b"file.txt\n")),
+        ]);
+        assert_failure(&result, SyncBaseFailure::MergeConflict);
+        assert_eq!(
+            calls.last(),
+            Some(&call("git", &["diff", "--name-only", "--diff-filter=U"]))
+        );
     }
 
     #[test]
     fn sync_base_rejects_empty_base_ref_without_running_git() {
         let (result, calls) = run_scripted(vec![Ok(output(0, b"\n"))]);
-        assert_other(&result);
+        assert_failure(&result, SyncBaseFailure::BaseRefInvalid);
         assert_eq!(calls.len(), 1);
     }
 
     #[test]
     fn sync_base_rejects_option_like_base_ref_without_fetch() {
-        let (result, calls) = run_scripted(vec![
-            Ok(output(0, b"--upload-pack=evil\n")),
-            Ok(output(1, b"")),
-        ]);
-        assert_other(&result);
+        let (result, calls) = run_scripted(vec![Ok(output(0, b"--upload-pack=evil\n"))]);
+        assert_failure(&result, SyncBaseFailure::BaseRefInvalid);
         assert!(
             calls
                 .iter()
@@ -1377,28 +1500,28 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     #[test]
     fn sync_base_rejects_ref_failing_check_ref_format() {
         let (result, calls) = run_scripted(vec![Ok(output(0, b"bad..ref\n")), Ok(output(1, b""))]);
-        assert_other(&result);
+        assert_failure(&result, SyncBaseFailure::BaseRefInvalid);
         assert_eq!(calls.len(), 2);
     }
 
     #[test]
-    fn sync_base_gh_spawn_failure_is_other_and_stops() {
+    fn sync_base_gh_spawn_failure_is_query_error_and_stops() {
         let (result, calls) = run_scripted(vec![Err(std::io::Error::other("no gh"))]);
-        assert_other(&result);
+        assert_failure(&result, SyncBaseFailure::BaseRefQueryError);
         assert_eq!(calls.len(), 1);
     }
 
     #[test]
-    fn sync_base_gh_nonzero_is_other_and_stops() {
+    fn sync_base_gh_nonzero_is_query_error_and_stops() {
         let (result, calls) = run_scripted(vec![Ok(output(1, b""))]);
-        assert_other(&result);
+        assert_failure(&result, SyncBaseFailure::BaseRefQueryError);
         assert_eq!(calls.len(), 1);
     }
 
     #[test]
-    fn sync_base_gh_invalid_utf8_is_other_and_stops() {
+    fn sync_base_gh_invalid_utf8_is_query_error_and_stops() {
         let (result, calls) = run_scripted(vec![Ok(output(0, &[0xff, 0xfe, b'\n']))]);
-        assert_other(&result);
+        assert_failure(&result, SyncBaseFailure::BaseRefQueryError);
         assert_eq!(calls.len(), 1);
     }
 
@@ -1409,20 +1532,21 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             Ok(output(0, b"")),
             Ok(output(1, b"")),
         ]);
-        assert_other(&result);
+        assert_failure(&result, SyncBaseFailure::FetchFailed);
         assert_eq!(calls.len(), 3);
     }
 
     #[test]
-    fn sync_base_merge_failure_is_other() {
+    fn sync_base_merge_failure_without_unmerged_paths_is_merge_failed() {
         let (result, calls) = run_scripted(vec![
             Ok(output(0, b"main\n")),
             Ok(output(0, b"")),
             Ok(output(0, b"")),
             Ok(output(1, b"")),
+            Ok(output(0, b"")),
         ]);
-        assert_other(&result);
-        assert_eq!(calls.len(), 4);
+        assert_failure(&result, SyncBaseFailure::MergeFailed);
+        assert_eq!(calls.len(), 5);
     }
 
     #[test]
