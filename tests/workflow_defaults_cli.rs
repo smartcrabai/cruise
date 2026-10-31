@@ -867,13 +867,18 @@ fn builtin_wait_ci_command_for_url(name: &str, pr_url: &str) -> String {
 fn wait_ci_marker(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr)
         .lines()
-        .find(|line| line.starts_with("CRUISE_CI_DIAGNOSTIC_V1 "))
+        .find(|line| line.starts_with("CRUISE_CI_DIAGNOSTIC_V2 "))
         .unwrap_or_else(|| panic!("missing wait-ci diagnostic marker: {}", text(output)))
         .to_owned()
 }
 
 #[cfg(unix)]
-fn run_gitlab_wait_ci_command(command: &str, status_response: &str, status_exit: i32) -> Output {
+fn run_gitlab_wait_ci_command(
+    command: &str,
+    status_response: &str,
+    status_exit: i32,
+    status_stderr: &str,
+) -> Output {
     let root = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let repo = root.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create repo: {error}"));
@@ -885,7 +890,12 @@ fn run_gitlab_wait_ci_command(command: &str, status_response: &str, status_exit:
         r#"#!/bin/sh
 case "$*" in
   *--status=failed*) printf '{"id":1,"jobs":[]}\n'; exit 0 ;;
-  *) printf '%s\n' "$WAIT_CI_STATUS_RESPONSE"; exit "$WAIT_CI_STATUS_EXIT" ;;
+  *)
+    if [ -n "${WAIT_CI_STATUS_STDERR-}" ]; then
+      printf '%s\n' "$WAIT_CI_STATUS_STDERR" >&2
+    fi
+    printf '%s\n' "$WAIT_CI_STATUS_RESPONSE"
+    exit "$WAIT_CI_STATUS_EXIT" ;;
 esac
 "#,
     );
@@ -902,6 +912,7 @@ esac
         .env("PATH", path)
         .env("WAIT_CI_STATUS_RESPONSE", status_response)
         .env("WAIT_CI_STATUS_EXIT", status_exit.to_string())
+        .env("WAIT_CI_STATUS_STDERR", status_stderr)
         .output()
         .unwrap_or_else(|error| panic!("run builtin GitLab wait-ci command: {error}"))
 }
@@ -962,7 +973,10 @@ count=$(cat "$WAIT_CI_GH_COUNT" 2>/dev/null || printf 0)
 count=$((count + 1))
 printf '%s\n' "$count" > "$WAIT_CI_GH_COUNT"
 if [ "${WAIT_CI_GH_API_FAILURE-0}" = 1 ]; then
-  printf 'fake GitHub API failure\n' >&2
+  case "${WAIT_CI_GH_API_ERROR_KIND-}" in
+    http) printf 'HTTP 502: Bad Gateway (https://api.github.com/graphql)\n' >&2 ;;
+    *) printf 'fake GitHub API failure\n' >&2 ;;
+  esac
   exit 95
 fi
 response="$WAIT_CI_RESPONSES/$count.json"
@@ -1038,11 +1052,15 @@ fi
     }
 
     fn run(&self, command: &str, responses: &[serde_json::Value], timeout: bool) -> Output {
-        self.run_with_api_error(command, responses, timeout, false)
+        self.run_with_api_error(command, responses, timeout, "none")
     }
 
     fn run_api_error(&self, command: &str) -> Output {
-        self.run_with_api_error(command, &[], false, true)
+        self.run_with_api_error(command, &[], false, "http")
+    }
+
+    fn run_network_error(&self, command: &str) -> Output {
+        self.run_with_api_error(command, &[], false, "network")
     }
 
     fn run_with_api_error(
@@ -1050,7 +1068,7 @@ fi
         command: &str,
         responses: &[serde_json::Value],
         timeout: bool,
-        api_error: bool,
+        api_error: &str,
     ) -> Output {
         let _ = std::fs::remove_file(&self.gh_count);
         let _ = std::fs::remove_file(&self.date_count);
@@ -1076,7 +1094,11 @@ fi
             .env("WAIT_CI_DATE_COUNT", &self.date_count)
             .env("WAIT_CI_RESPONSES", &self.responses)
             .env("WAIT_CI_TIMEOUT", if timeout { "1" } else { "0" })
-            .env("WAIT_CI_GH_API_FAILURE", if api_error { "1" } else { "0" })
+            .env(
+                "WAIT_CI_GH_API_FAILURE",
+                if api_error == "none" { "0" } else { "1" },
+            )
+            .env("WAIT_CI_GH_API_ERROR_KIND", api_error)
             .output()
             .unwrap_or_else(|error| panic!("run builtin wait-ci command: {error}"))
     }
@@ -1125,6 +1147,10 @@ fn github_ci_response(
 
 #[cfg(unix)]
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one matrix covers every GitHub wait-ci diagnostic outcome"
+)]
 fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     let old_head = "1111111111111111111111111111111111111111";
     for workflow in cruise::builtin_workflows::BUILTIN_WORKFLOWS {
@@ -1162,7 +1188,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     assert!(!output.status.success(), "{terminal}");
     assert_eq!(
         wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE true 1"
+        "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE true 1 unknown"
     );
     assert_eq!(fixture.gh_calls(), 1);
 
@@ -1182,7 +1208,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     assert!(!output.status.success(), "{terminal}");
     assert_eq!(
         wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V1 github head_mismatch unobserved false unknown"
+        "CRUISE_CI_DIAGNOSTIC_V2 github head_mismatch unobserved false unknown unknown"
     );
     assert_eq!(fixture.gh_calls(), 1);
 
@@ -1196,7 +1222,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     assert!(!output.status.success(), "{terminal}");
     assert_eq!(
         wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V1 github graphql_error unobserved unknown unknown"
+        "CRUISE_CI_DIAGNOSTIC_V2 github graphql_error unobserved unknown unknown unknown"
     );
     assert!(!terminal.contains("query rejected"), "{terminal}");
     assert_eq!(fixture.gh_calls(), 1);
@@ -1206,7 +1232,21 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     assert!(!output.status.success(), "{terminal}");
     assert_eq!(
         wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V1 github api_error unobserved unknown unknown"
+        "CRUISE_CI_DIAGNOSTIC_V2 github api_error unobserved unknown unknown 502"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("HTTP 502: Bad Gateway (https://api.github.com/graphql)\n")
+    );
+    assert_eq!(fixture.gh_calls(), 1);
+
+    let fixture = GithubWaitCiFixture::new();
+    let output = fixture.run_network_error(&command);
+    let terminal = text(&output);
+    assert!(!output.status.success(), "{terminal}");
+    assert_eq!(
+        wait_ci_marker(&output),
+        "CRUISE_CI_DIAGNOSTIC_V2 github api_error unobserved unknown unknown unknown"
     );
     assert_eq!(fixture.gh_calls(), 1);
 
@@ -1234,32 +1274,44 @@ fn builtin_gitlab_wait_ci_markers_classify_failure_and_untrusted_responses() {
     let command =
         builtin_wait_ci_command_for_url("tdd", "https://gitlab.com/owner/repo/-/merge_requests/42");
 
-    let output = run_gitlab_wait_ci_command(&command, r#"{"status":"failed"}"#, 0);
+    let output = run_gitlab_wait_ci_command(&command, r#"{"status":"failed"}"#, 0, "");
     assert!(!output.status.success(), "{}", text(&output));
     assert_eq!(
         wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V1 gitlab ci_failed failed unknown unknown"
+        "CRUISE_CI_DIAGNOSTIC_V2 gitlab ci_failed failed unknown unknown unknown"
     );
 
-    let output = run_gitlab_wait_ci_command(&command, "", 1);
+    let output = run_gitlab_wait_ci_command(&command, "", 1, "");
     assert!(!output.status.success(), "{}", text(&output));
     assert_eq!(
         wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V1 gitlab api_error unknown unknown unknown"
+        "CRUISE_CI_DIAGNOSTIC_V2 gitlab api_error unknown unknown unknown unknown"
     );
 
-    let output = run_gitlab_wait_ci_command(&command, "not-json", 0);
+    let output = run_gitlab_wait_ci_command(
+        &command,
+        "",
+        1,
+        "GET https://gitlab.example/api/v4/projects/1/pipelines/latest: 404 {message: 404 Not Found}",
+    );
     assert!(!output.status.success(), "{}", text(&output));
     assert_eq!(
         wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V1 gitlab invalid_ci_state unknown unknown unknown"
+        "CRUISE_CI_DIAGNOSTIC_V2 gitlab api_error unknown unknown unknown 404"
     );
 
-    let output = run_gitlab_wait_ci_command(&command, r#"{"status":"secret raw status"}"#, 0);
+    let output = run_gitlab_wait_ci_command(&command, "not-json", 0, "");
     assert!(!output.status.success(), "{}", text(&output));
     assert_eq!(
         wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V1 gitlab unknown_state unknown unknown unknown"
+        "CRUISE_CI_DIAGNOSTIC_V2 gitlab invalid_ci_state unknown unknown unknown unknown"
+    );
+
+    let output = run_gitlab_wait_ci_command(&command, r#"{"status":"secret raw status"}"#, 0, "");
+    assert!(!output.status.success(), "{}", text(&output));
+    assert_eq!(
+        wait_ci_marker(&output),
+        "CRUISE_CI_DIAGNOSTIC_V2 gitlab unknown_state unknown unknown unknown unknown"
     );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret raw status"));
 }

@@ -330,6 +330,7 @@ struct SpanRecord {
     resource_attributes: HashMap<String, String>,
     events: Vec<EventRecord>,
     status_code: i32,
+    status_description: String,
 }
 
 fn spans(requests: &[CapturedRequest]) -> Vec<SpanRecord> {
@@ -368,6 +369,11 @@ fn spans(requests: &[CapturedRequest]) -> Vec<SpanRecord> {
                                 int_attributes: int_attributes(&event.attributes),
                             })
                             .collect(),
+                        status_description: span
+                            .status
+                            .as_ref()
+                            .map_or("", |status| status.message.as_str())
+                            .to_owned(),
                         status_code: span.status.map_or(0, |status| status.code),
                     });
                 }
@@ -1637,6 +1643,11 @@ fn assert_application_failed_run_trace(collector: &Collector, result_path: &std:
         failing.attributes.get("error.type").map(String::as_str),
         Some("command_exit")
     );
+    assert_eq!(
+        execution.status_description,
+        execution.attributes["error.type"]
+    );
+    assert_eq!(failing.status_description, failing.attributes["error.type"]);
     let result_path = result_path.to_string_lossy().into_owned();
     assert_payload_omits(
         &requests,
@@ -2682,9 +2693,9 @@ fn invalid_ci_markers_export_no_untrusted_fields() {
         r"steps:
   invalid-ci:
     command: |
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V1 github private-reason-secret FAILURE false 3' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V1 github ci_failed private-state-secret false 3' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 3 leaked-field-secret' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github private-reason-secret FAILURE false 3 unknown' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github ci_failed private-state-secret false 3 unknown' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 3 unknown leaked-field-secret' >&2
       printf '%s\n' 'invalid-marker-stderr-secret' >&2
       exit 9
 ",
@@ -2725,8 +2736,62 @@ fn invalid_ci_markers_export_no_untrusted_fields() {
         ],
     );
 }
+#[test]
+fn command_diagnostic_markers_export_bounded_ci_and_sync_base_attributes() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        r"steps:
+  diagnostics:
+    command: |
+      printf '%s\n' 'human-readable private sync error' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github api_error unobserved unknown unknown 502' >&2
+      printf '%s\n' 'CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed' >&2
+      exit 1
+",
+    );
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "diagnostic-marker-input-secret",
+    );
+    assert!(
+        !output.status.success(),
+        "diagnostic fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported_spans = spans(&requests);
+    let failed = named_span(
+        &exported_spans,
+        "cruise.step",
+        "cruise.step.name",
+        "diagnostics",
+    );
+    assert_eq!(
+        failed.int_attributes.get("cruise.ci.http_status"),
+        Some(&502)
+    );
+    assert_eq!(
+        failed
+            .attributes
+            .get("cruise.sync_base.failure_reason")
+            .map(String::as_str),
+        Some("fetch_failed")
+    );
+    assert_eq!(failed.status_description, failed.attributes["error.type"]);
+    assert_payload_omits(
+        &requests,
+        &[
+            "diagnostic-marker-input-secret",
+            "human-readable private sync error",
+        ],
+    );
+}
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "fixture setup and span privacy assertions stay in one scenario"
+)]
 fn builtin_wait_ci_exports_graphql_failure_reason_without_raw_response() {
     let collector = Collector::start();
     let command = builtin_wait_ci_command("tdd")
@@ -2800,6 +2865,14 @@ exit 97
                 .map(String::as_str),
             Some("graphql_error"),
             "{span:#?}"
+        );
+        assert!(
+            !span.int_attributes.contains_key("cruise.ci.http_status"),
+            "GraphQL failure has no numeric HTTP status: {span:#?}"
+        );
+        assert_eq!(
+            span.status_description, span.attributes["error.type"],
+            "status description must match error.type: {span:#?}"
         );
     }
     assert_eq!(
