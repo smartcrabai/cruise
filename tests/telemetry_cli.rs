@@ -954,6 +954,44 @@ fn named_span<'a>(
         })
         .unwrap_or_else(|| panic!("missing {name} span with {attribute}={value:?}: {spans:#?}"))
 }
+fn assert_command_failure_diagnostic<'a>(
+    spans: &'a [SpanRecord],
+    step_name: &str,
+    status: &str,
+    stderr_present: bool,
+) -> (&'a SpanRecord, &'a SpanRecord) {
+    let step = named_span(spans, "cruise.step", "cruise.step.name", step_name);
+    let attempt = spans
+        .iter()
+        .find(|span| span.name == "cruise.attempt" && span.parent_span_id == step.span_id)
+        .unwrap_or_else(|| panic!("missing command attempt for step {step_name}: {spans:#?}"));
+    for span in [step, attempt] {
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.diagnostic_status")
+                .map(String::as_str),
+            Some(status),
+            "diagnostic status: {span:#?}"
+        );
+        assert_eq!(
+            span.bool_attributes.get("cruise.command.stderr_present"),
+            Some(&stderr_present),
+            "stderr presence: {span:#?}"
+        );
+    }
+    (step, attempt)
+}
+
+fn assert_no_untrusted_ci_attributes(span: &SpanRecord) {
+    assert!(
+        span.attributes
+            .keys()
+            .chain(span.int_attributes.keys())
+            .chain(span.bool_attributes.keys())
+            .all(|key| !key.starts_with("cruise.ci.") || key == "cruise.ci.diagnostic_status"),
+        "invalid diagnostic exported an untrusted CI field: {span:#?}"
+    );
+}
 
 fn assert_success(output: &Output) {
     assert!(output.status.success(), "{}", output_text(output));
@@ -2711,20 +2749,15 @@ fn invalid_ci_markers_export_no_untrusted_fields() {
 
     let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
     let spans = spans(&requests);
-    let failed = named_span(&spans, "cruise.step", "cruise.step.name", "invalid-ci");
+    let (failed, attempt) =
+        assert_command_failure_diagnostic(&spans, "invalid-ci", "invalid", true);
     assert_eq!(
         failed.int_attributes.get("cruise.command.exit_code"),
         Some(&9)
     );
-    assert!(
-        failed
-            .attributes
-            .keys()
-            .chain(failed.int_attributes.keys())
-            .chain(failed.bool_attributes.keys())
-            .all(|key| !key.starts_with("cruise.ci.")),
-        "malformed marker added CI attributes: {failed:#?}"
-    );
+    for span in [failed, attempt] {
+        assert_no_untrusted_ci_attributes(span);
+    }
     assert_payload_omits(
         &requests,
         &[
@@ -2746,6 +2779,8 @@ fn command_diagnostic_markers_export_bounded_ci_and_sync_base_attributes() {
       printf '%s\n' 'human-readable private sync error' >&2
       printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github api_error unobserved unknown unknown 502' >&2
       printf '%s\n' 'CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github invalid-reason-secret FAILURE false 3 invalid-extra-secret' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 private-provider-secret ci_failed unsupported-reason-secret false 3 503' >&2
       exit 1
 ",
     );
@@ -2760,16 +2795,26 @@ fn command_diagnostic_markers_export_bounded_ci_and_sync_base_attributes() {
 
     let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
     let exported_spans = spans(&requests);
-    let failed = named_span(
-        &exported_spans,
-        "cruise.step",
-        "cruise.step.name",
-        "diagnostics",
-    );
-    assert_eq!(
-        failed.int_attributes.get("cruise.ci.http_status"),
-        Some(&502)
-    );
+    let (failed, attempt) =
+        assert_command_failure_diagnostic(&exported_spans, "diagnostics", "valid", true);
+    for span in [failed, attempt] {
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.provider")
+                .map(String::as_str),
+            Some("github"),
+            "{span:#?}"
+        );
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.failure_reason")
+                .map(String::as_str),
+            Some("api_error"),
+            "{span:#?}"
+        );
+        assert_eq!(span.int_attributes.get("cruise.ci.http_status"), Some(&502));
+        assert_eq!(span.attributes["cruise.ci.diagnostic_status"], "valid");
+    }
     assert_eq!(
         failed
             .attributes
@@ -2783,8 +2828,65 @@ fn command_diagnostic_markers_export_bounded_ci_and_sync_base_attributes() {
         &[
             "diagnostic-marker-input-secret",
             "human-readable private sync error",
+            "invalid-reason-secret",
+            "invalid-extra-secret",
+            "private-provider-secret",
+            "unsupported-reason-secret",
         ],
     );
+}
+
+#[test]
+fn command_failure_diagnostic_status_covers_missing_and_unsupported_markers() {
+    for (step_name, script, status, stderr_present, input_secret, output_secret) in [
+        (
+            "missing",
+            r"printf '%s' 'missing-stdout-private-secret'; exit 8",
+            "missing",
+            false,
+            "missing-marker-input-secret",
+            "missing-stdout-private-secret",
+        ),
+        (
+            "unsupported",
+            r"printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 private-provider-secret ci_failed unsupported-field-secret false 3 503' >&2; printf '%s\n' 'unsupported-marker-private-stderr-secret' >&2; exit 9",
+            "unsupported",
+            true,
+            "unsupported-marker-input-secret",
+            "unsupported-marker-private-stderr-secret",
+        ),
+    ] {
+        let collector = Collector::start();
+        let yaml = format!("steps:\n  {step_name}:\n    command: |\n      {script}\n");
+        let fixture = Fixture::new(&yaml);
+        let output = fixture.run(
+            &borrowed_env(&otlp_env(&collector.endpoint())),
+            input_secret,
+        );
+        assert!(
+            !output.status.success(),
+            "{step_name} diagnostic fixture unexpectedly succeeded"
+        );
+
+        let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+        let exported_spans = spans(&requests);
+        let (step, attempt) =
+            assert_command_failure_diagnostic(&exported_spans, step_name, status, stderr_present);
+        for span in [step, attempt] {
+            assert_no_untrusted_ci_attributes(span);
+        }
+        assert_payload_omits(&requests, &[input_secret, output_secret]);
+        if step_name == "unsupported" {
+            assert_payload_omits(
+                &requests,
+                &[
+                    "private-provider-secret",
+                    "unsupported-field-secret",
+                    "unsupported-marker-private-stderr-secret",
+                ],
+            );
+        }
+    }
 }
 
 #[test]

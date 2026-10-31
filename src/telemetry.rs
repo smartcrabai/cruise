@@ -431,6 +431,15 @@ pub(crate) fn record_command_failure(
     }
 
     let span = context.span();
+    let (diagnostic, diagnostic_status) = last_ci_diagnostic(stderr);
+    span.set_attribute(KeyValue::new(
+        "cruise.ci.diagnostic_status",
+        diagnostic_status,
+    ));
+    span.set_attribute(KeyValue::new(
+        "cruise.command.stderr_present",
+        !stderr.is_empty(),
+    ));
     if let Some(exit_code) = exit_code {
         span.set_attribute(KeyValue::new(
             "cruise.command.exit_code",
@@ -440,7 +449,7 @@ pub(crate) fn record_command_failure(
     if let Some(signal) = signal {
         span.set_attribute(KeyValue::new("cruise.command.signal", i64::from(signal)));
     }
-    if let Some(diagnostic) = last_ci_diagnostic(stderr) {
+    if let Some(diagnostic) = diagnostic {
         span.set_attribute(KeyValue::new("cruise.ci.provider", diagnostic.provider));
         span.set_attribute(KeyValue::new("cruise.ci.failure_reason", diagnostic.reason));
         span.set_attribute(KeyValue::new("cruise.ci.state", diagnostic.state));
@@ -459,8 +468,39 @@ pub(crate) fn record_command_failure(
     }
 }
 
-fn last_ci_diagnostic(stderr: &str) -> Option<CiDiagnostic> {
-    stderr.lines().rev().find_map(parse_ci_diagnostic_line)
+fn last_ci_diagnostic(stderr: &str) -> (Option<CiDiagnostic>, &'static str) {
+    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V2";
+    const VERSION_PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V";
+
+    let mut saw_invalid = false;
+    let mut saw_unsupported = false;
+    for line in stderr.lines().rev() {
+        if let Some(diagnostic) = parse_ci_diagnostic_line(line) {
+            return (Some(diagnostic), "valid");
+        }
+
+        let Some(token) = line.split_ascii_whitespace().next() else {
+            continue;
+        };
+        if token == PREFIX {
+            saw_invalid = true;
+        } else if let Some(version) = token.strip_prefix(VERSION_PREFIX)
+            && !version.is_empty()
+            && version != "2"
+            && version.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            saw_unsupported = true;
+        }
+    }
+
+    let status = if saw_invalid {
+        "invalid"
+    } else if saw_unsupported {
+        "unsupported"
+    } else {
+        "missing"
+    };
+    (None, status)
 }
 
 fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
@@ -885,8 +925,10 @@ mod tests {
             "CRUISE_CI_DIAGNOSTIC_V2 github leaked FAILURE false 7 500\n",
             "CRUISE_CI_DIAGNOSTIC_V2 gitlab graphql_error failed unknown 0 unknown\n",
         );
+        let (diagnostic, status) = last_ci_diagnostic(stderr);
+        assert_eq!(status, "valid");
         assert_eq!(
-            last_ci_diagnostic(stderr),
+            diagnostic,
             Some(CiDiagnostic {
                 provider: "gitlab",
                 reason: "graphql_error",
@@ -896,6 +938,61 @@ mod tests {
                 http_status: None,
             })
         );
+    }
+
+    #[test]
+    fn ci_diagnostic_status_is_bounded_and_uses_global_precedence() {
+        let valid = "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 2 500";
+        for (stderr, expected_status, has_valid_diagnostic) in [
+            ("", "missing", false),
+            ("private human-readable error", "missing", false),
+            (
+                "error mentions CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 2 500",
+                "missing",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V2suffix github ci_failed FAILURE false 2 500",
+                "missing",
+                false,
+            ),
+            ("CRUISE_CI_DIAGNOSTIC_Vx private-value", "missing", false),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V2 github private-reason FAILURE false 2 500",
+                "invalid",
+                false,
+            ),
+            (
+                " CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 2 500",
+                "invalid",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V3 private-value",
+                "unsupported",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V3 private-value\nCRUISE_CI_DIAGNOSTIC_V2 malformed",
+                "invalid",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V2 malformed\nCRUISE_CI_DIAGNOSTIC_V3 private-value",
+                "invalid",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V3 private-value\n{valid}\nCRUISE_CI_DIAGNOSTIC_V2 malformed",
+                "valid",
+                true,
+            ),
+        ] {
+            let stderr = stderr.replace("{valid}", valid);
+            let (diagnostic, status) = last_ci_diagnostic(&stderr);
+            assert_eq!(status, expected_status, "{stderr:?}");
+            assert_eq!(diagnostic.is_some(), has_valid_diagnostic, "{stderr:?}");
+        }
     }
 
     #[test]
