@@ -2173,6 +2173,17 @@ Outcomes include `success`, `failed`, `error`, `cancelled`, `timeout`, and `paus
 
 Failed shell attempts include numeric `cruise.command.exit_code` or, on Unix when terminated by a signal, `cruise.command.signal`. The terminal failed result also annotates its step span; a recovered rate-limit attempt does not annotate the successful step.
 
+Completed unsuccessful shell results also record `cruise.command.stderr_present` (whether captured stderr is nonempty, including whitespace) and `cruise.ci.diagnostic_status` on those spans:
+
+| Diagnostic status | Meaning |
+|---|---|
+| `valid` | A bounded, allowlisted `CRUISE_CI_DIAGNOSTIC_V2` marker was accepted |
+| `invalid` | A V2 marker candidate was present, but none passed validation |
+| `unsupported` | Only unsupported numeric marker versions were recognized |
+| `missing` | No CI marker candidate was recognized in captured stderr |
+
+The last valid V2 marker wins even if later lines are malformed or unsupported; otherwise `invalid` takes precedence over `unsupported`. Candidates start with the marker token, allowing leading ASCII whitespace for detection only. Unknown versions and malformed values are never exported. `missing` can also describe an unrelated command or an old workflow without diagnostic markers: these statuses describe captured output, not the underlying CI failure. Spawn errors, timeouts, and cancellation without a completed shell result do not add these fields. Both attributes are trace-only, not metric labels.
+
 Jcode failures add fixed diagnostics to the affected `cruise.attempt` span:
 
 | Attribute | Meaning |
