@@ -41,7 +41,7 @@ cardinality, unbounded verification or Rust refinement proof is claimed.
 
 ## Reproduce with the repository pins
 
-From the repository root, with Node **26.12.0** on PATH and Rust **1.99.1**
+From the repository root, with Node **26.12.1** on PATH and Rust **1.99.1**
 installed:
 
 ```sh
