@@ -10,6 +10,8 @@ use std::{
     time::Instant,
 };
 
+use serde::{Deserialize, Serialize};
+
 use opentelemetry::{
     Context, KeyValue, global,
     metrics::{Counter, Histogram, MeterProvider},
@@ -410,7 +412,41 @@ pub(crate) fn record_jcode_failure(stage: &'static str, reason: &'static str) {
     span.set_attribute(KeyValue::new("cruise.agent.failure_stage", stage));
     span.set_attribute(KeyValue::new("cruise.agent.failure_reason", reason));
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CiFailedCheck {
+    name: String,
+    state: CiCheckState,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum CiCheckState {
+    #[serde(rename = "FAILURE")]
+    Failure,
+    #[serde(rename = "ERROR")]
+    Error,
+    #[serde(rename = "TIMED_OUT")]
+    TimedOut,
+    #[serde(rename = "CANCELLED")]
+    Cancelled,
+    #[serde(rename = "ACTION_REQUIRED")]
+    ActionRequired,
+    #[serde(rename = "STARTUP_FAILURE")]
+    StartupFailure,
+    #[serde(rename = "STALE")]
+    Stale,
+    #[serde(rename = "failed")]
+    Failed,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CiDiagnosticDetails {
+    checks: Vec<CiFailedCheck>,
+    truncated: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 struct CiDiagnostic {
     provider: &'static str,
     reason: &'static str,
@@ -418,7 +454,42 @@ struct CiDiagnostic {
     head_matches: Option<bool>,
     check_count: Option<i64>,
     http_status: Option<i64>,
+    failed_checks: Vec<CiFailedCheck>,
+    failed_checks_truncated: bool,
 }
+
+fn next_ascii_token<'a>(line: &'a str, position: &mut usize) -> Option<&'a str> {
+    let bytes = line.as_bytes();
+    while *position < bytes.len() && bytes[*position].is_ascii_whitespace() {
+        *position += 1;
+    }
+    let start = *position;
+    while *position < bytes.len() && !bytes[*position].is_ascii_whitespace() {
+        *position += 1;
+    }
+    (start != *position).then_some(&line[start..*position])
+}
+
+fn ci_check_state_allowed(provider: &str, state: CiCheckState) -> bool {
+    match provider {
+        "github" => matches!(
+            state,
+            CiCheckState::Failure
+                | CiCheckState::Error
+                | CiCheckState::TimedOut
+                | CiCheckState::Cancelled
+                | CiCheckState::ActionRequired
+                | CiCheckState::StartupFailure
+                | CiCheckState::Stale
+        ),
+        "gitlab" => state == CiCheckState::Failed,
+        _ => false,
+    }
+}
+
+const MAX_CI_DIAGNOSTIC_BYTES: usize = 16_384;
+const MAX_CI_FAILED_CHECKS: usize = 10;
+const MAX_CI_CHECK_NAME_CHARS: usize = 128;
 
 pub(crate) fn record_command_failure(
     context: &Context,
@@ -462,6 +533,15 @@ pub(crate) fn record_command_failure(
         if let Some(http_status) = diagnostic.http_status {
             span.set_attribute(KeyValue::new("cruise.ci.http_status", http_status));
         }
+        if diagnostic.reason == "ci_failed" {
+            let failed_checks = serde_json::to_string(&diagnostic.failed_checks)
+                .expect("serializing validated CI failure checks cannot fail");
+            span.set_attribute(KeyValue::new("cruise.ci.failed_checks", failed_checks));
+            span.set_attribute(KeyValue::new(
+                "cruise.ci.failed_checks_truncated",
+                diagnostic.failed_checks_truncated,
+            ));
+        }
     }
     if let Some(reason) = last_sync_base_diagnostic(stderr) {
         span.set_attribute(KeyValue::new("cruise.sync_base.failure_reason", reason));
@@ -469,7 +549,7 @@ pub(crate) fn record_command_failure(
 }
 
 fn last_ci_diagnostic(stderr: &str) -> (Option<CiDiagnostic>, &'static str) {
-    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V2";
+    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V3";
     const VERSION_PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V";
 
     let mut saw_invalid = false;
@@ -486,7 +566,7 @@ fn last_ci_diagnostic(stderr: &str) -> (Option<CiDiagnostic>, &'static str) {
             saw_invalid = true;
         } else if let Some(version) = token.strip_prefix(VERSION_PREFIX)
             && !version.is_empty()
-            && version != "2"
+            && version != "3"
             && version.bytes().all(|byte| byte.is_ascii_digit())
         {
             saw_unsupported = true;
@@ -504,21 +584,21 @@ fn last_ci_diagnostic(stderr: &str) -> (Option<CiDiagnostic>, &'static str) {
 }
 
 fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
-    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V2";
+    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V3";
 
-    if line.len() > 256 || !line.is_ascii() || !line.starts_with(PREFIX) {
+    if line.len() > MAX_CI_DIAGNOSTIC_BYTES || !line.is_ascii() || !line.starts_with(PREFIX) {
         return None;
     }
-    let mut fields = line.split_ascii_whitespace();
-    if fields.next()? != PREFIX {
+    let mut position = 0;
+    if next_ascii_token(line, &mut position)? != PREFIX {
         return None;
     }
-    let provider = match fields.next()? {
+    let provider = match next_ascii_token(line, &mut position)? {
         "github" => "github",
         "gitlab" => "gitlab",
         _ => return None,
     };
-    let reason = match fields.next()? {
+    let reason = match next_ascii_token(line, &mut position)? {
         "local_head_error" => "local_head_error",
         "repository_query_error" => "repository_query_error",
         "repository_invalid" => "repository_invalid",
@@ -536,7 +616,7 @@ fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
         "timeout" => "timeout",
         _ => return None,
     };
-    let state = match fields.next()? {
+    let state = match next_ascii_token(line, &mut position)? {
         "unobserved" => "unobserved",
         "SUCCESS" => "SUCCESS",
         "FAILURE" => "FAILURE",
@@ -561,20 +641,20 @@ fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
         "unknown" => "unknown",
         _ => return None,
     };
-    let head_matches = match fields.next()? {
+    let head_matches = match next_ascii_token(line, &mut position)? {
         "true" => Some(true),
         "false" => Some(false),
         "unknown" => None,
         _ => return None,
     };
-    let check_count = match fields.next()? {
+    let check_count = match next_ascii_token(line, &mut position)? {
         "unknown" => None,
         value if value.bytes().all(|byte| byte.is_ascii_digit()) && !value.is_empty() => {
             Some(value.parse::<i64>().ok()?)
         }
         _ => return None,
     };
-    let http_status = match fields.next()? {
+    let http_status = match next_ascii_token(line, &mut position)? {
         "unknown" => None,
         value if value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_digit()) => {
             let status = value.parse::<i64>().ok()?;
@@ -585,7 +665,24 @@ fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
         }
         _ => return None,
     };
-    if fields.next().is_some() {
+    let tail_start = line.as_bytes()[position..]
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .map(|offset| position + offset)?;
+    let details: CiDiagnosticDetails = serde_json::from_str(&line[tail_start..]).ok()?;
+    if reason != "ci_failed" {
+        if !details.checks.is_empty() || details.truncated {
+            return None;
+        }
+    } else if details.checks.len() > MAX_CI_FAILED_CHECKS
+        || details.checks.iter().any(|check| {
+            check.name.is_empty()
+                || check.name.chars().take(MAX_CI_CHECK_NAME_CHARS + 1).count()
+                    > MAX_CI_CHECK_NAME_CHARS
+                || check.name.chars().any(char::is_control)
+                || !ci_check_state_allowed(provider, check.state)
+        })
+    {
         return None;
     }
 
@@ -596,6 +693,8 @@ fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
         head_matches,
         check_count,
         http_status,
+        failed_checks: details.checks,
+        failed_checks_truncated: details.truncated,
     })
 }
 
@@ -846,12 +945,269 @@ impl Error for InitError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        CiDiagnostic, Context, ErrorTypeState, claim_error_type, is_enabled, last_ci_diagnostic,
-        last_sync_base_diagnostic, parse_ci_diagnostic_line, parse_sync_base_diagnostic_line,
-        workflow_identity,
+        CiCheckState, CiDiagnostic, CiFailedCheck, Context, ErrorTypeState, claim_error_type,
+        is_enabled, last_ci_diagnostic, last_sync_base_diagnostic, parse_ci_diagnostic_line,
+        parse_sync_base_diagnostic_line, workflow_identity,
     };
     use crate::session_config::SessionConfigRef;
     use std::{borrow::Cow, path::PathBuf, sync::OnceLock};
+
+    #[test]
+    fn ci_diagnostic_parser_accepts_bounded_whitelisted_fields_and_v3_details() {
+        let valid = concat!(
+            "CRUISE_CI_DIAGNOSTIC_V3 github head_mismatch FAILURE false 4 503 ",
+            r#"{"checks":[],"truncated":false}"#
+        );
+        assert_eq!(
+            parse_ci_diagnostic_line(valid),
+            Some(CiDiagnostic {
+                provider: "github",
+                reason: "head_mismatch",
+                state: "FAILURE",
+                head_matches: Some(false),
+                check_count: Some(4),
+                http_status: Some(503),
+                failed_checks: vec![],
+                failed_checks_truncated: false,
+            })
+        );
+        assert_eq!(
+            parse_ci_diagnostic_line(concat!(
+                "CRUISE_CI_DIAGNOSTIC_V3 gitlab api_error unknown unknown unknown unknown ",
+                r#"{"checks":[],"truncated":false}"#
+            )),
+            Some(CiDiagnostic {
+                provider: "gitlab",
+                reason: "api_error",
+                state: "unknown",
+                head_matches: None,
+                check_count: None,
+                http_status: None,
+                failed_checks: vec![],
+                failed_checks_truncated: false,
+            })
+        );
+        let failed = parse_ci_diagnostic_line(concat!(
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 ",
+            r#"{"checks":[{"name":"unit-tests","state":"FAILURE"}],"truncated":true}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            failed.failed_checks,
+            vec![CiFailedCheck {
+                name: "unit-tests".into(),
+                state: CiCheckState::Failure,
+            }]
+        );
+        assert!(failed.failed_checks_truncated);
+        assert_eq!(
+            serde_json::to_string(&failed.failed_checks).unwrap(),
+            r#"[{"name":"unit-tests","state":"FAILURE"}]"#
+        );
+
+        let invalid = [
+            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 not-json",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {\"checks\":\"not-an-array\",\"truncated\":false}",
+            " CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 secret-provider ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github arbitrary-reason FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed private-state false 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE secret 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false -1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false +1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 9223372036854775808 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 099 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 600 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 abc {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 1000 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false} extra",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500",
+        ];
+        for line in invalid {
+            assert_eq!(parse_ci_diagnostic_line(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn ci_diagnostic_parser_rejects_unsafe_or_inconsistent_details() {
+        let marker = |reason: &str, details: &str| {
+            format!("CRUISE_CI_DIAGNOSTIC_V3 github {reason} FAILURE false 1 500 {details}")
+        };
+        let invalid_details = [
+            r#"{"checks":[]}"#,
+            r#"{"checks":[],"truncated":"false"}"#,
+            r#"{"checks":[],"truncated":false,"extra":"private"}"#,
+            r#"{"checks":[{"name":"build","state":"FAILURE","extra":"private"}],"truncated":false}"#,
+            r#"{"checks":[{"name":"build","state":"SUCCESS"}],"truncated":false}"#,
+            r#"{"checks":[{"name":"build","state":"failed"}],"truncated":false}"#,
+            r#"{"checks":[{"name":"","state":"FAILURE"}],"truncated":false}"#,
+            r#"{"checks":[{"name":"build","state":"failed"}],"truncated":false}"#,
+            r#"{"checks":[{"name":"build\u0001job","state":"FAILURE"}],"truncated":false}"#,
+        ];
+        for details in invalid_details {
+            assert_eq!(
+                parse_ci_diagnostic_line(&marker("ci_failed", details)),
+                None,
+                "{details:?}"
+            );
+        }
+        assert_eq!(
+            parse_ci_diagnostic_line(&marker(
+                "head_mismatch",
+                r#"{"checks":[{"name":"build","state":"FAILURE"}],"truncated":false}"#
+            )),
+            None
+        );
+        assert_eq!(
+            parse_ci_diagnostic_line(&marker(
+                "head_mismatch",
+                r#"{"checks":[],"truncated":true}"#
+            )),
+            None
+        );
+
+        let ten_checks = format!(
+            r#"{{"checks":[{}],"truncated":false}}"#,
+            [r#"{"name":"build","state":"FAILURE"}"#; 10].join(",")
+        );
+        let ten = parse_ci_diagnostic_line(&marker("ci_failed", &ten_checks)).unwrap();
+        assert_eq!(ten.failed_checks.len(), super::MAX_CI_FAILED_CHECKS);
+
+        let too_many = format!(
+            r#"{{"checks":[{}],"truncated":false}}"#,
+            [r#"{"name":"build","state":"FAILURE"}"#; 11].join(",")
+        );
+        assert_eq!(
+            parse_ci_diagnostic_line(&marker("ci_failed", &too_many)),
+            None
+        );
+
+        let too_long_name = format!(
+            r#"{{"checks":[{{"name":"{}","state":"FAILURE"}}],"truncated":false}}"#,
+            "x".repeat(129)
+        );
+        assert_eq!(
+            parse_ci_diagnostic_line(&marker("ci_failed", &too_long_name)),
+            None
+        );
+        let unicode_name = format!(
+            r#"{{"checks":[{{"name":"{}","state":"FAILURE"}}],"truncated":false}}"#,
+            r"\u00e9".repeat(128)
+        );
+        let unicode = parse_ci_diagnostic_line(&marker("ci_failed", &unicode_name)).unwrap();
+        assert_eq!(unicode.failed_checks[0].name.chars().count(), 128);
+        let non_ascii_wire = marker(
+            "ci_failed",
+            r#"{"checks":[{"name":"café","state":"FAILURE"}],"truncated":false}"#,
+        );
+        assert_eq!(parse_ci_diagnostic_line(&non_ascii_wire), None);
+
+        let valid = marker("ci_failed", r#"{"checks":[],"truncated":false}"#);
+        let at_limit = format!(
+            "{valid}{}",
+            " ".repeat(super::MAX_CI_DIAGNOSTIC_BYTES - valid.len())
+        );
+        assert!(parse_ci_diagnostic_line(&at_limit).is_some());
+        let oversized = format!("{at_limit} ");
+        assert_eq!(parse_ci_diagnostic_line(&oversized), None);
+    }
+
+    #[test]
+    fn ci_diagnostic_parser_uses_last_valid_full_line_without_neighbor_leaks() {
+        let stderr = concat!(
+            "raw command error private-details-token\n",
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {\"checks\":[{\"name\":\"old-check\",\"state\":\"FAILURE\"}],\"truncated\":false}\n",
+            "CRUISE_CI_DIAGNOSTIC_V3 github private-reason FAILURE false 99 500 {\"checks\":[{\"name\":\"neighbor-private-token\",\"state\":\"FAILURE\"}],\"truncated\":false}\n",
+            "CRUISE_CI_DIAGNOSTIC_V3 gitlab ci_failed failed unknown 2 unknown {\"checks\":[{\"name\":\"deploy\",\"state\":\"failed\"}],\"truncated\":true}\n",
+            "raw trailing stderr private-trailing-token\n",
+        );
+        let (diagnostic, status) = last_ci_diagnostic(stderr);
+        assert_eq!(status, "valid");
+        let diagnostic = diagnostic.unwrap();
+        assert_eq!(diagnostic.provider, "gitlab");
+        assert_eq!(diagnostic.reason, "ci_failed");
+        assert_eq!(diagnostic.state, "failed");
+        assert_eq!(diagnostic.check_count, Some(2));
+        assert_eq!(
+            diagnostic.failed_checks,
+            vec![CiFailedCheck {
+                name: "deploy".into(),
+                state: CiCheckState::Failed,
+            }]
+        );
+        assert!(diagnostic.failed_checks_truncated);
+        let exported = serde_json::to_string(&diagnostic.failed_checks).unwrap();
+        assert!(!exported.contains("private-details-token"));
+        assert!(!exported.contains("neighbor-private-token"));
+        assert!(!exported.contains("private-trailing-token"));
+    }
+
+    #[test]
+    fn ci_diagnostic_status_is_bounded_and_uses_global_precedence() {
+        let valid = concat!(
+            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 2 500 ",
+            r#"{"checks":[],"truncated":false}"#
+        );
+        for (stderr, expected_status, has_valid_diagnostic) in [
+            ("", "missing", false),
+            ("private human-readable error", "missing", false),
+            (
+                "error mentions CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 2 500",
+                "missing",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V3suffix github ci_failed FAILURE false 2 500",
+                "missing",
+                false,
+            ),
+            ("CRUISE_CI_DIAGNOSTIC_Vx private-value", "missing", false),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V3 github private-reason FAILURE false 2 500 {\"checks\":[],\"truncated\":false}",
+                "invalid",
+                false,
+            ),
+            (
+                " CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 2 500 {\"checks\":[],\"truncated\":false}",
+                "invalid",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 2 500 {\"checks\":[],\"truncated\":false}",
+                "unsupported",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 2 500 {\"checks\":[],\"truncated\":false}",
+                "unsupported",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V4 private-value\nCRUISE_CI_DIAGNOSTIC_V2 malformed",
+                "unsupported",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V2 malformed\nCRUISE_CI_DIAGNOSTIC_V3 private-value",
+                "invalid",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V3 private-value\n{valid}\nCRUISE_CI_DIAGNOSTIC_V3 malformed",
+                "valid",
+                true,
+            ),
+        ] {
+            let stderr = stderr.replace("{valid}", valid);
+            let (diagnostic, status) = last_ci_diagnostic(&stderr);
+            assert_eq!(status, expected_status, "{stderr:?}");
+            assert_eq!(diagnostic.is_some(), has_valid_diagnostic, "{stderr:?}");
+        }
+    }
 
     #[test]
     fn sdk_disabled_overrides_explicit_opt_in() {
@@ -863,136 +1219,6 @@ mod tests {
         assert!(!is_enabled(None, None));
         assert!(!is_enabled(Some("false"), None));
         assert!(is_enabled(Some("true"), None));
-    }
-
-    #[test]
-    fn ci_diagnostic_parser_accepts_only_bounded_whitelisted_fields() {
-        let valid = "CRUISE_CI_DIAGNOSTIC_V2 github head_mismatch FAILURE false 4 503";
-        assert_eq!(
-            parse_ci_diagnostic_line(valid),
-            Some(CiDiagnostic {
-                provider: "github",
-                reason: "head_mismatch",
-                state: "FAILURE",
-                head_matches: Some(false),
-                check_count: Some(4),
-                http_status: Some(503),
-            })
-        );
-        assert_eq!(
-            parse_ci_diagnostic_line(
-                "CRUISE_CI_DIAGNOSTIC_V2 gitlab api_error unknown unknown unknown unknown"
-            ),
-            Some(CiDiagnostic {
-                provider: "gitlab",
-                reason: "api_error",
-                state: "unknown",
-                head_matches: None,
-                check_count: None,
-                http_status: None,
-            })
-        );
-
-        for invalid in [
-            "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 1",
-            " CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 500",
-            "CRUISE_CI_DIAGNOSTIC_V2 secret-provider ci_failed FAILURE false 1 500",
-            "CRUISE_CI_DIAGNOSTIC_V2 github arbitrary-reason FAILURE false 1 500",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed private-state false 1 500",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE secret 1 500",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false -1 500",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false +1 500",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 9223372036854775808 500",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 099",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 600",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 abc",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 1000",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 500 extra",
-        ] {
-            assert_eq!(parse_ci_diagnostic_line(invalid), None, "{invalid:?}");
-        }
-        assert_eq!(
-            parse_ci_diagnostic_line(&format!("{valid} {}", "x".repeat(256))),
-            None
-        );
-    }
-
-    #[test]
-    fn ci_diagnostic_parser_uses_last_valid_line_without_exporting_neighbors() {
-        let stderr = concat!(
-            "raw command error with private details\n",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 2 500\n",
-            "CRUISE_CI_DIAGNOSTIC_V2 github leaked FAILURE false 7 500\n",
-            "CRUISE_CI_DIAGNOSTIC_V2 gitlab graphql_error failed unknown 0 unknown\n",
-        );
-        let (diagnostic, status) = last_ci_diagnostic(stderr);
-        assert_eq!(status, "valid");
-        assert_eq!(
-            diagnostic,
-            Some(CiDiagnostic {
-                provider: "gitlab",
-                reason: "graphql_error",
-                state: "failed",
-                head_matches: None,
-                check_count: Some(0),
-                http_status: None,
-            })
-        );
-    }
-
-    #[test]
-    fn ci_diagnostic_status_is_bounded_and_uses_global_precedence() {
-        let valid = "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 2 500";
-        for (stderr, expected_status, has_valid_diagnostic) in [
-            ("", "missing", false),
-            ("private human-readable error", "missing", false),
-            (
-                "error mentions CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 2 500",
-                "missing",
-                false,
-            ),
-            (
-                "CRUISE_CI_DIAGNOSTIC_V2suffix github ci_failed FAILURE false 2 500",
-                "missing",
-                false,
-            ),
-            ("CRUISE_CI_DIAGNOSTIC_Vx private-value", "missing", false),
-            (
-                "CRUISE_CI_DIAGNOSTIC_V2 github private-reason FAILURE false 2 500",
-                "invalid",
-                false,
-            ),
-            (
-                " CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 2 500",
-                "invalid",
-                false,
-            ),
-            (
-                "CRUISE_CI_DIAGNOSTIC_V3 private-value",
-                "unsupported",
-                false,
-            ),
-            (
-                "CRUISE_CI_DIAGNOSTIC_V3 private-value\nCRUISE_CI_DIAGNOSTIC_V2 malformed",
-                "invalid",
-                false,
-            ),
-            (
-                "CRUISE_CI_DIAGNOSTIC_V2 malformed\nCRUISE_CI_DIAGNOSTIC_V3 private-value",
-                "invalid",
-                false,
-            ),
-            (
-                "CRUISE_CI_DIAGNOSTIC_V3 private-value\n{valid}\nCRUISE_CI_DIAGNOSTIC_V2 malformed",
-                "valid",
-                true,
-            ),
-        ] {
-            let stderr = stderr.replace("{valid}", valid);
-            let (diagnostic, status) = last_ci_diagnostic(&stderr);
-            assert_eq!(status, expected_status, "{stderr:?}");
-            assert_eq!(diagnostic.is_some(), has_valid_diagnostic, "{stderr:?}");
-        }
     }
 
     #[test]
