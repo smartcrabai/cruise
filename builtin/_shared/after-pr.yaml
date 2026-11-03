@@ -159,11 +159,17 @@ steps:
             detail_page_available=false
           fi
         done
+        if [ "$(printf '%s' "$checks" | jq -r 'length')" -eq 0 ]; then details_truncated=true; fi
         if ! diagnostic_payload=$(jq -ac -n --argjson checks "$checks" --argjson truncated "$details_truncated" '{{checks:$checks,truncated:$truncated}}'); then
           diagnostic_payload='{{"checks":[],"truncated":true}}'
         fi
       }}
       collect_gitlab_failures() {{
+        if [ -z "$observed_pipeline_id" ] || ! printf '%s' "$1" | jq -e --argjson pipeline_id "$observed_pipeline_id" 'type == "object" and (.id | type == "number") and .id == $pipeline_id' >/dev/null 2>&1; then
+          diagnostic_payload='{{"checks":[],"truncated":true}}'
+          gitlab_trace_jobs=
+          return
+        fi
         gitlab_details=$(printf '%s' "$1" | jq -ac '
           def clean: gsub("[\u0000-\u001f\u007f-\u009f]";"") | gsub("^\\s+|\\s+$";"") | .[0:128];
           def known_job_status:
@@ -209,6 +215,7 @@ steps:
       case "{pr.url}" in
         */-/merge_requests/*)
           provider=gitlab
+          observed_pipeline_id=
           state=unobserved
           head_matches=unknown
           check_count=unknown
@@ -251,6 +258,7 @@ steps:
                   diagnostic_reason=unknown_state
                 fi
                 if [ "$diagnostic_reason" = ci_failed ]; then
+                  observed_pipeline_id=$(printf '%s' "$response" | jq -er 'select(type == "object") | .id | select(type == "number")' 2>/dev/null) || observed_pipeline_id=
                   if gitlab_details_response=$(glab ci get --merge-request {pr.number} --status=failed --with-job-details --output json 2>"$diagnostic_stderr"); then
                     collect_gitlab_failures "$gitlab_details_response"
                   else

@@ -412,14 +412,33 @@ pub(crate) fn record_jcode_failure(stage: &'static str, reason: &'static str) {
     span.set_attribute(KeyValue::new("cruise.agent.failure_stage", stage));
     span.set_attribute(KeyValue::new("cruise.agent.failure_reason", reason));
 }
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Eq, PartialEq, Serialize)]
 struct CiFailedCheck {
     name: String,
     state: CiCheckState,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CiFailedCheckFields {
+    name: String,
+    state: CiCheckState,
+}
+
+impl<'de> Deserialize<'de> for CiFailedCheck {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let fields: CiFailedCheckFields = deserialize_object(deserializer)?;
+        Ok(Self {
+            name: fields.name,
+            state: fields.state,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 enum CiCheckState {
     #[serde(rename = "FAILURE")]
     Failure,
@@ -437,6 +456,70 @@ enum CiCheckState {
     Stale,
     #[serde(rename = "failed")]
     Failed,
+}
+
+impl<'de> Deserialize<'de> for CiCheckState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_str(CiCheckStateVisitor)
+    }
+}
+
+struct CiCheckStateVisitor;
+
+impl serde::de::Visitor<'_> for CiCheckStateVisitor {
+    type Value = CiCheckState;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a string CI check state")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match value {
+            "FAILURE" => Ok(CiCheckState::Failure),
+            "ERROR" => Ok(CiCheckState::Error),
+            "TIMED_OUT" => Ok(CiCheckState::TimedOut),
+            "CANCELLED" => Ok(CiCheckState::Cancelled),
+            "ACTION_REQUIRED" => Ok(CiCheckState::ActionRequired),
+            "STARTUP_FAILURE" => Ok(CiCheckState::StartupFailure),
+            "STALE" => Ok(CiCheckState::Stale),
+            "failed" => Ok(CiCheckState::Failed),
+            _ => Err(E::custom("unknown CI check state")),
+        }
+    }
+}
+
+fn deserialize_object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+
+    impl<'de, T> serde::de::Visitor<'de> for ObjectVisitor<T>
+    where
+        T: Deserialize<'de>,
+    {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a JSON object")
+        }
+
+        fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+
+    deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
 }
 
 #[derive(Debug, Deserialize)]
@@ -534,12 +617,16 @@ pub(crate) fn record_command_failure(
             span.set_attribute(KeyValue::new("cruise.ci.http_status", http_status));
         }
         if diagnostic.reason == "ci_failed" {
-            let failed_checks = serde_json::to_string(&diagnostic.failed_checks)
-                .expect("serializing validated CI failure checks cannot fail");
-            span.set_attribute(KeyValue::new("cruise.ci.failed_checks", failed_checks));
+            let truncated = match serde_json::to_string(&diagnostic.failed_checks) {
+                Ok(failed_checks) => {
+                    span.set_attribute(KeyValue::new("cruise.ci.failed_checks", failed_checks));
+                    diagnostic.failed_checks_truncated
+                }
+                Err(_) => true,
+            };
             span.set_attribute(KeyValue::new(
                 "cruise.ci.failed_checks_truncated",
-                diagnostic.failed_checks_truncated,
+                truncated,
             ));
         }
     }
@@ -669,7 +756,28 @@ fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
         .iter()
         .position(|byte| !byte.is_ascii_whitespace())
         .map(|offset| position + offset)?;
-    let details: CiDiagnosticDetails = serde_json::from_str(&line[tail_start..]).ok()?;
+    let details = parse_ci_diagnostic_details(&line[tail_start..], provider, reason)?;
+
+    Some(CiDiagnostic {
+        provider,
+        reason,
+        state,
+        head_matches,
+        check_count,
+        http_status,
+        failed_checks: details.checks,
+        failed_checks_truncated: details.truncated,
+    })
+}
+
+fn parse_ci_diagnostic_details(
+    input: &str,
+    provider: &str,
+    reason: &str,
+) -> Option<CiDiagnosticDetails> {
+    let mut deserializer = serde_json::Deserializer::from_str(input);
+    let details: CiDiagnosticDetails = deserialize_object(&mut deserializer).ok()?;
+    deserializer.end().ok()?;
     if reason != "ci_failed" {
         if !details.checks.is_empty() || details.truncated {
             return None;
@@ -685,17 +793,7 @@ fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
     {
         return None;
     }
-
-    Some(CiDiagnostic {
-        provider,
-        reason,
-        state,
-        head_matches,
-        check_count,
-        http_status,
-        failed_checks: details.checks,
-        failed_checks_truncated: details.truncated,
-    })
+    Some(details)
 }
 
 fn last_sync_base_diagnostic(stderr: &str) -> Option<&'static str> {
@@ -991,7 +1089,7 @@ mod tests {
             "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 ",
             r#"{"checks":[{"name":"unit-tests","state":"FAILURE"}],"truncated":true}"#
         ))
-        .unwrap();
+        .unwrap_or_else(|| panic!("expected failed CI diagnostic to parse"));
         assert_eq!(
             failed.failed_checks,
             vec![CiFailedCheck {
@@ -1001,7 +1099,8 @@ mod tests {
         );
         assert!(failed.failed_checks_truncated);
         assert_eq!(
-            serde_json::to_string(&failed.failed_checks).unwrap(),
+            serde_json::to_string(&failed.failed_checks)
+                .unwrap_or_else(|_| panic!("expected failed checks to serialize")),
             r#"[{"name":"unit-tests","state":"FAILURE"}]"#
         );
 
@@ -1041,6 +1140,9 @@ mod tests {
             r#"{"checks":[]}"#,
             r#"{"checks":[],"truncated":"false"}"#,
             r#"{"checks":[],"truncated":false,"extra":"private"}"#,
+            r#"{"checks":[{"name":"build","state":{"FAILURE":null}}],"truncated":false}"#,
+            "[[],false]",
+            r#"{"checks":[["wrong-check","FAILURE"]],"truncated":false}"#,
             r#"{"checks":[{"name":"build","state":"FAILURE","extra":"private"}],"truncated":false}"#,
             r#"{"checks":[{"name":"build","state":"SUCCESS"}],"truncated":false}"#,
             r#"{"checks":[{"name":"build","state":"failed"}],"truncated":false}"#,
@@ -1074,7 +1176,8 @@ mod tests {
             r#"{{"checks":[{}],"truncated":false}}"#,
             [r#"{"name":"build","state":"FAILURE"}"#; 10].join(",")
         );
-        let ten = parse_ci_diagnostic_line(&marker("ci_failed", &ten_checks)).unwrap();
+        let ten = parse_ci_diagnostic_line(&marker("ci_failed", &ten_checks))
+            .unwrap_or_else(|| panic!("expected ten-check diagnostic to parse"));
         assert_eq!(ten.failed_checks.len(), super::MAX_CI_FAILED_CHECKS);
 
         let too_many = format!(
@@ -1098,7 +1201,8 @@ mod tests {
             r#"{{"checks":[{{"name":"{}","state":"FAILURE"}}],"truncated":false}}"#,
             r"\u00e9".repeat(128)
         );
-        let unicode = parse_ci_diagnostic_line(&marker("ci_failed", &unicode_name)).unwrap();
+        let unicode = parse_ci_diagnostic_line(&marker("ci_failed", &unicode_name))
+            .unwrap_or_else(|| panic!("expected Unicode diagnostic to parse"));
         assert_eq!(unicode.failed_checks[0].name.chars().count(), 128);
         let non_ascii_wire = marker(
             "ci_failed",
@@ -1127,7 +1231,7 @@ mod tests {
         );
         let (diagnostic, status) = last_ci_diagnostic(stderr);
         assert_eq!(status, "valid");
-        let diagnostic = diagnostic.unwrap();
+        let diagnostic = diagnostic.unwrap_or_else(|| panic!("expected valid GitLab diagnostic"));
         assert_eq!(diagnostic.provider, "gitlab");
         assert_eq!(diagnostic.reason, "ci_failed");
         assert_eq!(diagnostic.state, "failed");
@@ -1140,7 +1244,8 @@ mod tests {
             }]
         );
         assert!(diagnostic.failed_checks_truncated);
-        let exported = serde_json::to_string(&diagnostic.failed_checks).unwrap();
+        let exported = serde_json::to_string(&diagnostic.failed_checks)
+            .unwrap_or_else(|_| panic!("expected failed checks to serialize"));
         assert!(!exported.contains("private-details-token"));
         assert!(!exported.contains("neighbor-private-token"));
         assert!(!exported.contains("private-trailing-token"));

@@ -2805,6 +2805,56 @@ fn invalid_ci_markers_export_no_untrusted_fields() {
         ],
     );
 }
+
+#[test]
+fn malformed_ci_marker_does_not_replace_earlier_valid_diagnostic() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        r#"steps:
+  malformed-ci:
+    command: |
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {{"checks":[{{"name":"expected-check","state":"FAILURE"}}],"truncated":false}}' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE true 99 400 {{"checks":[{{"name":"malformed-check-private-secret","state":{{"FAILURE":null}}}}],"truncated":false}}' >&2
+      exit 9
+"#,
+    );
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "malformed-ci-input-secret",
+    );
+    assert!(
+        !output.status.success(),
+        "malformed marker fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let spans = spans(&requests);
+    let (step, attempt) = assert_command_failure_diagnostic(&spans, "malformed-ci", "valid", true);
+    for span in [step, attempt] {
+        assert_eq!(span.attributes["cruise.ci.failure_reason"], "ci_failed");
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.failed_checks")
+                .map(String::as_str),
+            Some(r#"[{"name":"expected-check","state":"FAILURE"}]"#),
+            "{span:#?}"
+        );
+        assert_eq!(
+            span.bool_attributes
+                .get("cruise.ci.failed_checks_truncated"),
+            Some(&false),
+            "{span:#?}"
+        );
+    }
+    assert_payload_omits(
+        &requests,
+        &[
+            "malformed-ci-input-secret",
+            "malformed-check-private-secret",
+        ],
+    );
+}
+
 #[test]
 fn command_diagnostic_markers_export_bounded_ci_and_sync_base_attributes() {
     let collector = Collector::start();
@@ -2922,10 +2972,6 @@ fn command_failure_diagnostic_status_covers_missing_and_unsupported_markers() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "fixture setup and span privacy assertions stay in one scenario"
-)]
 fn builtin_wait_ci_exports_graphql_failure_reason_without_raw_response() {
     let collector = Collector::start();
     let (fixture, env) = builtin_wait_ci_fixture(

@@ -95,7 +95,8 @@ async fn run_command<S: std::hash::BuildHasher>(
             .stderr
             .lines()
             .filter(|line| {
-                !line.starts_with("CRUISE_CI_DIAGNOSTIC_V3 ")
+                !line.starts_with("CRUISE_CI_DIAGNOSTIC_V2 ")
+                    && !line.starts_with("CRUISE_CI_DIAGNOSTIC_V3 ")
                     && !line.starts_with("CRUISE_SYNC_BASE_DIAGNOSTIC_V1 ")
             })
             .any(is_rate_limited);
@@ -486,9 +487,9 @@ mod tests {
             .unwrap_or_else(|error| panic!("create invocation-count temp directory: {error}"));
         let count = root.path().join("invocations");
         #[cfg(unix)]
-        let command = "printf 'x\\n' >> invocations; printf '%s\\n' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE true 1 unknown {\"checks\":[{\"name\":\"429 rate limit\",\"state\":\"FAILURE\"}],\"truncated\":false}' 'CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed 429' >&2; exit 1";
+        let command = "printf 'x\\n' >> invocations; printf '%s\\n' 'CRUISE_CI_DIAGNOSTIC_V2 github graphql_error PENDING true 429 502' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE true 1 unknown {\"checks\":[{\"name\":\"429 rate limit\",\"state\":\"FAILURE\"}],\"truncated\":false}' 'CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed 429' >&2; exit 1";
         #[cfg(windows)]
-        let command = "echo x>>invocations & echo CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE true 1 unknown {\"checks\":[{\"name\":\"429 rate limit\",\"state\":\"FAILURE\"}],\"truncated\":false} 1>&2 & echo CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed 429 1>&2 & exit /b 1";
+        let command = "echo x>>invocations & echo CRUISE_CI_DIAGNOSTIC_V2 github graphql_error PENDING true 429 502 1>&2 & echo CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE true 1 unknown {\"checks\":[{\"name\":\"429 rate limit\",\"state\":\"FAILURE\"}],\"truncated\":false} 1>&2 & echo CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed 429 1>&2 & exit /b 1";
         let result = run_command(
             command,
             1,

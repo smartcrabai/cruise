@@ -888,6 +888,23 @@ fn run_gitlab_wait_ci_command(
     status_exit: i32,
     status_stderr: &str,
 ) -> Output {
+    run_gitlab_wait_ci_command_with_details(
+        command,
+        status_response,
+        status_response,
+        status_exit,
+        status_stderr,
+    )
+}
+
+#[cfg(unix)]
+fn run_gitlab_wait_ci_command_with_details(
+    command: &str,
+    status_response: &str,
+    details_response: &str,
+    status_exit: i32,
+    status_stderr: &str,
+) -> Output {
     let root = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let repo = root.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create repo: {error}"));
@@ -900,36 +917,7 @@ fn run_gitlab_wait_ci_command(
     let trace_count = root.path().join("glab-trace-count");
     std::fs::write(&trace_count, "0\n")
         .unwrap_or_else(|error| panic!("initialize glab trace count: {error}"));
-    cruise::test_support::write_executable_script(
-        &bin.join("glab"),
-        r#"#!/bin/sh
-case "$1:$2" in
-  ci:trace)
-    count=$(cat "$WAIT_CI_TRACE_CALLS" 2>/dev/null || printf 0)
-    count=$((count + 1))
-    printf '%s\n' "$count" > "$WAIT_CI_TRACE_CALLS"
-    printf 'local trace output\n'
-    exit 0 ;;
-  ci:get) ;;
-  *) printf 'unexpected fake glab call: %s\n' "$*" >&2; exit 91 ;;
-esac
-case "$*" in
-  *--with-job-details*)
-    case "$*" in
-      *--status=failed*) ;;
-      *) printf 'failed-job details were not requested correctly: %s\n' "$*" >&2; exit 92 ;;
-    esac
-    count=$(cat "$WAIT_CI_STATUS_CALLS" 2>/dev/null || printf 0)
-    count=$((count + 1))
-    printf '%s\n' "$count" > "$WAIT_CI_STATUS_CALLS" ;;
-esac
-if [ -n "${WAIT_CI_STATUS_STDERR-}" ]; then
-  printf '%s\n' "$WAIT_CI_STATUS_STDERR" >&2
-fi
-printf '%s\n' "$WAIT_CI_STATUS_RESPONSE"
-exit "$WAIT_CI_STATUS_EXIT"
-"#,
-    );
+    cruise::test_support::write_executable_script(&bin.join("glab"), FAKE_GLAB_SCRIPT);
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
@@ -942,6 +930,7 @@ exit "$WAIT_CI_STATUS_EXIT"
         .current_dir(repo)
         .env("PATH", path)
         .env("WAIT_CI_STATUS_RESPONSE", status_response)
+        .env("WAIT_CI_DETAILS_RESPONSE", details_response)
         .env("WAIT_CI_STATUS_EXIT", status_exit.to_string())
         .env("WAIT_CI_STATUS_STDERR", status_stderr)
         .env("WAIT_CI_STATUS_CALLS", &get_count)
@@ -951,8 +940,7 @@ exit "$WAIT_CI_STATUS_EXIT"
     let calls = std::fs::read_to_string(get_count)
         .unwrap_or_else(|error| panic!("read fake glab get count: {error}"));
     let expects_failed = serde_json::from_str::<serde_json::Value>(status_response)
-        .map(|value| value["status"] == "failed")
-        .unwrap_or(false);
+        .is_ok_and(|value| value["status"] == "failed");
     let expected_detail_calls = if status_exit == 0 && expects_failed {
         "1"
     } else {
@@ -963,20 +951,25 @@ exit "$WAIT_CI_STATUS_EXIT"
         expected_detail_calls,
         "failed-job details should be fetched once and reused for traces"
     );
-    let expected_trace_calls = serde_json::from_str::<serde_json::Value>(status_response)
-        .ok()
-        .and_then(|value| {
-            value["jobs"].as_array().map(|jobs| {
-                if value["id"].is_number() {
-                    jobs.iter()
-                        .filter(|job| job["status"] == "failed" && job["id"].is_number())
-                        .count()
-                } else {
-                    0
-                }
+    let expected_trace_calls = match (
+        serde_json::from_str::<serde_json::Value>(status_response).ok(),
+        serde_json::from_str::<serde_json::Value>(details_response).ok(),
+    ) {
+        (Some(status), Some(details))
+            if status_exit == 0
+                && status["status"] == "failed"
+                && status["id"].is_number()
+                && details["id"].is_number()
+                && details["id"] == status["id"] =>
+        {
+            details["jobs"].as_array().map_or(0, |jobs| {
+                jobs.iter()
+                    .filter(|job| job["status"] == "failed" && job["id"].is_number())
+                    .count()
             })
-        })
-        .unwrap_or(0);
+        }
+        _ => 0,
+    };
     let traces = std::fs::read_to_string(trace_count)
         .unwrap_or_else(|error| panic!("read fake glab trace count: {error}"));
     assert_eq!(
@@ -986,6 +979,37 @@ exit "$WAIT_CI_STATUS_EXIT"
     );
     output
 }
+
+#[cfg(unix)]
+const FAKE_GLAB_SCRIPT: &str = r#"#!/bin/sh
+case "$1:$2" in
+  ci:trace)
+    count=$(cat "$WAIT_CI_TRACE_CALLS" 2>/dev/null || printf 0)
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$WAIT_CI_TRACE_CALLS"
+    printf 'local trace output\n'
+    exit 0 ;;
+  ci:get) ;;
+  *) printf 'unexpected fake glab call: %s\n' "$*" >&2; exit 91 ;;
+esac
+response=$WAIT_CI_STATUS_RESPONSE
+case "$*" in
+  *--with-job-details*)
+    case "$*" in
+      *--status=failed*) ;;
+      *) printf 'failed-job details were not requested correctly: %s\n' "$*" >&2; exit 92 ;;
+    esac
+    count=$(cat "$WAIT_CI_STATUS_CALLS" 2>/dev/null || printf 0)
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$WAIT_CI_STATUS_CALLS"
+    response=$WAIT_CI_DETAILS_RESPONSE ;;
+esac
+if [ -n "${WAIT_CI_STATUS_STDERR-}" ]; then
+  printf '%s\n' "$WAIT_CI_STATUS_STDERR" >&2
+fi
+printf '%s\n' "$response"
+exit "$WAIT_CI_STATUS_EXIT"
+"#;
 
 #[cfg(unix)]
 const FAKE_GH_SCRIPT: &str = r#"#!/bin/sh
@@ -1349,6 +1373,31 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     assert_eq!(fixture.gh_calls(), 2);
 
     let fixture = GithubWaitCiFixture::new();
+    let nonfailed_nodes = [
+        serde_json::json!({"__typename":"CheckRun","name":"success","status":"COMPLETED","conclusion":"SUCCESS"}),
+        serde_json::json!({"__typename":"CheckRun","name":"running","status":"IN_PROGRESS","conclusion":null}),
+    ];
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 2),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &nonfailed_nodes,
+                2,
+                false,
+                None,
+            ),
+        ],
+        false,
+    );
+    let payload = wait_ci_payload(&output);
+    assert_eq!(payload["checks"], serde_json::json!([]));
+    assert_eq!(payload["truncated"], true);
+    assert_eq!(fixture.gh_calls(), 2);
+
+    let fixture = GithubWaitCiFixture::new();
     let first_page = [
         serde_json::json!({"__typename":"CheckRun","name":"first","status":"COMPLETED","conclusion":"FAILURE"}),
         serde_json::json!({"__typename":"StatusContext","context":"second","state":"FAILURE"}),
@@ -1565,8 +1614,9 @@ fn builtin_gitlab_wait_ci_markers_classify_failure_and_untrusted_responses() {
     let command =
         builtin_wait_ci_command_for_url("tdd", "https://gitlab.com/owner/repo/-/merge_requests/42");
 
-    let output = run_gitlab_wait_ci_command(
+    let output = run_gitlab_wait_ci_command_with_details(
         &command,
+        r#"{"id":1,"status":"failed"}"#,
         r#"{"id":1,"status":"failed","jobs":[{"id":21,"name":"unit tests","status":"failed"},{"id":22,"name":"passing job","status":"success"}]}"#,
         0,
         "",
@@ -1638,4 +1688,36 @@ fn builtin_gitlab_wait_ci_markers_classify_failure_and_untrusted_responses() {
         "CRUISE_CI_DIAGNOSTIC_V3 gitlab unknown_state unknown unknown unknown unknown {\"checks\":[],\"truncated\":false}"
     );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret raw status"));
+}
+#[cfg(unix)]
+#[test]
+fn builtin_gitlab_wait_ci_rejects_unmatched_pipeline_details() {
+    let command =
+        builtin_wait_ci_command_for_url("tdd", "https://gitlab.com/owner/repo/-/merge_requests/42");
+    for (status_response, details_response) in [
+        (
+            r#"{"id":1,"status":"failed"}"#,
+            r#"{"id":2,"status":"failed","jobs":[{"id":21,"name":"other pipeline job","status":"failed"}]}"#,
+        ),
+        (
+            r#"{"id":1,"status":"failed"}"#,
+            r#"{"status":"failed","jobs":[{"id":21,"name":"unknown pipeline job","status":"failed"}]}"#,
+        ),
+        (
+            r#"{"status":"failed"}"#,
+            r#"{"id":1,"status":"failed","jobs":[{"id":21,"name":"unobserved pipeline job","status":"failed"}]}"#,
+        ),
+    ] {
+        let output = run_gitlab_wait_ci_command_with_details(
+            &command,
+            status_response,
+            details_response,
+            0,
+            "",
+        );
+        assert!(wait_ci_marker(&output).contains("gitlab ci_failed "));
+        let payload = wait_ci_payload(&output);
+        assert_eq!(payload["checks"], serde_json::json!([]));
+        assert_eq!(payload["truncated"], true);
+    }
 }
