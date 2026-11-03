@@ -20,6 +20,7 @@ steps:
   wait-ci:
     timeout: 30m
     command: |-
+      diagnostic_payload='{{"checks":[],"truncated":false}}'
       ci_diagnostic() {{
         diagnostic_state=$state
         case "$diagnostic_state" in
@@ -41,11 +42,180 @@ steps:
           [12345][0123456789][0123456789]) ;;
           *) diagnostic_http_status=unknown ;;
         esac
-        printf 'CRUISE_CI_DIAGNOSTIC_V2 %s %s %s %s %s %s\n' "$provider" "$1" "$diagnostic_state" "$diagnostic_head_matches" "$diagnostic_check_count" "$diagnostic_http_status" >&2
+        printf 'CRUISE_CI_DIAGNOSTIC_V3 %s %s %s %s %s %s %s\n' "$provider" "$1" "$diagnostic_state" "$diagnostic_head_matches" "$diagnostic_check_count" "$diagnostic_http_status" "$diagnostic_payload" >&2
+      }}
+      github_page() {{
+        printf '%s' "$1" | jq -ac --argjson total "$check_count" '
+          def classify:
+            if type != "object" then {{check:null,bad:true}}
+            else . as $node
+            | if $node.__typename == "CheckRun" then
+                if ($node.status | type) != "string" or $node.status == "" then {{check:null,bad:true}}
+                elif $node.status == "COMPLETED" then
+                  if ($node.conclusion | type) != "string" then {{check:null,bad:true}}
+                  elif (["FAILURE","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE","STALE"] | index($node.conclusion)) != null then
+                    {{check:{{name:$node.name,state:$node.conclusion}},bad:false}}
+                  elif (["SUCCESS","NEUTRAL","SKIPPED"] | index($node.conclusion)) != null then {{check:null,bad:false}}
+                  else {{check:null,bad:true}}
+                  end
+                elif (["QUEUED","IN_PROGRESS","WAITING","PENDING","REQUESTED"] | index($node.status)) != null then {{check:null,bad:false}}
+                else {{check:null,bad:true}}
+                end
+              elif $node.__typename == "StatusContext" then
+                if (["FAILURE","ERROR"] | index($node.state)) != null then
+                  {{check:{{name:$node.context,state:$node.state}},bad:false}}
+                elif (["SUCCESS","PENDING","EXPECTED"] | index($node.state)) != null then {{check:null,bad:false}}
+                else {{check:null,bad:true}}
+                end
+              else {{check:null,bad:true}}
+              end
+            end;
+          def clean: gsub("[\u0000-\u001f\u007f-\u009f]";"") | gsub("^\\s+|\\s+$";"") | .[0:128];
+          .data.repository.object.statusCheckRollup.contexts as $contexts
+          | (($contexts | type) == "object") as $contexts_valid
+          | (($contexts.nodes | type) == "array") as $nodes_valid
+          | (if $nodes_valid then $contexts.nodes else [] end) as $nodes
+          | ($nodes | map(classify)) as $classified
+          | ([$classified[] | select(.check != null) | .check]) as $candidates
+          | ($candidates | map(
+              . as $candidate
+              | if ($candidate.name | type) == "string" then
+                  ($candidate.name | clean) as $name
+                  | if $name == "" then {{check:null,bad:true}}
+                    else {{check:{{name:$name,state:$candidate.state}},bad:($name != $candidate.name)}}
+                    end
+                else {{check:null,bad:true}}
+                end
+            )) as $sanitized
+          | ([$sanitized[] | select(.check != null) | .check]) as $valid
+          | ($contexts.pageInfo // {{}}) as $page
+          | (($contexts.totalCount | type) == "number" and $contexts.totalCount == $total) as $total_valid
+          | (($page | type) == "object" and ($page.hasNextPage | type) == "boolean") as $page_valid
+          | ($page_valid and $page.hasNextPage) as $more
+          | (($page.endCursor | type) == "string" and $page.endCursor != "") as $cursor_valid
+          | {{
+              checks:$valid[:10],
+              node_count:($nodes | length),
+              truncated:(($contexts_valid | not) or ($nodes_valid | not) or ($total_valid | not) or ($page_valid | not) or ($more and ($cursor_valid | not)) or ([$classified[] | select(.bad)] | length) > 0 or ([$sanitized[] | select(.bad)] | length) > 0 or ($valid | length) > 10),
+              more:$more,
+              cursor:(if $cursor_valid then $page.endCursor else "" end)
+            }}
+        '
+      }}
+      collect_github_failures() {{
+        checks='[]'
+        details_truncated=false
+        current_response=
+        detail_page_available=true
+        fetched_nodes=0
+        seen_cursors=' '
+        if ! current_response=$(gh api graphql -f owner="$owner" -f name="$name" -F number={pr.number} -f head="$expected_head" -f query="$detail_query" 2>"$diagnostic_stderr"); then
+          details_truncated=true
+          detail_page_available=false
+        fi
+        while [ "$detail_page_available" = true ]; do
+          if ! printf '%s' "$current_response" | jq -e --arg head "$expected_head" '((.errors // []) | (type == "array" and length == 0)) and .data.repository.pullRequest.headRefOid == $head and .data.repository.object.oid == $head' >/dev/null 2>&1; then
+            details_truncated=true
+            break
+          fi
+          if ! page=$(github_page "$current_response" 2>/dev/null); then
+            details_truncated=true
+            break
+          fi
+          page_checks=$(printf '%s' "$page" | jq -ac '.checks')
+          page_node_count=$(printf '%s' "$page" | jq -r '.node_count')
+          fetched_nodes=$((fetched_nodes + page_node_count))
+          if [ "$(printf '%s' "$page" | jq -r '.truncated')" = true ]; then details_truncated=true; fi
+          merged=$(jq -ac -n --argjson old "$checks" --argjson new "$page_checks" '$old + $new')
+          merged_count=$(printf '%s' "$merged" | jq -r 'length')
+          if [ "$merged_count" -gt 10 ]; then details_truncated=true; fi
+          checks=$(printf '%s' "$merged" | jq -ac '.[0:10]')
+          page_more=$(printf '%s' "$page" | jq -r '.more')
+          if [ "$page_more" = true ] && [ "$page_node_count" -eq 0 ]; then
+            details_truncated=true
+            break
+          fi
+          if [ "$page_more" != true ]; then
+            if [ "$fetched_nodes" -ne "$check_count" ]; then details_truncated=true; fi
+            break
+          fi
+          if [ "$fetched_nodes" -ge "$check_count" ] || [ "$(printf '%s' "$checks" | jq -r 'length')" -ge 10 ]; then
+            details_truncated=true
+            break
+          fi
+          page_cursor=$(printf '%s' "$page" | jq -r '.cursor // ""')
+          if [ -z "$page_cursor" ]; then
+            details_truncated=true
+            break
+          fi
+          case "$seen_cursors" in
+            *" $page_cursor "*)
+              details_truncated=true
+              break ;;
+          esac
+          seen_cursors="$seen_cursors$page_cursor "
+          if ! current_response=$(gh api graphql -f owner="$owner" -f name="$name" -F number={pr.number} -f head="$expected_head" -f after="$page_cursor" -f query="$detail_query" 2>"$diagnostic_stderr"); then
+            details_truncated=true
+            detail_page_available=false
+          fi
+        done
+        if [ "$(printf '%s' "$checks" | jq -r 'length')" -eq 0 ]; then details_truncated=true; fi
+        if ! diagnostic_payload=$(jq -ac -n --argjson checks "$checks" --argjson truncated "$details_truncated" '{{checks:$checks,truncated:$truncated}}'); then
+          diagnostic_payload='{{"checks":[],"truncated":true}}'
+        fi
+      }}
+      collect_gitlab_failures() {{
+        if [ -z "$observed_pipeline_id" ] || ! printf '%s' "$1" | jq -e --argjson pipeline_id "$observed_pipeline_id" 'type == "object" and (.id | type == "number") and .id == $pipeline_id' >/dev/null 2>&1; then
+          diagnostic_payload='{{"checks":[],"truncated":true}}'
+          gitlab_trace_jobs=
+          return
+        fi
+        gitlab_details=$(printf '%s' "$1" | jq -ac '
+          def clean: gsub("[\u0000-\u001f\u007f-\u009f]";"") | gsub("^\\s+|\\s+$";"") | .[0:128];
+          def known_job_status:
+            . as $status
+            | ["success","failed","canceled","cancelled","skipped","running","pending","created","waiting_for_resource","preparing","scheduled","manual","canceling"]
+            | index($status) != null;
+          . as $pipeline
+          | (($pipeline.jobs | type) == "array") as $jobs_valid
+          | (if $jobs_valid then $pipeline.jobs else [] end) as $jobs
+          | [$jobs[] | select(type == "object" and .status == "failed")] as $failed
+          | ($failed | map(
+              . as $job
+              | if ($job.name | type) == "string" then
+                  ($job.name | clean) as $name
+                  | if $name == "" then {{check:null,bad:true}}
+                    else {{check:{{name:$name,state:"failed"}},bad:($name != $job.name)}}
+                    end
+                else {{check:null,bad:true}}
+                end
+            )) as $sanitized
+          | ([$sanitized[] | select(.check != null) | .check]) as $valid
+          | {{
+              checks:$valid[:10],
+              truncated:(($jobs_valid | not) or ([$jobs[] | select(type != "object")] | length) > 0 or ([$jobs[] | select(type == "object" and ((.status | known_job_status) | not))] | length) > 0 or ($failed | length) == 0 or ([$sanitized[] | select(.bad)] | length) > 0 or ($valid | length) > 10 or ($pipeline.id | type) != "number" or ([$failed[] | select((.id | type) != "number")] | length) > 0),
+              trace_jobs:(if ($pipeline.id | type) == "number" then [$failed[] | select((.id | type) == "number") | "\($pipeline.id) \(.id)"] else [] end)
+            }}
+        ' 2>/dev/null)
+        if [ -z "$gitlab_details" ]; then
+          diagnostic_payload='{{"checks":[],"truncated":true}}'
+          gitlab_trace_jobs=
+          return
+        fi
+        if ! diagnostic_payload=$(printf '%s' "$gitlab_details" | jq -ac '{{checks, truncated}}'); then
+          diagnostic_payload='{{"checks":[],"truncated":true}}'
+          gitlab_trace_jobs=
+          return
+        fi
+        if ! gitlab_trace_jobs=$(printf '%s' "$gitlab_details" | jq -r '.trace_jobs[]?'); then
+          diagnostic_payload='{{"checks":[],"truncated":true}}'
+          gitlab_trace_jobs=
+        fi
       }}
       case "{pr.url}" in
         */-/merge_requests/*)
           provider=gitlab
+          observed_pipeline_id=
           state=unobserved
           head_matches=unknown
           check_count=unknown
@@ -87,15 +257,25 @@ steps:
                 else
                   diagnostic_reason=unknown_state
                 fi
+                if [ "$diagnostic_reason" = ci_failed ]; then
+                  observed_pipeline_id=$(printf '%s' "$response" | jq -er 'select(type == "object") | .id | select(type == "number")' 2>/dev/null) || observed_pipeline_id=
+                  if gitlab_details_response=$(glab ci get --merge-request {pr.number} --status=failed --with-job-details --output json 2>"$diagnostic_stderr"); then
+                    collect_gitlab_failures "$gitlab_details_response"
+                  else
+                    diagnostic_payload='{{"checks":[],"truncated":true}}'
+                    gitlab_trace_jobs=
+                  fi
+                fi
                 ci_diagnostic "$diagnostic_reason"
-                log="$(git rev-parse --git-dir)/cruise-ci-traces.log"
-                : > "$log"
-                glab ci get --merge-request {pr.number} --status=failed --with-job-details --output json \
-                  | jq -r '.id as $p | (.jobs // [])[] | select(.status == "failed") | "\($p) \(.id)"' \
-                  | while read -r pid jid; do
-                      echo "=== job $jid (pipeline $pid) ===" >> "$log"
-                      glab ci trace "$jid" --pipeline-id "$pid" >> "$log" 2>&1 || true
-                    done
+                if [ "$diagnostic_reason" = ci_failed ]; then
+                  log="$(git rev-parse --git-dir)/cruise-ci-traces.log"
+                  : > "$log"
+                  printf '%s\n' "$gitlab_trace_jobs" | while read -r pid jid; do
+                    [ -n "$pid" ] && [ -n "$jid" ] || continue
+                    printf '=== job %s (pipeline %s) ===\n' "$jid" "$pid" >> "$log"
+                    glab ci trace "$jid" --pipeline-id "$pid" >> "$log" 2>&1 || true
+                  done
+                fi
                 exit 1 ;;
             esac
             sleep 15
@@ -132,6 +312,7 @@ steps:
             exit 1
           fi
           query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{state contexts(first:1) {{totalCount}}}}}}}}}}}}'
+          detail_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{contexts(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{__typename ... on CheckRun {{name status conclusion}} ... on StatusContext {{context state}}}}}}}}}}}}}}}}'
           deadline=$(( $(date +%s) + 1740 ))
           diagnostic_stderr="$(git rev-parse --git-dir)/cruise-ci-query.stderr"
           while :; do
@@ -213,6 +394,7 @@ steps:
                   exit 0 ;;
                 FAILURE|ERROR)
                   printf 'GitHub CI failed for PR #%s: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' {pr.number} "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
+                  collect_github_failures
                   ci_diagnostic ci_failed
                   exit 1 ;;
                 PENDING|EXPECTED) ;;

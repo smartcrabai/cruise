@@ -936,6 +936,42 @@ fn builtin_wait_ci_command(name: &str) -> String {
         .resolve(&command.as_slice().join("\n"))
         .unwrap_or_else(|error| panic!("resolve {name} wait-ci command: {error}"))
 }
+fn builtin_wait_ci_fixture(
+    collector: &Collector,
+    fake_gh_script: &str,
+) -> (Fixture, Vec<(String, String)>) {
+    let command = builtin_wait_ci_command("tdd")
+        .replace('{', "{{")
+        .replace('}', "}}");
+    let line_count = command.lines().count();
+    let mut config = String::with_capacity(
+        "steps:\n  wait-ci:\n    command: |\n".len() + command.len() + line_count * 7,
+    );
+    config.push_str("steps:\n  wait-ci:\n    command: |\n");
+    for line in command.lines() {
+        config.push_str("      ");
+        config.push_str(line);
+        config.push('\n');
+    }
+    let fixture = Fixture::new(&config);
+    let fake_bin = fixture.root.path().join("fake-gh/bin");
+    std::fs::create_dir_all(&fake_bin)
+        .unwrap_or_else(|error| panic!("create fake gh directory: {error}"));
+    cruise::test_support::write_executable_script(&fake_bin.join("gh"), fake_gh_script);
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let mut env = otlp_env(&collector.endpoint());
+    env.push((
+        "PATH".into(),
+        std::env::join_paths(paths)
+            .unwrap_or_else(|error| panic!("join fake gh PATH: {error}"))
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    (fixture, env)
+}
 
 fn named_span<'a>(
     spans: &'a [SpanRecord],
@@ -2728,15 +2764,15 @@ steps:
 fn invalid_ci_markers_export_no_untrusted_fields() {
     let collector = Collector::start();
     let fixture = Fixture::new(
-        r"steps:
+        r#"steps:
   invalid-ci:
     command: |
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github private-reason-secret FAILURE false 3 unknown' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github ci_failed private-state-secret false 3 unknown' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 3 unknown leaked-field-secret' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github private-reason-secret FAILURE false 3 unknown {{"checks":[],"truncated":false}}' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed private-state-secret false 3 unknown {{"checks":[],"truncated":false}}' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 3 200 {{"checks":[],"truncated":false,"unexpected":"leaked-field-secret"}}' >&2
       printf '%s\n' 'invalid-marker-stderr-secret' >&2
       exit 9
-",
+"#,
     );
     let output = fixture.run(
         &borrowed_env(&otlp_env(&collector.endpoint())),
@@ -2769,20 +2805,69 @@ fn invalid_ci_markers_export_no_untrusted_fields() {
         ],
     );
 }
+
+#[test]
+fn malformed_ci_marker_does_not_replace_earlier_valid_diagnostic() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        r#"steps:
+  malformed-ci:
+    command: |
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {{"checks":[{{"name":"expected-check","state":"FAILURE"}}],"truncated":false}}' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE true 99 400 {{"checks":[{{"name":"malformed-check-private-secret","state":{{"FAILURE":null}}}}],"truncated":false}}' >&2
+      exit 9
+"#,
+    );
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "malformed-ci-input-secret",
+    );
+    assert!(
+        !output.status.success(),
+        "malformed marker fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let spans = spans(&requests);
+    let (step, attempt) = assert_command_failure_diagnostic(&spans, "malformed-ci", "valid", true);
+    for span in [step, attempt] {
+        assert_eq!(span.attributes["cruise.ci.failure_reason"], "ci_failed");
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.failed_checks")
+                .map(String::as_str),
+            Some(r#"[{"name":"expected-check","state":"FAILURE"}]"#),
+            "{span:#?}"
+        );
+        assert_eq!(
+            span.bool_attributes
+                .get("cruise.ci.failed_checks_truncated"),
+            Some(&false),
+            "{span:#?}"
+        );
+    }
+    assert_payload_omits(
+        &requests,
+        &[
+            "malformed-ci-input-secret",
+            "malformed-check-private-secret",
+        ],
+    );
+}
+
 #[test]
 fn command_diagnostic_markers_export_bounded_ci_and_sync_base_attributes() {
     let collector = Collector::start();
     let fixture = Fixture::new(
-        r"steps:
+        r#"steps:
   diagnostics:
     command: |
       printf '%s\n' 'human-readable private sync error' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github api_error unobserved unknown unknown 502' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github api_error unobserved unknown unknown 502 {{"checks":[],"truncated":false}}' >&2
       printf '%s\n' 'CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github invalid-reason-secret FAILURE false 3 invalid-extra-secret' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 private-provider-secret ci_failed unsupported-reason-secret false 3 503' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github invalid-reason-secret FAILURE false 3 200 {{"checks":[],"truncated":false}}' >&2
       exit 1
-",
+"#,
     );
     let output = fixture.run(
         &borrowed_env(&otlp_env(&collector.endpoint())),
@@ -2829,9 +2914,6 @@ fn command_diagnostic_markers_export_bounded_ci_and_sync_base_attributes() {
             "diagnostic-marker-input-secret",
             "human-readable private sync error",
             "invalid-reason-secret",
-            "invalid-extra-secret",
-            "private-provider-secret",
-            "unsupported-reason-secret",
         ],
     );
 }
@@ -2849,7 +2931,7 @@ fn command_failure_diagnostic_status_covers_missing_and_unsupported_markers() {
         ),
         (
             "unsupported",
-            r"printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 private-provider-secret ci_failed unsupported-field-secret false 3 503' >&2; printf '%s\n' 'unsupported-marker-private-stderr-secret' >&2; exit 9",
+            r"printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 private-provider-secret ci_failed unsupported-field-secret false 3 503' >&2; printf '%s\n' 'unsupported-marker-private-stderr-secret' >&2; exit 9",
             "unsupported",
             true,
             "unsupported-marker-input-secret",
@@ -2890,31 +2972,10 @@ fn command_failure_diagnostic_status_covers_missing_and_unsupported_markers() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "fixture setup and span privacy assertions stay in one scenario"
-)]
 fn builtin_wait_ci_exports_graphql_failure_reason_without_raw_response() {
     let collector = Collector::start();
-    let command = builtin_wait_ci_command("tdd")
-        .replace('{', "{{")
-        .replace('}', "}}");
-    let line_count = command.lines().count();
-    let mut config = String::with_capacity(
-        "steps:\n  wait-ci:\n    command: |\n".len() + command.len() + line_count * 7,
-    );
-    config.push_str("steps:\n  wait-ci:\n    command: |\n");
-    for line in command.lines() {
-        config.push_str("      ");
-        config.push_str(line);
-        config.push('\n');
-    }
-    let fixture = Fixture::new(&config);
-    let fake_bin = fixture.root.path().join("fake-gh/bin");
-    std::fs::create_dir_all(&fake_bin)
-        .unwrap_or_else(|error| panic!("create fake gh directory: {error}"));
-    cruise::test_support::write_executable_script(
-        &fake_bin.join("gh"),
+    let (fixture, env) = builtin_wait_ci_fixture(
+        &collector,
         r#"#!/bin/sh
 if [ "$1" = repo ]; then
   printf '123/true\n'
@@ -2928,18 +2989,6 @@ printf 'unexpected fake gh invocation with secret details\n' >&2
 exit 97
 "#,
     );
-    let mut paths = vec![fake_bin];
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
-    let mut env = otlp_env(&collector.endpoint());
-    env.push((
-        "PATH".into(),
-        std::env::join_paths(paths)
-            .unwrap_or_else(|error| panic!("join fake gh PATH: {error}"))
-            .to_string_lossy()
-            .into_owned(),
-    ));
     let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-input-secret");
     assert!(
         !output.status.success(),
@@ -2996,6 +3045,96 @@ exit 97
         &[
             "builtin-wait-ci-input-secret",
             "private-provider-response-secret",
+            "unexpected fake gh invocation with secret details",
+        ],
+    );
+}
+
+#[test]
+fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
+    let collector = Collector::start();
+    let (fixture, env) = builtin_wait_ci_fixture(
+        &collector,
+        r#"#!/bin/sh
+if [ "$1" = repo ]; then
+  printf '123/true\n'
+  exit 0
+fi
+if [ "$1" = api ] && [ "$2" = graphql ]; then
+  head=$(git rev-parse HEAD) || exit 97
+  calls=$(cat .fake-gh-graphql-calls 2>/dev/null || printf '0')
+  calls=$((calls + 1))
+  printf '%s\n' "$calls" > .fake-gh-graphql-calls || exit 97
+  if [ "$calls" -eq 1 ]; then
+    printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"state":"FAILURE","contexts":{"totalCount":4}}}}},"extensions":{"message":"private-provider-response-secret"}}\n' "$head" "$head"
+    exit 0
+  fi
+  printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"contexts":{"totalCount":4,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"successful-check-private-secret","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"StatusContext","context":"successful-context-private-secret","state":"SUCCESS"},{"__typename":"StatusContext","context":"deploy-prod","state":"ERROR"}]}}}}},"extensions":{"message":"private-provider-response-secret"}}\n' "$head" "$head"
+  printf 'private-provider-stderr-secret\n' >&2
+  exit 0
+fi
+printf 'unexpected fake gh invocation with secret details\n' >&2
+exit 97
+"#,
+    );
+    let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-prompt-secret");
+    assert!(
+        !output.status.success(),
+        "failed CI fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported_spans = spans(&requests);
+    let (step, attempt) =
+        assert_command_failure_diagnostic(&exported_spans, "wait-ci", "valid", true);
+    let expected_checks =
+        r#"[{"name":"unit-tests","state":"FAILURE"},{"name":"deploy-prod","state":"ERROR"}]"#;
+    for span in [step, attempt] {
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.provider")
+                .map(String::as_str),
+            Some("github"),
+            "{span:#?}"
+        );
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.failure_reason")
+                .map(String::as_str),
+            Some("ci_failed"),
+            "{span:#?}"
+        );
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.failed_checks")
+                .map(String::as_str),
+            Some(expected_checks),
+            "failed check names and states: {span:#?}"
+        );
+        assert_eq!(
+            span.bool_attributes
+                .get("cruise.ci.failed_checks_truncated"),
+            Some(&false),
+            "complete failure details should not be truncated: {span:#?}"
+        );
+        assert_eq!(
+            span.attributes.get("error.type").map(String::as_str),
+            Some("command_exit"),
+            "CI details must not be copied into error.type: {span:#?}"
+        );
+        assert_eq!(
+            span.status_description, span.attributes["error.type"],
+            "status description must not carry check details: {span:#?}"
+        );
+    }
+    assert_payload_omits(
+        &requests,
+        &[
+            "builtin-wait-ci-prompt-secret",
+            "successful-check-private-secret",
+            "successful-context-private-secret",
+            "private-provider-response-secret",
+            "private-provider-stderr-secret",
             "unexpected fake gh invocation with secret details",
         ],
     );
