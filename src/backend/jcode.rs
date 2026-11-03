@@ -1547,7 +1547,7 @@ fn stop_private_daemon(home: &Path) -> std::io::Result<()> {
         .chain(sockets.iter().map(|s| s.to_string_lossy().into_owned()))
         .collect();
 
-    let mut system = System::new();
+    let mut system = System::new().map_err(std::io::Error::other)?;
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,

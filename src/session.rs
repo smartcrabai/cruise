@@ -470,10 +470,11 @@ impl SessionState {
     pub fn set_runner_to_current_process(&mut self) {
         let pid = std::process::id();
         self.runner_pid = Some(pid);
-        let mut system = sysinfo::System::new();
         let sys_pid = sysinfo::Pid::from_u32(pid);
-        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
-        self.runner_started_at = system.process(sys_pid).map(sysinfo::Process::start_time);
+        self.runner_started_at = sysinfo::System::new().ok().and_then(|mut system| {
+            system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
+            system.process(sys_pid).map(sysinfo::Process::start_time)
+        });
     }
 
     /// Clear runner tracking fields (called when the session transitions away from Running).
@@ -489,7 +490,9 @@ impl SessionState {
         let (Some(pid), Some(ts)) = (self.runner_pid, self.runner_started_at) else {
             return false;
         };
-        let mut system = sysinfo::System::new();
+        let Ok(mut system) = sysinfo::System::new() else {
+            return false;
+        };
         let sys_pid = sysinfo::Pid::from_u32(pid);
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
         system
