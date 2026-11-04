@@ -1236,7 +1236,7 @@ mod tests {
         assert!(!result.body.contains('\u{1b}'));
         assert!(!result.body.contains('\u{0000}'));
         assert!(!result.body.contains('\u{009b}'));
-        assert_eq!(sanitize("\u{1b}é").body, "é");
+        assert_eq!(sanitize("\u{1b}\u{e9}").body, "\u{e9}");
     }
 
     #[test]
@@ -1282,17 +1282,17 @@ mod tests {
     fn caps_unicode_output_at_utf8_boundaries_with_head_and_tail_excerpt() {
         let input = format!(
             "{}{}{}",
-            "前🧪".repeat(1500),
-            " 中間の診断 ".repeat(300),
-            "末尾🧪".repeat(1500)
+            "\u{524d}\u{1f9ea}".repeat(1500),
+            " \u{4e2d}\u{9593}\u{306e}\u{8a3a}\u{65ad} ".repeat(300),
+            "\u{672b}\u{5c3e}\u{1f9ea}".repeat(1500)
         );
         let result = sanitize(&input);
         assert!(result.truncated);
         assert!(result.body.len() <= MAX_STDERR_LOG_BYTES);
         assert!(result.body.is_char_boundary(result.body.len()));
-        assert!(result.body.starts_with("前🧪"));
+        assert!(result.body.starts_with("\u{524d}\u{1f9ea}"));
         assert!(result.body.contains("excerpt omitted"));
-        assert!(result.body.ends_with("末尾🧪"));
+        assert!(result.body.ends_with("\u{672b}\u{5c3e}\u{1f9ea}"));
     }
 
     #[test]
