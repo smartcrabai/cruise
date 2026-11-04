@@ -3064,6 +3064,114 @@ fn command_diagnostic_markers_export_bounded_ci_and_sync_base_attributes() {
 }
 
 #[test]
+fn saved_builtin_snapshot_v2_ci_failure_exports_bounded_diagnostic_and_correlated_stderr() {
+    let collector = Collector::start();
+    let fixture = Fixture::new("");
+    let session_id = "20261104000000001";
+    let manager = SessionManager::new(fixture.root.path().join("data/cruise"));
+    let mut session = cruise::session::SessionState::new(
+        session_id.to_owned(),
+        fixture.project.clone(),
+        cruise::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+        "saved V2 CI diagnostic".to_owned(),
+    );
+    session.phase = SessionPhase::Planned;
+    session.workspace_mode = WorkspaceMode::Worktree;
+    manager
+        .create(&session)
+        .unwrap_or_else(|error| panic!("create saved V2 diagnostic session: {error}"));
+
+    let snapshot_path = manager.sessions_dir().join(session_id).join("config.yaml");
+    let snapshot = r"steps:
+  v2-diagnostic:
+    command: |
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE true 6 unknown' >&2
+      printf '%s\n' 'ordinary-v2-human-diagnostic' >&2
+      exit 9
+";
+    std::fs::write(&snapshot_path, snapshot)
+        .unwrap_or_else(|error| panic!("write saved V2 workflow snapshot: {error}"));
+    std::fs::write(
+        manager.sessions_dir().join(session_id).join("plan.md"),
+        "# Saved V2 CI diagnostic\n",
+    )
+    .unwrap_or_else(|error| panic!("write saved V2 workflow plan: {error}"));
+
+    fixture
+        .cli_command(
+            &["run", session_id],
+            &borrowed_env(&otlp_env(&collector.endpoint())),
+        )
+        .output()
+        .unwrap_or_else(|error| panic!("run saved V2 diagnostic session: {error}"));
+    assert_eq!(
+        std::fs::read_to_string(&snapshot_path)
+            .unwrap_or_else(|error| panic!("read saved V2 workflow snapshot after run: {error}")),
+        snapshot,
+        "running the saved workflow must not rewrite its frozen snapshot"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics", "/v1/logs"]);
+    let exported_spans = spans(&requests);
+    let (step, attempt) =
+        assert_command_failure_diagnostic(&exported_spans, "v2-diagnostic", "valid", true);
+    for span in [step, attempt] {
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.provider")
+                .map(String::as_str),
+            Some("github"),
+            "{span:#?}"
+        );
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.failure_reason")
+                .map(String::as_str),
+            Some("ci_failed"),
+            "{span:#?}"
+        );
+        assert_eq!(
+            span.attributes.get("cruise.ci.state").map(String::as_str),
+            Some("FAILURE"),
+            "{span:#?}"
+        );
+        assert_eq!(
+            span.bool_attributes.get("cruise.ci.head_matches"),
+            Some(&true)
+        );
+        assert_eq!(span.int_attributes.get("cruise.ci.check_count"), Some(&6));
+        assert!(!span.int_attributes.contains_key("cruise.ci.http_status"));
+        assert_eq!(
+            span.attributes
+                .get("cruise.ci.failed_checks")
+                .map(String::as_str),
+            Some("[]")
+        );
+        assert_eq!(
+            span.bool_attributes
+                .get("cruise.ci.failed_checks_truncated"),
+            Some(&true),
+            "V2 has no persisted check descriptors and must not claim completeness: {span:#?}"
+        );
+    }
+
+    let exported_logs = logs(&requests);
+    assert_eq!(
+        exported_logs.len(),
+        1,
+        "one failed command attempt should export its stderr log: {exported_logs:#?}"
+    );
+    let log = &exported_logs[0];
+    assert!(
+        log.body.contains("ordinary-v2-human-diagnostic"),
+        "{log:#?}"
+    );
+    assert_eq!(log.trace_id, attempt.trace_id);
+    assert_eq!(log.span_id, attempt.span_id);
+    assert_payload_omits(&requests, &["CRUISE_CI_DIAGNOSTIC_V2"]);
+}
+
+#[test]
 fn command_failure_diagnostic_status_covers_missing_and_unsupported_markers() {
     for (step_name, script, status, stderr_present, input_secret, output_secret) in [
         (
@@ -3076,7 +3184,7 @@ fn command_failure_diagnostic_status_covers_missing_and_unsupported_markers() {
         ),
         (
             "unsupported",
-            r"printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 Authorization: Bearer private-provider-secret ci_failed password=unsupported-field-secret false 3 503' >&2; printf '%s\n' 'ordinary unsupported-marker context' >&2; printf '%s\n' 'Authorization: Bearer unsupported-marker-private-stderr-secret' >&2; exit 9",
+            r"printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 Authorization: Bearer private-provider-secret ci_failed password=unsupported-field-secret false 3 503' >&2; printf '%s\n' 'ordinary unsupported-marker context' >&2; printf '%s\n' 'Authorization: Bearer unsupported-marker-private-stderr-secret' >&2; exit 9",
             "unsupported",
             true,
             "unsupported-marker-input-secret",
