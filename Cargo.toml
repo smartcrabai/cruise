@@ -78,6 +78,7 @@ jsxrs = "0.1.6"
 opentelemetry = { version = "0.33.1", default-features = false, features = [
   "trace",
   "metrics",
+  "logs",
 ] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = [
   "http-proto",
@@ -86,10 +87,12 @@ opentelemetry-otlp = { version = "0.33.1", default-features = false, features = 
   "reqwest-rustls",
   "trace",
   "metrics",
+  "logs",
 ] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
   "trace",
   "metrics",
+  "logs",
 ] }
 pulldown-cmark = { version = "0.13", default-features = false, features = [
   "html",
@@ -155,6 +158,7 @@ opentelemetry-proto = { version = "=0.33.1", features = [
   "gen-tonic-messages",
   "trace",
   "metrics",
+  "logs",
 ] }
 portable-pty = "=0.9.0"
 prost = "=0.14.4"

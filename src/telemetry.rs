@@ -14,20 +14,25 @@ use serde::{Deserialize, Serialize};
 
 use opentelemetry::{
     Context, KeyValue, global,
+    logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity},
     metrics::{Counter, Histogram, MeterProvider},
     trace::{TraceContextExt, Tracer},
 };
-use opentelemetry_otlp::{ExporterBuildError, MetricExporter, SpanExporter};
+use opentelemetry_otlp::{ExporterBuildError, LogExporter, MetricExporter, SpanExporter};
 use opentelemetry_sdk::{
     Resource,
+    logs::SdkLoggerProvider,
     metrics::SdkMeterProvider,
     resource::{EnvResourceDetector, TelemetryResourceDetector},
     trace::SdkTracerProvider,
 };
 
+mod stderr;
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static OPERATION_METRICS: OnceLock<OperationMetrics> = OnceLock::new();
+static LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
 
 struct OperationMetrics {
     count: Counter<u64>,
@@ -39,7 +44,7 @@ struct ErrorTypeState(OnceLock<&'static str>);
 /// Process-level telemetry handle. Dropping it flushes and shuts down its providers.
 #[must_use = "keep the telemetry handle alive until application work is complete"]
 pub struct Telemetry {
-    providers: Option<(SdkTracerProvider, SdkMeterProvider)>,
+    providers: Option<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)>,
 }
 
 impl Telemetry {
@@ -49,13 +54,14 @@ impl Telemetry {
     }
 
     fn shutdown_inner(&mut self) {
-        let Some((tracer_provider, meter_provider)) = self.providers.take() else {
+        let Some((tracer_provider, meter_provider, logger_provider)) = self.providers.take() else {
             return;
         };
 
         ENABLED.store(false, Ordering::Release);
         let _ = tracer_provider.shutdown();
         let _ = meter_provider.shutdown();
+        let _ = logger_provider.shutdown();
     }
 }
 
@@ -65,7 +71,7 @@ impl Drop for Telemetry {
     }
 }
 
-/// Initializes process-global trace and metric providers when explicitly enabled.
+/// Initializes process-global trace, metric, and log providers when explicitly enabled.
 ///
 /// Call once before creating [`Operation`]s, and keep the returned handle alive until
 /// all instrumented work is complete. With observability disabled this returns a no-op
@@ -93,6 +99,10 @@ pub fn init() -> Result<Telemetry, InitError> {
         .with_http()
         .build()
         .map_err(|error| InitError::exporter("metrics", &error))?;
+    let log_exporter = LogExporter::builder()
+        .with_http()
+        .build()
+        .map_err(|error| InitError::exporter("logs", &error))?;
 
     if INITIALIZED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -108,6 +118,10 @@ pub fn init() -> Result<Telemetry, InitError> {
         .build();
     let meter_provider = SdkMeterProvider::builder()
         .with_periodic_exporter(metric_exporter)
+        .with_resource(resource.clone())
+        .build();
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_batch_exporter(log_exporter)
         .with_resource(resource)
         .build();
     let meter = meter_provider.meter("cruise");
@@ -123,7 +137,14 @@ pub fn init() -> Result<Telemetry, InitError> {
     if OPERATION_METRICS.set(metrics).is_err() {
         let _ = tracer_provider.shutdown();
         let _ = meter_provider.shutdown();
+        let _ = logger_provider.shutdown();
         INITIALIZED.store(false, Ordering::Release);
+        return Err(InitError(InitErrorKind::AlreadyInitialized));
+    }
+    if LOGGER_PROVIDER.set(logger_provider.clone()).is_err() {
+        let _ = tracer_provider.shutdown();
+        let _ = meter_provider.shutdown();
+        let _ = logger_provider.shutdown();
         return Err(InitError(InitErrorKind::AlreadyInitialized));
     }
 
@@ -132,7 +153,7 @@ pub fn init() -> Result<Telemetry, InitError> {
     ENABLED.store(true, Ordering::Release);
 
     Ok(Telemetry {
-        providers: Some((tracer_provider, meter_provider)),
+        providers: Some((tracer_provider, meter_provider, logger_provider)),
     })
 }
 
@@ -416,26 +437,57 @@ pub(crate) fn record_jcode_failure(stage: &'static str, reason: &'static str) {
 struct CiFailedCheck {
     name: String,
     state: CiCheckState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 struct CiFailedCheckFields {
     name: String,
     state: CiCheckState,
+    run_id: Option<serde_json::Value>,
+    job_id: Option<serde_json::Value>,
+    url: Option<serde_json::Value>,
 }
 
-impl<'de> Deserialize<'de> for CiFailedCheck {
+impl<'de> Deserialize<'de> for CiFailedCheckFields {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let fields: CiFailedCheckFields = deserialize_object(deserializer)?;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            name: String,
+            state: CiCheckState,
+            #[serde(default)]
+            run_id: Option<serde_json::Value>,
+            #[serde(default)]
+            job_id: Option<serde_json::Value>,
+            #[serde(default)]
+            url: Option<serde_json::Value>,
+        }
+
+        let fields: Fields = deserialize_object(deserializer)?;
         Ok(Self {
             name: fields.name,
             state: fields.state,
+            run_id: fields.run_id,
+            job_id: fields.job_id,
+            url: fields.url,
         })
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CiDiagnosticDetailsFields {
+    checks: Vec<CiFailedCheckFields>,
+    truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -522,8 +574,6 @@ where
     deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CiDiagnosticDetails {
     checks: Vec<CiFailedCheck>,
     truncated: bool,
@@ -573,6 +623,85 @@ fn ci_check_state_allowed(provider: &str, state: CiCheckState) -> bool {
 const MAX_CI_DIAGNOSTIC_BYTES: usize = 16_384;
 const MAX_CI_FAILED_CHECKS: usize = 10;
 const MAX_CI_CHECK_NAME_CHARS: usize = 128;
+const MAX_CI_CHECK_URL_BYTES: usize = 1024;
+
+fn reference_string(value: Option<serde_json::Value>) -> (Option<String>, bool) {
+    match value {
+        Some(serde_json::Value::String(value)) => (Some(value), false),
+        Some(_) => (None, true),
+        None => (None, false),
+    }
+}
+fn validate_ci_reference_id(value: Option<String>) -> (Option<String>, bool) {
+    match value {
+        Some(value)
+            if !value.is_empty()
+                && value.len() <= 20
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+                && value.bytes().any(|byte| byte != b'0') =>
+        {
+            (Some(value), false)
+        }
+        Some(_) => (None, true),
+        None => (None, false),
+    }
+}
+
+fn sanitize_ci_reference_url(value: Option<String>) -> (Option<String>, bool) {
+    let Some(value) = value else {
+        return (None, false);
+    };
+    let Ok(mut url) = url::Url::parse(&value) else {
+        return (None, true);
+    };
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return (None, true);
+    }
+
+    let has_userinfo = url
+        .as_str()
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split(['/', '?', '#']).next())
+        .is_some_and(|authority| authority.contains('@'));
+    let stripped_sensitive_parts = has_userinfo
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some();
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    let sanitized = url.to_string();
+    if sanitized.len() > MAX_CI_CHECK_URL_BYTES {
+        return (None, true);
+    }
+    (Some(sanitized), stripped_sensitive_parts)
+}
+
+fn validate_ci_failed_check(fields: CiFailedCheckFields) -> (CiFailedCheck, bool) {
+    let (raw_run_id, invalid_run_id_type) = reference_string(fields.run_id);
+    let (raw_job_id, invalid_job_id_type) = reference_string(fields.job_id);
+    let (raw_url, invalid_url_type) = reference_string(fields.url);
+    let (run_id, invalid_run_id) = validate_ci_reference_id(raw_run_id);
+    let (job_id, invalid_job_id) = validate_ci_reference_id(raw_job_id);
+    let (url, url_details_lost) = sanitize_ci_reference_url(raw_url);
+    (
+        CiFailedCheck {
+            name: fields.name,
+            state: fields.state,
+            run_id,
+            job_id,
+            url,
+        },
+        invalid_run_id_type
+            || invalid_job_id_type
+            || invalid_url_type
+            || invalid_run_id
+            || invalid_job_id
+            || url_details_lost,
+    )
+}
 
 pub(crate) fn record_command_failure(
     context: &Context,
@@ -634,9 +763,39 @@ pub(crate) fn record_command_failure(
         span.set_attribute(KeyValue::new("cruise.sync_base.failure_reason", reason));
     }
 }
+pub(crate) fn record_command_stderr_log(context: &Context, stderr_text: &str) {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(logger_provider) = LOGGER_PROVIDER.get() else {
+        return;
+    };
+    let sanitized = stderr::sanitize(stderr_text);
+    if sanitized.body.is_empty() {
+        return;
+    }
+
+    let logger = logger_provider.logger("cruise");
+    let mut record = logger.create_log_record();
+    record.set_event_name("cruise.command.stderr");
+    record.set_severity_number(Severity::Error);
+    record.set_severity_text("ERROR");
+    record.set_body(AnyValue::String(sanitized.body.into()));
+    record.add_attribute("cruise.command.stderr_truncated", sanitized.truncated);
+    let span = context.span();
+    let span_context = span.span_context();
+    if span_context.is_valid() {
+        record.set_trace_context(
+            span_context.trace_id(),
+            span_context.span_id(),
+            Some(span_context.trace_flags()),
+        );
+    }
+    logger.emit(record);
+}
 
 fn last_ci_diagnostic(stderr: &str) -> (Option<CiDiagnostic>, &'static str) {
-    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V3";
+    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V4";
     const VERSION_PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V";
 
     let mut saw_invalid = false;
@@ -653,7 +812,7 @@ fn last_ci_diagnostic(stderr: &str) -> (Option<CiDiagnostic>, &'static str) {
             saw_invalid = true;
         } else if let Some(version) = token.strip_prefix(VERSION_PREFIX)
             && !version.is_empty()
-            && version != "3"
+            && version != "4"
             && version.bytes().all(|byte| byte.is_ascii_digit())
         {
             saw_unsupported = true;
@@ -671,7 +830,7 @@ fn last_ci_diagnostic(stderr: &str) -> (Option<CiDiagnostic>, &'static str) {
 }
 
 fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
-    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V3";
+    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V4";
 
     if line.len() > MAX_CI_DIAGNOSTIC_BYTES || !line.is_ascii() || !line.starts_with(PREFIX) {
         return None;
@@ -776,13 +935,18 @@ fn parse_ci_diagnostic_details(
     reason: &str,
 ) -> Option<CiDiagnosticDetails> {
     let mut deserializer = serde_json::Deserializer::from_str(input);
-    let details: CiDiagnosticDetails = deserialize_object(&mut deserializer).ok()?;
+    let details: CiDiagnosticDetailsFields = deserialize_object(&mut deserializer).ok()?;
     deserializer.end().ok()?;
     if reason != "ci_failed" {
         if !details.checks.is_empty() || details.truncated {
             return None;
         }
-    } else if details.checks.len() > MAX_CI_FAILED_CHECKS
+        return Some(CiDiagnosticDetails {
+            checks: Vec::new(),
+            truncated: false,
+        });
+    }
+    if details.checks.len() > MAX_CI_FAILED_CHECKS
         || details.checks.iter().any(|check| {
             check.name.is_empty()
                 || check.name.chars().take(MAX_CI_CHECK_NAME_CHARS + 1).count()
@@ -793,7 +957,18 @@ fn parse_ci_diagnostic_details(
     {
         return None;
     }
-    Some(details)
+
+    let mut truncated = details.truncated;
+    let checks = details
+        .checks
+        .into_iter()
+        .map(|fields| {
+            let (check, lost_reference) = validate_ci_failed_check(fields);
+            truncated |= lost_reference;
+            check
+        })
+        .collect();
+    Some(CiDiagnosticDetails { checks, truncated })
 }
 
 fn last_sync_base_diagnostic(stderr: &str) -> Option<&'static str> {
@@ -1051,9 +1226,9 @@ mod tests {
     use std::{borrow::Cow, path::PathBuf, sync::OnceLock};
 
     #[test]
-    fn ci_diagnostic_parser_accepts_bounded_whitelisted_fields_and_v3_details() {
+    fn ci_diagnostic_parser_accepts_bounded_whitelisted_fields_and_v4_details() {
         let valid = concat!(
-            "CRUISE_CI_DIAGNOSTIC_V3 github head_mismatch FAILURE false 4 503 ",
+            "CRUISE_CI_DIAGNOSTIC_V4 github head_mismatch FAILURE false 4 503 ",
             r#"{"checks":[],"truncated":false}"#
         );
         assert_eq!(
@@ -1071,7 +1246,7 @@ mod tests {
         );
         assert_eq!(
             parse_ci_diagnostic_line(concat!(
-                "CRUISE_CI_DIAGNOSTIC_V3 gitlab api_error unknown unknown unknown unknown ",
+                "CRUISE_CI_DIAGNOSTIC_V4 gitlab api_error unknown unknown unknown unknown ",
                 r#"{"checks":[],"truncated":false}"#
             )),
             Some(CiDiagnostic {
@@ -1086,7 +1261,7 @@ mod tests {
             })
         );
         let failed = parse_ci_diagnostic_line(concat!(
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 ",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500 ",
             r#"{"checks":[{"name":"unit-tests","state":"FAILURE"}],"truncated":true}"#
         ))
         .unwrap_or_else(|| panic!("expected failed CI diagnostic to parse"));
@@ -1095,6 +1270,9 @@ mod tests {
             vec![CiFailedCheck {
                 name: "unit-tests".into(),
                 state: CiCheckState::Failure,
+                run_id: None,
+                job_id: None,
+                url: None,
             }]
         );
         assert!(failed.failed_checks_truncated);
@@ -1108,23 +1286,23 @@ mod tests {
             "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
             "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
             "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 not-json",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {\"checks\":\"not-an-array\",\"truncated\":false}",
-            " CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 secret-provider ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 github arbitrary-reason FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed private-state false 1 500 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE secret 1 500 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false -1 500 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false +1 500 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 9223372036854775808 500 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 099 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 600 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 abc {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 1000 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false} extra",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500 not-json",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500 {\"checks\":\"not-an-array\",\"truncated\":false}",
+            " CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 secret-provider ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 github arbitrary-reason FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed private-state false 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE secret 1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false -1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false +1 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 9223372036854775808 500 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 099 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 600 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 abc {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 1000 {\"checks\":[],\"truncated\":false}",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false} extra",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500",
         ];
         for line in invalid {
             assert_eq!(parse_ci_diagnostic_line(line), None, "{line:?}");
@@ -1134,7 +1312,7 @@ mod tests {
     #[test]
     fn ci_diagnostic_parser_rejects_unsafe_or_inconsistent_details() {
         let marker = |reason: &str, details: &str| {
-            format!("CRUISE_CI_DIAGNOSTIC_V3 github {reason} FAILURE false 1 500 {details}")
+            format!("CRUISE_CI_DIAGNOSTIC_V4 github {reason} FAILURE false 1 500 {details}")
         };
         let invalid_details = [
             r#"{"checks":[]}"#,
@@ -1221,12 +1399,57 @@ mod tests {
     }
 
     #[test]
+    fn ci_v4_failed_check_references_are_validated_and_sanitized() {
+        let marker = |details: &str| {
+            format!("CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500 {details}")
+        };
+        let references = parse_ci_diagnostic_line(&marker(
+            r#"{"checks":[{"name":"build","state":"FAILURE","run_id":"00000000000000000001","job_id":"12345678901234567890","url":"https://user:password@example.test/path?token=query-secret#fragment-secret"}],"truncated":false}"#,
+        ))
+        .unwrap_or_else(|| panic!("expected V4 check references to parse"));
+        let check = &references.failed_checks[0];
+        assert_eq!(check.name, "build");
+        assert_eq!(check.state, CiCheckState::Failure);
+        assert_eq!(check.run_id.as_deref(), Some("00000000000000000001"));
+        assert_eq!(check.job_id.as_deref(), Some("12345678901234567890"));
+        assert_eq!(check.url.as_deref(), Some("https://example.test/path"));
+        assert!(references.failed_checks_truncated);
+        let exported = serde_json::to_string(&references.failed_checks)
+            .unwrap_or_else(|_| panic!("expected safe references to serialize"));
+        for secret in ["user", "password", "query-secret", "fragment-secret"] {
+            assert!(!exported.contains(secret));
+        }
+
+        let invalid_refs = parse_ci_diagnostic_line(&marker(
+            r#"{"checks":[{"name":"lint","state":"ERROR","run_id":0,"job_id":"123456789012345678901","url":"ftp://example.test/job"}],"truncated":false}"#,
+        ))
+        .unwrap_or_else(|| panic!("invalid optional refs must not erase failed check"));
+        let check = &invalid_refs.failed_checks[0];
+        assert_eq!(check.name, "lint");
+        assert_eq!(check.state, CiCheckState::Error);
+        assert_eq!(check.run_id, None);
+        assert_eq!(check.job_id, None);
+        assert_eq!(check.url, None);
+        assert!(invalid_refs.failed_checks_truncated);
+
+        let long_url = format!("https://example.test/{}", "x".repeat(1024));
+        let oversized_url = format!(
+            r#"{{"checks":[{{"name":"build","state":"FAILURE","url":"{long_url}"}}],"truncated":false}}"#
+        );
+        let oversized = parse_ci_diagnostic_line(&marker(&oversized_url))
+            .unwrap_or_else(|| panic!("oversized optional URL must retain failed check"));
+        assert_eq!(oversized.failed_checks[0].name, "build");
+        assert_eq!(oversized.failed_checks[0].url, None);
+        assert!(oversized.failed_checks_truncated);
+    }
+
+    #[test]
     fn ci_diagnostic_parser_uses_last_valid_full_line_without_neighbor_leaks() {
         let stderr = concat!(
             "raw command error private-details-token\n",
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {\"checks\":[{\"name\":\"old-check\",\"state\":\"FAILURE\"}],\"truncated\":false}\n",
-            "CRUISE_CI_DIAGNOSTIC_V3 github private-reason FAILURE false 99 500 {\"checks\":[{\"name\":\"neighbor-private-token\",\"state\":\"FAILURE\"}],\"truncated\":false}\n",
-            "CRUISE_CI_DIAGNOSTIC_V3 gitlab ci_failed failed unknown 2 unknown {\"checks\":[{\"name\":\"deploy\",\"state\":\"failed\"}],\"truncated\":true}\n",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500 {\"checks\":[{\"name\":\"old-check\",\"state\":\"FAILURE\"}],\"truncated\":false}\n",
+            "CRUISE_CI_DIAGNOSTIC_V4 github private-reason FAILURE false 99 500 {\"checks\":[{\"name\":\"neighbor-private-token\",\"state\":\"FAILURE\"}],\"truncated\":false}\n",
+            "CRUISE_CI_DIAGNOSTIC_V4 gitlab ci_failed failed unknown 2 unknown {\"checks\":[{\"name\":\"deploy\",\"state\":\"failed\"}],\"truncated\":true}\n",
             "raw trailing stderr private-trailing-token\n",
         );
         let (diagnostic, status) = last_ci_diagnostic(stderr);
@@ -1241,6 +1464,9 @@ mod tests {
             vec![CiFailedCheck {
                 name: "deploy".into(),
                 state: CiCheckState::Failed,
+                run_id: None,
+                job_id: None,
+                url: None,
             }]
         );
         assert!(diagnostic.failed_checks_truncated);
@@ -1254,30 +1480,30 @@ mod tests {
     #[test]
     fn ci_diagnostic_status_is_bounded_and_uses_global_precedence() {
         let valid = concat!(
-            "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 2 500 ",
+            "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 2 500 ",
             r#"{"checks":[],"truncated":false}"#
         );
         for (stderr, expected_status, has_valid_diagnostic) in [
             ("", "missing", false),
             ("private human-readable error", "missing", false),
             (
-                "error mentions CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 2 500",
+                "error mentions CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 2 500",
                 "missing",
                 false,
             ),
             (
-                "CRUISE_CI_DIAGNOSTIC_V3suffix github ci_failed FAILURE false 2 500",
+                "CRUISE_CI_DIAGNOSTIC_V4suffix github ci_failed FAILURE false 2 500",
                 "missing",
                 false,
             ),
             ("CRUISE_CI_DIAGNOSTIC_Vx private-value", "missing", false),
             (
-                "CRUISE_CI_DIAGNOSTIC_V3 github private-reason FAILURE false 2 500 {\"checks\":[],\"truncated\":false}",
+                "CRUISE_CI_DIAGNOSTIC_V4 github private-reason FAILURE false 2 500 {\"checks\":[],\"truncated\":false}",
                 "invalid",
                 false,
             ),
             (
-                " CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 2 500 {\"checks\":[],\"truncated\":false}",
+                " CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 2 500 {\"checks\":[],\"truncated\":false}",
                 "invalid",
                 false,
             ),
@@ -1293,16 +1519,16 @@ mod tests {
             ),
             (
                 "CRUISE_CI_DIAGNOSTIC_V4 private-value\nCRUISE_CI_DIAGNOSTIC_V2 malformed",
-                "unsupported",
-                false,
-            ),
-            (
-                "CRUISE_CI_DIAGNOSTIC_V2 malformed\nCRUISE_CI_DIAGNOSTIC_V3 private-value",
                 "invalid",
                 false,
             ),
             (
-                "CRUISE_CI_DIAGNOSTIC_V3 private-value\n{valid}\nCRUISE_CI_DIAGNOSTIC_V3 malformed",
+                "CRUISE_CI_DIAGNOSTIC_V2 malformed\nCRUISE_CI_DIAGNOSTIC_V4 private-value",
+                "invalid",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V4 private-value\n{valid}\nCRUISE_CI_DIAGNOSTIC_V4 malformed",
                 "valid",
                 true,
             ),
