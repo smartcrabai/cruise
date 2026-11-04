@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use jcode_sdk::api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, ServerFrame, read_frame, write_frame,
 };
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 use cruise::application::{
@@ -21,8 +22,8 @@ use cruise::application::{
     RunRequest,
 };
 use cruise::session::{SessionManager, SessionPhase, WorkspaceMode};
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
-use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point};
 use opentelemetry_proto::tonic::trace::v1::status::StatusCode;
 use prost::Message;
@@ -310,12 +311,21 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 #[derive(Clone, Debug)]
+struct LogRecord {
+    event_name: String,
+    severity_number: i32,
+    body: String,
+    trace_id: Vec<u8>,
+    span_id: Vec<u8>,
+    bool_attributes: HashMap<String, bool>,
+}
+
+#[derive(Clone, Debug)]
 struct EventRecord {
     name: String,
     attributes: HashMap<String, String>,
     int_attributes: HashMap<String, i64>,
 }
-
 #[derive(Clone, Debug)]
 struct SpanRecord {
     name: String,
@@ -375,6 +385,42 @@ fn spans(requests: &[CapturedRequest]) -> Vec<SpanRecord> {
                             .map_or("", |status| status.message.as_str())
                             .to_owned(),
                         status_code: span.status.map_or(0, |status| status.code),
+                    });
+                }
+            }
+        }
+    }
+    records
+}
+
+fn logs(requests: &[CapturedRequest]) -> Vec<LogRecord> {
+    let mut records = Vec::new();
+    for request in requests.iter().filter(|request| request.path == "/v1/logs") {
+        let exported = ExportLogsServiceRequest::decode(request.body.as_slice())
+            .unwrap_or_else(|error| panic!("decode OTLP logs request: {error}"));
+        for resource_logs in exported.resource_logs {
+            for scope_logs in resource_logs.scope_logs {
+                for record in scope_logs.log_records {
+                    let body = record
+                        .body
+                        .as_ref()
+                        .and_then(|value| value.value.as_ref())
+                        .and_then(|value| {
+                            match value {
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                                value,
+                            ) => Some(value.clone()),
+                            _ => None,
+                        }
+                        })
+                        .unwrap_or_default();
+                    records.push(LogRecord {
+                        event_name: record.event_name,
+                        severity_number: record.severity_number,
+                        body,
+                        trace_id: record.trace_id,
+                        span_id: record.span_id,
+                        bool_attributes: bool_attributes(&record.attributes),
                     });
                 }
             }
@@ -2529,10 +2575,10 @@ fn cancelling_plan_approval_exits_successfully_deletes_session_and_cancels_root(
 }
 
 #[test]
-fn failed_exec_exports_error_status_without_error_text() {
+fn failed_exec_exports_fixed_error_classification_and_redacts_stderr() {
     let collector = Collector::start();
     let fixture = Fixture::new(
-        "command: [sh, -c, 'cat >/dev/null; exit 0']\nsteps:\n  failing:\n    command: \"printf '%s' failure-output-secret >&2; exit 7\"\n",
+        "command: [sh, -c, 'cat >/dev/null; exit 0']\nsteps:\n  failing:\n    command: \"printf '%s' 'Authorization: Bearer failure-output-secret' >&2; exit 7\"\n",
     );
     let mut env = otlp_env(&collector.endpoint());
     env.push((
@@ -2544,7 +2590,7 @@ fn failed_exec_exports_error_status_without_error_text() {
         !output.status.success(),
         "failure workflow unexpectedly succeeded"
     );
-    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics", "/v1/logs"]);
     let exported_spans = spans(&requests);
     let workflow = named_span(
         &exported_spans,
@@ -2622,6 +2668,102 @@ fn failed_exec_exports_error_status_without_error_text() {
             "failure-input-secret",
             "failure-header-secret",
             "exit 7",
+        ],
+    );
+}
+
+#[test]
+fn command_stderr_logs_are_bounded_sanitized_and_correlated_only_for_failures() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        r"steps:
+  succeeded:
+    command: |
+      printf '%s\n' 'successful-command-stderr-secret' >&2
+  failing:
+    command: |
+      printf '%s\n' 'ordinary-safe-diagnostic' >&2
+      printf '%s\n' 'Authorization: Bearer failed-bearer-secret' >&2
+      printf '%s\n' 'password=failed-password-secret' >&2
+      printf '%s\n' 'https://url-user-secret:url-pass-secret@example.test/path?token=url-query-secret#url-fragment-secret' >&2
+      printf '%10000s' '' | tr ' ' x >&2
+      exit 9
+",
+    );
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "command-stderr-input-secret",
+    );
+    assert!(
+        !output.status.success(),
+        "stderr telemetry fixture unexpectedly succeeded"
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics", "/v1/logs"]);
+    let exported_spans = spans(&requests);
+    let failed_step = named_span(
+        &exported_spans,
+        "cruise.step",
+        "cruise.step.name",
+        "failing",
+    );
+    let failed_attempt = exported_spans
+        .iter()
+        .find(|span| span.name == "cruise.attempt" && span.parent_span_id == failed_step.span_id)
+        .unwrap_or_else(|| panic!("failed command attempt missing: {exported_spans:#?}"));
+    let succeeded_step = named_span(
+        &exported_spans,
+        "cruise.step",
+        "cruise.step.name",
+        "succeeded",
+    );
+    let succeeded_attempt = exported_spans
+        .iter()
+        .find(|span| span.name == "cruise.attempt" && span.parent_span_id == succeeded_step.span_id)
+        .unwrap_or_else(|| panic!("successful command attempt missing: {exported_spans:#?}"));
+
+    let exported_logs = logs(&requests);
+    assert_eq!(
+        exported_logs.len(),
+        1,
+        "one nonempty failed command attempt should export exactly one log: {exported_logs:#?}"
+    );
+    let log = &exported_logs[0];
+    assert_eq!(log.event_name, "cruise.command.stderr");
+    assert_eq!(log.severity_number, 17, "command stderr should be ERROR");
+    assert_eq!(log.trace_id, failed_attempt.trace_id);
+    assert_eq!(log.span_id, failed_attempt.span_id);
+    assert_ne!(log.span_id, succeeded_attempt.span_id);
+    assert!(log.body.len() <= 8192);
+    assert_eq!(
+        log.bool_attributes.get("cruise.command.stderr_truncated"),
+        Some(&true)
+    );
+    assert!(log.body.contains("ordinary-safe-diagnostic"));
+    assert!(log.body.contains("[REDACTED]"));
+    for span in [failed_step, failed_attempt] {
+        assert!(
+            span.attributes
+                .values()
+                .all(|value| !value.contains("ordinary-safe-diagnostic")),
+            "stderr must not be copied into span attributes: {span:#?}"
+        );
+        assert!(
+            !span.status_description.contains("ordinary-safe-diagnostic"),
+            "stderr must not be copied into span status: {span:#?}"
+        );
+    }
+    assert_payload_omits(
+        &requests,
+        &[
+            "command-stderr-input-secret",
+            "successful-command-stderr-secret",
+            "failed-bearer-secret",
+            "failed-password-secret",
+            "url-user-secret",
+            "url-pass-secret",
+            "url-query-secret",
+            "url-fragment-secret",
         ],
     );
 }
@@ -2710,7 +2852,7 @@ steps:
     command: >-
       if [ ! -e .telemetry-retried ]; then
         touch .telemetry-retried;
-        echo 'rate limit retry-error-secret' >&2;
+        echo 'rate limit: Authorization: Bearer retry-error-secret' >&2;
         exit 1;
       fi;
       echo retry-output-secret
@@ -2729,7 +2871,7 @@ steps:
     );
     assert_success(&output);
 
-    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics", "/v1/logs"]);
     let exported_spans = spans(&requests);
     assert_rate_limit_retry_spans(&exported_spans);
 
@@ -2767,10 +2909,11 @@ fn invalid_ci_markers_export_no_untrusted_fields() {
         r#"steps:
   invalid-ci:
     command: |
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github private-reason-secret FAILURE false 3 unknown {{"checks":[],"truncated":false}}' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed private-state-secret false 3 unknown {{"checks":[],"truncated":false}}' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 3 200 {{"checks":[],"truncated":false,"unexpected":"leaked-field-secret"}}' >&2
-      printf '%s\n' 'invalid-marker-stderr-secret' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V4 github password=private-reason-secret FAILURE false 3 unknown {{"checks":[],"truncated":false}}' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V4 github ci_failed password=private-state-secret false 3 unknown {{"checks":[],"truncated":false}}' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 3 200 {{"checks":[],"truncated":false,"unexpected":"password=leaked-field-secret"}}' >&2
+      printf '%s\n' 'ordinary invalid-marker context' >&2
+      printf '%s\n' 'Authorization: Bearer invalid-marker-stderr-secret' >&2
       exit 9
 "#,
     );
@@ -2783,7 +2926,7 @@ fn invalid_ci_markers_export_no_untrusted_fields() {
         "invalid marker fixture unexpectedly succeeded"
     );
 
-    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics", "/v1/logs"]);
     let spans = spans(&requests);
     let (failed, attempt) =
         assert_command_failure_diagnostic(&spans, "invalid-ci", "invalid", true);
@@ -2813,8 +2956,9 @@ fn malformed_ci_marker_does_not_replace_earlier_valid_diagnostic() {
         r#"steps:
   malformed-ci:
     command: |
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {{"checks":[{{"name":"expected-check","state":"FAILURE"}}],"truncated":false}}' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE true 99 400 {{"checks":[{{"name":"malformed-check-private-secret","state":{{"FAILURE":null}}}}],"truncated":false}}' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500 {{"checks":[{{"name":"expected-check","state":"FAILURE"}}],"truncated":false}}' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE true 99 400 {{"checks":[{{"name":"password=malformed-check-private-secret","state":{{"FAILURE":null}}}}],"truncated":false}}' >&2
+      printf '%s\n' 'ordinary malformed-marker context' >&2
       exit 9
 "#,
     );
@@ -2827,7 +2971,7 @@ fn malformed_ci_marker_does_not_replace_earlier_valid_diagnostic() {
         "malformed marker fixture unexpectedly succeeded"
     );
 
-    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics", "/v1/logs"]);
     let spans = spans(&requests);
     let (step, attempt) = assert_command_failure_diagnostic(&spans, "malformed-ci", "valid", true);
     for span in [step, attempt] {
@@ -2862,10 +3006,11 @@ fn command_diagnostic_markers_export_bounded_ci_and_sync_base_attributes() {
         r#"steps:
   diagnostics:
     command: |
-      printf '%s\n' 'human-readable private sync error' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github api_error unobserved unknown unknown 502 {{"checks":[],"truncated":false}}' >&2
+      printf '%s\n' 'ordinary diagnostic marker context' >&2
+      printf '%s\n' 'Authorization: Bearer private-sync-error-secret' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V4 github api_error unobserved unknown unknown 502 {{"checks":[],"truncated":false}}' >&2
       printf '%s\n' 'CRUISE_SYNC_BASE_DIAGNOSTIC_V1 fetch_failed' >&2
-      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V3 github invalid-reason-secret FAILURE false 3 200 {{"checks":[],"truncated":false}}' >&2
+      printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V4 github password=invalid-reason-secret FAILURE false 3 200 {{"checks":[],"truncated":false}}' >&2
       exit 1
 "#,
     );
@@ -2878,7 +3023,7 @@ fn command_diagnostic_markers_export_bounded_ci_and_sync_base_attributes() {
         "diagnostic fixture unexpectedly succeeded"
     );
 
-    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics", "/v1/logs"]);
     let exported_spans = spans(&requests);
     let (failed, attempt) =
         assert_command_failure_diagnostic(&exported_spans, "diagnostics", "valid", true);
@@ -2912,7 +3057,7 @@ fn command_diagnostic_markers_export_bounded_ci_and_sync_base_attributes() {
         &requests,
         &[
             "diagnostic-marker-input-secret",
-            "human-readable private sync error",
+            "private-sync-error-secret",
             "invalid-reason-secret",
         ],
     );
@@ -2931,7 +3076,7 @@ fn command_failure_diagnostic_status_covers_missing_and_unsupported_markers() {
         ),
         (
             "unsupported",
-            r"printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 private-provider-secret ci_failed unsupported-field-secret false 3 503' >&2; printf '%s\n' 'unsupported-marker-private-stderr-secret' >&2; exit 9",
+            r"printf '%s\n' 'CRUISE_CI_DIAGNOSTIC_V2 Authorization: Bearer private-provider-secret ci_failed password=unsupported-field-secret false 3 503' >&2; printf '%s\n' 'ordinary unsupported-marker context' >&2; printf '%s\n' 'Authorization: Bearer unsupported-marker-private-stderr-secret' >&2; exit 9",
             "unsupported",
             true,
             "unsupported-marker-input-secret",
@@ -2950,7 +3095,11 @@ fn command_failure_diagnostic_status_covers_missing_and_unsupported_markers() {
             "{step_name} diagnostic fixture unexpectedly succeeded"
         );
 
-        let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+        let requests = if stderr_present {
+            collector.wait_for_paths(&["/v1/traces", "/v1/metrics", "/v1/logs"])
+        } else {
+            collector.wait_for_paths(&["/v1/traces", "/v1/metrics"])
+        };
         let exported_spans = spans(&requests);
         let (step, attempt) =
             assert_command_failure_diagnostic(&exported_spans, step_name, status, stderr_present);
@@ -3057,7 +3206,7 @@ fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
         &collector,
         r#"#!/bin/sh
 if [ "$1" = repo ]; then
-  printf '123/true\n'
+  printf 'owner/repo\n'
   exit 0
 fi
 if [ "$1" = api ] && [ "$2" = graphql ]; then
@@ -3066,11 +3215,11 @@ if [ "$1" = api ] && [ "$2" = graphql ]; then
   calls=$((calls + 1))
   printf '%s\n' "$calls" > .fake-gh-graphql-calls || exit 97
   if [ "$calls" -eq 1 ]; then
-    printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"state":"FAILURE","contexts":{"totalCount":4}}}}},"extensions":{"message":"private-provider-response-secret"}}\n' "$head" "$head"
+    printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"state":"FAILURE","contexts":{"totalCount":4}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
     exit 0
   fi
-  printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"contexts":{"totalCount":4,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"successful-check-private-secret","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"StatusContext","context":"successful-context-private-secret","state":"SUCCESS"},{"__typename":"StatusContext","context":"deploy-prod","state":"ERROR"}]}}}}},"extensions":{"message":"private-provider-response-secret"}}\n' "$head" "$head"
-  printf 'private-provider-stderr-secret\n' >&2
+  printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"contexts":{"totalCount":4,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"successful-check-not-exported","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://url-user-secret:url-pass-secret@github.com/owner/repo/actions/runs/789/job/456?token=url-query-secret#url-fragment-secret","checkSuite":{"workflowRun":{"databaseId":789}}},{"__typename":"StatusContext","context":"successful-context-not-exported","state":"SUCCESS"},{"__typename":"StatusContext","context":"deploy-prod","state":"ERROR","targetUrl":"https://status-user-secret:status-pass-secret@example.test/deploy/42?private_token=status-query-secret#status-fragment-secret"}]}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
+  printf 'Authorization: Bearer private-provider-stderr-secret\n' >&2
   exit 0
 fi
 printf 'unexpected fake gh invocation with secret details\n' >&2
@@ -3083,20 +3232,25 @@ exit 97
         "failed CI fixture unexpectedly succeeded"
     );
 
-    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics", "/v1/logs"]);
     let exported_spans = spans(&requests);
     let (step, attempt) =
         assert_command_failure_diagnostic(&exported_spans, "wait-ci", "valid", true);
-    let expected_checks =
-        r#"[{"name":"unit-tests","state":"FAILURE"},{"name":"deploy-prod","state":"ERROR"}]"#;
+    let expected_checks = json!([
+        {
+            "name": "unit-tests",
+            "state": "FAILURE",
+            "run_id": "789",
+            "job_id": "456",
+            "url": "https://github.com/owner/repo/actions/runs/789/job/456"
+        },
+        {
+            "name": "deploy-prod",
+            "state": "ERROR",
+            "url": "https://example.test/deploy/42"
+        }
+    ]);
     for span in [step, attempt] {
-        assert_eq!(
-            span.attributes
-                .get("cruise.ci.provider")
-                .map(String::as_str),
-            Some("github"),
-            "{span:#?}"
-        );
         assert_eq!(
             span.attributes
                 .get("cruise.ci.failure_reason")
@@ -3104,37 +3258,44 @@ exit 97
             Some("ci_failed"),
             "{span:#?}"
         );
-        assert_eq!(
+        let actual_checks: Value = serde_json::from_str(
             span.attributes
                 .get("cruise.ci.failed_checks")
-                .map(String::as_str),
-            Some(expected_checks),
-            "failed check names and states: {span:#?}"
+                .unwrap_or_else(|| panic!("failed-check details missing: {span:#?}")),
+        )
+        .unwrap_or_else(|error| panic!("decode failed-check details: {error}"));
+        assert_eq!(
+            actual_checks, expected_checks,
+            "failed check references must survive as sanitized JSON: {span:#?}"
         );
         assert_eq!(
             span.bool_attributes
                 .get("cruise.ci.failed_checks_truncated"),
-            Some(&false),
-            "complete failure details should not be truncated: {span:#?}"
+            Some(&true),
+            "sanitized reference changes must be reported as truncation: {span:#?}"
         );
         assert_eq!(
             span.attributes.get("error.type").map(String::as_str),
             Some("command_exit"),
             "CI details must not be copied into error.type: {span:#?}"
         );
-        assert_eq!(
-            span.status_description, span.attributes["error.type"],
-            "status description must not carry check details: {span:#?}"
-        );
     }
     assert_payload_omits(
         &requests,
         &[
             "builtin-wait-ci-prompt-secret",
-            "successful-check-private-secret",
-            "successful-context-private-secret",
+            "successful-check-not-exported",
+            "successful-context-not-exported",
             "private-provider-response-secret",
             "private-provider-stderr-secret",
+            "url-user-secret",
+            "url-pass-secret",
+            "url-query-secret",
+            "url-fragment-secret",
+            "status-user-secret",
+            "status-pass-secret",
+            "status-query-secret",
+            "status-fragment-secret",
             "unexpected fake gh invocation with secret details",
         ],
     );
@@ -3318,14 +3479,27 @@ fn telemetry_is_off_by_default_and_sdk_disabled_takes_precedence() {
         "telemetry exported without opt-in"
     );
 
-    let mut disabled = otlp_env(&collector.endpoint());
-    disabled.push(("OTEL_SDK_DISABLED".into(), "true".into()));
-    let disabled = fixture.run(&borrowed_env(&disabled), "sdk-disabled-input");
+    let mut disabled_env = otlp_env(&collector.endpoint());
+    disabled_env.push(("OTEL_SDK_DISABLED".into(), "true".into()));
+    let disabled = fixture.run(&borrowed_env(&disabled_env), "sdk-disabled-input");
     assert_success(&disabled);
     thread::sleep(Duration::from_millis(100));
     assert!(
         collector.requests().is_empty(),
         "OTEL_SDK_DISABLED did not suppress exports"
+    );
+    let failing_fixture = Fixture::new(
+        "steps:\n  failing:\n    command: \"printf '%s' 'Authorization: Bearer disabled-stderr-secret' >&2; exit 7\"\n",
+    );
+    let failed = failing_fixture.run(&borrowed_env(&disabled_env), "sdk-disabled-failure-input");
+    assert!(
+        !failed.status.success(),
+        "SDK-disabled failure fixture unexpectedly succeeded"
+    );
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        collector.requests().is_empty(),
+        "OTEL_SDK_DISABLED did not suppress failure stderr logs"
     );
 }
 

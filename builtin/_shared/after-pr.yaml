@@ -42,10 +42,54 @@ steps:
           [12345][0123456789][0123456789]) ;;
           *) diagnostic_http_status=unknown ;;
         esac
-        printf 'CRUISE_CI_DIAGNOSTIC_V3 %s %s %s %s %s %s %s\n' "$provider" "$1" "$diagnostic_state" "$diagnostic_head_matches" "$diagnostic_check_count" "$diagnostic_http_status" "$diagnostic_payload" >&2
+        payload_bytes=$(printf '%s' "$diagnostic_payload" | wc -c | tr -d '[:space:]')
+        if [ "$payload_bytes" -gt 16000 ]; then
+          diagnostic_payload=$(printf '%s' "$diagnostic_payload" | jq -ac '.checks |= map(del(.url)) | .truncated = true') || diagnostic_payload='{{"checks":[],"truncated":true}}'
+          payload_bytes=$(printf '%s' "$diagnostic_payload" | wc -c | tr -d '[:space:]')
+        fi
+        if [ "$payload_bytes" -gt 16000 ]; then
+          diagnostic_payload=$(printf '%s' "$diagnostic_payload" | jq -ac '.checks |= map(del(.url,.run_id,.job_id)) | .truncated = true') || diagnostic_payload='{{"checks":[],"truncated":true}}'
+        fi
+        printf 'CRUISE_CI_DIAGNOSTIC_V4 %s %s %s %s %s %s %s\n' "$provider" "$1" "$diagnostic_state" "$diagnostic_head_matches" "$diagnostic_check_count" "$diagnostic_http_status" "$diagnostic_payload" >&2
       }}
       github_page() {{
-        printf '%s' "$1" | jq -ac --argjson total "$check_count" '
+        printf '%s' "$1" | jq -ac --argjson total "$check_count" --arg repo_owner "$owner" --arg repo_name "$name" '
+          def clean_id:
+            if type == "number" then
+              if . > 0 and . == floor then
+                tostring | if test("^[1-9][0-9]{{0,19}}$") then . else null end
+              else null end
+            else null end;
+          def clean_url:
+            if type != "string" then null
+            else
+              (try (capture("^(?<scheme>[Hh][Tt][Tt][Pp][Ss]?)://(?<authority>[^/?#]+)(?<path>[^?#]*)") // null) catch null) as $parts
+              | if $parts == null then null
+                else
+                  ($parts.authority | split("@") | .[-1]) as $host
+                  | if ($host | test("^([A-Za-z0-9.-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{{1,5}})?$"))
+                      and ($parts.path | test("^(?:/(?:[A-Za-z0-9._~!$&()*+,;=:@-]|%[0-9A-Fa-f]{{2}})*)*$")) then
+                      (("\($parts.scheme | ascii_downcase)://\($host)\($parts.path)") as $url
+                       | if ($url | utf8bytelength) <= 1024 then $url else null end)
+                    else null
+                    end
+                end
+            end;
+          def actions_job_id($url; $run_id; $owner; $name):
+            if $url == null then {{job_id:null,bad:false}}
+            elif ($url | contains("/actions/runs/") | not) then {{job_id:null,bad:false}}
+            else
+              (try ($url | (capture("^https?://[^/]+/(?<owner>[^/]+)/(?<repo>[^/]+)/actions/runs/(?<run_id>[^/]+)/job/(?<job_id>[^/]+)$") // null)) catch null) as $parts
+              | if $parts == null then {{job_id:null,bad:true}}
+                elif ($parts.owner | ascii_downcase) != ($owner | ascii_downcase)
+                  or ($parts.repo | ascii_downcase) != ($name | ascii_downcase)
+                  or ($parts.run_id | test("^[1-9][0-9]{{0,19}}$") | not)
+                  or ($parts.job_id | test("^[1-9][0-9]{{0,19}}$") | not)
+                  or $run_id == null
+                  or $parts.run_id != $run_id then {{job_id:null,bad:true}}
+                else {{job_id:$parts.job_id,bad:false}}
+                end
+            end;
           def classify:
             if type != "object" then {{check:null,bad:true}}
             else . as $node
@@ -54,7 +98,7 @@ steps:
                 elif $node.status == "COMPLETED" then
                   if ($node.conclusion | type) != "string" then {{check:null,bad:true}}
                   elif (["FAILURE","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE","STALE"] | index($node.conclusion)) != null then
-                    {{check:{{name:$node.name,state:$node.conclusion}},bad:false}}
+                    {{check:{{name:$node.name,state:$node.conclusion,run_id:(if ($node.checkSuite | type) != "object" then null elif ($node.checkSuite.workflowRun | type) != "object" then null else $node.checkSuite.workflowRun.databaseId end),url:$node.detailsUrl,run_expected:(if ($node.checkSuite | type) != "object" then true else $node.checkSuite.workflowRun != null end),url_expected:true,checkrun:true}},bad:false}}
                   elif (["SUCCESS","NEUTRAL","SKIPPED"] | index($node.conclusion)) != null then {{check:null,bad:false}}
                   else {{check:null,bad:true}}
                   end
@@ -63,7 +107,7 @@ steps:
                 end
               elif $node.__typename == "StatusContext" then
                 if (["FAILURE","ERROR"] | index($node.state)) != null then
-                  {{check:{{name:$node.context,state:$node.state}},bad:false}}
+                  {{check:{{name:$node.context,state:$node.state,url:$node.targetUrl,url_expected:($node.targetUrl != null),checkrun:false}},bad:false}}
                 elif (["SUCCESS","PENDING","EXPECTED"] | index($node.state)) != null then {{check:null,bad:false}}
                 else {{check:null,bad:true}}
                 end
@@ -81,8 +125,13 @@ steps:
               . as $candidate
               | if ($candidate.name | type) == "string" then
                   ($candidate.name | clean) as $name
+                  | ($candidate.run_id | clean_id) as $run_id
+                  | ($candidate.url | clean_url) as $url
+                  | (if $candidate.checkrun then actions_job_id($url; $run_id; $repo_owner; $repo_name) else {{job_id:null,bad:false}} end) as $job
                   | if $name == "" then {{check:null,bad:true}}
-                    else {{check:{{name:$name,state:$candidate.state}},bad:($name != $candidate.name)}}
+                    else
+                      {{check:({{name:$name,state:$candidate.state}} + (if $candidate.run_expected and $run_id != null then {{run_id:$run_id}} else {{}} end) + (if $job.job_id != null then {{job_id:$job.job_id}} else {{}} end) + (if $url != null then {{url:$url}} else {{}} end)),
+                        bad:($name != $candidate.name or ($candidate.run_expected and $run_id == null) or ($candidate.url_expected and $url == null) or ($candidate.url != null and $url != $candidate.url) or $job.bad)}}
                     end
                 else {{check:null,bad:true}}
                 end
@@ -165,18 +214,40 @@ steps:
         fi
       }}
       collect_gitlab_failures() {{
-        if [ -z "$observed_pipeline_id" ] || ! printf '%s' "$1" | jq -e --argjson pipeline_id "$observed_pipeline_id" 'type == "object" and (.id | type == "number") and .id == $pipeline_id' >/dev/null 2>&1; then
+        if [ -z "$observed_pipeline_id" ] || ! printf '%s' "$1" | jq -e --argjson observed "$observed_pipeline_id" 'def valid_id: if type == "number" then . > 0 and . == floor and (tostring | test("^[1-9][0-9]{{0,19}}$")) else false end; . as $pipeline | type == "object" and ($pipeline.id | valid_id) and $pipeline.id == $observed' >/dev/null 2>&1; then
           diagnostic_payload='{{"checks":[],"truncated":true}}'
           gitlab_trace_jobs=
           return
         fi
         gitlab_details=$(printf '%s' "$1" | jq -ac '
+          def clean_id:
+            if type == "number" then
+              if . > 0 and . == floor then
+                tostring | if test("^[1-9][0-9]{{0,19}}$") then . else null end
+              else null end
+            else null end;
+          def clean_url:
+            if type != "string" then null
+            else
+              (try (capture("^(?<scheme>[Hh][Tt][Tt][Pp][Ss]?)://(?<authority>[^/?#]+)(?<path>[^?#]*)") // null) catch null) as $parts
+              | if $parts == null then null
+                else
+                  ($parts.authority | split("@") | .[-1]) as $host
+                  | if ($host | test("^([A-Za-z0-9.-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]{{1,5}})?$"))
+                      and ($parts.path | test("^(?:/(?:[A-Za-z0-9._~!$&()*+,;=:@-]|%[0-9A-Fa-f]{{2}})*)*$")) then
+                      (("\($parts.scheme | ascii_downcase)://\($host)\($parts.path)") as $url
+                       | if ($url | utf8bytelength) <= 1024 then $url else null end)
+                    else null
+                    end
+                end
+            end;
           def clean: gsub("[\u0000-\u001f\u007f-\u009f]";"") | gsub("^\\s+|\\s+$";"") | .[0:128];
           def known_job_status:
             . as $status
             | ["success","failed","canceled","cancelled","skipped","running","pending","created","waiting_for_resource","preparing","scheduled","manual","canceling"]
             | index($status) != null;
           . as $pipeline
+          | ($pipeline.id | clean_id) as $run_id
           | (($pipeline.jobs | type) == "array") as $jobs_valid
           | (if $jobs_valid then $pipeline.jobs else [] end) as $jobs
           | [$jobs[] | select(type == "object" and .status == "failed")] as $failed
@@ -184,8 +255,12 @@ steps:
               . as $job
               | if ($job.name | type) == "string" then
                   ($job.name | clean) as $name
+                  | ($job.id | clean_id) as $job_id
+                  | ($job.web_url | clean_url) as $url
                   | if $name == "" then {{check:null,bad:true}}
-                    else {{check:{{name:$name,state:"failed"}},bad:($name != $job.name)}}
+                    else
+                      {{check:({{name:$name,state:"failed"}} + (if $run_id != null then {{run_id:$run_id}} else {{}} end) + (if $job_id != null then {{job_id:$job_id}} else {{}} end) + (if $url != null then {{url:$url}} else {{}} end)),
+                        bad:($name != $job.name or $run_id == null or $job_id == null or $url == null or ($job.web_url != null and $url != $job.web_url))}}
                     end
                 else {{check:null,bad:true}}
                 end
@@ -193,7 +268,7 @@ steps:
           | ([$sanitized[] | select(.check != null) | .check]) as $valid
           | {{
               checks:$valid[:10],
-              truncated:(($jobs_valid | not) or ([$jobs[] | select(type != "object")] | length) > 0 or ([$jobs[] | select(type == "object" and ((.status | known_job_status) | not))] | length) > 0 or ($failed | length) == 0 or ([$sanitized[] | select(.bad)] | length) > 0 or ($valid | length) > 10 or ($pipeline.id | type) != "number" or ([$failed[] | select((.id | type) != "number")] | length) > 0),
+              truncated:(($jobs_valid | not) or ([$jobs[] | select(type != "object")] | length) > 0 or ([$jobs[] | select(type == "object" and ((.status | known_job_status) | not))] | length) > 0 or ($failed | length) == 0 or ([$sanitized[] | select(.bad)] | length) > 0 or ($valid | length) > 10 or $run_id == null),
               trace_jobs:(if ($pipeline.id | type) == "number" then [$failed[] | select((.id | type) == "number") | "\($pipeline.id) \(.id)"] else [] end)
             }}
         ' 2>/dev/null)
@@ -312,7 +387,7 @@ steps:
             exit 1
           fi
           query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{state contexts(first:1) {{totalCount}}}}}}}}}}}}'
-          detail_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{contexts(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{__typename ... on CheckRun {{name status conclusion}} ... on StatusContext {{context state}}}}}}}}}}}}}}}}'
+          detail_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{contexts(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{__typename ... on CheckRun {{name status conclusion detailsUrl checkSuite {{workflowRun {{databaseId}}}}}} ... on StatusContext {{context state targetUrl}}}}}}}}}}}}}}}}'
           deadline=$(( $(date +%s) + 1740 ))
           diagnostic_stderr="$(git rev-parse --git-dir)/cruise-ci-query.stderr"
           while :; do

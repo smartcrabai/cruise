@@ -867,8 +867,17 @@ fn builtin_wait_ci_command_for_url(name: &str, pr_url: &str) -> String {
 fn wait_ci_marker(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr)
         .lines()
-        .find(|line| line.starts_with("CRUISE_CI_DIAGNOSTIC_V3 "))
+        .find(|line| line.starts_with("CRUISE_CI_DIAGNOSTIC_V4 "))
         .unwrap_or_else(|| panic!("missing wait-ci diagnostic marker: {}", text(output)))
+        .to_owned()
+}
+#[cfg(unix)]
+fn wait_ci_reason(output: &Output) -> String {
+    let marker = wait_ci_marker(output);
+    marker
+        .split(' ')
+        .nth(2)
+        .unwrap_or_else(|| panic!("missing diagnostic reason in marker: {marker}"))
         .to_owned()
 }
 #[cfg(unix)]
@@ -877,8 +886,8 @@ fn wait_ci_payload(output: &Output) -> serde_json::Value {
     let json = marker
         .splitn(8, ' ')
         .nth(7)
-        .unwrap_or_else(|| panic!("missing V3 payload in marker: {marker}"));
-    serde_json::from_str(json).unwrap_or_else(|error| panic!("invalid V3 payload: {error}"))
+        .unwrap_or_else(|| panic!("missing V4 payload in marker: {marker}"));
+    serde_json::from_str(json).unwrap_or_else(|error| panic!("invalid V4 payload: {error}"))
 }
 
 #[cfg(unix)]
@@ -1068,10 +1077,6 @@ fi
 detail_count=0
 case "$*" in
   *'contexts(first:100,after:$after)'*)
-    case "$*" in
-      *totalCount*pageInfo*nodes*CheckRun*StatusContext*) ;;
-      *) printf 'GitHub detail query omitted required context fields: %s\n' "$*" >&2; exit 96 ;;
-    esac
     detail_count=$(cat "$WAIT_CI_GH_DETAIL_COUNT" 2>/dev/null || printf 0)
     detail_count=$((detail_count + 1))
     printf '%s\n' "$detail_count" > "$WAIT_CI_GH_DETAIL_COUNT"
@@ -1338,9 +1343,9 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     let command = builtin_wait_ci_command("tdd");
     let failure_nodes = [
         serde_json::json!({"__typename":"CheckRun","name":"passing","status":"COMPLETED","conclusion":"SUCCESS"}),
-        serde_json::json!({"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE"}),
-        serde_json::json!({"__typename":"StatusContext","context":"lint","state":"ERROR"}),
-        serde_json::json!({"__typename":"CheckRun","name":"deploy","status":"COMPLETED","conclusion":"CANCELLED"}),
+        serde_json::json!({"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://user:password@github.com/123/true/actions/runs/111/job/222?access_token=secret#private","checkSuite":{"workflowRun":{"databaseId":111}}}),
+        serde_json::json!({"__typename":"StatusContext","context":"lint","state":"ERROR","targetUrl":"https://user:password@ci.example/check?token=secret#private"}),
+        serde_json::json!({"__typename":"CheckRun","name":"deploy","status":"COMPLETED","conclusion":"CANCELLED","detailsUrl":"https://github.com/123/true/actions/runs/333/job/444","checkSuite":{"workflowRun":{"databaseId":333}}}),
         serde_json::json!({"__typename":"CheckRun","name":"running","status":"IN_PROGRESS","conclusion":null}),
     ];
     let fixture = GithubWaitCiFixture::new();
@@ -1366,11 +1371,99 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
+    let payload = wait_ci_payload(&output);
     assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE true 5 unknown {\"checks\":[{\"name\":\"unit-tests\",\"state\":\"FAILURE\"},{\"name\":\"lint\",\"state\":\"ERROR\"},{\"name\":\"deploy\",\"state\":\"CANCELLED\"}],\"truncated\":false}"
+        payload["checks"],
+        serde_json::json!([
+            {"name":"unit-tests","state":"FAILURE","run_id":"111","job_id":"222","url":"https://github.com/123/true/actions/runs/111/job/222"},
+            {"name":"lint","state":"ERROR","url":"https://ci.example/check"},
+            {"name":"deploy","state":"CANCELLED","run_id":"333","job_id":"444","url":"https://github.com/123/true/actions/runs/333/job/444"}
+        ])
     );
+    assert_eq!(payload["truncated"], true);
+    assert_eq!(wait_ci_reason(&output), "ci_failed");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("password"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("secret"));
     assert_eq!(fixture.gh_calls(), 2);
+    let fixture = GithubWaitCiFixture::new();
+    let oversized_url = format!("https://ci.example/{}", "a".repeat(1100));
+    let mismatched_refs = [
+        serde_json::json!({"__typename":"CheckRun","name":"mismatched-run","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/123/true/actions/runs/888/job/999?token=secret","checkSuite":{"workflowRun":{"databaseId":777}}}),
+        serde_json::json!({"__typename":"CheckRun","name":"invalid-url","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"javascript:private","checkSuite":{"workflowRun":{"databaseId":778}}}),
+        serde_json::json!({"__typename":"CheckRun","name":"invalid-run-id","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://ci.example/check","checkSuite":{"workflowRun":{"databaseId":0}}}),
+        serde_json::json!({"__typename":"CheckRun","name":"oversized-url","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":&oversized_url,"checkSuite":{"workflowRun":{"databaseId":779}}}),
+    ];
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 4),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &mismatched_refs,
+                4,
+                false,
+                None,
+            ),
+        ],
+        false,
+    );
+    let payload = wait_ci_payload(&output);
+    assert_eq!(
+        payload["checks"],
+        serde_json::json!([
+            {"name":"mismatched-run","state":"FAILURE","run_id":"777","url":"https://github.com/123/true/actions/runs/888/job/999"},
+            {"name":"invalid-url","state":"FAILURE","run_id":"778"},
+            {"name":"invalid-run-id","state":"FAILURE","url":"https://ci.example/check"},
+            {"name":"oversized-url","state":"FAILURE","run_id":"779"}
+        ])
+    );
+    assert_eq!(payload["truncated"], true);
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("secret"));
+    let fixture = GithubWaitCiFixture::new();
+    let url_prefix = "https://ci.example/";
+    let long_url = format!("{url_prefix}{}", "a".repeat(1024 - url_prefix.len()));
+    let long_name = "🧪".repeat(128);
+    let oversized_nodes = (0..10)
+        .map(|index| {
+            serde_json::json!({
+                "__typename":"CheckRun",
+                "name":&long_name,
+                "status":"COMPLETED",
+                "conclusion":"FAILURE",
+                "detailsUrl":&long_url,
+                "checkSuite":{"workflowRun":{"databaseId":index + 1}}
+            })
+        })
+        .collect::<Vec<_>>();
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 10),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &oversized_nodes,
+                10,
+                false,
+                None,
+            ),
+        ],
+        false,
+    );
+    let marker = wait_ci_marker(&output);
+    assert!(marker.len() <= 16_384);
+    let payload = wait_ci_payload(&output);
+    assert_eq!(payload["truncated"], true);
+    assert_eq!(payload["checks"].as_array().map(Vec::len), Some(10));
+    assert!(payload["checks"].as_array().is_some_and(|checks| {
+        checks.iter().all(|check| {
+            check["name"]
+                .as_str()
+                .is_some_and(|name| name.chars().count() == 128)
+                && check.get("url").is_none()
+        })
+    }));
 
     let fixture = GithubWaitCiFixture::new();
     let nonfailed_nodes = [
@@ -1422,10 +1515,17 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         ],
         false,
     );
+    let payload = wait_ci_payload(&output);
     assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE true 4 unknown {\"checks\":[{\"name\":\"first\",\"state\":\"FAILURE\"},{\"name\":\"second\",\"state\":\"FAILURE\"},{\"name\":\"third\",\"state\":\"TIMED_OUT\"},{\"name\":\"fourth\",\"state\":\"ERROR\"}],\"truncated\":false}"
+        payload["checks"],
+        serde_json::json!([
+            {"name":"first","state":"FAILURE"},
+            {"name":"second","state":"FAILURE"},
+            {"name":"third","state":"TIMED_OUT"},
+            {"name":"fourth","state":"ERROR"}
+        ])
     );
+    assert_eq!(payload["truncated"], true);
     assert_eq!(fixture.gh_calls(), 3);
 
     let fixture = GithubWaitCiFixture::new();
@@ -1523,10 +1623,9 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
             1,
         )],
     );
-    assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE true 1 unknown {\"checks\":[],\"truncated\":true}"
-    );
+    assert_eq!(wait_ci_reason(&output), "ci_failed");
+    assert_eq!(wait_ci_payload(&output)["checks"], serde_json::json!([]));
+    assert_eq!(wait_ci_payload(&output)["truncated"], true);
     assert_eq!(fixture.gh_calls(), 2);
     assert!(
         !String::from_utf8_lossy(&output.stderr).contains("fake GitHub details response failed")
@@ -1546,10 +1645,8 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
-    assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 github head_mismatch unobserved false unknown unknown {\"checks\":[],\"truncated\":false}"
-    );
+    assert_eq!(wait_ci_reason(&output), "head_mismatch");
+    assert_eq!(wait_ci_payload(&output)["truncated"], false);
     assert_eq!(fixture.gh_calls(), 1);
 
     let fixture = GithubWaitCiFixture::new();
@@ -1560,20 +1657,16 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
-    assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 github graphql_error unobserved unknown unknown unknown {\"checks\":[],\"truncated\":false}"
-    );
+    assert_eq!(wait_ci_reason(&output), "graphql_error");
+    assert_eq!(wait_ci_payload(&output)["truncated"], false);
     assert!(!terminal.contains("query rejected"), "{terminal}");
     assert_eq!(fixture.gh_calls(), 1);
     let fixture = GithubWaitCiFixture::new();
     let output = fixture.run_api_error(&command);
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
-    assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 github api_error unobserved unknown unknown 502 {\"checks\":[],\"truncated\":false}"
-    );
+    assert_eq!(wait_ci_reason(&output), "api_error");
+    assert_eq!(wait_ci_payload(&output)["truncated"], false);
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .contains("HTTP 502: Bad Gateway (https://api.github.com/graphql)\n")
@@ -1584,10 +1677,8 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     let output = fixture.run_network_error(&command);
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
-    assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 github api_error unobserved unknown unknown unknown {\"checks\":[],\"truncated\":false}"
-    );
+    assert_eq!(wait_ci_reason(&output), "api_error");
+    assert_eq!(wait_ci_payload(&output)["truncated"], false);
     assert_eq!(fixture.gh_calls(), 1);
 
     for (state, check_count) in [(None, 0), (Some("SUCCESS"), 0)] {
@@ -1610,6 +1701,74 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
 }
 #[cfg(unix)]
 #[test]
+fn builtin_github_wait_ci_retains_failures_with_malformed_optional_run_refs() {
+    let fixture = GithubWaitCiFixture::new();
+    let command = builtin_wait_ci_command("tdd");
+    let nodes = [
+        serde_json::json!({
+            "__typename":"CheckRun",
+            "name":"valid",
+            "status":"COMPLETED",
+            "conclusion":"FAILURE",
+            "detailsUrl":"https://ci.example/valid",
+            "checkSuite":{"workflowRun":{"databaseId":123}}
+        }),
+        serde_json::json!({
+            "__typename":"CheckRun",
+            "name":"invalid-suite",
+            "status":"COMPLETED",
+            "conclusion":"FAILURE",
+            "detailsUrl":"https://ci.example/invalid-suite",
+            "checkSuite":"invalid"
+        }),
+        serde_json::json!({
+            "__typename":"CheckRun",
+            "name":"invalid-workflow",
+            "status":"COMPLETED",
+            "conclusion":"FAILURE",
+            "detailsUrl":"https://ci.example/invalid-workflow",
+            "checkSuite":{"workflowRun":[]}
+        }),
+        serde_json::json!({
+            "__typename":"CheckRun",
+            "name":"non-actions",
+            "status":"COMPLETED",
+            "conclusion":"FAILURE",
+            "detailsUrl":"https://ci.example/non-actions",
+            "checkSuite":{"workflowRun":null}
+        }),
+    ];
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), nodes.len()),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &nodes,
+                nodes.len(),
+                false,
+                None,
+            ),
+        ],
+        false,
+    );
+    assert!(!output.status.success(), "{}", text(&output));
+    assert_eq!(wait_ci_reason(&output), "ci_failed");
+    assert_eq!(
+        wait_ci_payload(&output)["checks"],
+        serde_json::json!([
+            {"name":"valid","state":"FAILURE","run_id":"123","url":"https://ci.example/valid"},
+            {"name":"invalid-suite","state":"FAILURE","url":"https://ci.example/invalid-suite"},
+            {"name":"invalid-workflow","state":"FAILURE","url":"https://ci.example/invalid-workflow"},
+            {"name":"non-actions","state":"FAILURE","url":"https://ci.example/non-actions"}
+        ])
+    );
+    assert_eq!(wait_ci_payload(&output)["truncated"], true);
+}
+
+#[cfg(unix)]
+#[test]
 fn builtin_gitlab_wait_ci_markers_classify_failure_and_untrusted_responses() {
     let command =
         builtin_wait_ci_command_for_url("tdd", "https://gitlab.com/owner/repo/-/merge_requests/42");
@@ -1617,15 +1776,39 @@ fn builtin_gitlab_wait_ci_markers_classify_failure_and_untrusted_responses() {
     let output = run_gitlab_wait_ci_command_with_details(
         &command,
         r#"{"id":1,"status":"failed"}"#,
-        r#"{"id":1,"status":"failed","jobs":[{"id":21,"name":"unit tests","status":"failed"},{"id":22,"name":"passing job","status":"success"}]}"#,
+        r#"{"id":1,"status":"failed","jobs":[{"id":21,"name":"unit tests","status":"failed","web_url":"https://user:password@gitlab.com/owner/repo/-/jobs/21?private_token=secret#private"},{"id":22,"name":"passing job","status":"success"}]}"#,
         0,
         "",
     );
     assert!(!output.status.success(), "{}", text(&output));
+    let payload = wait_ci_payload(&output);
     assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 gitlab ci_failed failed unknown unknown unknown {\"checks\":[{\"name\":\"unit tests\",\"state\":\"failed\"}],\"truncated\":false}"
+        payload["checks"],
+        serde_json::json!([{
+            "name":"unit tests",
+            "state":"failed",
+            "run_id":"1",
+            "job_id":"21",
+            "url":"https://gitlab.com/owner/repo/-/jobs/21"
+        }])
     );
+    assert_eq!(payload["truncated"], true);
+    assert_eq!(wait_ci_reason(&output), "ci_failed");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("password"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("secret"));
+    let invalid_refs = serde_json::json!({
+        "id": 1,
+        "status": "failed",
+        "jobs": [{"id":"21", "name":"still failed", "status":"failed", "web_url":"javascript:do-not-export"}]
+    })
+    .to_string();
+    let output = run_gitlab_wait_ci_command(&command, &invalid_refs, 0, "");
+    let payload = wait_ci_payload(&output);
+    assert_eq!(
+        payload["checks"],
+        serde_json::json!([{"name":"still failed","state":"failed","run_id":"1"}])
+    );
+    assert_eq!(payload["truncated"], true);
 
     let long_name = format!("  {} \u{1}", "job".repeat(50));
     let response = serde_json::json!({
@@ -1657,10 +1840,8 @@ fn builtin_gitlab_wait_ci_markers_classify_failure_and_untrusted_responses() {
 
     let output = run_gitlab_wait_ci_command(&command, "", 1, "");
     assert!(!output.status.success(), "{}", text(&output));
-    assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 gitlab api_error unknown unknown unknown unknown {\"checks\":[],\"truncated\":false}"
-    );
+    assert_eq!(wait_ci_reason(&output), "api_error");
+    assert_eq!(wait_ci_payload(&output)["truncated"], false);
 
     let output = run_gitlab_wait_ci_command(
         &command,
@@ -1669,24 +1850,18 @@ fn builtin_gitlab_wait_ci_markers_classify_failure_and_untrusted_responses() {
         "GET https://gitlab.example/api/v4/projects/1/pipelines/latest: 404 {message: 404 Not Found}",
     );
     assert!(!output.status.success(), "{}", text(&output));
-    assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 gitlab api_error unknown unknown unknown 404 {\"checks\":[],\"truncated\":false}"
-    );
+    assert_eq!(wait_ci_reason(&output), "api_error");
+    assert_eq!(wait_ci_payload(&output)["truncated"], false);
 
     let output = run_gitlab_wait_ci_command(&command, "not-json", 0, "");
     assert!(!output.status.success(), "{}", text(&output));
-    assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 gitlab invalid_ci_state unknown unknown unknown unknown {\"checks\":[],\"truncated\":false}"
-    );
+    assert_eq!(wait_ci_reason(&output), "invalid_ci_state");
+    assert_eq!(wait_ci_payload(&output)["truncated"], false);
 
     let output = run_gitlab_wait_ci_command(&command, r#"{"status":"secret raw status"}"#, 0, "");
     assert!(!output.status.success(), "{}", text(&output));
-    assert_eq!(
-        wait_ci_marker(&output),
-        "CRUISE_CI_DIAGNOSTIC_V3 gitlab unknown_state unknown unknown unknown unknown {\"checks\":[],\"truncated\":false}"
-    );
+    assert_eq!(wait_ci_reason(&output), "unknown_state");
+    assert_eq!(wait_ci_payload(&output)["truncated"], false);
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret raw status"));
 }
 #[cfg(unix)]
@@ -1715,7 +1890,7 @@ fn builtin_gitlab_wait_ci_rejects_unmatched_pipeline_details() {
             0,
             "",
         );
-        assert!(wait_ci_marker(&output).contains("gitlab ci_failed "));
+        assert_eq!(wait_ci_reason(&output), "ci_failed");
         let payload = wait_ci_payload(&output);
         assert_eq!(payload["checks"], serde_json::json!([]));
         assert_eq!(payload["truncated"], true);

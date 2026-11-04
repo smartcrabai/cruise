@@ -2124,7 +2124,7 @@ See [`docs/github-actions.md`](docs/github-actions.md) for the full command gram
 
 ## OpenTelemetry
 
-Inspired by [TAKT's observability support](https://github.com/nrslib/takt/blob/main/docs/observability.md), Cruise can export workflow traces and execution metrics over OTLP HTTP/protobuf. Telemetry is off by default; no workflow YAML changes are needed.
+Inspired by [TAKT's observability support](https://github.com/nrslib/takt/blob/main/docs/observability.md), Cruise can export workflow traces, execution metrics, and bounded failed-command stderr logs over OTLP HTTP/protobuf. Telemetry is off by default; no workflow YAML changes are needed.
 
 ```sh
 CRUISE_OBSERVABILITY_ENABLED=true \
@@ -2135,8 +2135,8 @@ cruise exec --config cruise.yaml
 ```
 
 - `CRUISE_OBSERVABILITY_ENABLED=true` opts in (case-insensitive). `OTEL_SDK_DISABLED=true` overrides it. Disabled telemetry creates no exporter or network client.
-- Without an endpoint override, enabled telemetry uses `http://localhost:4318`. The base endpoint gets `/v1/traces` and `/v1/metrics` appended. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` override each URL verbatim, including its signal path.
-- `OTEL_EXPORTER_OTLP_HEADERS` supplies comma-separated, URL-encoded `key=value` authentication headers; use an environment/secret manager, not workflow YAML. `OTEL_EXPORTER_OTLP_TIMEOUT` sets the request timeout in milliseconds (SDK default: 10,000). Signal-specific `OTEL_EXPORTER_OTLP_TRACES_*` / `OTEL_EXPORTER_OTLP_METRICS_*` values take precedence.
+- Without an endpoint override, enabled telemetry uses `http://localhost:4318`. The base endpoint gets `/v1/traces`, `/v1/metrics`, and `/v1/logs` appended. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, and `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` override each URL verbatim, including its signal path.
+- `OTEL_EXPORTER_OTLP_HEADERS` supplies comma-separated, URL-encoded `key=value` authentication headers; use an environment/secret manager, not workflow YAML. `OTEL_EXPORTER_OTLP_TIMEOUT` sets the request timeout in milliseconds (SDK default: 10,000). Signal-specific `OTEL_EXPORTER_OTLP_TRACES_*` / `OTEL_EXPORTER_OTLP_METRICS_*` / `OTEL_EXPORTER_OTLP_LOGS_*` values take precedence.
 - Only HTTP/protobuf is supported; gRPC and HTTP/JSON protocol selections fall back to HTTP/protobuf. Optional compression: `OTEL_EXPORTER_OTLP_COMPRESSION=gzip`.
 - Resources default to `service.name=cruise` and the package's `service.version`. `OTEL_RESOURCE_ATTRIBUTES` adds or overrides resource attributes; `OTEL_SERVICE_NAME` takes precedence for the service name.
 
@@ -2177,12 +2177,12 @@ Completed unsuccessful shell results also record `cruise.command.stderr_present`
 
 | Diagnostic status | Meaning |
 |---|---|
-| `valid` | A bounded, allowlisted `CRUISE_CI_DIAGNOSTIC_V3` marker was accepted |
-| `invalid` | A V3 marker candidate was present, but none passed validation |
+| `valid` | A bounded, allowlisted `CRUISE_CI_DIAGNOSTIC_V4` marker was accepted |
+| `invalid` | A V4 marker candidate was present, but none passed validation |
 | `unsupported` | Only unsupported numeric marker versions were recognized |
 | `missing` | No CI marker candidate was recognized in captured stderr |
 
-The last valid V3 marker wins even if later lines are malformed or unsupported; otherwise `invalid` takes precedence over `unsupported`. Candidates start with the marker token, allowing leading ASCII whitespace for detection only. V3 markers are limited to 16,384 bytes and contain allowlisted scalar fields plus a strictly validated JSON detail payload. Unknown versions, unknown JSON fields, and malformed values are never exported. `missing` can also describe an unrelated command or an old workflow without diagnostic markers: these statuses describe captured output, not the underlying CI failure. Spawn errors, timeouts, and cancellation without a completed shell result do not add these fields. Both attributes are trace-only, not metric labels.
+The last valid V4 marker wins even if later lines are malformed or unsupported; otherwise `invalid` takes precedence over `unsupported`. Candidates start with the marker token, allowing leading ASCII whitespace for detection only. V4 markers are limited to 16,384 bytes and contain allowlisted scalar fields plus a strictly validated JSON detail payload. Unknown versions, unknown JSON fields, and malformed values are never exported; invalid optional references are omitted while retaining valid check names/states and marking details incomplete. `missing` can also describe an unrelated command or an old workflow without diagnostic markers: these statuses describe captured output, not the underlying CI failure. Spawn errors, timeouts, and cancellation without a completed shell result do not add these fields. Both attributes are trace-only, not metric labels.
 
 Jcode failures add fixed diagnostics to the affected `cruise.attempt` span:
 
@@ -2203,18 +2203,24 @@ The built-in `follow-up/wait-ci` command additionally reports bounded, allowlist
 | `cruise.ci.head_matches` | Whether the observed GitHub PR head matches local HEAD; omitted when unobserved. A matching PR head does not prove the rollup is current |
 | `cruise.ci.check_count` | Observed numeric check count when available |
 | `cruise.ci.http_status` | Numeric HTTP status from 100 through 599 when observed; omitted when unknown |
-| `cruise.ci.failed_checks` | For `ci_failed`, a compact JSON array of failed check/job descriptors containing only `name` and `state` |
-| `cruise.ci.failed_checks_truncated` | For `ci_failed`, whether details are incomplete, invalid entries were omitted, or names were normalized/shortened |
+| `cruise.ci.failed_checks` | For `ci_failed`, a compact JSON array of failed check/job descriptors containing `name`, `state`, and available `run_id`, `job_id`, and `url` references |
+| `cruise.ci.failed_checks_truncated` | For `ci_failed`, whether details are incomplete, invalid references/entries were omitted, or names/references were normalized/shortened |
 
-Failure details include at most 10 checks, with names limited to 128 Unicode characters after removing controls and trimming whitespace. GitHub collects completed failing CheckRun conclusions and failing StatusContext states, fetching and paginating detail responses only after a failed rollup; collection stops at the detail limit, and no remaining failed checks means the details are incomplete. GitLab requires the detail response to match the observed failed pipeline before using it for descriptors and local trace fetching. An unavailable or incomplete detail response preserves `ci_failed` and sets the truncation flag rather than inventing a reason. Names are exported on the failed command's attempt and step spans only, never as metric labels; job output and raw provider messages remain excluded.
+Failure details include at most 10 checks, with names limited to 128 Unicode characters after removing controls and trimming whitespace. GitHub collects completed failing CheckRun conclusions and failing StatusContext states, fetching and paginating detail responses only after a failed rollup. CheckRun references include the workflow run ID when available; an Actions job ID is extracted only when the details URL's repository and run ID match the observed repository/workflow run. StatusContext entries do not invent run/job IDs. GitLab requires the detail response to match the observed failed pipeline before using its pipeline ID, failed job IDs, URLs, or local trace fetching. Reference IDs are positive decimal strings of at most 20 digits. URLs are HTTP(S), at most 1,024 bytes, with userinfo, query strings, and fragments removed. Missing or invalid details preserve `ci_failed` and set the truncation flag; the producer drops optional references if needed to keep the complete marker bounded. These descriptors are trace-only, never metric labels. Full CI job logs remain on the provider; telemetry records references, not copies of those logs.
 
-The built-in `follow-up/sync-base` command exports `cruise.sync_base.failure_reason` with one of `base_ref_query_error`, `base_ref_invalid`, `fetch_failed`, `merge_conflict`, or `merge_failed`. CI and sync-base reasons are read from strict bounded stderr markers; malformed lines are ignored, and raw output, provider errors, commit IDs, PR URLs, and job traces are not exported. These diagnostics are trace-only, not metric labels. Saved workflow snapshots and previously ejected workflows retain their old CI command: V2 markers are now reported as `unsupported`, so create a new snapshot or update the ejected workflow to obtain V3 diagnostics. Existing exported spans are not changed.
+The built-in `follow-up/sync-base` command exports `cruise.sync_base.failure_reason` with one of `base_ref_query_error`, `base_ref_invalid`, `fetch_failed`, `merge_conflict`, or `merge_failed`. CI and sync-base span diagnostics come from strict bounded stderr markers; malformed marker fields and raw provider responses are not attached to spans. All CI/sync-base machine-marker lines, including invalid or unsupported ones, are omitted from stderr logs. Saved workflow snapshots and previously ejected workflows retain their old CI command: V2/V3 markers are reported as `unsupported`, so create a new snapshot or update the ejected workflow to obtain V4 diagnostics. Existing exported spans are not changed.
 
 Errors classified as `loop_protection` annotate each result-based enclosing span with `cruise.loop.from`, `cruise.loop.to`, `cruise.loop.max_retries`, `cruise.loop.traversals` (accepted budgeted traversals of that edge, before the refused transition), and `cruise.loop.skipped_step_count`. Step IDs follow the existing step-name privacy policy; full edge tables, skipped-step lists, and exception messages are not exported. The retry budget and workflow behavior are unchanged.
 
-Metrics are `cruise.operation.count` and `cruise.operation.duration` (seconds), labeled only by `cruise.operation` and `cruise.outcome`, plus `cruise.retry.count`, labeled only by `cruise.retry.action` and `cruise.retry.reason`. Session/workflow/model identifiers are trace-only, not metric labels. OTLP logs, token usage, and cost are not exported.
+Metrics are `cruise.operation.count` and `cruise.operation.duration` (seconds), labeled only by `cruise.operation` and `cruise.outcome`, plus `cruise.retry.count`, labeled only by `cruise.retry.action` and `cruise.retry.reason`. Session/workflow/model identifiers are trace-only, not metric labels. Token usage and cost are not exported.
 
-Prompt/input text, agent output, command bodies, working paths, exception messages, and authentication headers are not included in telemetry payloads. Session IDs, workflow file names, step/model names, CI check/job names, and explicitly supplied resource attributes are exported; keep secrets out of those values.
+Prompt/input text, agent output, command bodies, working paths, and exception messages are not automatically attached to spans or metrics. Session IDs, workflow file names, step/model names, CI check/job names and references, and explicitly supplied resource attributes are exported; keep secrets out of those values.
+
+Each completed unsuccessful shell attempt can additionally emit one ERROR OTLP log named `cruise.command.stderr`, correlated to that attempt's native `trace_id` and `span_id`. The final step does not duplicate it, successful-command stderr is not exported, and empty/whitespace-only sanitized output emits no record. Spawn errors, timeouts, and cancellation without a completed shell result do not produce stderr logs.
+
+Log bodies redact recognized credential headers and assignments, auth schemes, known token formats, private-key blocks, and URL userinfo/query/fragment values; ANSI/control sequences are normalized before matching. Redaction happens before a UTF-8-safe head/tail excerpt capped at 8,192 bytes. `cruise.command.stderr_truncated` records whether sanitized output exceeded that cap, not whether credentials were redacted.
+
+Redaction is pattern-based, not a guarantee that arbitrary secrets or personal data are removed. Captured stderr can still contain sensitive paths, messages, or business data. Before enabling telemetry for real workloads, restrict backend log access to authorized operators and configure short retention. Cruise does not provision backend RBAC or retention policies; these remain deployment responsibilities and are not changed by enabling logs.
 
 Providers flush on normal CLI completion, including workflow errors. Collector/export failures do not change the workflow result, though shutdown can wait for export timeouts. Invalid exporter initialization settings stop startup with a redacted diagnostic. Forced termination cannot guarantee a flush.
 
