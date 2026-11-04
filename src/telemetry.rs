@@ -795,7 +795,8 @@ pub(crate) fn record_command_stderr_log(context: &Context, stderr_text: &str) {
 }
 
 fn last_ci_diagnostic(stderr: &str) -> (Option<CiDiagnostic>, &'static str) {
-    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V4";
+    const V2_PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V2";
+    const V4_PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V4";
     const VERSION_PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V";
 
     let mut saw_invalid = false;
@@ -808,10 +809,11 @@ fn last_ci_diagnostic(stderr: &str) -> (Option<CiDiagnostic>, &'static str) {
         let Some(token) = line.split_ascii_whitespace().next() else {
             continue;
         };
-        if token == PREFIX {
+        if token == V2_PREFIX || token == V4_PREFIX {
             saw_invalid = true;
         } else if let Some(version) = token.strip_prefix(VERSION_PREFIX)
             && !version.is_empty()
+            && version != "2"
             && version != "4"
             && version.bytes().all(|byte| byte.is_ascii_digit())
         {
@@ -830,15 +832,21 @@ fn last_ci_diagnostic(stderr: &str) -> (Option<CiDiagnostic>, &'static str) {
 }
 
 fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
-    const PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V4";
+    const V2_PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V2";
+    const V4_PREFIX: &str = "CRUISE_CI_DIAGNOSTIC_V4";
 
-    if line.len() > MAX_CI_DIAGNOSTIC_BYTES || !line.is_ascii() || !line.starts_with(PREFIX) {
+    if line.len() > MAX_CI_DIAGNOSTIC_BYTES
+        || !line.is_ascii()
+        || !(line.starts_with(V2_PREFIX) || line.starts_with(V4_PREFIX))
+    {
         return None;
     }
     let mut position = 0;
-    if next_ascii_token(line, &mut position)? != PREFIX {
-        return None;
-    }
+    let is_v2 = match next_ascii_token(line, &mut position)? {
+        V2_PREFIX => true,
+        V4_PREFIX => false,
+        _ => return None,
+    };
     let provider = match next_ascii_token(line, &mut position)? {
         "github" => "github",
         "gitlab" => "gitlab",
@@ -911,11 +919,7 @@ fn parse_ci_diagnostic_line(line: &str) -> Option<CiDiagnostic> {
         }
         _ => return None,
     };
-    let tail_start = line.as_bytes()[position..]
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .map(|offset| position + offset)?;
-    let details = parse_ci_diagnostic_details(&line[tail_start..], provider, reason)?;
+    let details = parse_ci_diagnostic_details(&line[position..], provider, reason, is_v2)?;
 
     Some(CiDiagnostic {
         provider,
@@ -933,7 +937,24 @@ fn parse_ci_diagnostic_details(
     input: &str,
     provider: &str,
     reason: &str,
+    is_v2: bool,
 ) -> Option<CiDiagnosticDetails> {
+    if is_v2 {
+        if !input.bytes().all(|byte| byte.is_ascii_whitespace()) {
+            return None;
+        }
+        return Some(CiDiagnosticDetails {
+            checks: Vec::new(),
+            truncated: reason == "ci_failed",
+        });
+    }
+
+    let tail_start = input
+        .as_bytes()
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())?;
+    let input = &input[tail_start..];
+
     let mut deserializer = serde_json::Deserializer::from_str(input);
     let details: CiDiagnosticDetailsFields = deserialize_object(&mut deserializer).ok()?;
     deserializer.end().ok()?;
@@ -1284,7 +1305,6 @@ mod tests {
 
         let invalid = [
             "CRUISE_CI_DIAGNOSTIC_V1 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
-            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false}",
             "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 1 500 {",
             "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500 not-json",
             "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 1 500 {\"checks\":[],\"truncated\":false",
@@ -1306,6 +1326,52 @@ mod tests {
         ];
         for line in invalid {
             assert_eq!(parse_ci_diagnostic_line(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn ci_v2_parser_accepts_scalar_diagnostics_without_check_descriptors() {
+        let failed = parse_ci_diagnostic_line(
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE true 6 unknown",
+        )
+        .unwrap_or_else(|| panic!("expected scalar V2 diagnostic to parse"));
+        assert_eq!(
+            failed,
+            CiDiagnostic {
+                provider: "github",
+                reason: "ci_failed",
+                state: "FAILURE",
+                head_matches: Some(true),
+                check_count: Some(6),
+                http_status: None,
+                failed_checks: vec![],
+                failed_checks_truncated: true,
+            }
+        );
+
+        assert_eq!(
+            parse_ci_diagnostic_line(concat!(
+                "CRUISE_CI_DIAGNOSTIC_V2 github repository_query_error ",
+                "unknown unknown unknown unknown"
+            )),
+            Some(CiDiagnostic {
+                provider: "github",
+                reason: "repository_query_error",
+                state: "unknown",
+                head_matches: None,
+                check_count: None,
+                http_status: None,
+                failed_checks: vec![],
+                failed_checks_truncated: false,
+            })
+        );
+
+        for malformed in [
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE true 6 unknown extra",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE invalid 6 unknown",
+            "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE true 6 unknown {\"checks\":[],\"truncated\":false}",
+        ] {
+            assert_eq!(parse_ci_diagnostic_line(malformed), None, "{malformed:?}");
         }
     }
 
@@ -1483,6 +1549,7 @@ mod tests {
             "CRUISE_CI_DIAGNOSTIC_V4 github ci_failed FAILURE false 2 500 ",
             r#"{"checks":[],"truncated":false}"#
         );
+        let valid_v2 = "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE true 6 unknown";
         for (stderr, expected_status, has_valid_diagnostic) in [
             ("", "missing", false),
             ("private human-readable error", "missing", false),
@@ -1514,9 +1581,16 @@ mod tests {
             ),
             (
                 "CRUISE_CI_DIAGNOSTIC_V2 github ci_failed FAILURE false 2 500 {\"checks\":[],\"truncated\":false}",
+                "invalid",
+                false,
+            ),
+            (
+                "CRUISE_CI_DIAGNOSTIC_V3 github ci_failed FAILURE false 2 500 {",
                 "unsupported",
                 false,
             ),
+            ("CRUISE_CI_DIAGNOSTIC_V7 unknown", "unsupported", false),
+            (valid_v2, "valid", true),
             (
                 "CRUISE_CI_DIAGNOSTIC_V4 private-value\nCRUISE_CI_DIAGNOSTIC_V2 malformed",
                 "invalid",
@@ -1538,6 +1612,19 @@ mod tests {
             assert_eq!(status, expected_status, "{stderr:?}");
             assert_eq!(diagnostic.is_some(), has_valid_diagnostic, "{stderr:?}");
         }
+        let latest_v2 = concat!(
+            "CRUISE_CI_DIAGNOSTIC_V2 github repository_query_error ",
+            "unknown unknown unknown unknown"
+        );
+        let stderr = format!("{valid}\n{latest_v2}");
+        let (diagnostic, status) = last_ci_diagnostic(&stderr);
+        assert_eq!(status, "valid");
+        assert_eq!(
+            diagnostic
+                .unwrap_or_else(|| panic!("expected latest V2 diagnostic"))
+                .reason,
+            "repository_query_error"
+        );
     }
 
     #[test]
