@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "cruise"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "axum",
  "clap",
