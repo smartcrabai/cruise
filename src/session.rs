@@ -1361,11 +1361,14 @@ mod tests {
     #[test]
     fn pr_failed_roundtrips_and_is_not_runnable() {
         let json = serde_json::json!({"PrFailed": "push failed"});
-        let phase: super::SessionPhase =
-            serde_json::from_value(json.clone()).expect("persisted PR failure must deserialize");
+        let phase: super::SessionPhase = serde_json::from_value(json.clone())
+            .unwrap_or_else(|e| panic!("persisted PR failure must deserialize: {e}"));
         assert_eq!(phase.label(), "PR Failed");
         assert!(!phase.is_runnable());
-        assert_eq!(serde_json::to_value(phase).unwrap(), json);
+        assert_eq!(
+            serde_json::to_value(phase).unwrap_or_else(|e| panic!("serialize PR failure: {e}")),
+            json
+        );
     }
     use super::*;
     use tempfile::TempDir;

@@ -4820,13 +4820,15 @@ mod tests {
     // Deserialize through the persisted representation so these contract tests compile
     // even before the new phase and action variants have been implemented.
     fn pr_failed_phase() -> SessionPhase {
-        serde_json::from_value(serde_json::json!({"PrFailed": "push failed"}))
-            .expect("persisted PR publication failures must be readable")
+        serde_json::from_value(serde_json::json!({"PrFailed": "push failed"})).unwrap_or_else(
+            |error| panic!("persisted PR publication failures must be readable: {error}"),
+        )
     }
 
     #[tokio::test]
     async fn create_pr_rejects_other_phases_without_changing_them() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let manager = SessionManager::new(temp.path().join("sessions"));
         let app = CruiseApplication::new(manager.clone());
         for phase in [
@@ -4841,11 +4843,19 @@ mod tests {
                 "task".into(),
             );
             state.phase = phase.clone();
-            manager.create(&state).unwrap();
+            manager
+                .create(&state)
+                .unwrap_or_else(|error| panic!("create session: {error}"));
             let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_: ApplicationEvent| Ok(()));
             let error = app.create_pr(&state.id, sink, None).await.unwrap_err();
             assert!(error.to_string().contains(phase.label()));
-            assert_eq!(manager.load(&state.id).unwrap().phase, phase);
+            assert_eq!(
+                manager
+                    .load(&state.id)
+                    .unwrap_or_else(|error| panic!("load session: {error}"))
+                    .phase,
+                phase
+            );
         }
     }
 
@@ -4871,14 +4881,14 @@ mod tests {
             None,
             &crate::worktree::WorktreeBase::default(),
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("create session worktree: {error}"));
         let workflow_marker = temp.path().join("workflow-ran");
         let after_marker = temp.path().join("after-pr-ran");
         let workflow = temp.path().join("workflow.yaml");
         std::fs::write(&workflow, format!(
             "command: [cat]\ncreate_pr: true\ncleanup_after_pr: false\nsteps:\n  implement:\n    command: 'printf workflow >> {}'\nafter-pr:\n  verify:\n    command: 'printf x >> {}'\n",
             workflow_marker.display(), after_marker.display()
-        )).unwrap();
+        )).unwrap_or_else(|error| panic!("write workflow fixture: {error}"));
         let mut state = SessionState::new(
             id,
             repo,
@@ -4888,8 +4898,11 @@ mod tests {
         state.phase = SessionPhase::PrFailed("original error".into());
         state.worktree_path = Some(worktree.path);
         state.worktree_branch = Some(worktree.branch);
-        manager.create(&state).unwrap();
-        std::fs::write(state.plan_path(&manager.sessions_dir()), "# Plan\n").unwrap();
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("create session: {error}"));
+        std::fs::write(state.plan_path(&manager.sessions_dir()), "# Plan\n")
+            .unwrap_or_else(|error| panic!("write session plan: {error}"));
         (app, manager, state, workflow_marker, after_marker)
     }
 
@@ -4897,7 +4910,8 @@ mod tests {
     #[tokio::test]
     async fn create_pr_recovery_restores_workflow_variables() {
         let _lock = crate::test_support::lock_process();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let _home = crate::test_support::set_fake_home(temp.path());
         let repo = application_reload_test_repo(&temp);
         let (bin, _) = install_application_test_gh(&temp);
@@ -4909,7 +4923,7 @@ mod tests {
         std::fs::write(temp.path().join("workflow.yaml"), format!(
             "command: [cat]\ncreate_pr: true\ncleanup_after_pr: false\nsteps:\n  implement:\n    command: 'printf x >> {}; touch change.txt'\nafter-pr:\n  verify:\n    command: 'printf %s {{prev.success}} > {}'\n",
             marker.display(), after.display()
-        )).unwrap();
+        )).unwrap_or_else(|error| panic!("write workflow fixture: {error}"));
         crate::test_support::run_git_ok(
             &repo,
             &[
@@ -4926,40 +4940,76 @@ mod tests {
                 .is_err()
         );
         assert!(matches!(
-            manager.load(id).unwrap().phase,
+            manager
+                .load(id)
+                .unwrap_or_else(|error| panic!("load session: {error}"))
+                .phase,
             SessionPhase::PrFailed(_)
         ));
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+        assert_eq!(
+            std::fs::read_to_string(&marker)
+                .unwrap_or_else(|error| panic!("read test output: {error}")),
+            "x"
+        );
         let origin = temp.path().join("origin.git");
         crate::test_support::run_git_ok(
             &repo,
-            &["remote", "set-url", "origin", origin.to_str().unwrap()],
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                origin
+                    .to_str()
+                    .unwrap_or_else(|| panic!("origin path must be valid UTF-8")),
+            ],
         );
-        let result = app.create_pr(id, sink, None).await.unwrap();
+        let result = app
+            .create_pr(id, sink, None)
+            .await
+            .unwrap_or_else(|error| panic!("retry PR creation: {error}"));
         assert_eq!(result.phase, SessionPhase::Completed);
-        assert_eq!(std::fs::read_to_string(marker).unwrap(), "x");
-        assert_eq!(std::fs::read_to_string(after).unwrap(), "true");
+        assert_eq!(
+            std::fs::read_to_string(marker)
+                .unwrap_or_else(|error| panic!("read test output: {error}")),
+            "x"
+        );
+        assert_eq!(
+            std::fs::read_to_string(after)
+                .unwrap_or_else(|error| panic!("read test output: {error}")),
+            "true"
+        );
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn create_pr_success_publishes_without_rerunning_workflow() {
         let _lock = crate::test_support::lock_process();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let _home = crate::test_support::set_fake_home(temp.path());
         let (bin, gh_log) = install_application_test_gh(&temp);
         let _path = crate::test_support::prepend_to_path(&bin);
         let (app, manager, state, workflow_marker, after_marker) = create_pr_fixture(&temp);
-        let worktree = state.worktree_path.as_ref().unwrap();
-        std::fs::write(worktree.join("change.txt"), "change").unwrap();
+        let worktree = state
+            .worktree_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("session must have a worktree"));
+        std::fs::write(worktree.join("change.txt"), "change")
+            .unwrap_or_else(|error| panic!("write worktree change: {error}"));
         let events = Arc::new(Mutex::new(Vec::new()));
         let received = Arc::clone(&events);
         let sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event| {
-            received.lock().unwrap().push(event);
+            received
+                .lock()
+                .unwrap_or_else(|error| panic!("lock received events: {error}"))
+                .push(event);
             Ok(())
         });
 
-        let result = app.create_pr(&state.id, sink, None).await.unwrap();
+        let result = app
+            .create_pr(&state.id, sink, None)
+            .await
+            .unwrap_or_else(|error| panic!("retry PR creation: {error}"));
         assert_eq!(result.phase, SessionPhase::Completed);
         assert_eq!(
             result.pr_url.as_deref(),
@@ -4967,20 +5017,27 @@ mod tests {
         );
         assert_eq!(result.pr_skipped_reason, None);
         assert_eq!(
-            manager.load(&state.id).unwrap().phase,
+            manager
+                .load(&state.id)
+                .unwrap_or_else(|error| panic!("load session: {error}"))
+                .phase,
             SessionPhase::Completed
         );
         assert!(!workflow_marker.exists(), "workflow must not run again");
-        assert_eq!(std::fs::read_to_string(after_marker).unwrap(), "x");
+        assert_eq!(
+            std::fs::read_to_string(after_marker)
+                .unwrap_or_else(|error| panic!("read test output: {error}")),
+            "x"
+        );
         assert!(
             std::fs::read_to_string(gh_log)
-                .unwrap()
+                .unwrap_or_else(|error| panic!("read test output: {error}"))
                 .contains("pr create")
         );
         assert!(
             events
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|error| panic!("lock received events: {error}"))
                 .iter()
                 .any(|e| matches!(e, ApplicationEvent::PrCreated { .. }))
         );
@@ -4994,13 +5051,17 @@ mod tests {
     #[tokio::test]
     async fn create_pr_no_commits_completes_without_forge_call() {
         let _lock = crate::test_support::lock_process();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let _home = crate::test_support::set_fake_home(temp.path());
         let (bin, gh_log) = install_application_test_gh(&temp);
         let _path = crate::test_support::prepend_to_path(&bin);
         let (app, manager, state, workflow_marker, after_marker) = create_pr_fixture(&temp);
         let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_: ApplicationEvent| Ok(()));
-        let result = app.create_pr(&state.id, sink, None).await.unwrap();
+        let result = app
+            .create_pr(&state.id, sink, None)
+            .await
+            .unwrap_or_else(|error| panic!("retry PR creation: {error}"));
         assert_eq!(result.phase, SessionPhase::Completed);
         assert_eq!(
             result.pr_skipped_reason,
@@ -5008,7 +5069,10 @@ mod tests {
         );
         assert!(result.pr_url.is_none());
         assert_eq!(
-            manager.load(&state.id).unwrap().phase,
+            manager
+                .load(&state.id)
+                .unwrap_or_else(|error| panic!("load session: {error}"))
+                .phase,
             SessionPhase::Completed
         );
         assert!(!gh_log.exists());
@@ -5020,15 +5084,22 @@ mod tests {
     #[tokio::test]
     async fn create_pr_push_failure_retains_pr_failed_and_workspace() {
         let _lock = crate::test_support::lock_process();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let _home = crate::test_support::set_fake_home(temp.path());
         let (bin, _) = install_application_test_gh(&temp);
         let _path = crate::test_support::prepend_to_path(&bin);
         let (app, manager, mut state, workflow_marker, after_marker) = create_pr_fixture(&temp);
         state.pr_url = Some("https://example.com/previous-pr".into());
-        manager.save(&state).unwrap();
-        let worktree = state.worktree_path.as_ref().unwrap();
-        std::fs::write(worktree.join("change.txt"), "change").unwrap();
+        manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("save session: {error}"));
+        let worktree = state
+            .worktree_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("session must have a worktree"));
+        std::fs::write(worktree.join("change.txt"), "change")
+            .unwrap_or_else(|error| panic!("write worktree change: {error}"));
         crate::test_support::run_git_ok(
             &state.base_dir,
             &[
@@ -5041,7 +5112,10 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let received = Arc::clone(&events);
         let sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event| {
-            received.lock().unwrap().push(event);
+            received
+                .lock()
+                .unwrap_or_else(|error| panic!("lock received events: {error}"))
+                .push(event);
             Ok(())
         });
         let error = app.create_pr(&state.id, sink, None).await.unwrap_err();
@@ -5049,7 +5123,9 @@ mod tests {
             matches!(error, CruiseError::PrPublicationFailed(_)),
             "{error:?}"
         );
-        let saved = manager.load(&state.id).unwrap();
+        let saved = manager
+            .load(&state.id)
+            .unwrap_or_else(|error| panic!("load session: {error}"));
         assert!(
             matches!(saved.phase, SessionPhase::PrFailed(ref message) if message.contains("push"))
         );
@@ -5060,7 +5136,7 @@ mod tests {
         assert!(
             events
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|error| panic!("lock received events: {error}"))
                 .iter()
                 .any(|e| matches!(e, ApplicationEvent::RunFailed { .. }))
         );
@@ -5070,7 +5146,8 @@ mod tests {
     #[tokio::test]
     async fn create_pr_cancellation_retains_pr_failed() {
         let _lock = crate::test_support::lock_process();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let _home = crate::test_support::set_fake_home(temp.path());
         let (app, manager, state, workflow_marker, after_marker) = create_pr_fixture(&temp);
         let runtime = Arc::clone(&app.runtime);
@@ -5081,19 +5158,33 @@ mod tests {
             if matches!(event, ApplicationEvent::RunPhase { .. }) {
                 assert!(runtime.cancel_session(&id));
             }
-            received.lock().unwrap().push(event);
+            received
+                .lock()
+                .unwrap_or_else(|error| panic!("lock received events: {error}"))
+                .push(event);
             Ok(())
         });
         let error = app.create_pr(&state.id, sink, None).await.unwrap_err();
         assert!(matches!(error, CruiseError::Interrupted));
-        assert_eq!(manager.load(&state.id).unwrap().phase, state.phase);
-        assert!(state.worktree_path.unwrap().exists());
+        assert_eq!(
+            manager
+                .load(&state.id)
+                .unwrap_or_else(|error| panic!("load session: {error}"))
+                .phase,
+            state.phase
+        );
+        assert!(
+            state
+                .worktree_path
+                .unwrap_or_else(|| panic!("session must have a worktree"))
+                .exists()
+        );
         assert!(!workflow_marker.exists());
         assert!(!after_marker.exists());
         assert!(
             events
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|error| panic!("lock received events: {error}"))
                 .iter()
                 .any(|e| matches!(e, ApplicationEvent::RunCancelled { .. }))
         );
@@ -5101,7 +5192,8 @@ mod tests {
 
     #[test]
     fn capabilities_pr_failed_offers_only_publication_and_terminal_actions() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let manager = SessionManager::new(temp.path().join("sessions"));
         let app = CruiseApplication::new(manager);
         let mut state = SessionState::new(
@@ -5119,14 +5211,16 @@ mod tests {
             ),
         ] {
             state.pr_url = url.map(str::to_string);
-            let actions = serde_json::to_value(app.capabilities(&state)).unwrap();
+            let actions = serde_json::to_value(app.capabilities(&state))
+                .unwrap_or_else(|error| panic!("serialize capabilities: {error}"));
             assert_eq!(actions, serde_json::json!(expected));
         }
     }
 
     #[test]
     fn reset_to_planned_accepts_persisted_pr_failed_session() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let manager = SessionManager::new(temp.path().join("sessions"));
         let app = CruiseApplication::new(manager.clone());
         let mut state = SessionState::new(
@@ -5136,11 +5230,18 @@ mod tests {
             "task".to_string(),
         );
         state.phase = pr_failed_phase();
-        manager.create(&state).unwrap();
-        let reset = app.reset_to_planned(&state.id).unwrap();
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("create session: {error}"));
+        let reset = app
+            .reset_to_planned(&state.id)
+            .unwrap_or_else(|error| panic!("reset session to planned: {error}"));
         assert_eq!(reset.phase, SessionPhase::Planned);
         assert_eq!(
-            manager.load(&state.id).unwrap().phase,
+            manager
+                .load(&state.id)
+                .unwrap_or_else(|error| panic!("load session: {error}"))
+                .phase,
             SessionPhase::Planned
         );
     }

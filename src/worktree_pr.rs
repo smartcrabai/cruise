@@ -1460,6 +1460,7 @@ mod tests {
 
     #[tokio::test]
     async fn selected_local_ref_overrides_stale_remote_for_both_eligibility_checks() {
+        let _lock = crate::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let ctx = base_ahead_fixture(&tmp);
         crate::test_support::run_git_ok(
@@ -1571,9 +1572,11 @@ mod tests {
 
     #[cfg(unix)]
     async fn exercise_publication_failure(mode: &str) -> (Result<()>, SessionState, bool) {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
         let bin = tmp.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&bin)
+            .unwrap_or_else(|error| panic!("failed to create test bin directory: {error:?}"));
         let git = if mode == "push" {
             "#!/bin/sh\ncase \"$1\" in rev-parse|merge-base) echo base;; rev-list) echo 1;; push) echo push-denied >&2; exit 1;; esac\n"
         } else {
@@ -1617,7 +1620,8 @@ mod tests {
         );
         let mut vars = VariableStore::new("test".to_string());
         let plan = tmp.path().join("plan.md");
-        std::fs::write(&plan, "# Test plan").unwrap();
+        std::fs::write(&plan, "# Test plan")
+            .unwrap_or_else(|error| panic!("failed to write test plan: {error:?}"));
         vars.set_named_file(crate::session::PLAN_VAR, plan);
         let mut tracker = FileTracker::with_root(ctx.path.clone());
         let persist = |_: &SessionState| Err(CruiseError::Other("disk unavailable".to_string()));
@@ -1705,7 +1709,8 @@ mod tests {
     #[tokio::test]
     async fn existing_open_pr_is_reused() {
         let _lock = crate::test_support::lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
         crate::test_support::write_executable_script(
             &tmp.path().join("gh"),
             "#!/bin/sh\nif [ \"$2\" = create ]; then echo already-exists >&2; exit 1; fi\necho 'https://github.com/o/r/pull/42 OPEN'\n",
@@ -1721,7 +1726,7 @@ mod tests {
             None,
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("failed to create or reuse PR: {error:?}"));
         assert_eq!(url, "https://github.com/o/r/pull/42");
     }
 
@@ -1729,7 +1734,8 @@ mod tests {
     #[tokio::test]
     async fn existing_closed_pr_is_not_reused() {
         let _lock = crate::test_support::lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
         crate::test_support::write_executable_script(
             &tmp.path().join("gh"),
             "#!/bin/sh\nif [ \"$2\" = create ]; then echo already-exists >&2; exit 1; fi\necho 'https://github.com/o/r/pull/42 CLOSED'\n",
@@ -1752,7 +1758,8 @@ mod tests {
     #[tokio::test]
     async fn publication_commands_disable_authentication_prompts() {
         let _lock = crate::test_support::lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
         let script = "#!/bin/sh\nprintf '%s %s %s\\n' \"${GIT_TERMINAL_PROMPT-unset}\" \"${GCM_INTERACTIVE-unset}\" \"${GH_PROMPT_DISABLED-unset}\" > \"$CRUISE_TEST_PROMPT_ENV\"\necho https://github.com/o/r/pull/42\n";
         crate::test_support::write_executable_script(&tmp.path().join("gh"), script);
         let _path = crate::test_support::prepend_to_path(tmp.path());
@@ -1771,9 +1778,11 @@ mod tests {
             None,
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("failed to create or reuse PR: {error:?}"));
         assert_eq!(
-            std::fs::read_to_string(env_file).unwrap().trim(),
+            std::fs::read_to_string(env_file)
+                .unwrap_or_else(|error| panic!("failed to read prompt environment: {error:?}"))
+                .trim(),
             "0 never 1"
         );
     }
@@ -1782,19 +1791,23 @@ mod tests {
     #[tokio::test]
     async fn push_and_glab_disable_authentication_prompts() {
         let _lock = crate::test_support::lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
         let script = "#!/bin/sh\nprintf '%s %s %s %s\n' \"$GIT_TERMINAL_PROMPT\" \"$GCM_INTERACTIVE\" \"$GH_PROMPT_DISABLED\" \"$GLAB_NO_PROMPT\" >> \"$CRUISE_TEST_PROMPT_ENV\"\necho https://gitlab.com/o/r/-/merge_requests/42\n";
         crate::test_support::write_executable_script(&tmp.path().join("git"), script);
         crate::test_support::write_executable_script(&tmp.path().join("glab"), script);
         let _path = crate::test_support::prepend_to_path(tmp.path());
         let env_file = tmp.path().join("env");
         let _env = crate::test_support::EnvGuard::set("CRUISE_TEST_PROMPT_ENV", &env_file);
-        push_branch(tmp.path(), "branch", None).await.unwrap();
+        push_branch(tmp.path(), "branch", None)
+            .await
+            .unwrap_or_else(|error| panic!("failed to push test branch: {error:?}"));
         create_mr(tmp.path(), "branch", "", "", None, None)
             .await
-            .unwrap();
+            .unwrap_or_else(|error| panic!("failed to create test merge request: {error:?}"));
         assert_eq!(
-            std::fs::read_to_string(env_file).unwrap(),
+            std::fs::read_to_string(env_file)
+                .unwrap_or_else(|error| panic!("failed to read prompt environment: {error:?}")),
             "0 never 1 1\n0 never 1 1\n"
         );
     }

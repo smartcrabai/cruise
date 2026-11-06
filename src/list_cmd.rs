@@ -830,7 +830,7 @@ mod tests {
 
     fn pr_failed_session() -> SessionState {
         let phase = serde_json::from_value(serde_json::json!({"PrFailed": "push failed"}))
-            .expect("PR failure state must be readable");
+            .unwrap_or_else(|error| panic!("PR failure state must be readable: {error}"));
         make_session("20260306143000", "task", phase)
     }
 

@@ -34,7 +34,7 @@ fn git(path: &Path, args: &[&str]) {
         .current_dir(path)
         .args(args)
         .output()
-        .expect("run git");
+        .unwrap_or_else(|error| panic!("failed to run git {args:?}: {error}"));
     assert!(
         result.status.success(),
         "git {args:?}: {}",
@@ -43,20 +43,27 @@ fn git(path: &Path, args: &[&str]) {
 }
 impl World {
     fn manager(&self) -> &SessionManager {
-        self.manager.as_ref().expect("manager")
+        self.manager
+            .as_ref()
+            .unwrap_or_else(|| panic!("fixture session manager is missing"))
     }
     fn state(&self) -> SessionState {
-        self.manager().load(&self.id).expect("load session")
+        self.manager()
+            .load(&self.id)
+            .unwrap_or_else(|error| panic!("failed to load session {}: {error}", self.id))
     }
 }
 fn fixture(w: &mut World, phase: SessionPhase) {
-    let temp = tempfile::tempdir().expect("temporary directory");
+    let temp = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("failed to create temporary directory: {error}"));
     let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).expect("repo");
+    std::fs::create_dir(&repo)
+        .unwrap_or_else(|error| panic!("failed to create fixture repository: {error}"));
     git(&repo, &["init", "-q"]);
     git(&repo, &["config", "user.name", "BDD"]);
     git(&repo, &["config", "user.email", "bdd@example.test"]);
-    std::fs::write(repo.join("base"), "base").expect("base file");
+    std::fs::write(repo.join("base"), "base")
+        .unwrap_or_else(|error| panic!("failed to write base file: {error}"));
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-qm", "base"]);
     let manager = SessionManager::new(temp.path().join("sessions"));
@@ -69,10 +76,10 @@ fn fixture(w: &mut World, phase: SessionPhase) {
         None,
         &cruise::worktree::WorktreeBase::default(),
     )
-    .expect("worktree");
+    .unwrap_or_else(|error| panic!("failed to create fixture worktree: {error}"));
     let marker = temp.path().join("workflow-ran");
     let workflow = temp.path().join("workflow.yaml");
-    std::fs::write(&workflow, format!("create_pr: true\ncleanup_after_pr: false\nsteps:\n  implement:\n    command: 'touch {}'\n", marker.display())).expect("workflow");
+    std::fs::write(&workflow, format!("create_pr: true\ncleanup_after_pr: false\nsteps:\n  implement:\n    command: 'touch {}'\n", marker.display())).unwrap_or_else(|error| panic!("failed to write fixture workflow: {error}"));
     let mut state = SessionState::new(
         id.clone(),
         repo,
@@ -82,8 +89,11 @@ fn fixture(w: &mut World, phase: SessionPhase) {
     state.phase = phase;
     state.worktree_path = Some(worktree.path.clone());
     state.worktree_branch = Some(worktree.branch);
-    manager.create(&state).expect("create session");
-    std::fs::write(state.plan_path(&manager.sessions_dir()), "# Plan\n").expect("plan");
+    manager
+        .create(&state)
+        .unwrap_or_else(|error| panic!("failed to create fixture session: {error}"));
+    std::fs::write(state.plan_path(&manager.sessions_dir()), "# Plan\n")
+        .unwrap_or_else(|error| panic!("failed to write fixture plan: {error}"));
     w.temp = Some(temp);
     w.manager = Some(manager);
     w.id = id;
@@ -103,7 +113,9 @@ fn missing(w: &mut World) {
     let mut state = w.state();
     state.worktree_path = None;
     state.worktree_branch = None;
-    w.manager().save(&state).expect("save");
+    w.manager()
+        .save(&state)
+        .unwrap_or_else(|error| panic!("failed to save session without worktree: {error}"));
 }
 #[given("the base repository is unavailable to Git")]
 fn unavailable_base(w: &mut World) {
@@ -111,12 +123,15 @@ fn unavailable_base(w: &mut World) {
     state.base_dir = w
         .temp
         .as_ref()
-        .expect("fixture")
+        .unwrap_or_else(|| panic!("fixture temporary directory is missing"))
         .path()
         .join("not-a-repository");
-    std::fs::create_dir(&state.base_dir).expect("create non-repository directory");
+    std::fs::create_dir(&state.base_dir)
+        .unwrap_or_else(|error| panic!("failed to create non-repository directory: {error}"));
     state.pr_url = Some("https://example.test/existing-pr".into());
-    w.manager().save(&state).expect("save session");
+    w.manager()
+        .save(&state)
+        .unwrap_or_else(|error| panic!("failed to save session with unavailable base: {error}"));
 }
 #[when("the user creates the PR")]
 async fn create(w: &mut World) {
@@ -157,14 +172,19 @@ fn rejected_planned(w: &mut World) {
     assert!(
         w.error
             .as_deref()
-            .expect("error")
+            .unwrap_or_else(|| panic!("expected planned session operation to be rejected"))
             .contains("only to PR Failed")
     );
     assert_eq!(w.state().phase, SessionPhase::Planned);
 }
 #[then("the operation is rejected and the PR failure is preserved")]
 fn rejected_missing(w: &mut World) {
-    assert!(w.error.as_deref().expect("error").contains("worktree"));
+    assert!(
+        w.error
+            .as_deref()
+            .unwrap_or_else(|| panic!("expected missing worktree operation to be rejected"))
+            .contains("worktree")
+    );
     assert_eq!(
         w.state().phase,
         SessionPhase::PrFailed("original error".into())
@@ -172,7 +192,10 @@ fn rejected_missing(w: &mut World) {
 }
 #[then("the publication fails and the PR Failed state is saved")]
 fn publication_failed(w: &mut World) {
-    let error = w.error.as_deref().expect("publication must fail");
+    let error = w
+        .error
+        .as_deref()
+        .unwrap_or_else(|| panic!("publication must fail"));
     assert!(error.contains("git rev-parse HEAD failed"), "{error}");
     let state = w.state();
     assert!(
