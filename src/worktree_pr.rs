@@ -171,7 +171,13 @@ pub async fn handle_worktree_pr_with_persistence(
     }
     let skipped_reason = if compiled.create_pr {
         session.pr_skipped_reason = None;
-        pr_creation_skip_reason(ctx, session.worktree_base_ref.as_deref(), session.worktree_base_branch.as_deref(), cancel_token).await?
+        pr_creation_skip_reason(
+            ctx,
+            session.worktree_base_ref.as_deref(),
+            session.worktree_base_branch.as_deref(),
+            cancel_token,
+        )
+        .await?
     } else {
         Some(crate::session::PrSkippedReason::Disabled)
     };
@@ -206,12 +212,7 @@ pub async fn handle_worktree_pr_with_persistence(
         match pr_attempt {
             PrAttemptOutcome::Created { url, .. } => {
                 crate::status_eprintln!("{} PR created: {}", style("v").green().bold(), url);
-                if let Some(number) = extract_last_path_segment(&url) {
-                    vars.set_named_value(PR_NUMBER_VAR, number);
-                }
-                vars.set_named_value(PR_URL_VAR, url.clone());
-                session.pr_url = Some(url);
-                session.pr_skipped_reason = None;
+                record_created_pr(session, vars, url);
                 if let Some(persist) = on_pr_created {
                     persist(session)?;
                 }
@@ -263,6 +264,15 @@ pub async fn handle_worktree_pr_with_persistence(
         operation.finish_result(&result);
     }
     result
+}
+
+fn record_created_pr(session: &mut SessionState, vars: &mut VariableStore, url: String) {
+    if let Some(number) = extract_last_path_segment(&url) {
+        vars.set_named_value(PR_NUMBER_VAR, number);
+    }
+    vars.set_named_value(PR_URL_VAR, url.clone());
+    session.pr_url = Some(url);
+    session.pr_skipped_reason = None;
 }
 
 async fn pr_creation_skip_reason(
@@ -324,8 +334,10 @@ async fn create_pr_attempt(
         session.input_or_title(),
         &pr_title,
         &pr_body,
-        session.worktree_base_ref.as_deref(),
-        session.worktree_base_branch.as_deref(),
+        (
+            session.worktree_base_ref.as_deref(),
+            session.worktree_base_branch.as_deref(),
+        ),
         cancel_token,
     )
     .await
@@ -594,7 +606,16 @@ pub(crate) async fn attempt_pr_creation(
     base_branch: Option<&str>,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<PrAttemptOutcome> {
-    attempt_pr_creation_with_ref(ctx, forge, message, title, body, None, base_branch, cancel_token).await
+    attempt_pr_creation_with_ref(
+        ctx,
+        forge,
+        message,
+        title,
+        body,
+        (None, base_branch),
+        cancel_token,
+    )
+    .await
 }
 
 async fn attempt_pr_creation_with_ref(
@@ -603,10 +624,10 @@ async fn attempt_pr_creation_with_ref(
     message: &str,
     title: &str,
     body: &str,
-    base_ref: Option<&str>,
-    base_branch: Option<&str>,
+    base: (Option<&str>, Option<&str>),
     cancel_token: Option<&CancellationToken>,
 ) -> Result<PrAttemptOutcome> {
+    let (base_ref, base_branch) = base;
     let trimmed_title = title.trim();
     let commit_message = if trimmed_title.is_empty() {
         message
@@ -701,16 +722,37 @@ async fn branch_commit_count_with_ref(
     cancel_token: Option<&CancellationToken>,
 ) -> Result<usize> {
     let base_head = if let Some(base_ref) = base_ref {
-        git_stdout(&ctx.path, &["rev-parse", "--verify", base_ref], "git rev-parse base failed", cancel_token).await?
+        git_stdout(
+            &ctx.path,
+            &["rev-parse", "--verify", base_ref],
+            "git rev-parse base failed",
+            cancel_token,
+        )
+        .await?
     } else if let Some(base) = base_branch {
         let local = format!("refs/heads/{base}");
         let remote = format!("refs/remotes/origin/{base}");
         // A successful auto-fetch starts the worktree from the remote-tracking ref,
         // even when a stale local branch exists.
-        match git_stdout(&ctx.path, &["rev-parse", "--verify", &remote], "git rev-parse base failed", cancel_token).await {
+        match git_stdout(
+            &ctx.path,
+            &["rev-parse", "--verify", &remote],
+            "git rev-parse base failed",
+            cancel_token,
+        )
+        .await
+        {
             Ok(head) => head,
             Err(CruiseError::Interrupted) => return Err(CruiseError::Interrupted),
-            Err(_) => git_stdout(&ctx.path, &["rev-parse", "--verify", &local], "git rev-parse base failed", cancel_token).await?,
+            Err(_) => {
+                git_stdout(
+                    &ctx.path,
+                    &["rev-parse", "--verify", &local],
+                    "git rev-parse base failed",
+                    cancel_token,
+                )
+                .await?
+            }
         }
     } else {
         git_stdout(
@@ -1264,64 +1306,185 @@ mod tests {
     fn base_ahead_fixture(tmp: &TempDir) -> worktree::WorktreeContext {
         let original = tmp.path().join("original");
         let path = tmp.path().join("worktree");
-        std::fs::create_dir_all(&original).unwrap();
+        std::fs::create_dir_all(&original)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         crate::test_support::init_git_repo(&original);
         crate::test_support::run_git_ok(&original, &["checkout", "-b", "develop"]);
-        std::fs::write(original.join("base-change"), "base").unwrap();
+        std::fs::write(original.join("base-change"), "base")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         crate::test_support::run_git_ok(&original, &["add", "base-change"]);
         crate::test_support::run_git_ok(&original, &["commit", "-m", "base change"]);
-        crate::test_support::run_git_ok(&original, &["worktree", "add", "-b", "cruise/test", path.to_str().unwrap(), "develop"]);
+        crate::test_support::run_git_ok(
+            &original,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "cruise/test",
+                path.to_str()
+                    .unwrap_or_else(|| panic!("test path must be UTF-8")),
+                "develop",
+            ],
+        );
         crate::test_support::run_git_ok(&original, &["checkout", "--detach", "HEAD~1"]);
-        worktree::WorktreeContext { path, original_dir: original, branch: "cruise/test".to_string() }
+        worktree::WorktreeContext {
+            path,
+            original_dir: original,
+            branch: "cruise/test".to_string(),
+        }
     }
 
     #[tokio::test]
     async fn configured_base_ahead_without_worktree_commit_skips_pr() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let ctx = base_ahead_fixture(&tmp);
-        assert_eq!(pr_creation_skip_reason(&ctx, None, Some("develop"), None).await.unwrap(), Some(crate::session::PrSkippedReason::NoCommits));
-        assert!(matches!(attempt_pr_creation(&ctx, crate::forge::ForgeKind::GitHub, "task", "", "", Some("develop"), None).await.unwrap(), PrAttemptOutcome::SkippedNoCommits));
+        assert_eq!(
+            pr_creation_skip_reason(&ctx, None, Some("develop"), None)
+                .await
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            Some(crate::session::PrSkippedReason::NoCommits)
+        );
+        assert!(matches!(
+            attempt_pr_creation(
+                &ctx,
+                crate::forge::ForgeKind::GitHub,
+                "task",
+                "",
+                "",
+                Some("develop"),
+                None
+            )
+            .await
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            PrAttemptOutcome::SkippedNoCommits
+        ));
     }
 
     #[tokio::test]
     async fn fetched_remote_base_takes_precedence_over_stale_local_branch() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let ctx = base_ahead_fixture(&tmp);
-        crate::test_support::run_git_ok(&ctx.path, &["update-ref", "refs/remotes/origin/develop", "refs/heads/develop"]);
-        crate::test_support::run_git_ok(&ctx.path, &["update-ref", "refs/heads/develop", "refs/heads/develop~1"]);
-        assert_eq!(pr_creation_skip_reason(&ctx, None, Some("develop"), None).await.unwrap(), Some(crate::session::PrSkippedReason::NoCommits));
-        assert!(matches!(attempt_pr_creation(&ctx, crate::forge::ForgeKind::GitHub, "task", "", "", Some("develop"), None).await.unwrap(), PrAttemptOutcome::SkippedNoCommits));
+        crate::test_support::run_git_ok(
+            &ctx.path,
+            &[
+                "update-ref",
+                "refs/remotes/origin/develop",
+                "refs/heads/develop",
+            ],
+        );
+        crate::test_support::run_git_ok(
+            &ctx.path,
+            &["update-ref", "refs/heads/develop", "refs/heads/develop~1"],
+        );
+        assert_eq!(
+            pr_creation_skip_reason(&ctx, None, Some("develop"), None)
+                .await
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            Some(crate::session::PrSkippedReason::NoCommits)
+        );
+        assert!(matches!(
+            attempt_pr_creation(
+                &ctx,
+                crate::forge::ForgeKind::GitHub,
+                "task",
+                "",
+                "",
+                Some("develop"),
+                None
+            )
+            .await
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            PrAttemptOutcome::SkippedNoCommits
+        ));
     }
 
     #[tokio::test]
     async fn selected_local_ref_overrides_stale_remote_for_both_eligibility_checks() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let ctx = base_ahead_fixture(&tmp);
-        crate::test_support::run_git_ok(&ctx.path, &["update-ref", "refs/remotes/origin/develop", "refs/heads/develop~1"]);
+        crate::test_support::run_git_ok(
+            &ctx.path,
+            &[
+                "update-ref",
+                "refs/remotes/origin/develop",
+                "refs/heads/develop~1",
+            ],
+        );
         let selected = Some("refs/heads/develop");
-        assert_eq!(pr_creation_skip_reason(&ctx, selected, Some("develop"), None).await.unwrap(), Some(crate::session::PrSkippedReason::NoCommits));
-        assert!(matches!(attempt_pr_creation_with_ref(&ctx, crate::forge::ForgeKind::GitHub, "task", "", "", selected, Some("develop"), None).await.unwrap(), PrAttemptOutcome::SkippedNoCommits));
+        assert_eq!(
+            pr_creation_skip_reason(&ctx, selected, Some("develop"), None)
+                .await
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            Some(crate::session::PrSkippedReason::NoCommits)
+        );
+        assert!(matches!(
+            attempt_pr_creation_with_ref(
+                &ctx,
+                crate::forge::ForgeKind::GitHub,
+                "task",
+                "",
+                "",
+                (selected, Some("develop")),
+                None
+            )
+            .await
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            PrAttemptOutcome::SkippedNoCommits
+        ));
     }
 
     #[tokio::test]
     async fn configured_base_ahead_with_worktree_commit_is_eligible() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let ctx = base_ahead_fixture(&tmp);
-        std::fs::write(ctx.path.join("worktree-change"), "change").unwrap();
+        std::fs::write(ctx.path.join("worktree-change"), "change")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         crate::test_support::run_git_ok(&ctx.path, &["add", "worktree-change"]);
         crate::test_support::run_git_ok(&ctx.path, &["commit", "-m", "worktree change"]);
-        assert_eq!(branch_commit_count(&ctx, Some("develop"), None).await.unwrap(), 1);
-        assert_eq!(pr_creation_skip_reason(&ctx, None, Some("develop"), None).await.unwrap(), None);
+        assert_eq!(
+            branch_commit_count(&ctx, Some("develop"), None)
+                .await
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            1
+        );
+        assert_eq!(
+            pr_creation_skip_reason(&ctx, None, Some("develop"), None)
+                .await
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            None
+        );
         // No remote is configured, so reaching push proves the post-commit check did not skip.
-        assert!(attempt_pr_creation(&ctx, crate::forge::ForgeKind::GitHub, "task", "", "", Some("develop"), None).await.is_err());
+        assert!(
+            attempt_pr_creation(
+                &ctx,
+                crate::forge::ForgeKind::GitHub,
+                "task",
+                "",
+                "",
+                Some("develop"),
+                None
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test]
     async fn unset_base_compares_against_original_checkout() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let ctx = base_ahead_fixture(&tmp);
-        assert_eq!(branch_commit_count(&ctx, None, None).await.unwrap(), 1);
-        assert_eq!(pr_creation_skip_reason(&ctx, None, None, None).await.unwrap(), None);
+        assert_eq!(
+            branch_commit_count(&ctx, None, None)
+                .await
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            1
+        );
+        assert_eq!(
+            pr_creation_skip_reason(&ctx, None, None, None)
+                .await
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            None
+        );
     }
 
     #[test]
@@ -1333,8 +1496,8 @@ mod tests {
         );
         let gh = super::pr_create_args("cruise/x", "title", "body", Some("develop"));
         assert!(gh.windows(2).any(|args| args == ["--base", "develop"]));
-        let gl_default = super::mr_create_args("cruise/x", "", "", None);
-        assert!(!gl_default.iter().any(|arg| arg == "--target-branch"));
+        let gitlab_default = super::mr_create_args("cruise/x", "", "", None);
+        assert!(!gitlab_default.iter().any(|arg| arg == "--target-branch"));
         let gl = super::mr_create_args("cruise/x", "title", "body", Some("develop"));
         assert!(
             gl.windows(2)

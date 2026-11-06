@@ -51,7 +51,14 @@ pub fn setup_session_worktree(
     existing_branch: Option<&str>,
     base: &WorktreeBase,
 ) -> Result<(WorktreeContext, bool)> {
-    let (ctx, reused, _) = setup_session_worktree_with_ref(base_dir, session_id, input, worktrees_dir, existing_branch, base)?;
+    let (ctx, reused, _) = setup_session_worktree_with_ref(
+        base_dir,
+        session_id,
+        input,
+        worktrees_dir,
+        existing_branch,
+        base,
+    )?;
     Ok((ctx, reused))
 }
 
@@ -376,36 +383,95 @@ mod tests {
         run(&["commit", "-m", "init"]);
     }
 
-    #[test]
-    fn auto_fetch_updates_tracking_ref_outside_configured_refspec() {
-        let _lock = lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+    fn git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn setup_refspec_fixture(tmp: &TempDir) -> (PathBuf, PathBuf) {
         let source = tmp.path().join("source");
         let origin = tmp.path().join("origin.git");
         let clone = tmp.path().join("clone");
         fs::create_dir(&source).unwrap_or_else(|e| panic!("{e:?}"));
         init_git_repo(&source);
-        let git = |dir: &Path, args: &[&str]| {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .stdin(std::process::Stdio::null())
-                .output()
-                .unwrap_or_else(|e| panic!("{e:?}"));
-            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-        };
         git(&source, &["checkout", "-b", "feature"]);
-        git(tmp.path(), &["init", "--bare", origin.to_str().unwrap()]);
-        git(&source, &["remote", "add", "origin", origin.to_str().unwrap()]);
-        git(&source, &["push", "origin", "refs/heads/feature:refs/heads/feature"]);
-        git(tmp.path(), &["clone", "--branch", "feature", origin.to_str().unwrap(), clone.to_str().unwrap()]);
-        git(&clone, &["config", "--replace-all", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other"]);
+        git(
+            tmp.path(),
+            &[
+                "init",
+                "--bare",
+                origin
+                    .to_str()
+                    .unwrap_or_else(|| panic!("test path must be UTF-8")),
+            ],
+        );
+        git(
+            &source,
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin
+                    .to_str()
+                    .unwrap_or_else(|| panic!("test path must be UTF-8")),
+            ],
+        );
+        git(
+            &source,
+            &["push", "origin", "refs/heads/feature:refs/heads/feature"],
+        );
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "--branch",
+                "feature",
+                origin
+                    .to_str()
+                    .unwrap_or_else(|| panic!("test path must be UTF-8")),
+                clone
+                    .to_str()
+                    .unwrap_or_else(|| panic!("test path must be UTF-8")),
+            ],
+        );
+        git(
+            &clone,
+            &[
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/heads/other:refs/remotes/origin/other",
+            ],
+        );
+        (source, clone)
+    }
+
+    #[test]
+    fn auto_fetch_updates_tracking_ref_outside_configured_refspec() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let (source, clone) = setup_refspec_fixture(&tmp);
         fs::write(source.join("README.md"), "updated").unwrap_or_else(|e| panic!("{e:?}"));
         git(&source, &["add", "README.md"]);
         git(&source, &["commit", "-m", "update"]);
-        git(&source, &["push", "origin", "refs/heads/feature:refs/heads/feature"]);
+        git(
+            &source,
+            &["push", "origin", "refs/heads/feature:refs/heads/feature"],
+        );
         git(&source, &["tag", "feature"]);
-        git(&source, &["push", "origin", "refs/tags/feature:refs/tags/feature"]);
+        git(
+            &source,
+            &["push", "origin", "refs/tags/feature:refs/tags/feature"],
+        );
 
         let (ctx, reused) = setup_session_worktree(
             &clone,
@@ -413,10 +479,18 @@ mod tests {
             "",
             &tmp.path().join("worktrees"),
             None,
-            &WorktreeBase { branch: Some("feature".to_string()), auto_fetch: true },
-        ).unwrap_or_else(|e| panic!("{e:?}"));
+            &WorktreeBase {
+                branch: Some("feature".to_string()),
+                auto_fetch: true,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!reused);
-        assert_eq!(fs::read_to_string(ctx.path.join("README.md")).unwrap(), "updated");
+        assert_eq!(
+            fs::read_to_string(ctx.path.join("README.md"))
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            "updated"
+        );
 
         git(&clone, &["update-ref", "-d", "refs/remotes/origin/feature"]);
         let (second, reused) = setup_session_worktree(
@@ -425,10 +499,18 @@ mod tests {
             "",
             &tmp.path().join("worktrees"),
             None,
-            &WorktreeBase { branch: Some("feature".to_string()), auto_fetch: true },
-        ).unwrap_or_else(|e| panic!("{e:?}"));
+            &WorktreeBase {
+                branch: Some("feature".to_string()),
+                auto_fetch: true,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!reused);
-        assert_eq!(fs::read_to_string(second.path.join("README.md")).unwrap(), "updated");
+        assert_eq!(
+            fs::read_to_string(second.path.join("README.md"))
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            "updated"
+        );
         assert!(ref_exists(&clone, "refs/remotes/origin/feature"));
     }
 
@@ -443,8 +525,15 @@ mod tests {
             .output()
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(output.status.success());
-        let base = WorktreeBase { branch: Some("fallback".to_string()), auto_fetch: true };
-        assert_eq!(resolve_start_point(tmp.path(), &base).unwrap(), Some("refs/heads/fallback".to_string()));
+        let base = WorktreeBase {
+            branch: Some("fallback".to_string()),
+            auto_fetch: true,
+        };
+        assert_eq!(
+            resolve_start_point(tmp.path(), &base)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            Some("refs/heads/fallback".to_string())
+        );
     }
 
     #[test]

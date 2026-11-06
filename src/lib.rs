@@ -63,10 +63,10 @@ pub mod batch_dashboard;
 pub mod console_mode;
 pub mod display;
 pub mod herdr;
-pub mod sleep_guard;
 pub(crate) mod multiline_input;
 pub mod platform;
 pub mod run_observer;
+pub mod sleep_guard;
 mod spinner;
 
 #[cfg(any(test, feature = "test-utils"))]

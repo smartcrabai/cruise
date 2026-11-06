@@ -725,7 +725,8 @@ mod tests {
             "{error}"
         );
         write(&env.project_file, "base_branch: main\n");
-        WorkflowDefaults::load(Some(env.project.path())).unwrap();
+        WorkflowDefaults::load(Some(env.project.path()))
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
     }
 
     #[test]

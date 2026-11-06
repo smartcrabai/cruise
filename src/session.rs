@@ -1473,7 +1473,7 @@ mod tests {
 
     #[test]
     fn test_worktree_base_branch_persists_and_legacy_session_loads() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let state = SessionState::new(
             "20260306150001".to_string(),
@@ -1483,32 +1483,52 @@ mod tests {
             },
             "task".to_string(),
         );
-        let mut json = serde_json::to_value(&state).unwrap();
-        json.as_object_mut().unwrap().remove("worktree_base_branch");
-        json.as_object_mut().unwrap().remove("worktree_base_ref");
-        let legacy: SessionState = serde_json::from_value(json.clone()).unwrap();
+        let mut json = serde_json::to_value(&state)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("serialized session must be an object"))
+            .remove("worktree_base_branch");
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("serialized session must be an object"))
+            .remove("worktree_base_ref");
+        let legacy: SessionState = serde_json::from_value(json.clone())
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         assert_eq!(legacy.worktree_base_ref, None);
         assert_eq!(
             serde_json::to_value(&legacy)
-                .unwrap()
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))
                 .get("worktree_base_branch"),
             Some(&serde_json::Value::Null)
         );
 
         json["worktree_base_branch"] = serde_json::json!("develop");
         json["worktree_base_ref"] = serde_json::json!("refs/heads/develop");
-        let configured: SessionState = serde_json::from_value(json).unwrap();
-        manager.create(&configured).unwrap();
-        let loaded = manager.load(&configured.id).unwrap();
+        let configured: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        manager
+            .create(&configured)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let loaded = manager
+            .load(&configured.id)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         assert_eq!(
-            serde_json::to_value(&loaded).unwrap()["worktree_base_branch"],
+            serde_json::to_value(&loaded)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))["worktree_base_branch"],
             "develop"
         );
-        manager.save(&loaded).unwrap();
-        let reloaded = manager.load(&configured.id).unwrap();
-        assert_eq!(reloaded.worktree_base_ref.as_deref(), Some("refs/heads/develop"));
+        manager
+            .save(&loaded)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let reloaded = manager
+            .load(&configured.id)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         assert_eq!(
-            serde_json::to_value(&reloaded).unwrap()["worktree_base_branch"],
+            reloaded.worktree_base_ref.as_deref(),
+            Some("refs/heads/develop")
+        );
+        assert_eq!(
+            serde_json::to_value(&reloaded)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))["worktree_base_branch"],
             "develop"
         );
     }

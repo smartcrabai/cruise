@@ -1427,9 +1427,15 @@ mod tests {
         );
 
         let worktrees_dir = tmp.path().join("worktrees");
-        let (ctx, reused) =
-            worktree::setup_session_worktree(&repo, session_id, "test task", &worktrees_dir, None, &worktree::WorktreeBase::default())
-                .unwrap_or_else(|e| panic!("{e:?}"));
+        let (ctx, reused) = worktree::setup_session_worktree(
+            &repo,
+            session_id,
+            "test task",
+            &worktrees_dir,
+            None,
+            &worktree::WorktreeBase::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!reused, "test worktree should be created fresh");
         (repo, ctx)
     }
@@ -2848,28 +2854,25 @@ steps:
     }
 
     #[tokio::test]
-    async fn worktree_pr_handler_uses_persisted_base_not_live_defaults() {
-        let tmp = TempDir::new().unwrap();
+    async fn worktree_pr_handler_uses_persisted_base_not_live_defaults()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
         let f = setup_pr_test(
             &tmp,
             "20260307225905",
             "https://github.com/owner/repo/pull/5",
         );
-        fs::create_dir_all(f.repo.join(".cruise")).unwrap();
+        crate::test_support::run_git_ok(&f.repo, &["branch", "develop", "HEAD"]);
+        fs::create_dir_all(f.repo.join(".cruise"))?;
         fs::write(
             f.repo.join(".cruise/default.yaml"),
             "base_branch: changed\n",
-        )
-        .unwrap();
-        let compiled = crate::workflow::compile(
-            crate::config::WorkflowConfig::from_yaml(
-                "command: [sh, -c, 'printf description']\nsteps:\n  main:\n    prompt: inspect\n",
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        )?;
+        let compiled = crate::workflow::compile(crate::config::WorkflowConfig::from_yaml(
+            "command: [sh, -c, 'printf description']\nsteps:\n  main:\n    prompt: inspect\n",
+        )?)?;
         let plan_path = tmp.path().join("plan.md");
-        fs::write(&plan_path, "# Plan\n").unwrap();
+        fs::write(&plan_path, "# Plan\n")?;
         let mut vars = VariableStore::new("implement change".to_string());
         vars.set_named_file(PLAN_VAR, plan_path);
         let mut tracker = FileTracker::with_root(f.ctx.path.clone());
@@ -2881,9 +2884,9 @@ steps:
             },
             "implement change".to_string(),
         );
-        let mut json = serde_json::to_value(state).unwrap();
+        let mut json = serde_json::to_value(state)?;
         json["worktree_base_branch"] = serde_json::json!("develop");
-        let mut session: SessionState = serde_json::from_value(json).unwrap();
+        let mut session: SessionState = serde_json::from_value(json)?;
         let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
             &f.ctx,
             &compiled,
@@ -2903,11 +2906,11 @@ steps:
         .await;
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(session.pr_url.as_deref(), Some(f.url.as_str()));
-        let calls = fs::read_to_string(&f.log_path).unwrap();
+        let calls = fs::read_to_string(&f.log_path)?;
         let create = calls
             .lines()
             .find(|line| line.starts_with("pr create "))
-            .unwrap();
+            .ok_or("expected PR creation command")?;
         let args: Vec<_> = create.split_whitespace().collect();
         assert!(
             args.windows(2).any(|pair| pair == ["--base", "develop"]),
@@ -2917,7 +2920,8 @@ steps:
             !args.windows(2).any(|pair| pair == ["--base", "changed"]),
             "{create}"
         );
-        worktree::cleanup_worktree(&f.ctx).unwrap();
+        worktree::cleanup_worktree(&f.ctx)?;
+        Ok(())
     }
 
     struct PrTestFixture {

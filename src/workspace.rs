@@ -179,39 +179,50 @@ mod tests {
 
     fn base_test_repo(tmp: &TempDir, defaults: &str) -> (PathBuf, SessionManager) {
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         init_git_repo(&repo);
-        fs::create_dir_all(repo.join(".cruise")).unwrap();
-        fs::write(repo.join(".cruise/default.yaml"), defaults).unwrap();
+        fs::create_dir_all(repo.join(".cruise"))
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        fs::write(repo.join(".cruise/default.yaml"), defaults)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         (repo, SessionManager::new(tmp.path().join("data")))
     }
 
     fn head(repo: &Path, revision: &str) -> String {
-        git_stdout(repo, &["rev-parse", revision], "rev-parse failed").unwrap()
+        git_stdout(repo, &["rev-parse", revision], "rev-parse failed")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))
     }
 
     #[test]
     fn test_worktree_base_config_selects_local_branch() {
         let _lock = lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let _config = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("config"));
         let (repo, manager) = base_test_repo(&tmp, "base_branch: main\nauto_fetch: false\n");
         run_git_ok(&repo, &["update-ref", "refs/remotes/origin/main", "main"]);
-        run_git_ok(&repo, &["commit", "--allow-empty", "-m", "advance local base"]);
+        run_git_ok(
+            &repo,
+            &["commit", "--allow-empty", "-m", "advance local base"],
+        );
         let main = head(&repo, "main");
         run_git_ok(&repo, &["checkout", "-b", "feature"]);
         run_git_ok(&repo, &["commit", "--allow-empty", "-m", "feature"]);
         let mut session = make_session("20260321120101", &repo);
         let workspace =
-            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree).unwrap();
+            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         assert_eq!(head(workspace.path(), "HEAD"), main);
-        assert_eq!(session.worktree_base_ref.as_deref(), Some("refs/heads/main"));
+        assert_eq!(
+            session.worktree_base_ref.as_deref(),
+            Some("refs/heads/main")
+        );
     }
 
     #[test]
     fn test_worktree_base_fetch_updates_remote_and_uses_it() {
         let _lock = lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let _config = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("config"));
         let (repo, manager) = base_test_repo(&tmp, "base_branch: main\nauto_fetch: true\n");
         let remote = tmp.path().join("remote.git");
@@ -220,20 +231,38 @@ mod tests {
             &[
                 "clone",
                 "--bare",
-                repo.to_str().unwrap(),
-                remote.to_str().unwrap(),
+                repo.to_str()
+                    .unwrap_or_else(|| panic!("test path must be UTF-8")),
+                remote
+                    .to_str()
+                    .unwrap_or_else(|| panic!("test path must be UTF-8")),
             ],
         );
         run_git_ok(
             &repo,
-            &["remote", "add", "origin", remote.to_str().unwrap()],
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote
+                    .to_str()
+                    .unwrap_or_else(|| panic!("test path must be UTF-8")),
+            ],
         );
         run_git_ok(&repo, &["fetch", "origin", "main"]);
         let old = head(&repo, "main");
         let writer = tmp.path().join("writer");
         run_git_ok(
             tmp.path(),
-            &["clone", remote.to_str().unwrap(), writer.to_str().unwrap()],
+            &[
+                "clone",
+                remote
+                    .to_str()
+                    .unwrap_or_else(|| panic!("test path must be UTF-8")),
+                writer
+                    .to_str()
+                    .unwrap_or_else(|| panic!("test path must be UTF-8")),
+            ],
         );
         run_git_ok(&writer, &["config", "user.email", "test@example.com"]);
         run_git_ok(&writer, &["config", "user.name", "Test"]);
@@ -242,17 +271,21 @@ mod tests {
         let new = head(&writer, "HEAD");
         let mut session = make_session("20260321120102", &repo);
         let workspace =
-            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree).unwrap();
+            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         assert_eq!(head(&repo, "main"), old);
         assert_eq!(head(workspace.path(), "HEAD"), new);
         assert_eq!(head(&repo, "refs/remotes/origin/main"), new);
-        assert_eq!(session.worktree_base_ref.as_deref(), Some("refs/remotes/origin/main"));
+        assert_eq!(
+            session.worktree_base_ref.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
     }
 
     #[test]
     fn test_worktree_base_missing_branch_is_rejected() {
         let _lock = lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let _config = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("config"));
         let (repo, manager) = base_test_repo(&tmp, "base_branch: nonexistent\n");
         let mut session = make_session("20260321120103", &repo);
@@ -267,7 +300,7 @@ mod tests {
     #[test]
     fn test_worktree_base_invalid_name_is_rejected() {
         let _lock = lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let _config = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("config"));
         let (repo, manager) = base_test_repo(&tmp, "base_branch: '-x'\nauto_fetch: true\n");
         let mut session = make_session("20260321120104", &repo);
@@ -282,25 +315,32 @@ mod tests {
     #[test]
     fn test_worktree_base_fetch_failure_falls_back_to_local() {
         let _lock = lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let _config = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("config"));
         let (repo, manager) = base_test_repo(&tmp, "base_branch: main\nauto_fetch: true\n");
         run_git_ok(&repo, &["update-ref", "refs/remotes/origin/main", "main"]);
-        run_git_ok(&repo, &["commit", "--allow-empty", "-m", "advance local base"]);
+        run_git_ok(
+            &repo,
+            &["commit", "--allow-empty", "-m", "advance local base"],
+        );
         let main = head(&repo, "main");
         run_git_ok(&repo, &["checkout", "-b", "feature"]);
         run_git_ok(&repo, &["commit", "--allow-empty", "-m", "feature"]);
         let mut session = make_session("20260321120105", &repo);
         let workspace =
-            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree).unwrap();
+            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         assert_eq!(head(workspace.path(), "HEAD"), main);
-        assert_eq!(session.worktree_base_ref.as_deref(), Some("refs/heads/main"));
+        assert_eq!(
+            session.worktree_base_ref.as_deref(),
+            Some("refs/heads/main")
+        );
     }
 
     #[test]
     fn test_worktree_base_uses_remote_when_local_branch_missing() {
         let _lock = lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let _config = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("config"));
         let (repo, manager) = base_test_repo(&tmp, "base_branch: main\nauto_fetch: false\n");
         let main = head(&repo, "main");
@@ -310,40 +350,50 @@ mod tests {
         run_git_ok(&repo, &["branch", "-D", "main"]);
         let mut session = make_session("20260321120106", &repo);
         let workspace =
-            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree).unwrap();
+            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         assert_eq!(head(workspace.path(), "HEAD"), main);
-        assert_eq!(session.worktree_base_ref.as_deref(), Some("refs/remotes/origin/main"));
+        assert_eq!(
+            session.worktree_base_ref.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
     }
 
     #[test]
     fn test_worktree_base_reuse_preserves_recorded_base() {
         let _lock = lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let _config = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("config"));
         let (repo, manager) = base_test_repo(&tmp, "base_branch: main\n");
         let mut session = make_session("20260321120107", &repo);
         let workspace =
-            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree).unwrap();
+            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         update_session_workspace(&mut session, &workspace);
         assert_eq!(
-            serde_json::to_value(&session).unwrap()["worktree_base_branch"],
+            serde_json::to_value(&session)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))["worktree_base_branch"],
             "main"
         );
         fs::write(
             repo.join(".cruise/default.yaml"),
             "base_branch: '-x'\nauto_fetch: true\n",
         )
-        .unwrap();
-        let reused =
-            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree).unwrap();
+        .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let reused = prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         assert!(matches!(
             reused,
             ExecutionWorkspace::Worktree { reused: true, .. }
         ));
         assert_eq!(reused.path(), workspace.path());
-        assert_eq!(session.worktree_base_ref.as_deref(), Some("refs/heads/main"));
         assert_eq!(
-            serde_json::to_value(&session).unwrap()["worktree_base_branch"],
+            session.worktree_base_ref.as_deref(),
+            Some("refs/heads/main")
+        );
+        assert_eq!(
+            serde_json::to_value(&session)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))["worktree_base_branch"],
             "main"
         );
     }
