@@ -316,12 +316,22 @@ async fn create_pr_attempt(
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
     }
+    let pr_body = crate::issue_input::with_closing_reference(&pr_body, session.issue_number);
+    // Without an issue, GitHub's fill path historically ignores the generated body.
+    let pr_body = if session.issue_number.is_none()
+        && crate::forge::session_forge(session) == crate::forge::ForgeKind::GitHub
+        && pr_title.trim().is_empty()
+    {
+        ""
+    } else {
+        &pr_body
+    };
     attempt_pr_creation(
         ctx,
         crate::forge::session_forge(session),
         session.input_or_title(),
         &pr_title,
-        &pr_body,
+        pr_body,
         cancel_token,
     )
     .await
@@ -832,6 +842,16 @@ async fn create_pr(
     let mut gh_args = vec!["pr", "create", "--head", branch, "--draft"];
     if title.is_empty() {
         gh_args.push("--fill");
+        let has_reference = body.lines().any(|line| {
+            line.split_whitespace()
+                .nth(1)
+                .and_then(|word| word.strip_prefix('#'))
+                .and_then(|number| number.parse::<u64>().ok())
+                .is_some_and(|number| crate::issue_input::has_closing_reference(line, number))
+        });
+        if has_reference {
+            gh_args.extend(["--body", body]);
+        }
     } else {
         gh_args.extend(["--title", title, "--body", body]);
     }

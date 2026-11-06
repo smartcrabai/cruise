@@ -196,6 +196,9 @@ pub struct SessionState {
     /// (`--skip-planning` / input-as-plan). `input` is then stored empty.
     #[serde(default)]
     pub input_as_plan: bool,
+    /// GitHub issue from which this session was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -274,6 +277,7 @@ impl SessionState {
             published_issue_url: None,
             exec: false,
             input_as_plan: false,
+            issue_number: None,
         }
     }
 
@@ -315,6 +319,14 @@ impl SessionState {
             .map(str::trim)
             .filter(|title| !title.is_empty())
             .unwrap_or(&self.input)
+    }
+
+    #[must_use]
+    pub fn worktree_branch_source(&self) -> String {
+        self.issue_number.map_or_else(
+            || self.input_or_title().to_string(),
+            |n| format!("issue-{n}"),
+        )
     }
 
     /// Return the planning input with attached image paths appended (or the
@@ -1338,6 +1350,33 @@ fn fetch_pr_state(session: &SessionState, pr_url: &str) -> std::result::Result<S
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn planned_issue_number_legacy_state_is_omitted_when_absent() {
+        let session = crate::test_support::make_session("legacy-issue", Path::new("/tmp"));
+        let mut json = serde_json::to_value(&session).unwrap();
+        json.as_object_mut().unwrap().remove("issue_number");
+        let restored: SessionState = serde_json::from_value(json).unwrap();
+        assert!(
+            serde_json::to_value(restored)
+                .unwrap()
+                .get("issue_number")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn planned_issue_number_survives_save_and_load() {
+        let tmp = TempDir::new().unwrap();
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let session = crate::test_support::make_session("issue-persistence", tmp.path());
+        let mut json = serde_json::to_value(session).unwrap();
+        json["issue_number"] = serde_json::json!(12);
+        let session: SessionState = serde_json::from_value(json).unwrap();
+        manager.save(&session).unwrap();
+        let restored = manager.load(&session.id).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap()["issue_number"], 12);
+    }
 
     /// Guard that saves an environment variable's current value, removes it for
     /// the duration of the test, and restores it on drop.

@@ -51,7 +51,7 @@ pub fn prepare_execution_workspace(
             let (ctx, reused) = worktree::setup_session_worktree(
                 &session.base_dir,
                 &session.id,
-                session.input_or_title(),
+                &session.worktree_branch_source(),
                 &worktrees_dir,
                 session.worktree_branch.as_deref(),
             )?;
@@ -158,6 +158,29 @@ mod tests {
     use crate::test_support::{init_git_repo, lock_process, make_session, run_git_ok};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn planned_issue_session_uses_issue_number_for_worktree_branch() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        let manager = SessionManager::new(tmp.path().join("data"));
+        let mut session = make_session("issue-branch", &repo);
+        session.input = "# Formatted issue title\n\nIssue #12: details".into();
+        let mut json = serde_json::to_value(session).unwrap();
+        json["issue_number"] = serde_json::json!(12);
+        let mut session = serde_json::from_value(json).unwrap();
+        let workspace =
+            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree).unwrap();
+        match workspace {
+            ExecutionWorkspace::Worktree { ctx, .. } => {
+                assert_eq!(ctx.branch, "cruise/issue-branch-issue-12");
+            }
+            ExecutionWorkspace::CurrentBranch { .. } => panic!("expected worktree"),
+        }
+    }
 
     #[test]
     fn test_prepare_execution_workspace_worktree_mode_creates_session_worktree() {

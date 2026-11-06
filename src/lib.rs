@@ -22,6 +22,8 @@ pub mod flags;
 pub(crate) mod forge;
 pub mod github_review;
 pub mod graph;
+pub(crate) mod issue_images;
+pub(crate) mod issue_input;
 pub mod issue_publish;
 pub mod metadata;
 pub mod model_schedule;

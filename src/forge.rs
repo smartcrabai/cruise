@@ -116,6 +116,22 @@ pub(crate) fn resolve_repo_locator_env(locator: &str) -> Result<ForgeContext> {
     resolve_repo_locator(locator, forced)
 }
 
+/// Resolve an explicit repository locator or the checkout's origin remote.
+pub(crate) fn repository_context(
+    repo: Option<&str>,
+    dir: &std::path::Path,
+) -> Result<ForgeContext> {
+    if let Some(repo) = repo {
+        return resolve_repo_locator_env(repo);
+    }
+    let origin = origin_url(dir).map_err(CruiseError::Other)?;
+    resolve_remote(&origin, forge_override_from_env()?).map_err(|e| {
+        CruiseError::Other(format!(
+            "could not determine repository from origin URL: {origin}: {e}"
+        ))
+    })
+}
+
 /// Verify that the CLI for `kind` (`gh` / `glab`) is available.
 pub(crate) fn ensure_forge_available(kind: ForgeKind) -> Result<()> {
     match kind {
