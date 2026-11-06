@@ -9,16 +9,30 @@ use crate::{cli::ConfigArgs, error::Result};
 ///
 /// # Errors
 ///
-/// Returns an error if the config cannot be read or written, or if `N` is 0.
+/// Returns an error if the config cannot be read or written, or if parallelism is 0.
 pub fn run(args: &ConfigArgs) -> Result<()> {
-    if let Some(parallelism) = args.set_parallelism {
+    if args.set_parallelism.is_some() || args.set_auto_requeue_max_attempts.is_some() {
         let mut config = crate::app_config::AppConfig::load()?;
-        config.run_all_parallelism = parallelism;
+        if let Some(parallelism) = args.set_parallelism {
+            config.run_all_parallelism = parallelism;
+        }
+        if let Some(max) = args.set_auto_requeue_max_attempts {
+            config.run_all_auto_requeue_max_attempts = max;
+        }
         config.save()?;
-        println!("run_all_parallelism = {parallelism}");
+        if let Some(parallelism) = args.set_parallelism {
+            println!("run_all_parallelism = {parallelism}");
+        }
+        if let Some(max) = args.set_auto_requeue_max_attempts {
+            println!("run_all_auto_requeue_max_attempts = {max}");
+        }
     } else {
         let config = crate::app_config::AppConfig::load()?;
         println!("run_all_parallelism = {}", config.run_all_parallelism);
+        println!(
+            "run_all_auto_requeue_max_attempts = {}",
+            config.run_all_auto_requeue_max_attempts
+        );
         println!("prevent_sleep = {}", config.prevent_sleep);
         if let Some(model) = config.model.as_ref() {
             println!("model = {}", serde_json::to_string(model)?);

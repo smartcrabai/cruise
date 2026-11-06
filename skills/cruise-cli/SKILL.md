@@ -71,6 +71,8 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | Run a config right here, no plan/worktree/PR | `cruise exec "task"` (or `cruise "task"` with `force_exec: true`; use `cruise plan "ssh"` or `cruise plan "mcp-bridge"` when the task text is exactly `ssh` or `mcp-bridge`, respectively) |
 | Execute every Planned or Suspended session back-to-back (live dashboard on TTY for non-dry runs) | `cruise run --all` |
 | Run all planned or suspended sessions with bounded concurrency (one run) | `cruise run --all --parallelism 4` |
+| Retry eligible Run All failures once (one run) | `cruise run --all --auto-requeue-max-attempts 1` |
+| Set the shared Run All retry limit | `cruise config --set-auto-requeue-max-attempts 1` |
 | Manage sessions interactively in the full keyboard client | `cruise` |
 | Browse / approve / resume / delete sessions with the CLI selector | `cruise list` |
 | Review a session branch's changes or summary | `cruise diff <session-id>` / `cruise diff <session-id> --stat` |
@@ -295,6 +297,7 @@ Keys are fixed and cannot be configured:
 | `[` / `]` / `Left` / `Right` | Move between detail tabs (`Left` / `Right` only outside text questions, where they edit text instead) |
 | `a` | Open the action palette |
 | `p` | On Run All, edit the shared parallelism setting; `Enter` saves and `Esc` cancels |
+| `e` | On Run All, edit the auto-requeue limit; `Enter` saves and `Esc` cancels |
 | `o` | In Sessions, open the selected session's Ask in its Plan tab. Otherwise handle the Option queue or open a dedicated PR/Issue URL |
 | `f` | Follow the log |
 | `Enter` | In a Plan Ask, start editing or submit the answer. Otherwise accept the New Session answer and move to the next question, start or draft the session, or insert a task/image newline |
@@ -381,6 +384,8 @@ On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cru
 - **`cruise clean` also removes terminal no-PR exec/current-branch sessions** without calling `gh`, plus Planned CurrentBranch sessions with no `current_step` when `plan.md` is missing or contains only whitespace; resumable sessions and ordinary planned sessions are retained.
 - **`--all`** runs Planned or Suspended sessions sequentially by default, regardless of `cruise config --set-parallelism` (that value governs the **WebUI and TUI**). If a session state file cannot be reloaded for the final summary, that session is reported as `Failed` with the state path and error, and the batch still completes.
 - **`--parallelism <N>`** is a one-run override for `cruise run --all` (default `1`, must be >= 1, requires `--all`). Each session still runs in its own worktree; one failure does not stop the other workers, and Ctrl+C suspends active sessions and stops new scheduling. It never reads or changes the persisted `cruise config --set-parallelism` value (that value governs the **WebUI and TUI**).
+- **`--auto-requeue-max-attempts <N>`** overrides the persisted `run_all_auto_requeue_max_attempts` for one Run All batch. Unlike parallelism, CLI Run All reads the persisted value when omitted. Set it with `cruise config --set-auto-requeue-max-attempts <N>`, WebUI settings, or TUI Run All `e`. It defaults to `0` (disabled) and is sampled at batch start.
+- Eligible failed sessions retry from the failed step in the same worker. The persisted count limits automatic retries across batches. Manual Run and Retry do not clear it, while Reset to Planned does. Failed sessions are not selected at batch start, and single-session runs and exec sessions are not automatically retried. Unclassified command errors remain eligible, but cancellation, configuration, authentication and authorization errors are not. Normal failure notifications still appear, and a completed run with failed steps is not reclassified.
 - In an interactive terminal, a non-dry `cruise run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 - **Hot-reload:** during `cruise run`, the config is re-read between steps when its mtime changes — tweak prompts mid-run without restarting (only for external configs, and the current step must still exist; newly declared flags absent from the session's saved values are off).
 - **Retries:** Without an SDK fallback policy, HTTP 429 uses exponential backoff (2s → 60s) with `--rate-limit-retries` retries (default 5, i.e. up to 6 attempts); an SDK `retry:` block or workflow-level model array with fallback entries switches a 429 straight to a usable fallback (same-model backoff only when none is left) and also makes 5xx/network failures and HTTP 4xx other than 429, 401, 403, 407, and 408 retryable and can switch to fallback models using the same `--rate-limit-retries` budget — such a 4xx switches straight to the next chain entry instead of being resent to the same model, and surfaces unchanged when no entry is left. Whether the model it left behind is put on the 30-minute cooldown that a 429/5xx/network skip applies depends on what the failure blames: a refused request (`client error`) leaves that model immediately usable, while an error naming the model as absent (`400 model_not_supported`, `404 model_not_found`, `unknown model`) is a `missing model` and does cool it down, so later turns and later steps stop selecting a model the provider does not have. 401/403/407 are auth or permission failures another model cannot fix, so they fail the step immediately; 408 counts as a network failure, so it switches to a usable fallback first like a 5xx (same-model resend only when no fallback is left, visible text was already streamed, or `--rate-limit-retries` is `0`) and does cool the model it left behind down. Rate-limit wording and 5xx are classified ahead of 4xx-looking numbers, so a 429 or 503 keeps its class even when stderr noise in the message contains something 4xx-shaped. Budgeted graph transitions — including ordinary sequential transitions — are bounded by `--max-retries`, resolved as: the explicit flag wins, else the workflow config's top-level `max_retries`, else 3.
@@ -403,6 +408,9 @@ cruise run --all                 # every Planned or Suspended session, worktree 
 
 # Drain the queue with bounded concurrency (this invocation only)
 cruise run --all --parallelism 4
+
+# Retry eligible failures at most twice for each session
+cruise run --all --auto-requeue-max-attempts 2
 
 # Throwaway run against the current branch, no PR
 cruise exec "tidy up the imports in src/"

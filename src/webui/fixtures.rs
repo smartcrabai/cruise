@@ -208,6 +208,7 @@ fn shell_fixtures() -> Vec<(&'static str, Value)> {
         (
             "components/session-header",
             value(&SessionHeaderVm {
+                auto_requeue_count: 2,
                 id: "s1".to_string(),
                 title: "Add a WebUI".to_string(),
                 input: Some("add a webui".to_string()),
@@ -258,6 +259,7 @@ fn tab_fixtures() -> Vec<(&'static str, Value)> {
         (
             "tab-info",
             value(&TabInfoVm {
+                auto_requeue_count: 2,
                 id: "s1".to_string(),
                 config_source: "builtin".to_string(),
                 flags: vec![FlagRowVm {
@@ -461,6 +463,7 @@ fn run_all_fixtures() -> Vec<(&'static str, Value)> {
             "settings-modal",
             value(&SettingsVm {
                 run_all_parallelism: 4,
+                run_all_auto_requeue_max_attempts: 2,
                 error: Some("Must be at least 1".to_string()),
             }),
         ),

@@ -255,6 +255,10 @@ pub enum Modal {
         editor: Box<Editor>,
         error: Option<String>,
     },
+    RunAllAutoRequeue {
+        editor: Box<Editor>,
+        error: Option<String>,
+    },
     Publish {
         trigger_cruise: bool,
     },
@@ -311,6 +315,7 @@ pub struct TuiApp {
     pub batch_total: usize,
     pub batch_finished: usize,
     pub batch_parallelism: usize,
+    pub batch_auto_requeue_max: u32,
     pub batch_parallelism_error: Option<String>,
     pub batch_rows: Vec<BatchRow>,
     pub batch_finished_ids: std::collections::HashSet<String>,
@@ -382,6 +387,7 @@ impl TuiApp {
             batch_total: 0,
             batch_finished: 0,
             batch_parallelism: 0,
+            batch_auto_requeue_max: 0,
             batch_parallelism_error: None,
             batch_rows: Vec::new(),
             batch_finished_ids: std::collections::HashSet::new(),
@@ -580,6 +586,7 @@ impl TuiApp {
         match self.application.app_config() {
             Ok(config) => {
                 self.batch_parallelism = config.run_all_parallelism;
+                self.batch_auto_requeue_max = config.run_all_auto_requeue_max_attempts;
                 self.batch_parallelism_error = None;
                 true
             }
@@ -1333,6 +1340,18 @@ impl TuiApp {
             ApplicationEvent::BatchSessionFinished { id, phase, error } => {
                 self.finish_batch_session(id, phase, error);
             }
+            ApplicationEvent::AutoRequeued {
+                session_id,
+                attempt,
+                max_attempts,
+                ..
+            } => {
+                self.invalidate(&session_id, true, true, false);
+                self.refresh();
+                self.status = Some(format!(
+                    "Auto-requeued {session_id} ({attempt}/{max_attempts})"
+                ));
+            }
             ApplicationEvent::BatchFinished { cancelled } => self.finish_batch(cancelled),
             ApplicationEvent::BatchFailed { error } => self.set_error_and_refresh(error),
             ApplicationEvent::LogChunk {
@@ -1647,7 +1666,11 @@ impl TuiApp {
                     }
                     _ => {}
                 }
-            } else if let Some(Modal::RunAllParallelism { editor, error }) = self.modal.as_mut() {
+            } else if let Some(
+                Modal::RunAllParallelism { editor, error }
+                | Modal::RunAllAutoRequeue { editor, error },
+            ) = self.modal.as_mut()
+            {
                 match key.code {
                     KeyCode::Char(_)
                     | KeyCode::Backspace
@@ -1980,6 +2003,10 @@ impl TuiApp {
             }
             Action::Character('p') if self.view == View::RunAll => {
                 self.open_run_all_parallelism_editor();
+                false
+            }
+            Action::Character('e') if self.view == View::RunAll => {
+                self.open_run_all_auto_requeue_editor();
                 false
             }
             Action::Character(_) | Action::Backspace | Action::None => false,
@@ -2382,6 +2409,9 @@ impl TuiApp {
             Modal::RunAllParallelism { editor, error } => {
                 self.handle_run_all_parallelism_modal(editor, error, action)
             }
+            Modal::RunAllAutoRequeue { editor, error } => {
+                self.handle_run_all_auto_requeue_modal(editor, error, action)
+            }
             Modal::Publish { trigger_cruise } => self.handle_publish_modal(trigger_cruise, action),
             Modal::MergePr { status, method } => self.handle_merge_pr_modal(status, method, action),
         }
@@ -2557,6 +2587,34 @@ impl TuiApp {
             _ => {
                 self.modal = Some(Modal::RunAllParallelism { editor, error });
             }
+        }
+        false
+    }
+
+    fn handle_run_all_auto_requeue_modal(
+        &mut self,
+        mut editor: Box<Editor>,
+        error: Option<String>,
+        action: Action,
+    ) -> bool {
+        match action {
+            Action::Enter => self.save_run_all_auto_requeue(editor),
+            Action::Escape => {}
+            Action::Character(c) => {
+                editor.input(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+                self.modal = Some(Modal::RunAllAutoRequeue {
+                    editor,
+                    error: None,
+                });
+            }
+            Action::Backspace => {
+                editor.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+                self.modal = Some(Modal::RunAllAutoRequeue {
+                    editor,
+                    error: None,
+                });
+            }
+            _ => self.modal = Some(Modal::RunAllAutoRequeue { editor, error }),
         }
         false
     }
@@ -2795,6 +2853,49 @@ impl TuiApp {
         self.status = Some(format!(
             "Saved shared WebUI/TUI Run All parallelism: {value}; applies from the next scheduling point"
         ));
+    }
+
+    fn open_run_all_auto_requeue_editor(&mut self) {
+        if !self.sync_batch_parallelism(true) {
+            return;
+        }
+        let mut editor = Editor::new(&self.batch_auto_requeue_max.to_string());
+        editor.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        self.modal = Some(Modal::RunAllAutoRequeue {
+            editor: Box::new(editor),
+            error: None,
+        });
+    }
+
+    fn save_run_all_auto_requeue(&mut self, editor: Box<Editor>) {
+        let result = parse_run_all_auto_requeue(&editor.text()).and_then(|value| {
+            let mut config = self
+                .application
+                .app_config()
+                .map_err(|error| error.to_string())?;
+            config.run_all_auto_requeue_max_attempts = value;
+            self.application
+                .save_app_config(&config)
+                .map_err(|error| error.to_string())?;
+            Ok(value)
+        });
+        match result {
+            Ok(value) => {
+                self.batch_auto_requeue_max = value;
+                self.last_error = None;
+                self.modal = None;
+                self.status = Some(format!(
+                    "Saved Run All auto-requeue max: {value}; applies to the next batch"
+                ));
+            }
+            Err(error) => {
+                self.last_error = Some(error.clone());
+                self.modal = Some(Modal::RunAllAutoRequeue {
+                    editor,
+                    error: Some(error),
+                });
+            }
+        }
     }
 
     fn apply_action(&mut self, action: SessionAction) {
@@ -3532,6 +3633,16 @@ fn parse_run_all_parallelism(input: &str) -> Result<usize, String> {
         return Err("Run All parallelism must be at least 1".to_string());
     }
     Ok(value)
+}
+
+fn parse_run_all_auto_requeue(input: &str) -> Result<u32, String> {
+    let input = input.trim();
+    if input.is_empty() || !input.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("Run All auto-requeue must be a non-negative integer".to_string());
+    }
+    input
+        .parse()
+        .map_err(|_| "Run All auto-requeue is too large".to_string())
 }
 
 fn operation_label(operation: crate::application::OperationKind) -> &'static str {

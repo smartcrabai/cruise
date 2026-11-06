@@ -50,6 +50,10 @@ jobs:
           cargo +1.99.1 build --locked --all-features --bin cruise-runtime
           node tests/webui/graph-flags.mjs
           node tests/webui/diff-browser.mjs
+      - name: Auto-requeue WebUI browser test
+        run: |
+          node tests/webui/auto-requeue.mjs all
+          node tests/webui/auto-requeue.mjs header
       - name: PR retry real browser boundaries
         run: node tests/webui/pr-failed-real.mjs
       - name: Production PR form browser test

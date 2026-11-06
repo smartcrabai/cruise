@@ -394,6 +394,9 @@ pub struct RunArgs {
     /// together with `--all`; must be at least 1.
     #[arg(long, value_name = "N")]
     pub parallelism: Option<usize>,
+    /// Maximum automatic retries per session in a batch.
+    #[arg(long, value_name = "N", requires = "all", allow_hyphen_values = true)]
+    pub auto_requeue_max_attempts: Option<u32>,
 
     /// Maximum number of times a budgeted graph transition may be traversed.
     ///
@@ -466,6 +469,9 @@ pub struct ConfigArgs {
     /// Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
     #[arg(long, value_name = "N")]
     pub set_parallelism: Option<usize>,
+    /// Set the maximum automatic retries per session in a batch.
+    #[arg(long, value_name = "N")]
+    pub set_auto_requeue_max_attempts: Option<u32>,
 }
 
 #[derive(Parser, Debug)]

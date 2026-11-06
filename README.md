@@ -267,6 +267,7 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 | `[` / `]` | Move between detail tabs |
 | `a` | Open the action palette |
 | `p` | On Run All, edit the shared parallelism setting; `Enter` saves and `Esc` cancels |
+| `e` | On Run All, edit the automatic requeue limit; `Enter` saves and `Esc` cancels |
 | `o` | In Sessions, open the selected session's Ask in its Plan tab; otherwise handle the Option queue or open a dedicated PR/Issue URL |
 | `f` | Follow the log |
 | `c` | On Sessions, ask for confirmation to Clean reclaimable and closed-PR sessions |
@@ -445,6 +446,7 @@ Arguments:
 Options:
       --all                        Run all planned or suspended sessions (live dashboard on interactive terminals for non-dry runs)
       --parallelism <N>            Max number of sessions `--all` executes concurrently (no flag default; 1 when omitted, must be >= 1, requires `--all`)
+      --auto-requeue-max-attempts <N>  Maximum automatic retries per session (requires `--all`)
       --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (no flag default; falls back to the workflow config's top-level `max_retries`, else 3)
       --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
@@ -457,9 +459,11 @@ Options:
 
 `--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the summary, that session is reported as `Failed` with the state path and error, and the batch still completes. `--all` and `[SESSION]` are mutually exclusive.
 
-Each session that reaches a persisted `Completed` or `Failed` state sends one best-effort desktop notification. A Run All batch does not send an additional aggregate notification. Option prompts and interactive planning questions send **Action required** immediately before waiting for input.
+Each attempt that reaches a persisted `Completed` or `Failed` state sends one best-effort desktop notification, including intermediate failures before an automatic retry. A Run All batch does not send an additional aggregate notification. Option prompts and interactive planning questions send **Action required** immediately before waiting for input.
 
 `--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the other workers, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted WebUI/TUI setting (`cruise config --set-parallelism`).
+
+`--auto-requeue-max-attempts <N>` overrides the persisted auto-requeue limit for this batch only. Unlike parallelism, CLI Run All reads the persisted limit when the flag is omitted. The default is `0` (disabled).
 
 When stderr is an interactive terminal and `--dry-run` is not set, `run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output remains in that session's `sessions/{id}/run.log`. In non-TTY environments such as CI, or during `--dry-run`, it keeps the normal log output and final summary behavior.
 
@@ -529,9 +533,13 @@ Options:
           Set the maximum number of sessions the WebUI and TUI run concurrently in `run --all` mode.
 
           Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
+      --set-auto-requeue-max-attempts <N>
+          Set the automatic retry limit for Run All (0 disables it).
 ```
 
 Shows or updates application-level settings stored in `config.json` or `config.yaml` under `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI and TUI** execute in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
+
+`cruise config --set-auto-requeue-max-attempts <N>` sets `run_all_auto_requeue_max_attempts` for CLI, TUI and WebUI Run All. The CLI flag `--auto-requeue-max-attempts <N>` overrides it for one batch. The limit is read once when a batch starts.
 
 Set `prevent_sleep: true` in the machine-level `config.yaml` (or `"prevent_sleep": true` in `config.json`) to prevent sleep during runs on macOS; the default is `false`. Cruise shares `/usr/bin/caffeinate -dis -w <pid>` across overlapping enabled runs and stops it when the last one ends. This also covers CLI, TUI, and WebUI runs, but not planning alone. Other operating systems do nothing. Failures to load the setting or start caffeinate only warn and do not fail the run; a later run retries. Changes take effect on the next run. This setting is not supported in project `default.yaml`.
 
@@ -2148,6 +2156,10 @@ Normal resume and prompt/model reloads retain counters. `--max-retries` applies 
 The compatibility filename `dag.json` and IPC name `get_session_dag` remain. Unversioned legacy graphs are viewable but cannot resume with guessed counters. Missing, corrupt and unknown-version checkpoints stop resume without deleting data. Explicitly restart the session to run from the beginning. Main and after-pr use separate graphs and counters. This does not add an independently resumable after-pr phase.
 
 ## Parallel Session Execution
+
+Run All can automatically retry eligible failures from the failed step within the same worker. Set the non-negative limit in WebUI settings, with `e` in the TUI Run All view, or with `cruise config --set-auto-requeue-max-attempts <N>`. It defaults to `0`, disabling retries. Unclassified command errors and eligible provider errors and no-file-changes errors may retry, while cancellation, configuration, authentication and authorization errors do not. An attempt's normal failure notification still appears. Completed runs with failed steps are not reclassified as failures.
+
+The persisted per-session count is a lifetime budget across batches. Manual Run or Retry does not reset it, but Reset to Planned does. Failed sessions are not picked up at batch start, single-session runs and exec sessions are not automatically retried, and lowering the limit does not erase the count. Counts appear in session details, CLI list JSON and batch summaries.
 
 The WebUI, TUI, and CLI support running multiple sessions concurrently during `run --all`.
 

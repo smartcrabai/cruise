@@ -762,6 +762,80 @@ fn tui_parallelism_edit_persists_and_is_loaded_after_restart() {
 }
 
 #[test]
+fn tui_auto_requeue_setting_persists_and_is_loaded_after_restart()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !tui_available() {
+        return Ok(());
+    }
+    let fixture = Fixture::new();
+    let mut tui = fixture.start(120, 30, true);
+    enter_run_all(&mut tui);
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.to_lowercase().contains("auto-requeue")
+    });
+    tui.send(b"e");
+    tui.wait_for_output("Enter save", START_TIMEOUT);
+    tui.send(&[b'\x7f'; 16]);
+    tui.send(b"2\r");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.lines().any(|line| {
+            let line = line.to_lowercase();
+            line.contains("auto-requeue") && line.contains('2')
+        })
+    });
+    tui.send(b"q");
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.app_config_path())?)?;
+    assert_eq!(config["runAllAutoRequeueMaxAttempts"], 2);
+
+    let mut restarted = fixture.start(120, 30, true);
+    enter_run_all(&mut restarted);
+    restarted.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.lines().any(|line| {
+            let line = line.to_lowercase();
+            line.contains("auto-requeue") && line.contains('2')
+        })
+    });
+    restarted.send(b"q");
+    let (status, transcript) = restarted.finish();
+    assert!(
+        status.success(),
+        "restarted cruise failed in PTY: {transcript}"
+    );
+    Ok(())
+}
+
+#[test]
+fn tui_session_info_displays_nonzero_auto_requeue_count() -> Result<(), Box<dyn std::error::Error>>
+{
+    if !tui_available() {
+        return Ok(());
+    }
+    let fixture = Fixture::new();
+    let id = fixture.seed_display_session(
+        1,
+        "retry display",
+        SessionPhase::Failed("provider failed".into()),
+        false,
+        None,
+    );
+    let path = fixture.manager.state_path(&id);
+    let mut state: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    state["auto_requeue_count"] = 2.into();
+    std::fs::write(path, serde_json::to_vec(&state)?)?;
+
+    let mut tui = fixture.start(120, 30, true);
+    tui.wait_for_output("retry display", START_TIMEOUT);
+    tui.wait_for_output("Auto-requeued 2", START_TIMEOUT);
+    tui.send(b"q");
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+    Ok(())
+}
+
+#[test]
 fn tui_parallelism_increase_applies_to_the_next_batch_schedule() {
     if !tui_available() {
         return;

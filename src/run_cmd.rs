@@ -455,6 +455,11 @@ pub(crate) async fn run_with_operation(
 
 async fn run_inner(args: RunArgs, operation: Option<&crate::telemetry::Operation>) -> Result<()> {
     let _herdr = crate::herdr::start();
+    if args.auto_requeue_max_attempts.is_some() && !args.all {
+        return Err(CruiseError::Other(
+            "--auto-requeue-max-attempts requires --all".to_string(),
+        ));
+    }
     // Validate --parallelism before any session is selected or executed.
     if let Some(parallelism) = args.parallelism {
         if parallelism == 0 {
@@ -1189,6 +1194,10 @@ async fn run_all(args: RunArgs) -> Result<()> {
 /// Batch runner with an injectable cancellation token so tests can drive the
 /// shared-token Ctrl+C path (`run_all` itself creates a fresh token).
 async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result<()> {
+    let max_attempts = match args.auto_requeue_max_attempts {
+        Some(max) => max,
+        None => crate::app_config::AppConfig::load()?.run_all_auto_requeue_max_attempts,
+    };
     let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
     // Validation in `run()` guarantees `Some(0)` never reaches here.
     let parallelism = args.parallelism.unwrap_or(1);
@@ -1214,57 +1223,14 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
                 // matches the scheduler's batch-index order.
                 dashboard.add(&session);
             }
-            Box::pin(async move {
-                let session_id = session.id.clone();
-                let operation = crate::telemetry::Operation::execution(
-                    if session.exec { "exec" } else { "run" },
-                    &session.id,
-                    Some(&session.config),
-                );
-                let session_args = RunArgs {
-                    session: Some(session_id.clone()),
-                    all: false,
-                    parallelism: None,
-                    ..base_args
-                };
-                let noop = NoopObserver;
-                let cli_option_handler = CliOptionHandler;
-                let dashboard_option_handler = dashboard.as_ref().map(|dashboard| {
-                    crate::batch_dashboard::DashboardOptionHandler {
-                        session_id: session_id.clone(),
-                        dashboard: Arc::clone(dashboard),
-                    }
-                });
-                let option_handler: &dyn OptionHandler = dashboard_option_handler
-                    .as_ref()
-                    .map_or(&cli_option_handler, |handler| handler);
-                let observer: &dyn RunObserver = dashboard
-                    .as_deref()
-                    .map_or(&noop as &dyn RunObserver, |dashboard| dashboard);
-                let mut workflow_failed = false;
-                let outcome = run_single_with_operation(
-                    session_args,
-                    WorkspaceOverride::ForceWorktree,
-                    option_handler,
-                    session_cancel,
-                    observer,
-                    Some(&operation),
-                    &mut workflow_failed,
-                )
-                .with_context(operation.context())
-                .await;
-                if let Some(dashboard) = &dashboard {
-                    let state = load_run_all_result_state(&manager, &session);
-                    dashboard.finish(&session_id, &state, &outcome);
-                }
-                if workflow_failed && outcome.is_ok() {
-                    operation.set_error_type("step_failed");
-                    operation.finish("error");
-                } else {
-                    operation.finish_result(&outcome);
-                }
-                outcome
-            })
+            Box::pin(run_all_session(
+                session,
+                session_cancel,
+                base_args,
+                dashboard,
+                manager,
+                max_attempts,
+            ))
         },
     );
     tokio::pin!(batch_future);
@@ -1282,6 +1248,87 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
     report_run_all_results(&batch_results, &manager);
 
     Ok(())
+}
+
+async fn run_all_session(
+    session: SessionState,
+    session_cancel: CancellationToken,
+    base_args: RunArgs,
+    dashboard: Option<Arc<crate::batch_dashboard::BatchDashboard>>,
+    manager: SessionManager,
+    max_attempts: u32,
+) -> Result<()> {
+    let session_id = session.id.clone();
+    let operation = crate::telemetry::Operation::execution(
+        if session.exec { "exec" } else { "run" },
+        &session.id,
+        Some(&session.config),
+    );
+    let session_args = RunArgs {
+        session: Some(session_id.clone()),
+        all: false,
+        parallelism: None,
+        ..base_args
+    };
+    let noop = NoopObserver;
+    let cli_option_handler = CliOptionHandler;
+    let dashboard_option_handler =
+        dashboard
+            .as_ref()
+            .map(|dashboard| crate::batch_dashboard::DashboardOptionHandler {
+                session_id: session_id.clone(),
+                dashboard: Arc::clone(dashboard),
+            });
+    let option_handler: &dyn OptionHandler = dashboard_option_handler
+        .as_ref()
+        .map_or(&cli_option_handler, |handler| handler);
+    let observer: &dyn RunObserver = dashboard
+        .as_deref()
+        .map_or(&noop as &dyn RunObserver, |dashboard| dashboard);
+    let mut workflow_failed = false;
+    let outcome = loop {
+        let outcome = run_single_with_operation(
+            session_args.clone(),
+            WorkspaceOverride::ForceWorktree,
+            option_handler,
+            session_cancel.clone(),
+            observer,
+            Some(&operation),
+            &mut workflow_failed,
+        )
+        .with_context(operation.context())
+        .await;
+        if let Err(error) = &outcome
+            && let Ok(Some(attempt)) = crate::auto_requeue::try_record_requeue(
+                &manager,
+                &session_id,
+                error,
+                max_attempts,
+                session_cancel.is_cancelled(),
+            )
+        {
+            let announcement =
+                format!("Auto-requeued {session_id} ({attempt}/{max_attempts}): {error}");
+            if dashboard.is_some() {
+                crate::batch_dashboard::BatchDashboard::announce(&announcement);
+            } else {
+                crate::status_eprintln!("{announcement}");
+            }
+            continue;
+        }
+        break outcome;
+    };
+    if let Some(dashboard) = &dashboard {
+        let state = load_run_all_result_state(&manager, &session);
+        dashboard.finish(&session_id, &state, &outcome);
+    }
+    if workflow_failed && outcome.is_ok() {
+        operation.set_error_type("step_failed");
+        operation.finish("error");
+    } else {
+        operation.finish_result(&outcome);
+    }
+    outcome
 }
 
 fn report_run_all_results(
@@ -1435,7 +1482,14 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
                 format!("[{}] ? {}", i + 1, truncated)
             }
         };
-        lines.push(line);
+        if result.auto_requeue_count > 0 {
+            lines.push(format!(
+                "{line} (auto-requeued {})",
+                result.auto_requeue_count
+            ));
+        } else {
+            lines.push(line);
+        }
     }
 
     lines.join("\n")
@@ -1790,6 +1844,7 @@ mod tests {
         RunArgs {
             session: Some(session_id.to_string()),
             all: false,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: None,
             rate_limit_retries: 0,
@@ -3724,6 +3779,7 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: Some("some-session-id".to_string()),
             all: true,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: None,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
@@ -3769,6 +3825,7 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: None,
             all: true,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: None,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
@@ -4778,6 +4835,7 @@ steps:
         let result = run(RunArgs {
             session: None,
             all: true,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
@@ -4859,6 +4917,7 @@ steps:
         let run_fut = run(RunArgs {
             session: None,
             all: true,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
@@ -6020,6 +6079,7 @@ steps:
         let run_fut = run(RunArgs {
             session: None,
             all: true,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
@@ -6209,6 +6269,7 @@ steps:
         RunArgs {
             session: None,
             all: true,
+            auto_requeue_max_attempts: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
             dry_run: false,
@@ -6280,6 +6341,7 @@ steps:
         let args = RunArgs {
             session: None,
             all: false,
+            auto_requeue_max_attempts: None,
             max_retries: None,
             rate_limit_retries: 0,
             dry_run: false,

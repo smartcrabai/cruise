@@ -1,5 +1,9 @@
 # Checkpoint contract verification
 
+For bounded batch auto-requeue safety, see `AUTO_REQUEUE.md` and run
+`bash scripts/check_auto_requeue_specs.sh`. The dedicated `auto-requeue-specs`
+CI job retains verification receipts and traces.
+
 For the bounded PR publication recovery lifecycle, run `bash scripts/check_pr_failed_specs.sh` with the pinned toolchain described below. The suite checks that Create PR does not rerun the workflow, cancellation retains PR Failed, worktrees remain available, and completion has a PR or a no-commits skip. It includes Quint, Alloy assertion and witness receipts, and executable production application scenarios. These bounded abstractions are not a proof of the production implementation. Reports are retained under `target/formal-reports/pr-failed.*`, and the `agent-auth-specs` CI job runs the suite independently of the preceding authentication check.
 
 For PR review-fix permission filtering and bounded termination, see

@@ -385,6 +385,7 @@ pub(crate) async fn settings_modal(State(state): State<WebState>) -> Response {
             "settings-modal",
             &SettingsVm {
                 run_all_parallelism: config.run_all_parallelism,
+                run_all_auto_requeue_max_attempts: config.run_all_auto_requeue_max_attempts,
                 error: None,
             },
         )
@@ -1217,8 +1218,13 @@ pub(crate) async fn save_settings(
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value >= 1)
             .ok_or_else(|| CruiseError::Other("Must be at least 1".to_string()))?;
+        let auto_requeue = fields
+            .opt("runAllAutoRequeueMaxAttempts")
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| CruiseError::Other("Must be a non-negative integer".to_string()))?;
         let mut config = state.application.app_config()?;
         config.run_all_parallelism = parallelism;
+        config.run_all_auto_requeue_max_attempts = auto_requeue;
         state.application.save_app_config(&config)?;
         Ok(html(partials::by_id("dialogs", "")))
     })

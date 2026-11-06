@@ -215,12 +215,22 @@ pub struct SessionState {
     /// (`--skip-planning` / input-as-plan). `input` is then stored empty.
     #[serde(default)]
     pub input_as_plan: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub auto_requeue_count: u32,
     /// Existing GitHub pull request targeted by this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_target: Option<crate::pr_review_fix::PrTarget>,
     /// GitHub issue from which this session was created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_number: Option<u64>,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if callbacks receive a field reference"
+)]
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -302,6 +312,7 @@ impl SessionState {
             published_issue_url: None,
             exec: false,
             input_as_plan: false,
+            auto_requeue_count: 0,
             pr_target: None,
             issue_number: None,
         }
@@ -472,6 +483,7 @@ impl SessionState {
 
     /// Resets this session back to `Planned` state so it can be re-executed.
     pub fn reset_to_planned(&mut self) {
+        self.auto_requeue_count = 0;
         self.phase = SessionPhase::Planned;
         self.current_step = None;
         self.completed_at = None;

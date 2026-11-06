@@ -22,6 +22,8 @@ pub struct AppConfig {
     /// Must be >= 1. Defaults to `1` (preserves backward-compatible sequential behaviour).
     #[serde(alias = "run_all_parallelism")]
     pub run_all_parallelism: usize,
+    #[serde(alias = "run_all_auto_requeue_max_attempts")]
+    pub run_all_auto_requeue_max_attempts: u32,
 
     /// Default model reference or ordered primary-plus-fallback list.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,6 +50,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             run_all_parallelism: 1,
+            run_all_auto_requeue_max_attempts: 0,
             model: None,
             plan_model: None,
             prevent_sleep: false,
@@ -486,6 +489,7 @@ mod tests {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let path = tmp.path().join("config.json");
         let original = AppConfig {
+            run_all_auto_requeue_max_attempts: 0,
             run_all_parallelism: 8,
             model: Some(crate::config::ModelSpec::Multiple(vec![
                 "primary".into(),
@@ -529,6 +533,7 @@ mod tests {
             (
                 "runAllParallelism: 8\nmodel: primary\nplan_model:\n  - plan-primary\n  - plan-fallback\n",
                 AppConfig {
+                    run_all_auto_requeue_max_attempts: 0,
                     run_all_parallelism: 8,
                     model: Some(crate::config::ModelSpec::Single("primary".to_string())),
                     plan_model: Some(crate::config::ModelSpec::Multiple(vec![
@@ -541,6 +546,7 @@ mod tests {
             (
                 "run_all_parallelism: 4\nmodel:\n  - primary\n  - fallback\nplanModel: plan-primary\n",
                 AppConfig {
+                    run_all_auto_requeue_max_attempts: 0,
                     run_all_parallelism: 4,
                     model: Some(crate::config::ModelSpec::Multiple(vec![
                         "primary".into(),

@@ -90,6 +90,7 @@ pub(crate) fn header_vm(
         badge,
         current_step: session.current_step.clone(),
         phase_error: session.phase_error.clone(),
+        auto_requeue_count: session.auto_requeue_count,
         plan_error: session.plan_error.clone(),
         pr_url: session.pr_url.clone(),
         pr_is_link,
@@ -613,6 +614,15 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
         | ApplicationEvent::BatchTotalChanged { .. }
         | ApplicationEvent::BatchSessionStarted { .. } => {
             out.push(SseMessage::Html(run_all_partials(state)?));
+        }
+        ApplicationEvent::AutoRequeued { session_id, .. } => {
+            let mut html = run_all_partials(state)?;
+            html.push_str(&header_and_row(state, session_id, None)?);
+            html.push_str(&replace(
+                &format!("tab-info-{session_id}"),
+                &super::pages::tab_panel_html(state, session_id, "info")?,
+            ));
+            out.push(SseMessage::Html(html));
         }
         ApplicationEvent::BatchSessionFinished { id, .. } => {
             let mut html = run_all_partials(state)?;
