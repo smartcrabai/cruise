@@ -155,6 +155,7 @@ pub(crate) struct TabHrefs {
     pub(crate) dag: String,
     pub(crate) plan: String,
     pub(crate) log: String,
+    pub(crate) diff: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -199,6 +200,21 @@ pub(crate) struct TabPlanVm {
     pub(crate) id: String,
     pub(crate) html: RawHtml,
     pub(crate) available: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TabDiffVm {
+    pub(crate) id: String,
+    pub(crate) lines: Vec<DiffLineVm>,
+    pub(crate) message: Option<String>,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DiffLineVm {
+    pub(crate) text: String,
+    pub(crate) class: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]

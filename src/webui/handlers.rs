@@ -516,30 +516,36 @@ pub(crate) async fn create_session(
     State(state): State<WebState>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
-    create_session_inner(&state, &Fields::from(pairs), true)
+    create_session_inner(&state, &Fields::from(pairs), true).await
 }
 
 pub(crate) async fn create_draft_session(
     State(state): State<WebState>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
-    create_session_inner(&state, &Fields::from(pairs), false)
+    create_session_inner(&state, &Fields::from(pairs), false).await
 }
 
-fn create_session_inner(state: &WebState, fields: &Fields, plan: bool) -> Response {
-    run(state, "Create session", || {
-        if fields.text("sourceMode") == "repo" {
-            let value = fields.text("pr_number");
-            let value = value.trim();
-            if !value.is_empty() && !value.parse::<u64>().is_ok_and(|number| number > 0) {
-                return Err(crate::error::CruiseError::Other(
+async fn create_session_inner(state: &WebState, fields: &Fields, plan: bool) -> Response {
+    if fields.text("sourceMode") == "repo" {
+        let value = fields.text("pr_number");
+        let value = value.trim();
+        if !value.is_empty() && !value.parse::<u64>().is_ok_and(|number| number > 0) {
+            return run(state, "Create session", || {
+                Err(crate::error::CruiseError::Other(
                     "Pull request number must be a positive integer".to_string(),
-                ));
-            }
+                ))
+            });
         }
-        let request = new_session_request(fields);
+    }
+    let request = new_session_request(fields);
+    let application = state.application.clone();
+    let blocking_request = request.clone();
+    let session =
+        tokio::task::spawn_blocking(move || application.create_session(blocking_request)).await;
+    run(state, "Create session", || {
         let skip_planning = fields.flag("skipPlanning");
-        let session = state.application.create_session(request.clone())?;
+        let session = session.map_err(|error| CruiseError::Other(error.to_string()))??;
         discard_uploads(&request);
         let _ = state.application.clear_draft();
         let id = session.id.clone();

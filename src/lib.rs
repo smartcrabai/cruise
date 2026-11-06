@@ -7,6 +7,7 @@ pub mod ask_handler;
 pub mod attachments;
 pub mod backend;
 pub mod batch_run;
+pub mod branch_diff;
 pub mod builtin_workflows;
 pub mod cancellation;
 pub(crate) mod commit_guard;
@@ -22,6 +23,8 @@ pub mod flags;
 pub(crate) mod forge;
 pub mod github_review;
 pub mod graph;
+pub(crate) mod issue_images;
+pub(crate) mod issue_input;
 pub mod issue_publish;
 pub mod metadata;
 pub mod model_schedule;
@@ -67,6 +70,7 @@ pub mod herdr;
 pub(crate) mod multiline_input;
 pub mod platform;
 pub mod run_observer;
+pub mod sleep_guard;
 mod spinner;
 
 #[cfg(any(test, feature = "test-utils"))]

@@ -40,6 +40,7 @@ pub(crate) async fn run_resolved(
     source: &ConfigSource,
     req: ExecRequest,
 ) -> Result<()> {
+    let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
     let effective_max_retries =
         crate::config::resolve_effective_max_retries(req.max_retries, config);
     crate::config::validate_group_retry_budget(config, effective_max_retries)?;
