@@ -2222,6 +2222,9 @@ impl CruiseApplication {
     }
 
     /// Read the current branch diff for a session.
+    ///
+    /// # Errors
+    /// Returns an error if the session cannot be loaded or its branch diff cannot be generated.
     pub fn session_branch_diff(&self, id: &str) -> Result<crate::branch_diff::BranchDiff> {
         let state = self.manager.load(id)?;
         crate::branch_diff::session_branch_diff(&state, false)

@@ -498,7 +498,8 @@ mod tests {
             (vec!["cruise", "diff", "20260101000000000"], false),
             (vec!["cruise", "diff", "20260101000000000", "--stat"], true),
         ] {
-            let cli = Cli::try_parse_from(args).expect("diff arguments should parse");
+            let cli = Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("diff arguments should parse: {error}"));
             match cli.command {
                 Some(Commands::Diff(args)) => {
                     assert_eq!(args.session, "20260101000000000");

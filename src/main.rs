@@ -5,10 +5,10 @@ mod artifacts;
 mod ask_handler;
 mod attachments;
 mod backend;
-mod branch_diff;
 mod batch_dashboard;
 #[cfg_attr(not(test), expect(dead_code))]
 mod batch_run;
+mod branch_diff;
 mod builtin_workflows;
 mod cancellation;
 mod clean_cmd;
@@ -25,10 +25,10 @@ mod console_mode;
 )]
 mod dag;
 mod desktop_notifications;
-mod display;
 mod diff_cmd;
 #[cfg(test)]
 mod diff_cmd_contract_tests;
+mod display;
 mod draft_cmd;
 #[cfg_attr(
     not(test),
@@ -161,7 +161,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Draft(args)) => draft_cmd::run(args),
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
-        Some(cli::Commands::Diff(args)) => diff_cmd::run(args),
+        Some(cli::Commands::Diff(args)) => diff_cmd::run(&args),
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,

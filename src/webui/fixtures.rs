@@ -10,12 +10,12 @@ use super::actions::SessionActionsVm;
 use super::templates::RawHtml;
 use super::view::{
     AskPanelVm, AttachmentListVm, AttachmentVm, ChoiceVm, ConfigGroupVm, ConfigOptionVm,
-    ConfigSelectVm, DirectorySuggestionsVm, EditorVm, EmptyStateVm, ErrorPageVm, FlagRowVm,
-    MergeCheckVm, MergePrDialogVm, NewSessionVm, OptionDialogVm, PhaseBadgeVm, PublishDialogVm,
-    RepoOptionsVm, RunAllControlVm, RunAllResultVm, RunAllRunningVm, RunAllVm, SessionDetailVm,
-    SessionHeaderVm, SessionRowVm, SessionSettingsVm, SessionSyncVm, SettingsVm, ShellVm,
-    SidebarVm, StepRowVm, StepTreeVm, TabDagVm, TabHrefs, TabInfoVm, TabLogVm, TabPlanVm,
-    ToastKind, ToastVm,
+    ConfigSelectVm, DiffLineVm, DirectorySuggestionsVm, EditorVm, EmptyStateVm, ErrorPageVm,
+    FlagRowVm, MergeCheckVm, MergePrDialogVm, NewSessionVm, OptionDialogVm, PhaseBadgeVm,
+    PublishDialogVm, RepoOptionsVm, RunAllControlVm, RunAllResultVm, RunAllRunningVm, RunAllVm,
+    SessionDetailVm, SessionHeaderVm, SessionRowVm, SessionSettingsVm, SessionSyncVm, SettingsVm,
+    ShellVm, SidebarVm, StepRowVm, StepTreeVm, TabDagVm, TabDiffVm, TabHrefs, TabInfoVm, TabLogVm,
+    TabPlanVm, ToastKind, ToastVm,
 };
 use crate::application::DirectoryEntry;
 
@@ -290,6 +290,18 @@ fn tab_fixtures() -> Vec<(&'static str, Value)> {
                 id: "s1".to_string(),
                 mermaid_source: Some("flowchart TD\n  a --> b".to_string()),
                 message: None,
+            }),
+        ),
+        (
+            "tab-diff",
+            value(&TabDiffVm {
+                id: "s1".to_string(),
+                lines: vec![DiffLineVm {
+                    text: "+added line".to_string(),
+                    class: "add",
+                }],
+                message: None,
+                truncated: false,
             }),
         ),
         (

@@ -4,9 +4,11 @@ use cruise::application::{CruiseApplication, SessionAction};
 use cruise::session::{SessionManager, SessionPhase, SessionState};
 use cruise::session_config::SessionConfigRef;
 
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
 #[test]
-fn view_diff_capability_depends_only_on_branch_and_is_first() {
-    let temp = tempfile::tempdir().expect("temporary directory");
+fn view_diff_capability_depends_only_on_branch_and_is_first() -> Result<()> {
+    let temp = tempfile::tempdir()?;
     let app = CruiseApplication::new(SessionManager::new(temp.path().join("sessions")));
     for phase in [
         SessionPhase::Draft,
@@ -37,23 +39,26 @@ fn view_diff_capability_depends_only_on_branch_and_is_first() {
             "{phase:?}: {capabilities:?}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn diff_for_missing_session_fails() {
-    let temp = tempfile::tempdir().expect("temporary directory");
+fn diff_for_missing_session_fails() -> Result<()> {
+    let temp = tempfile::tempdir()?;
     let app = CruiseApplication::new(SessionManager::new(temp.path().join("sessions")));
     assert!(app.session_branch_diff("missing-id").is_err());
+    Ok(())
 }
 
 #[test]
-fn view_diff_action_serializes_as_camel_case() {
+fn view_diff_action_serializes_as_camel_case() -> Result<()> {
     assert_eq!(
-        serde_json::to_string(&SessionAction::ViewDiff).unwrap(),
+        serde_json::to_string(&SessionAction::ViewDiff)?,
         "\"viewDiff\""
     );
     assert_eq!(
-        serde_json::from_str::<SessionAction>("\"viewDiff\"").unwrap(),
+        serde_json::from_str::<SessionAction>("\"viewDiff\"")?,
         SessionAction::ViewDiff
     );
+    Ok(())
 }

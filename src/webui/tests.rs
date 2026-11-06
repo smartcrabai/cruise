@@ -95,13 +95,15 @@ async fn diff_tab_renders_escaped_patch() {
     let uri = format!("/webui/sessions/{}/tab/diff", session.id);
     let repo = &session.base_dir;
     let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
+        let Ok(output) = std::process::Command::new("git")
             .current_dir(repo)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .args(args)
             .output()
-            .expect("run git");
+        else {
+            panic!("run git {args:?}");
+        };
         assert!(
             output.status.success(),
             "git {args:?}: {}",
@@ -120,7 +122,9 @@ async fn diff_tab_renders_escaped_patch() {
         "base",
     ]);
     git(&["checkout", "-b", "diff-fixture"]);
-    std::fs::write(repo.join("change.txt"), "<script>alert(1)</script>\n").expect("write fixture");
+    if let Err(error) = std::fs::write(repo.join("change.txt"), "<script>alert(1)</script>\n") {
+        panic!("write fixture: {error}");
+    }
     external_edit(&harness, &session.id, |state| {
         state.worktree_branch = Some("diff-fixture".to_string());
         state.worktree_path = Some(repo.clone());
@@ -136,10 +140,12 @@ async fn diff_tab_renders_escaped_patch() {
         "{html}"
     );
     assert!(!html.contains("<script>alert(1)</script>"), "{html}");
-    let added_line = html
+    let Some(added_line) = html
         .split('\n')
         .find(|line| line.contains("&lt;script&gt;alert(1)"))
-        .expect("added line");
+    else {
+        panic!("added line: {html}");
+    };
     assert!(added_line.contains("text-green-"), "{added_line}");
 }
 
@@ -152,16 +158,15 @@ async fn diff_tab_navigation_contract() {
     let (status, _, html) = get(&harness, &format!("/sessions/{}?tab=diff", session.id), &[]).await;
     assert_eq!(status, StatusCode::OK, "{html}");
     assert_eq!(html.matches("role=\"tab\"").count(), 5, "{html}");
-    let diff_button = html
-        .split("<button")
-        .find(|button| {
-            button
-                .split("</button>")
-                .next()
-                .and_then(|body| body.split_once('>'))
-                .is_some_and(|(_, text)| text.trim() == "Diff")
-        })
-        .expect("Diff tab");
+    let Some(diff_button) = html.split("<button").find(|button| {
+        button
+            .split("</button>")
+            .next()
+            .and_then(|body| body.split_once('>'))
+            .is_some_and(|(_, text)| text.trim() == "Diff")
+    }) else {
+        panic!("Diff tab: {html}");
+    };
     assert!(
         diff_button.contains("aria-selected=\"true\""),
         "{diff_button}"
@@ -172,8 +177,9 @@ async fn diff_tab_navigation_contract() {
 async fn diff_tab_is_not_in_sync_partials() {
     let harness = harness();
     let session = create_session(&harness);
-    let sync = super::partials::session_sync_partials(&harness.state, &session.id, "1")
-        .expect("sync partials");
+    let Ok(sync) = super::partials::session_sync_partials(&harness.state, &session.id, "1") else {
+        panic!("sync partials");
+    };
     assert!(!sync.contains("tab-diff-"), "{sync}");
 }
 

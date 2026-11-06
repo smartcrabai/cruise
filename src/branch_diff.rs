@@ -1,9 +1,10 @@
 //! Read-only diffs for session branches and their worktrees.
 use std::{
     ffi::OsStr,
+    fmt::Write as _,
     fs,
-    path::Path,
     io::Read,
+    path::Path,
     process::{Command, Output, Stdio},
 };
 
@@ -63,38 +64,73 @@ fn checked_git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn append_patch(dir: &Path, args: &[&str], path: Option<&OsStr>, patch: &mut Vec<u8>, truncated: &mut bool, no_index: bool) -> Result<()> {
+fn append_patch(
+    dir: &Path,
+    args: &[&str],
+    file: Option<&OsStr>,
+    patch: &mut Vec<u8>,
+    truncated: &mut bool,
+    no_index: bool,
+) -> Result<()> {
     let mut child = Command::new("git")
-        .arg("-C").arg(dir).args(args)
-        .args(path)
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .args(file)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| CruiseError::Other(format!("git {}: {e}", git_subcommand(args))))?;
-    let mut stderr = child.stderr.take().unwrap();
+    let (Some(mut stderr), Some(mut stdout)) = (child.stderr.take(), child.stdout.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(CruiseError::Other(
+            "git diff: failed to capture output".into(),
+        ));
+    };
     let stderr_reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         let result = stderr.read_to_end(&mut bytes);
         (result, bytes)
     });
-    let mut stdout = child.stdout.take().unwrap();
     let mut buffer = [0u8; 8192];
     let read_result = (|| -> std::io::Result<()> {
         loop {
             let n = stdout.read(&mut buffer)?;
-            if n == 0 { break; }
-            let keep = n.min(MAX_PATCH_BYTES.saturating_add(1).saturating_sub(patch.len()));
+            if n == 0 {
+                break;
+            }
+            let keep = n.min(
+                MAX_PATCH_BYTES
+                    .saturating_add(1)
+                    .saturating_sub(patch.len()),
+            );
             patch.extend_from_slice(&buffer[..keep]);
-            if keep < n || patch.len() > MAX_PATCH_BYTES { *truncated = true; }
+            if keep < n || patch.len() > MAX_PATCH_BYTES {
+                *truncated = true;
+            }
         }
         Ok(())
     })();
     drop(stdout);
-    if read_result.is_err() { let _ = child.kill(); }
+    if read_result.is_err() {
+        let _ = child.kill();
+    }
     let status = child.wait()?;
-    let (stderr_result, stderr) = stderr_reader.join().map_err(|_| CruiseError::Other("git stderr reader failed".into()))?;
+    let (stderr_result, stderr) = stderr_reader
+        .join()
+        .map_err(|_| CruiseError::Other("git stderr reader failed".into()))?;
     read_result?;
     stderr_result?;
-    if !status.success() && !(no_index && status.code() == Some(1)) {
-        return Err(git_error(args, &Output { status, stdout: Vec::new(), stderr }));
+    if !(status.success() || no_index && status.code() == Some(1)) {
+        return Err(git_error(
+            args,
+            &Output {
+                status,
+                stdout: Vec::new(),
+                stderr,
+            },
+        ));
     }
     Ok(())
 }
@@ -107,6 +143,9 @@ fn branch(state: &SessionState) -> Result<&str> {
 }
 
 /// Resolve the merge-base used for all session diff operations.
+///
+/// # Errors
+/// Returns an error if the session has no branch, Git fails, or the base and branch have no common history.
 pub fn session_base_commit(state: &SessionState) -> Result<String> {
     let name = branch(state)?;
     let dir = &state.base_dir;
@@ -183,6 +222,9 @@ fn diff_args(color: bool) -> Vec<&'static str> {
 }
 
 /// Compare the session worktree, or its surviving branch, to its merge-base.
+///
+/// # Errors
+/// Returns an error if the base cannot be resolved, Git fails, or worktree metadata cannot be read.
 pub fn session_branch_diff(state: &SessionState, color: bool) -> Result<BranchDiff> {
     let name = branch(state)?.to_owned();
     let base = session_base_commit(state)?;
@@ -220,15 +262,15 @@ pub fn session_branch_diff(state: &SessionState, color: bool) -> Result<BranchDi
         let mut count = 0;
         for raw in paths {
             #[cfg(unix)]
-            let path = {
+            let file = {
                 use std::os::unix::ffi::OsStrExt;
                 Path::new(OsStr::from_bytes(raw))
             };
             #[cfg(not(unix))]
             let path_string = String::from_utf8_lossy(raw);
             #[cfg(not(unix))]
-            let path = Path::new(path_string.as_ref());
-            if excluded.iter().any(|e| path.starts_with(Path::new(e))) {
+            let file = Path::new(path_string.as_ref());
+            if excluded.iter().any(|e| file.starts_with(Path::new(e))) {
                 continue;
             }
             if count == UNTRACKED_FILE_LIMIT {
@@ -236,10 +278,17 @@ pub fn session_branch_diff(state: &SessionState, color: bool) -> Result<BranchDi
                 break;
             }
             count += 1;
-            stat.push_str(&format!(" {} | untracked\n", path.display()));
+            let _ = writeln!(stat, " {} | untracked", file.display());
             let mut args = diff_args(color);
             args.extend(["--no-index", "--", "/dev/null"]);
-            append_patch(dir, &args, Some(path.as_os_str()), &mut patch, &mut truncated, true)?;
+            append_patch(
+                dir,
+                &args,
+                Some(file.as_os_str()),
+                &mut patch,
+                &mut truncated,
+                true,
+            )?;
         }
     }
     let mut patch = String::from_utf8_lossy(&patch).into_owned();

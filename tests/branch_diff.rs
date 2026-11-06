@@ -14,7 +14,9 @@ use cruise::{
 };
 use tempfile::TempDir;
 
-fn git(dir: &Path, args: &[&str]) -> String {
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -22,38 +24,43 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .expect("run git");
+        .output()?;
     assert!(
         output.status.success(),
         "git {args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
 struct Repo {
-    _tmp: TempDir,
+    tmp: TempDir,
     base: PathBuf,
     wt: PathBuf,
     state: SessionState,
 }
 impl Repo {
-    fn new() -> Self {
-        let tmp = TempDir::new().unwrap();
+    fn new() -> Result<Self> {
+        let tmp = TempDir::new()?;
         let base = tmp.path().join("base");
         let wt = tmp.path().join("worktree");
-        fs::create_dir(&base).unwrap();
-        git(&base, &["init", "-b", "main"]);
-        git(&base, &["config", "user.email", "test@example.com"]);
-        git(&base, &["config", "user.name", "Test User"]);
-        fs::write(base.join("README.md"), "initial\n").unwrap();
-        git(&base, &["add", "README.md"]);
-        git(&base, &["commit", "-m", "initial"]);
+        fs::create_dir(&base)?;
+        git(&base, &["init", "-b", "main"])?;
+        git(&base, &["config", "user.email", "test@example.com"])?;
+        git(&base, &["config", "user.name", "Test User"])?;
+        fs::write(base.join("README.md"), "initial\n")?;
+        git(&base, &["add", "README.md"])?;
+        git(&base, &["commit", "-m", "initial"])?;
         git(
             &base,
-            &["worktree", "add", "-b", "session", wt.to_str().unwrap()],
-        );
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "session",
+                wt.to_str().ok_or("non-UTF-8 worktree path")?,
+            ],
+        )?;
         let mut state = SessionState::new(
             "test-session".into(),
             base.clone(),
@@ -64,66 +71,79 @@ impl Repo {
         );
         state.worktree_branch = Some("session".into());
         state.worktree_path = Some(wt.clone());
-        Self {
-            _tmp: tmp,
+        Ok(Self {
+            tmp,
             base,
             wt,
             state,
-        }
+        })
     }
-    fn commit(&self, path: &str, contents: &str) {
-        fs::write(self.wt.join(path), contents).unwrap();
-        git(&self.wt, &["add", path]);
-        git(&self.wt, &["commit", "-m", "session change"]);
+    fn commit(&self, path: &str, contents: &str) -> Result<()> {
+        fs::write(self.wt.join(path), contents)?;
+        git(&self.wt, &["add", path])?;
+        git(&self.wt, &["commit", "-m", "session change"])?;
+        Ok(())
     }
 }
 
 #[test]
-fn t1_no_branch_is_unavailable() {
-    let mut r = Repo::new();
+fn t1_no_branch_is_unavailable() -> Result<()> {
+    let mut r = Repo::new()?;
     r.state.worktree_branch = None;
     assert!(
         session_branch_diff(&r.state, false)
-            .unwrap_err()
+            .err()
+            .ok_or("expected an error")?
             .to_string()
             .contains("has no worktree branch")
     );
+    Ok(())
 }
 
 #[test]
-fn t2_deleted_branch_is_reported() {
-    let mut r = Repo::new();
-    git(&r.base, &["worktree", "remove", r.wt.to_str().unwrap()]);
-    git(&r.base, &["branch", "-D", "session"]);
+fn t2_deleted_branch_is_reported() -> Result<()> {
+    let mut r = Repo::new()?;
+    git(
+        &r.base,
+        &[
+            "worktree",
+            "remove",
+            r.wt.to_str().ok_or("non-UTF-8 worktree path")?,
+        ],
+    )?;
+    git(&r.base, &["branch", "-D", "session"])?;
     r.state.worktree_path = None;
     assert!(
         session_branch_diff(&r.state, false)
-            .unwrap_err()
+            .err()
+            .ok_or("expected an error")?
             .to_string()
             .contains("no longer exists")
     );
+    Ok(())
 }
 
 #[test]
-fn t3_committed_only_includes_patch_stat_and_full_merge_base() {
-    let mut r = Repo::new();
-    let base = git(&r.base, &["rev-parse", "HEAD"]);
-    r.commit("a.txt", "hello\n");
+fn t3_committed_only_includes_patch_stat_and_full_merge_base() -> Result<()> {
+    let mut r = Repo::new()?;
+    let base = git(&r.base, &["rev-parse", "HEAD"])?;
+    r.commit("a.txt", "hello\n")?;
     r.state.worktree_path = None;
-    let diff = session_branch_diff(&r.state, false).unwrap();
+    let diff = session_branch_diff(&r.state, false)?;
     assert_eq!(diff.source, DiffSource::CommittedOnly);
     assert_eq!(diff.base_commit, base);
     assert!(diff.patch.contains("+++ b/a.txt"), "{}", diff.patch);
     assert!(diff.stat.contains("a.txt | 1 +"), "{}", diff.stat);
     assert!(!diff.truncated);
+    Ok(())
 }
 
 #[test]
-fn t4_worktree_includes_tracked_and_untracked_changes() {
-    let r = Repo::new();
-    fs::write(r.wt.join("README.md"), "changed\n").unwrap();
-    fs::write(r.wt.join("new.txt"), "new\n").unwrap();
-    let diff = session_branch_diff(&r.state, false).unwrap();
+fn t4_worktree_includes_tracked_and_untracked_changes() -> Result<()> {
+    let r = Repo::new()?;
+    fs::write(r.wt.join("README.md"), "changed\n")?;
+    fs::write(r.wt.join("new.txt"), "new\n")?;
+    let diff = session_branch_diff(&r.state, false)?;
     assert_eq!(diff.source, DiffSource::Worktree);
     for expected in [
         "+changed",
@@ -138,135 +158,148 @@ fn t4_worktree_includes_tracked_and_untracked_changes() {
         );
     }
     assert!(diff.stat.contains(" new.txt | untracked"), "{}", diff.stat);
+    Ok(())
 }
 
 #[test]
-fn t5_base_advancement_does_not_appear_in_diff() {
-    let r = Repo::new();
-    r.commit("session.txt", "session\n");
-    fs::write(r.base.join("base-only.txt"), "base\n").unwrap();
-    git(&r.base, &["add", "base-only.txt"]);
-    git(&r.base, &["commit", "-m", "advance base"]);
-    let diff = session_branch_diff(&r.state, false).unwrap();
+fn t5_base_advancement_does_not_appear_in_diff() -> Result<()> {
+    let r = Repo::new()?;
+    r.commit("session.txt", "session\n")?;
+    fs::write(r.base.join("base-only.txt"), "base\n")?;
+    git(&r.base, &["add", "base-only.txt"])?;
+    git(&r.base, &["commit", "-m", "advance base"])?;
+    let diff = session_branch_diff(&r.state, false)?;
     assert!(diff.patch.contains("session.txt"));
     assert!(!diff.patch.contains("base-only.txt"));
+    Ok(())
 }
 
 #[test]
-fn t6_external_diff_and_textconv_are_never_executed() {
-    let r = Repo::new();
-    fs::write(r.wt.join(".gitattributes"), "*.txt diff=evil\n").unwrap();
-    fs::write(r.wt.join("evil.txt"), "before\n").unwrap();
-    git(&r.wt, &["add", ".gitattributes", "evil.txt"]);
-    git(&r.wt, &["commit", "-m", "attributes"]);
-    fs::write(r.wt.join("evil.txt"), "after\n").unwrap();
-    let marker = r._tmp.path().join("MARKER");
+fn t6_external_diff_and_textconv_are_never_executed() -> Result<()> {
+    let r = Repo::new()?;
+    fs::write(r.wt.join(".gitattributes"), "*.txt diff=evil\n")?;
+    fs::write(r.wt.join("evil.txt"), "before\n")?;
+    git(&r.wt, &["add", ".gitattributes", "evil.txt"])?;
+    git(&r.wt, &["commit", "-m", "attributes"])?;
+    fs::write(r.wt.join("evil.txt"), "after\n")?;
+    let marker = r.tmp.path().join("MARKER");
     let command = format!("touch {}", marker.display());
-    git(&r.base, &["config", "diff.evil.textconv", &command]);
-    git(&r.base, &["config", "diff.evil.command", &command]);
-    let diff = session_branch_diff(&r.state, false).unwrap();
+    git(&r.base, &["config", "diff.evil.textconv", &command])?;
+    git(&r.base, &["config", "diff.evil.command", &command])?;
+    let diff = session_branch_diff(&r.state, false)?;
     assert!(diff.patch.contains("evil.txt"));
     assert!(!marker.exists());
+    Ok(())
 }
 
 #[test]
-fn t7_clean_branch_has_empty_diff() {
-    let r = Repo::new();
-    let diff = session_branch_diff(&r.state, false).unwrap();
+fn t7_clean_branch_has_empty_diff() -> Result<()> {
+    let r = Repo::new()?;
+    let diff = session_branch_diff(&r.state, false)?;
     assert_eq!(diff.patch, "");
     assert_eq!(diff.stat, "");
     assert!(!diff.truncated);
+    Ok(())
 }
 
 #[test]
-fn t8_large_untracked_patch_is_bounded_at_newline() {
-    let r = Repo::new();
+fn t8_large_untracked_patch_is_bounded_at_newline() -> Result<()> {
+    let r = Repo::new()?;
     fs::write(
         r.wt.join("large.txt"),
         ("a".repeat(127) + "\n").repeat(16384),
-    )
-    .unwrap();
-    let diff = session_branch_diff(&r.state, false).unwrap();
+    )?;
+    let diff = session_branch_diff(&r.state, false)?;
     assert!(diff.truncated);
     assert!(diff.patch.len() <= MAX_PATCH_BYTES);
     assert!(diff.patch.ends_with('\n'));
+    Ok(())
 }
 
 #[test]
-fn large_tracked_patch_is_bounded_and_git_finishes() {
-    let r = Repo::new();
-    fs::write(r.wt.join("README.md"), ("large line\n").repeat(600_000)).unwrap();
-    let diff = session_branch_diff(&r.state, false).unwrap();
+fn large_tracked_patch_is_bounded_and_git_finishes() -> Result<()> {
+    let r = Repo::new()?;
+    fs::write(r.wt.join("README.md"), ("large line\n").repeat(600_000))?;
+    let diff = session_branch_diff(&r.state, false)?;
     assert!(diff.truncated);
     assert!(diff.patch.len() <= MAX_PATCH_BYTES);
     assert!(diff.patch.ends_with('\n'));
     assert!(diff.patch.contains("+large line"));
     assert!(session_branch_diff(&r.state, false).is_ok());
+    Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn untracked_non_utf8_path_is_passed_to_git_unchanged() {
+fn untracked_non_utf8_path_is_passed_to_git_unchanged() -> Result<()> {
     use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
-    let r = Repo::new();
-    fs::write(r.wt.join(OsStr::from_bytes(b"invalid-\xff.txt")), "native path content\n").unwrap();
-    let diff = session_branch_diff(&r.state, false).unwrap();
+    let r = Repo::new()?;
+    fs::write(
+        r.wt.join(OsStr::from_bytes(b"invalid-\xff.txt")),
+        "native path content\n",
+    )?;
+    let diff = session_branch_diff(&r.state, false)?;
     assert!(diff.patch.contains("+native path content"));
     assert!(!diff.truncated);
+    Ok(())
 }
 
 #[test]
-fn t9_untracked_count_is_bounded() {
-    let r = Repo::new();
+fn t9_untracked_count_is_bounded() -> Result<()> {
+    let r = Repo::new()?;
     for n in 0..=UNTRACKED_FILE_LIMIT {
-        fs::write(r.wt.join(format!("file-{n:04}.txt")), "hello\n").unwrap();
+        fs::write(r.wt.join(format!("file-{n:04}.txt")), "hello\n")?;
     }
-    let diff = session_branch_diff(&r.state, false).unwrap();
+    let diff = session_branch_diff(&r.state, false)?;
     assert!(diff.truncated);
     assert_eq!(
         diff.patch.matches("diff --git ").count(),
         UNTRACKED_FILE_LIMIT
     );
+    Ok(())
 }
 
 #[test]
-fn t10_color_is_opt_in() {
-    let r = Repo::new();
-    fs::write(r.wt.join("README.md"), "changed\n").unwrap();
+fn t10_color_is_opt_in() -> Result<()> {
+    let r = Repo::new()?;
+    fs::write(r.wt.join("README.md"), "changed\n")?;
     assert!(
-        session_branch_diff(&r.state, true)
-            .unwrap()
+        session_branch_diff(&r.state, true)?
             .patch
             .contains("\u{1b}[")
     );
     assert!(
-        !session_branch_diff(&r.state, false)
-            .unwrap()
+        !session_branch_diff(&r.state, false)?
             .patch
             .contains("\u{1b}[")
     );
+    Ok(())
 }
 
 #[test]
-fn t11_missing_worktree_falls_back_to_committed_only() {
-    let mut r = Repo::new();
-    r.commit("a.txt", "hello\n");
-    r.state.worktree_path = Some(r._tmp.path().join("missing"));
-    let diff = session_branch_diff(&r.state, false).unwrap();
+fn t11_missing_worktree_falls_back_to_committed_only() -> Result<()> {
+    let mut r = Repo::new()?;
+    r.commit("a.txt", "hello\n")?;
+    r.state.worktree_path = Some(r.tmp.path().join("missing"));
+    let diff = session_branch_diff(&r.state, false)?;
     assert_eq!(diff.source, DiffSource::CommittedOnly);
     assert!(diff.patch.contains("+++ b/a.txt"));
+    Ok(())
 }
 
 #[test]
-fn t12_worktreeinclude_files_and_directories_are_excluded() {
-    let r = Repo::new();
-    fs::write(r.base.join(".worktreeinclude"), "secret.env\nvendor/\nREADME.md\n").unwrap();
-    fs::write(r.wt.join("README.md"), "tracked change\n").unwrap();
-    fs::write(r.wt.join("secret.env"), "secret\n").unwrap();
-    fs::create_dir(r.wt.join("vendor")).unwrap();
-    fs::write(r.wt.join("vendor/copied.txt"), "copied\n").unwrap();
-    fs::write(r.wt.join("visible.txt"), "visible\n").unwrap();
-    let diff = session_branch_diff(&r.state, false).unwrap();
+fn t12_worktreeinclude_files_and_directories_are_excluded() -> Result<()> {
+    let r = Repo::new()?;
+    fs::write(
+        r.base.join(".worktreeinclude"),
+        "secret.env\nvendor/\nREADME.md\n",
+    )?;
+    fs::write(r.wt.join("README.md"), "tracked change\n")?;
+    fs::write(r.wt.join("secret.env"), "secret\n")?;
+    fs::create_dir(r.wt.join("vendor"))?;
+    fs::write(r.wt.join("vendor/copied.txt"), "copied\n")?;
+    fs::write(r.wt.join("visible.txt"), "visible\n")?;
+    let diff = session_branch_diff(&r.state, false)?;
     assert!(diff.patch.contains("+tracked change"), "{}", diff.patch);
     assert!(diff.stat.contains("README.md"), "{}", diff.stat);
     assert!(diff.patch.contains("visible.txt"));
@@ -274,52 +307,60 @@ fn t12_worktreeinclude_files_and_directories_are_excluded() {
     assert!(!diff.patch.contains("vendor/"));
     assert!(!diff.stat.contains("secret.env"));
     assert!(!diff.stat.contains("vendor/"));
+    Ok(())
 }
 
 #[test]
-fn t13_non_repository_reports_git_error_not_unborn_head() {
-    let mut r = Repo::new();
-    r.state.base_dir = r._tmp.path().join("not-a-repository");
-    fs::create_dir(&r.state.base_dir).unwrap();
+fn t13_non_repository_reports_git_error_not_unborn_head() -> Result<()> {
+    let mut r = Repo::new()?;
+    r.state.base_dir = r.tmp.path().join("not-a-repository");
+    fs::create_dir(&r.state.base_dir)?;
     let error = session_branch_diff(&r.state, false)
-        .unwrap_err()
+        .err()
+        .ok_or("expected an error")?
         .to_string();
     assert!(!error.contains("has no HEAD commit"), "{error}");
     assert!(
         error.contains("git") || error.contains("failed to read"),
         "{error}"
     );
+    Ok(())
 }
 
 #[test]
-fn t14a_unborn_base_has_no_head_commit() {
-    let mut r = Repo::new();
-    let unborn = r._tmp.path().join("unborn");
-    fs::create_dir(&unborn).unwrap();
-    git(&unborn, &["init", "-b", "main"]);
+fn t14a_unborn_base_has_no_head_commit() -> Result<()> {
+    let mut r = Repo::new()?;
+    let unborn = r.tmp.path().join("unborn");
+    fs::create_dir(&unborn)?;
+    git(&unborn, &["init", "-b", "main"])?;
     r.state.base_dir = unborn;
-    let error = session_base_commit(&r.state).unwrap_err().to_string();
+    let error = session_base_commit(&r.state)
+        .err()
+        .ok_or("expected an error")?
+        .to_string();
     assert!(error.contains("has no HEAD commit"), "{error}");
+    Ok(())
 }
 
 #[test]
 #[ignore = "requires the sibling local-merge feature for explicit merge-target precedence"]
-fn t14b_explicit_merge_target_takes_precedence_over_head() {
-    let mut r = Repo::new();
+fn t14b_explicit_merge_target_takes_precedence_over_head() -> Result<()> {
+    let mut r = Repo::new()?;
     // Keep HEAD on an older diverged branch while main advances to the session commit.
-    r.commit("a.txt", "hello\n");
-    git(&r.base, &["checkout", "-b", "other"]);
-    fs::write(r.base.join("other.txt"), "other\n").unwrap();
-    git(&r.base, &["add", "other.txt"]);
-    git(&r.base, &["commit", "-m", "other"]);
-    git(&r.base, &["branch", "-f", "main", "session"]);
+    r.commit("a.txt", "hello\n")?;
+    git(&r.base, &["checkout", "-b", "other"])?;
+    fs::write(r.base.join("other.txt"), "other\n")?;
+    git(&r.base, &["add", "other.txt"])?;
+    git(&r.base, &["commit", "-m", "other"])?;
+    git(&r.base, &["branch", "-f", "main", "session"])?;
     // The merge-target field is supplied by the sibling local-merge change. Using
     // serde keeps this contract test buildable before that field is introduced.
-    let mut value = serde_json::to_value(&r.state).unwrap();
+    let mut value = serde_json::to_value(&r.state)?;
     value["forked_from_branch"] = serde_json::json!("main");
-    r.state = serde_json::from_value(value).unwrap();
-    let expected = git(&r.base, &["merge-base", "main", "refs/heads/session"]);
-    let actual = session_base_commit(&r.state).unwrap();
+    r.state = serde_json::from_value(value)?;
+    let expected = git(&r.base, &["merge-base", "main", "refs/heads/session"])?;
+    let actual = session_base_commit(&r.state)?;
     assert_eq!(actual, expected);
-    assert_ne!(actual, git(&r.base, &["rev-parse", "HEAD"]));
+    assert_ne!(actual, git(&r.base, &["rev-parse", "HEAD"])?);
+    Ok(())
 }

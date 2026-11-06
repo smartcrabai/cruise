@@ -19,19 +19,18 @@ pub fn print_session_diff(state: &SessionState, stat: bool) -> Result<()> {
     if diff.truncated {
         eprintln!("warning: diff truncated");
     }
-    if use_pager {
-        if let Ok(mut child) = Command::new("less").arg("-R").stdin(Stdio::piped()).spawn() {
-            let result = child
-                .stdin
-                .take()
-                .map(|mut stdin| write_session_diff(&mut stdin, &diff, false));
-            let _ = child.wait();
-            if let Some(result) = result {
-                match result {
-                    Ok(()) => return Ok(()),
-                    Err(e) if e.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
-                    Err(e) => return Err(e.into()),
-                }
+    if use_pager && let Ok(mut child) = Command::new("less").arg("-R").stdin(Stdio::piped()).spawn()
+    {
+        let result = child
+            .stdin
+            .take()
+            .map(|mut stdin| write_session_diff(&mut stdin, &diff, false));
+        let _ = child.wait();
+        if let Some(result) = result {
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
+                Err(e) => return Err(e.into()),
             }
         }
     }
@@ -39,7 +38,7 @@ pub fn print_session_diff(state: &SessionState, stat: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn run(args: DiffArgs) -> Result<()> {
+pub fn run(args: &DiffArgs) -> Result<()> {
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let state = manager.load(&args.session)?;
     print_session_diff(&state, args.stat)

@@ -834,7 +834,8 @@ mod tests {
 
     #[test]
     fn diff_contract_print_rejects_non_git_base_directory() {
-        let temp = TempDir::new().expect("temporary non-git directory");
+        let temp =
+            TempDir::new().unwrap_or_else(|error| panic!("temporary non-git directory: {error}"));
         let mut session = make_session("20260101000000000", "task", SessionPhase::Completed);
         session.base_dir = temp.path().to_path_buf();
         session.worktree_branch = Some("session-branch".into());

@@ -19,7 +19,8 @@ fn writes_selected_patch_or_stat_without_modification() {
     let diff = example_diff();
     for (stat, expected) in [(false, &diff.patch), (true, &diff.stat)] {
         let mut output = Vec::new();
-        write_session_diff(&mut output, &diff, stat).expect("write diff");
+        write_session_diff(&mut output, &diff, stat)
+            .unwrap_or_else(|error| panic!("write diff: {error}"));
         assert_eq!(output, expected.as_bytes());
     }
 }
@@ -29,8 +30,9 @@ fn empty_patch_writes_nothing() {
     let mut diff = example_diff();
     diff.patch.clear();
     let mut output = Vec::new();
-    write_session_diff(&mut output, &diff, false).expect("write empty diff");
-    assert!(output.is_empty());
+    write_session_diff(&mut output, &diff, false)
+        .unwrap_or_else(|error| panic!("write empty diff: {error}"));
+    assert_eq!(output, [] as [u8; 0]);
 }
 
 #[test]
@@ -39,7 +41,8 @@ fn preserves_trailing_newline_exactly() {
     for patch in ["+line\n", "+line", "+line\n\n"] {
         diff.patch = patch.into();
         let mut output = Vec::new();
-        write_session_diff(&mut output, &diff, false).expect("write diff");
+        write_session_diff(&mut output, &diff, false)
+            .unwrap_or_else(|error| panic!("write diff: {error}"));
         assert_eq!(output, patch.as_bytes());
     }
 }

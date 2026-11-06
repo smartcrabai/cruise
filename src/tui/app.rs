@@ -4211,14 +4211,15 @@ mod tests {
     fn diff_fixture() -> PersistedTuiFixture {
         let mut fixture = persisted_fixture(&[(1, SessionPhase::Completed)]);
         let repo = fixture.temp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&repo)
+            .unwrap_or_else(|error| panic!("create test repository: {error}"));
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
                 .arg("-C")
                 .arg(&repo)
                 .args(args)
                 .output()
-                .unwrap();
+                .unwrap_or_else(|error| panic!("run git {args:?}: {error}"));
             assert!(
                 output.status.success(),
                 "git {args:?}: {}",
@@ -4228,25 +4229,33 @@ mod tests {
         git(&["init", "-q"]);
         git(&["config", "user.email", "test@example.com"]);
         git(&["config", "user.name", "Test"]);
-        std::fs::write(repo.join("tracked.txt"), "original\n").unwrap();
+        std::fs::write(repo.join("tracked.txt"), "original\n")
+            .unwrap_or_else(|error| panic!("write tracked file: {error}"));
         git(&["add", "tracked.txt"]);
         git(&["commit", "-qm", "initial"]);
         git(&["branch", "session-branch"]);
-        let mut state = fixture.manager.load(&test_session_id(1)).unwrap();
+        let mut state = fixture
+            .manager
+            .load(&test_session_id(1))
+            .unwrap_or_else(|error| panic!("load session: {error}"));
         state.base_dir = repo.clone();
         state.worktree_branch = Some("session-branch".to_string());
         state.worktree_path = Some(repo);
-        fixture.manager.save(&state).unwrap();
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("save session: {error}"));
         fixture.app.refresh();
         fixture
     }
 
     fn diff_screen(app: &mut TuiApp) -> String {
         let backend = ratatui::backend::TestBackend::new(140, 40);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut terminal = ratatui::Terminal::new(backend)
+            .unwrap_or_else(|error| panic!("create terminal: {error}"));
         terminal
             .draw(|frame| crate::tui::ui::draw(frame, app))
-            .unwrap();
+            .unwrap_or_else(|error| panic!("draw terminal: {error}"));
         terminal
             .backend()
             .buffer()
@@ -4289,16 +4298,17 @@ mod tests {
         assert!(
             !fixture.app.diff_cache[&id]
                 .as_ref()
-                .unwrap()
+                .unwrap_or_else(|error| panic!("load initial diff: {error}"))
                 .patch
                 .contains("fresh change")
         );
-        std::fs::write(fixture.temp.path().join("repo/new.txt"), "fresh change\n").unwrap();
+        std::fs::write(fixture.temp.path().join("repo/new.txt"), "fresh change\n")
+            .unwrap_or_else(|error| panic!("write fresh change: {error}"));
         assert!(!fixture.app.handle_key(key(KeyCode::Char('r'))));
         assert!(
             fixture.app.diff_cache[&id]
                 .as_ref()
-                .unwrap()
+                .unwrap_or_else(|error| panic!("load refreshed diff: {error}"))
                 .patch
                 .contains("+fresh change")
         );
@@ -4311,7 +4321,8 @@ mod tests {
         let text = diff_screen(&mut fixture.app);
         assert!(text.contains("Diff"));
         assert!(text.contains("No changes"), "{text}");
-        std::fs::write(fixture.temp.path().join("repo/new.txt"), "visible change\n").unwrap();
+        std::fs::write(fixture.temp.path().join("repo/new.txt"), "visible change\n")
+            .unwrap_or_else(|error| panic!("write visible change: {error}"));
         fixture.app.handle_key(key(KeyCode::Char('r')));
         let text = diff_screen(&mut fixture.app);
         assert!(text.contains("+visible change"), "{text}");
@@ -4319,9 +4330,9 @@ mod tests {
             .app
             .diff_cache
             .get_mut(&test_session_id(1))
-            .unwrap()
+            .unwrap_or_else(|| panic!("diff cache entry missing"))
             .as_mut()
-            .unwrap()
+            .unwrap_or_else(|error| panic!("load diff: {error}"))
             .truncated = true;
         let text = diff_screen(&mut fixture.app);
         assert!(text.to_lowercase().contains("truncated"), "{text}");
@@ -4342,11 +4353,11 @@ mod tests {
             fixture.temp.path().join("repo/new.txt"),
             "one\ntwo\nthree\n",
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("write diff lines: {error}"));
         fixture.app.apply_action(SessionAction::ViewDiff);
         let count = fixture.app.diff_cache[&test_session_id(1)]
             .as_ref()
-            .unwrap()
+            .unwrap_or_else(|error| panic!("load diff lines: {error}"))
             .patch
             .lines()
             .count();
@@ -4568,7 +4579,7 @@ mod tests {
         fixture.app.focus = SessionsFocus::Detail;
         fixture.app.tab = DetailTab::Info;
         assert!(!fixture.app.handle_key(key(KeyCode::Left)));
-        assert_eq!(fixture.app.tab, DetailTab::Log);
+        assert_eq!(fixture.app.tab, DetailTab::Diff);
         assert!(!fixture.app.handle_key(key(KeyCode::Right)));
         assert_eq!(fixture.app.tab, DetailTab::Info);
         assert_eq!(fixture.app.focus, SessionsFocus::Detail);
