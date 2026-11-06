@@ -2607,6 +2607,62 @@ steps:
     }
 
     #[tokio::test]
+    async fn test_attempt_pr_creation_preserves_closing_reference_with_fill() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let f = setup_pr_test(
+            &tmp,
+            "issue_close_fill",
+            "https://github.com/owner/repo/pull/12",
+        );
+        let body = crate::issue_input::with_closing_reference("```\nCloses #12\n```", Some(12));
+        attempt_pr_creation(
+            &f.ctx,
+            crate::forge::ForgeKind::GitHub,
+            "task",
+            "",
+            &body,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let args = fs::read_to_string(&f.log_path).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(args.contains("--fill"), "expected --fill: {args}");
+        assert!(
+            args.contains("--body") && args.contains(&body) && body.ends_with("```\n\nCloses #12"),
+            "closing reference must reach gh: {args}"
+        );
+        worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[tokio::test]
+    async fn test_attempt_pr_creation_fill_without_closing_reference_unchanged() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let f = setup_pr_test(
+            &tmp,
+            "issue_close_control",
+            "https://github.com/owner/repo/pull/13",
+        );
+        attempt_pr_creation(
+            &f.ctx,
+            crate::forge::ForgeKind::GitHub,
+            "task",
+            "",
+            "Summary.",
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let args = fs::read_to_string(&f.log_path).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(
+            args.contains("--fill") && !args.contains("--body"),
+            "unexpected arguments: {args}"
+        );
+        worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[tokio::test]
     async fn test_attempt_pr_creation_adds_commit_coauthor_from_env() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(

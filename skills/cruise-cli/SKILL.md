@@ -1,6 +1,6 @@
 ---
 name: cruise-cli
-description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / ssh / webui / update / update --status), planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), workflow catalog and flags, bounded `run --all --parallelism` execution, the live dashboard, the TUI's WebUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is stuck, failed, or not picked up by `cruise run`.
+description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / ssh / webui / update / update --status), GitHub issue input, planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), workflow catalog and flags, bounded `run --all --parallelism` execution, the live dashboard, the TUI's WebUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is stuck, failed, or not picked up by `cruise run`.
 ---
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → usually open a PR → after-pr automation when a PR is created**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
@@ -56,6 +56,7 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Audit and safely repair confirmed security defects in a durable session | `cruise plan --no-force-exec -c builtin:security "audit request"`; approve if prompted, then `cruise run <session-id>` |
 | Disable SDK planning tools and have the agent write `plan.md` directly | `cruise plan --no-interactive-planning "task"` |
 | Attach planning images | `cruise plan --image screenshot.png "task"` (repeat `--image` as needed) |
+| Plan from a GitHub issue | `cruise plan --issue 12 "additional instructions"` or `cruise plan '#12'` |
 | Target a GitHub repo instead of a local directory | `cruise plan --repo owner/repo "task"` (also with `--plan`) |
 | Just capture an idea now, plan later | `cruise draft "task"` |
 | Execute or resume a non-exec session (Planned, Running, Failed, or Suspended; prompts when multiple) | `cruise run` |
@@ -145,7 +146,7 @@ The remote host owns its XDG session/config/state directories, jcode authenticat
 1. **Create a session.**
    - `cruise plan "task"` — runs the built-in plan step in an isolated *planning worktree*; in a non-git directory, planning runs in the base directory without a worktree, and `cruise run` then requires a git repository. It then drops you into the **approve-plan menu** (below). Foreground.
    - `cruise --plan "task"` — creates the session and spawns a detached worker to generate the plan, then returns the session ID immediately. `cruise list` shows it as `Planning`, then `AwaitingApproval` (or `Plan Failed`).
-   - `cruise draft "task"` — records the task as a `Draft` with no planning at all. Plan it later via **Generate Plan** in `cruise list`.
+   - `cruise draft "task"` — records the task as a `Draft` with no planning at all. Use `cruise draft --issue 12` to capture a GitHub issue. Plan it later via **Generate Plan** in `cruise list`.
 
 2. **Approve the plan.** The approve-plan menu offers:
    - **Approve** → session becomes `Planned`, ready to run.
@@ -164,7 +165,7 @@ The remote host owns its XDG session/config/state directories, jcode authenticat
 
 ### `--skip-planning`
 
-`--skip-planning` skips the planning call: the trimmed input (plus stored attachment paths, when present) is written to `plan.md`; empty/whitespace input is rejected. Foreground TTY use still opens the approval menu. Foreground non-TTY use auto-approves to `Planned`; background `cruise --plan … --skip-planning` also creates a `Planned` session immediately. SDK-mode foreground approval makes a separate title-generation request; background skip-planning and command mode derive the title from `plan.md`. When the resolved local workflow has `force_exec: true`, `--skip-planning` does not opt out: force-exec runs before this flag is handled; only `--no-force-exec`, `--grill`, and `--image` opt out. Such sessions store an empty `input` with `input_as_plan: true` in `state.json`; `plan.md` holds the task text and `{input}` resolves to the current `plan.md` content.
+`--skip-planning` skips the planning call: the trimmed input (plus stored attachment paths, when present) is written to `plan.md`; empty/whitespace input is rejected. Foreground TTY use still opens the approval menu. Foreground non-TTY use auto-approves to `Planned`; background `cruise --plan … --skip-planning` also creates a `Planned` session immediately. SDK-mode foreground approval makes a separate title-generation request; background skip-planning and command mode derive the title from `plan.md`. When the resolved local workflow has `force_exec: true`, `--skip-planning` does not opt out: force-exec runs before this flag is handled; `--no-force-exec`, `--grill`, `--image`, and issue input opt out. Such sessions store an empty `input` with `input_as_plan: true` in `state.json`; `plan.md` holds the task text and `{input}` resolves to the current `plan.md` content.
 
 ### `--grill` (interview planning)
 
@@ -172,7 +173,7 @@ The remote host owns its XDG session/config/state directories, jcode authenticat
 
 ### `--no-interactive-planning`
 
-`cruise plan --no-interactive-planning "task"` disables interactive SDK planning for this invocation and asks the agent to write `plan.md` directly. It conflicts with `--grill`; the WebUI equivalent is **Non-interactive planning**. When the resolved local workflow has `force_exec: true`, `--no-interactive-planning` does not opt out: force-exec runs before this flag is handled; only `--no-force-exec`, `--grill`, and `--image` opt out.
+`cruise plan --no-interactive-planning "task"` disables interactive SDK planning for this invocation and asks the agent to write `plan.md` directly. It conflicts with `--grill`; the WebUI equivalent is **Non-interactive planning**. When the resolved local workflow has `force_exec: true`, `--no-interactive-planning` does not opt out: force-exec runs before this flag is handled; only `--no-force-exec`, `--grill`, `--image`, and issue input opt out.
 
 ### Built-in workflow flags
 
