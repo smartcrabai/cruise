@@ -55,6 +55,8 @@ mod github_review;
 mod graph;
 mod herdr;
 mod install_identity;
+mod issue_images;
+mod issue_input;
 mod issue_publish;
 mod list_cmd;
 mod metadata;
@@ -224,6 +226,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             // Backward compat: positional input and planning options use `plan`.
             let plan_args = cli::PlanArgs {
                 input,
+                issue: None,
                 config: None,
                 dry_run: false,
                 no_force_exec,

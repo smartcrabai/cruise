@@ -215,6 +215,9 @@ pub struct SessionState {
     /// (`--skip-planning` / input-as-plan). `input` is then stored empty.
     #[serde(default)]
     pub input_as_plan: bool,
+    /// GitHub issue from which this session was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -296,6 +299,7 @@ impl SessionState {
             published_issue_url: None,
             exec: false,
             input_as_plan: false,
+            issue_number: None,
         }
     }
 
@@ -337,6 +341,14 @@ impl SessionState {
             .map(str::trim)
             .filter(|title| !title.is_empty())
             .unwrap_or(&self.input)
+    }
+
+    #[must_use]
+    pub fn worktree_branch_source(&self) -> String {
+        self.issue_number.map_or_else(
+            || self.input_or_title().to_string(),
+            |n| format!("issue-{n}"),
+        )
     }
 
     /// Return the planning input with attached image paths appended (or the
@@ -1372,6 +1384,48 @@ mod tests {
     }
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn planned_issue_number_legacy_state_is_omitted_when_absent() {
+        let session = crate::test_support::make_session("legacy-issue", Path::new("/tmp"));
+        let mut json = serde_json::to_value(&session)
+            .unwrap_or_else(|error| panic!("serialize session: {error}"));
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("session must serialize as an object"))
+            .remove("issue_number");
+        let restored: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("deserialize session: {error}"));
+        assert!(
+            serde_json::to_value(restored)
+                .unwrap_or_else(|error| panic!("serialize restored session: {error}"))
+                .get("issue_number")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn planned_issue_number_survives_save_and_load() {
+        let tmp =
+            TempDir::new().unwrap_or_else(|error| panic!("create temporary directory: {error}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let session = crate::test_support::make_session("issue-persistence", tmp.path());
+        let mut json = serde_json::to_value(session)
+            .unwrap_or_else(|error| panic!("serialize session: {error}"));
+        json["issue_number"] = serde_json::json!(12);
+        let session: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("deserialize session: {error}"));
+        manager
+            .save(&session)
+            .unwrap_or_else(|error| panic!("save session: {error}"));
+        let restored = manager
+            .load(&session.id)
+            .unwrap_or_else(|error| panic!("load session: {error}"));
+        assert_eq!(
+            serde_json::to_value(restored)
+                .unwrap_or_else(|error| panic!("serialize session: {error}"))["issue_number"],
+            12
+        );
+    }
 
     /// Guard that saves an environment variable's current value, removes it for
     /// the duration of the test, and restores it on drop.

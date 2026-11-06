@@ -47,6 +47,63 @@ pub struct Cli {
     pub input: Option<String>,
 }
 
+#[cfg(test)]
+mod issue_entrypoint_tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn plan_issue_accepts_optional_additional_instructions() {
+        for input in [None, Some("focus on tests")] {
+            let mut args = vec!["cruise", "plan", "--issue", "12"];
+            if let Some(input) = input {
+                args.push(input);
+            }
+            let cli = Cli::try_parse_from(args).expect("plan --issue should parse");
+            let Some(Commands::Plan(plan)) = cli.command else {
+                panic!("expected plan command");
+            };
+            assert_eq!(plan.input.as_deref(), input);
+        }
+    }
+
+    #[test]
+    fn draft_issue_accepts_optional_additional_instructions() {
+        for input in [None, Some("focus on tests")] {
+            let mut args = vec!["cruise", "draft", "--issue", "12"];
+            if let Some(input) = input {
+                args.push(input);
+            }
+            let cli = Cli::try_parse_from(args).expect("draft --issue should parse");
+            let Some(Commands::Draft(draft)) = cli.command else {
+                panic!("expected draft command");
+            };
+            assert_eq!(draft.input.as_deref(), input);
+        }
+    }
+
+    #[test]
+    fn issue_flag_rejects_zero_and_non_numbers() {
+        for command in ["plan", "draft"] {
+            for number in ["0", "-1", "abc", "18446744073709551616"] {
+                assert!(
+                    Cli::try_parse_from(["cruise", command, "--issue", number]).is_err(),
+                    "{command} accepted invalid issue number {number}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn root_issue_inputs_are_forwarded_verbatim_and_exec_does_not_accept_issue_flag() {
+        let positional = Cli::try_parse_from(["cruise", "#12\nextra"]).unwrap();
+        assert_eq!(positional.input.as_deref(), Some("#12\nextra"));
+        let background = Cli::try_parse_from(["cruise", "--plan", "#12\nextra"]).unwrap();
+        assert_eq!(background.plan.as_deref(), Some("#12\nextra"));
+        assert!(Cli::try_parse_from(["cruise", "exec", "--issue", "12"]).is_err());
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Create an implementation plan for a task.
@@ -224,6 +281,10 @@ pub struct PlanArgs {
     /// Task description.
     pub input: Option<String>,
 
+    /// Use a GitHub issue as the task.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub issue: Option<u64>,
+
     /// Path to the workflow config file. The special value `__builtin__`
     /// selects the built-in default workflow;
     /// `builtin:<name>` selects a named built-in workflow.
@@ -282,6 +343,10 @@ pub struct PlanArgs {
 pub struct DraftArgs {
     /// Task description.
     pub input: Option<String>,
+
+    /// Use a GitHub issue as the task.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub issue: Option<u64>,
 
     /// Path to the workflow config file. The special value `__builtin__`
     /// selects the built-in default workflow, and `builtin:<name>` selects a
