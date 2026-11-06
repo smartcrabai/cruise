@@ -2104,7 +2104,7 @@ mod tests {
     }
 
     #[test]
-    fn session_state_local_merge_fields_legacy_defaults_are_omitted() {
+    fn session_state_local_merge_fields_legacy_defaults_are_omitted() -> serde_json::Result<()> {
         let legacy = serde_json::json!({
             "id": "20260622000000001",
             "base_dir": "/repo",
@@ -2117,8 +2117,8 @@ mod tests {
             "worktree_path": null,
             "worktree_branch": null
         });
-        let state: SessionState = serde_json::from_value(legacy).unwrap();
-        let saved = serde_json::to_value(&state).unwrap();
+        let state: SessionState = serde_json::from_value(legacy)?;
+        let saved = serde_json::to_value(&state)?;
         assert!(saved.get("forked_from_branch").is_none());
         assert!(saved.get("local_merge_commit").is_none());
         assert!(saved.get("local_merge_intent").is_none());
@@ -2127,14 +2127,15 @@ mod tests {
         let mut with_nulls = saved;
         with_nulls["forked_from_branch"] = serde_json::Value::Null;
         with_nulls["local_merge_commit"] = serde_json::Value::Null;
-        let state: SessionState = serde_json::from_value(with_nulls).unwrap();
-        let saved = serde_json::to_value(state).unwrap();
+        let state: SessionState = serde_json::from_value(with_nulls)?;
+        let saved = serde_json::to_value(state)?;
         assert!(saved.get("forked_from_branch").is_none());
         assert!(saved.get("local_merge_commit").is_none());
+        Ok(())
     }
 
     #[test]
-    fn session_state_local_merge_fields_roundtrip() {
+    fn session_state_local_merge_fields_roundtrip() -> serde_json::Result<()> {
         let state = SessionState::new(
             "20260622000000002".to_string(),
             PathBuf::from("/repo"),
@@ -2143,18 +2144,19 @@ mod tests {
             },
             "task".to_string(),
         );
-        let mut json = serde_json::to_value(state).unwrap();
+        let mut json = serde_json::to_value(state)?;
         json["forked_from_branch"] = serde_json::json!("feature/base");
         json["local_merge_commit"] = serde_json::json!("0123456789abcdef0123456789abcdef01234567");
         json["local_merge_intent"] = serde_json::json!({"base_parent": "parent", "source_commit": "source", "squash_tree": "tree"});
-        let state: SessionState = serde_json::from_value(json).unwrap();
-        let saved = serde_json::to_value(state).unwrap();
+        let state: SessionState = serde_json::from_value(json)?;
+        let saved = serde_json::to_value(state)?;
         assert_eq!(saved["forked_from_branch"], "feature/base");
         assert_eq!(saved["local_merge_intent"]["squash_tree"], "tree");
         assert_eq!(
             saved["local_merge_commit"],
             "0123456789abcdef0123456789abcdef01234567"
         );
+        Ok(())
     }
 
     #[test]

@@ -933,7 +933,7 @@ fn local_merge_response(
                     &ToastVm::new(
                         ToastKind::Failed,
                         "Merged locally, but cleanup failed",
-                        Some(error.to_string()),
+                        Some(error.clone()),
                     ),
                 ));
                 Ok(html(body))

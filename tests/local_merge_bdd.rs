@@ -81,12 +81,12 @@ impl Fixture {
     fn kept(&self) {
         assert!(self.manager.load(ID).is_ok());
         assert!(self.worktree.is_dir());
-        assert!(!git(&self.base, &["branch", "--list", &self.branch]).is_empty());
+        assert_ne!(git(&self.base, &["branch", "--list", &self.branch]), "");
     }
     fn cleaned(&self) {
         assert!(self.manager.load(ID).is_err());
         assert!(!self.worktree.exists());
-        assert!(git(&self.base, &["branch", "--list", &self.branch]).is_empty());
+        assert_eq!(git(&self.base, &["branch", "--list", &self.branch]), "");
     }
 }
 

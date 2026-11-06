@@ -3061,12 +3061,7 @@ impl CruiseApplication {
                 if state.worktree_branch.is_some() {
                     actions.push(SessionAction::ViewDiff);
                 }
-                if crate::local_merge::can_stage_locally(state) {
-                    actions.push(SessionAction::StageLocalMerge);
-                }
-                if crate::local_merge::can_merge_locally(state) {
-                    actions.push(SessionAction::MergeLocally);
-                }
+                Self::add_local_merge_actions(state, &mut actions);
                 actions.extend([SessionAction::ResetToPlanned, SessionAction::Delete]);
             }
             SessionPhase::Suspended => actions.extend([
@@ -3081,12 +3076,7 @@ impl CruiseApplication {
                     actions.push(SessionAction::OpenPr);
                     actions.push(SessionAction::MergePr);
                 }
-                if crate::local_merge::can_stage_locally(state) {
-                    actions.push(SessionAction::StageLocalMerge);
-                }
-                if crate::local_merge::can_merge_locally(state) {
-                    actions.push(SessionAction::MergeLocally);
-                }
+                Self::add_local_merge_actions(state, &mut actions);
                 actions.extend([SessionAction::ResetToPlanned, SessionAction::Delete]);
             }
         }
@@ -3105,6 +3095,15 @@ impl CruiseApplication {
             actions.push(SessionAction::Cancel);
         }
         actions
+    }
+
+    fn add_local_merge_actions(state: &SessionState, actions: &mut Vec<SessionAction>) {
+        if crate::local_merge::can_stage_locally(state) {
+            actions.push(SessionAction::StageLocalMerge);
+        }
+        if crate::local_merge::can_merge_locally(state) {
+            actions.push(SessionAction::MergeLocally);
+        }
     }
 
     async fn plan_with_operation(

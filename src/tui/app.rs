@@ -3126,32 +3126,7 @@ impl TuiApp {
             },
             SessionAction::MergePr => self.open_merge_pr_preview(),
             SessionAction::StageLocalMerge | SessionAction::MergeLocally => {
-                use crate::application::{LocalMergeMode, LocalMergeOutcome};
-                let mode = if action == SessionAction::StageLocalMerge {
-                    LocalMergeMode::Stage
-                } else {
-                    LocalMergeMode::MergeAndCleanup
-                };
-                match self.application.local_merge(&id, mode) {
-                    Ok(outcome) => {
-                        self.invalidate(&id, true, true, true);
-                        self.refresh();
-                        match outcome {
-                            LocalMergeOutcome::Staged => {
-                                self.status = Some(
-                                    "Squash staged in base checkout; session retained".to_string(),
-                                );
-                            }
-                            LocalMergeOutcome::Merged => {
-                                self.status = Some(format!("Merged locally and cleaned up {id}"));
-                            }
-                            LocalMergeOutcome::MergedCleanupFailed { error } => {
-                                self.set_error(format!("Merge committed but cleanup failed: {error}. Retry cleanup from this session."));
-                            }
-                        }
-                    }
-                    Err(error) => self.set_error(error.to_string()),
-                }
+                self.apply_local_merge(&id, action);
             }
             SessionAction::OpenPr => match self.application.open_pr(&id) {
                 Ok(url) => match open_url(&url) {
@@ -3160,6 +3135,34 @@ impl TuiApp {
                 },
                 Err(error) => self.set_error(error.to_string()),
             },
+        }
+    }
+
+    fn apply_local_merge(&mut self, id: &str, action: SessionAction) {
+        use crate::application::{LocalMergeMode, LocalMergeOutcome};
+        let mode = if action == SessionAction::StageLocalMerge {
+            LocalMergeMode::Stage
+        } else {
+            LocalMergeMode::MergeAndCleanup
+        };
+        match self.application.local_merge(id, mode) {
+            Ok(outcome) => {
+                self.invalidate(id, true, true, true);
+                self.refresh();
+                match outcome {
+                    LocalMergeOutcome::Staged => {
+                        self.status =
+                            Some("Squash staged in base checkout; session retained".to_string());
+                    }
+                    LocalMergeOutcome::Merged => {
+                        self.status = Some(format!("Merged locally and cleaned up {id}"));
+                    }
+                    LocalMergeOutcome::MergedCleanupFailed { error } => {
+                        self.set_error(format!("Merge committed but cleanup failed: {error}. Retry cleanup from this session."));
+                    }
+                }
+            }
+            Err(error) => self.set_error(error.to_string()),
         }
     }
 
@@ -3630,7 +3633,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn local_merge_actions_confirm_with_branch_and_target_and_cancel() {
+    fn local_merge_actions_confirm_with_branch_and_target_and_cancel() -> Result<(), &'static str> {
         let mut app = app();
         add_session(&mut app, "local", SessionPhase::Completed);
         app.sessions[0].worktree_branch = Some("cruise/task".into());
@@ -3645,7 +3648,7 @@ mod tests {
             let modal = app
                 .modal
                 .take()
-                .expect("local merge must require confirmation");
+                .ok_or("local merge must require confirmation")?;
             match &modal {
                 Modal::Confirm {
                     command: PendingCommand::Session(pending),
@@ -3661,6 +3664,7 @@ mod tests {
             assert!(app.modal.is_none());
             assert_eq!(app.sessions.len(), 1);
         }
+        Ok(())
     }
 
     fn app_for(application: CruiseApplication) -> TuiApp {
