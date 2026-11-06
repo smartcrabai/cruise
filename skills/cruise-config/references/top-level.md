@@ -86,6 +86,7 @@ fails the load (see [steps.md](steps.md)).
 
 A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`, `subagent_model`,
 `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `commit_message_template`, `pr_body_template`,
+`base_branch`, `auto_fetch`,
 `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `env`, `retry`, `mcp_servers`, and
 `pre_steps`. Unknown keys and workflow-only keys (`description`, `steps`,
 `groups`, `after-pr`, and `create_pr`) are rejected.
@@ -284,6 +285,19 @@ During `cruise run`, the config file's mtime is checked between steps and the fi
 
 - Does not apply to sessions started from an embedded built-in workflow.
 - The current step must still exist in the new config.
+
+## `base_branch`
+
+Set this defaults-only key in user or project `default.yaml` to select the starting branch for new worktrees and the target branch for their PRs or MRs. Project defaults override user defaults. Without it, new worktrees start at the repository's HEAD and the forge CLI selects its default target. The value must be nonblank, must not start with `-`, and must pass `git check-ref-format --branch`. The local branch is preferred over `origin/<base_branch>` unless a successful `auto_fetch` supplies the remote-tracking ref. A missing branch is an error. Reused worktrees retain their saved base and are not resolved again.
+
+## `auto_fetch`
+
+This defaults-only boolean defaults to `false`. Set it to `true` alongside a `base_branch` to fetch that branch from `origin` before creating a new worktree. The requirement is checked after user and project defaults are merged. Fetch failure produces a warning and continues with local refs, preferring the local branch over the remote-tracking branch. Existing worktrees are not fetched again.
+
+```yaml
+base_branch: main
+auto_fetch: true
+```
 
 ## `cleanup_after_pr`
 

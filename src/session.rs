@@ -100,6 +100,12 @@ pub struct SessionState {
     pub worktree_path: Option<PathBuf>,
     /// Worktree branch name (set during run phase).
     pub worktree_branch: Option<String>,
+    /// Base branch used when the worktree was created.
+    #[serde(default)]
+    pub worktree_base_branch: Option<String>,
+    /// Exact ref selected as the worktree creation start point, when configured.
+    #[serde(default)]
+    pub worktree_base_ref: Option<String>,
     /// Where this session should run.
     #[serde(default)]
     pub workspace_mode: WorkspaceMode,
@@ -196,6 +202,9 @@ pub struct SessionState {
     /// (`--skip-planning` / input-as-plan). `input` is then stored empty.
     #[serde(default)]
     pub input_as_plan: bool,
+    /// GitHub issue from which this session was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -247,6 +256,8 @@ impl SessionState {
             completed_at: None,
             worktree_path: None,
             worktree_branch: None,
+            worktree_base_branch: None,
+            worktree_base_ref: None,
             workspace_mode: WorkspaceMode::Worktree,
             target_branch: None,
             allow_dirty_working_tree: false,
@@ -274,6 +285,7 @@ impl SessionState {
             published_issue_url: None,
             exec: false,
             input_as_plan: false,
+            issue_number: None,
         }
     }
 
@@ -315,6 +327,14 @@ impl SessionState {
             .map(str::trim)
             .filter(|title| !title.is_empty())
             .unwrap_or(&self.input)
+    }
+
+    #[must_use]
+    pub fn worktree_branch_source(&self) -> String {
+        self.issue_number.map_or_else(
+            || self.input_or_title().to_string(),
+            |n| format!("issue-{n}"),
+        )
     }
 
     /// Return the planning input with attached image paths appended (or the
@@ -1339,6 +1359,48 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[test]
+    fn planned_issue_number_legacy_state_is_omitted_when_absent() {
+        let session = crate::test_support::make_session("legacy-issue", Path::new("/tmp"));
+        let mut json = serde_json::to_value(&session)
+            .unwrap_or_else(|error| panic!("serialize session: {error}"));
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("session must serialize as an object"))
+            .remove("issue_number");
+        let restored: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("deserialize session: {error}"));
+        assert!(
+            serde_json::to_value(restored)
+                .unwrap_or_else(|error| panic!("serialize restored session: {error}"))
+                .get("issue_number")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn planned_issue_number_survives_save_and_load() {
+        let tmp =
+            TempDir::new().unwrap_or_else(|error| panic!("create temporary directory: {error}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let session = crate::test_support::make_session("issue-persistence", tmp.path());
+        let mut json = serde_json::to_value(session)
+            .unwrap_or_else(|error| panic!("serialize session: {error}"));
+        json["issue_number"] = serde_json::json!(12);
+        let session: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("deserialize session: {error}"));
+        manager
+            .save(&session)
+            .unwrap_or_else(|error| panic!("save session: {error}"));
+        let restored = manager
+            .load(&session.id)
+            .unwrap_or_else(|error| panic!("load session: {error}"));
+        assert_eq!(
+            serde_json::to_value(restored)
+                .unwrap_or_else(|error| panic!("serialize session: {error}"))["issue_number"],
+            12
+        );
+    }
+
     /// Guard that saves an environment variable's current value, removes it for
     /// the duration of the test, and restores it on drop.
     struct EnvVarGuard {
@@ -1461,6 +1523,68 @@ mod tests {
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(matches!(loaded.phase, SessionPhase::Running));
         assert_eq!(loaded.current_step, Some("implement".to_string()));
+    }
+
+    #[test]
+    fn test_worktree_base_branch_persists_and_legacy_session_loads() {
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let state = SessionState::new(
+            "20260306150001".to_string(),
+            PathBuf::from("/repo"),
+            crate::session_config::SessionConfigRef::File {
+                path: PathBuf::from("cruise.yaml"),
+            },
+            "task".to_string(),
+        );
+        let mut json = serde_json::to_value(&state)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("serialized session must be an object"))
+            .remove("worktree_base_branch");
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("serialized session must be an object"))
+            .remove("worktree_base_ref");
+        let legacy: SessionState = serde_json::from_value(json.clone())
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        assert_eq!(legacy.worktree_base_ref, None);
+        assert_eq!(
+            serde_json::to_value(&legacy)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))
+                .get("worktree_base_branch"),
+            Some(&serde_json::Value::Null)
+        );
+
+        json["worktree_base_branch"] = serde_json::json!("develop");
+        json["worktree_base_ref"] = serde_json::json!("refs/heads/develop");
+        let configured: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        manager
+            .create(&configured)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let loaded = manager
+            .load(&configured.id)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        assert_eq!(
+            serde_json::to_value(&loaded)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))["worktree_base_branch"],
+            "develop"
+        );
+        manager
+            .save(&loaded)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let reloaded = manager
+            .load(&configured.id)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        assert_eq!(
+            reloaded.worktree_base_ref.as_deref(),
+            Some("refs/heads/develop")
+        );
+        assert_eq!(
+            serde_json::to_value(&reloaded)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))["worktree_base_branch"],
+            "develop"
+        );
     }
 
     #[test]
@@ -4346,6 +4470,7 @@ mod tests {
             "task",
             &tmp.path().join("worktrees"),
             None,
+            &crate::worktree::WorktreeBase::default(),
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
         let mut terminal = SessionState::new(

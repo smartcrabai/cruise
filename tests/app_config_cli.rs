@@ -98,7 +98,7 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
     assert!(shown.status.success(), "{}", output_text(&shown));
     assert_eq!(
         String::from_utf8_lossy(&shown.stdout),
-        "run_all_parallelism = 3\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\n"
+        "run_all_parallelism = 3\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\n"
     );
 
     let updated = fixture.run(&["config", "--set-parallelism", "7"]);
@@ -121,7 +121,7 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
     );
     assert_eq!(
         String::from_utf8_lossy(&shown_after_update.stdout),
-        "run_all_parallelism = 7\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\n"
+        "run_all_parallelism = 7\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\n"
     );
 }
 

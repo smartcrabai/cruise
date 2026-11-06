@@ -49,18 +49,10 @@ pub fn parse_github_repo_from_origin(origin_url: &str) -> Option<String> {
 /// Resolve the `owner/repo` slug for `session`: its recorded `repo` field if
 /// set, otherwise the `origin` remote of its `base_dir` git checkout.
 fn resolve_repo(session: &SessionState) -> Result<(crate::forge::ForgeKind, String)> {
+    let ctx = crate::forge::repository_context(session.repo.as_deref(), &session.base_dir)?;
     if let Some(repo) = &session.repo {
-        let ctx = crate::forge::resolve_repo_locator_env(repo)?;
         return Ok((ctx.kind, repo.clone()));
     }
-
-    let origin_url = crate::forge::origin_url(&session.base_dir).map_err(CruiseError::Other)?;
-    let forced = crate::forge::forge_override_from_env()?;
-    let ctx = crate::forge::resolve_remote(&origin_url, forced).map_err(|e| {
-        CruiseError::Other(format!(
-            "could not determine repository from origin URL: {origin_url}: {e}"
-        ))
-    })?;
     let repo = match ctx.kind {
         crate::forge::ForgeKind::GitHub => ctx.repository,
         crate::forge::ForgeKind::GitLab if ctx.host == "gitlab.com" => ctx.repository,

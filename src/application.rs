@@ -430,6 +430,24 @@ fn cleanup_new_execution_workspace(
     Ok(())
 }
 
+fn resolve_new_session_task(
+    request: &NewSessionRequest,
+    repo: Option<&str>,
+) -> Result<crate::issue_input::ResolvedTaskInput> {
+    let issue_dir = if request.base_dir.as_os_str().is_empty() {
+        std::env::current_dir()?
+    } else {
+        request.base_dir.clone()
+    };
+    crate::issue_input::resolve_task_input(
+        &request.input,
+        None,
+        repo,
+        &issue_dir,
+        &crate::issue_input::GhGithub,
+    )
+}
+
 fn create_session_inner(
     manager: &SessionManager,
     request: NewSessionRequest,
@@ -449,6 +467,7 @@ fn create_session_inner(
     if let Some(repo) = &repo {
         crate::repo_clone::validate_repo_spec(repo)?;
     }
+    let task = resolve_new_session_task(&request, repo.as_deref())?;
     let base_dir = if let Some(repo) = &repo {
         let clone_path = manager.clones_dir().join(id);
         crate::repo_clone::clone_repo(repo, &clone_path)?;
@@ -487,12 +506,8 @@ fn create_session_inner(
     let mut nodes = crate::workflow::list_skippable_steps(&config)?;
     nodes.extend(crate::workflow::list_skippable_after_pr_steps(&config)?);
     let skipped_steps = crate::flags::drop_disabled_skips(skipped_steps, &nodes, &request.flags);
-    let mut state = SessionState::new_draft(
-        id.to_string(),
-        base_dir,
-        config_ref,
-        request.input.trim().to_string(),
-    );
+    let mut state = SessionState::new_draft(id.to_string(), base_dir, config_ref, task.text);
+    state.issue_number = task.issue_number;
     state.workspace_mode = request.workspace_mode;
     state.allow_dirty_working_tree = request.allow_dirty_working_tree;
     state.forge = match repo.as_deref() {
@@ -504,8 +519,13 @@ fn create_session_inner(
     state.flags = request.flags;
     manager.create_with_config(&state, &config)?;
     let session_dir = manager.sessions_dir().join(id);
-    state.attachments =
-        crate::attachments::copy_images_into_session(&session_dir, &request.attachments)?;
+    state.attachments = crate::attachments::store_downloaded_images(&session_dir, &task.images)?;
+    state
+        .attachments
+        .extend(crate::attachments::copy_images_into_session(
+            &session_dir,
+            &request.attachments,
+        )?);
     manager.save(&state)?;
     let resolved_config_key = state
         .config
@@ -513,7 +533,7 @@ fn create_session_inner(
     let mut history = NewSessionHistory::load_best_effort();
     history.record_selection(crate::new_session_history::NewSessionHistoryEntry {
         selected_at: crate::session::current_iso8601(),
-        input: state.input.clone(),
+        input: request.input.trim().to_string(),
         requested_config_path: requested,
         working_dir: if state.repo.is_some() {
             String::new()
@@ -1321,6 +1341,7 @@ pub enum SessionAction {
     Resume,
     OpenPr,
     MergePr,
+    ViewDiff,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2220,6 +2241,15 @@ impl CruiseApplication {
             .map_err(|e| CruiseError::Other(format!("failed to read plan for {id}: {e}")))
     }
 
+    /// Read the current branch diff for a session.
+    ///
+    /// # Errors
+    /// Returns an error if the session cannot be loaded or its branch diff cannot be generated.
+    pub fn session_branch_diff(&self, id: &str) -> Result<crate::branch_diff::BranchDiff> {
+        let state = self.manager.load(id)?;
+        crate::branch_diff::session_branch_diff(&state, false)
+    }
+
     /// Report whether a session has non-empty, readable plan markdown.
     #[must_use]
     pub fn session_plan_available(&self, state: &SessionState) -> bool {
@@ -2887,6 +2917,9 @@ impl CruiseApplication {
         let usable_plan =
             state.plan_error.is_none() && state.has_usable_plan(&self.manager.sessions_dir());
         let mut actions = Vec::new();
+        if state.worktree_branch.is_some() {
+            actions.push(SessionAction::ViewDiff);
+        }
         match &state.phase {
             SessionPhase::Draft => actions.extend([SessionAction::Generate, SessionAction::Delete]),
             SessionPhase::AwaitingInput => {
@@ -3217,6 +3250,7 @@ impl CruiseApplication {
     {
         let parallelism = batch_parallelism(&parallelism_provider)?;
         let batch = self.runtime.try_begin_batch()?;
+        let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
         let candidates = self.manager.run_all_candidates()?;
         let candidate_map = candidates
             .iter()
@@ -3381,6 +3415,7 @@ impl CruiseApplication {
         log_sink: Option<Arc<dyn LogSink>>,
         batch_started: bool,
     ) -> Result<SessionState> {
+        let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
         let execution = crate::telemetry::Operation::execution("run", id, None);
         let exec_initial =
             self.manager
@@ -4631,6 +4666,167 @@ mod tests {
             crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL"),
         ]);
         guards
+    }
+
+    #[cfg(unix)]
+    fn issue_test_request(base_dir: &std::path::Path, input: &str) -> NewSessionRequest {
+        NewSessionRequest {
+            input: input.to_string(),
+            base_dir: base_dir.to_path_buf(),
+            config_path: None,
+            config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
+            repo: None,
+            workspace_mode: WorkspaceMode::Worktree,
+            allow_dirty_working_tree: false,
+            attachments: vec![],
+            skipped_steps: vec![],
+            flags: BTreeMap::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn issue_test_repo(
+        root: &std::path::Path,
+        remote: &str,
+        script: &str,
+    ) -> crate::test_support::EnvGuard {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("create test repo: {e}"));
+        for args in [
+            &["init", "-q"][..],
+            &["remote", "add", "origin", remote][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&repo)
+                    .status()
+                    .unwrap_or_else(|e| panic!("run git: {e}"))
+                    .success()
+            );
+        }
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("create test bin: {e}"));
+        let gh = bin.join("gh");
+        std::fs::write(&gh, script).unwrap_or_else(|e| panic!("write fake gh: {e}"));
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| panic!("make fake gh executable: {e}"));
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        crate::test_support::EnvGuard::set("PATH", path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_session_issue_input_formats_and_preserves_history() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::tempdir().unwrap_or_else(|e| panic!("create temp dir: {e}"));
+        let _home = isolate_application_config(temp.path());
+        let _path = issue_test_repo(
+            temp.path(),
+            "https://github.com/example/project.git",
+            r##"#!/bin/sh
+case "$*" in
+  *issues/42/comments*) printf '%s\n' '[{"user":{"login":"alice"},"body":"A comment"}]' ;;
+  *issues/42*) printf '%s\n' '{"number":42,"title":"Fix the bug","body":"Issue body","html_url":"https://github.com/example/project/issues/42","labels":[{"name":"bug"}]}' ;;
+  --version) echo 'gh version 2.0' ;;
+  *) exit 1 ;;
+esac
+"##,
+        );
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let raw = "#42\nFocus on tests";
+        let state = app
+            .create_session(issue_test_request(&temp.path().join("repo"), raw))
+            .unwrap_or_else(|e| panic!("create issue session: {e}"));
+        let expected = "# Fix the bug\n\nIssue #42: https://github.com/example/project/issues/42\n\nIssue body\n\n### Labels\n\nbug\n\n### Comments\n\n**alice**: A comment\n\n## Additional instructions\n\nFocus on tests";
+        assert_eq!(state.input, expected);
+        assert_eq!(
+            manager
+                .load(&state.id)
+                .unwrap_or_else(|e| panic!("load session: {e}"))
+                .input,
+            expected
+        );
+        let history = app
+            .history()
+            .unwrap_or_else(|e| panic!("load history: {e}"));
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].input, raw);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_session_issue_fetch_failure_leaves_no_session_or_history() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::tempdir().unwrap_or_else(|e| panic!("create temp dir: {e}"));
+        let _home = isolate_application_config(temp.path());
+        let _path = issue_test_repo(
+            temp.path(),
+            "https://github.com/example/project.git",
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'gh version 2.0'; exit 0; fi\necho 'issue unavailable' >&2\nexit 1\n",
+        );
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        assert!(
+            app.create_session(issue_test_request(&temp.path().join("repo"), "#42"))
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .list()
+                .unwrap_or_else(|e| panic!("list sessions: {e}"))
+                .len(),
+            0
+        );
+        assert_eq!(
+            app.history()
+                .unwrap_or_else(|e| panic!("load history: {e}"))
+                .entries
+                .len(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_session_issue_input_rejects_gitlab() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::tempdir().unwrap_or_else(|e| panic!("create temp dir: {e}"));
+        let _home = isolate_application_config(temp.path());
+        let _path = issue_test_repo(
+            temp.path(),
+            "https://gitlab.com/example/project.git",
+            "#!/bin/sh\nexit 1\n",
+        );
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let error = app
+            .create_session(issue_test_request(&temp.path().join("repo"), "#42"))
+            .err()
+            .unwrap_or_else(|| panic!("expected unsupported GitLab repository error"));
+        assert!(
+            error.to_string().contains("GitHub repositories only"),
+            "{error}"
+        );
+        assert_eq!(
+            manager
+                .list()
+                .unwrap_or_else(|e| panic!("list sessions: {e}"))
+                .len(),
+            0
+        );
+        assert_eq!(
+            app.history()
+                .unwrap_or_else(|e| panic!("load history: {e}"))
+                .entries
+                .len(),
+            0
+        );
     }
 
     fn assert_create_session_flag_skips(flags: &crate::flags::FlagValues, expected: &[&str]) {
@@ -6431,6 +6627,7 @@ mod merge_pr_tests {
             "task",
             &f.tmp.path().join("worktrees"),
             None,
+            &crate::worktree::WorktreeBase::default(),
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let mut state = SessionState::new(

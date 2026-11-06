@@ -19,6 +19,7 @@ pub fn run(args: &ConfigArgs) -> Result<()> {
     } else {
         let config = crate::app_config::AppConfig::load()?;
         println!("run_all_parallelism = {}", config.run_all_parallelism);
+        println!("prevent_sleep = {}", config.prevent_sleep);
         if let Some(model) = config.model.as_ref() {
             println!("model = {}", serde_json::to_string(model)?);
         }
