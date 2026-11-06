@@ -370,7 +370,10 @@ mod tests {
             let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
             if workflow.name == "pr-review-fix" {
                 assert_eq!(compiled.after_pr.len(), 1);
-                let (id, step) = &compiled.after_pr[0];
+                let (id, step) = compiled
+                    .after_pr
+                    .get_index(0)
+                    .unwrap_or_else(|| panic!("pr-review-fix has no after-pr steps"));
                 assert_eq!(id, "address-review");
                 assert!(step.github_review.is_some());
                 continue;

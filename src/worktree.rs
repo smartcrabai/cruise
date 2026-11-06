@@ -604,9 +604,8 @@ mod tests {
             &["commit", "--allow-empty", "-m", "remote divergence"],
         );
         git(&repo, &["push", "origin", "HEAD:refs/heads/pr-head"]);
-        let err = match setup_pr_worktree(&repo, "four", &worktrees, "pr-head") {
-            Err(err) => err,
-            Ok(_) => panic!("diverged branch should be rejected"),
+        let Err(err) = setup_pr_worktree(&repo, "four", &worktrees, "pr-head") else {
+            panic!("diverged branch should be rejected");
         };
         assert!(err.to_string().contains("diverged"));
         assert!(!worktrees.join("four").exists());

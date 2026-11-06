@@ -1773,7 +1773,9 @@ mod tests {
             }
             manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
             write_config(&manager, id, &config);
-            let (session, initial_fingerprint) = manager.load_with_fingerprint(id).unwrap();
+            let (session, initial_fingerprint) = manager
+                .load_with_fingerprint(id)
+                .unwrap_or_else(|error| panic!("load session with fingerprint: {error}"));
             let mut args = run_args(id);
             args.dry_run = true;
             args.flags.push(("review".into(), enabled));

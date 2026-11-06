@@ -6172,6 +6172,8 @@ mod tests {
         app.modal = None;
         type_text(&mut app, "acme/cruise");
         assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::PullRequest);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
         assert_eq!(app.form.step, Step::Config);
         assert_eq!(app.form.input.text(), "");
         assert!(!app.handle_key(key(KeyCode::Enter)));
@@ -6414,6 +6416,8 @@ mod tests {
         app.form.step = Step::Repository;
         assert!(!app.handle_key(key(KeyCode::Down)));
         assert_eq!(app.form.repository.text(), "acme/other");
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::PullRequest);
         assert!(!app.handle_key(key(KeyCode::Enter)));
         assert_eq!(app.form.step, Step::Config);
         assert!(

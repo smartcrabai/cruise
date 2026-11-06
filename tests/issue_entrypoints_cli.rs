@@ -165,7 +165,14 @@ esac
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let sessions = root.path().join("data/cruise/sessions");
+    assert_draft_issue_persisted(root.path(), &log);
+}
+
+#[cfg(unix)]
+fn assert_draft_issue_persisted(root: &std::path::Path, log: &std::path::Path) {
+    use std::fs;
+
+    let sessions = root.join("data/cruise/sessions");
     let entries: Vec<_> = fs::read_dir(&sessions)
         .unwrap_or_else(|error| panic!("read sessions directory: {error}"))
         .map(|e| e.unwrap_or_else(|error| panic!("test operation failed: {error}")))
