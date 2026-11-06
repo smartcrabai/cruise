@@ -47,6 +47,8 @@ impl Fixture {
         git!(&base, &["init"]);
         git!(&base, &["config", "user.name", "Test"]);
         git!(&base, &["config", "user.email", "test@example.com"]);
+        // Keep fixture contents byte-for-byte stable regardless of Git's global autocrlf setting.
+        git!(&base, &["config", "core.autocrlf", "false"]);
         std::fs::write(base.join("shared.txt"), "original\n")?;
         git!(&base, &["add", "."]);
         git!(&base, &["commit", "-m", "initial"]);
