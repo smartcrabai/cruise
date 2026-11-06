@@ -46,6 +46,12 @@ pub struct BatchDashboard {
 }
 
 impl BatchDashboard {
+    /// Print a persistent notice without colliding with a dashboard repaint.
+    pub(crate) fn announce(&self, message: &str) {
+        let _guard = prompt_lock_guard();
+        let _ = Term::stderr().write_line(&sanitize_terminal_text(message));
+    }
+
     fn lock_rows(&self) -> std::sync::MutexGuard<'_, IndexMap<String, Row>> {
         self.rows
             .lock()

@@ -331,6 +331,7 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
             session: Some(session_id),
             all: false,
             parallelism: None,
+            auto_requeue_max_attempts: None,
             max_retries: None,
             rate_limit_retries: args.rate_limit_retries,
             dry_run: false,

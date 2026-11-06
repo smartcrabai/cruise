@@ -1,5 +1,19 @@
 # Responsive WebUI executable specifications
 
+## Auto-requeue browser coverage
+
+With Node 26.12.1 and Rust 1.99.1, from the repository root run:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+tests/webui/node_modules/.bin/playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/auto-requeue.mjs all
+node tests/webui/auto-requeue.mjs header
+```
+
+On Linux install Chromium's system dependencies as described below. The test isolates its HOME and session data and saves screenshots to `target/formal-reports/auto-requeue-browser/`. It checks settings persistence and validation, counter display and a Run All retry. The retry uses a scripted command provider, so it does not verify a real external provider. The existing responsive WebUI CI workflow runs both scenarios and uploads the reports.
+
 ## Graph flag browser regression
 
 After installing the pinned browser dependencies, run `cargo +1.99.1 build --locked --all-features --bin cruise-runtime` followed by `node tests/webui/graph-flags.mjs` from the repository root. The existing WebUI CI job runs this test and uploads `target/formal-reports/graph-browser/`. `WEBUI_BDD_BIN` can select another runtime and `WEBUI_GRAPH_REPORT_DIR` changes the screenshot directory. The test uses a temporary HOME/XDG tree and changes persisted flags externally, exercising real Graph tab HTMX requests for off, on, off again, and an all-disabled graph. It asserts the server's Mermaid source and projected edges, not that the externally loaded Mermaid CDN successfully rendered SVG. Screenshots capture the browser state at the swap and may show Mermaid source if the CDN has not loaded.

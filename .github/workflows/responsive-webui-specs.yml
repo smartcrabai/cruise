@@ -49,6 +49,10 @@ jobs:
         run: |
           cargo +1.99.1 build --locked --all-features --bin cruise-runtime
           node tests/webui/graph-flags.mjs
+      - name: Auto-requeue WebUI browser test
+        run: |
+          node tests/webui/auto-requeue.mjs all
+          node tests/webui/auto-requeue.mjs header
       - name: Upload specification evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

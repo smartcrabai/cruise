@@ -36,6 +36,7 @@ struct ListSessionJson {
     updated_at: Option<String>,
     awaiting_input: bool,
     plan_available: bool,
+    auto_requeue_count: u32,
 }
 
 /// `Failed(msg)` is normalized to `phase = "Failed"` + `phase_error = Some(msg)`.
@@ -59,6 +60,7 @@ fn session_to_json_with_plan_availability(
         SessionPhase::Suspended => ("Suspended", None),
     };
     ListSessionJson {
+        auto_requeue_count: session.auto_requeue_count,
         id: session.id,
         base_dir: session.base_dir.to_string_lossy().into_owned(),
         phase,
@@ -259,6 +261,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         session: Some(session.id.clone()),
                         all: false,
                         parallelism: None,
+                        auto_requeue_max_attempts: None,
                         max_retries: None,
                         rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
                         dry_run: false,
@@ -771,7 +774,7 @@ fn format_session_date(id: &str) -> String {
 
 /// Returns " \[`step_name`\]" for Running/Suspended, or " PR#N" for Completed with PR URL.
 fn format_suffix(s: &SessionState) -> String {
-    match &s.phase {
+    let mut suffix = match &s.phase {
         SessionPhase::Running | SessionPhase::Suspended => s
             .current_step
             .as_ref()
@@ -786,7 +789,11 @@ fn format_suffix(s: &SessionState) -> String {
             })
             .unwrap_or_default(),
         _ => String::new(),
+    };
+    if s.auto_requeue_count > 0 {
+        suffix.push_str(&format!(" auto-requeued {}", s.auto_requeue_count));
     }
+    suffix
 }
 
 #[cfg(test)]

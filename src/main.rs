@@ -4,6 +4,7 @@ pub mod application;
 mod artifacts;
 mod ask_handler;
 mod attachments;
+mod auto_requeue;
 mod backend;
 mod batch_dashboard;
 #[cfg_attr(not(test), expect(dead_code))]

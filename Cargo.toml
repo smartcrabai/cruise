@@ -178,6 +178,11 @@ path = "tests/checkpoint_bdd.rs"
 
 [[test]]
 harness = false
+name = "auto_requeue_bdd"
+path = "tests/auto_requeue_bdd.rs"
+
+[[test]]
+harness = false
 name = "opencode_bdd"
 path = "tests/opencode_bdd.rs"
 # POSIX fixture: required explicitly by check_opencode_specs.sh on Linux CI.

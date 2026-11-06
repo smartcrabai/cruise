@@ -5,6 +5,7 @@ pub mod application;
 pub mod artifacts;
 pub mod ask_handler;
 pub mod attachments;
+pub mod auto_requeue;
 pub mod backend;
 pub mod batch_run;
 pub mod builtin_workflows;

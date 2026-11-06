@@ -139,6 +139,7 @@ pub(crate) struct SessionHeaderVm {
     pub(crate) badge: PhaseBadgeVm,
     pub(crate) current_step: Option<String>,
     pub(crate) phase_error: Option<String>,
+    pub(crate) auto_requeue_count: u32,
     pub(crate) plan_error: Option<String>,
     pub(crate) pr_url: Option<String>,
     pub(crate) pr_is_link: bool,
@@ -175,6 +176,7 @@ pub(crate) struct SessionDetailVm {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TabInfoVm {
+    pub(crate) auto_requeue_count: u32,
     pub(crate) id: String,
     pub(crate) config_source: String,
     /// Declared workflow flags with this session's values; absent values are off.
@@ -569,6 +571,7 @@ impl ToastVm {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsVm {
     pub(crate) run_all_parallelism: usize,
+    pub(crate) run_all_auto_requeue_max_attempts: u32,
     pub(crate) error: Option<String>,
 }
 

@@ -1,5 +1,9 @@
 # Checkpoint contract verification
 
+For bounded batch auto-requeue safety, see `AUTO_REQUEUE.md` and run
+`bash scripts/check_auto_requeue_specs.sh`. The dedicated `auto-requeue-specs`
+CI job retains verification receipts and traces.
+
 For task-scoped `subagent_model` selection, backend configuration and exclusions,
 see `SUBAGENT_MODEL.md` and run `bash scripts/check_subagent_model_specs.sh`.
 The dedicated `subagent-model-specs` PR job runs pinned Quint verification,

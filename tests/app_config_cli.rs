@@ -87,6 +87,91 @@ fn output_text(output: &Output) -> String {
 }
 
 #[test]
+fn auto_requeue_config_defaults_to_zero_and_persists_updates() {
+    let fixture = Fixture::new();
+    let shown = fixture.run(&["config"]);
+    assert!(shown.status.success(), "{}", output_text(&shown));
+    assert!(output_text(&shown).contains("run_all_auto_requeue_max_attempts = 0"));
+
+    let updated = fixture.run(&["config", "--set-auto-requeue-max-attempts", "3"]);
+    assert!(updated.status.success(), "{}", output_text(&updated));
+    assert!(output_text(&updated).contains("run_all_auto_requeue_max_attempts = 3"));
+    let shown = fixture.run(&["config"]);
+    assert!(shown.status.success(), "{}", output_text(&shown));
+    assert!(output_text(&shown).contains("run_all_auto_requeue_max_attempts = 3"));
+    let zero = fixture.run(&["config", "--set-auto-requeue-max-attempts", "0"]);
+    assert!(zero.status.success(), "{}", output_text(&zero));
+    assert!(output_text(&zero).contains("run_all_auto_requeue_max_attempts = 0"));
+}
+
+#[test]
+fn auto_requeue_config_accepts_both_names_and_rejects_negative_values() {
+    for extension in ["json", "yaml"] {
+        for key in [
+            "runAllAutoRequeueMaxAttempts",
+            "run_all_auto_requeue_max_attempts",
+        ] {
+            let fixture = Fixture::new();
+            let value = serde_json::json!({key: 2});
+            let contents = if extension == "yaml" {
+                serde_yaml::to_string(&value).unwrap()
+            } else {
+                value.to_string()
+            };
+            fixture.write_app_config(extension, &contents);
+            let shown = fixture.run(&["config"]);
+            assert!(
+                shown.status.success(),
+                "{extension} {key}: {}",
+                output_text(&shown)
+            );
+            assert!(output_text(&shown).contains("run_all_auto_requeue_max_attempts = 2"));
+        }
+        let fixture = Fixture::new();
+        let contents = if extension == "yaml" {
+            "runAllAutoRequeueMaxAttempts: -1"
+        } else {
+            "{\"runAllAutoRequeueMaxAttempts\": -1}"
+        };
+        fixture.write_app_config(extension, contents);
+        let shown = fixture.run(&["config"]);
+        assert!(
+            !shown.status.success(),
+            "{extension}: {}",
+            output_text(&shown)
+        );
+    }
+}
+
+#[test]
+fn auto_requeue_run_flag_requires_all_and_unsigned_integer() {
+    let fixture = Fixture::new();
+    let output = fixture.run(&["run", "some-session", "--auto-requeue-max-attempts", "2"]);
+    assert!(!output.status.success(), "{}", output_text(&output));
+    assert!(
+        output_text(&output).contains("--all"),
+        "{}",
+        output_text(&output)
+    );
+    for value in ["-1", "abc"] {
+        let output = fixture.run(&["run", "--all", "--auto-requeue-max-attempts", value]);
+        assert!(
+            !output.status.success(),
+            "{value}: {}",
+            output_text(&output)
+        );
+        assert!(
+            output_text(&output).contains("auto-requeue-max-attempts"),
+            "{}",
+            output_text(&output)
+        );
+    }
+    let help = fixture.run(&["run", "--help"]);
+    assert!(help.status.success(), "{}", output_text(&help));
+    assert!(output_text(&help).contains("--auto-requeue-max-attempts"));
+}
+
+#[test]
 fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
     let fixture = Fixture::new();
     let yaml_path = fixture.write_app_config(
@@ -96,10 +181,10 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
 
     let shown = fixture.run(&["config"]);
     assert!(shown.status.success(), "{}", output_text(&shown));
-    assert_eq!(
-        String::from_utf8_lossy(&shown.stdout),
-        "run_all_parallelism = 3\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\n"
-    );
+    let stdout = String::from_utf8_lossy(&shown.stdout);
+    assert!(stdout.lines().any(|line| line == "run_all_parallelism = 3"));
+    assert!(stdout.lines().any(|line| line == "model = [\"app/primary\",\"app/fallback\"]"));
+    assert!(stdout.lines().any(|line| line == "plan_model = [\"plan/primary\",\"plan/fallback\"]"));
 
     let updated = fixture.run(&["config", "--set-parallelism", "7"]);
     assert!(updated.status.success(), "{}", output_text(&updated));
@@ -119,10 +204,10 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
         "{}",
         output_text(&shown_after_update)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&shown_after_update.stdout),
-        "run_all_parallelism = 7\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\n"
-    );
+    let stdout = String::from_utf8_lossy(&shown_after_update.stdout);
+    assert!(stdout.lines().any(|line| line == "run_all_parallelism = 7"));
+    assert!(stdout.lines().any(|line| line == "model = [\"app/primary\",\"app/fallback\"]"));
+    assert!(stdout.lines().any(|line| line == "plan_model = [\"plan/primary\",\"plan/fallback\"]"));
 }
 
 #[test]
