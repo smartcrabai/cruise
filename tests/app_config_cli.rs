@@ -181,10 +181,10 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
 
     let shown = fixture.run(&["config"]);
     assert!(shown.status.success(), "{}", output_text(&shown));
-    let stdout = String::from_utf8_lossy(&shown.stdout);
-    assert!(stdout.lines().any(|line| line == "run_all_parallelism = 3"));
-    assert!(stdout.lines().any(|line| line == "model = [\"app/primary\",\"app/fallback\"]"));
-    assert!(stdout.lines().any(|line| line == "plan_model = [\"plan/primary\",\"plan/fallback\"]"));
+    assert_eq!(
+        String::from_utf8_lossy(&shown.stdout),
+        "run_all_parallelism = 3\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\n"
+    );
 
     let updated = fixture.run(&["config", "--set-parallelism", "7"]);
     assert!(updated.status.success(), "{}", output_text(&updated));
@@ -204,10 +204,10 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
         "{}",
         output_text(&shown_after_update)
     );
-    let stdout = String::from_utf8_lossy(&shown_after_update.stdout);
-    assert!(stdout.lines().any(|line| line == "run_all_parallelism = 7"));
-    assert!(stdout.lines().any(|line| line == "model = [\"app/primary\",\"app/fallback\"]"));
-    assert!(stdout.lines().any(|line| line == "plan_model = [\"plan/primary\",\"plan/fallback\"]"));
+    assert_eq!(
+        String::from_utf8_lossy(&shown_after_update.stdout),
+        "run_all_parallelism = 7\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\n"
+    );
 }
 
 #[test]

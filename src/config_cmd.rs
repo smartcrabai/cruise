@@ -33,6 +33,7 @@ pub fn run(args: &ConfigArgs) -> Result<()> {
             "run_all_auto_requeue_max_attempts = {}",
             config.run_all_auto_requeue_max_attempts
         );
+        println!("prevent_sleep = {}", config.prevent_sleep);
         if let Some(model) = config.model.as_ref() {
             println!("model = {}", serde_json::to_string(model)?);
         }

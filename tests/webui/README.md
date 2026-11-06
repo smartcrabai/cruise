@@ -14,6 +14,19 @@ node tests/webui/auto-requeue.mjs header
 
 On Linux install Chromium's system dependencies as described below. The test isolates its HOME and session data and saves screenshots to `target/formal-reports/auto-requeue-browser/`. It checks settings persistence and validation, counter display and a Run All retry. The retry uses a scripted command provider, so it does not verify a real external provider. The existing responsive WebUI CI workflow runs both scenarios and uploads the reports.
 
+## Diff browser regression
+
+From the repository root, install the pinned Playwright package and Chromium, build the production runtime, and run the dedicated test:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+tests/webui/node_modules/.bin/playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/diff-browser.mjs
+```
+
+On Linux, install Chromium system dependencies as well with `tests/webui/node_modules/.bin/playwright install --with-deps chromium`. The responsive WebUI workflow runs the test and uploads `target/formal-reports/diff-browser/`, containing changed, refresh, empty, unavailable and error screenshots. The test uses a real runtime, real HTMX requests and an isolated temporary Git repository and worktree, not the project repository. It verifies a changed file, refresh after an external edit, an empty diff, an unavailable session branch and an error for a nonexistent Git branch. `WEBUI_BDD_BIN` selects an alternative runtime and `WEBUI_DIFF_REPORT_DIR` overrides the screenshot directory.
+
 ## Graph flag browser regression
 
 After installing the pinned browser dependencies, run `cargo +1.99.1 build --locked --all-features --bin cruise-runtime` followed by `node tests/webui/graph-flags.mjs` from the repository root. The existing WebUI CI job runs this test and uploads `target/formal-reports/graph-browser/`. `WEBUI_BDD_BIN` can select another runtime and `WEBUI_GRAPH_REPORT_DIR` changes the screenshot directory. The test uses a temporary HOME/XDG tree and changes persisted flags externally, exercising real Graph tab HTMX requests for off, on, off again, and an all-disabled graph. It asserts the server's Mermaid source and projected edges, not that the externally loaded Mermaid CDN successfully rendered SVG. Screenshots capture the browser state at the swap and may show Mermaid source if the CDN has not loaded.
