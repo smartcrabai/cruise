@@ -85,7 +85,8 @@ fails the load (see [steps.md](steps.md)).
 ## Workflow defaults (`default.yaml`)
 
 A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`, `subagent_model`,
-`max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `base_branch`, `auto_fetch`,
+`max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `commit_message_template`, `pr_body_template`,
+`base_branch`, `auto_fetch`,
 `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `env`, `retry`, `mcp_servers`, and
 `pre_steps`. Unknown keys and workflow-only keys (`description`, `steps`,
 `groups`, `after-pr`, and `create_pr`) are rejected.
@@ -340,6 +341,23 @@ CLI option.
 
 
 See [after-pr.md](after-pr.md) for steps that run after PR creation.
+
+## `commit_message_template` and `pr_body_template`
+
+These optional top-level strings customize the host-created commit message and PR body in the worktree PR creation path. They may also be set in user `<config_dir>/default.yaml` or project `.cruise/default.yaml`; precedence is workflow > project defaults > user defaults > unset. They are not CLI options or environment overrides.
+
+```yaml
+commit_message_template: "{title} [{session_id}]"
+pr_body_template: |
+  ## Summary
+  {body}
+```
+
+The commit template permits `{title}`, `{issue}`, `{session_id}`, and `{branch}`. The PR body template additionally permits `{body}`. `{title}` is the trimmed generated PR title, falling back to the first non-empty trimmed line of the session input or title. `{body}` is the trimmed generated body, or empty if generation fails. `{issue}` currently always expands to an empty string, `{session_id}` is the session ID, and `{branch}` is the worktree branch name. See [variables.md](variables.md#commit-and-pr-template-variables) for the separate vocabulary.
+
+Unknown variables, including `{plan}`, and malformed syntax are rejected at workflow load/compile time. Use `{{` and `}}` for literal braces; expanded values are not rescanned. Rendered output is trimmed, and an empty commit message is an error. Cruise appends any configured Co-authored-by trailer separately. With a body template, the title and body are passed explicitly instead of using `--fill`.
+
+When both templates are unset, existing commit and PR creation behavior is unchanged, including the existing input fallback and `--fill` for an empty PR title. These settings do not affect current-branch runs, `create_pr: false`, agent-created commits, or squash-merge messages. They do not automatically add issue closing text.
 
 ## `force_exec`
 

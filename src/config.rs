@@ -178,6 +178,13 @@ pub struct WorkflowConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub languages: Option<LanguagesConfig>,
 
+    /// Optional template for the generated commit subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_message_template: Option<String>,
+    /// Optional template for the generated pull request body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_body_template: Option<String>,
+
     /// Automatically commit, push, and create a pull request after a successful
     /// worktree run. When false, the session completes without PR processing;
     /// the worktree and its artifacts are retained. Defaults to `true`.
@@ -4871,6 +4878,8 @@ steps:
                 "pr_language",
                 "plan_language",
                 "languages",
+                "commit_message_template",
+                "pr_body_template",
                 "env",
                 "force_exec",
                 "disallowed_tools",

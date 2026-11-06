@@ -92,7 +92,7 @@ The full spec is split into the files below. Load only the sections you need.
 
 | Doc | Contents |
 |-----|----------|
-| [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, workflow-only `create_pr`, `force_exec`, hot-reload, rate-limit retry |
+| [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, workflow-only `create_pr`, `commit_message_template`, `pr_body_template`, `force_exec`, hot-reload, rate-limit retry |
 | [references/sdk.md](references/sdk.md) | SDK backends: jcode SDK (default, requires jcode CLI v0.88.0+), claude-agent-sdk, and OpenCode V2; model references, session tools, workflow-level MCP servers, and differences from command mode |
 | [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, `output_file`, command, option, parallel, `github-review` (after-pr only); child restrictions, `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{file:...}`, `{plan.language}`, `{pr.*}` |

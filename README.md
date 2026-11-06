@@ -883,6 +883,8 @@ plan_model: opus          # model used for the built-in plan step (optional)
 languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
   plan: English           # language used by built-in planning prompts
+# commit_message_template: "{title} [{session_id}]" # host-created commit message
+# pr_body_template: "## Summary\n{body}"            # generated PR body wrapper
 # force_exec: false       # execute direct plan entry points in place (use --no-force-exec to opt out)
 # permission: full        # prompt permission: read-only | edit | full (default full)
 # disallowed_tools: [web, subagent, "shell:npm publish"] # SDK prompt deny list
@@ -1248,6 +1250,28 @@ plan_language: Japanese   # Deprecated; use languages.plan instead.
 
 The effective values are available to built-in templates as `{pr.language}` and `{plan.language}`.
 
+### Commit and PR Templates
+
+Optional top-level string keys `commit_message_template` and `pr_body_template` customize the host-created commit and PR body in the worktree PR creation path. Set them in the workflow or in user `<config_dir>/default.yaml` or project `.cruise/default.yaml`. Precedence is workflow > project defaults > user defaults > unset. They are not CLI options or environment overrides.
+
+```yaml
+commit_message_template: "{title} [{session_id}]"
+pr_body_template: |
+  ## Summary
+  {body}
+```
+
+| Template | Allowed variables |
+|----------|-------------------|
+| `commit_message_template` | `{title}`, `{issue}`, `{session_id}`, `{branch}` |
+| `pr_body_template` | `{title}`, `{body}`, `{issue}`, `{session_id}`, `{branch}` |
+
+`{title}` is the trimmed LLM-generated PR title, or the first non-empty trimmed line of the session input or title if generation yields an empty title. `{body}` is the trimmed LLM-generated PR body, or an empty string if generation fails. `{issue}` currently always expands to an empty string, `{session_id}` is the session ID, and `{branch}` is the worktree branch name. No issue closing text is added automatically by these templates.
+
+Unknown variables and malformed syntax are rejected at workflow load/compile time. Escape literal braces as `{{` and `}}`; expanded values are not expanded again. The rendered body and commit message are trimmed. An empty rendered commit message is an error; the configured Co-authored-by trailer is appended separately. When a PR body template is set, Cruise supplies the title and body explicitly rather than using `--fill`.
+
+When both templates are unset, existing behavior is unchanged: the commit uses the generated PR title or existing input fallback, and an empty PR title uses `--fill`. These settings do not affect current-branch runs, `create_pr: false`, agent-created commits, or squash-merge messages.
+
 ### Session Title Generation
 
 After plan approval, cruise generates a concise session title (up to 80 characters) shown in `cruise list` and the WebUI sidebar instead of the raw task input. The behavior depends on the backend:
@@ -1484,6 +1508,8 @@ steps:
 ```
 
 ### Post-PR Automation (`after-pr`)
+
+For host-created commit and PR body formatting, see [Commit and PR Templates](#commit-and-pr-templates).
 
 Prompt steps here, including `github-review` prompts, inherit workflow
 `disallowed_tools` and may add step restrictions. Native `squash-merge` is not
@@ -1870,6 +1896,8 @@ steps:
 ```
 
 ### Variable Reference
+
+Commit and PR templates use a separate [allowed vocabulary](#commit-and-pr-templates), which does not include `{plan}`. The `{plan}` below remains a session plan file path.
 
 | Variable | Description |
 |----------|-------------|
