@@ -170,7 +170,9 @@ fn footer_line(app: &TuiApp) -> Line<'_> {
     Line::from(footer_spans(app, footer_status_spans(app)))
 }
 fn render_sessions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
-    app.load_tab_data();
+    if app.tab != DetailTab::Diff {
+        app.load_tab_data();
+    }
     let layout = if area.width >= 120 {
         Layout::horizontal([Constraint::Length(34), Constraint::Min(1)])
     } else {
@@ -254,6 +256,7 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             DetailTab::Dag,
             DetailTab::Plan,
             DetailTab::Log,
+            DetailTab::Diff,
         ]
         .into_iter()
         .map(|tab| Line::from(format!(" {} ", tab.label()))),
@@ -263,6 +266,7 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         DetailTab::Dag => 1,
         DetailTab::Plan => 2,
         DetailTab::Log => 3,
+        DetailTab::Diff => 4,
     })
     .block(focus_panel(
         app,
@@ -279,6 +283,7 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         DetailTab::Dag => render_dag(frame, app, body),
         DetailTab::Plan => render_plan(frame, app, body),
         DetailTab::Log => render_log(frame, app, body),
+        DetailTab::Diff => render_diff(frame, app, body),
     }
 }
 
@@ -721,6 +726,56 @@ fn strip_text_styles(text: Text<'_>) -> Text<'_> {
                 .collect::<Line<'_>>()
         })
         .collect()
+}
+
+fn render_diff(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let result = app.active_session().and_then(|s| app.diff_cache.get(&s.id));
+    let height = usize::from(area.height.saturating_sub(2));
+    let mut lines = Vec::new();
+    match result {
+        Some(Ok(diff)) => {
+            if diff.truncated {
+                lines.push(Line::styled(
+                    "Warning: diff truncated",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            if diff.patch.is_empty() {
+                lines.push(Line::from(format!("No changes on {}", diff.branch)));
+            } else {
+                let remaining = height.saturating_sub(lines.len());
+                lines.extend(
+                    diff.patch
+                        .lines()
+                        .skip(app.diff_scroll)
+                        .take(remaining)
+                        .map(|line| {
+                            let style = if line.starts_with("diff --git") {
+                                Style::default().add_modifier(Modifier::BOLD)
+                            } else if line.starts_with('+') {
+                                Style::default().fg(Color::Green)
+                            } else if line.starts_with('-') {
+                                Style::default().fg(Color::Red)
+                            } else if line.starts_with("@@") {
+                                Style::default().fg(Color::Cyan)
+                            } else {
+                                Style::default()
+                            };
+                            Line::styled(line, style)
+                        }),
+                );
+            }
+        }
+        Some(Err(error)) if error.contains("has no worktree branch") => {
+            lines.push(Line::from("No session branch available for diff"));
+        }
+        Some(Err(error)) => lines.push(Line::from(error.as_str())),
+        None => lines.push(Line::from("Diff unavailable")),
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(panel(app, " Diff ", false)),
+        area,
+    );
 }
 
 fn render_log(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {

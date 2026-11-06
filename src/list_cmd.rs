@@ -165,6 +165,12 @@ pub async fn run(args: ListArgs) -> Result<()> {
             };
 
             match action {
+                "View Diff" => {
+                    crate::platform::reclaim_terminal_foreground();
+                    if let Err(e) = crate::diff_cmd::print_session_diff(&session, false) {
+                        eprintln!("{e}");
+                    }
+                }
                 "Generate Plan" => {
                     match crate::plan_cmd::regenerate_plan_for_session(
                         &manager,
@@ -420,6 +426,7 @@ fn pick_session(manager: &crate::session::SessionManager) -> Result<Option<Sessi
 }
 
 /// Returns the action menu items available for the given session.
+/// "View Diff" appears when the session has a worktree branch; Create PR takes priority.
 /// "Run"/"Resume" appears for runnable phases; "Replan" only for Planned.
 /// "Open PR" appears for Completed sessions that have a PR URL.
 /// "Reset to Planned" appears for Running, Failed, Completed, and Suspended.
@@ -436,6 +443,9 @@ fn session_actions_with_plan_availability(
     plan_available: bool,
 ) -> Vec<&'static str> {
     let mut actions = vec![];
+    if session.worktree_branch.is_some() && !matches!(session.phase, SessionPhase::PrFailed(_)) {
+        actions.push("View Diff");
+    }
     match &session.phase {
         SessionPhase::Draft | SessionPhase::AwaitingInput => {
             actions.push("Generate Plan");
@@ -473,6 +483,9 @@ fn session_actions_with_plan_availability(
             actions.push("Create PR");
             if session.pr_url.is_some() {
                 actions.push("Open PR");
+            }
+            if session.worktree_branch.is_some() {
+                actions.push("View Diff");
             }
             actions.push("Reset to Planned");
         }
@@ -846,6 +859,18 @@ mod tests {
             session_actions(&session),
             vec!["Create PR", "Open PR", "Reset to Planned", "Delete", "Back"]
         );
+        session.worktree_branch = Some("session-branch".into());
+        assert_eq!(
+            session_actions(&session),
+            vec![
+                "Create PR",
+                "Open PR",
+                "View Diff",
+                "Reset to Planned",
+                "Delete",
+                "Back"
+            ]
+        );
     }
 
     #[test]
@@ -858,6 +883,44 @@ mod tests {
     #[test]
     fn pr_failed_label_identifies_publication_failure() {
         assert!(format_session_label(&pr_failed_session()).contains("PR Failed"));
+    }
+
+    #[test]
+    fn diff_contract_list_action_is_first_only_with_branch_in_every_phase() {
+        for phase in [
+            SessionPhase::Draft,
+            SessionPhase::AwaitingInput,
+            SessionPhase::AwaitingApproval,
+            SessionPhase::Planned,
+            SessionPhase::Running,
+            SessionPhase::Completed,
+            SessionPhase::Failed("x".into()),
+            SessionPhase::PrFailed("x".into()),
+            SessionPhase::Suspended,
+        ] {
+            let mut session = make_session("20260101000000000", "task", phase.clone());
+            let actions = session_actions_with_plan_availability(&session, true);
+            assert!(!actions.contains(&"View Diff"), "{phase:?}: {actions:?}");
+            assert_eq!(actions.last(), Some(&"Back"), "{phase:?}");
+            session.worktree_branch = Some("session-branch".into());
+            let actions = session_actions_with_plan_availability(&session, true);
+            assert_eq!(
+                actions.first(),
+                Some(&"View Diff"),
+                "{phase:?}: {actions:?}"
+            );
+            assert_eq!(actions.last(), Some(&"Back"), "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn diff_contract_print_rejects_non_git_base_directory() {
+        let temp =
+            TempDir::new().unwrap_or_else(|error| panic!("temporary non-git directory: {error}"));
+        let mut session = make_session("20260101000000000", "task", SessionPhase::Completed);
+        session.base_dir = temp.path().to_path_buf();
+        session.worktree_branch = Some("session-branch".into());
+        assert!(crate::diff_cmd::print_session_diff(&session, false).is_err());
     }
 
     // -----------------------------------------------------------------------
