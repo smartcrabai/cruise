@@ -512,6 +512,8 @@ Options:
 
 Shows or updates application-level settings stored in `config.json` or `config.yaml` under `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI and TUI** execute in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
 
+Set `prevent_sleep: true` in the machine-level `config.yaml` (or `"prevent_sleep": true` in `config.json`) to prevent sleep during runs on macOS; the default is `false`. Cruise shares `/usr/bin/caffeinate -dis -w <pid>` across overlapping enabled runs and stops it when the last one ends. This also covers CLI, TUI, and WebUI runs, but not planning alone. Other operating systems do nothing. Failures to load the setting or start caffeinate only warn and do not fail the run; a later run retries. Changes take effect on the next run. This setting is not supported in project `default.yaml`.
+
 If both files exist, `config.json` wins; otherwise an existing `config.yaml` is used. When neither exists, settings updates create `config.json`. The files are not merged, and an invalid selected file is an error rather than a reason to try the other format. Updates write back to the selected file in its format; YAML comments are not retained.
 
 `model` and `plan_model` in either format provide optional global model defaults. Each accepts a string or an ordered array: the first entry is primary, the rest are SDK fallbacks. Both formats use the same field names and aliases. For example, `config.yaml`:
@@ -808,6 +810,7 @@ fresh snapshot session to use updated settings.
 - `env` and `mcp_servers` merge per key (higher layer wins).
 - `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
 - Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
+- Worktree settings `base_branch` and `auto_fetch` are defaults-only keys, with project values overriding user values. `auto_fetch: true` requires a nonempty `base_branch` after merging.
 - `description`, `steps`, `groups`, and `after-pr` are workflow-only and are a load error in `default.yaml`. Unknown keys are errors too.
 - If defaults name a backend (`command` / `sdk`) of a different kind than the workflow's own, validation fails when they would fill an unset backend-specific `model`, `plan_model`, `subagent_model`, or `retry`, add a missing `mcp_servers` entry, or fill an unset `computer_use`, `permission`, or `disallowed_tools` field, regardless of its value. Set the field in the workflow or remove it from `default.yaml`. The check runs before `CRUISE_SDK` overrides, which are not considered.
 
@@ -1871,7 +1874,7 @@ When `cruise run` starts a new session, it prompts you to choose a workspace mod
 
 | Mode | Description |
 |------|-------------|
-| **Worktree** (default) | Creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` (default: `~/.local/share/cruise/worktrees/<session-id>/`). A new branch `cruise/<session-id>-<sanitized-input>` is checked out. Requires `gh` CLI for PR creation (`glab` for GitLab repositories). |
+| **Worktree** (default) | Creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` (default: `~/.local/share/cruise/worktrees/<session-id>/`). A new branch `cruise/<session-id>-<sanitized-input>` is checked out from HEAD or the configured `base_branch` as described below. Requires `gh` CLI for PR creation (`glab` for GitLab repositories). |
 | **Current branch** | Executes directly in the current repository on the active branch. No worktree or PR is created automatically, and no automatic merge runs. If `after_pr` or `merge` is opted in, its unavailable after-PR actions are skipped with a reason. |
 
 With `--all`, worktree mode is always used; a single `cruise run` keeps the workspace mode already recorded on the session, and in non-interactive environments (piped stdin) fresh sessions default to worktree mode. Sessions created with `--repo` (or the WebUI repository picker) are always pinned to Worktree mode — the prompt is skipped and current-branch mode is not available, since a PR is the only way the work leaves the temporary clone.
@@ -1886,6 +1889,8 @@ With `--all`, worktree mode is always used; a single `cruise run` keeps the work
 
 - The worktree is retained until the PR is closed or merged; run `cruise clean` to delete it.
 - Set `cleanup_after_pr: true` in the config (or pass `--cleanup-after-pr` at runtime) to automatically delete the local worktree and branch immediately after the PR is created. Use `--no-cleanup-after-pr` to override the config setting and keep them.
+
+New worktrees start at the repository's current HEAD unless `base_branch` is set in user or project `default.yaml`. With a base configured, Cruise prefers the local branch, then `origin/<base>`; with `auto_fetch: true`, it fetches only that branch from `origin` and prefers the updated remote-tracking ref. A failed fetch warns and falls back to local refs; a missing base is an error. The configured base is saved with the session and used as the PR or MR target; without it, the forge CLI chooses its default. Existing worktrees are reused without fetching or resolving the base again.
 
 ### Copying files into the worktree
 

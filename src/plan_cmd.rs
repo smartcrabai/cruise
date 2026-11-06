@@ -946,14 +946,7 @@ fn plan_working_dir(session: &SessionState) -> &Path {
 /// set.  If `base_dir` is not a git repository the call succeeds silently and
 /// the session keeps `worktree_path = None` (plan runs in `base_dir`).
 fn setup_planning_worktree(manager: &SessionManager, session: &mut SessionState) -> Result<()> {
-    let worktrees_dir = manager.worktrees_dir();
-    match crate::worktree::setup_session_worktree(
-        &session.base_dir,
-        &session.id,
-        &session.worktree_branch_source(),
-        &worktrees_dir,
-        session.worktree_branch.as_deref(),
-    ) {
+    match crate::workspace::setup_session_worktree(manager, session) {
         Ok((ctx, _reused)) => {
             eprintln!(
                 "{} worktree: {} (planning)",
@@ -1039,7 +1032,11 @@ enum PlanTarget {
 /// For local sessions the config is resolved (and displayed) immediately; for
 /// repo sessions only the spec is validated -- the config lives in the
 /// temporary clone, which is created later.
-fn resolve_plan_target(repo: Option<&str>, explicit_config: Option<&str>, has_issue: bool) -> Result<PlanTarget> {
+fn resolve_plan_target(
+    repo: Option<&str>,
+    explicit_config: Option<&str>,
+    has_issue: bool,
+) -> Result<PlanTarget> {
     match repo.map(str::trim) {
         Some(spec) if !spec.is_empty() => {
             crate::repo_clone::validate_repo_spec(spec)?;
@@ -2763,6 +2760,36 @@ steps:
             .worktree_context()
             .unwrap_or_else(|| panic!("expected worktree context"));
         crate::worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn test_planning_worktree_reuse_ignores_invalid_base_settings()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = lock_process();
+        let tmp = TempDir::new()?;
+        let _config =
+            crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("config"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join(".cruise"))?;
+        init_git_repo(&repo);
+        fs::write(repo.join(".cruise/default.yaml"), "base_branch: main\n")?;
+        let manager = SessionManager::new(tmp.path().join("data"));
+        let mut session = make_session("20260522080002", &repo);
+        manager.create(&session)?;
+        setup_planning_worktree(&manager, &mut session)?;
+        let path = session.worktree_path.clone();
+        let branch = session.worktree_branch.clone();
+        fs::write(repo.join(".cruise/default.yaml"), "base_branch: '-x'\n")?;
+
+        setup_planning_worktree(&manager, &mut session)?;
+        assert_eq!(session.worktree_path, path);
+        assert_eq!(session.worktree_branch, branch);
+        assert_eq!(session.worktree_base_branch.as_deref(), Some("main"));
+
+        let mut fresh = make_session("20260522080003", &repo);
+        assert!(setup_planning_worktree(&manager, &mut fresh).is_err());
+        assert!(!manager.worktrees_dir().join(&fresh.id).exists());
+        Ok(())
     }
 
     #[test]

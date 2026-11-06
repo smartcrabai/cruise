@@ -100,6 +100,12 @@ pub struct SessionState {
     pub worktree_path: Option<PathBuf>,
     /// Worktree branch name (set during run phase).
     pub worktree_branch: Option<String>,
+    /// Base branch used when the worktree was created.
+    #[serde(default)]
+    pub worktree_base_branch: Option<String>,
+    /// Exact ref selected as the worktree creation start point, when configured.
+    #[serde(default)]
+    pub worktree_base_ref: Option<String>,
     /// Where this session should run.
     #[serde(default)]
     pub workspace_mode: WorkspaceMode,
@@ -250,6 +256,8 @@ impl SessionState {
             completed_at: None,
             worktree_path: None,
             worktree_branch: None,
+            worktree_base_branch: None,
+            worktree_base_ref: None,
             workspace_mode: WorkspaceMode::Worktree,
             target_branch: None,
             allow_dirty_working_tree: false,
@@ -1500,6 +1508,68 @@ mod tests {
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(matches!(loaded.phase, SessionPhase::Running));
         assert_eq!(loaded.current_step, Some("implement".to_string()));
+    }
+
+    #[test]
+    fn test_worktree_base_branch_persists_and_legacy_session_loads() {
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let state = SessionState::new(
+            "20260306150001".to_string(),
+            PathBuf::from("/repo"),
+            crate::session_config::SessionConfigRef::File {
+                path: PathBuf::from("cruise.yaml"),
+            },
+            "task".to_string(),
+        );
+        let mut json = serde_json::to_value(&state)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("serialized session must be an object"))
+            .remove("worktree_base_branch");
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("serialized session must be an object"))
+            .remove("worktree_base_ref");
+        let legacy: SessionState = serde_json::from_value(json.clone())
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        assert_eq!(legacy.worktree_base_ref, None);
+        assert_eq!(
+            serde_json::to_value(&legacy)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))
+                .get("worktree_base_branch"),
+            Some(&serde_json::Value::Null)
+        );
+
+        json["worktree_base_branch"] = serde_json::json!("develop");
+        json["worktree_base_ref"] = serde_json::json!("refs/heads/develop");
+        let configured: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        manager
+            .create(&configured)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let loaded = manager
+            .load(&configured.id)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        assert_eq!(
+            serde_json::to_value(&loaded)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))["worktree_base_branch"],
+            "develop"
+        );
+        manager
+            .save(&loaded)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let reloaded = manager
+            .load(&configured.id)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        assert_eq!(
+            reloaded.worktree_base_ref.as_deref(),
+            Some("refs/heads/develop")
+        );
+        assert_eq!(
+            serde_json::to_value(&reloaded)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))["worktree_base_branch"],
+            "develop"
+        );
     }
 
     #[test]
@@ -4385,6 +4455,7 @@ mod tests {
             "task",
             &tmp.path().join("worktrees"),
             None,
+            &crate::worktree::WorktreeBase::default(),
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
         let mut terminal = SessionState::new(

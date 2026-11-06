@@ -68,6 +68,7 @@ pub mod herdr;
 pub(crate) mod multiline_input;
 pub mod platform;
 pub mod run_observer;
+pub mod sleep_guard;
 mod spinner;
 
 #[cfg(any(test, feature = "test-utils"))]
