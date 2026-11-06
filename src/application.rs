@@ -3256,6 +3256,7 @@ impl CruiseApplication {
     {
         let parallelism = batch_parallelism(&parallelism_provider)?;
         let batch = self.runtime.try_begin_batch()?;
+        let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
         let candidates = self.manager.run_all_candidates()?;
         let candidate_map = candidates
             .iter()
@@ -3623,6 +3624,7 @@ impl CruiseApplication {
         log_sink: Option<Arc<dyn LogSink>>,
         batch_started: bool,
     ) -> Result<SessionState> {
+        let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
         let execution = crate::telemetry::Operation::execution("run", id, None);
         let exec_initial =
             self.manager
@@ -7015,6 +7017,7 @@ mod merge_pr_tests {
             "task",
             &f.tmp.path().join("worktrees"),
             None,
+            &crate::worktree::WorktreeBase::default(),
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let mut state = SessionState::new(
