@@ -64,7 +64,7 @@ pub(crate) fn session_actions(
         && session.plan_available;
     let usable_plan = session.plan_available && !has_plan_error;
     let show_approve = awaiting_approval_with_plan && !has_plan_error;
-    let show_publish_issue = (session.phase == "Awaiting Approval" || session.phase == "Planned")
+    let show_publish_issue = session.pr_target.is_none() && (session.phase == "Awaiting Approval" || session.phase == "Planned")
         && usable_plan
         && !is_locally_running
         && !is_active_run;
@@ -85,7 +85,7 @@ pub(crate) fn session_actions(
         && (session.phase == "Suspended"
             || session.phase == "Failed"
             || session.phase == "Completed");
-    let show_replan = !is_active_run && session.phase == "Planned";
+    let show_replan = session.pr_target.is_none() && !is_active_run && session.phase == "Planned";
     let show_discard = !is_locally_running && session.phase == "Awaiting Approval";
     let show_delete =
         !is_locally_running && session.phase != "Running" && session.phase != "Awaiting Approval";

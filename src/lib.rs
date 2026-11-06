@@ -32,6 +32,7 @@ pub mod option_handler;
 pub mod paths;
 pub mod planning;
 pub mod pr_merge;
+pub mod pr_review_fix;
 pub mod repo_clone;
 pub mod resolver;
 pub mod retry;

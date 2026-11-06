@@ -65,6 +65,7 @@ mod plan_cmd;
 mod planning;
 mod platform;
 mod pr_merge;
+mod pr_review_fix;
 mod repo_clone;
 mod resolver;
 mod retry;
@@ -218,6 +219,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             // Backward compat: positional input and planning options use `plan`.
             let plan_args = cli::PlanArgs {
                 input,
+                pr: None,
                 config: None,
                 dry_run: false,
                 no_force_exec,

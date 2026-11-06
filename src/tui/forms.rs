@@ -81,6 +81,7 @@ pub enum Step {
     Source,
     WorkingDirectory,
     Repository,
+    PullRequest,
     Config,
     SkippedSteps,
     Flags,
@@ -90,10 +91,11 @@ pub enum Step {
 }
 
 impl Step {
-    pub const ORDER: [Self; 11] = [
+    pub const ORDER: [Self; 12] = [
         Self::Source,
         Self::WorkingDirectory,
         Self::Repository,
+        Self::PullRequest,
         Self::Config,
         Self::Task,
         Self::Attachments,
@@ -112,6 +114,7 @@ impl Step {
             Self::Source => "Source",
             Self::WorkingDirectory => "Working directory",
             Self::Repository => "Repository (GitHub or GitLab)",
+            Self::PullRequest => "Pull request number",
             Self::Config => "Workflow config",
             Self::SkippedSteps => "Skipped steps",
             Self::Flags => "Workflow flags",
@@ -193,6 +196,7 @@ pub struct NewSessionForm {
     pub input: Editor,
     pub working_dir: Editor,
     pub repository: Editor,
+    pub pull_request: Editor,
     pub config: Editor,
     pub attachments: Editor,
     pub skipped: Editor,
@@ -236,6 +240,7 @@ impl NewSessionForm {
             input: Editor::new(&draft.input),
             working_dir: Editor::new(&draft.working_dir),
             repository: Editor::new(draft.repo.as_deref().unwrap_or("")),
+            pull_request: Editor::default(),
             config: Editor::new(draft.requested_config_path.as_deref().unwrap_or("")),
             attachments: Editor::default(),
             skipped: Editor::new(&draft.skipped_steps.join(", ")),
@@ -340,6 +345,9 @@ impl NewSessionForm {
             config_path,
             config_yaml: None,
             repo,
+            pr_number: (self.source == SourceKind::GitHub)
+                .then(|| self.pull_request.text().trim().parse::<u64>().ok())
+                .flatten(),
             workspace_mode: if self.source == SourceKind::GitHub {
                 WorkspaceMode::Worktree
             } else {
@@ -357,7 +365,7 @@ impl NewSessionForm {
     pub fn applies(&self, step: Step) -> bool {
         match step {
             Step::WorkingDirectory | Step::Workspace => self.source == SourceKind::Directory,
-            Step::Repository => self.source == SourceKind::GitHub,
+            Step::Repository | Step::PullRequest => self.source == SourceKind::GitHub,
             Step::Flags => !self.flag_choices.is_empty(),
             Step::DirtyTree => {
                 self.source == SourceKind::Directory
@@ -457,6 +465,7 @@ impl NewSessionForm {
             Step::Task => self.input.input(event),
             Step::WorkingDirectory => self.working_dir.input(event),
             Step::Repository => self.repository.input(event),
+            Step::PullRequest => self.pull_request.input(event),
             Step::Config => self.config.input(event),
             Step::Attachments => self.attachments.input(event),
             Step::SkippedSteps => self.skipped.input(event),
@@ -494,6 +503,9 @@ impl NewSessionForm {
             Step::WorkingDirectory => nonempty(&self.working_dir.text())
                 .unwrap_or_else(|| "current directory".to_string()),
             Step::Repository => self.repository.text().trim().to_string(),
+            Step::PullRequest => {
+                nonempty(&self.pull_request.text()).unwrap_or_else(|| "none".to_string())
+            }
             Step::Config => {
                 nonempty(&self.config.text()).unwrap_or_else(|| "auto-detect".to_string())
             }
@@ -597,12 +609,18 @@ impl NewSessionForm {
     pub fn validate_step(&self) -> Result<(), String> {
         match self.step {
             Step::Attachments
-                if self.input.text().trim().is_empty() && self.attachment_paths().is_empty() =>
+                if self.input.text().trim().is_empty()
+                    && self.attachment_paths().is_empty()
+                    && (self.source != SourceKind::GitHub
+                        || nonempty(&self.pull_request.text()).is_none()) =>
             {
                 Err("Task description or an image attachment is required".to_string())
             }
             Step::Repository if self.repository.text().trim().is_empty() => {
                 Err("Select a GitHub repository before creating a session".to_string())
+            }
+            Step::PullRequest if !valid_pr_number(&self.pull_request.text()) => {
+                Err("Pull request number must be a positive integer".to_string())
             }
             _ => Ok(()),
         }
@@ -615,8 +633,16 @@ impl NewSessionForm {
         if self.source == SourceKind::GitHub && self.repository.text().trim().is_empty() {
             return Err("Select a GitHub repository before creating a session".to_string());
         }
+        if self.source == SourceKind::GitHub && !valid_pr_number(&self.pull_request.text()) {
+            return Err("Pull request number must be a positive integer".to_string());
+        }
         Ok(())
     }
+}
+
+fn valid_pr_number(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || value.parse::<u64>().is_ok_and(|number| number > 0)
 }
 
 fn nonempty(value: &str) -> Option<String> {
@@ -1148,6 +1174,68 @@ mod tests {
 
         assert!(form.advance());
         assert_eq!(form.step, Step::SkippedSteps);
+    }
+
+    #[test]
+    fn github_pr_number_step_contract() {
+        let mut form = NewSessionForm::default();
+        form.choose(1);
+        form.repository.set_text("acme/cruise");
+        let steps = form
+            .steps()
+            .map(|step| format!("{step:?}"))
+            .collect::<Vec<_>>();
+        let repository = steps
+            .iter()
+            .position(|step| step == "Repository")
+            .unwrap_or_else(|| panic!("{steps:?}"));
+        assert_eq!(
+            steps.get(repository + 1).map(String::as_str),
+            Some("PullRequest")
+        );
+        assert!(form.advance());
+        assert!(form.advance());
+        assert_eq!(format!("{:?}", form.step), "PullRequest");
+        assert!(form.validate_step().is_ok());
+        let request = serde_json::to_value(form.request()).unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            request
+                .get("prNumber")
+                .is_some_and(serde_json::Value::is_null),
+            "{request}"
+        );
+        for c in "12".chars() {
+            form.input(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert!(form.validate_step().is_ok());
+        let request = serde_json::to_value(form.request()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(request.get("prNumber"), Some(&serde_json::json!(12)));
+    }
+
+    #[test]
+    fn github_pr_number_step_rejects_invalid_values() {
+        for invalid in ["abc", "0"] {
+            let mut form = NewSessionForm::default();
+            form.choose(1);
+            form.repository.set_text("acme/cruise");
+            assert!(form.advance());
+            assert!(form.advance());
+            assert_eq!(format!("{:?}", form.step), "PullRequest");
+            for c in invalid.chars() {
+                form.input(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            assert!(form.validate_step().is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn directory_source_has_no_pr_number_step() {
+        let form = NewSessionForm::default();
+        assert!(
+            !form
+                .steps()
+                .any(|step| format!("{step:?}") == "PullRequest")
+        );
     }
 
     #[test]

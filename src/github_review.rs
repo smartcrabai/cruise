@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::cancellation::CancellationToken;
+use crate::config::ReviewerScope;
 use crate::engine::{ExecutionContext, PromptStepOutput, run_prompt_step};
 use crate::error::{CruiseError, Result};
 use crate::step::GitHubReviewStep;
@@ -384,6 +385,75 @@ pub async fn unresolved_bot_threads(
         .collect())
 }
 
+async fn unresolved_review_threads(
+    pr: &PullRequestRef,
+    scope: ReviewerScope,
+    bots: &[String],
+    permissions: &mut std::collections::HashMap<String, bool>,
+    cancel: Option<&CancellationToken>,
+) -> Result<(Vec<ReviewThread>, Vec<String>)> {
+    let mut included = Vec::new();
+    let mut excluded = Vec::new();
+    for thread in fetch_threads(pr, cancel)
+        .await?
+        .into_iter()
+        .filter(|t| !t.is_resolved)
+    {
+        let author = thread
+            .comments
+            .first()
+            .map(|c| c.author.as_str())
+            .unwrap_or_default();
+        let allowed = if scope == ReviewerScope::Bots {
+            is_listed(author, bots)
+        } else if author.is_empty() {
+            false
+        } else if let Some(allowed) = permissions.get(&author.to_ascii_lowercase()) {
+            *allowed
+        } else {
+            // Never interpolate arbitrary API data into an endpoint path.
+            if !author
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'[' || c == b']')
+            {
+                return Err(failed("invalid review author login"));
+            }
+            let args = vec![
+                "api".into(),
+                format!("repos/{{owner}}/{{repo}}/collaborators/{author}/permission"),
+                "--jq".into(),
+                ".permission".into(),
+            ];
+            let output = run_process("gh", &args, pr, cancel).await?;
+            let allowed = if output.status.success() {
+                match String::from_utf8_lossy(&output.stdout).trim() {
+                    "admin" | "maintain" | "write" => true,
+                    "read" | "triage" | "none" => false,
+                    _ => return Err(failed("invalid collaborator permission response")),
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("HTTP 404") {
+                    false
+                } else {
+                    return Err(failed(format!(
+                        "gh collaborator permission failed: {}",
+                        stderr.trim()
+                    )));
+                }
+            };
+            permissions.insert(author.to_ascii_lowercase(), allowed);
+            allowed
+        };
+        if allowed {
+            included.push(thread);
+        } else if scope == ReviewerScope::All {
+            excluded.push(thread.id);
+        }
+    }
+    Ok((included, excluded))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawResponse {
@@ -593,18 +663,25 @@ fn write_report(
     vars: &VariableStore,
     file: Option<&str>,
     iterations: &[Value],
+    excluded: &std::collections::BTreeSet<String>,
     error: Option<&str>,
 ) -> Result<()> {
     let Some(file) = file else {
         return Ok(());
     };
-    let report = json!({"iterations": iterations, "error": error});
+    let report = json!({"iterations": iterations, "excluded_thread_ids": excluded, "error": error});
     let text = serde_json::to_string_pretty(&report).map_err(|e| failed(e.to_string()))?;
     vars.write_artifact(file, &text)
 }
 
 fn ids(threads: &[ReviewThread]) -> Vec<&str> {
     threads.iter().map(|t| t.id.as_str()).collect()
+}
+
+fn same_thread_ids(before: &[ReviewThread], after: &[ReviewThread]) -> bool {
+    let before: std::collections::HashSet<_> = ids(before).into_iter().collect();
+    let after: std::collections::HashSet<_> = ids(after).into_iter().collect();
+    before == after
 }
 
 /// Run the `github-review` step: wait for bot review, let the prompt address
@@ -635,6 +712,7 @@ pub(crate) async fn run_step(
             .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf),
     };
     let mut report = Vec::new();
+    let mut excluded = std::collections::BTreeSet::new();
     let result = run_loop(
         ctx,
         step,
@@ -645,11 +723,12 @@ pub(crate) async fn run_step(
         step_name,
         allow_commit,
         &mut report,
+        &mut excluded,
     )
     .await;
     match result {
         Ok(()) => {
-            write_report(vars, step.report_file.as_deref(), &report, None)?;
+            write_report(vars, step.report_file.as_deref(), &report, &excluded, None)?;
             Ok(())
         }
         Err(error) => {
@@ -658,6 +737,7 @@ pub(crate) async fn run_step(
                 vars,
                 step.report_file.as_deref(),
                 &report,
+                &excluded,
                 Some(&error.to_string()),
             );
             Err(error)
@@ -676,19 +756,34 @@ async fn run_loop(
     step_name: &str,
     allow_commit: bool,
     report: &mut Vec<Value>,
+    excluded: &mut std::collections::BTreeSet<String>,
 ) -> Result<()> {
     let cancel = ctx.cancel_token;
     let bots = &step.review.bots;
+    let scope = step.review.reviewers;
+    let mut permissions = std::collections::HashMap::new();
     for iteration in 1..=step.review.max_iterations {
         let head = head_oid(pr, cancel).await?;
-        wait_for_review(pr, bots, &head, deadline, cancel).await?;
-        let threads = unresolved_bot_threads(pr, bots, cancel).await?;
+        if scope == ReviewerScope::Bots {
+            wait_for_review(pr, bots, &head, deadline, cancel).await?;
+        }
+        let (threads, ignored) =
+            unresolved_review_threads(pr, scope, bots, &mut permissions, cancel).await?;
+        excluded.extend(ignored);
         if threads.is_empty() {
             report.push(json!({"iteration": iteration, "head_oid": head, "bots": bots, "thread_ids": Vec::<&str>::new(), "actions": [], "remaining_thread_ids": Vec::<&str>::new()}));
-            write_report(vars, step.report_file.as_deref(), report, None)?;
+            if let Some(entry) = report.last_mut().filter(|_| scope == ReviewerScope::All) {
+                entry["reviewers"] = json!("all");
+                entry["excluded_thread_ids"] = json!(excluded);
+            }
+            write_report(vars, step.report_file.as_deref(), report, excluded, None)?;
             return Ok(());
         }
         report.push(json!({"iteration": iteration, "head_oid": head, "bots": bots, "thread_ids": ids(&threads)}));
+        if let Some(entry) = report.last_mut().filter(|_| scope == ReviewerScope::All) {
+            entry["reviewers"] = json!("all");
+            entry["excluded_thread_ids"] = json!(excluded);
+        }
 
         let remaining = deadline
             .checked_duration_since(Instant::now())
@@ -723,18 +818,29 @@ async fn run_loop(
         let actions = parse_review_actions(&output, &threads)?;
         publish_prompt_commits(pr, head_before.as_deref(), cancel).await?;
         apply_actions(pr, &threads, &actions, cancel).await?;
-        let left = unresolved_bot_threads(pr, bots, cancel).await?;
+        let (left, ignored) =
+            unresolved_review_threads(pr, scope, bots, &mut permissions, cancel).await?;
+        excluded.extend(ignored);
         if let Some(entry) = report.last_mut() {
             entry["actions"] = json!(actions.iter().map(|a| json!({"thread_id": a.thread_id, "reply": a.reply.is_some(), "resolve": a.resolve})).collect::<Vec<_>>());
             entry["remaining_thread_ids"] = json!(ids(&left));
+            if scope == ReviewerScope::All {
+                entry["excluded_thread_ids"] = json!(excluded);
+            }
         }
-        write_report(vars, step.report_file.as_deref(), report, None)?;
+        write_report(vars, step.report_file.as_deref(), report, excluded, None)?;
         if left.is_empty() {
             return Ok(());
         }
+        if scope == ReviewerScope::All && same_thread_ids(&threads, &left) {
+            return Err(failed(format!(
+                "{} review threads remain and iteration {iteration} resolved none (no progress)",
+                left.len()
+            )));
+        }
     }
     Err(failed(format!(
-        "unresolved bot threads remain after {} iterations",
+        "unresolved review threads remain after {} iterations",
         step.review.max_iterations
     )))
 }
@@ -769,6 +875,13 @@ D="$GH_FIXTURE_DIR"
 all=$(printf '%s ' "$@" | tr '\n' ' ')
 echo "$all" >> "$D/calls.log"
 case "$all" in
+  *collaborators/*/permission*)
+    case "$all" in
+      *collaborators/writer/permission*) echo write ;;
+      *collaborators/reader/permission*) echo read ;;
+      *collaborators/missing/permission*) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+      *) echo 'gh: Forbidden (HTTP 403)' >&2; exit 1 ;;
+    esac ;;
   *addPullRequestReviewThreadReply*)
     echo "$all" >> "$D/replies.log"
     echo '{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"c1"}}}}' ;;
@@ -887,6 +1000,68 @@ esac
 
     fn count(log: &str) -> usize {
         log.lines().filter(|l| !l.trim().is_empty()).count()
+    }
+
+    #[test]
+    fn progress_compares_id_sets_not_order_or_count() {
+        let before = [thread("a", true, true), thread("b", true, true)];
+        assert!(same_thread_ids(
+            &before,
+            &[thread("b", true, true), thread("a", true, true)]
+        ));
+        assert!(!same_thread_ids(
+            &before,
+            &[thread("a", true, true), thread("c", true, true)]
+        ));
+        assert!(!same_thread_ids(&before, &[thread("a", true, true)]));
+    }
+
+    #[tokio::test]
+    async fn all_reviewers_filters_and_caches_permissions() {
+        let f = Fixture::new();
+        f.threads(
+            &[
+                thread_node("a", false, &["writer"]),
+                thread_node("b", false, &["writer"]),
+                thread_node("c", false, &["reader"]),
+                thread_node("d", false, &["missing"]),
+            ],
+            None,
+        );
+        let mut cache = std::collections::HashMap::new();
+        for _ in 0..2 {
+            let (included, excluded) =
+                unresolved_review_threads(&pr(&f), ReviewerScope::All, &[], &mut cache, None)
+                    .await
+                    .unwrap();
+            assert_eq!(ids(&included), vec!["a", "b"]);
+            assert_eq!(excluded, vec!["c", "d"]);
+        }
+        assert_eq!(
+            f.read("calls.log")
+                .lines()
+                .filter(|line| line.contains("collaborators/"))
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn all_reviewers_permission_error_fails_closed() {
+        let f = Fixture::new();
+        f.threads(&[thread_node("a", false, &["forbidden"])], None);
+        let result = unresolved_review_threads(
+            &pr(&f),
+            ReviewerScope::All,
+            &[],
+            &mut std::collections::HashMap::new(),
+            None,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(CruiseError::GitHubReviewFailed { .. })
+        ));
     }
 
     #[tokio::test]

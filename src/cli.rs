@@ -222,6 +222,10 @@ pub struct PlanArgs {
     /// Task description.
     pub input: Option<String>,
 
+    /// Fix review threads on an existing GitHub pull request.
+    #[arg(long, value_name = "NUMBER", conflicts_with_all = ["grill", "images"])]
+    pub pr: Option<u64>,
+
     /// Path to the workflow config file. The special value `__builtin__`
     /// selects the built-in default workflow;
     /// `builtin:<name>` selects a named built-in workflow.

@@ -169,6 +169,51 @@ pub async fn handle_worktree_pr_with_persistence(
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
     }
+    if let Some(target) = session.pr_target.clone() {
+        crate::pr_review_fix::validate_origin(&target, &ctx.path)?;
+        crate::forge::ensure_forge_available(crate::forge::ForgeKind::GitHub)?;
+        if let Some(on_pr_processing) = on_pr_processing {
+            on_pr_processing()?;
+        }
+        vars.set_named_value(PR_NUMBER_VAR, target.number.to_string());
+        vars.set_named_value(PR_URL_VAR, target.url.clone());
+        session.pr_url = Some(target.url);
+        session.pr_skipped_reason = None;
+        if worktree_has_changes(ctx, cancel_token).await? {
+            return Err(CruiseError::Other(
+                "PR review fix worktree has uncommitted changes".to_string(),
+            ));
+        }
+        let range = format!("origin/{}..HEAD", target.head_branch);
+        let count = git_stdout(
+            &ctx.path,
+            &["rev-list", "--count", &range],
+            "git rev-list failed",
+            cancel_token,
+        )
+        .await?;
+        let count: u64 = count
+            .trim()
+            .parse()
+            .map_err(|_| CruiseError::Other("invalid git rev-list count".to_string()))?;
+        if count > 0 {
+            push_branch(&ctx.path, &target.head_branch, cancel_token).await?;
+        }
+        return run_after_pr_steps(
+            compiled,
+            vars,
+            tracker,
+            max_retries,
+            rate_limit_retries,
+            &ctx.path,
+            skipped_steps,
+            flags,
+            cancel_token,
+            option_handler,
+            on_step_log,
+        )
+        .await;
+    }
     let skipped_reason = if compiled.create_pr {
         session.pr_skipped_reason = None;
         pr_creation_skip_reason(ctx, cancel_token).await?

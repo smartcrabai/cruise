@@ -48,13 +48,23 @@ pub fn prepare_execution_workspace(
     match workspace_mode {
         WorkspaceMode::Worktree => {
             let worktrees_dir = manager.worktrees_dir();
-            let (ctx, reused) = worktree::setup_session_worktree(
-                &session.base_dir,
-                &session.id,
-                session.input_or_title(),
-                &worktrees_dir,
-                session.worktree_branch.as_deref(),
-            )?;
+            let (ctx, reused) = if let Some(target) = &session.pr_target {
+                crate::pr_review_fix::validate_origin(target, &session.base_dir)?;
+                worktree::setup_pr_worktree(
+                    &session.base_dir,
+                    &session.id,
+                    &worktrees_dir,
+                    &target.head_branch,
+                )?
+            } else {
+                worktree::setup_session_worktree(
+                    &session.base_dir,
+                    &session.id,
+                    session.input_or_title(),
+                    &worktrees_dir,
+                    session.worktree_branch.as_deref(),
+                )?
+            };
             Ok(ExecutionWorkspace::Worktree { ctx, reused })
         }
         WorkspaceMode::CurrentBranch => {
@@ -158,6 +168,43 @@ mod tests {
     use crate::test_support::{init_git_repo, lock_process, make_session, run_git_ok};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn pr_workspace_rejects_clone_origin_mismatch_before_fetch_or_worktree() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        init_git_repo(&source);
+        let clone = tmp.path().join("clone");
+        assert!(Command::new("git").arg("clone").arg(&source).arg(&clone).status().unwrap().success());
+        run_git_ok(&clone, &["remote", "set-url", "origin", "https://github.com/other/repo.git"]);
+        let manager = SessionManager::new(tmp.path().join("data"));
+        let mut session = make_session("pr-mismatch", &clone);
+        session.pr_target = Some(crate::pr_review_fix::PrTarget {
+            number: 12,
+            title: "Fix".into(),
+            url: "https://github.com/owner/repo/pull/12".into(),
+            head_branch: "main".into(),
+            base_branch: "main".into(),
+        });
+        let fetch_head = clone.join(".git/FETCH_HEAD");
+        let before = fs::read(&fetch_head).ok();
+        let error = prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
+            .unwrap_err();
+        assert!(error.to_string().contains("origin fetch repository does not match"));
+        assert_eq!(fs::read(&fetch_head).ok(), before);
+        assert!(!manager.worktrees_dir().join("pr-mismatch").exists());
+
+        run_git_ok(&clone, &["remote", "set-url", "origin", "git@github.com:owner/repo.git"]);
+        assert!(crate::pr_review_fix::validate_origin(session.pr_target.as_ref().unwrap(), &clone).is_ok());
+        run_git_ok(&clone, &["remote", "set-url", "--push", "origin", "https://github.com/other/repo.git"]);
+        let error = prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
+            .unwrap_err();
+        assert!(error.to_string().contains("origin push repository does not match"));
+        assert_eq!(fs::read(&fetch_head).ok(), before);
+        assert!(!manager.worktrees_dir().join("pr-mismatch").exists());
+    }
 
     #[test]
     fn test_prepare_execution_workspace_worktree_mode_creates_session_worktree() {

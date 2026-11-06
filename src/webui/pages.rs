@@ -222,7 +222,9 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
                 config_source: session.config_source.clone(),
                 flags,
                 flags_note,
-                location_label: if session.repo.is_some() {
+                location_label: if let Some(target) = &session.pr_target {
+                    format!("PR #{}", target.number)
+                } else if session.repo.is_some() {
                     "Repository".to_string()
                 } else {
                     "Base dir".to_string()

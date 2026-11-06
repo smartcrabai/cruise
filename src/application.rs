@@ -458,12 +458,22 @@ fn create_session_inner(
     } else {
         request.base_dir.clone()
     };
+    let pr_target = request
+        .pr_number
+        .map(|number| {
+            crate::pr_review_fix::resolve_pr_target_in_dir(number, repo.as_deref(), Some(&base_dir))
+        })
+        .transpose()?;
     let requested = request
         .config_path
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned())
         .map(|path| crate::new_session_history::expand_tilde(&path))
-        .filter(|path| !path.trim().is_empty());
+        .filter(|path| !path.trim().is_empty())
+        .or_else(|| {
+            (pr_target.is_some() && request.config_yaml.is_none())
+                .then(|| crate::pr_review_fix::BUILTIN_SELECTOR.to_string())
+        });
     let (yaml, source, config_ref) = if let Some(raw) = request.config_yaml.as_deref() {
         let source = crate::resolver::ConfigSource::Inline;
         (raw.to_string(), source, SessionConfigRef::inline_snapshot())
@@ -478,6 +488,9 @@ fn create_session_inner(
         (repo.is_none() || config_ref.live_path().is_none()).then_some(base_dir.as_path());
     let config = crate::resolver::resolve_workflow_config(&yaml, &source, &base_dir, project_dir)?;
     crate::config::validate_config(&config)?;
+    if pr_target.is_some() {
+        crate::pr_review_fix::validate_workflow(&config)?;
+    }
     let skipped_steps = if repo.is_some() && config_ref.is_snapshot() {
         filter_skipped_steps(&config, request.skipped_steps)?
     } else {
@@ -502,7 +515,22 @@ fn create_session_inner(
     state.repo = repo;
     state.skipped_steps = skipped_steps;
     state.flags = request.flags;
-    manager.create_with_config(&state, &config)?;
+    if let Some(target) = pr_target {
+        let plan = crate::pr_review_fix::plan_text(&target, &request.input);
+        state.title = plan
+            .lines()
+            .next()
+            .map(|line| line.trim_start_matches("# ").to_string());
+        state.pr_url = Some(target.url.clone());
+        state.pr_target = Some(target);
+        state.workspace_mode = WorkspaceMode::Worktree;
+        state.mark_input_as_plan();
+        state.phase = SessionPhase::AwaitingApproval;
+        manager.create_with_config(&state, &config)?;
+        std::fs::write(state.plan_path(&manager.sessions_dir()), plan)?;
+    } else {
+        manager.create_with_config(&state, &config)?;
+    }
     let session_dir = manager.sessions_dir().join(id);
     state.attachments =
         crate::attachments::copy_images_into_session(&session_dir, &request.attachments)?;
@@ -1187,6 +1215,8 @@ pub struct NewSessionRequest {
     pub config_yaml: Option<String>,
     #[serde(default)]
     pub repo: Option<String>,
+    #[serde(default)]
+    pub pr_number: Option<u64>,
     #[serde(default)]
     pub workspace_mode: WorkspaceMode,
     #[serde(default)]
@@ -2703,7 +2733,10 @@ impl CruiseApplication {
     /// Returns an error when the input, repository, configuration, attachments,
     /// or session persistence is invalid.
     pub fn create_session(&self, mut request: NewSessionRequest) -> Result<SessionState> {
-        if request.input.trim().is_empty() && request.attachments.is_empty() {
+        if request.input.trim().is_empty()
+            && request.attachments.is_empty()
+            && request.pr_number.is_none()
+        {
             return Err(CruiseError::Other(
                 "session input cannot be empty".to_string(),
             ));
@@ -2867,6 +2900,7 @@ impl CruiseApplication {
                 path: path.clone(),
                 branch: branch.clone(),
                 original_dir: state.base_dir.clone(),
+                owns_branch: state.pr_target.is_none(),
             })
         } else {
             Ok(())
@@ -2901,12 +2935,11 @@ impl CruiseApplication {
             }
             SessionPhase::AwaitingApproval => {
                 if usable_plan {
-                    actions.extend([
-                        SessionAction::Approve,
-                        SessionAction::Publish,
-                        SessionAction::Fix,
-                        SessionAction::Ask,
-                    ]);
+                    actions.push(SessionAction::Approve);
+                    if state.pr_target.is_none() {
+                        actions.push(SessionAction::Publish);
+                    }
+                    actions.extend([SessionAction::Fix, SessionAction::Ask]);
                 } else {
                     actions.extend([SessionAction::Fix, SessionAction::Generate]);
                 }
@@ -2915,16 +2948,17 @@ impl CruiseApplication {
             SessionPhase::Planned => {
                 if usable_plan {
                     actions.push(SessionAction::RunWorktree);
-                    if state.repo.is_none() {
+                    if state.repo.is_none() && state.pr_target.is_none() {
                         actions.push(SessionAction::RunCurrentBranch);
                     }
-                    actions.push(SessionAction::Publish);
+                    if state.pr_target.is_none() {
+                        actions.push(SessionAction::Publish);
+                    }
                 }
-                actions.extend([
-                    SessionAction::Replan,
-                    SessionAction::EditSettings,
-                    SessionAction::Delete,
-                ]);
+                if state.pr_target.is_none() {
+                    actions.push(SessionAction::Replan);
+                }
+                actions.extend([SessionAction::EditSettings, SessionAction::Delete]);
             }
             SessionPhase::Running => {
                 if self.runtime.active_identity(&state.id).is_some() {
@@ -3590,7 +3624,12 @@ fn setup_run_blocking(
     }
     let config = manager.load_config(&state)?;
     crate::config::validate_config(&config)?;
-    let workspace_mode = if state.exec {
+    if state.pr_target.is_some() {
+        crate::pr_review_fix::validate_workflow(&config)?;
+    }
+    let workspace_mode = if state.pr_target.is_some() {
+        WorkspaceMode::Worktree
+    } else if state.exec {
         WorkspaceMode::CurrentBranch
     } else if state.repo.is_some() {
         WorkspaceMode::Worktree
@@ -3611,6 +3650,13 @@ fn setup_run_blocking(
     crate::config::validate_group_retry_budget(&config, max_retries)?;
     let retry_policy = crate::retry::policy_for_config(config.retry.clone());
     let compiled = crate::workflow::compile(config)?;
+    if state.pr_target.is_some() {
+        crate::pr_review_fix::validate_effective_workflow(
+            &compiled,
+            &state.flags,
+            &state.skipped_steps,
+        )?;
+    }
     let mut dag = crate::graph::build_graph(&compiled, max_retries)?;
     let entry = crate::graph::persistence::prepare_resume(
         &mut dag,
@@ -3626,7 +3672,7 @@ fn setup_run_blocking(
         &entry,
         &crate::flags::preflight_skips(&compiled, &state.flags, &state.skipped_steps),
     )?;
-    if state.repo.is_some() {
+    if state.repo.is_some() || state.pr_target.is_some() {
         crate::forge::ensure_forge_available(crate::forge::session_forge(&state))?;
     }
     let workspace_phase = crate::telemetry::Operation::phase("workspace");
@@ -3815,7 +3861,7 @@ impl WorktreeRun<'_> {
         if self.claim.token().is_cancelled() {
             return Err(CruiseError::Interrupted);
         }
-        if !setup.compiled.create_pr {
+        if !setup.compiled.create_pr && setup.state.pr_target.is_none() {
             setup.state.pr_skipped_reason = Some(crate::session::PrSkippedReason::Disabled);
             crate::worktree_pr::log_after_pr_skipped(
                 &setup.compiled,
@@ -4763,6 +4809,43 @@ after-pr:
             )
             .unwrap_or_else(|e| panic!("{e}"));
         }
+    }
+
+    #[test]
+    fn setup_run_blocking_rejects_skipped_or_flag_disabled_pr_review() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap();
+        let _home = isolate_application_config(temp.path());
+        let _skip_auth = crate::test_support::EnvGuard::set("CRUISE_SKIP_AGENT_AUTH_CHECK", "1");
+        let manager = SessionManager::new(temp.path().join("data"));
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let config = include_str!("../builtin/pr-review-fix.yaml")
+            .replace("create_pr: true", "flags:\n  review: {}\ncreate_pr: true")
+            .replace("  address-review:\n", "  address-review:\n    flag: review\n");
+        for (id, skipped, enabled) in [("20261024000013", true, true), ("20261024000014", false, false)] {
+            let mut state = SessionState::new(
+                id.to_string(), temp.path().to_path_buf(),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+                "review".into(),
+            );
+            state.phase = SessionPhase::Planned;
+            state.pr_target = Some(crate::pr_review_fix::PrTarget {
+                number: 1, title: "test".into(), url: "https://github.com/a/b/pull/1".into(),
+                head_branch: "feature".into(), base_branch: "main".into(),
+            });
+            state.flags.insert("review".into(), enabled);
+            if skipped { state.skipped_steps.push("address-review".into()); }
+            manager.create(&state).unwrap();
+            let session_dir = manager.sessions_dir().join(id);
+            std::fs::write(session_dir.join("config.yaml"), &config).unwrap();
+            std::fs::write(session_dir.join("plan.md"), "# Plan\n").unwrap();
+            let result = setup_run_blocking(
+                &manager, runtime.handle(), id, &CancellationToken::new(), None, None, 0,
+            );
+            let Err(error) = result else { panic!("unavailable review must reject application execution") };
+            assert!(error.to_string().contains("enabled, unskipped github-review"), "{error}");
+        }
+        assert!(!manager.worktrees_dir().exists());
     }
 
     #[test]
