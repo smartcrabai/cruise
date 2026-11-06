@@ -26,6 +26,16 @@ const PR_LANGUAGE_VAR: &str = "pr.language";
 const COMMIT_COAUTHOR_NAME_ENV: &str = "CRUISE_COMMIT_COAUTHOR_NAME";
 const COMMIT_COAUTHOR_EMAIL_ENV: &str = "CRUISE_COMMIT_COAUTHOR_EMAIL";
 const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
+const PUBLICATION_ENV: &[(&str, &str)] = &[
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_ASKPASS", "/usr/bin/false"),
+    ("SSH_ASKPASS", "/usr/bin/false"),
+    ("SSH_ASKPASS_REQUIRE", "never"),
+    ("GCM_INTERACTIVE", "never"),
+    ("GH_PROMPT_DISABLED", "1"),
+    // https://docs.gitlab.com/cli/configuration/ documents this glab setting.
+    ("GLAB_NO_PROMPT", "1"),
+];
 
 // --- Types --------------------------------------------------------------------
 
@@ -33,6 +43,13 @@ const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
 pub(crate) enum CommitOutcome {
     Created,
     NoChanges,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PublicationOutcome {
+    Created,
+    SkippedNoCommits,
+    DisabledByConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,14 +204,73 @@ pub async fn handle_worktree_pr_with_persistence(
         )
         .await;
     }
-    let skipped_reason = session_pr_skip_reason(ctx, compiled, session, cancel_token).await?;
-    if let Some(reason) = skipped_reason {
-        mark_pr_skipped(session, compiled, flags, skipped_steps, reason);
-        return Ok(());
+    let outcome = publish_worktree_pr(
+        ctx,
+        compiled,
+        vars,
+        session,
+        rate_limit_retries,
+        skipped_steps,
+        flags,
+        cancel_token,
+        on_step_log,
+        on_pr_processing,
+        on_pr_created,
+    )
+    .await?;
+    if matches!(outcome, PublicationOutcome::Created) {
+        if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+            return Err(CruiseError::Interrupted);
+        }
+        run_after_pr_steps(
+            compiled,
+            vars,
+            tracker,
+            max_retries,
+            rate_limit_retries,
+            &ctx.path,
+            skipped_steps,
+            flags,
+            cancel_token,
+            option_handler,
+            on_step_log,
+        )
+        .await?;
     }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "publication requires workflow context and callbacks"
+)]
+pub(crate) async fn publish_worktree_pr(
+    ctx: &worktree::WorktreeContext,
+    compiled: &CompiledWorkflow,
+    vars: &mut VariableStore,
+    session: &mut SessionState,
+    rate_limit_retries: usize,
+    skipped_steps: &[String],
+    flags: &crate::flags::FlagValues,
+    cancel_token: Option<&CancellationToken>,
+    on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
+    on_pr_processing: Option<&PrProcessingCallback<'_>>,
+    on_pr_created: Option<&PrCreatedCallback<'_>>,
+) -> Result<PublicationOutcome> {
     let operation = crate::telemetry::Operation::phase("pull_request");
-    let mut pr_creation_failed = false;
-    let result: Result<()> = async {
+    let result: Result<PublicationOutcome> = async {
+        if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+            return Err(CruiseError::Interrupted);
+        }
+        let skipped_reason = session_pr_skip_reason(ctx, compiled, session, cancel_token).await?;
+        if let Some(reason) = skipped_reason {
+            let outcome = match reason {
+                crate::session::PrSkippedReason::Disabled => PublicationOutcome::DisabledByConfig,
+                crate::session::PrSkippedReason::NoCommits => PublicationOutcome::SkippedNoCommits,
+            };
+            mark_pr_skipped(session, compiled, flags, skipped_steps, reason);
+            return Ok(outcome);
+        }
         prepare_pr_processing(session, on_pr_processing)?;
 
         let pr_attempt = create_pr_attempt(
@@ -211,28 +287,16 @@ pub async fn handle_worktree_pr_with_persistence(
         match pr_attempt {
             PrAttemptOutcome::Created { url, .. } => {
                 crate::status_eprintln!("{} PR created: {}", style("v").green().bold(), url);
-                record_created_pr(session, vars, url);
+                record_created_pr(session, vars, url.clone());
                 if let Some(persist) = on_pr_created {
-                    persist(session)?;
+                    persist(session).map_err(|e| match e {
+                        CruiseError::Interrupted => CruiseError::Interrupted,
+                        other => CruiseError::Other(format!(
+                            "PR created at {url} but saving the session failed: {other}"
+                        )),
+                    })?;
                 }
-                if cancel_token.is_some_and(CancellationToken::is_cancelled) {
-                    return Err(CruiseError::Interrupted);
-                }
-                run_after_pr_steps(
-                    compiled,
-                    vars,
-                    tracker,
-                    max_retries,
-                    rate_limit_retries,
-                    ctx.path.as_path(),
-                    skipped_steps,
-                    flags,
-                    cancel_token,
-                    option_handler,
-                    on_step_log,
-                )
-                .await?;
-                Ok(())
+                Ok(PublicationOutcome::Created)
             }
             PrAttemptOutcome::SkippedNoCommits => {
                 mark_pr_skipped(
@@ -242,21 +306,18 @@ pub async fn handle_worktree_pr_with_persistence(
                     skipped_steps,
                     crate::session::PrSkippedReason::NoCommits,
                 );
-                Ok(())
+                Ok(PublicationOutcome::SkippedNoCommits)
             }
-            PrAttemptOutcome::CreateFailed { error, .. } => {
-                if session.repo.is_some() {
-                    return Err(CruiseError::Other(format!("PR creation failed: {error}")));
-                }
-                crate::status_eprintln!("warning: PR creation failed: {error}");
-                pr_creation_failed = true;
-                Ok(())
-            }
+            PrAttemptOutcome::CreateFailed { error, .. } => Err(CruiseError::Other(error)),
         }
     }
     .with_context(operation.context())
     .await;
-    if pr_creation_failed && result.is_ok() {
+    let result = result.map_err(|error| match error {
+        CruiseError::Interrupted | CruiseError::PrPublicationFailed(_) => error,
+        other => CruiseError::PrPublicationFailed(other.to_string()),
+    });
+    if matches!(result, Err(CruiseError::PrPublicationFailed(_))) {
         operation.set_error_type("pr_creation_failed");
         operation.finish("error");
     } else {
@@ -433,9 +494,7 @@ async fn create_pr_attempt(
     .await
 }
 
-/// Generate a PR title and body. Returns `Err(Interrupted)` on cancellation and
-/// propagates [`CruiseError::MissingJcodeModel`]; other failures return empty
-/// strings (best-effort PR description).
+/// Generate a PR title and body, propagating prompt and execution failures.
 async fn generate_pr_description(
     worktree_path: &Path,
     compiled: &CompiledWorkflow,
@@ -444,13 +503,7 @@ async fn generate_pr_description(
     cancel_token: Option<&CancellationToken>,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
 ) -> Result<(String, String)> {
-    let pr_prompt = match build_pr_prompt(vars, compiled) {
-        Err(e) => {
-            crate::status_eprintln!("warning: PR prompt resolution failed: {e}");
-            return Ok((String::new(), String::new()));
-        }
-        Ok(p) => p,
-    };
+    let pr_prompt = build_pr_prompt(vars, compiled)?;
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
     let model = compiled.model.as_ref();
     let spinner = crate::spinner::Spinner::start("Generating PR description...");
@@ -481,7 +534,7 @@ async fn generate_pr_description(
                 cb("info", msg);
             }
         };
-        match executor
+        executor
             .run(crate::executor::PromptRun {
                 prompt: &pr_prompt,
                 model,
@@ -500,18 +553,9 @@ async fn generate_pr_description(
                 permission: crate::config::PermissionMode::Full,
                 tool_policy: crate::tool_policy::ToolPolicy::default(),
             })
-            .await
-        {
-            Ok(o) => o.result.output,
-            Err(CruiseError::Interrupted) => {
-                drop(spinner);
-                return Err(CruiseError::Interrupted);
-            }
-            Err(e) => {
-                crate::status_eprintln!("warning: PR description generation failed: {e}");
-                String::new()
-            }
-        }
+            .await?
+            .result
+            .output
     };
     drop(spinner);
     let (pr_title, pr_body) = parse_pr_metadata(&output);
@@ -587,12 +631,7 @@ async fn generate_pr_via_sdk_tool(
                 Ok((String::new(), String::new()))
             }
         }
-        Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
-        Err(e @ CruiseError::MissingJcodeModel(_)) => Err(e),
-        Err(e) => {
-            crate::status_eprintln!("warning: PR description generation failed: {e}");
-            Ok((String::new(), String::new()))
-        }
+        Err(e) => Err(e),
     }
 }
 
@@ -600,7 +639,7 @@ async fn generate_pr_via_sdk_tool(
 /// GitHub review failures always propagate; other errors only warn unless
 /// native squash merge is opted in.
 #[expect(clippy::too_many_arguments, reason = "mirrors the PR flow parameters")]
-async fn run_after_pr_steps(
+pub(crate) async fn run_after_pr_steps(
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
@@ -977,11 +1016,12 @@ async fn push_branch(
     branch: &str,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
-    let output = crate::step::command::run_process_output_cancelled(
+    let output = crate::step::command::run_process_output_cancelled_with_env(
         "git",
         &["push", "-u", "origin", branch],
         Some(worktree_path),
         cancel_token,
+        PUBLICATION_ENV,
     )
     .await?;
     if !output.status.success() {
@@ -1017,11 +1057,12 @@ async fn create_pr(
     }
     let gh_args = pr_create_args(branch, title, body, base_branch);
     let gh_args: Vec<&str> = gh_args.iter().map(String::as_str).collect();
-    let output = crate::step::command::run_process_output_cancelled(
+    let output = crate::step::command::run_process_output_cancelled_with_env(
         "gh",
         &gh_args,
         Some(worktree_path),
         cancel_token,
+        PUBLICATION_ENV,
     )
     .await?;
     if output.status.success()
@@ -1029,17 +1070,37 @@ async fn create_pr(
     {
         return Ok(url);
     }
-    let fallback = crate::step::command::run_process_output_cancelled(
+    let fallback = crate::step::command::run_process_output_cancelled_with_env(
         "gh",
-        &["pr", "view", branch, "--json", "url", "--jq", ".url"],
+        &[
+            "pr",
+            "view",
+            branch,
+            "--json",
+            "url,state",
+            "--jq",
+            ".url + \" \" + .state",
+        ],
         Some(worktree_path),
         cancel_token,
+        PUBLICATION_ENV,
     )
     .await?;
     if fallback.status.success()
-        && let Some(url) = gh_output_line(&fallback.stdout)
+        && let Some(line) = gh_output_line(&fallback.stdout)
     {
-        return Ok(url);
+        let mut fields = line.split_whitespace();
+        if let (Some(url), Some(state), None) = (fields.next(), fields.next(), fields.next()) {
+            if state == "OPEN" {
+                return Ok(url.to_string());
+            }
+            return Err(CruiseError::Other(format!(
+                "existing pull request for branch {branch} is {state}"
+            )));
+        }
+        return Err(CruiseError::Other(format!(
+            "gh pr view returned an invalid URL or state for branch {branch}"
+        )));
     }
     let create_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let view_stderr = String::from_utf8_lossy(&fallback.stderr).trim().to_string();
@@ -1083,11 +1144,12 @@ async fn create_mr(
 ) -> Result<String> {
     let args = mr_create_args(branch, title, body, base_branch);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let output = crate::step::command::run_process_output_cancelled(
+    let output = crate::step::command::run_process_output_cancelled_with_env(
         "glab",
         &args,
         Some(worktree_path),
         cancel_token,
+        PUBLICATION_ENV,
     )
     .await?;
     if output.status.success()
@@ -1095,11 +1157,12 @@ async fn create_mr(
     {
         return Ok(url);
     }
-    let fallback = crate::step::command::run_process_output_cancelled(
+    let fallback = crate::step::command::run_process_output_cancelled_with_env(
         "glab",
         &["mr", "view", branch, "--output", "json", "--jq", ".web_url"],
         Some(worktree_path),
         cancel_token,
+        PUBLICATION_ENV,
     )
     .await?;
     if fallback.status.success()
@@ -1501,6 +1564,7 @@ mod tests {
 
     #[tokio::test]
     async fn selected_local_ref_overrides_stale_remote_for_both_eligibility_checks() {
+        let _lock = crate::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let ctx = base_ahead_fixture(&tmp);
         crate::test_support::run_git_ok(
@@ -1622,6 +1686,249 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    async fn exercise_publication_failure(mode: &str) -> (Result<()>, SessionState, bool) {
+        let tmp = TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin)
+            .unwrap_or_else(|error| panic!("failed to create test bin directory: {error:?}"));
+        let git = if mode == "push" {
+            "#!/bin/sh\ncase \"$1\" in rev-parse|merge-base) echo base;; rev-list) echo 1;; push) echo push-denied >&2; exit 1;; esac\n"
+        } else {
+            "#!/bin/sh\ncase \"$1\" in rev-parse|merge-base) echo base;; rev-list) echo 1;; esac\n"
+        };
+        crate::test_support::write_executable_script(&bin.join("git"), git);
+        let gh = if mode == "create" {
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\necho forge-denied >&2\nexit 1\n"
+        } else {
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\necho https://github.com/o/r/pull/42\n"
+        };
+        crate::test_support::write_executable_script(&bin.join("gh"), gh);
+        let _path = crate::test_support::prepend_to_path(&bin);
+        let marker = tmp.path().join("after-pr-marker");
+        let command = if mode == "metadata" {
+            "cruise-nonexistent-metadata-command"
+        } else {
+            "true"
+        };
+        let mut compiled = minimal_compiled_workflow(vec![command.to_string()]);
+        compiled.after_pr.insert(
+            "marker".to_string(),
+            crate::config::StepConfig {
+                command: Some(crate::config::StringOrVec::Single(format!(
+                    "touch {}",
+                    marker.display()
+                ))),
+                ..Default::default()
+            },
+        );
+        let ctx = worktree::WorktreeContext {
+            path: tmp.path().to_path_buf(),
+            branch: "test-branch".to_string(),
+            original_dir: tmp.path().to_path_buf(),
+            owns_branch: true,
+        };
+        let mut session = SessionState::new(
+            "pr-failure-test".to_string(),
+            ctx.path.clone(),
+            crate::session_config::SessionConfigRef::inline_snapshot(),
+            "test".to_string(),
+        );
+        let mut vars = VariableStore::new("test".to_string());
+        let plan = tmp.path().join("plan.md");
+        std::fs::write(&plan, "# Test plan")
+            .unwrap_or_else(|error| panic!("failed to write test plan: {error:?}"));
+        vars.set_named_file(crate::session::PLAN_VAR, plan);
+        let mut tracker = FileTracker::with_root(ctx.path.clone());
+        let persist = |_: &SessionState| Err(CruiseError::Other("disk unavailable".to_string()));
+        let callback: Option<&PrCreatedCallback<'_>> = if mode == "persist" {
+            Some(&persist)
+        } else {
+            None
+        };
+        let result = handle_worktree_pr_with_persistence(
+            &ctx,
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            &mut session,
+            0,
+            0,
+            &[],
+            &crate::flags::NO_FLAGS,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+            None,
+            callback,
+        )
+        .await;
+        (result, session, marker.exists())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publication_push_failure_is_typed_and_skips_after_pr() {
+        let _lock = crate::test_support::lock_process();
+        let (result, session, marker_exists) = exercise_publication_failure("push").await;
+        assert!(
+            matches!(&result, Err(CruiseError::PrPublicationFailed(message)) if message.contains("git push failed") && message.contains("push-denied")),
+            "{result:?}"
+        );
+        assert!(session.pr_url.is_none());
+        assert!(!marker_exists);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publication_create_failure_is_typed_and_skips_after_pr() {
+        let _lock = crate::test_support::lock_process();
+        let (result, session, marker_exists) = exercise_publication_failure("create").await;
+        assert!(
+            matches!(&result, Err(CruiseError::PrPublicationFailed(message)) if message.contains("gh pr create failed") && message.contains("forge-denied")),
+            "{result:?}"
+        );
+        assert!(session.pr_url.is_none());
+        assert!(!marker_exists);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publication_save_failure_reports_and_retains_created_url() {
+        let _lock = crate::test_support::lock_process();
+        let (result, session, marker_exists) = exercise_publication_failure("persist").await;
+        assert!(
+            matches!(&result, Err(CruiseError::PrPublicationFailed(message)) if message.contains("https://github.com/o/r/pull/42") && message.contains("disk unavailable")),
+            "{result:?}"
+        );
+        assert_eq!(
+            session.pr_url.as_deref(),
+            Some("https://github.com/o/r/pull/42")
+        );
+        assert!(!marker_exists);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publication_metadata_execution_failure_is_typed() {
+        let _lock = crate::test_support::lock_process();
+        let (result, session, marker_exists) = exercise_publication_failure("metadata").await;
+        assert!(
+            matches!(&result, Err(CruiseError::PrPublicationFailed(_))),
+            "{result:?}"
+        );
+        assert!(session.pr_url.is_none());
+        assert!(!marker_exists);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_open_pr_is_reused() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
+        crate::test_support::write_executable_script(
+            &tmp.path().join("gh"),
+            "#!/bin/sh\nif [ \"$2\" = create ]; then echo already-exists >&2; exit 1; fi\necho 'https://github.com/o/r/pull/42 OPEN'\n",
+        );
+        let _path = crate::test_support::prepend_to_path(tmp.path());
+        let url = create_pr(
+            crate::forge::ForgeKind::GitHub,
+            tmp.path(),
+            "branch",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("failed to create or reuse PR: {error:?}"));
+        assert_eq!(url, "https://github.com/o/r/pull/42");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_closed_pr_is_not_reused() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
+        crate::test_support::write_executable_script(
+            &tmp.path().join("gh"),
+            "#!/bin/sh\nif [ \"$2\" = create ]; then echo already-exists >&2; exit 1; fi\necho 'https://github.com/o/r/pull/42 CLOSED'\n",
+        );
+        let _path = crate::test_support::prepend_to_path(tmp.path());
+        let result = create_pr(
+            crate::forge::ForgeKind::GitHub,
+            tmp.path(),
+            "branch",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err(), "closed PR must not be reused: {result:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publication_commands_disable_authentication_prompts() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
+        let script = "#!/bin/sh\nprintf '%s %s %s\\n' \"${GIT_TERMINAL_PROMPT-unset}\" \"${GCM_INTERACTIVE-unset}\" \"${GH_PROMPT_DISABLED-unset}\" > \"$CRUISE_TEST_PROMPT_ENV\"\necho https://github.com/o/r/pull/42\n";
+        crate::test_support::write_executable_script(&tmp.path().join("gh"), script);
+        let _path = crate::test_support::prepend_to_path(tmp.path());
+        let env_file = tmp.path().join("env");
+        let _env = crate::test_support::EnvGuard::set("CRUISE_TEST_PROMPT_ENV", &env_file);
+        let _git = crate::test_support::EnvGuard::remove("GIT_TERMINAL_PROMPT");
+        let _gcm = crate::test_support::EnvGuard::remove("GCM_INTERACTIVE");
+        let _gh = crate::test_support::EnvGuard::remove("GH_PROMPT_DISABLED");
+        create_pr(
+            crate::forge::ForgeKind::GitHub,
+            tmp.path(),
+            "branch",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("failed to create or reuse PR: {error:?}"));
+        assert_eq!(
+            std::fs::read_to_string(env_file)
+                .unwrap_or_else(|error| panic!("failed to read prompt environment: {error:?}"))
+                .trim(),
+            "0 never 1"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn push_and_glab_disable_authentication_prompts() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
+        let script = "#!/bin/sh\nprintf '%s %s %s %s\n' \"$GIT_TERMINAL_PROMPT\" \"$GCM_INTERACTIVE\" \"$GH_PROMPT_DISABLED\" \"$GLAB_NO_PROMPT\" >> \"$CRUISE_TEST_PROMPT_ENV\"\necho https://gitlab.com/o/r/-/merge_requests/42\n";
+        crate::test_support::write_executable_script(&tmp.path().join("git"), script);
+        crate::test_support::write_executable_script(&tmp.path().join("glab"), script);
+        let _path = crate::test_support::prepend_to_path(tmp.path());
+        let env_file = tmp.path().join("env");
+        let _env = crate::test_support::EnvGuard::set("CRUISE_TEST_PROMPT_ENV", &env_file);
+        push_branch(tmp.path(), "branch", None)
+            .await
+            .unwrap_or_else(|error| panic!("failed to push test branch: {error:?}"));
+        create_mr(tmp.path(), "branch", "", "", None, None)
+            .await
+            .unwrap_or_else(|error| panic!("failed to create test merge request: {error:?}"));
+        assert_eq!(
+            std::fs::read_to_string(env_file)
+                .unwrap_or_else(|error| panic!("failed to read prompt environment: {error:?}")),
+            "0 never 1 1\n0 never 1 1\n"
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -2674,8 +2981,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         .await;
 
         assert!(
-            matches!(result, Err(CruiseError::MissingJcodeModel(_))),
-            "SDK metadata generation must preserve the missing-model error: {result:?}"
+            matches!(&result, Err(CruiseError::PrPublicationFailed(message)) if message.contains("model")),
+            "SDK metadata generation must report a publication error containing the model failure: {result:?}"
         );
         assert!(
             !pr_created.load(std::sync::atomic::Ordering::SeqCst),

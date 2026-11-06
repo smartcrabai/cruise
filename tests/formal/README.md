@@ -1,5 +1,7 @@
 # Checkpoint contract verification
 
+For the bounded PR publication recovery lifecycle, run `bash scripts/check_pr_failed_specs.sh` with the pinned toolchain described below. The suite checks that Create PR does not rerun the workflow, cancellation retains PR Failed, worktrees remain available, and completion has a PR or a no-commits skip. It includes Quint, Alloy assertion and witness receipts, and executable production application scenarios. These bounded abstractions are not a proof of the production implementation. Reports are retained under `target/formal-reports/pr-failed.*`, and the `agent-auth-specs` CI job runs the suite independently of the preceding authentication check.
+
 For PR review-fix permission filtering and bounded termination, see
 `PR_REVIEW_FIX.md` and run `bash scripts/check_pr_review_fix_specs.sh`.
 The `pr-review-fix-specs` CI job runs Quint, Alloy receipt checks and

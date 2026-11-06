@@ -44,7 +44,7 @@ fn notification_kind_for_run_result(
         (SessionPhase::Completed, Ok(())) => {
             Some(crate::desktop_notifications::WorkflowNotificationKind::Completed)
         }
-        (SessionPhase::Failed(_), Err(_)) => {
+        (SessionPhase::Failed(_) | SessionPhase::PrFailed(_), Err(_)) => {
             Some(crate::desktop_notifications::WorkflowNotificationKind::Failed)
         }
         _ => None,
@@ -588,6 +588,11 @@ async fn run_single_loaded(
     } = loaded;
     let cleanup_override = args.cleanup_after_pr_override();
     if !session.phase.is_runnable() {
+        if matches!(session.phase, SessionPhase::PrFailed(_)) {
+            return Err(CruiseError::Other(format!(
+                "Session {session_id} is PR Failed. Use Create PR in `cruise list` to retry publishing."
+            )));
+        }
         return Err(CruiseError::Other(format!(
             "Session {} is in '{}' phase and cannot be run. Approve it first with `cruise list`.",
             session_id,
@@ -929,6 +934,12 @@ async fn run_single_loaded(
                         }
                     }
                     ExecutionWorkspace::Worktree { ctx, .. } => {
+                        session.pr_workflow_vars = Some(vars.clone());
+                        let expected = *lock_unpoisoned(&session_fingerprint);
+                        let fingerprint = save_session_state_with_conflict_resolution(
+                            &manager, session, expected,
+                        )?;
+                        *lock_unpoisoned(&session_fingerprint) = fingerprint;
                         let on_pr_processing = || {
                             observer.on_phase(&session_id, RunPhase::CreatingPr);
                             Ok(())
@@ -1000,32 +1011,74 @@ async fn run_single_loaded(
         }
 
         apply_run_result_to_session(session, &overall_result);
-        // Repo-backed sessions: drop the temporary clone (and its worktree) once
-        // the PR has been created.
-        if compiled.create_pr
-            && session.repo.is_some()
-            && matches!(session.phase, SessionPhase::Completed)
-            && session.pr_url.is_some()
-        {
-            let _ = crate::repo_clone::cleanup_session_workspace(&manager, session);
-            session.worktree_path = None;
-            crate::status_eprintln!(
-                "{} removed temporary clone for {}",
-                style("->").cyan(),
-                session.id
-            );
-        }
-        // Non-repo worktree sessions: remove the worktree and branch when configured.
         let effective_cleanup = cleanup_override
             .or(session.cleanup_after_pr_override)
             .unwrap_or(compiled.cleanup_after_pr);
-        if compiled.create_pr
+        let cleanup_repo = compiled.create_pr
+            && session.repo.is_some()
+            && matches!(session.phase, SessionPhase::Completed)
+            && session.pr_url.is_some();
+        let cleanup_worktree = compiled.create_pr
             && effective_cleanup
             && session.repo.is_none()
             && matches!(session.phase, SessionPhase::Completed)
             && session.pr_url.is_some()
-            && let ExecutionWorkspace::Worktree { ctx, .. } = &execution_workspace
-        {
+            && matches!(&execution_workspace, ExecutionWorkspace::Worktree { .. });
+
+        // Persist completion with workspace metadata before destructive cleanup.
+        let expected = *lock_unpoisoned(&session_fingerprint);
+        let saved_fingerprint =
+            match save_session_state_with_conflict_resolution(&manager, session, expected) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    if matches!(overall_result, Ok(()))
+                        && let Some(url) = session.pr_url.clone()
+                    {
+                        let message =
+                            format!("PR created at {url} but saving the session failed: {error}");
+                        session.phase = SessionPhase::PrFailed(message.clone());
+                        // A conflict or an explicit abort must never be bypassed by retrying
+                        // a save. Other failures may be transient, so try to persist the
+                        // retryable phase using the same conflict protection.
+                        return Err(match error {
+                            CruiseError::SessionStateConflict(_) => {
+                                CruiseError::SessionStateConflict(message)
+                            }
+                            CruiseError::SessionStateConflictAborted(_) => {
+                                CruiseError::SessionStateConflictAborted(message)
+                            }
+                            _ => {
+                                let _ = save_session_state_with_conflict_resolution(
+                                    &manager, session, expected,
+                                );
+                                CruiseError::PrPublicationFailed(message)
+                            }
+                        });
+                    }
+                    return Err(error);
+                }
+            };
+        // Repo-backed sessions: drop the temporary clone (and its worktree) once
+        // the PR has been created.
+        if cleanup_repo {
+            match crate::repo_clone::cleanup_session_workspace(&manager, session) {
+                Ok(()) => {
+                    session.worktree_path = None;
+                    crate::status_eprintln!(
+                        "{} removed temporary clone for {}",
+                        style("->").cyan(),
+                        session.id
+                    );
+                }
+                Err(e) => crate::status_eprintln!(
+                    "{} warning: post-PR cleanup failed: {}",
+                    style("!").yellow(),
+                    e
+                ),
+            }
+        }
+        // Non-repo worktree sessions: remove the worktree and branch when configured.
+        if cleanup_worktree && let ExecutionWorkspace::Worktree { ctx, .. } = &execution_workspace {
             if let Err(e) = crate::worktree::cleanup_worktree(ctx) {
                 crate::status_eprintln!(
                     "{} warning: post-PR cleanup failed: {}",
@@ -1033,21 +1086,19 @@ async fn run_single_loaded(
                     e
                 );
             } else {
+                session.worktree_path = None;
+                session.worktree_branch = None;
                 crate::status_eprintln!(
                     "{} removed worktree and branch for {}",
                     style("->").cyan(),
                     session.id
                 );
             }
-            session.worktree_path = None;
-            session.worktree_branch = None;
+        }
+        if (cleanup_repo || cleanup_worktree) && session.worktree_path.is_none() {
+            save_session_state_with_conflict_resolution(&manager, session, saved_fingerprint)?;
         }
 
-        save_session_state_with_conflict_resolution(
-            &manager,
-            session,
-            *lock_unpoisoned(&session_fingerprint),
-        )?;
         if let Some(kind) = notification_kind_for_run_result(&session.phase, &overall_result, false)
         {
             let detail = overall_result.as_ref().err().map(ToString::to_string);
@@ -1087,7 +1138,7 @@ fn apply_run_result_to_session(session: &mut SessionState, result: &Result<()>) 
         }
         Err(e) => {
             session.clear_runner();
-            session.phase = SessionPhase::Failed(e.to_string());
+            session.phase = crate::session::phase_for_run_error(e);
             session.completed_at = Some(current_iso8601());
         }
     }
@@ -1353,6 +1404,15 @@ fn format_run_all_summary(results: &[SessionState]) -> String {
             SessionPhase::Failed(err) => {
                 format!(
                     "[{}] {} {} -- Failed: {}",
+                    i + 1,
+                    style("x").red().bold(),
+                    truncated,
+                    err
+                )
+            }
+            SessionPhase::PrFailed(err) => {
+                format!(
+                    "[{}] {} {} -- PR Failed: {}",
                     i + 1,
                     style("x").red().bold(),
                     truncated,
@@ -2978,8 +3038,8 @@ steps:
         .await;
 
         assert!(
-            result.is_ok(),
-            "local PR failures retain their existing behavior"
+            matches!(&result, Err(crate::error::CruiseError::PrPublicationFailed(message)) if message.contains("provider unavailable")),
+            "PR creation failure must propagate with the provider error: {result:?}"
         );
         assert!(session.pr_url.is_none());
         assert_eq!(session.pr_skipped_reason, None);
@@ -4893,6 +4953,22 @@ steps:
     // apply_run_result_to_session() integration tests
     // These test the finalization logic across engine -> run_cmd -> session.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn publication_failure_is_preserved_and_notified() {
+        let mut session = make_session("task", SessionPhase::Running, None);
+        session.pr_url = Some("https://example.com/pr/1".into());
+        let result = Err(CruiseError::PrPublicationFailed("push failed".into()));
+        apply_run_result_to_session(&mut session, &result);
+        assert_eq!(session.phase, SessionPhase::PrFailed("push failed".into()));
+        assert_eq!(session.pr_url.as_deref(), Some("https://example.com/pr/1"));
+        assert_eq!(session.pr_skipped_reason, None);
+        assert_eq!(
+            notification_kind_for_run_result(&session.phase, &result, false),
+            Some(crate::desktop_notifications::WorkflowNotificationKind::Failed)
+        );
+        assert!(format_run_all_summary(&[session]).contains("PR Failed: push failed"));
+    }
 
     #[test]
     fn test_apply_run_result_completed_sets_completed_phase() {

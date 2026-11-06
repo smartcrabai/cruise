@@ -61,6 +61,9 @@ pub enum CruiseError {
     #[error("git worktree error: {0}")]
     WorktreeError(String),
 
+    #[error("PR publication failed: {0}")]
+    PrPublicationFailed(String),
+
     #[error("session busy: {0}")]
     Busy(String),
 
@@ -123,6 +126,7 @@ impl CruiseError {
             Self::SerializationError(_) => "serialization_error",
             Self::NotGitRepository => "not_git_repository",
             Self::WorktreeError(_) => "worktree_error",
+            Self::PrPublicationFailed(_) => "pr_publication_failed",
             Self::Busy(_) => "session_busy",
             Self::SessionError(_) => "session_error",
             Self::SessionStateConflict(_) => "session_state_conflict",

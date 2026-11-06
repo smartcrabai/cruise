@@ -70,6 +70,7 @@ pub(crate) fn session_dto(
     let plan_available = session_plan_available(&state);
     let (phase, phase_error) = match &state.phase {
         SessionPhase::Failed(message) => ("Failed".to_string(), Some(message.clone())),
+        SessionPhase::PrFailed(message) => ("PR Failed".to_string(), Some(message.clone())),
         phase => (phase.label().to_string(), None),
     };
     let config_path = state.config.selection_value();

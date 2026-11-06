@@ -233,6 +233,26 @@ async fn send(harness: &Harness, request: Request<Body>) -> (StatusCode, String,
     )
 }
 
+#[tokio::test]
+async fn pr_failed_header_and_create_pr_route() {
+    let harness = harness();
+    let mut session = create_session(&harness);
+    session.phase = crate::session::SessionPhase::PrFailed("push failed".to_string());
+    assert!(harness.manager.save(&session).is_ok());
+    let (status, _, body) = get(&harness, &format!("/sessions/{}", session.id), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("PR Failed") && body.contains("push failed"));
+    assert!(body.contains("Create PR") && body.contains("/create-pr"));
+    let (status, _, body) = post(
+        &harness,
+        &format!("/webui/sessions/{}/create-pr", session.id),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(&format!("session-header-{}", session.id)));
+}
+
 const FLAG_CONFIG_YAML: &str = "command: [cat]
 flags:
   e2e:
