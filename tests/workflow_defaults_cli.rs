@@ -1076,17 +1076,23 @@ if [ "$typed_owner" != true ] || [ "$typed_name" != true ] || [ "$typed_head" !=
 fi
 detail_count=0
 case "$*" in
-  *'contexts(first:100,after:$after)'*)
+  *'contexts(first:100,after:$after)'*|*'checkSuites(first:100,after:$after)'*)
     detail_count=$(cat "$WAIT_CI_GH_DETAIL_COUNT" 2>/dev/null || printf 0)
     detail_count=$((detail_count + 1))
     printf '%s\n' "$detail_count" > "$WAIT_CI_GH_DETAIL_COUNT"
-    if [ "$detail_count" -gt 1 ] && [ "$typed_after" != "$WAIT_CI_GH_EXPECTED_CURSOR" ]; then
+    if [ -n "$typed_after" ] && [ "$typed_after" != "$WAIT_CI_GH_EXPECTED_CURSOR" ]; then
       printf 'GitHub details pagination did not advance its cursor: %s\n' "$*" >&2
       exit 97
     fi ;;
   *'contexts(first:1)'*) ;;
-  *) printf 'GraphQL request did not query a supported context connection: %s\n' "$*" >&2; exit 98 ;;
+  *) printf 'GraphQL request did not query a supported wait-ci connection: %s\n' "$*" >&2; exit 98 ;;
 esac
+if [ "$detail_count" -gt 0 ]; then
+  case "$*" in
+    *'databaseId status conclusion'*|*'status conclusion workflowRun'*) ;;
+    *) printf 'GitHub details query omitted workflow-run fields: %s\n' "$*" >&2; exit 99 ;;
+  esac
+fi
 count=$(cat "$WAIT_CI_GH_COUNT" 2>/dev/null || printf 0)
 count=$((count + 1))
 printf '%s\n' "$count" > "$WAIT_CI_GH_COUNT"
@@ -1156,10 +1162,12 @@ count=$((count + 1))
 printf '%s\n' "$count" > "$WAIT_CI_DATE_COUNT"
 if [ "${WAIT_CI_TIMEOUT-0}" = 1 ] && [ "$count" -gt 1 ]; then
   printf '1900\n'
-elif [ "$count" -gt 1 ]; then
-  printf '1101\n'
-else
+elif [ "$count" -eq 1 ]; then
   printf '100\n'
+elif [ "$count" -eq 2 ]; then
+  printf '105\n'
+else
+  printf '1101\n'
 fi
 "#,
         );
@@ -1294,6 +1302,17 @@ fn github_ci_details_response(
     has_next_page: bool,
     end_cursor: Option<&str>,
 ) -> serde_json::Value {
+    let check_suites = nodes
+        .iter()
+        .filter_map(|node| node.get("checkSuite"))
+        .map(|suite| {
+            serde_json::json!({
+                "status":suite.get("status").cloned().unwrap_or(serde_json::Value::Null),
+                "conclusion":suite.get("conclusion").cloned().unwrap_or(serde_json::Value::Null),
+                "workflowRun":suite.get("workflowRun").cloned().unwrap_or(serde_json::Value::Null)
+            })
+        })
+        .collect::<Vec<_>>();
     serde_json::json!({
         "data": {
             "repository": {
@@ -1306,9 +1325,74 @@ fn github_ci_details_response(
                             "pageInfo": {"hasNextPage": has_next_page, "endCursor": end_cursor},
                             "nodes": nodes
                         }
+                    },
+                    "checkSuites": {
+                        "totalCount": check_suites.len(),
+                        "pageInfo": {"hasNextPage": false, "endCursor": null},
+                        "nodes": check_suites
                     }
                 }
             }
+        }
+    })
+}
+
+#[cfg(unix)]
+fn github_ci_suites_response(
+    pr_head: &str,
+    rollup_head: &str,
+    suites: &[serde_json::Value],
+    total_count: usize,
+    has_next_page: bool,
+    end_cursor: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "data": {
+            "repository": {
+                "pullRequest": {"headRefOid": pr_head},
+                "object": {
+                    "oid": rollup_head,
+                    "checkSuites": {
+                        "totalCount": total_count,
+                        "pageInfo": {"hasNextPage": has_next_page, "endCursor": end_cursor},
+                        "nodes": suites
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[cfg(unix)]
+fn github_workflow_run_suite(status: &str, conclusion: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "status":status,
+        "conclusion":conclusion,
+        "workflowRun":{"databaseId":901}
+    })
+}
+
+#[cfg(unix)]
+fn github_workflow_run_check(status: &str, conclusion: Option<&str>) -> serde_json::Value {
+    let check_status = match status {
+        "QUEUED" | "IN_PROGRESS" => status,
+        _ => "COMPLETED",
+    };
+    let check_conclusion = if status == "COMPLETED" {
+        Some("SUCCESS")
+    } else {
+        None
+    };
+    serde_json::json!({
+        "__typename":"CheckRun",
+        "name":"build",
+        "status":check_status,
+        "conclusion":check_conclusion,
+        "detailsUrl":"https://github.com/123/true/actions/runs/901/job/902",
+        "checkSuite":{
+            "status":status,
+            "conclusion":conclusion,
+            "workflowRun":{"databaseId":901}
         }
     })
 }
@@ -1335,12 +1419,29 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
                 github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 0),
                 github_ci_response(&fixture.head, &fixture.head, Some("PENDING"), 1),
                 github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+                github_ci_details_response(
+                    &fixture.head,
+                    &fixture.head,
+                    &[github_workflow_run_check("COMPLETED", Some("SUCCESS"))],
+                    1,
+                    false,
+                    None,
+                ),
+                github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+                github_ci_details_response(
+                    &fixture.head,
+                    &fixture.head,
+                    &[github_workflow_run_check("COMPLETED", Some("SUCCESS"))],
+                    1,
+                    false,
+                    None,
+                ),
             ],
             false,
         );
         let terminal = text(&output);
         assert!(output.status.success(), "{}: {terminal}", workflow.name);
-        assert_eq!(fixture.gh_calls(), 5, "{}", workflow.name);
+        assert_eq!(fixture.gh_calls(), 8, "{}", workflow.name);
     }
 
     let command = builtin_wait_ci_command("tdd");
@@ -1638,19 +1739,17 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     let changed_head = "2222222222222222222222222222222222222222";
     let output = fixture.run(
         &command,
-        &[github_ci_response(
-            changed_head,
-            &fixture.head,
-            Some("SUCCESS"),
-            1,
-        )],
+        &[
+            github_ci_response(changed_head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_response(changed_head, &fixture.head, Some("SUCCESS"), 1),
+        ],
         false,
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
     assert_eq!(wait_ci_reason(&output), "head_mismatch");
     assert_eq!(wait_ci_payload(&output)["truncated"], false);
-    assert_eq!(fixture.gh_calls(), 1);
+    assert_eq!(fixture.gh_calls(), 2);
 
     let fixture = GithubWaitCiFixture::new();
     let output = fixture.run(
@@ -1702,6 +1801,349 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         assert_eq!(fixture.date_calls(), 2);
     }
 }
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_tracks_workflow_run_completion_timeline() {
+    let fixture = GithubWaitCiFixture::new();
+    let command = builtin_wait_ci_command("tdd");
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &[github_workflow_run_check("QUEUED", None)],
+                1,
+                false,
+                None,
+            ),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &[github_workflow_run_check("IN_PROGRESS", None)],
+                1,
+                false,
+                None,
+            ),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &[github_workflow_run_check("COMPLETED", Some("SUCCESS"))],
+                1,
+                false,
+                None,
+            ),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &[github_workflow_run_check("COMPLETED", Some("SUCCESS"))],
+                1,
+                false,
+                None,
+            ),
+        ],
+        false,
+    );
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(fixture.gh_calls(), 8);
+}
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_checks_workflow_runs_across_detail_pages() {
+    let fixture = GithubWaitCiFixture::new();
+    let command = builtin_wait_ci_command("tdd");
+    let completed = github_workflow_run_suite("COMPLETED", Some("SUCCESS"));
+    let queued = github_workflow_run_suite("QUEUED", None);
+    let first_page = || {
+        github_ci_suites_response(
+            &fixture.head,
+            &fixture.head,
+            std::slice::from_ref(&completed),
+            2,
+            true,
+            Some("page-1"),
+        )
+    };
+    let second_page = |suite: &serde_json::Value| {
+        github_ci_suites_response(
+            &fixture.head,
+            &fixture.head,
+            std::slice::from_ref(suite),
+            2,
+            false,
+            None,
+        )
+    };
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 2),
+            first_page(),
+            second_page(&queued),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 2),
+            first_page(),
+            second_page(&completed),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 2),
+            first_page(),
+            second_page(&completed),
+        ],
+        false,
+    );
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(fixture.gh_calls(), 9);
+}
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_waits_for_queued_suite_without_checkrun_context() {
+    let fixture = GithubWaitCiFixture::new();
+    let command = builtin_wait_ci_command("tdd");
+    let queued = github_workflow_run_suite("QUEUED", None);
+    let completed = github_workflow_run_suite("COMPLETED", Some("SUCCESS"));
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_suites_response(
+                &fixture.head,
+                &fixture.head,
+                std::slice::from_ref(&queued),
+                1,
+                false,
+                None,
+            ),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_suites_response(
+                &fixture.head,
+                &fixture.head,
+                std::slice::from_ref(&completed),
+                1,
+                false,
+                None,
+            ),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_suites_response(
+                &fixture.head,
+                &fixture.head,
+                std::slice::from_ref(&completed),
+                1,
+                false,
+                None,
+            ),
+        ],
+        false,
+    );
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(fixture.gh_calls(), 6);
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_requires_two_consecutive_ready_polls() {
+    let fixture = GithubWaitCiFixture::new();
+    let command = builtin_wait_ci_command("tdd");
+    let run_ready = github_workflow_run_check("COMPLETED", Some("SUCCESS"));
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                std::slice::from_ref(&run_ready),
+                1,
+                false,
+                None,
+            ),
+            github_ci_response(&fixture.head, &fixture.head, Some("PENDING"), 1),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                std::slice::from_ref(&run_ready),
+                1,
+                false,
+                None,
+            ),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                std::slice::from_ref(&run_ready),
+                1,
+                false,
+                None,
+            ),
+        ],
+        false,
+    );
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(fixture.gh_calls(), 7);
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_ignores_queued_third_party_checks_without_workflow_run() {
+    let fixture = GithubWaitCiFixture::new();
+    let command = builtin_wait_ci_command("tdd");
+    let third_party = serde_json::json!({
+        "__typename":"CheckRun",
+        "name":"third-party-app",
+        "status":"QUEUED",
+        "conclusion":null,
+        "checkSuite":{"workflowRun":null}
+    });
+    let response =
+        github_ci_details_response(&fixture.head, &fixture.head, &[third_party], 1, false, None);
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            response.clone(),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            response,
+        ],
+        false,
+    );
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(fixture.gh_calls(), 4);
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_fails_for_completed_failed_workflow_run() {
+    let fixture = GithubWaitCiFixture::new();
+    let command = builtin_wait_ci_command("tdd");
+    let failed_run = github_workflow_run_check("COMPLETED", Some("FAILURE"));
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                std::slice::from_ref(&failed_run),
+                1,
+                false,
+                None,
+            ),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                std::slice::from_ref(&failed_run),
+                1,
+                false,
+                None,
+            ),
+        ],
+        false,
+    );
+    assert!(!output.status.success(), "{}", text(&output));
+    assert_eq!(wait_ci_reason(&output), "ci_failed");
+    assert_eq!(
+        wait_ci_payload(&output)["checks"],
+        serde_json::json!([{
+            "name":"build",
+            "state":"FAILURE",
+            "run_id":"901",
+            "job_id":"902",
+            "url":"https://github.com/123/true/actions/runs/901/job/902"
+        }])
+    );
+    assert_eq!(fixture.gh_calls(), 3);
+}
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_fails_for_completed_suite_without_checkrun_context() {
+    let fixture = GithubWaitCiFixture::new();
+    let command = builtin_wait_ci_command("tdd");
+    let failed_suite = github_workflow_run_suite("COMPLETED", Some("FAILURE"));
+    let status_context = serde_json::json!({
+        "__typename":"StatusContext",
+        "context":"external-gate",
+        "state":"SUCCESS"
+    });
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_suites_response(
+                &fixture.head,
+                &fixture.head,
+                std::slice::from_ref(&failed_suite),
+                1,
+                false,
+                None,
+            ),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &[status_context],
+                1,
+                false,
+                None,
+            ),
+        ],
+        false,
+    );
+    assert!(!output.status.success(), "{}", text(&output));
+    assert_eq!(wait_ci_reason(&output), "ci_failed");
+    assert_eq!(wait_ci_payload(&output)["checks"], serde_json::json!([]));
+    assert_eq!(fixture.gh_calls(), 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_allows_transient_head_mismatch_but_rejects_persistent_mismatch() {
+    let command = builtin_wait_ci_command("tdd");
+    let changed_head = "2222222222222222222222222222222222222222";
+    let fixture = GithubWaitCiFixture::new();
+    let run_ready = github_workflow_run_check("COMPLETED", Some("SUCCESS"));
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(changed_head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                std::slice::from_ref(&run_ready),
+                1,
+                false,
+                None,
+            ),
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                std::slice::from_ref(&run_ready),
+                1,
+                false,
+                None,
+            ),
+        ],
+        false,
+    );
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(fixture.gh_calls(), 5);
+
+    let fixture = GithubWaitCiFixture::new();
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(changed_head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_response(changed_head, &fixture.head, Some("SUCCESS"), 1),
+        ],
+        false,
+    );
+    assert!(!output.status.success(), "{}", text(&output));
+    assert_eq!(wait_ci_reason(&output), "head_mismatch");
+    assert_eq!(fixture.gh_calls(), 2);
+}
+
 #[cfg(unix)]
 #[test]
 fn builtin_github_wait_ci_retains_failures_with_malformed_optional_run_refs() {

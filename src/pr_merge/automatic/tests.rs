@@ -19,10 +19,15 @@ struct Fixture {
     merged: PathBuf,
     gh_identity: PathBuf,
     gh_identity_after: PathBuf,
+    gh_identity_sequence: PathBuf,
+    gh_identity_calls: PathBuf,
     gh_status: PathBuf,
     gh_status_after: PathBuf,
     gh_status_sequence: PathBuf,
     gh_status_calls: PathBuf,
+    gh_suites: PathBuf,
+    gh_suites_sequence: PathBuf,
+    gh_suites_calls: PathBuf,
     gh_rules: PathBuf,
     gl_mr: PathBuf,
     gl_mr_after: PathBuf,
@@ -44,14 +49,17 @@ impl Fixture {
         fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("{error}"));
         let log = temp.path().join("provider.log");
         let effects = temp.path().join("effects.log");
-        let merged = temp.path().join("merged");
         let gh_identity = temp.path().join("gh_identity.json");
         let gh_identity_after = temp.path().join("gh_identity_after.json");
+        let gh_identity_sequence = temp.path().join("gh_identity_sequence.jsonl");
+        let gh_identity_calls = temp.path().join("gh_identity_calls");
         let gh_status = temp.path().join("gh_status.json");
         let gh_status_after = temp.path().join("gh_status_after.json");
         let gh_status_sequence = temp.path().join("gh_status_sequence.jsonl");
         let gh_status_calls = temp.path().join("gh_status_calls");
-        let gh_rules = temp.path().join("gh_rules.json");
+        let gh_suites = temp.path().join("gh_suites.json");
+        let gh_suites_sequence = temp.path().join("gh_suites_sequence.jsonl");
+        let gh_suites_calls = temp.path().join("gh_suites_calls");
         let gl_mr = temp.path().join("gl_mr.json");
         let gl_mr_after = temp.path().join("gl_mr_after.json");
         let gl_mr_seen = temp.path().join("gl_mr_seen");
@@ -72,6 +80,14 @@ impl Fixture {
                 gh_identity_after.display().to_string(),
             ),
             (
+                "FAKE_GH_IDENTITY_SEQUENCE".to_string(),
+                gh_identity_sequence.display().to_string(),
+            ),
+            (
+                "FAKE_GH_IDENTITY_CALLS".to_string(),
+                gh_identity_calls.display().to_string(),
+            ),
+            (
                 "FAKE_GH_STATUS".to_string(),
                 gh_status.display().to_string(),
             ),
@@ -86,6 +102,18 @@ impl Fixture {
             (
                 "FAKE_GH_STATUS_CALLS".to_string(),
                 gh_status_calls.display().to_string(),
+            ),
+            (
+                "FAKE_GH_SUITES".to_string(),
+                gh_suites.display().to_string(),
+            ),
+            (
+                "FAKE_GH_SUITES_SEQUENCE".to_string(),
+                gh_suites_sequence.display().to_string(),
+            ),
+            (
+                "FAKE_GH_SUITES_CALLS".to_string(),
+                gh_suites_calls.display().to_string(),
             ),
             ("FAKE_GH_RULES".to_string(), gh_rules.display().to_string()),
             ("FAKE_GL_MR".to_string(), gl_mr.display().to_string()),
@@ -117,10 +145,15 @@ impl Fixture {
             merged,
             gh_identity,
             gh_identity_after,
+            gh_identity_sequence,
+            gh_identity_calls,
             gh_status,
             gh_status_after,
             gh_status_sequence,
             gh_status_calls,
+            gh_suites,
+            gh_suites_sequence,
+            gh_suites_calls,
             gh_rules,
             gl_mr,
             gl_mr_after,
@@ -190,6 +223,27 @@ if [ "$1" = "api" ]; then
           ;;
       esac
       case "$*" in
+        *checkSuites*)
+          case "$*" in
+            *"oid=$FAKE_EXPECTED_HEAD"*) ;;
+            *) exit 64 ;;
+          esac
+          if [ -f "$FAKE_GH_SUITES_SEQUENCE" ]; then
+            calls=$(cat "$FAKE_GH_SUITES_CALLS" 2>/dev/null || printf '0')
+            calls=$((calls + 1))
+            printf '%s\n' "$calls" > "$FAKE_GH_SUITES_CALLS"
+            remaining=$calls
+            response=
+            while IFS= read -r item || [ -n "$item" ]; do
+              response=$item
+              remaining=$((remaining - 1))
+              [ "$remaining" -le 0 ] && break
+            done < "$FAKE_GH_SUITES_SEQUENCE"
+            printf '%s\n' "$response"
+          else
+            cat "$FAKE_GH_SUITES"
+          fi
+          ;;
         *mergeQueueEntry*)
           if [ -f "$FAKE_MERGED" ]; then
             cat "$FAKE_GH_STATUS_AFTER"
@@ -210,7 +264,23 @@ if [ "$1" = "api" ]; then
           fi
           ;;
         *)
-          if [ -f "$FAKE_MERGED" ]; then cat "$FAKE_GH_IDENTITY_AFTER"; else cat "$FAKE_GH_IDENTITY"; fi
+          if [ -f "$FAKE_MERGED" ]; then
+            cat "$FAKE_GH_IDENTITY_AFTER"
+          elif [ -f "$FAKE_GH_IDENTITY_SEQUENCE" ]; then
+            calls=$(cat "$FAKE_GH_IDENTITY_CALLS" 2>/dev/null || printf '0')
+            calls=$((calls + 1))
+            printf '%s\n' "$calls" > "$FAKE_GH_IDENTITY_CALLS"
+            remaining=$calls
+            response=
+            while IFS= read -r item || [ -n "$item" ]; do
+              response=$item
+              remaining=$((remaining - 1))
+              [ "$remaining" -le 0 ] && break
+            done < "$FAKE_GH_IDENTITY_SEQUENCE"
+            printf '%s\n' "$response"
+          else
+            cat "$FAKE_GH_IDENTITY"
+          fi
           ;;
       esac
       ;;
@@ -279,17 +349,34 @@ esac
     fn configure_github(&self, identity: &Value, status: &Value, rules: &Value) {
         write_json(&self.gh_identity, identity);
         write_json(&self.gh_status, status);
+        write_json(&self.gh_suites, &github_check_suites(&[]));
         write_json(&self.gh_rules, rules);
         write_json(
             &self.gh_identity_after,
             &github_identity("MERGED", &self.head),
         );
         write_json(&self.gh_status_after, status);
-        for path in [&self.gh_status_sequence, &self.gh_status_calls] {
+        for path in [
+            &self.gh_identity_sequence,
+            &self.gh_identity_calls,
+            &self.gh_status_sequence,
+            &self.gh_status_calls,
+            &self.gh_suites_sequence,
+            &self.gh_suites_calls,
+        ] {
             if path.exists() {
                 fs::remove_file(path).unwrap_or_else(|error| panic!("{error}"));
             }
         }
+    }
+
+    fn write_json_sequence(&self, path: &Path, values: &[Value]) {
+        let sequence = values
+            .iter()
+            .map(|value| serde_json::to_string(value).unwrap_or_else(|error| panic!("{error}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(path, format!("{sequence}\n")).unwrap_or_else(|error| panic!("{error}"));
     }
 
     fn configure_github_sequence(&self, identity: &Value, statuses: &[Value], rules: &Value) {
@@ -297,17 +384,33 @@ esac
             .first()
             .unwrap_or_else(|| panic!("GitHub status sequence must not be empty"));
         self.configure_github(identity, initial, rules);
-        let sequence = statuses
-            .iter()
-            .map(|status| serde_json::to_string(status).unwrap_or_else(|error| panic!("{error}")))
-            .collect::<Vec<_>>()
-            .join("\n");
-        fs::write(&self.gh_status_sequence, format!("{sequence}\n"))
-            .unwrap_or_else(|error| panic!("{error}"));
+        self.write_json_sequence(&self.gh_status_sequence, statuses);
+    }
+
+    fn configure_github_identity_sequence(&self, identities: &[Value]) {
+        self.write_json_sequence(&self.gh_identity_sequence, identities);
+    }
+
+    fn configure_github_suite_sequence(&self, suites: &[Value]) {
+        self.write_json_sequence(&self.gh_suites_sequence, suites);
+    }
+
+    fn github_identity_call_count(&self) -> usize {
+        fs::read_to_string(&self.gh_identity_calls)
+            .ok()
+            .and_then(|calls| calls.trim().parse().ok())
+            .unwrap_or_default()
     }
 
     fn github_status_call_count(&self) -> usize {
         fs::read_to_string(&self.gh_status_calls)
+            .ok()
+            .and_then(|calls| calls.trim().parse().ok())
+            .unwrap_or_default()
+    }
+
+    fn github_suite_call_count(&self) -> usize {
+        fs::read_to_string(&self.gh_suites_calls)
             .ok()
             .and_then(|calls| calls.trim().parse().ok())
             .unwrap_or_default()
@@ -407,6 +510,37 @@ fn github_status(head: &str) -> Value {
             }
         } } }
     })
+}
+
+fn github_check_suite(workflow_run: bool, status: &str, conclusion: Option<&str>) -> Value {
+    json!({
+        "status": status,
+        "conclusion": conclusion,
+        "workflowRun": if workflow_run {
+            json!({ "databaseId": 773 })
+        } else {
+            Value::Null
+        }
+    })
+}
+
+fn github_check_suite_page(
+    total_count: usize,
+    nodes: &[Value],
+    has_next_page: bool,
+    end_cursor: Option<&str>,
+) -> Value {
+    json!({
+        "data": { "repository": { "object": { "checkSuites": {
+            "totalCount": total_count,
+            "pageInfo": { "hasNextPage": has_next_page, "endCursor": end_cursor },
+            "nodes": nodes
+        } } } }
+    })
+}
+
+fn github_check_suites(nodes: &[Value]) -> Value {
+    github_check_suite_page(nodes.len(), nodes, false, None)
 }
 
 async fn run_github_with_timing(
@@ -819,16 +953,32 @@ async fn github_blocks_drafts_conflicts_and_head_races() {
             conflict,
             json!([]),
         ),
-        (
-            "stale head",
-            github_open_identity(other_head),
-            github_status(&fixture.head),
-            json!([]),
-        ),
     ];
     for (reason, identity, status, rules) in cases {
         assert_github_rejected(&fixture, reason, &identity, &status, &rules).await;
     }
+
+    fixture.configure_github_sequence(
+        &github_open_identity(other_head),
+        &[github_status(&fixture.head)],
+        &json!([]),
+    );
+    fixture.configure_github_identity_sequence(&[github_open_identity(other_head)]);
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_millis(500),
+        Duration::from_millis(5),
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(AutoSquashError::Rejected(
+            "local HEAD does not match the GitHub pull request head".to_string()
+        ))
+    );
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
+    assert!(fixture.github_identity_call_count() >= 2);
 }
 
 #[tokio::test]
@@ -888,7 +1038,7 @@ async fn github_pending_ci_with_unstable_mergeability_waits_for_current_head_suc
     .await;
 
     assert_eq!(result, Ok(AutoSquashOutcome::Merged));
-    assert_eq!(fixture.github_status_call_count(), 2);
+    assert_eq!(fixture.github_status_call_count(), 3);
     assert_eq!(fixture.effect_lines().len(), 1);
 }
 
@@ -963,7 +1113,7 @@ async fn github_stale_unstable_ci_waits_for_current_head_success() {
     .await;
 
     assert_eq!(result, Ok(AutoSquashOutcome::Merged));
-    assert_eq!(fixture.github_status_call_count(), 3);
+    assert_eq!(fixture.github_status_call_count(), 4);
     assert_eq!(fixture.effect_lines().len(), 1);
 }
 
@@ -998,8 +1148,249 @@ async fn github_null_and_empty_unstable_ci_registration_waits_for_checks() {
     .await;
 
     assert_eq!(result, Ok(AutoSquashOutcome::Merged));
-    assert_eq!(fixture.github_status_call_count(), 3);
+    assert_eq!(fixture.github_status_call_count(), 4);
     assert_eq!(fixture.effect_lines().len(), 1);
+}
+
+#[tokio::test]
+async fn github_paginated_check_suite_timeline_waits_for_completion() {
+    let fixture = Fixture::new();
+    let identity = github_open_identity(&fixture.head);
+    let status = github_status(&fixture.head);
+    let pending_workflow = github_check_suite(true, "IN_PROGRESS", None);
+    let completed_workflow = github_check_suite(true, "COMPLETED", Some("SUCCESS"));
+    let third_party = github_check_suite(false, "QUEUED", None);
+    let pending_page = github_check_suite_page(
+        2,
+        std::slice::from_ref(&pending_workflow),
+        true,
+        Some("cursor-1"),
+    );
+    let pending_second_page =
+        github_check_suite_page(2, std::slice::from_ref(&third_party), false, None);
+    let completed_page = github_check_suite_page(
+        2,
+        std::slice::from_ref(&completed_workflow),
+        true,
+        Some("cursor-1"),
+    );
+    let completed_second_page =
+        github_check_suite_page(2, std::slice::from_ref(&third_party), false, None);
+    fixture.configure_github_sequence(&identity, &[status], &json!([]));
+    fixture.configure_github_suite_sequence(&[
+        pending_page,
+        pending_second_page.clone(),
+        completed_page.clone(),
+        completed_second_page.clone(),
+        completed_page,
+        completed_second_page,
+    ]);
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_secs(2),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    assert_eq!(result, Ok(AutoSquashOutcome::Merged));
+    assert_eq!(fixture.github_status_call_count(), 3);
+    assert_eq!(fixture.github_suite_call_count(), 6);
+    assert_eq!(fixture.effect_lines().len(), 1);
+}
+
+#[tokio::test]
+async fn github_pr_773_queued_actions_suite_without_check_run_context_blocks_readiness() {
+    let fixture = Fixture::new();
+    let mut no_check_run = github_status(&fixture.head);
+    no_check_run["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["totalCount"] =
+        json!(0);
+    no_check_run["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"] =
+        json!([]);
+    let pending = github_check_suites(&[github_check_suite(true, "QUEUED", None)]);
+    let completed = github_check_suites(&[github_check_suite(true, "COMPLETED", Some("SUCCESS"))]);
+    fixture.configure_github_sequence(
+        &github_open_identity(&fixture.head),
+        &[
+            no_check_run,
+            github_status(&fixture.head),
+            github_status(&fixture.head),
+            github_status(&fixture.head),
+        ],
+        &json!([]),
+    );
+    fixture.configure_github_suite_sequence(&[
+        pending.clone(),
+        pending,
+        completed.clone(),
+        completed,
+    ]);
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_secs(2),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    assert_eq!(result, Ok(AutoSquashOutcome::Merged));
+    assert_eq!(fixture.github_status_call_count(), 4);
+    assert_eq!(fixture.github_suite_call_count(), 4);
+    assert_eq!(fixture.effect_lines().len(), 1);
+}
+
+#[tokio::test]
+async fn github_completed_failed_workflow_suite_blocks_merge() {
+    let fixture = Fixture::new();
+    fixture.configure_github_sequence(
+        &github_open_identity(&fixture.head),
+        &[github_status(&fixture.head)],
+        &json!([]),
+    );
+    fixture.configure_github_suite_sequence(&[github_check_suites(&[github_check_suite(
+        true,
+        "COMPLETED",
+        Some("FAILURE"),
+    )])]);
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_secs(1),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    let reason = match result {
+        Err(AutoSquashError::Rejected(reason)) => reason,
+        other => panic!("expected failed suite rejection, got {other:?}"),
+    };
+    assert!(
+        reason.contains("CI failed for the current pull request head"),
+        "{reason}"
+    );
+    assert_eq!(fixture.github_suite_call_count(), 1);
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn github_queued_third_party_suite_without_workflow_run_does_not_block() {
+    let fixture = Fixture::new();
+    fixture.configure_github_sequence(
+        &github_open_identity(&fixture.head),
+        &[github_status(&fixture.head)],
+        &json!([]),
+    );
+    fixture.configure_github_suite_sequence(&[github_check_suites(&[github_check_suite(
+        false, "QUEUED", None,
+    )])]);
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_secs(1),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    assert_eq!(result, Ok(AutoSquashOutcome::Merged));
+    assert_eq!(fixture.github_suite_call_count(), 2);
+    assert_eq!(fixture.effect_lines().len(), 1);
+}
+
+#[tokio::test]
+async fn github_readiness_requires_two_consecutive_ready_observations() {
+    let fixture = Fixture::new();
+    let mut pending = github_status(&fixture.head);
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["state"] = json!("PENDING");
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["status"] =
+        json!("IN_PROGRESS");
+    pending["data"]["repository"]["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"][0]["conclusion"] =
+        Value::Null;
+    fixture.configure_github_sequence(
+        &github_open_identity(&fixture.head),
+        &[
+            github_status(&fixture.head),
+            pending,
+            github_status(&fixture.head),
+            github_status(&fixture.head),
+        ],
+        &json!([]),
+    );
+    fixture.configure_github_suite_sequence(&[github_check_suites(&[])]);
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_secs(2),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    assert_eq!(result, Ok(AutoSquashOutcome::Merged));
+    assert_eq!(fixture.github_status_call_count(), 4);
+    assert_eq!(fixture.github_suite_call_count(), 4);
+    assert_eq!(fixture.effect_lines().len(), 1);
+}
+
+#[tokio::test]
+async fn github_transient_head_mismatch_waits_then_merges_after_matching_head() {
+    let fixture = Fixture::new();
+    let other_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    fixture.configure_github_sequence(
+        &github_open_identity(&fixture.head),
+        &[github_status(&fixture.head)],
+        &json!([]),
+    );
+    fixture.configure_github_identity_sequence(&[
+        github_open_identity(other_head),
+        github_open_identity(&fixture.head),
+    ]);
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_secs(2),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    assert_eq!(result, Ok(AutoSquashOutcome::Merged));
+    assert_eq!(fixture.github_status_call_count(), 2);
+    assert!(fixture.github_identity_call_count() >= 3);
+    assert_eq!(fixture.effect_lines().len(), 1);
+}
+
+#[tokio::test]
+async fn github_persistent_head_mismatch_uses_existing_diagnostic_at_deadline() {
+    let fixture = Fixture::new();
+    let other_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    fixture.configure_github_sequence(
+        &github_open_identity(other_head),
+        &[github_status(&fixture.head)],
+        &json!([]),
+    );
+    fixture.configure_github_identity_sequence(&[github_open_identity(other_head)]);
+
+    let result = run_github_with_timing(
+        &fixture,
+        None,
+        Duration::from_millis(500),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Err(AutoSquashError::Rejected(
+            "local HEAD does not match the GitHub pull request head".to_string()
+        ))
+    );
+    assert_eq!(fixture.github_status_call_count(), 0);
+    assert!(fixture.github_identity_call_count() >= 2);
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
 }
 
 #[tokio::test]

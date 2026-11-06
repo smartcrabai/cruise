@@ -94,7 +94,12 @@ steps:
             if type != "object" then {{check:null,bad:true}}
             else . as $node
             | if $node.__typename == "CheckRun" then
-                if ($node.status | type) != "string" or $node.status == "" then {{check:null,bad:true}}
+                if ($node.checkSuite | type) == "object"
+                  and ($node.checkSuite.workflowRun | type) == "object"
+                  and $node.checkSuite.status == "COMPLETED"
+                  and (["FAILURE","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE","STALE"] | index($node.checkSuite.conclusion)) != null then
+                  {{check:{{name:$node.name,state:$node.checkSuite.conclusion,run_id:$node.checkSuite.workflowRun.databaseId,url:$node.detailsUrl,run_expected:true,url_expected:true,checkrun:true}},bad:false}}
+                elif ($node.status | type) != "string" or $node.status == "" then {{check:null,bad:true}}
                 elif $node.status == "COMPLETED" then
                   if ($node.conclusion | type) != "string" then {{check:null,bad:true}}
                   elif (["FAILURE","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE","STALE"] | index($node.conclusion)) != null then
@@ -212,6 +217,91 @@ steps:
         if ! diagnostic_payload=$(jq -ac -n --argjson checks "$checks" --argjson truncated "$details_truncated" '{{checks:$checks,truncated:$truncated}}'); then
           diagnostic_payload='{{"checks":[],"truncated":true}}'
         fi
+      }}
+      github_actions_status() {{
+        actions_state=ready
+        actions_seen=0
+        suites_total=
+        seen_cursors=' '
+        if ! current_response=$(gh api graphql -f owner="$owner" -f name="$name" -F number={pr.number} -f head="$expected_head" -f query="$suite_query" 2>"$diagnostic_stderr"); then
+          actions_state=pending
+          return
+        fi
+        detail_page_available=true
+        while [ "$detail_page_available" = true ]; do
+          if ! printf '%s' "$current_response" | jq -e --arg head "$expected_head" '((.errors // []) | (type == "array" and length == 0)) and .data.repository.pullRequest.headRefOid == $head and .data.repository.object.oid == $head' >/dev/null 2>&1; then
+            actions_state=pending
+            return
+          fi
+          if ! page=$(printf '%s' "$current_response" | jq -ac '
+            def classify_suite:
+              . as $suite
+              | if type != "object" then "invalid"
+                elif ($suite | has("workflowRun") | not) then "invalid"
+                elif $suite.workflowRun == null then "ignored"
+                elif ($suite.workflowRun | type) != "object" then "invalid"
+                elif $suite.status == "COMPLETED" then
+                  if (["SUCCESS","NEUTRAL","SKIPPED"] | index($suite.conclusion)) != null then "ready"
+                  elif (["FAILURE","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE","STALE"] | index($suite.conclusion)) != null then "failed"
+                  else "invalid" end
+                elif (["QUEUED","IN_PROGRESS","WAITING","PENDING","REQUESTED"] | index($suite.status)) != null then "pending"
+                else "invalid" end;
+            .data.repository.object.checkSuites as $suites
+            | (if ($suites.nodes | type) == "array" then $suites.nodes else [] end) as $nodes
+            | ($suites.pageInfo // {{}}) as $info
+            | ($nodes | map(classify_suite)) as $runs
+            | {{
+                valid:(($suites | type) == "object" and ($suites.totalCount | type) == "number" and ($info | type) == "object" and ($info.hasNextPage | type) == "boolean" and (if $info.hasNextPage then ($info.endCursor | type) == "string" and $info.endCursor != "" else true end)),
+                total_count:$suites.totalCount,
+                node_count:($nodes | length),
+                pending:([$runs[] | select(. == "pending" or . == "invalid")] | length) > 0,
+                failed:([$runs[] | select(. == "failed")] | length) > 0,
+                more:($info.hasNextPage == true),
+                cursor:(if ($info.endCursor | type) == "string" then $info.endCursor else "" end)
+              }}
+          '); then
+            actions_state=pending
+            return
+          fi
+          if [ "$(printf '%s' "$page" | jq -r '.valid')" != true ]; then
+            actions_state=pending
+            return
+          fi
+          page_total_count=$(printf '%s' "$page" | jq -r '.total_count')
+          if [ -z "$suites_total" ]; then
+            suites_total=$page_total_count
+          elif [ "$suites_total" -ne "$page_total_count" ]; then
+            actions_state=pending
+            return
+          fi
+          page_node_count=$(printf '%s' "$page" | jq -r '.node_count')
+          actions_seen=$((actions_seen + page_node_count))
+          if [ "$(printf '%s' "$page" | jq -r '.failed')" = true ]; then
+            actions_state=failed
+            return
+          fi
+          if [ "$(printf '%s' "$page" | jq -r '.pending')" = true ]; then actions_state=pending; fi
+          if [ "$(printf '%s' "$page" | jq -r '.more')" != true ]; then
+            detail_page_available=false
+            break
+          fi
+          if [ "$actions_seen" -ge "$suites_total" ] || [ "$page_node_count" -eq 0 ]; then
+            actions_state=pending
+            return
+          fi
+          page_cursor=$(printf '%s' "$page" | jq -r '.cursor')
+          case "$seen_cursors" in
+            *" $page_cursor "*)
+              actions_state=pending
+              return ;;
+          esac
+          seen_cursors="$seen_cursors$page_cursor "
+          if ! current_response=$(gh api graphql -f owner="$owner" -f name="$name" -F number={pr.number} -f head="$expected_head" -f after="$page_cursor" -f query="$suite_query" 2>"$diagnostic_stderr"); then
+            actions_state=pending
+            return
+          fi
+        done
+        if [ "$actions_seen" -ne "$suites_total" ]; then actions_state=pending; fi
       }}
       collect_gitlab_failures() {{
         if [ -z "$observed_pipeline_id" ] || ! printf '%s' "$1" | jq -e --argjson observed "$observed_pipeline_id" 'def valid_id: if type == "number" then . > 0 and . == floor and (tostring | test("^[1-9][0-9]{{0,19}}$")) else false end; . as $pipeline | type == "object" and ($pipeline.id | valid_id) and $pipeline.id == $observed' >/dev/null 2>&1; then
@@ -387,8 +477,11 @@ steps:
             exit 1
           fi
           query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{state contexts(first:1) {{totalCount}}}}}}}}}}}}'
-          detail_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{contexts(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{__typename ... on CheckRun {{name status conclusion detailsUrl checkSuite {{workflowRun {{databaseId}}}}}} ... on StatusContext {{context state targetUrl}}}}}}}}}}}}}}}}'
+          detail_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{contexts(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{__typename ... on CheckRun {{name status conclusion detailsUrl checkSuite {{status conclusion workflowRun {{databaseId}}}}}} ... on StatusContext {{context state targetUrl}}}}}}}}}}}}}}'
+          suite_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid checkSuites(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{status conclusion workflowRun {{databaseId}}}}}}}}}}}}}}'
           deadline=$(( $(date +%s) + 1740 ))
+          head_mismatch_since=
+          ready_streak=0
           diagnostic_stderr="$(git rev-parse --git-dir)/cruise-ci-query.stderr"
           while :; do
             if response=$(gh api graphql -f owner="$owner" -f name="$name" -F number={pr.number} -f head="$expected_head" -f query="$query" 2>"$diagnostic_stderr"); then
@@ -416,11 +509,24 @@ steps:
             fi
             if [ "$pr_head" != "$expected_head" ]; then
               head_matches=false
-              printf 'GitHub PR #%s head changed: expected %s, found %s.\n' {pr.number} "$expected_head" "$pr_head" >&2
-              ci_diagnostic head_mismatch
-              exit 1
+              if ! now=$(date +%s); then
+                printf 'Unable to check the GitHub CI head propagation grace period for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+                ci_diagnostic clock_error
+                exit 1
+              fi
+              if [ -z "$head_mismatch_since" ]; then head_mismatch_since=$now; fi
+              if [ "$now" -ge "$deadline" ] || [ "$((now - head_mismatch_since))" -ge 90 ]; then
+                printf 'GitHub PR #%s head changed: expected %s, found %s.\n' {pr.number} "$expected_head" "$pr_head" >&2
+                ci_diagnostic head_mismatch
+                exit 1
+              fi
+              ready_streak=0
+              printf 'Waiting for GitHub PR #%s head propagation: expected %s, found %s.\n' {pr.number} "$expected_head" "$pr_head"
+              sleep 5
+              continue
             fi
             head_matches=true
+            head_mismatch_since=
             if ! rollup_head=$(printf '%s' "$response" | jq -er '.data.repository.object.oid | strings'); then
               printf 'GitHub did not return the expected commit object for PR #%s (HEAD %s).\n' {pr.number} "$expected_head" >&2
               ci_diagnostic rollup_head_missing
@@ -462,11 +568,20 @@ steps:
                 fi
               fi
             fi
+            poll_ready=false
             if [ "$check_count" -gt 0 ]; then
               case "$state" in
                 SUCCESS)
-                  printf 'GitHub CI passed for HEAD %s (%s checks).\n' "$expected_head" "$check_count"
-                  exit 0 ;;
+                  github_actions_status
+                  case "$actions_state" in
+                    ready) poll_ready=true ;;
+                    failed)
+                      printf 'GitHub Actions workflow run failed for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2
+                      state=FAILURE
+                      collect_github_failures
+                      ci_diagnostic ci_failed
+                      exit 1 ;;
+                  esac ;;
                 FAILURE|ERROR)
                   printf 'GitHub CI failed for PR #%s: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' {pr.number} "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
                   collect_github_failures
@@ -478,6 +593,15 @@ steps:
                   ci_diagnostic unknown_state
                   exit 1 ;;
               esac
+            fi
+            if [ "$poll_ready" = true ]; then
+              ready_streak=$((ready_streak + 1))
+              if [ "$ready_streak" -ge 2 ]; then
+                printf 'GitHub CI passed for HEAD %s (%s checks).\n' "$expected_head" "$check_count"
+                exit 0
+              fi
+            else
+              ready_streak=0
             fi
             if ! now=$(date +%s); then
               printf 'Unable to check the GitHub CI wait deadline for PR #%s at HEAD %s.\n' {pr.number} "$expected_head" >&2

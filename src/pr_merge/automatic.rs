@@ -15,8 +15,10 @@ use crate::cancellation::CancellationToken;
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(120);
 const GITHUB_READINESS_TIMEOUT: Duration = Duration::from_mins(10);
 const GITHUB_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const GITHUB_HEAD_MISMATCH_GRACE: Duration = Duration::from_secs(90);
 const GITHUB_STATUS_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!,$after:String){repository(owner:$owner,name:$repo){squashMergeAllowed pullRequest(number:$number){state isDraft headRefOid baseRefName mergeable mergeStateStatus reviewDecision mergeQueueEntry{id} autoMergeRequest{enabledAt} statusCheckRollup{state commit{oid} contexts(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}}}}";
-const GITHUB_IDENTITY_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state headRefOid}}}";
+const GITHUB_CHECK_SUITES_QUERY: &str = "query($owner:String!,$repo:String!,$oid:GitObjectID!,$after:String){repository(owner:$owner,name:$repo){object(oid:$oid){... on Commit{checkSuites(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{status conclusion workflowRun{databaseId}}}}}}}";
+const GITHUB_HEAD_MISMATCH_MESSAGE: &str = "local HEAD does not match the GitHub pull request head";
 
 /// Request to synchronously squash the open pull request associated with the current worktree.
 pub(crate) struct AutoSquashRequest<'a> {
@@ -338,11 +340,19 @@ struct GitHubSnapshotPage {
     end_cursor: Option<String>,
 }
 
+struct GitHubCheckSuitePage {
+    check_count: usize,
+    check_status: GitHubCheckStatus,
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GitHubReadiness {
     Ready,
     AlreadyMerged,
     Pending,
+    HeadMismatch,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -497,6 +507,14 @@ impl GitHubReadinessObservation {
             self.check_commit_oid.as_deref().unwrap_or("unobserved"),
             self.reason.unwrap_or("readiness"),
         )
+    }
+
+    fn deadline_error(&self, head_mismatch: bool) -> AutoSquashError {
+        AutoSquashError::Rejected(if head_mismatch {
+            GITHUB_HEAD_MISMATCH_MESSAGE.to_string()
+        } else {
+            self.timeout_message()
+        })
     }
 }
 
@@ -840,6 +858,114 @@ fn parse_github_ci_page(pr: &Value) -> Result<GitHubCiPage, AutoSquashError> {
     parse_github_ci_context_page(contexts, check_state, check_commit_oid, rollup_status)
 }
 
+fn parse_github_check_suite_page(value: &Value) -> Result<GitHubCheckSuitePage, AutoSquashError> {
+    if value
+        .get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|errors| !errors.is_empty())
+    {
+        return Err(AutoSquashError::CommandFailed(
+            "GitHub could not provide complete check suite status".to_string(),
+        ));
+    }
+    let suites = value
+        .pointer("/data/repository/object/checkSuites")
+        .filter(|node| node.is_object())
+        .ok_or_else(|| AutoSquashError::Rejected("GitHub CI suites are unavailable".into()))?;
+    let nodes = suites
+        .get("nodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AutoSquashError::Rejected("GitHub CI suites are incomplete".into()))?;
+    let check_count = suites
+        .get("totalCount")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| AutoSquashError::Rejected("GitHub CI suite count is unavailable".into()))?;
+    let page_info = suites
+        .get("pageInfo")
+        .filter(|node| node.is_object())
+        .ok_or_else(|| {
+            AutoSquashError::Rejected("GitHub CI suite pagination is unavailable".into())
+        })?;
+    let has_next_page = page_info
+        .get("hasNextPage")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            AutoSquashError::Rejected("GitHub CI suite pagination is incomplete".into())
+        })?;
+    let end_cursor = page_info
+        .get("endCursor")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    if has_next_page && end_cursor.as_deref().is_none_or(str::is_empty) {
+        return Err(AutoSquashError::Rejected(
+            "GitHub CI suite pagination is incomplete".to_string(),
+        ));
+    }
+    let mut check_status = GitHubCheckStatus::Green;
+    for suite in nodes {
+        let workflow_run = suite.get("workflowRun").ok_or_else(|| {
+            AutoSquashError::Rejected("GitHub CI workflow run is unavailable".into())
+        })?;
+        if workflow_run.is_null() {
+            continue;
+        }
+        if !workflow_run.is_object() {
+            return Err(AutoSquashError::Rejected(
+                "GitHub CI workflow run is malformed".into(),
+            ));
+        }
+        let status = match required_str(suite, "status")? {
+            "QUEUED" | "IN_PROGRESS" | "WAITING" | "REQUESTED" | "PENDING" => {
+                GitHubCheckStatus::Pending
+            }
+            "COMPLETED" => {
+                let conclusion = suite
+                    .get("conclusion")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        AutoSquashError::Rejected(
+                            "GitHub CI suite conclusion is unavailable".into(),
+                        )
+                    })?;
+                if !matches!(
+                    conclusion,
+                    "ACTION_REQUIRED"
+                        | "CANCELLED"
+                        | "FAILURE"
+                        | "NEUTRAL"
+                        | "SKIPPED"
+                        | "STALE"
+                        | "STARTUP_FAILURE"
+                        | "SUCCESS"
+                        | "TIMED_OUT"
+                ) {
+                    return Err(AutoSquashError::Rejected(
+                        "GitHub returned an unknown CI suite conclusion".to_string(),
+                    ));
+                }
+                match conclusion {
+                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => GitHubCheckStatus::Green,
+                    _ => GitHubCheckStatus::Failed,
+                }
+            }
+            _ => {
+                return Err(AutoSquashError::Rejected(
+                    "GitHub returned an unknown CI suite status".to_string(),
+                ));
+            }
+        };
+        check_status = check_status.combine(status);
+    }
+    Ok(GitHubCheckSuitePage {
+        check_count,
+        check_status,
+        has_next_page,
+        end_cursor,
+    })
+}
+
 fn parse_github_snapshot(
     value: &Value,
     observation: &mut GitHubReadinessObservation,
@@ -935,6 +1061,106 @@ async fn github_graphql(
     })
 }
 
+async fn github_check_suites_graphql(
+    reference: &ProviderRef,
+    head_oid: &str,
+    after: Option<&str>,
+    request: &AutoSquashRequest<'_>,
+) -> Result<Value, AutoSquashError> {
+    let ProviderRef::GitHub {
+        hostname,
+        owner,
+        repo,
+        ..
+    } = reference
+    else {
+        return Err(AutoSquashError::Rejected(
+            "provider URL changed unexpectedly".into(),
+        ));
+    };
+    let mut args = vec![
+        "api".to_string(),
+        "--hostname".to_string(),
+        hostname.clone(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!("query={GITHUB_CHECK_SUITES_QUERY}"),
+        "-f".to_string(),
+        format!("owner={owner}"),
+        "-f".to_string(),
+        format!("repo={repo}"),
+        "-f".to_string(),
+        format!("oid={head_oid}"),
+    ];
+    if let Some(after) = after {
+        args.extend(["-f".to_string(), format!("after={after}")]);
+    }
+    let output = run_process(
+        "gh",
+        &args,
+        request.working_dir,
+        request.env,
+        request.cancel_token,
+    )
+    .await
+    .map_err(|error| run_error(error, "gh"))?;
+    if !successful(&output) {
+        return Err(AutoSquashError::CommandFailed(
+            "unable to inspect GitHub check suites".to_string(),
+        ));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|_| {
+        AutoSquashError::Rejected("GitHub returned malformed check suite status".to_string())
+    })
+}
+
+async fn inspect_github_check_suites(
+    reference: &ProviderRef,
+    request: &AutoSquashRequest<'_>,
+    head_oid: &str,
+) -> Result<GitHubCheckStatus, AutoSquashError> {
+    let mut cursor = None;
+    let mut total_count = None;
+    let mut node_count = 0usize;
+    let mut seen_cursors = HashSet::new();
+    let mut check_status = GitHubCheckStatus::Green;
+    loop {
+        let value =
+            github_check_suites_graphql(reference, head_oid, cursor.as_deref(), request).await?;
+        let page = parse_github_check_suite_page(&value)?;
+        if total_count.is_some_and(|expected| expected != page.check_count) {
+            return Err(AutoSquashError::Rejected(
+                "GitHub CI suites changed while status was being read".into(),
+            ));
+        }
+        total_count = Some(page.check_count);
+        let page_nodes = value
+            .pointer("/data/repository/object/checkSuites/nodes")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        node_count = node_count.saturating_add(page_nodes);
+        check_status = check_status.combine(page.check_status);
+        if !page.has_next_page {
+            break;
+        }
+        let next_cursor = page.end_cursor.ok_or_else(|| {
+            AutoSquashError::Rejected("GitHub CI suite pagination is incomplete".to_string())
+        })?;
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err(AutoSquashError::Rejected(
+                "GitHub CI suite pagination did not advance".to_string(),
+            ));
+        }
+        cursor = Some(next_cursor);
+    }
+    if total_count != Some(node_count) {
+        return Err(AutoSquashError::Rejected(
+            "GitHub CI suites are missing or incomplete".to_string(),
+        ));
+    }
+    Ok(check_status)
+}
+
 async fn github_identity(
     reference: &ProviderRef,
     request: &AutoSquashRequest<'_>,
@@ -1007,9 +1233,7 @@ async fn inspect_github(
                 current.check_commit_oid.as_deref() == Some(expected_head);
         }
         if current.metadata.head_oid != expected_head {
-            return Err(AutoSquashError::Rejected(
-                "GitHub pull request head changed while status was being read".to_string(),
-            ));
+            return Ok((current, Vec::new(), GitHubCheckStatus::Green));
         }
         if let Some(first) = &snapshot {
             if first != &current {
@@ -1500,10 +1724,8 @@ async fn github_merge_readiness(
 ) -> Result<GitHubReadiness, AutoSquashError> {
     let (state, remote_head) = github_identity(reference, request).await?;
     if remote_head != expected_head {
-        observation.reason = None;
-        return Err(AutoSquashError::Rejected(
-            "local HEAD does not match the GitHub pull request head".to_string(),
-        ));
+        observation.reason = Some("head_mismatch");
+        return Ok(GitHubReadiness::HeadMismatch);
     }
     if state == "MERGED" {
         observation.reason = None;
@@ -1517,6 +1739,10 @@ async fn github_merge_readiness(
     }
     let (snapshot, check_names, check_status) =
         inspect_github(reference, request, expected_head, observation).await?;
+    if snapshot.metadata.head_oid != expected_head {
+        observation.reason = Some("head_mismatch");
+        return Ok(GitHubReadiness::HeadMismatch);
+    }
     if snapshot.metadata.state == "MERGED" {
         return Ok(GitHubReadiness::AlreadyMerged);
     }
@@ -1528,6 +1754,10 @@ async fn github_merge_readiness(
     let current_head_rollup =
         snapshot.contexts_registered && snapshot.check_commit_oid.as_deref() == Some(expected_head);
     let current_head_ci = current_head_rollup && snapshot.context_total > 0;
+    if current_head_rollup && check_status != GitHubCheckStatus::Failed {
+        check_status = check_status
+            .combine(inspect_github_check_suites(reference, request, expected_head).await?);
+    }
     if current_head_rollup && check_status == GitHubCheckStatus::Failed {
         return Err(AutoSquashError::Rejected(
             "GitHub CI failed for the current pull request head".to_string(),
@@ -1619,6 +1849,8 @@ async fn perform_github_with_timing(
 ) -> Result<AutoSquashOutcome, AutoSquashError> {
     let deadline = tokio::time::Instant::now() + readiness_timeout;
     let mut observation = GitHubReadinessObservation::new();
+    let mut head_mismatch_since = None;
+    let mut ready_observations = 0u8;
     loop {
         check_cancel(request.cancel_token)?;
         let attempt = tokio::select! {
@@ -1635,39 +1867,63 @@ async fn perform_github_with_timing(
         };
         let readiness = match attempt {
             Ok(readiness) => readiness?,
-            Err(_) => return Err(AutoSquashError::Rejected(observation.timeout_message())),
+            Err(_) => {
+                return Err(observation.deadline_error(head_mismatch_since.is_some()));
+            }
         };
         match readiness {
-            GitHubReadiness::Ready => break,
-            GitHubReadiness::AlreadyMerged => return Ok(AutoSquashOutcome::AlreadyMerged),
-            GitHubReadiness::Pending => {
-                let pending_head = tokio::select! {
-                    biased;
-                    () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
-                    result = tokio::time::timeout_at(deadline, local_head(request)) => match result {
-                        Ok(result) => result?,
-                        Err(_) => return Err(AutoSquashError::Rejected(observation.timeout_message())),
-                    },
-                };
-                if pending_head != expected_head {
-                    return Err(AutoSquashError::Rejected(
-                        "local HEAD changed while GitHub readiness was pending".to_string(),
-                    ));
-                }
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    return Err(AutoSquashError::Rejected(observation.timeout_message()));
-                }
-                let wait = poll_interval.min(remaining);
-                tokio::select! {
-                    biased;
-                    () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
-                    () = tokio::time::sleep(wait) => {}
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(AutoSquashError::Rejected(observation.timeout_message()));
+            GitHubReadiness::Ready => {
+                head_mismatch_since = None;
+                ready_observations += 1;
+                if ready_observations >= 2 {
+                    break;
                 }
             }
+            GitHubReadiness::AlreadyMerged => {
+                return Ok(AutoSquashOutcome::AlreadyMerged);
+            }
+            GitHubReadiness::Pending => {
+                ready_observations = 0;
+                head_mismatch_since = None;
+            }
+            GitHubReadiness::HeadMismatch => {
+                ready_observations = 0;
+                let now = tokio::time::Instant::now();
+                let started = *head_mismatch_since.get_or_insert(now);
+                if now.duration_since(started) >= GITHUB_HEAD_MISMATCH_GRACE {
+                    return Err(observation.deadline_error(true));
+                }
+            }
+        }
+        let pending_head = tokio::select! {
+            biased;
+            () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
+            result = tokio::time::timeout_at(deadline, local_head(request)) => match result {
+                Ok(result) => result?,
+                Err(_) => return Err(observation.deadline_error(head_mismatch_since.is_some())),
+            },
+        };
+        if pending_head != expected_head {
+            return Err(AutoSquashError::Rejected(
+                "local HEAD changed while GitHub readiness was pending".to_string(),
+            ));
+        }
+        let now = tokio::time::Instant::now();
+        let remaining = deadline.saturating_duration_since(now);
+        if remaining.is_zero() {
+            return Err(observation.deadline_error(head_mismatch_since.is_some()));
+        }
+        let grace_remaining = head_mismatch_since.map_or(Duration::MAX, |started| {
+            GITHUB_HEAD_MISMATCH_GRACE.saturating_sub(now.duration_since(started))
+        });
+        let wait = poll_interval.min(remaining).min(grace_remaining);
+        tokio::select! {
+            biased;
+            () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
+            () = tokio::time::sleep(wait) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(observation.deadline_error(head_mismatch_since.is_some()));
         }
     }
     check_cancel(request.cancel_token)?;
