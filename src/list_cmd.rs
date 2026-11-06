@@ -893,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_contract_list_action_is_first_only_with_branch_in_every_phase() {
+    fn diff_contract_list_action_order_depends_on_phase_and_requires_branch() {
         for phase in [
             SessionPhase::Draft,
             SessionPhase::AwaitingInput,
@@ -911,11 +911,15 @@ mod tests {
             assert_eq!(actions.last(), Some(&"Back"), "{phase:?}");
             session.worktree_branch = Some("session-branch".into());
             let actions = session_actions_with_plan_availability(&session, true);
-            assert_eq!(
-                actions.first(),
-                Some(&"View Diff"),
-                "{phase:?}: {actions:?}"
-            );
+            if matches!(phase, SessionPhase::PrFailed(_)) {
+                assert_eq!(&actions[..2], &["Create PR", "View Diff"], "{phase:?}");
+            } else {
+                assert_eq!(
+                    actions.first(),
+                    Some(&"View Diff"),
+                    "{phase:?}: {actions:?}"
+                );
+            }
             assert_eq!(actions.last(), Some(&"Back"), "{phase:?}");
         }
     }

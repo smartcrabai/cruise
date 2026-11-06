@@ -3038,8 +3038,8 @@ steps:
         .await;
 
         assert!(
-            result.is_ok(),
-            "local PR failures retain their existing behavior"
+            matches!(&result, Err(crate::error::CruiseError::PrPublicationFailed(message)) if message.contains("provider unavailable")),
+            "PR creation failure must propagate with the provider error: {result:?}"
         );
         assert!(session.pr_url.is_none());
         assert_eq!(session.pr_skipped_reason, None);
