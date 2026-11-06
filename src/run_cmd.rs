@@ -3064,7 +3064,8 @@ steps:
         };
         let f = setup_pr_test(&tmp, id, url);
         #[cfg(unix)]
-        fs::copy(tmp.path().join("bin/gh"), tmp.path().join("bin/glab")).unwrap();
+        fs::copy(tmp.path().join("bin/gh"), tmp.path().join("bin/glab"))
+            .unwrap_or_else(|e| panic!("{e:?}"));
         let generator = tmp.path().join("generate-pr.sh");
         fs::write(
             &generator,
@@ -3176,17 +3177,18 @@ steps:
             ("20260310emptygithub", crate::forge::ForgeKind::GitHub),
             ("20260310emptygitlab", crate::forge::ForgeKind::GitLab),
         ] {
-            let tmp = TempDir::new().unwrap();
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let f = setup_pr_test(&tmp, id, "https://github.com/owner/repo/pull/19");
-            fs::copy(tmp.path().join("bin/gh"), tmp.path().join("bin/glab")).unwrap();
+            fs::copy(tmp.path().join("bin/gh"), tmp.path().join("bin/glab"))
+                .unwrap_or_else(|e| panic!("{e:?}"));
             let before = git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]);
             let compiled = crate::workflow::compile(
                 crate::config::WorkflowConfig::from_yaml(
                     "command: [sh, -c, 'exit 0']\npr_body_template: 'rendered {body}'\nsteps:\n  main:\n    prompt: inspect\n",
-                ).unwrap(),
-            ).unwrap();
+                ).unwrap_or_else(|e| panic!("{e:?}")),
+            ).unwrap_or_else(|e| panic!("{e:?}"));
             let plan = tmp.path().join("plan.md");
-            fs::write(&plan, "# Plan\n").unwrap();
+            fs::write(&plan, "# Plan\n").unwrap_or_else(|e| panic!("{e:?}"));
             let mut vars = VariableStore::new(String::new());
             vars.set_named_file(PLAN_VAR, plan);
             let mut tracker = FileTracker::with_root(f.ctx.path.clone());
@@ -3200,7 +3202,7 @@ steps:
             );
             session.title = Some("  ".to_string());
             session.forge = Some(forge);
-            let error = crate::worktree_pr::handle_worktree_pr_with_persistence(
+            let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
                 &f.ctx,
                 &compiled,
                 &mut vars,
@@ -3216,8 +3218,11 @@ steps:
                 None,
                 None,
             )
-            .await
-            .unwrap_err();
+            .await;
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("expected missing title error"),
+            };
             assert!(
                 error
                     .to_string()
@@ -3227,16 +3232,16 @@ steps:
             assert_eq!(git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]), before);
             assert!(
                 !Command::new("git")
+                    .arg("--git-dir")
+                    .arg(tmp.path().join("origin.git"))
                     .args([
-                        "--git-dir",
-                        tmp.path().join("origin.git").to_str().unwrap(),
                         "show-ref",
                         "--verify",
                         "--quiet",
                         &format!("refs/heads/{}", f.ctx.branch)
                     ])
                     .status()
-                    .unwrap()
+                    .unwrap_or_else(|e| panic!("{e:?}"))
                     .success()
             );
             let calls = fs::read_to_string(&f.log_path).unwrap_or_default();
@@ -3244,7 +3249,7 @@ steps:
                 !calls.contains("pr create") && !calls.contains("mr create"),
                 "{calls}"
             );
-            worktree::cleanup_worktree(&f.ctx).unwrap();
+            worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
         }
     }
 
