@@ -1,5 +1,9 @@
 # Responsive WebUI executable specifications
 
+## PR form browser regression
+
+Build the production runtime with `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, install the pinned Playwright browser, then run `npm --prefix tests/webui run test:pr-form`. `WEBUI_BDD_BIN` selects a runtime and `WEBUI_PR_REPORT_DIR` overrides the screenshot directory (default `target/formal-reports/pr-form-browser`). The test starts the real server with an isolated temporary HOME/XDG tree, exercises source switching, browser number validation, and real draft endpoint rejection of zero and u64 overflow. It saves screenshots and cleans up its temporary data. It does not contact a forge or use fake services. A real successful PR-backed session needs a reachable GitHub repository and authentication, so this secret-free test does not claim that coverage.
+
 ## Diff browser regression
 
 From the repository root, install the pinned Playwright package and Chromium, build the production runtime, and run the dedicated test:

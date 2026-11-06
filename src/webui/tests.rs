@@ -66,6 +66,7 @@ fn create_session(harness: &Harness) -> SessionState {
         config_path: None,
         config_yaml: Some(CONFIG_YAML.to_string()),
         repo: None,
+        pr_number: None,
         workspace_mode: WorkspaceMode::Worktree,
         allow_dirty_working_tree: true,
         attachments: Vec::new(),
@@ -414,6 +415,7 @@ async fn webui_flag_rerender_preserves_explicit_skips_and_flag_choices() {
             config_path: Some(config.clone()),
             config_yaml: None,
             repo: None,
+            pr_number: None,
             workspace_mode: WorkspaceMode::Worktree,
             allow_dirty_working_tree: true,
             attachments: Vec::new(),
@@ -566,6 +568,7 @@ async fn webui_dag_tab_tracks_external_flag_changes() {
             config_path: Some(config),
             config_yaml: None,
             repo: None,
+            pr_number: None,
             workspace_mode: WorkspaceMode::Worktree,
             allow_dirty_working_tree: true,
             attachments: Vec::new(),
@@ -600,6 +603,7 @@ async fn webui_settings_filter_skips_but_keep_current_step_options() {
             config_path: Some(config),
             config_yaml: None,
             repo: None,
+            pr_number: None,
             workspace_mode: WorkspaceMode::Worktree,
             allow_dirty_working_tree: true,
             attachments: Vec::new(),
@@ -831,6 +835,7 @@ fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
             config_path: Some(std::path::PathBuf::from("__builtin__")),
             config_yaml: None,
             repo: Some(repo.to_string()),
+            pr_number: None,
             workspace_mode: crate::session::WorkspaceMode::Worktree,
             allow_dirty_working_tree: false,
             attachments: Vec::new(),
@@ -990,6 +995,50 @@ async fn preview_rejects_paths_outside_uploads_dir() {
         status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
         "{status}"
     );
+}
+
+#[tokio::test]
+async fn new_session_pr_number_input_is_scoped_to_repository_source() {
+    let harness = harness();
+    let (status, _, body) = get(&harness, "/new", &[("hx-request", "true")]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repo_fields = body
+        .split_once("id=\"source-repo\"")
+        .unwrap_or_else(|| panic!("{body}"))
+        .1
+        .split_once("</fieldset>")
+        .unwrap_or_else(|| panic!("{body}"))
+        .0;
+    assert!(repo_fields.contains("name=\"pr_number\""), "{body}");
+    let directory_fields = body
+        .split_once("id=\"source-directory\"")
+        .unwrap_or_else(|| panic!("{body}"))
+        .1
+        .split_once("</fieldset>")
+        .unwrap_or_else(|| panic!("{body}"))
+        .0;
+    assert!(!directory_fields.contains("name=\"pr_number\""), "{body}");
+}
+
+#[tokio::test]
+async fn new_session_rejects_invalid_pr_number() {
+    let harness = harness();
+    // Prevent an unimplemented parser from invoking real git/gh or accessing the network.
+    let empty_path = harness.dir.path().join("empty-path");
+    std::fs::create_dir_all(&empty_path).unwrap_or_else(|error| panic!("{error}"));
+    let _path = crate::test_support::EnvGuard::set("PATH", empty_path.as_os_str());
+    for body in [
+        "sourceMode=repo&repo=acme%2Fcruise&pr_number=abc&input=task",
+        "sourceMode=repo&repo=acme%2Fcruise&pr_number=0&input=task",
+    ] {
+        let (status, _, response) = post(&harness, "/webui/sessions", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        let lower = response.to_lowercase();
+        assert!(
+            lower.contains("number") && (lower.contains("pr") || lower.contains("pull request")),
+            "{response}"
+        );
+    }
 }
 
 #[tokio::test]

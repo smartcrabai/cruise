@@ -602,7 +602,12 @@ async fn run_single_loaded(
         observer.on_phase(&session_id, RunPhase::Preparing);
         let config = manager.load_config(&session)?;
         validate_config(&config)?;
-        let effective_workspace_mode = if args.dry_run {
+        if session.pr_target.is_some() {
+            crate::pr_review_fix::validate_workflow(&config)?;
+        }
+        let effective_workspace_mode = if session.pr_target.is_some() {
+            WorkspaceMode::Worktree
+        } else if args.dry_run {
             session.workspace_mode
         } else if session.repo.is_some() {
             // Explicit repo sessions always execute in a worktree.
@@ -667,6 +672,13 @@ async fn run_single_loaded(
         if should_prompt_flags(&args, workspace_override, &session) {
             session.flags = prompt_flag_values(&config, &session.flags)?;
         }
+        if session.pr_target.is_some() {
+            crate::pr_review_fix::validate_effective_workflow(
+                &compiled,
+                &session.flags,
+                &session.skipped_steps,
+            )?;
+        }
         crate::graph::validation::validate_workflow(
             &compiled,
             &dag,
@@ -717,7 +729,7 @@ async fn run_single_loaded(
             session.worktree_path = None;
             session.worktree_branch = None;
         }
-        if session.repo.is_some() {
+        if session.repo.is_some() || session.pr_target.is_some() {
             crate::forge::ensure_forge_available(crate::forge::session_forge(&session))?;
         }
         if cancel_token.is_cancelled() {
@@ -899,7 +911,9 @@ async fn run_single_loaded(
                         );
                         Ok(())
                     }
-                    ExecutionWorkspace::Worktree { .. } if !compiled.create_pr => {
+                    ExecutionWorkspace::Worktree { .. }
+                        if !compiled.create_pr && session.pr_target.is_none() =>
+                    {
                         if cancel_token.is_cancelled() {
                             Err(CruiseError::Interrupted)
                         } else {
@@ -1724,6 +1738,72 @@ mod tests {
             no_cleanup_after_pr: false,
             flags: vec![],
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pr_run_rejects_skipped_or_flag_disabled_review() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let manager = SessionManager::new(tmp.path().join("data"));
+        let config = include_str!("../builtin/pr-review-fix.yaml")
+            .replace("create_pr: true", "flags:\n  review: {}\ncreate_pr: true")
+            .replace(
+                "  address-review:\n",
+                "  address-review:\n    flag: review\n",
+            );
+        for (id, skipped, enabled) in [
+            ("20261024000011", true, true),
+            ("20261024000012", false, false),
+        ] {
+            let mut session = SessionState::new(
+                id.to_string(),
+                tmp.path().to_path_buf(),
+                crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+                "review".to_string(),
+            );
+            session.phase = SessionPhase::Planned;
+            session.pr_target = Some(crate::pr_review_fix::PrTarget {
+                number: 1,
+                title: "test".into(),
+                url: "https://github.com/a/b/pull/1".into(),
+                head_branch: "feature".into(),
+                base_branch: "main".into(),
+            });
+            if skipped {
+                session.skipped_steps.push("address-review".into());
+            }
+            manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+            write_config(&manager, id, &config);
+            let (session, initial_fingerprint) = manager.load_with_fingerprint(id).unwrap();
+            let mut args = run_args(id);
+            args.dry_run = true;
+            args.flags.push(("review".into(), enabled));
+            let mut workflow_failed = false;
+            let result = run_single_loaded(
+                args,
+                WorkspaceOverride::RespectSession,
+                &NoOpOptionHandler,
+                CancellationToken::new(),
+                &NoopObserver,
+                LoadedRunSession {
+                    manager: manager.clone(),
+                    session_id: id.into(),
+                    session,
+                    initial_fingerprint,
+                },
+                &mut workflow_failed,
+            )
+            .await;
+            let Err(error) = result else {
+                panic!("unavailable review must reject CLI execution")
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("enabled, unskipped github-review"),
+                "{error}"
+            );
+        }
+        assert!(!manager.worktrees_dir().exists());
     }
 
     async fn check_expired_agent_auth_execution(dry_run: bool) {

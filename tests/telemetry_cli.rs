@@ -146,6 +146,7 @@ fn create_application_session(
             "command: [sh, -c, 'cat']\nmodel: ['{model}']\nsteps:\n  s1:\n    prompt: planning smoke\n"
         )),
         repo: None,
+        pr_number: None,
         workspace_mode: WorkspaceMode::Worktree,
         allow_dirty_working_tree: false,
         attachments: vec![],
@@ -1666,6 +1667,7 @@ fn run_application_failed_step_helper() {
                     .to_owned(),
             ),
             repo: None,
+            pr_number: None,
             workspace_mode: WorkspaceMode::Worktree,
             allow_dirty_working_tree: false,
             attachments: vec![],

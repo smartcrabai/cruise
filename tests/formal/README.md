@@ -1,5 +1,10 @@
 # Checkpoint contract verification
 
+For PR review-fix permission filtering and bounded termination, see
+`PR_REVIEW_FIX.md` and run `bash scripts/check_pr_review_fix_specs.sh`.
+The `pr-review-fix-specs` CI job runs Quint, Alloy receipt checks and
+production-connected Gherkin.
+
 For task-scoped `subagent_model` selection, backend configuration and exclusions,
 see `SUBAGENT_MODEL.md` and run `bash scripts/check_subagent_model_specs.sh`.
 The dedicated `subagent-model-specs` PR job runs pinned Quint verification,

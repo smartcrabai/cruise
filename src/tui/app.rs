@@ -1115,7 +1115,9 @@ impl TuiApp {
                         .position(|item| item.id == state.id)
                         .unwrap_or(self.selected);
                     self.sync_selected_detail();
-                    self.start_plan(state.id, plan);
+                    if state.pr_target.is_none() {
+                        self.start_plan(state.id, plan);
+                    }
                     self.form.reset_after_creation();
                 }
                 Err(error) => self.set_error(error),
@@ -3405,7 +3407,10 @@ impl TuiApp {
                     .set_text(&request.skipped_steps.join(", "));
             }
         }
-        if request.input.trim().is_empty() && request.attachments.is_empty() {
+        if request.input.trim().is_empty()
+            && request.attachments.is_empty()
+            && request.pr_number.is_none()
+        {
             self.set_error("Task description or an image attachment is required".to_string());
             return None;
         }

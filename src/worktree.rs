@@ -18,6 +18,7 @@ pub struct WorktreeContext {
     pub path: PathBuf,
     pub branch: String,
     pub original_dir: PathBuf,
+    pub owns_branch: bool,
 }
 
 /// Generate the default branch name for a session worktree.
@@ -85,6 +86,7 @@ pub(crate) fn setup_session_worktree_with_ref(
                 path: worktree_path,
                 branch,
                 original_dir: base_dir.to_path_buf(),
+                owns_branch: true,
             },
             true,
             None,
@@ -127,10 +129,171 @@ pub(crate) fn setup_session_worktree_with_ref(
             path: worktree_path,
             branch,
             original_dir: base_dir.to_path_buf(),
+            owns_branch: true,
         },
         false,
         start,
     ))
+}
+
+/// Create or reuse a worktree on an existing PR head without resetting its branch.
+///
+/// # Errors
+/// Returns an error if the branch is invalid or diverged, or git or file I/O fails.
+pub fn setup_pr_worktree(
+    base_dir: &Path,
+    session_id: &str,
+    worktrees_dir: &Path,
+    head_branch: &str,
+) -> Result<(WorktreeContext, bool)> {
+    ensure_git_repo(base_dir)?;
+    let valid = Command::new("git")
+        .args(["check-ref-format", "--branch", head_branch])
+        .current_dir(base_dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
+    if !valid.status.success() || head_branch.starts_with('-') {
+        return Err(CruiseError::WorktreeError(format!(
+            "invalid PR head branch: {head_branch}"
+        )));
+    }
+    let path = worktrees_dir.join(session_id);
+    let ctx = WorktreeContext {
+        path: path.clone(),
+        branch: head_branch.to_string(),
+        original_dir: base_dir.to_path_buf(),
+        owns_branch: false,
+    };
+    let refspec = format!("+refs/heads/{head_branch}:refs/remotes/origin/{head_branch}");
+    git_output(base_dir, &["fetch", "origin", &refspec])?;
+    if path.is_dir() {
+        let actual = git_output(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+        if actual.trim() != head_branch {
+            return Err(CruiseError::WorktreeError(format!(
+                "existing worktree is not on PR head branch {head_branch}"
+            )));
+        }
+        git_output(
+            base_dir,
+            &[
+                "branch",
+                "--set-upstream-to",
+                &format!("origin/{head_branch}"),
+                head_branch,
+            ],
+        )?;
+        return Ok((ctx, true));
+    }
+
+    let local_ref = format!("refs/heads/{head_branch}");
+    let remote_ref = format!("refs/remotes/origin/{head_branch}");
+    let exists = git_status(base_dir, &["show-ref", "--verify", "--quiet", &local_ref])?;
+    let fast_forward =
+        pr_branch_needs_fast_forward(base_dir, head_branch, &local_ref, &remote_ref, exists)?;
+    fs::create_dir_all(worktrees_dir)?;
+    let path_arg = path.to_str().ok_or_else(|| {
+        CruiseError::WorktreeError("worktree path is not valid UTF-8".to_string())
+    })?;
+    if exists {
+        git_output(base_dir, &["worktree", "add", path_arg, head_branch])?;
+    } else {
+        git_output(
+            base_dir,
+            &[
+                "worktree",
+                "add",
+                "--track",
+                "-b",
+                head_branch,
+                path_arg,
+                &remote_ref,
+            ],
+        )?;
+    }
+    let setup = (|| {
+        if fast_forward {
+            git_output(&path, &["merge", "--ff-only", &remote_ref])?;
+        }
+        git_output(
+            base_dir,
+            &[
+                "branch",
+                "--set-upstream-to",
+                &format!("origin/{head_branch}"),
+                head_branch,
+            ],
+        )?;
+        copy_worktree_includes(base_dir, &path)?;
+        Ok(())
+    })();
+    if let Err(error) = setup {
+        // The branch belongs to the user, even when this invocation created it.
+        let _ = cleanup_worktree(&ctx);
+        return Err(error);
+    }
+    Ok((ctx, false))
+}
+
+fn pr_branch_needs_fast_forward(
+    base_dir: &Path,
+    head_branch: &str,
+    local_ref: &str,
+    remote_ref: &str,
+    exists: bool,
+) -> Result<bool> {
+    if exists
+        && !git_status(
+            base_dir,
+            &["merge-base", "--is-ancestor", remote_ref, local_ref],
+        )?
+    {
+        if git_status(
+            base_dir,
+            &["merge-base", "--is-ancestor", local_ref, remote_ref],
+        )? {
+            return Ok(true);
+        }
+        return Err(CruiseError::WorktreeError(format!(
+            "local branch {head_branch} has diverged from origin/{head_branch}"
+        )));
+    }
+    Ok(false)
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
+    if !output.status.success() {
+        return Err(CruiseError::WorktreeError(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn git_status(dir: &Path, args: &[&str]) -> Result<bool> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(CruiseError::WorktreeError(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
 }
 
 pub(crate) fn validate_base_branch_name(
@@ -234,6 +397,10 @@ pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
             "git worktree remove failed: {}",
             stderr.trim()
         )));
+    }
+
+    if !ctx.owns_branch {
+        return Ok(());
     }
 
     let output = Command::new("git")
@@ -383,18 +550,68 @@ mod tests {
         run(&["commit", "-m", "init"]);
     }
 
-    fn git(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
+    fn git(dir: &Path, args: &[&str]) -> String {
+        git_output(dir, args).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn pr_worktree_preserves_branch_and_handles_divergence()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = lock_process();
+        let tmp = TempDir::new()?;
+        let remote = tmp.path().join("remote.git");
+        let remote_arg = remote.to_str().ok_or("test path must be UTF-8")?;
+        git(tmp.path(), &["init", "--bare", remote_arg]);
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo)?;
+        init_git_repo(&repo);
+        git(&repo, &["remote", "add", "origin", remote_arg]);
+        git(&repo, &["push", "origin", "HEAD:refs/heads/pr-head"]);
+        let worktrees = tmp.path().join("worktrees");
+        let (ctx, reused) = setup_pr_worktree(&repo, "one", &worktrees, "pr-head")?;
+        assert!(!reused && !ctx.owns_branch);
+        assert_eq!(
+            git(&ctx.path, &["rev-parse", "--abbrev-ref", "@{upstream}"]).trim(),
+            "origin/pr-head"
         );
+        assert!(setup_pr_worktree(&repo, "one", &worktrees, "pr-head")?.1);
+        cleanup_worktree(&ctx)?;
+        assert!(git_status(
+            &repo,
+            &["show-ref", "--verify", "--quiet", "refs/heads/pr-head"]
+        )?);
+
+        // Advance remote while the local branch stays behind.
+        git(&repo, &["commit", "--allow-empty", "-m", "remote advance"]);
+        git(&repo, &["push", "origin", "HEAD:refs/heads/pr-head"]);
+        let (ctx, _) = setup_pr_worktree(&repo, "two", &worktrees, "pr-head")?;
+        assert_eq!(
+            git(&ctx.path, &["rev-parse", "HEAD"]),
+            git(&repo, &["rev-parse", "HEAD"])
+        );
+        git(
+            &ctx.path,
+            &["commit", "--allow-empty", "-m", "local advance"],
+        );
+        let local_head = git(&ctx.path, &["rev-parse", "HEAD"]);
+        cleanup_worktree(&ctx)?;
+        let (ctx, _) = setup_pr_worktree(&repo, "three", &worktrees, "pr-head")?;
+        assert_eq!(git(&ctx.path, &["rev-parse", "HEAD"]), local_head);
+        cleanup_worktree(&ctx)?;
+
+        git(
+            &repo,
+            &["commit", "--allow-empty", "-m", "remote divergence"],
+        );
+        git(&repo, &["push", "origin", "HEAD:refs/heads/pr-head"]);
+        let err = match setup_pr_worktree(&repo, "four", &worktrees, "pr-head") {
+            Err(err) => err,
+            Ok(_) => panic!("diverged branch should be rejected"),
+        };
+        assert!(err.to_string().contains("diverged"));
+        assert!(!worktrees.join("four").exists());
+        assert_eq!(git(&repo, &["rev-parse", "pr-head"]), local_head);
+        Ok(())
     }
 
     fn setup_refspec_fixture(tmp: &TempDir) -> (PathBuf, PathBuf) {

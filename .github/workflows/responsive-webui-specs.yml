@@ -50,6 +50,8 @@ jobs:
           cargo +1.99.1 build --locked --all-features --bin cruise-runtime
           node tests/webui/graph-flags.mjs
           node tests/webui/diff-browser.mjs
+      - name: Production PR form browser test
+        run: node tests/webui/pr-form.mjs
       - name: Upload specification evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

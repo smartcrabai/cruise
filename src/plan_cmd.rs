@@ -226,6 +226,16 @@ async fn run_force_exec(
 }
 
 pub async fn run(mut args: PlanArgs) -> Result<()> {
+    let pr_target = if let Some(number) = args.pr {
+        let target = crate::pr_review_fix::resolve_pr_target(number, args.repo.as_deref())?;
+        args.config
+            .get_or_insert_with(|| crate::pr_review_fix::BUILTIN_SELECTOR.to_string());
+        args.skip_planning = true;
+        args.no_force_exec = true;
+        Some(target)
+    } else {
+        None
+    };
     // noninteractive is true whenever stdin is not a terminal (pipe, redirect,
     // or backward-compat path where cli.rs already consumed stdin and placed
     // the content in args.input).  This prevents inquire from attempting to
@@ -242,7 +252,23 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
         ));
     }
 
-    let (raw_input, from_interactive) = if args.issue.is_some() && args.input.is_none() {
+    let (raw_input, from_interactive) = if let Some(pr) = &pr_target {
+        let extra = match args.input.take() {
+            Some(input) if input != "stdin" => input,
+            Some(_) if !noninteractive => {
+                return Err(CruiseError::Other("stdin requires piped input".into()));
+            }
+            _ if noninteractive => {
+                let mut input = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut input)
+                    .map_err(|e| CruiseError::Other(format!("failed to read stdin: {e}")))?;
+                input
+            }
+            _ => String::new(),
+        };
+        (crate::pr_review_fix::plan_text(pr, &extra), false)
+    } else if args.issue.is_some() && args.input.is_none() {
         (String::new(), false)
     } else {
         read_plan_input(args.input.take(), noninteractive)?
@@ -266,6 +292,13 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
     }
     let has_issue = args.issue.is_some() || binding.is_some();
     let target = resolve_plan_target(args.repo.as_deref(), args.config.as_deref(), has_issue)?;
+    if pr_target.is_some() {
+        if let PlanTarget::Local { config, .. } = &target {
+            validate_config(config)?;
+            crate::pr_review_fix::validate_workflow(config)?;
+            crate::flags::validate_names(config, &crate::flags::from_cli(&args.flags)?)?;
+        }
+    }
 
     if let PlanTarget::Local { config, .. } = &target
         && config.force_exec()
@@ -327,7 +360,17 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
         &session_id,
     );
     let plan_result = match created {
-        Ok((config, session)) => {
+        Ok((config, mut session)) => {
+            if let Some(pr) = pr_target {
+                if let Err(error) = crate::pr_review_fix::validate_workflow(&config) {
+                    cleanup_discarded_session_workspace(&manager, &session);
+                    let _ = manager.delete(&session.id);
+                    return Err(error);
+                }
+                session.pr_url = Some(pr.url.clone());
+                session.pr_target = Some(pr);
+                manager.save(&session)?;
+            }
             operation.set_workflow(&session.config);
             run_created_plan(
                 &args,
@@ -842,7 +885,9 @@ async fn approve_with_title(
 ) -> Result<()> {
     // The `generate_title` tool needs an SDK backend, which includes the default
     // `jcode` one a config gets by naming neither `sdk:` nor `command:`.
-    if crate::executor::Executor::new(config.sdk.as_deref(), &config.command).is_sdk() {
+    if session.pr_target.is_some() {
+        crate::metadata::refresh_session_title_from_plan(session, plan_content);
+    } else if crate::executor::Executor::new(config.sdk.as_deref(), &config.command).is_sdk() {
         // Title dispatch forwards neither workflow env nor a working directory.
         // Keep this gate outside the optional title-error warning handler.
         let mut auth_config = config.clone();
@@ -878,7 +923,9 @@ async fn approve_with_title(
         crate::metadata::refresh_session_title_from_plan(session, plan_content);
     }
     session.approve();
-    crate::repo_clone::cleanup_after_approval(manager, session, config.create_pr);
+    if session.pr_target.is_none() {
+        crate::repo_clone::cleanup_after_approval(manager, session, config.create_pr);
+    }
     manager.save(session)
 }
 
@@ -946,7 +993,19 @@ fn plan_working_dir(session: &SessionState) -> &Path {
 /// set.  If `base_dir` is not a git repository the call succeeds silently and
 /// the session keeps `worktree_path = None` (plan runs in `base_dir`).
 fn setup_planning_worktree(manager: &SessionManager, session: &mut SessionState) -> Result<()> {
-    match crate::workspace::setup_session_worktree(manager, session) {
+    let worktrees_dir = manager.worktrees_dir();
+    let result = if let Some(pr) = &session.pr_target {
+        crate::pr_review_fix::validate_origin(pr, &session.base_dir)?;
+        crate::worktree::setup_pr_worktree(
+            &session.base_dir,
+            &session.id,
+            &worktrees_dir,
+            &pr.head_branch,
+        )
+    } else {
+        crate::workspace::setup_session_worktree(manager, session)
+    };
+    match result {
         Ok((ctx, _reused)) => {
             eprintln!(
                 "{} worktree: {} (planning)",
@@ -1530,7 +1589,10 @@ async fn run_approve_loop(
 
         let review = crate::herdr::blocked("Plan ready: approve, fix, or ask");
 
-        let options = vec!["Approve", "Fix", "Ask", "Execute now", "Publish as Issue"];
+        let mut options = vec!["Approve", "Fix", "Ask", "Execute now"];
+        if session.pr_target.is_none() {
+            options.push("Publish as Issue");
+        }
         crate::platform::reclaim_terminal_foreground();
         let selected = match inquire::Select::new("Action:", options).prompt() {
             Ok(s) => s,
@@ -2240,6 +2302,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         PlanArgs {
             issue: None,
             input: Some("implement force exec".to_string()),
+            pr: None,
             config: Some(
                 config_path
                     .to_str()

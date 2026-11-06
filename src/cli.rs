@@ -281,6 +281,10 @@ pub struct PlanArgs {
     /// Task description.
     pub input: Option<String>,
 
+    /// Fix review threads on an existing GitHub pull request.
+    #[arg(long, value_name = "NUMBER", conflicts_with_all = ["grill", "images", "issue"])]
+    pub pr: Option<u64>,
+
     /// Use a GitHub issue as the task.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
     pub issue: Option<u64>,
