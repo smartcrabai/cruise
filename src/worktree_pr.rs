@@ -316,12 +316,15 @@ async fn create_pr_attempt(
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
     }
+    let texts =
+        crate::pr_template::render_pr_texts(compiled, session, &ctx.branch, &pr_title, &pr_body)?;
     attempt_pr_creation(
         ctx,
         crate::forge::session_forge(session),
         session.input_or_title(),
-        &pr_title,
-        &pr_body,
+        &texts.title,
+        &texts.body,
+        texts.commit_message.as_deref(),
         cancel_token,
     )
     .await
@@ -586,10 +589,13 @@ pub(crate) async fn attempt_pr_creation(
     message: &str,
     title: &str,
     body: &str,
+    commit_message_override: Option<&str>,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<PrAttemptOutcome> {
     let trimmed_title = title.trim();
-    let commit_message = if trimmed_title.is_empty() {
+    let commit_message = if let Some(override_message) = commit_message_override {
+        override_message
+    } else if trimmed_title.is_empty() {
         message
     } else {
         trimmed_title
@@ -1688,6 +1694,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             env: HashMap::new(),
             plan_language: "English".to_string(),
             pr_language: "English".to_string(),
+            commit_message_template: None,
+            pr_body_template: None,
             mcp_servers: IndexMap::new(),
             create_pr: true,
             cleanup_after_pr: false,

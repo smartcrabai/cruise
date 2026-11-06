@@ -143,6 +143,8 @@ struct DefaultsFile {
     max_retries: Option<usize>,
     interactive_planning: Option<bool>,
     languages: Option<LanguagesConfig>,
+    commit_message_template: Option<String>,
+    pr_body_template: Option<String>,
     cleanup_after_pr: Option<bool>,
     force_exec: Option<bool>,
     computer_use: Option<bool>,
@@ -185,6 +187,8 @@ pub struct WorkflowDefaults {
     max_retries: Option<usize>,
     interactive_planning: Option<bool>,
     languages: Option<LanguagesConfig>,
+    commit_message_template: Option<String>,
+    pr_body_template: Option<String>,
     cleanup_after_pr: Option<bool>,
     force_exec: Option<bool>,
     computer_use: Option<Sourced<bool>>,
@@ -332,6 +336,10 @@ impl WorkflowDefaults {
         self.max_retries = file.max_retries.or(self.max_retries);
         self.interactive_planning = file.interactive_planning.or(self.interactive_planning);
         self.languages = file.languages.or(self.languages.take());
+        self.commit_message_template = file
+            .commit_message_template
+            .or(self.commit_message_template.take());
+        self.pr_body_template = file.pr_body_template.or(self.pr_body_template.take());
         self.cleanup_after_pr = file.cleanup_after_pr.or(self.cleanup_after_pr);
         self.force_exec = file.force_exec.or(self.force_exec);
         self.computer_use = sourced(file.computer_use, path).or(self.computer_use.take());
@@ -469,6 +477,14 @@ impl WorkflowDefaults {
     }
 
     fn fill_fields(&self, config: &mut WorkflowConfig, presence: WorkflowConfigPresence) {
+        if config.commit_message_template.is_none() {
+            config
+                .commit_message_template
+                .clone_from(&self.commit_message_template);
+        }
+        if config.pr_body_template.is_none() {
+            config.pr_body_template.clone_from(&self.pr_body_template);
+        }
         if config.disallowed_tools.is_none()
             && let Some(value) = &self.disallowed_tools
         {
@@ -680,6 +696,49 @@ mod tests {
     }
 
     // ---- load ----
+
+    #[test]
+    fn pr_templates_follow_workflow_project_user_precedence() {
+        let env = env();
+        write(
+            &env.user_file,
+            "pr_body_template: user-body\ncommit_message_template: user-commit\n",
+        );
+        let mut config = workflow("");
+        applied(&env, &mut config);
+        let values = serde_json::to_value(&config).unwrap();
+        assert_eq!(values["pr_body_template"], "user-body");
+        assert_eq!(values["commit_message_template"], "user-commit");
+
+        write(
+            &env.project_file,
+            "pr_body_template: project-body\ncommit_message_template: project-commit\n",
+        );
+        let mut config = workflow("");
+        applied(&env, &mut config);
+        let values = serde_json::to_value(&config).unwrap();
+        assert_eq!(values["pr_body_template"], "project-body");
+        assert_eq!(values["commit_message_template"], "project-commit");
+
+        let mut config =
+            workflow("pr_body_template: workflow-body\ncommit_message_template: workflow-commit");
+        applied(&env, &mut config);
+        let values = serde_json::to_value(&config).unwrap();
+        assert_eq!(values["pr_body_template"], "workflow-body");
+        assert_eq!(values["commit_message_template"], "workflow-commit");
+    }
+
+    #[test]
+    fn default_template_variables_are_validated_after_application() {
+        let env = env();
+        write(&env.project_file, "pr_body_template: '{plan}'\n");
+        let mut config = workflow("");
+        applied(&env, &mut config);
+        assert!(matches!(
+            crate::workflow::compile(config),
+            Err(CruiseError::ConfigParseError(_))
+        ));
+    }
 
     #[test]
     fn missing_files_leave_config_unchanged() {
