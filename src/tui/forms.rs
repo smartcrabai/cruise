@@ -1257,6 +1257,7 @@ mod tests {
             vec![
                 Step::Source,
                 Step::Repository,
+                Step::PullRequest,
                 Step::Config,
                 Step::Task,
                 Step::Attachments,
@@ -1266,6 +1267,8 @@ mod tests {
         );
         assert!(form.advance());
         assert_eq!(form.step, Step::Repository);
+        assert!(form.advance());
+        assert_eq!(form.step, Step::PullRequest);
         assert!(form.advance());
         assert_eq!(form.step, Step::Config);
         assert!(form.advance());

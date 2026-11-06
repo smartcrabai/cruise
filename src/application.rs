@@ -5035,10 +5035,7 @@ after-pr:
             .unwrap_or_else(|e| panic!("build runtime: {e}"));
         let config = include_str!("../builtin/pr-review-fix.yaml")
             .replace("create_pr: true", "flags:\n  review: {}\ncreate_pr: true")
-            .replace(
-                "  address-review:\n",
-                "  address-review:\n    flag: review\n",
-            );
+            .replace("  address-review:", "  address-review:\n    flag: review");
         for (id, skipped, enabled) in [
             ("20261024000013", true, true),
             ("20261024000014", false, false),

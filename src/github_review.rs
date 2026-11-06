@@ -394,6 +394,9 @@ async fn unresolved_review_threads(
 ) -> Result<(Vec<ReviewThread>, Vec<String>)> {
     let mut included = Vec::new();
     let mut excluded = Vec::new();
+    if scope == ReviewerScope::Bots {
+        return Ok((unresolved_bot_threads(pr, bots, cancel).await?, excluded));
+    }
     for thread in fetch_threads(pr, cancel)
         .await?
         .into_iter()
@@ -404,9 +407,7 @@ async fn unresolved_review_threads(
             .first()
             .map(|c| c.author.as_str())
             .unwrap_or_default();
-        let allowed = if scope == ReviewerScope::Bots {
-            is_listed(author, bots)
-        } else if author.is_empty() {
+        let allowed = if author.is_empty() {
             false
         } else if let Some(allowed) = permissions.get(&author.to_ascii_lowercase()) {
             *allowed
@@ -1143,6 +1144,35 @@ esac
         assert_eq!(ids, ["keep"]);
         assert_eq!(threads[0].comments.len(), 2, "all comments are preserved");
         assert_eq!(threads[0].comments[1].author, "human");
+    }
+    #[tokio::test]
+    async fn bot_scope_filters_threads_without_checking_collaborator_permissions() {
+        let f = Fixture::new();
+        f.threads(
+            &[
+                thread_node("keep", false, &[BOT, "human"]),
+                thread_node("resolved", true, &[BOT]),
+                thread_node("human-started", false, &["human", BOT]),
+                thread_node("other-bot", false, &["x[bot]"]),
+            ],
+            None,
+        );
+        let (threads, excluded) = unresolved_review_threads(
+            &pr(&f),
+            ReviewerScope::Bots,
+            &bots(),
+            &mut std::collections::HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fetch bot review threads: {error}"));
+        assert_eq!(ids(&threads), ["keep"]);
+        assert_eq!(excluded, Vec::<String>::new());
+        assert!(
+            f.read("calls.log")
+                .lines()
+                .all(|line| !line.contains("collaborators/"))
+        );
     }
 
     #[tokio::test]

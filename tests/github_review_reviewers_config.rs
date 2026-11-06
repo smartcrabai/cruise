@@ -24,12 +24,15 @@ fn reviewer_scopes_accept_all_and_preserve_legacy_bots() {
         let yaml = workflow(review);
         let config = parse(&yaml);
         validate_config(&config).unwrap_or_else(|error| panic!("{review}: {error}"));
-        let serialized = serde_yaml::to_string(&config).expect("serialize config");
+        let serialized = serde_yaml::to_string(&config)
+            .unwrap_or_else(|error| panic!("serialize config: {error}"));
         let restored = parse(&serialized);
         validate_config(&restored).unwrap_or_else(|error| panic!("roundtrip {review}: {error}"));
         assert_eq!(
-            serde_json::to_value(config).unwrap(),
-            serde_json::to_value(restored).unwrap()
+            serde_json::to_value(config)
+                .unwrap_or_else(|error| panic!("serialize config as JSON: {error}")),
+            serde_json::to_value(restored)
+                .unwrap_or_else(|error| panic!("serialize restored config as JSON: {error}"))
         );
     }
 }
@@ -45,10 +48,12 @@ fn reviewer_scope_validation_rejects_incompatible_bots() {
         ),
         ("{}", "github-review bots must not be empty"),
     ] {
-        let error = validate_config(&parse(&workflow(review))).expect_err(review);
+        let Err(error) = validate_config(&parse(&workflow(review))) else {
+            panic!("{review}: expected invalid reviewer configuration");
+        };
         match error {
             CruiseError::InvalidStepConfig(message) => {
-                assert!(message.contains(expected), "{review}: {message}")
+                assert!(message.contains(expected), "{review}: {message}");
             }
             other => panic!("{review}: expected InvalidStepConfig, got {other:?}"),
         }
@@ -62,8 +67,10 @@ fn unknown_reviewer_scope_is_a_deserialization_error() {
 
 #[test]
 fn schema_supports_both_reviewer_scopes_and_legacy_bots() {
-    let schema: Value = serde_json::from_str(include_str!("../cruise-schema.json")).unwrap();
-    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+    let schema: Value = serde_json::from_str(include_str!("../cruise-schema.json"))
+        .unwrap_or_else(|error| panic!("parse workflow schema: {error}"));
+    let validator = jsonschema::validator_for(&schema)
+        .unwrap_or_else(|error| panic!("compile schema: {error}"));
     let fixture = |review: Value| {
         json!({
             "steps": {"main": {"prompt": "implement"}},
