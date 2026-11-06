@@ -1,4 +1,4 @@
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::io::Write;
 
 use console::style;
@@ -801,7 +801,7 @@ fn format_suffix(s: &SessionState) -> String {
         _ => String::new(),
     };
     if s.auto_requeue_count > 0 {
-        suffix.push_str(&format!(" auto-requeued {}", s.auto_requeue_count));
+        let _ = write!(suffix, " auto-requeued {}", s.auto_requeue_count);
     }
     suffix
 }

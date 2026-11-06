@@ -1158,79 +1158,14 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
                 // matches the scheduler's batch-index order.
                 dashboard.add(&session);
             }
-            Box::pin(async move {
-                let session_id = session.id.clone();
-                let operation = crate::telemetry::Operation::execution(
-                    if session.exec { "exec" } else { "run" },
-                    &session.id,
-                    Some(&session.config),
-                );
-                let session_args = RunArgs {
-                    session: Some(session_id.clone()),
-                    all: false,
-                    parallelism: None,
-                    ..base_args
-                };
-                let noop = NoopObserver;
-                let cli_option_handler = CliOptionHandler;
-                let dashboard_option_handler = dashboard.as_ref().map(|dashboard| {
-                    crate::batch_dashboard::DashboardOptionHandler {
-                        session_id: session_id.clone(),
-                        dashboard: Arc::clone(dashboard),
-                    }
-                });
-                let option_handler: &dyn OptionHandler = dashboard_option_handler
-                    .as_ref()
-                    .map_or(&cli_option_handler, |handler| handler);
-                let observer: &dyn RunObserver = dashboard
-                    .as_deref()
-                    .map_or(&noop as &dyn RunObserver, |dashboard| dashboard);
-                let mut workflow_failed = false;
-                let outcome = loop {
-                    let outcome = run_single_with_operation(
-                        session_args.clone(),
-                        WorkspaceOverride::ForceWorktree,
-                        option_handler,
-                        session_cancel.clone(),
-                        observer,
-                        Some(&operation),
-                        &mut workflow_failed,
-                    )
-                    .with_context(operation.context())
-                    .await;
-                    if let Err(error) = &outcome {
-                        if let Ok(Some(attempt)) = crate::auto_requeue::try_record_requeue(
-                            &manager,
-                            &session_id,
-                            error,
-                            max_attempts,
-                            session_cancel.is_cancelled(),
-                        ) {
-                            let announcement = format!(
-                                "Auto-requeued {session_id} ({attempt}/{max_attempts}): {error}"
-                            );
-                            if dashboard.is_some() {
-                                crate::batch_dashboard::BatchDashboard::announce(&announcement);
-                            } else {
-                                crate::status_eprintln!("{announcement}");
-                            }
-                            continue;
-                        }
-                    }
-                    break outcome;
-                };
-                if let Some(dashboard) = &dashboard {
-                    let state = load_run_all_result_state(&manager, &session);
-                    dashboard.finish(&session_id, &state, &outcome);
-                }
-                if workflow_failed && outcome.is_ok() {
-                    operation.set_error_type("step_failed");
-                    operation.finish("error");
-                } else {
-                    operation.finish_result(&outcome);
-                }
-                outcome
-            })
+            Box::pin(run_all_session(
+                session,
+                session_cancel,
+                base_args,
+                dashboard,
+                manager,
+                max_attempts,
+            ))
         },
     );
     tokio::pin!(batch_future);
@@ -1248,6 +1183,87 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
     report_run_all_results(&batch_results, &manager);
 
     Ok(())
+}
+
+async fn run_all_session(
+    session: SessionState,
+    session_cancel: CancellationToken,
+    base_args: RunArgs,
+    dashboard: Option<Arc<crate::batch_dashboard::BatchDashboard>>,
+    manager: SessionManager,
+    max_attempts: u32,
+) -> Result<()> {
+    let session_id = session.id.clone();
+    let operation = crate::telemetry::Operation::execution(
+        if session.exec { "exec" } else { "run" },
+        &session.id,
+        Some(&session.config),
+    );
+    let session_args = RunArgs {
+        session: Some(session_id.clone()),
+        all: false,
+        parallelism: None,
+        ..base_args
+    };
+    let noop = NoopObserver;
+    let cli_option_handler = CliOptionHandler;
+    let dashboard_option_handler =
+        dashboard
+            .as_ref()
+            .map(|dashboard| crate::batch_dashboard::DashboardOptionHandler {
+                session_id: session_id.clone(),
+                dashboard: Arc::clone(dashboard),
+            });
+    let option_handler: &dyn OptionHandler = dashboard_option_handler
+        .as_ref()
+        .map_or(&cli_option_handler, |handler| handler);
+    let observer: &dyn RunObserver = dashboard
+        .as_deref()
+        .map_or(&noop as &dyn RunObserver, |dashboard| dashboard);
+    let mut workflow_failed = false;
+    let outcome = loop {
+        let outcome = run_single_with_operation(
+            session_args.clone(),
+            WorkspaceOverride::ForceWorktree,
+            option_handler,
+            session_cancel.clone(),
+            observer,
+            Some(&operation),
+            &mut workflow_failed,
+        )
+        .with_context(operation.context())
+        .await;
+        if let Err(error) = &outcome
+            && let Ok(Some(attempt)) = crate::auto_requeue::try_record_requeue(
+                &manager,
+                &session_id,
+                error,
+                max_attempts,
+                session_cancel.is_cancelled(),
+            )
+        {
+            let announcement =
+                format!("Auto-requeued {session_id} ({attempt}/{max_attempts}): {error}");
+            if dashboard.is_some() {
+                crate::batch_dashboard::BatchDashboard::announce(&announcement);
+            } else {
+                crate::status_eprintln!("{announcement}");
+            }
+            continue;
+        }
+        break outcome;
+    };
+    if let Some(dashboard) = &dashboard {
+        let state = load_run_all_result_state(&manager, &session);
+        dashboard.finish(&session_id, &state, &outcome);
+    }
+    if workflow_failed && outcome.is_ok() {
+        operation.set_error_type("step_failed");
+        operation.finish("error");
+    } else {
+        operation.finish_result(&outcome);
+    }
+    outcome
 }
 
 fn report_run_all_results(
