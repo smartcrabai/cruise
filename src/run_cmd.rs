@@ -2720,8 +2720,8 @@ steps:
             &ctx,
             crate::forge::ForgeKind::GitHub,
             "test task",
-            "",
-            "",
+            ("", ""),
+            None,
             None,
             None,
         )
@@ -2754,8 +2754,8 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "add feature",
-            "",
-            "",
+            ("", ""),
+            None,
             None,
             None,
         )
@@ -2813,8 +2813,8 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "task",
-            "",
-            &body,
+            ("", &body),
+            None,
             None,
             None,
         )
@@ -2841,8 +2841,8 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "task",
-            "",
-            "Summary.",
+            ("", "Summary."),
+            None,
             None,
             None,
         )
@@ -2874,8 +2874,8 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "add feature",
-            "",
-            "",
+            ("", ""),
+            None,
             None,
             None,
         )
@@ -2899,6 +2899,44 @@ steps:
     }
 
     #[tokio::test]
+    async fn test_attempt_pr_creation_adds_coauthor_to_override() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let f = setup_pr_test(
+            &tmp,
+            "20260708_template_coauthor",
+            "https://github.com/owner/repo/pull/21",
+        );
+        let _name = EnvGuard::set("CRUISE_COMMIT_COAUTHOR_NAME", "octocat");
+        let _email = EnvGuard::set(
+            "CRUISE_COMMIT_COAUTHOR_EMAIL",
+            "12345+octocat@users.noreply.github.com",
+        );
+        let result = attempt_pr_creation(
+            &f.ctx,
+            crate::forge::ForgeKind::GitHub,
+            "fallback",
+            ("title", "body"),
+            Some("feat: title [session]"),
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(matches!(
+            result,
+            PrAttemptOutcome::Created {
+                commit_outcome: CommitOutcome::Created,
+                ..
+            }
+        ));
+        assert_eq!(
+            git_stdout_ok(&f.ctx.path, &["log", "-1", "--pretty=%B"]),
+            "feat: title [session]\n\nCo-authored-by: octocat <12345+octocat@users.noreply.github.com>"
+        );
+        worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[tokio::test]
     async fn test_attempt_pr_creation_reuses_existing_branch_commits() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let f = setup_pr_test(
@@ -2917,8 +2955,8 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "rerun without changes",
-            "",
-            "",
+            ("", ""),
+            None,
             None,
             None,
         )
@@ -3204,6 +3242,210 @@ steps:
         }
     }
 
+    // Exercise the real handler rather than a test-only renderer: the template must
+    // survive workflow compilation and reach both git and the forge invocation.
+    async fn run_pr_template_entrypoint_case(
+        template: &str,
+        generated: &str,
+        id: &str,
+        forge: crate::forge::ForgeKind,
+    ) {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let url = if forge == crate::forge::ForgeKind::GitLab {
+            "https://gitlab.com/owner/repo/-/merge_requests/19"
+        } else {
+            "https://github.com/owner/repo/pull/19"
+        };
+        let f = setup_pr_test(&tmp, id, url);
+        #[cfg(unix)]
+        fs::copy(tmp.path().join("bin/gh"), tmp.path().join("bin/glab"))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let generator = tmp.path().join("generate-pr.sh");
+        fs::write(
+            &generator,
+            format!("#!/bin/sh\ncat <<'EOF'\n{generated}\nEOF\n"),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let yaml = format!(
+            "command: [sh, '{}']\n{template}\nsteps:\n  main:\n    prompt: inspect\n",
+            generator.display()
+        );
+        let compiled = crate::workflow::compile(
+            crate::config::WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}")),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let plan_path = tmp.path().join("plan.md");
+        fs::write(&plan_path, "# Plan\n").unwrap_or_else(|e| panic!("{e:?}"));
+        let mut vars = VariableStore::new("first line\nsecond line".to_string());
+        vars.set_named_file(PLAN_VAR, plan_path);
+        let mut tracker = FileTracker::with_root(f.ctx.path.clone());
+        let mut session = SessionState::new(
+            id.to_string(),
+            f.repo.clone(),
+            crate::session_config::SessionConfigRef::File {
+                path: tmp.path().join("workflow.yaml"),
+            },
+            "first line\nsecond line".to_string(),
+        );
+        session.forge = Some(forge);
+        crate::worktree_pr::handle_worktree_pr_with_persistence(
+            &f.ctx,
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            &mut session,
+            0,
+            0,
+            &[],
+            &crate::flags::NO_FLAGS,
+            None,
+            &NoOpOptionHandler,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(session.pr_url.as_deref(), Some(f.url.as_str()));
+        let args = fs::read_to_string(&f.log_path).unwrap_or_else(|e| panic!("{e:?}"));
+        if template.starts_with("commit_message_template") {
+            assert_eq!(
+                git_stdout_ok(&f.ctx.path, &["log", "-1", "--pretty=%s"]),
+                format!("feat: add user icon [{id}]")
+            );
+        } else {
+            assert!(
+                args.contains("--title") && args.contains("first line"),
+                "{args}"
+            );
+            let body_arg = if forge == crate::forge::ForgeKind::GitLab {
+                "--description"
+            } else {
+                "--body"
+            };
+            assert!(args.contains(body_arg) && args.contains("BODY"), "{args}");
+            assert!(args.contains("Closes #"), "{args}");
+            assert!(!args.contains("--fill"), "{args}");
+        }
+        worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[tokio::test]
+    async fn pr_template_entrypoint_renders_commit_subject() {
+        run_pr_template_entrypoint_case(
+            "commit_message_template: '{title} [{session_id}]'",
+            "---\ntitle: 'feat: add user icon'\n---\nBODY",
+            "20260310prtemplate01",
+            crate::forge::ForgeKind::GitHub,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pr_template_entrypoint_renders_body_with_fallback_title() {
+        run_pr_template_entrypoint_case(
+            "pr_body_template: \"## Summary\\n{body}\\n\\nCloses #{issue}\"",
+            "---\ntitle: ''\n---\nBODY",
+            "20260310prtemplate02",
+            crate::forge::ForgeKind::GitHub,
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pr_template_entrypoint_gitlab_renders_body_with_fallback_title() {
+        run_pr_template_entrypoint_case(
+            "pr_body_template: \"## Summary\\n{body}\\n\\nCloses #{issue}\"",
+            "---\ntitle: ''\n---\nBODY",
+            "20260310prtemplategitlab",
+            crate::forge::ForgeKind::GitLab,
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pr_template_entrypoint_rejects_missing_title_before_git_and_forge() {
+        for (id, forge) in [
+            ("20260310emptygithub", crate::forge::ForgeKind::GitHub),
+            ("20260310emptygitlab", crate::forge::ForgeKind::GitLab),
+        ] {
+            let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+            let f = setup_pr_test(&tmp, id, "https://github.com/owner/repo/pull/19");
+            fs::copy(tmp.path().join("bin/gh"), tmp.path().join("bin/glab"))
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            let before = git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]);
+            let compiled = crate::workflow::compile(
+                crate::config::WorkflowConfig::from_yaml(
+                    "command: [sh, -c, 'exit 0']\npr_body_template: 'rendered {body}'\nsteps:\n  main:\n    prompt: inspect\n",
+                ).unwrap_or_else(|e| panic!("{e:?}")),
+            ).unwrap_or_else(|e| panic!("{e:?}"));
+            let plan = tmp.path().join("plan.md");
+            fs::write(&plan, "# Plan\n").unwrap_or_else(|e| panic!("{e:?}"));
+            let mut vars = VariableStore::new(String::new());
+            vars.set_named_file(PLAN_VAR, plan);
+            let mut tracker = FileTracker::with_root(f.ctx.path.clone());
+            let mut session = SessionState::new(
+                id.to_string(),
+                f.repo.clone(),
+                crate::session_config::SessionConfigRef::File {
+                    path: tmp.path().join("workflow.yaml"),
+                },
+                " \n ".to_string(),
+            );
+            session.title = Some("  ".to_string());
+            session.forge = Some(forge);
+            let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+                &f.ctx,
+                &compiled,
+                &mut vars,
+                &mut tracker,
+                &mut session,
+                0,
+                0,
+                &[],
+                &crate::flags::NO_FLAGS,
+                None,
+                &NoOpOptionHandler,
+                None,
+                None,
+                None,
+            )
+            .await;
+            let Err(error) = result else {
+                panic!("expected missing title error");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("pr_body_template requires a nonempty generated or session title"),
+                "{error}"
+            );
+            assert_eq!(git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]), before);
+            assert!(
+                !Command::new("git")
+                    .arg("--git-dir")
+                    .arg(tmp.path().join("origin.git"))
+                    .args([
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{}", f.ctx.branch)
+                    ])
+                    .status()
+                    .unwrap_or_else(|e| panic!("{e:?}"))
+                    .success()
+            );
+            let calls = fs::read_to_string(&f.log_path).unwrap_or_default();
+            assert!(
+                !calls.contains("pr create") && !calls.contains("mr create"),
+                "{calls}"
+            );
+            worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+    }
+
     #[tokio::test]
     async fn test_attempt_pr_creation_uses_pr_title_as_commit_message_when_title_is_present() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
@@ -3218,8 +3460,8 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "implement user icon feature",
-            pr_title,
-            "",
+            (pr_title, ""),
+            None,
             None,
             None,
         )
@@ -3260,8 +3502,8 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             fallback,
-            "",
-            "",
+            ("", ""),
+            None,
             None,
             None,
         )
@@ -3302,8 +3544,8 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             fallback,
-            "   ",
-            "",
+            ("   ", ""),
+            None,
             None,
             None,
         )

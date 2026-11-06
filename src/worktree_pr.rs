@@ -469,11 +469,14 @@ async fn create_pr_attempt(
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
     }
-    let pr_body = crate::issue_input::with_closing_reference(&pr_body, session.issue_number);
+    let texts =
+        crate::pr_template::render_pr_texts(compiled, session, &ctx.branch, &pr_title, &pr_body)?;
+    let pr_body = crate::issue_input::with_closing_reference(&texts.body, session.issue_number);
     // Without an issue, GitHub's fill path historically ignores the generated body.
     let pr_body = if session.issue_number.is_none()
         && crate::forge::session_forge(session) == crate::forge::ForgeKind::GitHub
-        && pr_title.trim().is_empty()
+        && texts.title.trim().is_empty()
+        && compiled.pr_body_template.is_none()
     {
         ""
     } else {
@@ -483,8 +486,8 @@ async fn create_pr_attempt(
         ctx,
         crate::forge::session_forge(session),
         session.input_or_title(),
-        &pr_title,
-        pr_body,
+        (&texts.title, pr_body),
+        texts.commit_message.as_deref(),
         (
             session.worktree_base_ref.as_deref(),
             session.worktree_base_branch.as_deref(),
@@ -730,8 +733,8 @@ pub(crate) async fn attempt_pr_creation(
     ctx: &worktree::WorktreeContext,
     forge: crate::forge::ForgeKind,
     message: &str,
-    title: &str,
-    body: &str,
+    pr_text: (&str, &str),
+    commit_message_override: Option<&str>,
     base_branch: Option<&str>,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<PrAttemptOutcome> {
@@ -739,8 +742,8 @@ pub(crate) async fn attempt_pr_creation(
         ctx,
         forge,
         message,
-        title,
-        body,
+        pr_text,
+        commit_message_override,
         (None, base_branch),
         cancel_token,
     )
@@ -751,14 +754,17 @@ async fn attempt_pr_creation_with_ref(
     ctx: &worktree::WorktreeContext,
     forge: crate::forge::ForgeKind,
     message: &str,
-    title: &str,
-    body: &str,
+    pr_text: (&str, &str),
+    commit_message_override: Option<&str>,
     base: (Option<&str>, Option<&str>),
     cancel_token: Option<&CancellationToken>,
 ) -> Result<PrAttemptOutcome> {
+    let (title, body) = pr_text;
     let (base_ref, base_branch) = base;
     let trimmed_title = title.trim();
-    let commit_message = if trimmed_title.is_empty() {
+    let commit_message = if let Some(override_message) = commit_message_override {
+        override_message
+    } else if trimmed_title.is_empty() {
         message
     } else {
         trimmed_title
@@ -1513,8 +1519,8 @@ mod tests {
                 &ctx,
                 crate::forge::ForgeKind::GitHub,
                 "task",
-                "",
-                "",
+                ("", ""),
+                None,
                 Some("develop"),
                 None
             )
@@ -1551,8 +1557,8 @@ mod tests {
                 &ctx,
                 crate::forge::ForgeKind::GitHub,
                 "task",
-                "",
-                "",
+                ("", ""),
+                None,
                 Some("develop"),
                 None
             )
@@ -1587,8 +1593,8 @@ mod tests {
                 &ctx,
                 crate::forge::ForgeKind::GitHub,
                 "task",
-                "",
-                "",
+                ("", ""),
+                None,
                 (selected, Some("develop")),
                 None
             )
@@ -1624,8 +1630,8 @@ mod tests {
                 &ctx,
                 crate::forge::ForgeKind::GitHub,
                 "task",
-                "",
-                "",
+                ("", ""),
+                None,
                 Some("develop"),
                 None
             )
@@ -2423,6 +2429,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             env: HashMap::new(),
             plan_language: "English".to_string(),
             pr_language: "English".to_string(),
+            commit_message_template: None,
+            pr_body_template: None,
             mcp_servers: IndexMap::new(),
             create_pr: true,
             cleanup_after_pr: false,

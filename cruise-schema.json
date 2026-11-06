@@ -88,6 +88,14 @@
       "$ref": "#/$defs/LanguagesConfig",
       "description": "Nested language configuration for PR descriptions and planning prompts"
     },
+    "commit_message_template": {
+      "type": ["string", "null"],
+      "description": "Optional commit subject template. Supports {title}, {issue}, {session_id}, and {branch}; doubled braces escape literal braces."
+    },
+    "pr_body_template": {
+      "type": ["string", "null"],
+      "description": "Optional pull request body template. Supports {title}, {body}, {issue}, {session_id}, and {branch}; doubled braces escape literal braces."
+    },
     "env": {
       "type": "object",
       "additionalProperties": {
