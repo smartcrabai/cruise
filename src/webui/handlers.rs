@@ -804,6 +804,40 @@ pub(crate) async fn run_session(
     })
 }
 
+pub(crate) async fn create_pr(State(state): State<WebState>, Path(id): Path<String>) -> Response {
+    run(&state, "Create PR", || {
+        let application = state.application.clone();
+        let (sink, log_sink) = state.hub.sinks();
+        let spawn_id = id.clone();
+        super::ops::spawn(async move {
+            let terminal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let seen = terminal.clone();
+            let event_sink = sink.clone();
+            let tracking_sink: std::sync::Arc<dyn crate::application::ApplicationEventSink> =
+                std::sync::Arc::new(move |event: crate::application::ApplicationEvent| {
+                    if matches!(event, crate::application::ApplicationEvent::RunFailed { .. } | crate::application::ApplicationEvent::RunCancelled { .. }) {
+                        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    event_sink.send(event)
+                });
+            let result = application.create_pr(&spawn_id, tracking_sink, Some(log_sink)).await;
+            if let Err(error) = &result && !terminal.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = sink.send(crate::application::ApplicationEvent::RunFailed {
+                    session_id: spawn_id,
+                    error: error.to_string(),
+                });
+            }
+            result
+        });
+        let mut body = partials::header_and_row(&state, &id, Some(OperationKind::CreatePr))?;
+        body.push_str(&partials::by_id(
+            &format!("tab-panel-{id}"),
+            &partials::log_tab_html(&state, &id, Some(OperationKind::CreatePr))?,
+        ));
+        Ok(push_url(html(body), &format!("/sessions/{id}?tab=log")))
+    })
+}
+
 pub(crate) async fn cancel(State(state): State<WebState>, Path(id): Path<String>) -> Response {
     run(&state, "Cancel", || {
         let _ = state.application.cancel_session(&id);

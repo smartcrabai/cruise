@@ -53,6 +53,7 @@ fn actions() -> SessionActionsVm {
         show_ask: true,
         show_create_worktree: true,
         show_run: true,
+        show_create_pr: true,
         run_label: "Retry".to_string(),
         show_reset: true,
         show_replan: true,

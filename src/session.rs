@@ -25,6 +25,8 @@ pub enum SessionPhase {
     Running,
     Completed,
     Failed(String),
+    /// Workflow succeeded, but publishing the pull request failed.
+    PrFailed(String),
     /// Process was interrupted (Ctrl+C or panic) mid-execution; can be resumed.
     Suspended,
 }
@@ -40,6 +42,7 @@ impl SessionPhase {
             Self::Running => "Running",
             Self::Completed => "Completed",
             Self::Failed(_) => "Failed",
+            Self::PrFailed(_) => "PR Failed",
             Self::Suspended => "Suspended",
         }
     }
@@ -51,6 +54,13 @@ impl SessionPhase {
             self,
             Self::Planned | Self::Running | Self::Failed(_) | Self::Suspended
         )
+    }
+}
+
+pub(crate) fn phase_for_run_error(error: &CruiseError) -> SessionPhase {
+    match error {
+        CruiseError::PrPublicationFailed(message) => SessionPhase::PrFailed(message.clone()),
+        _ => SessionPhase::Failed(error.to_string()),
     }
 }
 
@@ -115,6 +125,9 @@ pub struct SessionState {
     /// Deliberate reason a completed worktree session has no PR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_skipped_reason: Option<PrSkippedReason>,
+    /// Workflow variables captured before pull-request publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_workflow_vars: Option<crate::variable::VariableStore>,
     /// Forge (GitHub/GitLab) resolved when the session was created.
     #[serde(default)]
     pub forge: Option<crate::forge::ForgeKind>,
@@ -252,6 +265,7 @@ impl SessionState {
             allow_dirty_working_tree: false,
             pr_url: None,
             pr_skipped_reason: None,
+            pr_workflow_vars: None,
             forge: None,
             updated_at: None,
             awaiting_input: false,
@@ -982,7 +996,7 @@ impl SessionManager {
             Ok(SessionFileContents::Parsed { state, fingerprint })
                 if matches!(
                     state.phase,
-                    SessionPhase::Completed | SessionPhase::Failed(_)
+                    SessionPhase::Completed | SessionPhase::Failed(_) | SessionPhase::PrFailed(_)
                 ) || (matches!(initial_phase, SessionPhase::Planned)
                     && fingerprint == initial_fingerprint) =>
             {
@@ -1130,7 +1144,7 @@ fn validate_session_id(id: &str) -> Result<()> {
 fn is_unreclaimable_no_pr_session(session: &SessionState, plan_available: bool) -> bool {
     let terminal = matches!(
         session.phase,
-        SessionPhase::Completed | SessionPhase::Failed(_)
+        SessionPhase::Completed | SessionPhase::Failed(_) | SessionPhase::PrFailed(_)
     );
     if session.exec {
         // Explicitly resumed exec sessions remain transient, but a reset exec
@@ -1336,6 +1350,15 @@ fn fetch_pr_state(session: &SessionState, pr_url: &str) -> std::result::Result<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pr_failed_roundtrips_and_is_not_runnable() {
+        let json = serde_json::json!({"PrFailed": "push failed"});
+        let phase: super::SessionPhase =
+            serde_json::from_value(json.clone()).expect("persisted PR failure must deserialize");
+        assert_eq!(phase.label(), "PR Failed");
+        assert!(!phase.is_runnable());
+        assert_eq!(serde_json::to_value(phase).unwrap(), json);
+    }
     use super::*;
     use tempfile::TempDir;
 

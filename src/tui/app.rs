@@ -100,6 +100,7 @@ pub(crate) enum SidebarStatus {
     Planned,
     Completed,
     Failed,
+    PrFailed,
     PlanFailed,
     Suspended,
 }
@@ -116,6 +117,7 @@ impl SidebarStatus {
             Self::Planned => "Planned",
             Self::Completed => "Completed",
             Self::Failed => "Failed",
+            Self::PrFailed => "PR Failed",
             Self::PlanFailed => "Plan Failed",
             Self::Suspended => "Suspended",
         }
@@ -145,7 +147,12 @@ fn classify_sidebar_status(
         Some(OperationKind::Generate | OperationKind::Fix | OperationKind::Replan) => {
             return SidebarStatus::Planning;
         }
-        Some(OperationKind::Run | OperationKind::BatchRun | OperationKind::Ask) => {
+        Some(
+            OperationKind::Run
+            | OperationKind::BatchRun
+            | OperationKind::Ask
+            | OperationKind::CreatePr,
+        ) => {
             return SidebarStatus::Running;
         }
         Some(OperationKind::BatchQueued | OperationKind::Mutate) | None => {}
@@ -161,6 +168,7 @@ fn classify_sidebar_status(
     let status = match &session.phase {
         SessionPhase::Completed => SidebarStatus::Completed,
         SessionPhase::Failed(_) => SidebarStatus::Failed,
+        SessionPhase::PrFailed(_) => SidebarStatus::PrFailed,
         SessionPhase::Suspended => SidebarStatus::Suspended,
         SessionPhase::Draft
         | SessionPhase::AwaitingInput
@@ -2808,6 +2816,7 @@ impl TuiApp {
             | SessionAction::RunCurrentBranch
             | SessionAction::Retry
             | SessionAction::Resume
+            | SessionAction::CreatePr
             | SessionAction::OpenPr
             | SessionAction::MergePr => self.apply_command(PendingCommand::Session(action)),
         }
@@ -3056,6 +3065,7 @@ impl TuiApp {
                 self.start_run(id, Some(WorkspaceMode::CurrentBranch));
             }
             SessionAction::Retry | SessionAction::Resume => self.start_run(id, None),
+            SessionAction::CreatePr => self.start_create_pr(id),
             SessionAction::ResetToPlanned => match self.application.reset_to_planned(&id) {
                 Ok(_) => {
                     self.invalidate(&id, true, true, true);
@@ -3137,6 +3147,19 @@ impl TuiApp {
             self.logs_sender.clone(),
         ) {
             self.status = Some("Run started".to_string());
+        } else {
+            self.set_error("Session already has active work".to_string());
+        }
+    }
+
+    fn start_create_pr(&mut self, id: String) {
+        if self.registry.create_pr(
+            self.application.clone(),
+            id,
+            self.events.clone(),
+            self.logs_sender.clone(),
+        ) {
+            self.status = Some("Creating PR".to_string());
         } else {
             self.set_error("Session already has active work".to_string());
         }
@@ -3465,6 +3488,7 @@ fn operation_label(operation: crate::application::OperationKind) -> &'static str
         crate::application::OperationKind::Ask => "Ask",
         crate::application::OperationKind::Replan => "Replan",
         crate::application::OperationKind::Run => "Run",
+        crate::application::OperationKind::CreatePr => "Create PR",
         crate::application::OperationKind::BatchQueued => "Batch queued",
         crate::application::OperationKind::BatchRun => "Batch run",
         crate::application::OperationKind::Mutate => "Update",
@@ -3488,6 +3512,7 @@ pub fn action_label(action: SessionAction) -> &'static str {
         SessionAction::Replan => "Replan",
         SessionAction::EditSettings => "Edit Settings",
         SessionAction::Retry => "Retry",
+        SessionAction::CreatePr => "Create PR",
         SessionAction::ResetToPlanned => "Reset to Planned",
         SessionAction::EditCurrentStep => "Edit Current Step",
         SessionAction::Resume => "Resume",
@@ -3860,6 +3885,7 @@ mod tests {
             (SidebarStatus::Planned, "Planned", "●"),
             (SidebarStatus::Completed, "Completed", "●"),
             (SidebarStatus::Failed, "Failed", "●"),
+            (SidebarStatus::PrFailed, "PR Failed", "●"),
             (SidebarStatus::PlanFailed, "Plan Failed", "●"),
             (SidebarStatus::Suspended, "Suspended", "●"),
         ];
@@ -3883,6 +3909,10 @@ mod tests {
                 SessionPhase::Failed("failure".to_string()),
                 SidebarStatus::Failed,
             ),
+            (
+                SessionPhase::PrFailed("push failed".to_string()),
+                SidebarStatus::PrFailed,
+            ),
             (SessionPhase::Suspended, SidebarStatus::Suspended),
         ];
 
@@ -3890,6 +3920,17 @@ mod tests {
             let state = sidebar_session(&format!("phase-{index}"), phase);
             assert_eq!(app.sidebar_status(&state), expected);
         }
+    }
+
+    #[test]
+    fn creating_pr_shows_running_without_changing_failure_phase() {
+        let state = sidebar_session("pr", SessionPhase::PrFailed("push failed".to_string()));
+        assert_eq!(
+            classify_sidebar_status(&state, Some(OperationKind::CreatePr), false, true, false),
+            SidebarStatus::Running
+        );
+        assert!(matches!(state.phase, SessionPhase::PrFailed(_)));
+        assert_eq!(action_label(SessionAction::CreatePr), "Create PR");
     }
 
     #[test]

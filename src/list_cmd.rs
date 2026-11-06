@@ -56,6 +56,7 @@ fn session_to_json_with_plan_availability(
         SessionPhase::Running => ("Running", None),
         SessionPhase::Completed => ("Completed", None),
         SessionPhase::Failed(msg) => ("Failed", Some(msg)),
+        SessionPhase::PrFailed(msg) => ("PrFailed", Some(msg)),
         SessionPhase::Suspended => ("Suspended", None),
     };
     ListSessionJson {
@@ -283,6 +284,30 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     // Re-load so subsequent session_actions(&session) uses fresh state.
                     session = manager.load(&session.id)?;
                 }
+                "Create PR" => {
+                    let app = crate::application::CruiseApplication::new(manager.clone());
+                    let sink = std::sync::Arc::new(|event| {
+                        match event {
+                            crate::application::ApplicationEvent::RunPhase { phase, .. } => {
+                                eprintln!("{phase}")
+                            }
+                            crate::application::ApplicationEvent::PrCreated { url, .. } => {
+                                eprintln!("PR created: {url}")
+                            }
+                            crate::application::ApplicationEvent::RunFailed { error, .. } => {
+                                eprintln!("PR creation failed: {error}")
+                            }
+                            _ => {}
+                        }
+                        Ok(())
+                    });
+                    if let Err(error) = app.create_pr(&session.id, sink, None).await {
+                        eprintln!("PR creation failed: {error}");
+                    }
+                    if let Ok(reloaded) = manager.load(&session.id) {
+                        session = reloaded;
+                    }
+                }
                 "Open PR" => {
                     let url = session.pr_url.as_deref().ok_or_else(|| {
                         CruiseError::Other("Open PR action requires pr_url".into())
@@ -442,6 +467,13 @@ fn session_actions_with_plan_availability(
         SessionPhase::Failed(_) => {
             actions.push("Run");
             actions.push("Edit Settings");
+            actions.push("Reset to Planned");
+        }
+        SessionPhase::PrFailed(_) => {
+            actions.push("Create PR");
+            if session.pr_url.is_some() {
+                actions.push("Open PR");
+            }
             actions.push("Reset to Planned");
         }
         SessionPhase::Completed => {
@@ -751,6 +783,7 @@ fn format_session_label_with_plan_availability(s: &SessionState, plan_available:
         SessionPhase::Running => (style(">").yellow(), style("Running").yellow()),
         SessionPhase::Completed => (style("v").green(), style("Completed").green()),
         SessionPhase::Failed(_) => (style("x").red(), style("Failed").red()),
+        SessionPhase::PrFailed(_) => (style("x").red(), style("PR Failed").red()),
         SessionPhase::Suspended => (style("||").yellow(), style("Suspended").yellow()),
     };
     let date = format_session_date(&s.id);
@@ -794,6 +827,38 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    fn pr_failed_session() -> SessionState {
+        let phase = serde_json::from_value(serde_json::json!({"PrFailed": "push failed"}))
+            .expect("PR failure state must be readable");
+        make_session("20260306143000", "task", phase)
+    }
+
+    #[test]
+    fn pr_failed_list_actions_offer_publication_retry_not_workflow_run() {
+        let mut session = pr_failed_session();
+        assert_eq!(
+            session_actions(&session),
+            vec!["Create PR", "Reset to Planned", "Delete", "Back"]
+        );
+        session.pr_url = Some("https://example.com/pr/1".into());
+        assert_eq!(
+            session_actions(&session),
+            vec!["Create PR", "Open PR", "Reset to Planned", "Delete", "Back"]
+        );
+    }
+
+    #[test]
+    fn pr_failed_list_json_preserves_error() {
+        let dto = session_to_json(pr_failed_session());
+        assert_eq!(dto.phase, "PrFailed");
+        assert_eq!(dto.phase_error.as_deref(), Some("push failed"));
+    }
+
+    #[test]
+    fn pr_failed_label_identifies_publication_failure() {
+        assert!(format_session_label(&pr_failed_session()).contains("PR Failed"));
+    }
 
     // -----------------------------------------------------------------------
     // session_actions

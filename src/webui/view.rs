@@ -66,7 +66,7 @@ impl PhaseBadgeVm {
             "Planned" => "planned",
             "Running" => "running",
             "Completed" => "completed",
-            "Failed" => "failed",
+            "Failed" | "PR Failed" => "failed",
             "Suspended" => "suspended",
             _ => "draft",
         };

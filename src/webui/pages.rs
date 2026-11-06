@@ -495,7 +495,9 @@ pub(crate) fn run_all_vm(state: &WebState) -> RunAllVm {
             title: truncate(&result.title, 80),
             phase: result.phase.clone(),
             error: result.error.clone(),
-            failed: result.phase == "Failed" || result.phase == "Busy",
+            failed: result.phase == "Failed"
+                || result.phase == "PR Failed"
+                || result.phase == "Busy",
         })
         .collect();
     let finished = results.len();
