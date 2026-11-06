@@ -18,6 +18,7 @@ const GITHUB_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const GITHUB_HEAD_MISMATCH_GRACE: Duration = Duration::from_secs(90);
 const GITHUB_STATUS_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!,$after:String){repository(owner:$owner,name:$repo){squashMergeAllowed pullRequest(number:$number){state isDraft headRefOid baseRefName mergeable mergeStateStatus reviewDecision mergeQueueEntry{id} autoMergeRequest{enabledAt} statusCheckRollup{state commit{oid} contexts(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}}}}";
 const GITHUB_CHECK_SUITES_QUERY: &str = "query($owner:String!,$repo:String!,$oid:GitObjectID!,$after:String){repository(owner:$owner,name:$repo){object(oid:$oid){... on Commit{checkSuites(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{status conclusion workflowRun{databaseId}}}}}}}";
+const GITHUB_IDENTITY_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state headRefOid}}}";
 const GITHUB_HEAD_MISMATCH_MESSAGE: &str = "local HEAD does not match the GitHub pull request head";
 
 /// Request to synchronously squash the open pull request associated with the current worktree.
@@ -1737,7 +1738,7 @@ async fn github_merge_readiness(
             "GitHub pull request is not open".to_string(),
         ));
     }
-    let (snapshot, check_names, check_status) =
+    let (snapshot, check_names, mut check_status) =
         inspect_github(reference, request, expected_head, observation).await?;
     if snapshot.metadata.head_oid != expected_head {
         observation.reason = Some("head_mismatch");
