@@ -209,6 +209,10 @@ pub struct SessionState {
     pub issue_number: Option<u64>,
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if callbacks receive a field reference"
+)]
 fn is_zero(value: &u32) -> bool {
     *value == 0
 }

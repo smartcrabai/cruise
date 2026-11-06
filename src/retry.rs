@@ -600,9 +600,19 @@ pub(crate) fn classify_retryable(text: &str) -> Option<RetryClass> {
 
 pub(crate) fn is_auth_failure(text: &str) -> bool {
     let lower = text.to_lowercase();
-    ["401", "403", "407"].iter().any(|code| has_status_code(&lower, code))
-        || ["invalid_api_key", "invalid api key", "authentication", "unauthorized", "forbidden", "permission denied"]
-            .iter().any(|marker| lower.contains(marker))
+    ["401", "403", "407"]
+        .iter()
+        .any(|code| has_status_code(&lower, code))
+        || [
+            "invalid_api_key",
+            "invalid api key",
+            "authentication",
+            "unauthorized",
+            "forbidden",
+            "permission denied",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
 }
 
 /// Classify `lower`, which must already be lowercased.

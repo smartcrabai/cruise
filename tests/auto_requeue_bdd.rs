@@ -242,7 +242,11 @@ fn planned_auth_failure(w: &mut World) {
 #[then("the failure reports authentication")]
 fn auth_reported(w: &mut World) {
     let state = std::fs::read_to_string(w.state_path.as_ref().unwrap()).unwrap();
-    assert!(state.to_lowercase().contains("authentication"), "{state}; {}", w.text());
+    assert!(
+        state.to_lowercase().contains("authentication"),
+        "{state}; {}",
+        w.text()
+    );
 }
 
 #[then(expr = "the batch session is failed with {int} automatic retries")]

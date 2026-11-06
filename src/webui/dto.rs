@@ -603,6 +603,7 @@ mod tests {
             id: "session-1".to_string(),
             phase: "Planned".to_string(),
             phase_error: None,
+            auto_requeue_count: 0,
             config_source: crate::resolver::ConfigSource::Builtin.display_string(),
             config_path: Some(BUILTIN_CONFIG_PATH.to_string()),
             base_dir: "/tmp/project".to_string(),

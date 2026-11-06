@@ -128,6 +128,7 @@ mod tests {
             id: "session-1".to_string(),
             phase: phase.to_string(),
             phase_error: None,
+            auto_requeue_count: 0,
             config_source: "default.yaml".to_string(),
             config_path: Some("default.yaml".to_string()),
             base_dir: "/home/user/project".to_string(),

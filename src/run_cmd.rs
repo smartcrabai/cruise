@@ -1206,9 +1206,11 @@ async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result
                             max_attempts,
                             session_cancel.is_cancelled(),
                         ) {
-                            let announcement = format!("Auto-requeued {session_id} ({attempt}/{max_attempts}): {error}");
-                            if let Some(dashboard) = &dashboard {
-                                dashboard.announce(&announcement);
+                            let announcement = format!(
+                                "Auto-requeued {session_id} ({attempt}/{max_attempts}): {error}"
+                            );
+                            if dashboard.is_some() {
+                                crate::batch_dashboard::BatchDashboard::announce(&announcement);
                             } else {
                                 crate::status_eprintln!("{announcement}");
                             }
@@ -1752,6 +1754,7 @@ mod tests {
         RunArgs {
             session: Some(session_id.to_string()),
             all: false,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: None,
             rate_limit_retries: 0,
@@ -3379,6 +3382,7 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: Some("some-session-id".to_string()),
             all: true,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: None,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
@@ -3424,6 +3428,7 @@ Previously, emojis were used as user icons."#;
         let args = RunArgs {
             session: None,
             all: true,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: None,
             rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
@@ -4433,6 +4438,7 @@ steps:
         let result = run(RunArgs {
             session: None,
             all: true,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
@@ -4514,6 +4520,7 @@ steps:
         let run_fut = run(RunArgs {
             session: None,
             all: true,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
@@ -5659,6 +5666,7 @@ steps:
         let run_fut = run(RunArgs {
             session: None,
             all: true,
+            auto_requeue_max_attempts: None,
             parallelism: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
@@ -5848,6 +5856,7 @@ steps:
         RunArgs {
             session: None,
             all: true,
+            auto_requeue_max_attempts: None,
             max_retries: Some(10),
             rate_limit_retries: 0,
             dry_run: false,
@@ -5919,6 +5928,7 @@ steps:
         let args = RunArgs {
             session: None,
             all: false,
+            auto_requeue_max_attempts: None,
             max_retries: None,
             rate_limit_retries: 0,
             dry_run: false,
