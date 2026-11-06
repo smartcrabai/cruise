@@ -555,44 +555,36 @@ mod tests {
     }
 
     #[test]
-    fn pr_worktree_preserves_branch_and_handles_divergence() {
+    fn pr_worktree_preserves_branch_and_handles_divergence()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let _lock = lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new()?;
         let remote = tmp.path().join("remote.git");
-        git(tmp.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        let remote_arg = remote.to_str().ok_or("test path must be UTF-8")?;
+        git(tmp.path(), &["init", "--bare", remote_arg]);
         let repo = tmp.path().join("repo");
-        fs::create_dir(&repo).unwrap();
+        fs::create_dir(&repo)?;
         init_git_repo(&repo);
-        git(
-            &repo,
-            &["remote", "add", "origin", remote.to_str().unwrap()],
-        );
+        git(&repo, &["remote", "add", "origin", remote_arg]);
         git(&repo, &["push", "origin", "HEAD:refs/heads/pr-head"]);
         let worktrees = tmp.path().join("worktrees");
-        let (ctx, reused) = setup_pr_worktree(&repo, "one", &worktrees, "pr-head").unwrap();
+        let (ctx, reused) = setup_pr_worktree(&repo, "one", &worktrees, "pr-head")?;
         assert!(!reused && !ctx.owns_branch);
         assert_eq!(
             git(&ctx.path, &["rev-parse", "--abbrev-ref", "@{upstream}"]).trim(),
             "origin/pr-head"
         );
-        assert!(
-            setup_pr_worktree(&repo, "one", &worktrees, "pr-head")
-                .unwrap()
-                .1
-        );
-        cleanup_worktree(&ctx).unwrap();
-        assert!(
-            git_status(
-                &repo,
-                &["show-ref", "--verify", "--quiet", "refs/heads/pr-head"]
-            )
-            .unwrap()
-        );
+        assert!(setup_pr_worktree(&repo, "one", &worktrees, "pr-head")?.1);
+        cleanup_worktree(&ctx)?;
+        assert!(git_status(
+            &repo,
+            &["show-ref", "--verify", "--quiet", "refs/heads/pr-head"]
+        )?);
 
         // Advance remote while the local branch stays behind.
         git(&repo, &["commit", "--allow-empty", "-m", "remote advance"]);
         git(&repo, &["push", "origin", "HEAD:refs/heads/pr-head"]);
-        let (ctx, _) = setup_pr_worktree(&repo, "two", &worktrees, "pr-head").unwrap();
+        let (ctx, _) = setup_pr_worktree(&repo, "two", &worktrees, "pr-head")?;
         assert_eq!(
             git(&ctx.path, &["rev-parse", "HEAD"]),
             git(&repo, &["rev-parse", "HEAD"])
@@ -602,20 +594,24 @@ mod tests {
             &["commit", "--allow-empty", "-m", "local advance"],
         );
         let local_head = git(&ctx.path, &["rev-parse", "HEAD"]);
-        cleanup_worktree(&ctx).unwrap();
-        let (ctx, _) = setup_pr_worktree(&repo, "three", &worktrees, "pr-head").unwrap();
+        cleanup_worktree(&ctx)?;
+        let (ctx, _) = setup_pr_worktree(&repo, "three", &worktrees, "pr-head")?;
         assert_eq!(git(&ctx.path, &["rev-parse", "HEAD"]), local_head);
-        cleanup_worktree(&ctx).unwrap();
+        cleanup_worktree(&ctx)?;
 
         git(
             &repo,
             &["commit", "--allow-empty", "-m", "remote divergence"],
         );
         git(&repo, &["push", "origin", "HEAD:refs/heads/pr-head"]);
-        let err = setup_pr_worktree(&repo, "four", &worktrees, "pr-head").unwrap_err();
+        let err = match setup_pr_worktree(&repo, "four", &worktrees, "pr-head") {
+            Err(err) => err,
+            Ok(_) => panic!("diverged branch should be rejected"),
+        };
         assert!(err.to_string().contains("diverged"));
         assert!(!worktrees.join("four").exists());
         assert_eq!(git(&repo, &["rev-parse", "pr-head"]), local_head);
+        Ok(())
     }
 
     fn setup_refspec_fixture(tmp: &TempDir) -> (PathBuf, PathBuf) {

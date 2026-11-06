@@ -285,38 +285,49 @@ mod tests {
         serde_json::json!({"number":12,"title":"Fix","url":"https://github.com/a/b/pull/12","state":"OPEN","headRefName":"feat/x","baseRefName":"main","isCrossRepository":false,"isDraft":true})
     }
     fn parse(v: &serde_json::Value) -> Result<PrTarget> {
-        parse_pr_view(&serde_json::to_vec(v).unwrap(), 12)
+        parse_pr_view(
+            &serde_json::to_vec(v).unwrap_or_else(|error| panic!("unexpected error: {error}")),
+            12,
+        )
     }
     #[test]
     fn validates_pull_request_and_rejects_unsafe_targets() {
-        let target = parse(&pr()).unwrap();
+        let target = parse(&pr()).unwrap_or_else(|error| panic!("unexpected error: {error}"));
         assert_eq!(target.head_branch, "feat/x");
         for state in ["CLOSED", "MERGED"] {
             let mut v = pr();
             v["state"] = state.into();
             assert!(
                 parse(&v)
-                    .unwrap_err()
+                    .err()
+                    .unwrap_or_else(|| panic!("expected an error"))
                     .to_string()
                     .contains("only open pull requests")
             );
         }
         let mut v = pr();
         v["isCrossRepository"] = true.into();
-        assert!(parse(&v).unwrap_err().to_string().contains("fork"));
+        assert!(
+            parse(&v)
+                .err()
+                .unwrap_or_else(|| panic!("expected an error"))
+                .to_string()
+                .contains("fork")
+        );
         let mut v = pr();
         v["headRefName"] = "".into();
         assert!(parse(&v).is_err());
         assert!(
             parse_pr_view(b"not json", 12)
-                .unwrap_err()
+                .err()
+                .unwrap_or_else(|| panic!("expected an error"))
                 .to_string()
                 .contains("invalid gh pr view output")
         );
     }
     #[test]
     fn plan_sanitizes_title_and_trims_optional_instruction() {
-        let mut target = parse(&pr()).unwrap();
+        let mut target = parse(&pr()).unwrap_or_else(|error| panic!("unexpected error: {error}"));
         target.title = "Fix\nheading".into();
         let plan = plan_text(&target, "  focus on tests  ");
         assert!(plan.starts_with("# PR #12 review fix: Fix heading\n"));
@@ -327,13 +338,14 @@ mod tests {
     fn builtin_workflow_meets_requirements() {
         let config =
             crate::config::WorkflowConfig::from_yaml(include_str!("../builtin/pr-review-fix.yaml"))
-                .unwrap();
+                .unwrap_or_else(|error| panic!("unexpected error: {error}"));
         assert!(validate_workflow(&config).is_ok());
         let mut config = config;
         config.create_pr = false;
         assert!(
             validate_workflow(&config)
-                .unwrap_err()
+                .err()
+                .unwrap_or_else(|| panic!("expected an error"))
                 .to_string()
                 .contains(BUILTIN_SELECTOR)
         );
@@ -343,8 +355,9 @@ mod tests {
     fn effective_workflow_requires_an_enabled_unskipped_review() {
         let config = crate::config::WorkflowConfig::from_yaml(
             "flags:\n  review: {}\ncreate_pr: true\nsteps:\n  work:\n    command: echo work\nafter-pr:\n  first:\n    flag: review\n    github-review:\n      reviewers: all\n    prompt: review\n  second:\n    github-review:\n      reviewers: all\n    prompt: review\n",
-        ).unwrap();
-        let compiled = crate::workflow::compile(config).unwrap();
+        ).unwrap_or_else(|error| panic!("unexpected error: {error}"));
+        let compiled = crate::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("unexpected error: {error}"));
         let mut flags = crate::flags::FlagValues::new();
         let skip_second = vec!["second".to_string()];
         assert!(validate_effective_workflow(&compiled, &flags, &skip_second).is_err());
@@ -366,17 +379,22 @@ mod tests {
             crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
             "task".into(),
         );
-        let json = serde_json::to_value(&session).unwrap();
+        let json = serde_json::to_value(&session)
+            .unwrap_or_else(|error| panic!("unexpected error: {error}"));
         assert!(json.get("pr_target").is_none());
         assert!(
             serde_json::from_value::<crate::session::SessionState>(json)
-                .unwrap()
+                .unwrap_or_else(|error| panic!("unexpected error: {error}"))
                 .pr_target
                 .is_none()
         );
-        session.pr_target = Some(parse(&pr()).unwrap());
-        let restored: crate::session::SessionState =
-            serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+        session.pr_target =
+            Some(parse(&pr()).unwrap_or_else(|error| panic!("unexpected error: {error}")));
+        let restored: crate::session::SessionState = serde_json::from_slice(
+            &serde_json::to_vec(&session)
+                .unwrap_or_else(|error| panic!("unexpected error: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
         assert_eq!(session.pr_target, restored.pr_target);
     }
 }

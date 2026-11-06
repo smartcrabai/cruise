@@ -438,9 +438,9 @@ mod tests {
     #[test]
     fn pr_workspace_rejects_clone_origin_mismatch_before_fetch_or_worktree() {
         let _lock = lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("create temp dir: {error}"));
         let source = tmp.path().join("source");
-        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&source).unwrap_or_else(|error| panic!("create source dir: {error}"));
         init_git_repo(&source);
         let clone = tmp.path().join("clone");
         assert!(
@@ -449,7 +449,7 @@ mod tests {
                 .arg(&source)
                 .arg(&clone)
                 .status()
-                .unwrap()
+                .unwrap_or_else(|error| panic!("clone repository: {error}"))
                 .success()
         );
         run_git_ok(
@@ -473,7 +473,8 @@ mod tests {
         let fetch_head = clone.join(".git/FETCH_HEAD");
         let before = fs::read(&fetch_head).ok();
         let error = prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
-            .unwrap_err();
+            .err()
+            .unwrap_or_else(|| panic!("expected origin mismatch"));
         assert!(
             error
                 .to_string()
@@ -492,8 +493,14 @@ mod tests {
             ],
         );
         assert!(
-            crate::pr_review_fix::validate_origin(session.pr_target.as_ref().unwrap(), &clone)
-                .is_ok()
+            crate::pr_review_fix::validate_origin(
+                session
+                    .pr_target
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("missing PR target")),
+                &clone
+            )
+            .is_ok()
         );
         run_git_ok(
             &clone,
@@ -506,7 +513,8 @@ mod tests {
             ],
         );
         let error = prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
-            .unwrap_err();
+            .err()
+            .unwrap_or_else(|| panic!("expected origin mismatch"));
         assert!(
             error
                 .to_string()

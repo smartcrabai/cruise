@@ -468,15 +468,7 @@ fn create_session_inner(
         crate::repo_clone::validate_repo_spec(repo)?;
     }
     let task = resolve_new_session_task(&request, repo.as_deref())?;
-    let base_dir = if let Some(repo) = &repo {
-        let clone_path = manager.clones_dir().join(id);
-        crate::repo_clone::clone_repo(repo, &clone_path)?;
-        clone_path
-    } else if request.base_dir.as_os_str().is_empty() {
-        std::env::current_dir()?
-    } else {
-        request.base_dir.clone()
-    };
+    let base_dir = new_session_base_dir(manager, &request, id, repo.as_deref())?;
     let pr_target = request
         .pr_number
         .map(|number| {
@@ -557,6 +549,23 @@ fn create_session_inner(
     manager.save(&state)?;
     record_new_session_history(&state, &request.input, requested);
     Ok(state)
+}
+
+fn new_session_base_dir(
+    manager: &SessionManager,
+    request: &NewSessionRequest,
+    id: &str,
+    repo: Option<&str>,
+) -> Result<PathBuf> {
+    if let Some(repo) = repo {
+        let clone_path = manager.clones_dir().join(id);
+        crate::repo_clone::clone_repo(repo, &clone_path)?;
+        Ok(clone_path)
+    } else if request.base_dir.as_os_str().is_empty() {
+        Ok(std::env::current_dir()?)
+    } else {
+        Ok(request.base_dir.clone())
+    }
 }
 
 fn record_new_session_history(state: &SessionState, input: &str, requested: Option<String>) {
@@ -5016,14 +5025,14 @@ after-pr:
     #[test]
     fn setup_run_blocking_rejects_skipped_or_flag_disabled_pr_review() {
         let _lock = crate::test_support::lock_process();
-        let temp = tempfile::TempDir::new().unwrap();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("create temp dir: {e}"));
         let _home = isolate_application_config(temp.path());
         let _skip_auth = crate::test_support::EnvGuard::set("CRUISE_SKIP_AGENT_AUTH_CHECK", "1");
         let manager = SessionManager::new(temp.path().join("data"));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
+            .unwrap_or_else(|e| panic!("build runtime: {e}"));
         let config = include_str!("../builtin/pr-review-fix.yaml")
             .replace("create_pr: true", "flags:\n  review: {}\ncreate_pr: true")
             .replace(
@@ -5052,10 +5061,14 @@ after-pr:
             if skipped {
                 state.skipped_steps.push("address-review".into());
             }
-            manager.create(&state).unwrap();
+            manager
+                .create(&state)
+                .unwrap_or_else(|e| panic!("create session: {e}"));
             let session_dir = manager.sessions_dir().join(id);
-            std::fs::write(session_dir.join("config.yaml"), &config).unwrap();
-            std::fs::write(session_dir.join("plan.md"), "# Plan\n").unwrap();
+            std::fs::write(session_dir.join("config.yaml"), &config)
+                .unwrap_or_else(|e| panic!("write config: {e}"));
+            std::fs::write(session_dir.join("plan.md"), "# Plan\n")
+                .unwrap_or_else(|e| panic!("write plan: {e}"));
             let result = setup_run_blocking(
                 &manager,
                 runtime.handle(),

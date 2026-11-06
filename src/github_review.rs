@@ -1033,7 +1033,7 @@ esac
             let (included, excluded) =
                 unresolved_review_threads(&pr(&f), ReviewerScope::All, &[], &mut cache, None)
                     .await
-                    .unwrap();
+                    .unwrap_or_else(|error| panic!("fetch review threads: {error}"));
             assert_eq!(ids(&included), vec!["a", "b"]);
             assert_eq!(excluded, vec!["c", "d"]);
         }

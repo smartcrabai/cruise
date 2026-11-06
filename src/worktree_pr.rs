@@ -170,15 +170,7 @@ pub async fn handle_worktree_pr_with_persistence(
         return Err(CruiseError::Interrupted);
     }
     if let Some(target) = session.pr_target.clone() {
-        crate::pr_review_fix::validate_origin(&target, &ctx.path)?;
-        crate::forge::ensure_forge_available(crate::forge::ForgeKind::GitHub)?;
-        if let Some(on_pr_processing) = on_pr_processing {
-            on_pr_processing()?;
-        }
-        vars.set_named_value(PR_NUMBER_VAR, target.number.to_string());
-        vars.set_named_value(PR_URL_VAR, target.url.clone());
-        session.pr_url = Some(target.url);
-        session.pr_skipped_reason = None;
+        prepare_review_fix(ctx, &target, session, vars, on_pr_processing)?;
         ensure_review_fix_committed_and_push(ctx, &target.head_branch, cancel_token).await?;
         return run_after_pr_steps(
             compiled,
@@ -271,6 +263,25 @@ pub async fn handle_worktree_pr_with_persistence(
         operation.finish_result(&result);
     }
     result
+}
+
+fn prepare_review_fix(
+    ctx: &worktree::WorktreeContext,
+    target: &crate::pr_review_fix::PrTarget,
+    session: &mut SessionState,
+    vars: &mut VariableStore,
+    on_pr_processing: Option<&PrProcessingCallback<'_>>,
+) -> Result<()> {
+    crate::pr_review_fix::validate_origin(target, &ctx.path)?;
+    crate::forge::ensure_forge_available(crate::forge::ForgeKind::GitHub)?;
+    if let Some(on_pr_processing) = on_pr_processing {
+        on_pr_processing()?;
+    }
+    vars.set_named_value(PR_NUMBER_VAR, target.number.to_string());
+    vars.set_named_value(PR_URL_VAR, target.url.clone());
+    session.pr_url = Some(target.url.clone());
+    session.pr_skipped_reason = None;
+    Ok(())
 }
 
 fn prepare_pr_processing(
