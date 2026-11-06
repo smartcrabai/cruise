@@ -34,6 +34,10 @@ pub struct AppConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub plan_model: Option<crate::config::ModelSpec>,
+
+    /// Prevent idle sleep during runs on macOS.
+    #[serde(rename = "prevent_sleep", alias = "preventSleep")]
+    pub prevent_sleep: bool,
 }
 
 fn is_yaml_config_path(path: &Path) -> bool {
@@ -46,6 +50,7 @@ impl Default for AppConfig {
             run_all_parallelism: 1,
             model: None,
             plan_model: None,
+            prevent_sleep: false,
         }
     }
 }
@@ -490,6 +495,7 @@ mod tests {
                 "plan-primary".into(),
                 "plan-fallback".into(),
             ])),
+            prevent_sleep: false,
         };
         // When: save then load
         original
@@ -529,6 +535,7 @@ mod tests {
                         "plan-primary".into(),
                         "plan-fallback".into(),
                     ])),
+                    prevent_sleep: false,
                 },
             ),
             (
@@ -540,6 +547,7 @@ mod tests {
                         "fallback".into(),
                     ])),
                     plan_model: Some(crate::config::ModelSpec::Single("plan-primary".to_string())),
+                    prevent_sleep: false,
                 },
             ),
         ];

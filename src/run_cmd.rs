@@ -579,6 +579,7 @@ async fn run_single_loaded(
     loaded: LoadedRunSession,
     workflow_failed: &mut bool,
 ) -> Result<()> {
+    let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
     let LoadedRunSession {
         manager,
         session_id,
@@ -1123,6 +1124,7 @@ async fn run_all(args: RunArgs) -> Result<()> {
 /// Batch runner with an injectable cancellation token so tests can drive the
 /// shared-token Ctrl+C path (`run_all` itself creates a fresh token).
 async fn run_all_inner(args: RunArgs, cancel_token: CancellationToken) -> Result<()> {
+    let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
     // Validation in `run()` guarantees `Some(0)` never reaches here.
     let parallelism = args.parallelism.unwrap_or(1);
     let manager = SessionManager::new(crate::paths::data_dir()?);
@@ -1426,7 +1428,7 @@ mod tests {
 
         let worktrees_dir = tmp.path().join("worktrees");
         let (ctx, reused) =
-            worktree::setup_session_worktree(&repo, session_id, "test task", &worktrees_dir, None)
+            worktree::setup_session_worktree(&repo, session_id, "test task", &worktrees_dir, None, &worktree::WorktreeBase::default())
                 .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!reused, "test worktree should be created fresh");
         (repo, ctx)
@@ -2521,6 +2523,7 @@ steps:
             "",
             "",
             None,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -2553,6 +2556,7 @@ steps:
             "add feature",
             "",
             "",
+            None,
             None,
         )
         .await
@@ -2589,6 +2593,10 @@ steps:
             gh_args.contains("--draft"),
             "gh pr create should include --draft flag, got: {gh_args}"
         );
+        assert!(
+            !gh_args.split_whitespace().any(|arg| arg == "--base"),
+            "an unset base must preserve the forge default, got: {gh_args}"
+        );
         worktree::cleanup_worktree(&f.ctx).unwrap_or_else(|e| panic!("{e:?}"));
     }
 
@@ -2612,6 +2620,7 @@ steps:
             "add feature",
             "",
             "",
+            None,
             None,
         )
         .await
@@ -2654,6 +2663,7 @@ steps:
             "rerun without changes",
             "",
             "",
+            None,
             None,
         )
         .await
@@ -2837,6 +2847,79 @@ steps:
         assert!(calls.contains("pr view"), "{calls}");
     }
 
+    #[tokio::test]
+    async fn worktree_pr_handler_uses_persisted_base_not_live_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let f = setup_pr_test(
+            &tmp,
+            "20260307225905",
+            "https://github.com/owner/repo/pull/5",
+        );
+        fs::create_dir_all(f.repo.join(".cruise")).unwrap();
+        fs::write(
+            f.repo.join(".cruise/default.yaml"),
+            "base_branch: changed\n",
+        )
+        .unwrap();
+        let compiled = crate::workflow::compile(
+            crate::config::WorkflowConfig::from_yaml(
+                "command: [sh, -c, 'printf description']\nsteps:\n  main:\n    prompt: inspect\n",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let plan_path = tmp.path().join("plan.md");
+        fs::write(&plan_path, "# Plan\n").unwrap();
+        let mut vars = VariableStore::new("implement change".to_string());
+        vars.set_named_file(PLAN_VAR, plan_path);
+        let mut tracker = FileTracker::with_root(f.ctx.path.clone());
+        let state = SessionState::new(
+            "20260307225905".to_string(),
+            f.repo.clone(),
+            crate::session_config::SessionConfigRef::File {
+                path: tmp.path().join("workflow.yaml"),
+            },
+            "implement change".to_string(),
+        );
+        let mut json = serde_json::to_value(state).unwrap();
+        json["worktree_base_branch"] = serde_json::json!("develop");
+        let mut session: SessionState = serde_json::from_value(json).unwrap();
+        let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+            &f.ctx,
+            &compiled,
+            &mut vars,
+            &mut tracker,
+            &mut session,
+            0,
+            0,
+            &[],
+            &crate::flags::NO_FLAGS,
+            None,
+            &NoOpOptionHandler,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(session.pr_url.as_deref(), Some(f.url.as_str()));
+        let calls = fs::read_to_string(&f.log_path).unwrap();
+        let create = calls
+            .lines()
+            .find(|line| line.starts_with("pr create "))
+            .unwrap();
+        let args: Vec<_> = create.split_whitespace().collect();
+        assert!(
+            args.windows(2).any(|pair| pair == ["--base", "develop"]),
+            "{create}"
+        );
+        assert!(
+            !args.windows(2).any(|pair| pair == ["--base", "changed"]),
+            "{create}"
+        );
+        worktree::cleanup_worktree(&f.ctx).unwrap();
+    }
+
     struct PrTestFixture {
         repo: PathBuf,
         ctx: worktree::WorktreeContext,
@@ -2884,6 +2967,7 @@ steps:
             pr_title,
             "",
             None,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -2925,6 +3009,7 @@ steps:
             "",
             "",
             None,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -2965,6 +3050,7 @@ steps:
             fallback,
             "   ",
             "",
+            None,
             None,
         )
         .await
@@ -3569,6 +3655,7 @@ Previously, emojis were used as user icons."#;
             "edit in place",
             &worktrees_dir,
             None,
+            &crate::worktree::WorktreeBase::default(),
         )
         .unwrap_or_else(|e| panic!("failed to create plan-stage worktree: {e:?}"));
         let worktree_path = plan_ctx.path.clone();

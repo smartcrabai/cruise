@@ -1,8 +1,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use crate::error::{CruiseError, Result};
+
+static WORKTREE_BASE_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeBase {
+    pub branch: Option<String>,
+    pub auto_fetch: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct WorktreeContext {
@@ -40,7 +49,20 @@ pub fn setup_session_worktree(
     input: &str,
     worktrees_dir: &Path,
     existing_branch: Option<&str>,
+    base: &WorktreeBase,
 ) -> Result<(WorktreeContext, bool)> {
+    let (ctx, reused, _) = setup_session_worktree_with_ref(base_dir, session_id, input, worktrees_dir, existing_branch, base)?;
+    Ok((ctx, reused))
+}
+
+pub(crate) fn setup_session_worktree_with_ref(
+    base_dir: &Path,
+    session_id: &str,
+    input: &str,
+    worktrees_dir: &Path,
+    existing_branch: Option<&str>,
+    base: &WorktreeBase,
+) -> Result<(WorktreeContext, bool, Option<String>)> {
     ensure_git_repo(base_dir)?;
 
     let worktree_path = worktrees_dir.join(session_id);
@@ -58,15 +80,25 @@ pub fn setup_session_worktree(
                 original_dir: base_dir.to_path_buf(),
             },
             true,
+            None,
         ));
     }
 
     let branch = default_branch_name(session_id, input);
     fs::create_dir_all(worktrees_dir)?;
 
-    let output = Command::new("git")
+    let guard = WORKTREE_BASE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let start = resolve_start_point(base_dir, base)?;
+    let mut command = Command::new("git");
+    command
         .args(["worktree", "add", "-b", &branch])
-        .arg(&worktree_path)
+        .arg(&worktree_path);
+    if let Some(ref start) = start {
+        command.arg(start);
+    }
+    let output = command
         .current_dir(base_dir)
         .stdin(std::process::Stdio::null())
         .output()
@@ -79,6 +111,7 @@ pub fn setup_session_worktree(
             stderr.trim()
         )));
     }
+    drop(guard);
 
     copy_worktree_includes(base_dir, &worktree_path)?;
 
@@ -89,7 +122,88 @@ pub fn setup_session_worktree(
             original_dir: base_dir.to_path_buf(),
         },
         false,
+        start,
     ))
+}
+
+pub(crate) fn validate_base_branch_name(
+    repo_dir: &Path,
+    name: &str,
+) -> std::result::Result<(), String> {
+    validate_base_branch_name_with(name, || {
+        let output = Command::new("git")
+            .args(["check-ref-format", "--branch", name])
+            .current_dir(repo_dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("failed to run git: {e}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        Ok(())
+    })
+    .map_err(|error| error.unwrap_or_else(|| "branch name is empty or begins with '-'".to_string()))
+}
+
+pub(crate) fn validate_base_branch_name_with<E>(
+    name: &str,
+    check: impl FnOnce() -> std::result::Result<(), E>,
+) -> std::result::Result<(), Option<E>> {
+    if name.is_empty() || name.starts_with('-') {
+        return Err(None);
+    }
+    check().map_err(Some)
+}
+
+fn ref_exists(dir: &Path, full_ref: &str) -> bool {
+    Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", full_ref])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn resolve_start_point(base_dir: &Path, base: &WorktreeBase) -> Result<Option<String>> {
+    let Some(name) = base.branch.as_deref() else {
+        return Ok(None);
+    };
+    validate_base_branch_name(base_dir, name).map_err(|msg| {
+        CruiseError::WorktreeError(format!("invalid base branch `{name}`: {msg}"))
+    })?;
+    let remote = format!("refs/remotes/origin/{name}");
+    if base.auto_fetch {
+        let refspec = format!("+refs/heads/{name}:{remote}");
+        let fetched = Command::new("git")
+            .args(["fetch", "origin", &refspec])
+            .current_dir(base_dir)
+            .stdin(std::process::Stdio::null())
+            .output();
+        match fetched {
+            Ok(output) if output.status.success() => {
+                if ref_exists(base_dir, &remote) {
+                    return Ok(Some(remote));
+                }
+            }
+            Ok(output) => crate::status_eprintln!(
+                "warning: auto_fetch failed for origin/{name}; using local refs: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Err(error) => crate::status_eprintln!(
+                "warning: auto_fetch failed for origin/{name}; using local refs: {error}"
+            ),
+        }
+    }
+    let local = format!("refs/heads/{name}");
+    if ref_exists(base_dir, &local) {
+        return Ok(Some(local));
+    }
+    if ref_exists(base_dir, &remote) {
+        return Ok(Some(remote));
+    }
+    Err(CruiseError::WorktreeError(format!(
+        "base branch does not exist: {name}"
+    )))
 }
 
 /// Remove the worktree and delete its branch.
@@ -263,6 +377,77 @@ mod tests {
     }
 
     #[test]
+    fn auto_fetch_updates_tracking_ref_outside_configured_refspec() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let source = tmp.path().join("source");
+        let origin = tmp.path().join("origin.git");
+        let clone = tmp.path().join("clone");
+        fs::create_dir(&source).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&source);
+        let git = |dir: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&source, &["checkout", "-b", "feature"]);
+        git(tmp.path(), &["init", "--bare", origin.to_str().unwrap()]);
+        git(&source, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&source, &["push", "origin", "refs/heads/feature:refs/heads/feature"]);
+        git(tmp.path(), &["clone", "--branch", "feature", origin.to_str().unwrap(), clone.to_str().unwrap()]);
+        git(&clone, &["config", "--replace-all", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other"]);
+        fs::write(source.join("README.md"), "updated").unwrap_or_else(|e| panic!("{e:?}"));
+        git(&source, &["add", "README.md"]);
+        git(&source, &["commit", "-m", "update"]);
+        git(&source, &["push", "origin", "refs/heads/feature:refs/heads/feature"]);
+        git(&source, &["tag", "feature"]);
+        git(&source, &["push", "origin", "refs/tags/feature:refs/tags/feature"]);
+
+        let (ctx, reused) = setup_session_worktree(
+            &clone,
+            "fetch-test",
+            "",
+            &tmp.path().join("worktrees"),
+            None,
+            &WorktreeBase { branch: Some("feature".to_string()), auto_fetch: true },
+        ).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!reused);
+        assert_eq!(fs::read_to_string(ctx.path.join("README.md")).unwrap(), "updated");
+
+        git(&clone, &["update-ref", "-d", "refs/remotes/origin/feature"]);
+        let (second, reused) = setup_session_worktree(
+            &clone,
+            "fetch-test-no-tracking-ref",
+            "",
+            &tmp.path().join("worktrees"),
+            None,
+            &WorktreeBase { branch: Some("feature".to_string()), auto_fetch: true },
+        ).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!reused);
+        assert_eq!(fs::read_to_string(second.path.join("README.md")).unwrap(), "updated");
+        assert!(ref_exists(&clone, "refs/remotes/origin/feature"));
+    }
+
+    #[test]
+    fn auto_fetch_failure_falls_back_to_local_branch() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(tmp.path());
+        let output = Command::new("git")
+            .args(["branch", "fallback"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(output.status.success());
+        let base = WorktreeBase { branch: Some("fallback".to_string()), auto_fetch: true };
+        assert_eq!(resolve_start_point(tmp.path(), &base).unwrap(), Some("refs/heads/fallback".to_string()));
+    }
+
+    #[test]
     fn test_setup_session_worktree_and_cleanup() {
         let _lock = lock_process();
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
@@ -272,9 +457,15 @@ mod tests {
 
         let worktrees_dir = tmp.path().join("worktrees");
         let session_id = "20260306143000";
-        let (ctx, reused) =
-            setup_session_worktree(&repo, session_id, "test task", &worktrees_dir, None)
-                .unwrap_or_else(|e| panic!("{e:?}"));
+        let (ctx, reused) = setup_session_worktree(
+            &repo,
+            session_id,
+            "test task",
+            &worktrees_dir,
+            None,
+            &WorktreeBase::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert!(!reused, "should not be reused on first creation");
         assert!(ctx.path.exists(), "worktree directory should exist");
@@ -302,8 +493,15 @@ mod tests {
 
         let worktrees_dir = tmp.path().join("worktrees");
         let session_id = "20260306143001";
-        let (ctx, _) = setup_session_worktree(&repo, session_id, "", &worktrees_dir, None)
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let (ctx, _) = setup_session_worktree(
+            &repo,
+            session_id,
+            "",
+            &worktrees_dir,
+            None,
+            &WorktreeBase::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
 
         assert_eq!(ctx.branch, format!("cruise/{session_id}"));
         cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
@@ -313,8 +511,14 @@ mod tests {
     fn test_setup_session_worktree_not_git_repo() {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let worktrees_dir = tmp.path().join("worktrees");
-        let result =
-            setup_session_worktree(tmp.path(), "20260306143000", "task", &worktrees_dir, None);
+        let result = setup_session_worktree(
+            tmp.path(),
+            "20260306143000",
+            "task",
+            &worktrees_dir,
+            None,
+            &WorktreeBase::default(),
+        );
         assert!(
             matches!(result, Err(CruiseError::NotGitRepository)),
             "expected NotGitRepository error"

@@ -144,6 +144,8 @@ struct DefaultsFile {
     interactive_planning: Option<bool>,
     languages: Option<LanguagesConfig>,
     cleanup_after_pr: Option<bool>,
+    auto_fetch: Option<bool>,
+    base_branch: Option<String>,
     force_exec: Option<bool>,
     computer_use: Option<bool>,
     permission: Option<PermissionMode>,
@@ -186,6 +188,8 @@ pub struct WorkflowDefaults {
     interactive_planning: Option<bool>,
     languages: Option<LanguagesConfig>,
     cleanup_after_pr: Option<bool>,
+    auto_fetch: Option<bool>,
+    base_branch: Option<String>,
     force_exec: Option<bool>,
     computer_use: Option<Sourced<bool>>,
     permission: Option<Sourced<PermissionMode>>,
@@ -320,7 +324,35 @@ impl WorkflowDefaults {
                 merged.overlay(file, &path);
             }
         }
+        merged.validate_worktree_base()?;
         Ok(merged)
+    }
+
+    fn validate_worktree_base(&self) -> Result<()> {
+        if self
+            .base_branch
+            .as_ref()
+            .is_some_and(|branch| branch.trim().is_empty())
+        {
+            return Err(CruiseError::ConfigParseError(
+                "base_branch must not be empty".to_string(),
+            ));
+        }
+        if self.auto_fetch == Some(true) && self.base_branch.is_none() {
+            return Err(CruiseError::ConfigParseError(
+                "auto_fetch requires base_branch".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Return the worktree base settings from the merged defaults.
+    #[must_use]
+    pub fn worktree_base(&self) -> crate::worktree::WorktreeBase {
+        crate::worktree::WorktreeBase {
+            branch: self.base_branch.clone(),
+            auto_fetch: self.auto_fetch.unwrap_or(false),
+        }
     }
 
     fn overlay(&mut self, file: DefaultsFile, path: &Path) {
@@ -333,6 +365,8 @@ impl WorkflowDefaults {
         self.interactive_planning = file.interactive_planning.or(self.interactive_planning);
         self.languages = file.languages.or(self.languages.take());
         self.cleanup_after_pr = file.cleanup_after_pr.or(self.cleanup_after_pr);
+        self.auto_fetch = file.auto_fetch.or(self.auto_fetch);
+        self.base_branch = file.base_branch.or(self.base_branch.take());
         self.force_exec = file.force_exec.or(self.force_exec);
         self.computer_use = sourced(file.computer_use, path).or(self.computer_use.take());
         self.permission = sourced(file.permission, path).or(self.permission.take());
@@ -680,6 +714,35 @@ mod tests {
     }
 
     // ---- load ----
+
+    #[test]
+    fn worktree_defaults_validate_after_merging_layers() {
+        let env = env();
+        write(&env.user_file, "auto_fetch: true\n");
+        let error = parse_error(&env);
+        assert!(
+            error.contains("auto_fetch") && error.contains("base_branch"),
+            "{error}"
+        );
+        write(&env.project_file, "base_branch: main\n");
+        WorkflowDefaults::load(Some(env.project.path())).unwrap();
+    }
+
+    #[test]
+    fn worktree_defaults_reject_empty_base_branch() {
+        let env = env();
+        write(&env.project_file, "base_branch: '   '\n");
+        let error = parse_error(&env);
+        assert!(error.contains("base_branch must not be empty"), "{error}");
+    }
+
+    #[test]
+    fn worktree_defaults_reject_unknown_base_branch_typo() {
+        let env = env();
+        write(&env.project_file, "base_brnach: main\n");
+        let error = parse_error(&env);
+        assert!(error.contains("base_brnach"), "{error}");
+    }
 
     #[test]
     fn missing_files_leave_config_unchanged() {
