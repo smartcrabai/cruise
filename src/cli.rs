@@ -116,6 +116,8 @@ pub enum Commands {
     Run(RunArgs),
     /// List and manage sessions interactively.
     List(ListArgs),
+    /// Show the changes in a session branch and worktree.
+    Diff(DiffArgs),
     /// Remove sessions with closed/merged PRs.
     Clean(CleanArgs),
     /// Show or update application config (`~/.config/cruise/config.json` or `~/.config/cruise/config.yaml`).
@@ -441,6 +443,15 @@ pub struct ListArgs {
 }
 
 #[derive(Parser, Debug)]
+pub struct DiffArgs {
+    /// Session ID.
+    pub session: String,
+    /// Show a summary instead of the patch.
+    #[arg(long)]
+    pub stat: bool,
+}
+
+#[derive(Parser, Debug)]
 pub struct ConfigArgs {
     /// Set the maximum number of sessions the `WebUI` and TUI run concurrently in `run --all` mode.
     ///
@@ -545,6 +556,29 @@ pub fn parse_cli() -> Cli {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn diff_contract_parses_session_and_optional_stat() {
+        for (args, expected_stat) in [
+            (vec!["cruise", "diff", "20260101000000000"], false),
+            (vec!["cruise", "diff", "20260101000000000", "--stat"], true),
+        ] {
+            let cli = Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("diff arguments should parse: {error}"));
+            match cli.command {
+                Some(Commands::Diff(args)) => {
+                    assert_eq!(args.session, "20260101000000000");
+                    assert_eq!(args.stat, expected_stat);
+                }
+                other => panic!("unexpected parse result: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn diff_contract_requires_session() {
+        assert!(Cli::try_parse_from(["cruise", "diff"]).is_err());
+    }
 
     #[test]
     fn test_cli_verify() {

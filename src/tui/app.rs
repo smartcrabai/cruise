@@ -39,6 +39,7 @@ pub enum DetailTab {
     Dag,
     Plan,
     Log,
+    Diff,
 }
 
 impl DetailTab {
@@ -48,16 +49,18 @@ impl DetailTab {
             Self::Info => Self::Dag,
             Self::Dag => Self::Plan,
             Self::Plan => Self::Log,
-            Self::Log => Self::Info,
+            Self::Log => Self::Diff,
+            Self::Diff => Self::Info,
         }
     }
     #[must_use]
     pub fn previous(self) -> Self {
         match self {
-            Self::Info => Self::Log,
+            Self::Info => Self::Diff,
             Self::Dag => Self::Info,
             Self::Plan => Self::Dag,
             Self::Log => Self::Plan,
+            Self::Diff => Self::Log,
         }
     }
     #[must_use]
@@ -67,6 +70,7 @@ impl DetailTab {
             Self::Dag => "Graph",
             Self::Plan => "Plan",
             Self::Log => "Log",
+            Self::Diff => "Diff",
         }
     }
 }
@@ -280,6 +284,7 @@ pub struct TuiApp {
     pub logs: HashMap<String, VecDeque<String>>,
     pub batch_logs: VecDeque<String>,
     pub plan_cache: HashMap<String, String>,
+    pub diff_cache: HashMap<String, Result<crate::branch_diff::BranchDiff, String>>,
     pub(crate) sidebar_plan_available: HashSet<String>,
     pub dag_cache: HashMap<String, crate::graph::ExecutionGraph>,
     /// Declared flags per session; None when the session config failed to load.
@@ -288,6 +293,7 @@ pub struct TuiApp {
     pub ask_responses: HashMap<String, VecDeque<String>>,
     ask_active: std::collections::HashSet<String>,
     pub plan_scroll: usize,
+    pub diff_scroll: usize,
     pub log_scroll: usize,
     pub focus: SessionsFocus,
     pub info_scroll: usize,
@@ -352,6 +358,7 @@ impl TuiApp {
             ask_responses: HashMap::new(),
             ask_active: std::collections::HashSet::new(),
             plan_cache: HashMap::new(),
+            diff_cache: HashMap::new(),
             sidebar_plan_available: HashSet::new(),
             dag_cache: HashMap::new(),
             flag_choices_cache: HashMap::new(),
@@ -359,6 +366,7 @@ impl TuiApp {
             focus: SessionsFocus::Sidebar,
             info_scroll: 0,
             plan_scroll: 0,
+            diff_scroll: 0,
             log_scroll: 0,
             status: None,
             last_error: None,
@@ -708,6 +716,8 @@ impl TuiApp {
 
     fn evict_inactive_caches(&mut self) {
         let selected = self.active_session().map(|session| session.id.clone());
+        self.diff_cache
+            .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
         self.plan_cache
             .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
         self.dag_cache
@@ -902,6 +912,7 @@ impl TuiApp {
         self.detail_session_id = Some(id);
         if session_changed {
             self.info_scroll = 0;
+            self.diff_scroll = 0;
         }
         if session_changed || enters_plan_automatically {
             self.plan_scroll = 0;
@@ -953,6 +964,14 @@ impl TuiApp {
             return;
         };
         match self.tab {
+            DetailTab::Diff => {
+                let diff = self
+                    .application
+                    .session_branch_diff(&id)
+                    .map_err(|e| e.to_string());
+                self.diff_cache.insert(id, diff);
+                self.diff_scroll = 0;
+            }
             DetailTab::Plan => {
                 if !self.plan_cache.contains_key(&id)
                     && let Ok(plan) = self.application.session_plan(&id)
@@ -1852,6 +1871,9 @@ impl TuiApp {
             }
             Action::Refresh => {
                 self.refresh();
+                if self.tab == DetailTab::Diff {
+                    self.load_tab_data();
+                }
                 false
             }
             Action::Help => {
@@ -2272,6 +2294,8 @@ impl TuiApp {
             self.update_log_scroll(delta);
         } else if self.view == View::Sessions && self.tab == DetailTab::Plan {
             self.update_plan_scroll(delta);
+        } else if self.view == View::Sessions && self.tab == DetailTab::Diff {
+            self.update_diff_scroll(delta);
         } else {
             self.select_move(delta);
         }
@@ -2291,6 +2315,8 @@ impl TuiApp {
             self.log_scroll = self.current_line_count();
         } else if self.tab == DetailTab::Plan {
             self.plan_scroll = 0;
+        } else if self.tab == DetailTab::Diff {
+            self.diff_scroll = 0;
         } else {
             self.select_home();
         }
@@ -2316,6 +2342,8 @@ impl TuiApp {
             self.plan_scroll = self
                 .active_plan()
                 .map_or(0, |plan| plan.lines().count().saturating_sub(1));
+        } else if self.tab == DetailTab::Diff {
+            self.diff_scroll = self.diff_line_count().saturating_sub(1);
         } else {
             self.select_end();
         }
@@ -2761,6 +2789,10 @@ impl TuiApp {
 
     fn apply_action(&mut self, action: SessionAction) {
         match action {
+            SessionAction::ViewDiff => {
+                self.set_detail_tab(DetailTab::Diff);
+                self.focus = SessionsFocus::Detail;
+            }
             SessionAction::Delete | SessionAction::Discard | SessionAction::ResetToPlanned => {
                 let message = format!(
                     "{} {}?",
@@ -3039,6 +3071,7 @@ impl TuiApp {
                 }));
             }
             SessionAction::Fix
+            | SessionAction::ViewDiff
             | SessionAction::Ask
             | SessionAction::EditSettings
             | SessionAction::EditCurrentStep
@@ -3248,6 +3281,21 @@ impl TuiApp {
             self.plan_scroll.saturating_add(delta.cast_unsigned())
         }
         .min(max_scroll);
+    }
+    fn diff_line_count(&self) -> usize {
+        self.active_session()
+            .and_then(|s| self.diff_cache.get(&s.id))
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |diff| diff.patch.lines().count())
+    }
+
+    pub fn update_diff_scroll(&mut self, delta: isize) {
+        self.diff_scroll = if delta.is_negative() {
+            self.diff_scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.diff_scroll.saturating_add(delta.cast_unsigned())
+        }
+        .min(self.diff_line_count().saturating_sub(1));
     }
     fn current_line_count(&self) -> usize {
         if self.view == View::RunAll {
@@ -3493,6 +3541,7 @@ pub fn action_label(action: SessionAction) -> &'static str {
         SessionAction::Resume => "Resume",
         SessionAction::OpenPr => "Open Pull Request",
         SessionAction::MergePr => "Merge PR",
+        SessionAction::ViewDiff => "View Diff",
     }
 }
 
@@ -4149,7 +4198,176 @@ mod tests {
     #[test]
     fn detail_tabs_cycle_in_both_directions() {
         assert_eq!(DetailTab::Info.next(), DetailTab::Dag);
-        assert_eq!(DetailTab::Info.previous(), DetailTab::Log);
+        assert_eq!(DetailTab::Dag.label(), "Graph");
+        assert_eq!(DetailTab::Dag.next(), DetailTab::Plan);
+        assert_eq!(DetailTab::Plan.next(), DetailTab::Log);
+        assert_eq!(DetailTab::Log.next(), DetailTab::Diff);
+        assert_eq!(DetailTab::Diff.next(), DetailTab::Info);
+        assert_eq!(DetailTab::Info.previous(), DetailTab::Diff);
+        assert_eq!(DetailTab::Diff.previous(), DetailTab::Log);
+        assert_eq!(DetailTab::Diff.label(), "Diff");
+    }
+
+    fn diff_fixture() -> PersistedTuiFixture {
+        let mut fixture = persisted_fixture(&[(1, SessionPhase::Completed)]);
+        let repo = fixture.temp.path().join("repo");
+        std::fs::create_dir_all(&repo)
+            .unwrap_or_else(|error| panic!("create test repository: {error}"));
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap_or_else(|error| panic!("run git {args:?}: {error}"));
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(repo.join("tracked.txt"), "original\n")
+            .unwrap_or_else(|error| panic!("write tracked file: {error}"));
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-qm", "initial"]);
+        git(&["branch", "session-branch"]);
+        let mut state = fixture
+            .manager
+            .load(&test_session_id(1))
+            .unwrap_or_else(|error| panic!("load session: {error}"));
+        state.base_dir = repo.clone();
+        state.worktree_branch = Some("session-branch".to_string());
+        state.worktree_path = Some(repo);
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("save session: {error}"));
+        fixture.app.refresh();
+        fixture
+    }
+
+    fn diff_screen(app: &mut TuiApp) -> String {
+        let backend = ratatui::backend::TestBackend::new(140, 40);
+        let mut terminal = ratatui::Terminal::new(backend)
+            .unwrap_or_else(|error| panic!("create terminal: {error}"));
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, app))
+            .unwrap_or_else(|error| panic!("draw terminal: {error}"));
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(140)
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn view_diff_action_label_and_palette() {
+        assert_eq!(action_label(SessionAction::ViewDiff), "View Diff");
+        let mut fixture = diff_fixture();
+        fixture.app.open_palette();
+        let Some(Modal::Palette { actions, .. }) = fixture.app.modal.as_ref() else {
+            panic!("palette expected");
+        };
+        assert!(actions.contains(&SessionAction::ViewDiff));
+    }
+
+    #[test]
+    fn view_diff_action_opens_detail_and_loads_cache() {
+        let mut fixture = diff_fixture();
+        fixture.app.apply_action(SessionAction::ViewDiff);
+        assert_eq!(fixture.app.tab, DetailTab::Diff);
+        assert_eq!(fixture.app.focus, SessionsFocus::Detail);
+        assert!(fixture.app.diff_cache.contains_key(&test_session_id(1)));
+    }
+
+    #[test]
+    fn diff_refresh_reloads_worktree_changes() {
+        let mut fixture = diff_fixture();
+        fixture.app.apply_action(SessionAction::ViewDiff);
+        let id = test_session_id(1);
+        assert!(
+            !fixture.app.diff_cache[&id]
+                .as_ref()
+                .unwrap_or_else(|error| panic!("load initial diff: {error}"))
+                .patch
+                .contains("fresh change")
+        );
+        std::fs::write(fixture.temp.path().join("repo/new.txt"), "fresh change\n")
+            .unwrap_or_else(|error| panic!("write fresh change: {error}"));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('r'))));
+        assert!(
+            fixture.app.diff_cache[&id]
+                .as_ref()
+                .unwrap_or_else(|error| panic!("load refreshed diff: {error}"))
+                .patch
+                .contains("+fresh change")
+        );
+    }
+
+    #[test]
+    fn diff_detail_renders_changes_empty_and_truncation() {
+        let mut fixture = diff_fixture();
+        fixture.app.apply_action(SessionAction::ViewDiff);
+        let text = diff_screen(&mut fixture.app);
+        assert!(text.contains("Diff"));
+        assert!(text.contains("No changes"), "{text}");
+        std::fs::write(fixture.temp.path().join("repo/new.txt"), "visible change\n")
+            .unwrap_or_else(|error| panic!("write visible change: {error}"));
+        fixture.app.handle_key(key(KeyCode::Char('r')));
+        let text = diff_screen(&mut fixture.app);
+        assert!(text.contains("+visible change"), "{text}");
+        fixture
+            .app
+            .diff_cache
+            .get_mut(&test_session_id(1))
+            .unwrap_or_else(|| panic!("diff cache entry missing"))
+            .as_mut()
+            .unwrap_or_else(|error| panic!("load diff: {error}"))
+            .truncated = true;
+        let text = diff_screen(&mut fixture.app);
+        assert!(text.to_lowercase().contains("truncated"), "{text}");
+    }
+
+    #[test]
+    fn diff_detail_explains_missing_branch() {
+        let mut fixture = persisted_fixture(&[(1, SessionPhase::Completed)]);
+        fixture.app.set_detail_tab(DetailTab::Diff);
+        let text = diff_screen(&mut fixture.app);
+        assert!(text.contains("No session branch"), "{text}");
+    }
+
+    #[test]
+    fn diff_detail_navigation_uses_diff_lines() {
+        let mut fixture = diff_fixture();
+        std::fs::write(
+            fixture.temp.path().join("repo/new.txt"),
+            "one\ntwo\nthree\n",
+        )
+        .unwrap_or_else(|error| panic!("write diff lines: {error}"));
+        fixture.app.apply_action(SessionAction::ViewDiff);
+        let count = fixture.app.diff_cache[&test_session_id(1)]
+            .as_ref()
+            .unwrap_or_else(|error| panic!("load diff lines: {error}"))
+            .patch
+            .lines()
+            .count();
+        assert!(count > 1);
+        fixture.app.handle_action(Action::Down);
+        assert_eq!(fixture.app.diff_scroll, 1);
+        fixture.app.handle_action(Action::End);
+        assert_eq!(fixture.app.diff_scroll, count - 1);
+        fixture.app.handle_action(Action::Home);
+        assert_eq!(fixture.app.diff_scroll, 0);
     }
 
     #[test]
@@ -4361,7 +4579,7 @@ mod tests {
         fixture.app.focus = SessionsFocus::Detail;
         fixture.app.tab = DetailTab::Info;
         assert!(!fixture.app.handle_key(key(KeyCode::Left)));
-        assert_eq!(fixture.app.tab, DetailTab::Log);
+        assert_eq!(fixture.app.tab, DetailTab::Diff);
         assert!(!fixture.app.handle_key(key(KeyCode::Right)));
         assert_eq!(fixture.app.tab, DetailTab::Info);
         assert_eq!(fixture.app.focus, SessionsFocus::Detail);
