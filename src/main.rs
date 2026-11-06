@@ -74,6 +74,7 @@ mod sdk_tools;
 mod session;
 mod session_config;
 mod session_edit;
+mod sleep_guard;
 mod spinner;
 mod ssh_cmd;
 mod step;
@@ -96,7 +97,7 @@ mod workflow_defaults;
 mod workflow_generate;
 mod workflow_packages;
 mod workspace;
-mod worktree;
+pub mod worktree;
 mod worktree_pr;
 mod yaml_metadata;
 
