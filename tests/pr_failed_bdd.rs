@@ -26,7 +26,7 @@ impl std::fmt::Debug for World {
         f.debug_struct("World")
             .field("id", &self.id)
             .field("error", &self.error)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 fn git(path: &Path, args: &[&str]) {
