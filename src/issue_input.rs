@@ -162,7 +162,11 @@ impl GithubIssueSource for GhGithub {
 pub(crate) fn neutralize_cruise_mentions(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut rest = input;
-    while let Some(i) = rest.as_bytes().windows(7).position(|w| w.eq_ignore_ascii_case(b"@cruise")) {
+    while let Some(i) = rest
+        .as_bytes()
+        .windows(7)
+        .position(|w| w.eq_ignore_ascii_case(b"@cruise"))
+    {
         result.push_str(&rest[..i]);
         let after = &rest[i + 7..];
         result.push_str("@ cruise");
@@ -195,7 +199,8 @@ pub(crate) fn format_issue_task(issue: &IssueRecord, additional: &str) -> String
     }
     let mut task = neutralize_cruise_mentions(&sections.join("\n\n"));
     if !additional.trim().is_empty() {
-        task.push_str(&format!("\n\n## Additional instructions\n\n{}", additional.trim()));
+        task.push_str("\n\n## Additional instructions\n\n");
+        task.push_str(additional.trim());
     }
     task
 }
@@ -299,7 +304,10 @@ pub(crate) fn has_closing_reference(body: &str, number: u64) -> bool {
     body.split_inclusive('\n').any(|line| {
         let start = offset;
         offset += line.len();
-        if code_blocks.iter().any(|range| range.contains(&start)) {
+        if code_blocks
+            .iter()
+            .any(|range| range.start < offset && range.end > start)
+        {
             return false;
         }
         let mut words = line.split_whitespace();
@@ -320,6 +328,21 @@ pub(crate) fn has_closing_reference(body: &str, number: u64) -> bool {
             .and_then(|s| s.parse::<u64>().ok())
             == Some(number)
     })
+}
+
+pub(crate) fn with_closing_reference(body: &str, issue_number: Option<u64>) -> String {
+    let Some(n) = issue_number else {
+        return body.to_string();
+    };
+    if has_closing_reference(body, n) {
+        return body.to_string();
+    }
+    let trimmed = body.trim_end();
+    if trimmed.is_empty() {
+        format!("Closes #{n}")
+    } else {
+        format!("{trimmed}\n\nCloses #{n}")
+    }
 }
 
 #[cfg(test)]
@@ -345,13 +368,25 @@ mod closing_tests {
                 if url.path().contains("fail") {
                     Err(CruiseError::Other("download failed".into()))
                 } else {
-                    Ok(DownloadedImage { extension: "png", bytes: vec![1] })
+                    Ok(DownloadedImage {
+                        extension: "png",
+                        bytes: vec![1],
+                    })
                 }
             }
-            fn auth_token(&self, _: &str) -> Option<String> { None }
+            fn auth_token(&self, _: &str) -> Option<String> {
+                None
+            }
         }
         let source = Source(std::cell::RefCell::new(Vec::new()));
-        let result = resolve_task_input("#12", None, Some("https://github.com/example/project"), Path::new("."), &source).unwrap();
+        let result = resolve_task_input(
+            "#12",
+            None,
+            Some("https://github.com/example/project"),
+            Path::new("."),
+            &source,
+        )
+        .unwrap_or_else(|error| panic!("resolve issue input: {error}"));
         assert!(result.text.contains("Plain text"));
         assert_eq!(result.text.matches(" [Image #1]").count(), 2);
         assert!(result.text.contains("![fail](https://user-images.githubusercontent.com/fail.png) ![fail again](https://user-images.githubusercontent.com/fail.png) ![other](https://example.com/other.png)"));
@@ -361,7 +396,10 @@ mod closing_tests {
 
     #[test]
     fn repeated_mixed_case_mentions_preserve_unicode_and_substrings() {
-        assert_eq!(neutralize_cruise_mentions("é@CrUiSe🙂@CRUISEx"), "é@ cruise🙂@ cruisex");
+        assert_eq!(
+            neutralize_cruise_mentions("é@CrUiSe🙂@CRUISEx"),
+            "é@ cruise🙂@ cruisex"
+        );
     }
 
     #[test]
@@ -372,7 +410,10 @@ mod closing_tests {
             body: "@cruise body".into(),
             url: "url".into(),
             labels: vec![],
-            comments: vec![IssueComment { author: "user".into(), body: "@CRUISE comment".into() }],
+            comments: vec![IssueComment {
+                author: "user".into(),
+                body: "@CRUISE comment".into(),
+            }],
         };
         let task = format_issue_task(&issue, "Keep @cruise intact");
         assert!(task.contains("@ cruise title"));
@@ -385,7 +426,10 @@ mod closing_tests {
     fn fenced_references_do_not_close_issues() {
         for body in ["```text\nCloses #12\n```", "~~~\nfixes #12\n~~~"] {
             assert!(!has_closing_reference(body, 12));
-            assert_eq!(with_closing_reference(body, Some(12)), format!("{body}\n\nCloses #12"));
+            assert_eq!(
+                with_closing_reference(body, Some(12)),
+                format!("{body}\n\nCloses #12")
+            );
         }
         let body = "```\nCloses #12\n```\n\nFixes #12";
         assert_eq!(with_closing_reference(body, Some(12)), body);
@@ -395,20 +439,9 @@ mod closing_tests {
     fn indented_reference_does_not_close_issue() {
         let body = "    Closes #12";
         assert!(!has_closing_reference(body, 12));
-        assert_eq!(with_closing_reference(body, Some(12)), "    Closes #12\n\nCloses #12");
-    }
-}
-pub(crate) fn with_closing_reference(body: &str, issue_number: Option<u64>) -> String {
-    let Some(n) = issue_number else {
-        return body.to_string();
-    };
-    if has_closing_reference(body, n) {
-        return body.to_string();
-    }
-    let trimmed = body.trim_end();
-    if trimmed.is_empty() {
-        format!("Closes #{n}")
-    } else {
-        format!("{trimmed}\n\nCloses #{n}")
+        assert_eq!(
+            with_closing_reference(body, Some(12)),
+            "    Closes #12\n\nCloses #12"
+        );
     }
 }

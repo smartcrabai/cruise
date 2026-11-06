@@ -430,6 +430,24 @@ fn cleanup_new_execution_workspace(
     Ok(())
 }
 
+fn resolve_new_session_task(
+    request: &NewSessionRequest,
+    repo: Option<&str>,
+) -> Result<crate::issue_input::ResolvedTaskInput> {
+    let issue_dir = if request.base_dir.as_os_str().is_empty() {
+        std::env::current_dir()?
+    } else {
+        request.base_dir.clone()
+    };
+    crate::issue_input::resolve_task_input(
+        &request.input,
+        None,
+        repo,
+        &issue_dir,
+        &crate::issue_input::GhGithub,
+    )
+}
+
 fn create_session_inner(
     manager: &SessionManager,
     request: NewSessionRequest,
@@ -449,18 +467,7 @@ fn create_session_inner(
     if let Some(repo) = &repo {
         crate::repo_clone::validate_repo_spec(repo)?;
     }
-    let issue_dir = if request.base_dir.as_os_str().is_empty() {
-        std::env::current_dir()?
-    } else {
-        request.base_dir.clone()
-    };
-    let task = crate::issue_input::resolve_task_input(
-        &request.input,
-        None,
-        repo.as_deref(),
-        &issue_dir,
-        &crate::issue_input::GhGithub,
-    )?;
+    let task = resolve_new_session_task(&request, repo.as_deref())?;
     let base_dir = if let Some(repo) = &repo {
         let clone_path = manager.clones_dir().join(id);
         crate::repo_clone::clone_repo(repo, &clone_path)?;
@@ -4671,7 +4678,7 @@ mod tests {
         script: &str,
     ) -> crate::test_support::EnvGuard {
         let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("create test repo: {e}"));
         for args in [
             &["init", "-q"][..],
             &["remote", "add", "origin", remote][..],
@@ -4681,15 +4688,16 @@ mod tests {
                     .args(args)
                     .current_dir(&repo)
                     .status()
-                    .unwrap()
+                    .unwrap_or_else(|e| panic!("run git: {e}"))
                     .success()
             );
         }
         let bin = root.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("create test bin: {e}"));
         let gh = bin.join("gh");
-        std::fs::write(&gh, script).unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&gh, script).unwrap_or_else(|e| panic!("write fake gh: {e}"));
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| panic!("make fake gh executable: {e}"));
         let path = format!(
             "{}:{}",
             bin.display(),
@@ -4702,7 +4710,7 @@ mod tests {
     #[test]
     fn create_session_issue_input_formats_and_preserves_history() {
         let _lock = crate::test_support::lock_process();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap_or_else(|e| panic!("create temp dir: {e}"));
         let _home = isolate_application_config(temp.path());
         let _path = issue_test_repo(
             temp.path(),
@@ -4721,11 +4729,19 @@ esac
         let raw = "#42\nFocus on tests";
         let state = app
             .create_session(issue_test_request(&temp.path().join("repo"), raw))
-            .unwrap();
+            .unwrap_or_else(|e| panic!("create issue session: {e}"));
         let expected = "# Fix the bug\n\nIssue #42: https://github.com/example/project/issues/42\n\nIssue body\n\n### Labels\n\nbug\n\n### Comments\n\n**alice**: A comment\n\n## Additional instructions\n\nFocus on tests";
         assert_eq!(state.input, expected);
-        assert_eq!(manager.load(&state.id).unwrap().input, expected);
-        let history = app.history().unwrap();
+        assert_eq!(
+            manager
+                .load(&state.id)
+                .unwrap_or_else(|e| panic!("load session: {e}"))
+                .input,
+            expected
+        );
+        let history = app
+            .history()
+            .unwrap_or_else(|e| panic!("load history: {e}"));
         assert_eq!(history.entries.len(), 1);
         assert_eq!(history.entries[0].input, raw);
     }
@@ -4734,7 +4750,7 @@ esac
     #[test]
     fn create_session_issue_fetch_failure_leaves_no_session_or_history() {
         let _lock = crate::test_support::lock_process();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap_or_else(|e| panic!("create temp dir: {e}"));
         let _home = isolate_application_config(temp.path());
         let _path = issue_test_repo(
             temp.path(),
@@ -4747,15 +4763,27 @@ esac
             app.create_session(issue_test_request(&temp.path().join("repo"), "#42"))
                 .is_err()
         );
-        assert!(manager.list().unwrap().is_empty());
-        assert!(app.history().unwrap().entries.is_empty());
+        assert_eq!(
+            manager
+                .list()
+                .unwrap_or_else(|e| panic!("list sessions: {e}"))
+                .len(),
+            0
+        );
+        assert_eq!(
+            app.history()
+                .unwrap_or_else(|e| panic!("load history: {e}"))
+                .entries
+                .len(),
+            0
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn create_session_issue_input_rejects_gitlab() {
         let _lock = crate::test_support::lock_process();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap_or_else(|e| panic!("create temp dir: {e}"));
         let _home = isolate_application_config(temp.path());
         let _path = issue_test_repo(
             temp.path(),
@@ -4766,13 +4794,26 @@ esac
         let app = CruiseApplication::new(manager.clone());
         let error = app
             .create_session(issue_test_request(&temp.path().join("repo"), "#42"))
-            .unwrap_err();
+            .err()
+            .unwrap_or_else(|| panic!("expected unsupported GitLab repository error"));
         assert!(
             error.to_string().contains("GitHub repositories only"),
             "{error}"
         );
-        assert!(manager.list().unwrap().is_empty());
-        assert!(app.history().unwrap().entries.is_empty());
+        assert_eq!(
+            manager
+                .list()
+                .unwrap_or_else(|e| panic!("list sessions: {e}"))
+                .len(),
+            0
+        );
+        assert_eq!(
+            app.history()
+                .unwrap_or_else(|e| panic!("load history: {e}"))
+                .entries
+                .len(),
+            0
+        );
     }
 
     fn assert_create_session_flag_skips(flags: &crate::flags::FlagValues, expected: &[&str]) {

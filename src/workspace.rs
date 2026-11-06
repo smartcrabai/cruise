@@ -401,18 +401,22 @@ mod tests {
     #[test]
     fn planned_issue_session_uses_issue_number_for_worktree_branch() {
         let _lock = lock_process();
-        let tmp = TempDir::new().unwrap();
+        let tmp =
+            TempDir::new().unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create repo: {error}"));
         init_git_repo(&repo);
         let manager = SessionManager::new(tmp.path().join("data"));
         let mut session = make_session("issue-branch", &repo);
         session.input = "# Formatted issue title\n\nIssue #12: details".into();
-        let mut json = serde_json::to_value(session).unwrap();
+        let mut json = serde_json::to_value(session)
+            .unwrap_or_else(|error| panic!("serialize session: {error}"));
         json["issue_number"] = serde_json::json!(12);
-        let mut session = serde_json::from_value(json).unwrap();
+        let mut session = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("deserialize session: {error}"));
         let workspace =
-            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree).unwrap();
+            prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
+                .unwrap_or_else(|error| panic!("prepare workspace: {error}"));
         match workspace {
             ExecutionWorkspace::Worktree { ctx, .. } => {
                 assert_eq!(ctx.branch, "cruise/issue-branch-issue-12");

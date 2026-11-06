@@ -243,16 +243,16 @@ pub(crate) fn extract_image_refs(body: &str) -> Vec<ImageRef> {
     for (event, span) in Parser::new(body).into_offset_iter() {
         match event {
             Event::Start(Tag::Image {
-                link_type,
+                link_type: LinkType::Inline,
                 dest_url,
                 ..
-            }) if matches!(link_type, LinkType::Inline) => {
+            }) => {
                 if let Ok(url) = Url::parse(&dest_url) {
                     refs.push(ImageRef { url, span });
                 }
             }
             Event::Html(html) | Event::InlineHtml(html) => {
-                html_images(&html, span.start, &mut refs)
+                html_images(&html, span.start, &mut refs);
             }
             _ => {}
         }
@@ -282,11 +282,20 @@ mod tests {
 
     #[test]
     fn image_hosts_and_download_boundary() {
-        for url in ["https://github.com/user-attachments/assets/abc", "https://user-images.githubusercontent.com/a.png"] {
-            assert!(is_github_image_url(&Url::parse(url).unwrap()));
+        for url in [
+            "https://github.com/user-attachments/assets/abc",
+            "https://user-images.githubusercontent.com/a.png",
+        ] {
+            assert!(is_github_image_url(
+                &Url::parse(url).unwrap_or_else(|error| panic!("invalid test URL: {error}"))
+            ));
         }
-        for url in ["https://example.com/a.png", "http://github.com/user-attachments/assets/a", "https://github.com/user-attachments/assets/"] {
-            let url = Url::parse(url).unwrap();
+        for url in [
+            "https://example.com/a.png",
+            "http://github.com/user-attachments/assets/a",
+            "https://github.com/user-attachments/assets/",
+        ] {
+            let url = Url::parse(url).unwrap_or_else(|error| panic!("invalid test URL: {error}"));
             assert!(!is_github_image_url(&url));
             assert!(fetch_github_image(&url, None).is_err());
         }

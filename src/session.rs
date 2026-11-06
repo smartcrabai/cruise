@@ -1362,12 +1362,16 @@ mod tests {
     #[test]
     fn planned_issue_number_legacy_state_is_omitted_when_absent() {
         let session = crate::test_support::make_session("legacy-issue", Path::new("/tmp"));
-        let mut json = serde_json::to_value(&session).unwrap();
-        json.as_object_mut().unwrap().remove("issue_number");
-        let restored: SessionState = serde_json::from_value(json).unwrap();
+        let mut json = serde_json::to_value(&session)
+            .unwrap_or_else(|error| panic!("serialize session: {error}"));
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("session must serialize as an object"))
+            .remove("issue_number");
+        let restored: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("deserialize session: {error}"));
         assert!(
             serde_json::to_value(restored)
-                .unwrap()
+                .unwrap_or_else(|error| panic!("serialize restored session: {error}"))
                 .get("issue_number")
                 .is_none()
         );
@@ -1375,15 +1379,26 @@ mod tests {
 
     #[test]
     fn planned_issue_number_survives_save_and_load() {
-        let tmp = TempDir::new().unwrap();
+        let tmp =
+            TempDir::new().unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let manager = SessionManager::new(tmp.path().to_path_buf());
         let session = crate::test_support::make_session("issue-persistence", tmp.path());
-        let mut json = serde_json::to_value(session).unwrap();
+        let mut json = serde_json::to_value(session)
+            .unwrap_or_else(|error| panic!("serialize session: {error}"));
         json["issue_number"] = serde_json::json!(12);
-        let session: SessionState = serde_json::from_value(json).unwrap();
-        manager.save(&session).unwrap();
-        let restored = manager.load(&session.id).unwrap();
-        assert_eq!(serde_json::to_value(restored).unwrap()["issue_number"], 12);
+        let session: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("deserialize session: {error}"));
+        manager
+            .save(&session)
+            .unwrap_or_else(|error| panic!("save session: {error}"));
+        let restored = manager
+            .load(&session.id)
+            .unwrap_or_else(|error| panic!("load session: {error}"));
+        assert_eq!(
+            serde_json::to_value(restored)
+                .unwrap_or_else(|error| panic!("serialize session: {error}"))["issue_number"],
+            12
+        );
     }
 
     /// Guard that saves an environment variable's current value, removes it for

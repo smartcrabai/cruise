@@ -2238,6 +2238,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
 
     fn plan_args(config_path: &Path, no_force_exec: bool, skip_planning: bool) -> PlanArgs {
         PlanArgs {
+            issue: None,
             input: Some("implement force exec".to_string()),
             config: Some(
                 config_path
