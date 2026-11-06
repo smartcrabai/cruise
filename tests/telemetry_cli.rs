@@ -3345,10 +3345,7 @@ exit 97
 #[test]
 fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
     let collector = Collector::start();
-    let (fixture, env) = builtin_wait_ci_fixture(
-        &collector,
-        failed_check_details_fake_gh_script(),
-    );
+    let (fixture, env) = builtin_wait_ci_fixture(&collector, failed_check_details_fake_gh_script());
     let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-prompt-secret");
     assert!(
         !output.status.success(),
