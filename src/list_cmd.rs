@@ -31,6 +31,8 @@ struct ListSessionJson {
     workspace_mode: WorkspaceMode,
     target_branch: Option<String>,
     pr_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_target: Option<crate::pr_review_fix::PrTarget>,
     pr_skipped_reason: Option<PrSkippedReason>,
     config_path: Option<String>,
     updated_at: Option<String>,
@@ -56,6 +58,7 @@ fn session_to_json_with_plan_availability(
         SessionPhase::Running => ("Running", None),
         SessionPhase::Completed => ("Completed", None),
         SessionPhase::Failed(msg) => ("Failed", Some(msg)),
+        SessionPhase::PrFailed(msg) => ("PrFailed", Some(msg)),
         SessionPhase::Suspended => ("Suspended", None),
     };
     ListSessionJson {
@@ -77,6 +80,7 @@ fn session_to_json_with_plan_availability(
         workspace_mode: session.workspace_mode,
         target_branch: session.target_branch,
         pr_url: session.pr_url,
+        pr_target: session.pr_target,
         pr_skipped_reason: session.pr_skipped_reason,
         config_path: session.config.selection_value(),
         updated_at: session.updated_at,
@@ -164,6 +168,12 @@ pub async fn run(args: ListArgs) -> Result<()> {
             };
 
             match action {
+                "View Diff" => {
+                    crate::platform::reclaim_terminal_foreground();
+                    if let Err(e) = crate::diff_cmd::print_session_diff(&session, false) {
+                        eprintln!("{e}");
+                    }
+                }
                 "Generate Plan" => {
                     match crate::plan_cmd::regenerate_plan_for_session(
                         &manager,
@@ -282,6 +292,30 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     .await?;
                     // Re-load so subsequent session_actions(&session) uses fresh state.
                     session = manager.load(&session.id)?;
+                }
+                "Create PR" => {
+                    let app = crate::application::CruiseApplication::new(manager.clone());
+                    let sink = std::sync::Arc::new(|event| {
+                        match event {
+                            crate::application::ApplicationEvent::RunPhase { phase, .. } => {
+                                eprintln!("{phase}");
+                            }
+                            crate::application::ApplicationEvent::PrCreated { url, .. } => {
+                                eprintln!("PR created: {url}");
+                            }
+                            crate::application::ApplicationEvent::RunFailed { error, .. } => {
+                                eprintln!("PR creation failed: {error}");
+                            }
+                            _ => {}
+                        }
+                        Ok(())
+                    });
+                    if let Err(error) = app.create_pr(&session.id, sink, None).await {
+                        eprintln!("PR creation failed: {error}");
+                    }
+                    if let Ok(reloaded) = manager.load(&session.id) {
+                        session = reloaded;
+                    }
                 }
                 "Open PR" => {
                     let url = session.pr_url.as_deref().ok_or_else(|| {
@@ -408,6 +442,7 @@ fn pick_session(manager: &crate::session::SessionManager) -> Result<Option<Sessi
 }
 
 /// Returns the action menu items available for the given session.
+/// "View Diff" appears when the session has a worktree branch; Create PR takes priority.
 /// "Run"/"Resume" appears for runnable phases; "Replan" only for Planned.
 /// "Open PR" appears for Completed sessions that have a PR URL.
 /// "Reset to Planned" appears for Running, Failed, Completed, and Suspended.
@@ -424,6 +459,9 @@ fn session_actions_with_plan_availability(
     plan_available: bool,
 ) -> Vec<&'static str> {
     let mut actions = vec![];
+    if session.worktree_branch.is_some() && !matches!(session.phase, SessionPhase::PrFailed(_)) {
+        actions.push("View Diff");
+    }
     match &session.phase {
         SessionPhase::Draft | SessionPhase::AwaitingInput => {
             actions.push("Generate Plan");
@@ -431,17 +469,21 @@ fn session_actions_with_plan_availability(
         SessionPhase::AwaitingApproval => {
             if plan_available && session.plan_error.is_none() {
                 actions.push("Approve");
-                actions.push("Publish as Issue");
+                if session.pr_target.is_none() {
+                    actions.push("Publish as Issue");
+                }
             }
             actions.push("Edit Settings");
         }
         SessionPhase::Planned => {
             actions.push("Run");
-            if plan_available && session.plan_error.is_none() {
+            if plan_available && session.plan_error.is_none() && session.pr_target.is_none() {
                 actions.push("Publish as Issue");
             }
             actions.push("Edit Settings");
-            actions.push("Replan");
+            if session.pr_target.is_none() {
+                actions.push("Replan");
+            }
         }
         SessionPhase::Running => {
             actions.push("Resume");
@@ -455,6 +497,22 @@ fn session_actions_with_plan_availability(
         SessionPhase::Failed(_) => {
             actions.push("Run");
             actions.push("Edit Settings");
+            actions.push("Reset to Planned");
+        }
+        SessionPhase::PrFailed(_) => {
+            actions.push("Create PR");
+            if session.pr_url.is_some() {
+                actions.push("Open PR");
+            }
+            if session.worktree_branch.is_some() {
+                actions.push("View Diff");
+            }
+            if crate::local_merge::can_stage_locally(session) {
+                actions.push("Stage local merge");
+            }
+            if crate::local_merge::can_merge_locally(session) {
+                actions.push("Merge locally & cleanup");
+            }
             actions.push("Reset to Planned");
         }
         SessionPhase::Completed => {
@@ -818,6 +876,7 @@ fn format_session_label_with_plan_availability(s: &SessionState, plan_available:
         SessionPhase::Running => (style(">").yellow(), style("Running").yellow()),
         SessionPhase::Completed => (style("v").green(), style("Completed").green()),
         SessionPhase::Failed(_) => (style("x").red(), style("Failed").red()),
+        SessionPhase::PrFailed(_) => (style("x").red(), style("PR Failed").red()),
         SessionPhase::Suspended => (style("||").yellow(), style("Suspended").yellow()),
     };
     let date = format_session_date(&s.id);
@@ -870,6 +929,7 @@ mod tests {
         assert_eq!(
             session_actions_with_plan_availability(&session, false),
             vec![
+                "View Diff",
                 "Stage local merge",
                 "Merge locally & cleanup",
                 "Reset to Planned",
@@ -882,6 +942,7 @@ mod tests {
         assert_eq!(
             session_actions_with_plan_availability(&session, false),
             vec![
+                "View Diff",
                 "Merge locally & cleanup",
                 "Reset to Planned",
                 "Delete",
@@ -892,8 +953,101 @@ mod tests {
         session.pr_url = Some("https://example.com/pr/1".into());
         assert_eq!(
             session_actions_with_plan_availability(&session, false),
-            vec!["Open PR", "Merge PR", "Reset to Planned", "Delete", "Back"]
+            vec![
+                "View Diff",
+                "Open PR",
+                "Merge PR",
+                "Reset to Planned",
+                "Delete",
+                "Back"
+            ]
         );
+    }
+
+    fn pr_failed_session() -> SessionState {
+        let phase = serde_json::from_value(serde_json::json!({"PrFailed": "push failed"}))
+            .unwrap_or_else(|error| panic!("PR failure state must be readable: {error}"));
+        make_session("20260306143000", "task", phase)
+    }
+
+    #[test]
+    fn pr_failed_list_actions_offer_publication_retry_not_workflow_run() {
+        let mut session = pr_failed_session();
+        assert_eq!(
+            session_actions(&session),
+            vec!["Create PR", "Reset to Planned", "Delete", "Back"]
+        );
+        session.pr_url = Some("https://example.com/pr/1".into());
+        assert_eq!(
+            session_actions(&session),
+            vec!["Create PR", "Open PR", "Reset to Planned", "Delete", "Back"]
+        );
+        session.worktree_branch = Some("session-branch".into());
+        assert_eq!(
+            session_actions(&session),
+            vec![
+                "Create PR",
+                "Open PR",
+                "View Diff",
+                "Reset to Planned",
+                "Delete",
+                "Back"
+            ]
+        );
+    }
+
+    #[test]
+    fn pr_failed_list_json_preserves_error() {
+        let dto = session_to_json(pr_failed_session());
+        assert_eq!(dto.phase, "PrFailed");
+        assert_eq!(dto.phase_error.as_deref(), Some("push failed"));
+    }
+
+    #[test]
+    fn pr_failed_label_identifies_publication_failure() {
+        assert!(format_session_label(&pr_failed_session()).contains("PR Failed"));
+    }
+
+    #[test]
+    fn diff_contract_list_action_order_depends_on_phase_and_requires_branch() {
+        for phase in [
+            SessionPhase::Draft,
+            SessionPhase::AwaitingInput,
+            SessionPhase::AwaitingApproval,
+            SessionPhase::Planned,
+            SessionPhase::Running,
+            SessionPhase::Completed,
+            SessionPhase::Failed("x".into()),
+            SessionPhase::PrFailed("x".into()),
+            SessionPhase::Suspended,
+        ] {
+            let mut session = make_session("20260101000000000", "task", phase.clone());
+            let actions = session_actions_with_plan_availability(&session, true);
+            assert!(!actions.contains(&"View Diff"), "{phase:?}: {actions:?}");
+            assert_eq!(actions.last(), Some(&"Back"), "{phase:?}");
+            session.worktree_branch = Some("session-branch".into());
+            let actions = session_actions_with_plan_availability(&session, true);
+            if matches!(phase, SessionPhase::PrFailed(_)) {
+                assert_eq!(&actions[..2], &["Create PR", "View Diff"], "{phase:?}");
+            } else {
+                assert_eq!(
+                    actions.first(),
+                    Some(&"View Diff"),
+                    "{phase:?}: {actions:?}"
+                );
+            }
+            assert_eq!(actions.last(), Some(&"Back"), "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn diff_contract_print_rejects_non_git_base_directory() {
+        let temp =
+            TempDir::new().unwrap_or_else(|error| panic!("temporary non-git directory: {error}"));
+        let mut session = make_session("20260101000000000", "task", SessionPhase::Completed);
+        session.base_dir = temp.path().to_path_buf();
+        session.worktree_branch = Some("session-branch".into());
+        assert!(crate::diff_cmd::print_session_diff(&session, false).is_err());
     }
 
     // -----------------------------------------------------------------------

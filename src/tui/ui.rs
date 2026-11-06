@@ -170,7 +170,9 @@ fn footer_line(app: &TuiApp) -> Line<'_> {
     Line::from(footer_spans(app, footer_status_spans(app)))
 }
 fn render_sessions(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
-    app.load_tab_data();
+    if app.tab != DetailTab::Diff {
+        app.load_tab_data();
+    }
     let layout = if area.width >= 120 {
         Layout::horizontal([Constraint::Length(34), Constraint::Min(1)])
     } else {
@@ -254,6 +256,7 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             DetailTab::Dag,
             DetailTab::Plan,
             DetailTab::Log,
+            DetailTab::Diff,
         ]
         .into_iter()
         .map(|tab| Line::from(format!(" {} ", tab.label()))),
@@ -263,6 +266,7 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         DetailTab::Dag => 1,
         DetailTab::Plan => 2,
         DetailTab::Log => 3,
+        DetailTab::Diff => 4,
     })
     .block(focus_panel(
         app,
@@ -279,6 +283,7 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         DetailTab::Dag => render_dag(frame, app, body),
         DetailTab::Plan => render_plan(frame, app, body),
         DetailTab::Log => render_log(frame, app, body),
+        DetailTab::Diff => render_diff(frame, app, body),
     }
 }
 
@@ -370,9 +375,16 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
             Span::raw(session.input.as_str()),
         ));
     }
-    if let SessionPhase::Failed(error) = &session.phase {
+    if let SessionPhase::Failed(error) | SessionPhase::PrFailed(error) = &session.phase {
         lines.push(Line::from(vec![
-            Span::styled("Run error", error_style(app)),
+            Span::styled(
+                if matches!(&session.phase, SessionPhase::PrFailed(_)) {
+                    "PR error"
+                } else {
+                    "Run error"
+                },
+                error_style(app),
+            ),
             Span::raw(format!(" {error}")),
         ]));
     }
@@ -716,6 +728,56 @@ fn strip_text_styles(text: Text<'_>) -> Text<'_> {
         .collect()
 }
 
+fn render_diff(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let result = app.active_session().and_then(|s| app.diff_cache.get(&s.id));
+    let height = usize::from(area.height.saturating_sub(2));
+    let mut lines = Vec::new();
+    match result {
+        Some(Ok(diff)) => {
+            if diff.truncated {
+                lines.push(Line::styled(
+                    "Warning: diff truncated",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            if diff.patch.is_empty() {
+                lines.push(Line::from(format!("No changes on {}", diff.branch)));
+            } else {
+                let remaining = height.saturating_sub(lines.len());
+                lines.extend(
+                    diff.patch
+                        .lines()
+                        .skip(app.diff_scroll)
+                        .take(remaining)
+                        .map(|line| {
+                            let style = if line.starts_with("diff --git") {
+                                Style::default().add_modifier(Modifier::BOLD)
+                            } else if line.starts_with('+') {
+                                Style::default().fg(Color::Green)
+                            } else if line.starts_with('-') {
+                                Style::default().fg(Color::Red)
+                            } else if line.starts_with("@@") {
+                                Style::default().fg(Color::Cyan)
+                            } else {
+                                Style::default()
+                            };
+                            Line::styled(line, style)
+                        }),
+                );
+            }
+        }
+        Some(Err(error)) if error.contains("has no worktree branch") => {
+            lines.push(Line::from("No session branch available for diff"));
+        }
+        Some(Err(error)) => lines.push(Line::from(error.as_str())),
+        None => lines.push(Line::from("Diff unavailable")),
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(panel(app, " Diff ", false)),
+        area,
+    );
+}
+
 fn render_log(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let height = area.height.saturating_sub(2) as usize;
     let visible = app.visible_lines(height);
@@ -811,6 +873,7 @@ fn step_question(step: Step) -> &'static str {
         Step::Source => "Where is the code?",
         Step::WorkingDirectory => "Which directory? (blank = current directory)",
         Step::Repository => "Which repository? (owner/name, group/project, or URL)",
+        Step::PullRequest => "Pull request number? (optional, GitHub only)",
         Step::Config => "Which workflow config? (blank = auto-detect)",
         Step::SkippedSteps => "Skip any workflow steps?",
         Step::Flags => "Which optional workflow flags should be enabled?",
@@ -846,6 +909,7 @@ fn step_hint(app: &TuiApp) -> String {
                 format!("Enter next · ↑↓ gh repos ({found}) · {BACK}")
             }
         }
+        Step::PullRequest => format!("Enter next · {BACK}"),
         Step::Config => format!("↑↓ select · type path · Tab complete · Enter next · {BACK}"),
         Step::SkippedSteps if !app.has_skip_choices() => {
             format!("Comma-separated step ids · Enter next · {BACK}")
@@ -873,6 +937,7 @@ fn render_step_control(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Step::Attachments => return render_step_editor(frame, app, area, &form.attachments),
         Step::WorkingDirectory => return render_step_editor(frame, app, area, &form.working_dir),
         Step::Repository => return render_step_editor(frame, app, area, &form.repository),
+        Step::PullRequest => return render_step_editor(frame, app, area, &form.pull_request),
         Step::Config => return render_config_choices(frame, app, area),
         Step::SkippedSteps => return render_skip_choices(frame, app, area),
         Step::Flags => return render_flag_choices(frame, app, area),
@@ -1504,7 +1569,7 @@ fn focus_panel<'a>(app: &TuiApp, title: impl Into<Line<'a>>, focused: bool) -> B
 fn phase_style(app: &TuiApp, phase: &SessionPhase) -> Style {
     match phase {
         SessionPhase::Completed => success(app),
-        SessionPhase::Failed(_) => error_style(app),
+        SessionPhase::Failed(_) | SessionPhase::PrFailed(_) => error_style(app),
         SessionPhase::Running => warning(app),
         SessionPhase::Suspended => colored(app, Color::Rgb(192, 132, 252)),
         _ => muted(app),
@@ -1520,7 +1585,9 @@ pub(crate) fn sidebar_status_style(app: &TuiApp, status: SidebarStatus) -> Style
         SidebarStatus::Running | SidebarStatus::Planning => warning(app),
         SidebarStatus::Draft | SidebarStatus::Completed => success(app),
         SidebarStatus::Planned => colored(app, Color::Rgb(96, 165, 250)),
-        SidebarStatus::Failed | SidebarStatus::PlanFailed => error_style(app),
+        SidebarStatus::Failed | SidebarStatus::PrFailed | SidebarStatus::PlanFailed => {
+            error_style(app)
+        }
         SidebarStatus::Suspended => colored(app, Color::Rgb(192, 132, 252)),
     }
 }

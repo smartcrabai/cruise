@@ -228,6 +228,11 @@ path = "tests/webui_responsive_bdd.rs"
 # Requires the pinned browser package and Chromium, see tests/webui/README.md.
 test = false
 
+[[test]]
+harness = false
+name = "pr_failed_bdd"
+path = "tests/pr_failed_bdd.rs"
+
 [profile.release]
 codegen-units = 1
 lto = true

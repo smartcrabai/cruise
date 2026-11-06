@@ -45,6 +45,7 @@ pub struct SessionDto {
     pub pr_url: Option<String>,
     pub can_merge_locally: bool,
     pub can_stage_locally: bool,
+    pub pr_target: Option<crate::pr_review_fix::PrTarget>,
     pub updated_at: Option<String>,
     pub awaiting_input: bool,
     pub pending_ask_question: Option<String>,
@@ -73,6 +74,7 @@ pub(crate) fn session_dto(
     let can_stage_locally = crate::local_merge::can_stage_locally(&state);
     let (phase, phase_error) = match &state.phase {
         SessionPhase::Failed(message) => ("Failed".to_string(), Some(message.clone())),
+        SessionPhase::PrFailed(message) => ("PR Failed".to_string(), Some(message.clone())),
         phase => (phase.label().to_string(), None),
     };
     let config_path = state.config.selection_value();
@@ -110,6 +112,7 @@ pub(crate) fn session_dto(
         pr_url: state.pr_url,
         can_merge_locally,
         can_stage_locally,
+        pr_target: state.pr_target,
         updated_at: state.updated_at,
         awaiting_input: state.awaiting_input,
         pending_ask_question: state.pending_ask_question,
@@ -621,6 +624,7 @@ mod tests {
             pr_url: None,
             can_merge_locally: false,
             can_stage_locally: false,
+            pr_target: None,
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,

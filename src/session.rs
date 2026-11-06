@@ -25,6 +25,8 @@ pub enum SessionPhase {
     Running,
     Completed,
     Failed(String),
+    /// Workflow succeeded, but publishing the pull request failed.
+    PrFailed(String),
     /// Process was interrupted (Ctrl+C or panic) mid-execution; can be resumed.
     Suspended,
 }
@@ -40,6 +42,7 @@ impl SessionPhase {
             Self::Running => "Running",
             Self::Completed => "Completed",
             Self::Failed(_) => "Failed",
+            Self::PrFailed(_) => "PR Failed",
             Self::Suspended => "Suspended",
         }
     }
@@ -51,6 +54,13 @@ impl SessionPhase {
             self,
             Self::Planned | Self::Running | Self::Failed(_) | Self::Suspended
         )
+    }
+}
+
+pub(crate) fn phase_for_run_error(error: &CruiseError) -> SessionPhase {
+    match error {
+        CruiseError::PrPublicationFailed(message) => SessionPhase::PrFailed(message.clone()),
+        _ => SessionPhase::Failed(error.to_string()),
     }
 }
 
@@ -122,6 +132,12 @@ pub struct SessionState {
     /// Source commit included in the local squash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_merge_source_commit: Option<String>,
+    /// Base branch used when the worktree was created.
+    #[serde(default)]
+    pub worktree_base_branch: Option<String>,
+    /// Exact ref selected as the worktree creation start point, when configured.
+    #[serde(default)]
+    pub worktree_base_ref: Option<String>,
     /// Where this session should run.
     #[serde(default)]
     pub workspace_mode: WorkspaceMode,
@@ -137,6 +153,9 @@ pub struct SessionState {
     /// Deliberate reason a completed worktree session has no PR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_skipped_reason: Option<PrSkippedReason>,
+    /// Workflow variables captured before pull-request publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_workflow_vars: Option<crate::variable::VariableStore>,
     /// Forge (GitHub/GitLab) resolved when the session was created.
     #[serde(default)]
     pub forge: Option<crate::forge::ForgeKind>,
@@ -218,6 +237,12 @@ pub struct SessionState {
     /// (`--skip-planning` / input-as-plan). `input` is then stored empty.
     #[serde(default)]
     pub input_as_plan: bool,
+    /// Existing GitHub pull request targeted by this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_target: Option<crate::pr_review_fix::PrTarget>,
+    /// GitHub issue from which this session was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -273,11 +298,14 @@ impl SessionState {
             local_merge_intent: None,
             local_merge_commit: None,
             local_merge_source_commit: None,
+            worktree_base_branch: None,
+            worktree_base_ref: None,
             workspace_mode: WorkspaceMode::Worktree,
             target_branch: None,
             allow_dirty_working_tree: false,
             pr_url: None,
             pr_skipped_reason: None,
+            pr_workflow_vars: None,
             forge: None,
             updated_at: None,
             awaiting_input: false,
@@ -300,6 +328,8 @@ impl SessionState {
             published_issue_url: None,
             exec: false,
             input_as_plan: false,
+            pr_target: None,
+            issue_number: None,
         }
     }
 
@@ -341,6 +371,14 @@ impl SessionState {
             .map(str::trim)
             .filter(|title| !title.is_empty())
             .unwrap_or(&self.input)
+    }
+
+    #[must_use]
+    pub fn worktree_branch_source(&self) -> String {
+        self.issue_number.map_or_else(
+            || self.input_or_title().to_string(),
+            |n| format!("issue-{n}"),
+        )
     }
 
     /// Return the planning input with attached image paths appended (or the
@@ -486,6 +524,7 @@ impl SessionState {
             path: path.clone(),
             branch: branch.clone(),
             original_dir: self.base_dir.clone(),
+            owns_branch: self.pr_target.is_none(),
         })
     }
 
@@ -1008,7 +1047,7 @@ impl SessionManager {
             Ok(SessionFileContents::Parsed { state, fingerprint })
                 if matches!(
                     state.phase,
-                    SessionPhase::Completed | SessionPhase::Failed(_)
+                    SessionPhase::Completed | SessionPhase::Failed(_) | SessionPhase::PrFailed(_)
                 ) || (matches!(initial_phase, SessionPhase::Planned)
                     && fingerprint == initial_fingerprint) =>
             {
@@ -1130,6 +1169,7 @@ impl SessionManager {
                 path: path.clone(),
                 branch: branch.clone(),
                 original_dir: session.base_dir.clone(),
+                owns_branch: session.pr_target.is_none(),
             };
             crate::worktree::cleanup_worktree(&ctx)
         } else {
@@ -1156,7 +1196,7 @@ fn validate_session_id(id: &str) -> Result<()> {
 fn is_unreclaimable_no_pr_session(session: &SessionState, plan_available: bool) -> bool {
     let terminal = matches!(
         session.phase,
-        SessionPhase::Completed | SessionPhase::Failed(_)
+        SessionPhase::Completed | SessionPhase::Failed(_) | SessionPhase::PrFailed(_)
     );
     if session.exec {
         // Explicitly resumed exec sessions remain transient, but a reset exec
@@ -1362,8 +1402,62 @@ fn fetch_pr_state(session: &SessionState, pr_url: &str) -> std::result::Result<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pr_failed_roundtrips_and_is_not_runnable() {
+        let json = serde_json::json!({"PrFailed": "push failed"});
+        let phase: super::SessionPhase = serde_json::from_value(json.clone())
+            .unwrap_or_else(|e| panic!("persisted PR failure must deserialize: {e}"));
+        assert_eq!(phase.label(), "PR Failed");
+        assert!(!phase.is_runnable());
+        assert_eq!(
+            serde_json::to_value(phase).unwrap_or_else(|e| panic!("serialize PR failure: {e}")),
+            json
+        );
+    }
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn planned_issue_number_legacy_state_is_omitted_when_absent() {
+        let session = crate::test_support::make_session("legacy-issue", Path::new("/tmp"));
+        let mut json = serde_json::to_value(&session)
+            .unwrap_or_else(|error| panic!("serialize session: {error}"));
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("session must serialize as an object"))
+            .remove("issue_number");
+        let restored: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("deserialize session: {error}"));
+        assert!(
+            serde_json::to_value(restored)
+                .unwrap_or_else(|error| panic!("serialize restored session: {error}"))
+                .get("issue_number")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn planned_issue_number_survives_save_and_load() {
+        let tmp =
+            TempDir::new().unwrap_or_else(|error| panic!("create temporary directory: {error}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let session = crate::test_support::make_session("issue-persistence", tmp.path());
+        let mut json = serde_json::to_value(session)
+            .unwrap_or_else(|error| panic!("serialize session: {error}"));
+        json["issue_number"] = serde_json::json!(12);
+        let session: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("deserialize session: {error}"));
+        manager
+            .save(&session)
+            .unwrap_or_else(|error| panic!("save session: {error}"));
+        let restored = manager
+            .load(&session.id)
+            .unwrap_or_else(|error| panic!("load session: {error}"));
+        assert_eq!(
+            serde_json::to_value(restored)
+                .unwrap_or_else(|error| panic!("serialize session: {error}"))["issue_number"],
+            12
+        );
+    }
 
     /// Guard that saves an environment variable's current value, removes it for
     /// the duration of the test, and restores it on drop.
@@ -1487,6 +1581,68 @@ mod tests {
         let loaded = manager.load(&id).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(matches!(loaded.phase, SessionPhase::Running));
         assert_eq!(loaded.current_step, Some("implement".to_string()));
+    }
+
+    #[test]
+    fn test_worktree_base_branch_persists_and_legacy_session_loads() {
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let manager = SessionManager::new(tmp.path().to_path_buf());
+        let state = SessionState::new(
+            "20260306150001".to_string(),
+            PathBuf::from("/repo"),
+            crate::session_config::SessionConfigRef::File {
+                path: PathBuf::from("cruise.yaml"),
+            },
+            "task".to_string(),
+        );
+        let mut json = serde_json::to_value(&state)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("serialized session must be an object"))
+            .remove("worktree_base_branch");
+        json.as_object_mut()
+            .unwrap_or_else(|| panic!("serialized session must be an object"))
+            .remove("worktree_base_ref");
+        let legacy: SessionState = serde_json::from_value(json.clone())
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        assert_eq!(legacy.worktree_base_ref, None);
+        assert_eq!(
+            serde_json::to_value(&legacy)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))
+                .get("worktree_base_branch"),
+            Some(&serde_json::Value::Null)
+        );
+
+        json["worktree_base_branch"] = serde_json::json!("develop");
+        json["worktree_base_ref"] = serde_json::json!("refs/heads/develop");
+        let configured: SessionState = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        manager
+            .create(&configured)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let loaded = manager
+            .load(&configured.id)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        assert_eq!(
+            serde_json::to_value(&loaded)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))["worktree_base_branch"],
+            "develop"
+        );
+        manager
+            .save(&loaded)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let reloaded = manager
+            .load(&configured.id)
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        assert_eq!(
+            reloaded.worktree_base_ref.as_deref(),
+            Some("refs/heads/develop")
+        );
+        assert_eq!(
+            serde_json::to_value(&reloaded)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))["worktree_base_branch"],
+            "develop"
+        );
     }
 
     #[test]
@@ -4426,6 +4582,7 @@ mod tests {
             "task",
             &tmp.path().join("worktrees"),
             None,
+            &crate::worktree::WorktreeBase::default(),
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
         let mut terminal = SessionState::new(

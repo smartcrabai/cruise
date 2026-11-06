@@ -492,6 +492,9 @@ fn new_session_request(fields: &Fields) -> NewSessionRequest {
         config_path,
         config_yaml: None,
         repo,
+        pr_number: (source_mode == "repo")
+            .then(|| fields.text("pr_number").trim().parse::<u64>().ok())
+            .flatten(),
         workspace_mode: workspace_mode(fields.get("workspaceMode")).unwrap_or_default(),
         allow_dirty_working_tree: false,
         attachments,
@@ -513,25 +516,40 @@ pub(crate) async fn create_session(
     State(state): State<WebState>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
-    create_session_inner(&state, &Fields::from(pairs), true)
+    create_session_inner(&state, &Fields::from(pairs), true).await
 }
 
 pub(crate) async fn create_draft_session(
     State(state): State<WebState>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
-    create_session_inner(&state, &Fields::from(pairs), false)
+    create_session_inner(&state, &Fields::from(pairs), false).await
 }
 
-fn create_session_inner(state: &WebState, fields: &Fields, plan: bool) -> Response {
+async fn create_session_inner(state: &WebState, fields: &Fields, plan: bool) -> Response {
+    if fields.text("sourceMode") == "repo" {
+        let value = fields.text("pr_number");
+        let value = value.trim();
+        if !value.is_empty() && !value.parse::<u64>().is_ok_and(|number| number > 0) {
+            return run(state, "Create session", || {
+                Err(crate::error::CruiseError::Other(
+                    "Pull request number must be a positive integer".to_string(),
+                ))
+            });
+        }
+    }
+    let request = new_session_request(fields);
+    let application = state.application.clone();
+    let blocking_request = request.clone();
+    let session =
+        tokio::task::spawn_blocking(move || application.create_session(blocking_request)).await;
     run(state, "Create session", || {
-        let request = new_session_request(fields);
         let skip_planning = fields.flag("skipPlanning");
-        let session = state.application.create_session(request.clone())?;
+        let session = session.map_err(|error| CruiseError::Other(error.to_string()))??;
         discard_uploads(&request);
         let _ = state.application.clear_draft();
         let id = session.id.clone();
-        if plan {
+        if plan && session.pr_target.is_none() {
             let application = state.application.clone();
             let (sink, _log) = state.hub.sinks();
             if skip_planning {
@@ -545,7 +563,7 @@ fn create_session_inner(state: &WebState, fields: &Fields, plan: bool) -> Respon
                 );
             }
         }
-        let assumed = plan.then_some(OperationKind::Generate);
+        let assumed = (plan && session.pr_target.is_none()).then_some(OperationKind::Generate);
         let main = super::pages::session_detail_html(state, &id, "info")?;
         let mut body = main;
         body.push_str(&partials::sidebar_list_partial(state, Some(&id))?);
@@ -799,6 +817,48 @@ pub(crate) async fn run_session(
         body.push_str(&partials::by_id(
             &format!("tab-panel-{id}"),
             &partials::log_tab_html(&state, &id, Some(OperationKind::Run))?,
+        ));
+        Ok(push_url(html(body), &format!("/sessions/{id}?tab=log")))
+    })
+}
+
+pub(crate) async fn create_pr(State(state): State<WebState>, Path(id): Path<String>) -> Response {
+    run(&state, "Create PR", || {
+        let application = state.application.clone();
+        let (sink, log_sink) = state.hub.sinks();
+        let spawn_id = id.clone();
+        super::ops::spawn(async move {
+            let terminal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let seen = terminal.clone();
+            let event_sink = sink.clone();
+            let tracking_sink: std::sync::Arc<dyn crate::application::ApplicationEventSink> =
+                std::sync::Arc::new(move |event: crate::application::ApplicationEvent| {
+                    if matches!(
+                        event,
+                        crate::application::ApplicationEvent::RunFailed { .. }
+                            | crate::application::ApplicationEvent::RunCancelled { .. }
+                    ) {
+                        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    event_sink.send(event)
+                });
+            let result = application
+                .create_pr(&spawn_id, tracking_sink, Some(log_sink))
+                .await;
+            if let Err(error) = &result
+                && !terminal.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                let _ = sink.send(crate::application::ApplicationEvent::RunFailed {
+                    session_id: spawn_id,
+                    error: error.to_string(),
+                });
+            }
+            result
+        });
+        let mut body = partials::header_and_row(&state, &id, Some(OperationKind::CreatePr))?;
+        body.push_str(&partials::by_id(
+            &format!("tab-panel-{id}"),
+            &partials::log_tab_html(&state, &id, Some(OperationKind::CreatePr))?,
         ));
         Ok(push_url(html(body), &format!("/sessions/{id}?tab=log")))
     })
@@ -1226,6 +1286,23 @@ pub(crate) async fn save_settings(
 #[cfg(test)]
 mod tests {
     use super::{Fields, encode_query};
+
+    #[test]
+    fn new_session_request_maps_pr_number() {
+        let fields = Fields::from(vec![
+            ("sourceMode".into(), "repo".into()),
+            ("repo".into(), "acme/cruise".into()),
+            ("pr_number".into(), "12".into()),
+        ]);
+        let request = serde_json::to_value(super::new_session_request(&fields))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let request = request.get("Ok").unwrap_or(&request);
+        assert_eq!(
+            request.get("prNumber"),
+            Some(&serde_json::json!(12)),
+            "{request}"
+        );
+    }
 
     #[test]
     fn fields_reads_flags_and_repeated_values() {

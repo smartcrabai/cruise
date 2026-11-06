@@ -40,6 +40,7 @@ mod local_merge_regression_tests {
                 "task",
                 &tmp.path().join("worktrees"),
                 None,
+                &crate::worktree::WorktreeBase::default(),
             )
             .unwrap();
             let mut state = SessionState::new(
@@ -82,6 +83,15 @@ mod local_merge_regression_tests {
         let state = f.state;
         assert!(can_merge_locally(&state));
         assert!(can_stage_locally(&state));
+        let mut failed = state.clone();
+        failed.phase = SessionPhase::PrFailed("push failed".into());
+        assert!(can_merge_locally(&failed));
+        assert!(can_stage_locally(&failed));
+        let mut configured = state.clone();
+        configured.worktree_base_branch = Some("release".into());
+        assert_eq!(merge_target_branch(&configured), Some("release"));
+        configured.worktree_base_branch = None;
+        assert_eq!(merge_target_branch(&configured), Some("main"));
         for phase in [
             SessionPhase::Planned,
             SessionPhase::Running,
@@ -345,14 +355,21 @@ pub enum LocalMergeOutcome {
 
 #[must_use]
 pub fn merge_target_branch(state: &SessionState) -> Option<&str> {
-    state.forked_from_branch.as_deref()
+    state
+        .worktree_base_branch
+        .as_deref()
+        .or(state.forked_from_branch.as_deref())
 }
 
 #[must_use]
 pub fn can_merge_locally(state: &SessionState) -> bool {
-    matches!(state.phase, SessionPhase::Completed)
+    matches!(
+        state.phase,
+        SessionPhase::Completed | SessionPhase::PrFailed(_)
+    )
         && state.repo.is_none()
         && state.pr_url.is_none()
+        && state.pr_target.is_none()
         && state.workspace_mode == WorkspaceMode::Worktree
         && state.worktree_branch.is_some()
         && merge_target_branch(state).is_some()
@@ -484,6 +501,7 @@ pub fn merge_session(
         path: state.worktree_path.clone().unwrap_or_default(),
         branch: branch.clone(),
         original_dir: base.clone(),
+        owns_branch: state.pr_target.is_none(),
     };
     if state.local_merge_commit.is_none() && state.local_merge_intent.is_some() {
         let intent = state.local_merge_intent.as_ref().expect("intent checked");

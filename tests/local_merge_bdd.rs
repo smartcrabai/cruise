@@ -53,6 +53,7 @@ impl Fixture {
             "task",
             &tmp.path().join("worktrees"),
             None,
+            &cruise::worktree::WorktreeBase::default(),
         )
         .unwrap();
         let manager = SessionManager::new(tmp.path().join("sessions"));
