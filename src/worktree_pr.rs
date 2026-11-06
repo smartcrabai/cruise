@@ -183,6 +183,27 @@ pub async fn handle_worktree_pr_with_persistence(
     on_pr_processing: Option<&PrProcessingCallback<'_>>,
     on_pr_created: Option<&PrCreatedCallback<'_>>,
 ) -> Result<()> {
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(CruiseError::Interrupted);
+    }
+    if let Some(target) = session.pr_target.clone() {
+        prepare_review_fix(ctx, &target, session, vars, on_pr_processing)?;
+        ensure_review_fix_committed_and_push(ctx, &target.head_branch, cancel_token).await?;
+        return run_after_pr_steps(
+            compiled,
+            vars,
+            tracker,
+            max_retries,
+            rate_limit_retries,
+            &ctx.path,
+            skipped_steps,
+            flags,
+            cancel_token,
+            option_handler,
+            on_step_log,
+        )
+        .await;
+    }
     let outcome = publish_worktree_pr(
         ctx,
         compiled,
@@ -207,7 +228,7 @@ pub async fn handle_worktree_pr_with_persistence(
             tracker,
             max_retries,
             rate_limit_retries,
-            ctx.path.as_path(),
+            &ctx.path,
             skipped_steps,
             flags,
             cancel_token,
@@ -241,18 +262,7 @@ pub(crate) async fn publish_worktree_pr(
         if cancel_token.is_some_and(CancellationToken::is_cancelled) {
             return Err(CruiseError::Interrupted);
         }
-        let skipped_reason = if compiled.create_pr {
-            session.pr_skipped_reason = None;
-            pr_creation_skip_reason(
-                ctx,
-                session.worktree_base_ref.as_deref(),
-                session.worktree_base_branch.as_deref(),
-                cancel_token,
-            )
-            .await?
-        } else {
-            Some(crate::session::PrSkippedReason::Disabled)
-        };
+        let skipped_reason = session_pr_skip_reason(ctx, compiled, session, cancel_token).await?;
         if let Some(reason) = skipped_reason {
             let outcome = match reason {
                 crate::session::PrSkippedReason::Disabled => PublicationOutcome::DisabledByConfig,
@@ -261,15 +271,7 @@ pub(crate) async fn publish_worktree_pr(
             mark_pr_skipped(session, compiled, flags, skipped_steps, reason);
             return Ok(outcome);
         }
-        // Repo-backed sessions need forge availability before execution to clone
-        // private repositories; local worktrees defer this until PR processing is
-        // actually needed.
-        if session.repo.is_none() {
-            crate::forge::ensure_forge_available(crate::forge::session_forge(session))?;
-        }
-        if let Some(on_pr_processing) = on_pr_processing {
-            on_pr_processing()?;
-        }
+        prepare_pr_processing(session, on_pr_processing)?;
 
         let pr_attempt = create_pr_attempt(
             ctx,
@@ -297,12 +299,12 @@ pub(crate) async fn publish_worktree_pr(
                 Ok(PublicationOutcome::Created)
             }
             PrAttemptOutcome::SkippedNoCommits => {
-                session.pr_skipped_reason = Some(crate::session::PrSkippedReason::NoCommits);
-                log_after_pr_skipped(
+                mark_pr_skipped(
+                    session,
                     compiled,
                     flags,
                     skipped_steps,
-                    "the worktree has no commits or changes to open a pull request",
+                    crate::session::PrSkippedReason::NoCommits,
                 );
                 Ok(PublicationOutcome::SkippedNoCommits)
             }
@@ -322,6 +324,87 @@ pub(crate) async fn publish_worktree_pr(
         operation.finish_result(&result);
     }
     result
+}
+
+fn prepare_review_fix(
+    ctx: &worktree::WorktreeContext,
+    target: &crate::pr_review_fix::PrTarget,
+    session: &mut SessionState,
+    vars: &mut VariableStore,
+    on_pr_processing: Option<&PrProcessingCallback<'_>>,
+) -> Result<()> {
+    crate::pr_review_fix::validate_origin(target, &ctx.path)?;
+    crate::forge::ensure_forge_available(crate::forge::ForgeKind::GitHub)?;
+    if let Some(on_pr_processing) = on_pr_processing {
+        on_pr_processing()?;
+    }
+    vars.set_named_value(PR_NUMBER_VAR, target.number.to_string());
+    vars.set_named_value(PR_URL_VAR, target.url.clone());
+    session.pr_url = Some(target.url.clone());
+    session.pr_skipped_reason = None;
+    Ok(())
+}
+
+fn prepare_pr_processing(
+    session: &SessionState,
+    on_pr_processing: Option<&PrProcessingCallback<'_>>,
+) -> Result<()> {
+    // Local worktrees defer forge checks until PR processing is needed.
+    if session.repo.is_none() {
+        crate::forge::ensure_forge_available(crate::forge::session_forge(session))?;
+    }
+    if let Some(on_pr_processing) = on_pr_processing {
+        on_pr_processing()?;
+    }
+    Ok(())
+}
+
+async fn session_pr_skip_reason(
+    ctx: &worktree::WorktreeContext,
+    compiled: &CompiledWorkflow,
+    session: &mut SessionState,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<Option<crate::session::PrSkippedReason>> {
+    if compiled.create_pr {
+        session.pr_skipped_reason = None;
+        pr_creation_skip_reason(
+            ctx,
+            session.worktree_base_ref.as_deref(),
+            session.worktree_base_branch.as_deref(),
+            cancel_token,
+        )
+        .await
+    } else {
+        Ok(Some(crate::session::PrSkippedReason::Disabled))
+    }
+}
+
+async fn ensure_review_fix_committed_and_push(
+    ctx: &worktree::WorktreeContext,
+    head_branch: &str,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<()> {
+    if worktree_has_changes(ctx, cancel_token).await? {
+        return Err(CruiseError::Other(
+            "PR review fix worktree has uncommitted changes".to_string(),
+        ));
+    }
+    let range = format!("origin/{head_branch}..HEAD");
+    let count = git_stdout(
+        &ctx.path,
+        &["rev-list", "--count", &range],
+        "git rev-list failed",
+        cancel_token,
+    )
+    .await?;
+    let count: u64 = count
+        .trim()
+        .parse()
+        .map_err(|_| CruiseError::Other("invalid git rev-list count".to_string()))?;
+    if count > 0 {
+        push_branch(&ctx.path, head_branch, cancel_token).await?;
+    }
+    Ok(())
 }
 
 fn record_created_pr(session: &mut SessionState, vars: &mut VariableStore, url: String) {
@@ -1411,6 +1494,7 @@ mod tests {
             path,
             original_dir: original,
             branch: "cruise/test".to_string(),
+            owns_branch: true,
         }
     }
 
@@ -1644,6 +1728,7 @@ mod tests {
             path: tmp.path().to_path_buf(),
             branch: "test-branch".to_string(),
             original_dir: tmp.path().to_path_buf(),
+            owns_branch: true,
         };
         let mut session = SessionState::new(
             "pr-failure-test".to_string(),
@@ -2517,6 +2602,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             path: tmp.path().to_path_buf(),
             branch: "main".to_string(),
             original_dir: tmp.path().to_path_buf(),
+            owns_branch: false,
         };
         let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
         let mut session = SessionState::new(
@@ -2861,6 +2947,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             path: worktree_path,
             branch: "cruise/test".to_string(),
             original_dir,
+            owns_branch: true,
         };
         let mut tracker = FileTracker::with_root(ctx.path.clone());
         let mut session = SessionState::new(

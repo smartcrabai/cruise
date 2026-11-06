@@ -553,11 +553,23 @@ pub struct StepConfig {
 }
 
 /// Configuration of the `github-review` step.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewerScope {
+    #[default]
+    Bots,
+    All,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubReviewConfig {
     /// Bot logins whose review of the current head is awaited.
+    #[serde(default)]
     pub bots: Vec<String>,
+    /// Scope of review authors to consider.
+    #[serde(default)]
+    pub reviewers: ReviewerScope,
     /// Maximum number of loop iterations (default 3).
     #[serde(
         rename = "max-iterations",
@@ -1456,7 +1468,10 @@ pub(crate) fn validate_github_review(config: &WorkflowConfig) -> crate::error::R
         if review.max_iterations == 0 {
             return Err(invalid("github-review max-iterations must be positive"));
         }
-        if review.bots.is_empty() {
+        if review.reviewers == ReviewerScope::All && !review.bots.is_empty() {
+            return Err(invalid("github-review reviewers: all cannot specify bots"));
+        }
+        if review.reviewers == ReviewerScope::Bots && review.bots.is_empty() {
             return Err(invalid("github-review bots must not be empty"));
         }
         let mut seen = std::collections::HashSet::new();

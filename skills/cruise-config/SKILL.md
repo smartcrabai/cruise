@@ -29,7 +29,9 @@ Config files are resolved in this priority order:
 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` (ASCII-sorted)
 6. Built-in `tdd` (`builtin/tdd.yaml` in the source tree, embedded at build time: test-first steps + verify-review group (parallel read-only analyzers → consolidate → apply) + after-PR automation; uses the fallback `jcode` backend only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied) — selected by `-c __builtin__` or `-c builtin:tdd`.
 
-The fixed built-in catalog and selector order is `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`. All six declare `after_pr` and `merge`, off when absent. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. `-f after_pr` enables the prelude without merge; `-f merge` runs the same prelude once and adds the final native synchronous squash merge. `research` stays read-only with `create_pr: false`, so merge never creates a PR or overrides its no-PR policy.
+The built-in catalog contains `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, `security`, and `pr-review-fix`. The first six declare `after_pr` and `merge`, off when absent; `pr-review-fix` declares no flags and addresses an existing PR instead of creating or merging one. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. `-f after_pr` enables the prelude without merge; `-f merge` runs the same prelude once and adds the final native synchronous squash merge. `research` stays read-only with `create_pr: false`, so merge never creates a PR or overrides its no-PR policy.
+
+`cruise plan --pr NUMBER` defaults to `builtin:pr-review-fix` instead of normal config discovery. A custom workflow for a PR session must set `create_pr: true` and have a direct after-PR `github-review` step with `reviewers: all`; see [after-pr.md](references/after-pr.md#github-review) for the permission filter and loop rules.
 
 The shared six-step after-PR prelude is embedded with the binary and is not an
 extra catalog workflow. Built-ins never fall back to local shared files, while

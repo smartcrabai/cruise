@@ -1518,7 +1518,7 @@ mod tests {
         let candidates = collect_candidates(repo_dir.path(), Some(env_path_string))
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: file-backed candidates precede the six built-ins.
+        // Then: file-backed candidates precede the seven built-ins.
         let labels = candidates
             .iter()
             .map(|candidate| candidate.label.as_str())
@@ -1533,8 +1533,10 @@ mod tests {
                 "~/.config/cruise/workflows/zeta.yaml",
             ]
         );
+        assert_eq!(labels.len(), 12);
         for (label, name) in labels[5..].iter().zip([
             "tdd",
+            "pr-review-fix",
             "refactor",
             "add-tests",
             "add-formal-specs",
@@ -1983,6 +1985,7 @@ mod tests {
             values,
             vec![
                 "__builtin__",
+                "builtin:pr-review-fix",
                 "builtin:refactor",
                 "builtin:add-tests",
                 "builtin:add-formal-specs",
@@ -1992,6 +1995,7 @@ mod tests {
         );
         for (candidate, name) in candidates.iter().zip([
             "tdd",
+            "pr-review-fix",
             "refactor",
             "add-tests",
             "add-formal-specs",
@@ -2027,12 +2031,13 @@ mod tests {
             .iter()
             .map(ConfigCandidate::selection_value)
             .collect();
-        assert_eq!(values.len(), 7);
+        assert_eq!(values.len(), 8);
         assert!(values[0].ends_with("cruise.yaml"));
         assert_eq!(
             &values[1..],
             [
                 "__builtin__",
+                "builtin:pr-review-fix",
                 "builtin:refactor",
                 "builtin:add-tests",
                 "builtin:add-formal-specs",

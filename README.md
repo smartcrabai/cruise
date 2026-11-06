@@ -385,6 +385,7 @@ Options:
       --grill                      Interview-style planning: the agent asks one question at a time, then writes the plan (requires the SDK backend and a TTY; conflicts with --skip-planning)
       --no-interactive-planning    Disable interactive planning tools for this session; the agent writes plan.md directly (conflicts with --grill)
       --repo <OWNER/REPO>          Repository (owner/repository, group/sub/project, or full URL; GitHub or GitLab) to clone into a temporary directory for planning and execution
+      --pr <NUMBER>                Address reviews on an existing GitHub pull request
       --rate-limit-retries <N>     Maximum number of retries per LLM call (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --image <PATH>               Attach an image file to the planning input; can be repeated
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable)
@@ -402,7 +403,7 @@ With `--grill`, SDK planning becomes an interview: the agent asks questions one 
 
 With `--no-interactive-planning`, SDK planning uses the direct-to-file flow even when the workflow config has `interactive_planning: true`. The agent writes `plan.md` directly, as in `command` mode. The flag conflicts with `--grill`; it is equivalent to setting `interactive_planning: false` but only affects the current session. The WebUI exposes the same behavior via the **"Non-interactive planning"** checkbox on the New Session form (mutually exclusive with "Grill me").
 
-**Built-in workflow flags.** All six built-ins (`tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`) declare `after_pr` and `merge`; every flag is off unless explicitly enabled. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. For example, `cruise plan -c builtin:tdd -f browser_e2e,app_e2e "task"` enables only the two E2E flags, while `cruise plan -c builtin:tdd -f merge "task"` opts into after-PR automation and the native synchronous squash merge. `-f browser_e2e,app_e2e,merge` combines them. `merge` runs the same after-PR prelude as `after_pr`, once; `after_pr` alone never merges. The implied prelude does not add or rewrite `after_pr` in the session's sparse saved flag map.
+**Built-in workflow flags.** The six general-purpose built-ins (`tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`) declare `after_pr` and `merge`; every flag is off unless explicitly enabled. `pr-review-fix` declares no flags. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. For example, `cruise plan -c builtin:tdd -f browser_e2e,app_e2e "task"` enables only the two E2E flags, while `cruise plan -c builtin:tdd -f merge "task"` opts into after-PR automation and the native synchronous squash merge. `-f browser_e2e,app_e2e,merge` combines them. `merge` runs the same after-PR prelude as `after_pr`, once; `after_pr` alone never merges. The implied prelude does not add or rewrite `after_pr` in the session's sparse saved flag map.
 
 - `browser_e2e` enables actual browser exercises, assertions, and failure fixing.
 - `app_e2e` enables applicable mobile and desktop native-app exercises using repository/platform-native runners.
@@ -413,6 +414,10 @@ With `--no-interactive-planning`, SDK planning uses the direct-to-file flow even
 `research` remains read-only with `create_pr: false`; `merge` never creates a PR or overrides that no-PR policy. If an opted-in after-PR action is unavailable because no PR is created (including `research`, `exec`, current-branch runs, or a no-commit run), Cruise skips it and prints the reason.
 
 With `--repo <owner/repository>`, the session targets a GitHub or GitLab repository instead of the current directory. The repository is cloned via `gh repo clone` (or `glab repo clone` on GitLab) into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory. Repo sessions always run in Worktree mode and still require `gh`/`glab` to access the repository. With `create_pr: false`, Cruise skips automatic commit, push, PR creation, `after-pr`, and PR-based cleanup while retaining the normal session, artifacts, and worktree/clone. Otherwise, the planning worktree and clone are removed once the plan is approved (only the branch name is kept), then `cruise run` re-clones and recreates them; the clone is removed after PR creation. A successful run with no new branch commits completes without attempting PR creation; existing branch commits remain eligible for a PR. Publication failures in either repo or local worktree sessions enter **PR Failed** and retain the workspace for **Create PR** recovery, rather than rerunning the workflow. A config inside the clone (or the built-in `tdd` when no config file is found) is copied to `sessions/<session-id>/config.yaml` so it stays readable after clone removal, including inlined `prompt_file` contents; an external `-c` path or `CRUISE_CONFIG` file is referenced in place instead. `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The WebUI exposes the same behavior via the **Directory / Repository (GitHub or GitLab)** source toggle on the New Session form, with a repository picker backed by `gh repo list` (or `glab repo list` when `CRUISE_FORGE=gitlab`) (free-form `owner/repository` input is accepted too).
+
+**Fix reviews on an existing GitHub PR.** Run `cruise plan --pr 12` from the repository, or `cruise plan --repo owner/repo --pr 12 "focus on tests"`, approve the generated plan if prompted, then run `cruise run <session-id>`. The optional positional text is an additional instruction; this mode does not read stdin or use an LLM to generate the plan. TUI and WebUI new-session forms also accept a PR number for a GitHub repository. Authenticated `gh` is required. The PR must be open and have a nonempty head branch in the same repository; draft PRs are supported, but fork PRs and GitLab merge requests are not. `--grill` and `--image` cannot be combined with `--pr`.
+
+The default is `builtin:pr-review-fix`, not the project workflow. A custom `-c` workflow must enable PR handling and include an after-PR `github-review` step with `reviewers: all`. The builtin declares no flags, synchronizes the existing head with `git pull --ff-only`, and addresses reviews without creating or merging a PR. The session is pinned to an isolated worktree on the PR head branch, tracking `origin/<head>`; a diverged branch or a branch already checked out elsewhere causes an error rather than a reset. Cleanup removes the worktree but preserves the PR head branch. The review loop commits and pushes fixes, replies or resolves eligible threads, and writes `review-report.json`. Failures leave a retryable session. Publish as Issue and Replan are unavailable for PR sessions.
 
 #### `cruise draft`
 
@@ -756,6 +761,7 @@ cruise resolves the workflow config as follows:
    | `add-formal-specs` | Add executable Quint, Alloy, and Gherkin specs with CI; fix real spec/source defects |
    | `research` | Bounded, read-only investigation with source-backed evidence, independent review, and a cited report |
    | `security` | Scoped security inventory and parallel audits, triage, safe fixes for confirmed defects, and independent verification |
+   | `pr-review-fix` | Address eligible review threads on an existing GitHub PR head branch |
 
    `refactor`, `add-tests`, `add-formal-specs`, and `security` set `force_exec: true` by default: local planning runs directly in the current directory without an outer plan/session, worktree, or automatic PR. Pass `--no-force-exec` to use the normal plan/session path instead.
 
@@ -1507,9 +1513,9 @@ after-pr:
 
 Prompt steps in `after-pr` are guarded by the same default, with the same repository scope and the same fail-closed behaviour. The built-in `resolve-conflict` and `fix-ci-error` prompts explicitly set `allow_commit: true` because they are intentionally expected to commit fixes to the PR branch. Other after-PR prompts must opt in individually when they need to advance `HEAD` in the session repository; command and option steps are unaffected.
 
-#### Review bot loop (`github-review`)
+#### Review loop (`github-review`)
 
-An explicit, opt-in `after-pr` step lets review bots such as CodeRabbit be handled without a human in the loop. It is never added to the built-in workflow.
+An explicit `after-pr` step can handle review bots such as CodeRabbit. The general-purpose built-ins do not add it; `builtin:pr-review-fix` uses it for an existing PR.
 
 ```yaml
 after-pr:
@@ -1525,7 +1531,9 @@ after-pr:
     output_file: review-report.json # optional iteration report in the session artifacts
 ```
 
-Each iteration waits for a review of the current head commit by a listed bot, fetches the unresolved threads started by those bots (all pages), and runs the prompt with the head OID and thread data appended. The prompt must answer with JSON only: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`. Only listed thread IDs are accepted, each at most once, with a non-empty `reply` or `resolve: true`, and only where `viewerCanReply` / `viewerCanResolve` allow it. Cruise itself posts the replies and resolves the threads through `gh api graphql` (requires an authenticated `gh`). Commits made by the prompt are pushed; uncommitted changes fail the step. The loop ends when no unresolved bot threads remain and fails when they remain after `max-iterations`, on timeout, or on any API or response error. Unlike other `after-pr` errors, which are warning-only, this `github-review` failure marks the run `Failed`; cancellation and missing-model errors from jcode after-pr prompts also propagate, with missing-model errors failing the run/session. Rerunning resumes safely because replies carry an idempotency marker. The step is valid only directly in `after-pr`.
+In bot mode, each iteration waits for a review of the current head commit by a listed bot, then fetches unresolved threads started by those bots (all pages). In all-reviewer mode, it immediately fetches eligible unresolved threads without waiting for a review. Either mode runs the prompt with the head OID and thread data appended. The prompt must answer with JSON only: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`. Only listed thread IDs are accepted, each at most once, with a non-empty `reply` or `resolve: true`, and only where `viewerCanReply` / `viewerCanResolve` allow it. Cruise itself posts the replies and resolves the threads through `gh api graphql` (requires an authenticated `gh`). Commits made by the prompt are pushed; uncommitted changes fail the step. The loop ends when no eligible unresolved threads remain and fails when eligible threads remain after `max-iterations`, on timeout, or on any API or response error. Unlike other `after-pr` errors, which are warning-only, this `github-review` failure marks the run `Failed`; cancellation and missing-model errors from jcode after-pr prompts also propagate, with missing-model errors failing the run/session. Rerunning resumes safely because replies carry an idempotency marker. The step is valid only directly in `after-pr`.
+
+The default `reviewers: bots` preserves that behavior and requires a nonempty, unique `bots` list. To process existing human and bot feedback instead, use `github-review: { reviewers: all, max-iterations: 3 }` and omit `bots` or specify an empty list. This mode does not wait for a new review. Before passing thread text to the agent, Cruise checks each author's repository collaborator permission: only `write`, `maintain`, or `admin` authors are eligible. A 404 means no permission; other permission lookup failures fail the step. Excluded unresolved thread IDs are recorded in the report and do not block success. The loop succeeds when no eligible unresolved threads remain, fails if an iteration leaves the eligible ID set unchanged, and fails if the iteration limit is reached with eligible threads remaining. The builtin PR review workflow uses this mode with a 60-minute timeout, three iterations, and `allow_commit: true`.
 
 ### Flow Control
 
@@ -1820,7 +1828,7 @@ its supplied base directory for local dependencies, not the embedded registry.
 The shared after-PR resource is internal and is not a catalog entry or a new
 public `workflow_call` source syntax.
 
-All six built-ins call the same six-step after-PR prelude in order:
+The six general-purpose built-ins call the same six-step after-PR prelude in order:
 `pr-ready` → `sync-base` → `resolve-conflict` → `push-after-sync` → `wait-ci` →
 `fix-ci-error`. Each root supplies its workflow-specific conflict and CI prompts
 through `with`. The `follow-up` call's `flag: [after_pr, merge]` gates all six

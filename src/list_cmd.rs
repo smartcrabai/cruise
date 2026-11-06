@@ -31,6 +31,8 @@ struct ListSessionJson {
     workspace_mode: WorkspaceMode,
     target_branch: Option<String>,
     pr_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_target: Option<crate::pr_review_fix::PrTarget>,
     pr_skipped_reason: Option<PrSkippedReason>,
     config_path: Option<String>,
     updated_at: Option<String>,
@@ -78,6 +80,7 @@ fn session_to_json_with_plan_availability(
         workspace_mode: session.workspace_mode,
         target_branch: session.target_branch,
         pr_url: session.pr_url,
+        pr_target: session.pr_target,
         pr_skipped_reason: session.pr_skipped_reason,
         config_path: session.config.selection_value(),
         updated_at: session.updated_at,
@@ -453,17 +456,21 @@ fn session_actions_with_plan_availability(
         SessionPhase::AwaitingApproval => {
             if plan_available && session.plan_error.is_none() {
                 actions.push("Approve");
-                actions.push("Publish as Issue");
+                if session.pr_target.is_none() {
+                    actions.push("Publish as Issue");
+                }
             }
             actions.push("Edit Settings");
         }
         SessionPhase::Planned => {
             actions.push("Run");
-            if plan_available && session.plan_error.is_none() {
+            if plan_available && session.plan_error.is_none() && session.pr_target.is_none() {
                 actions.push("Publish as Issue");
             }
             actions.push("Edit Settings");
-            actions.push("Replan");
+            if session.pr_target.is_none() {
+                actions.push("Replan");
+            }
         }
         SessionPhase::Running => {
             actions.push("Resume");

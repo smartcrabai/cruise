@@ -1123,7 +1123,9 @@ impl TuiApp {
                         .position(|item| item.id == state.id)
                         .unwrap_or(self.selected);
                     self.sync_selected_detail();
-                    self.start_plan(state.id, plan);
+                    if state.pr_target.is_none() {
+                        self.start_plan(state.id, plan);
+                    }
                     self.form.reset_after_creation();
                 }
                 Err(error) => self.set_error(error),
@@ -3428,7 +3430,10 @@ impl TuiApp {
                     .set_text(&request.skipped_steps.join(", "));
             }
         }
-        if request.input.trim().is_empty() && request.attachments.is_empty() {
+        if request.input.trim().is_empty()
+            && request.attachments.is_empty()
+            && request.pr_number.is_none()
+        {
             self.set_error("Task description or an image attachment is required".to_string());
             return None;
         }
@@ -6208,6 +6213,8 @@ mod tests {
         app.modal = None;
         type_text(&mut app, "acme/cruise");
         assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::PullRequest);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
         assert_eq!(app.form.step, Step::Config);
         assert_eq!(app.form.input.text(), "");
         assert!(!app.handle_key(key(KeyCode::Enter)));
@@ -6450,6 +6457,8 @@ mod tests {
         app.form.step = Step::Repository;
         assert!(!app.handle_key(key(KeyCode::Down)));
         assert_eq!(app.form.repository.text(), "acme/other");
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::PullRequest);
         assert!(!app.handle_key(key(KeyCode::Enter)));
         assert_eq!(app.form.step, Step::Config);
         assert!(

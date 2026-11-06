@@ -873,6 +873,7 @@ fn step_question(step: Step) -> &'static str {
         Step::Source => "Where is the code?",
         Step::WorkingDirectory => "Which directory? (blank = current directory)",
         Step::Repository => "Which repository? (owner/name, group/project, or URL)",
+        Step::PullRequest => "Pull request number? (optional, GitHub only)",
         Step::Config => "Which workflow config? (blank = auto-detect)",
         Step::SkippedSteps => "Skip any workflow steps?",
         Step::Flags => "Which optional workflow flags should be enabled?",
@@ -908,6 +909,7 @@ fn step_hint(app: &TuiApp) -> String {
                 format!("Enter next · ↑↓ gh repos ({found}) · {BACK}")
             }
         }
+        Step::PullRequest => format!("Enter next · {BACK}"),
         Step::Config => format!("↑↓ select · type path · Tab complete · Enter next · {BACK}"),
         Step::SkippedSteps if !app.has_skip_choices() => {
             format!("Comma-separated step ids · Enter next · {BACK}")
@@ -935,6 +937,7 @@ fn render_step_control(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Step::Attachments => return render_step_editor(frame, app, area, &form.attachments),
         Step::WorkingDirectory => return render_step_editor(frame, app, area, &form.working_dir),
         Step::Repository => return render_step_editor(frame, app, area, &form.repository),
+        Step::PullRequest => return render_step_editor(frame, app, area, &form.pull_request),
         Step::Config => return render_config_choices(frame, app, area),
         Step::SkippedSteps => return render_skip_choices(frame, app, area),
         Step::Flags => return render_flag_choices(frame, app, area),

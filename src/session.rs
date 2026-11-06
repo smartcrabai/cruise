@@ -215,6 +215,9 @@ pub struct SessionState {
     /// (`--skip-planning` / input-as-plan). `input` is then stored empty.
     #[serde(default)]
     pub input_as_plan: bool,
+    /// Existing GitHub pull request targeted by this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_target: Option<crate::pr_review_fix::PrTarget>,
     /// GitHub issue from which this session was created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_number: Option<u64>,
@@ -299,6 +302,7 @@ impl SessionState {
             published_issue_url: None,
             exec: false,
             input_as_plan: false,
+            pr_target: None,
             issue_number: None,
         }
     }
@@ -494,6 +498,7 @@ impl SessionState {
             path: path.clone(),
             branch: branch.clone(),
             original_dir: self.base_dir.clone(),
+            owns_branch: self.pr_target.is_none(),
         })
     }
 
@@ -1138,6 +1143,7 @@ impl SessionManager {
                 path: path.clone(),
                 branch: branch.clone(),
                 original_dir: session.base_dir.clone(),
+                owns_branch: session.pr_target.is_none(),
             };
             crate::worktree::cleanup_worktree(&ctx)
         } else {
