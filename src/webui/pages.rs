@@ -181,6 +181,7 @@ pub(crate) fn normalize_tab(tab: Option<&str>) -> &'static str {
         Some("dag") => "dag",
         Some("plan") => "plan",
         Some("log") => "log",
+        Some("diff") => "diff",
         _ => "info",
     }
 }
@@ -201,6 +202,7 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
         }
         "plan" => partials::plan_tab_html(state, id),
         "log" => partials::log_tab_html(state, id, None),
+        "diff" => partials::diff_tab_html(state, id),
         _ => {
             let session_state = state.application.reconcile_session(id)?;
             let flags = state
@@ -266,12 +268,14 @@ pub(crate) fn session_detail_html(state: &WebState, id: &str, tab: &str) -> Resu
             dag: format!("/webui/sessions/{id}/tab/dag"),
             plan: format!("/webui/sessions/{id}/tab/plan"),
             log: format!("/webui/sessions/{id}/tab/log"),
+            diff: format!("/webui/sessions/{id}/tab/diff"),
         },
         push_hrefs: TabHrefs {
             info: format!("/sessions/{id}?tab=info"),
             dag: format!("/sessions/{id}?tab=dag"),
             plan: format!("/sessions/{id}?tab=plan"),
             log: format!("/sessions/{id}?tab=log"),
+            diff: format!("/sessions/{id}?tab=diff"),
         },
     };
     state.templates.render("session-detail", &vm)

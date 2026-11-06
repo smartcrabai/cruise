@@ -78,6 +78,105 @@ fn create_session(harness: &Harness) -> SessionState {
     }
 }
 
+#[tokio::test]
+async fn diff_tab_no_branch_message() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let uri = format!("/webui/sessions/{}/tab/diff", session.id);
+    let (status, _, html) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains("No session branch"), "{html}");
+}
+
+#[tokio::test]
+async fn diff_tab_renders_escaped_patch() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let uri = format!("/webui/sessions/{}/tab/diff", session.id);
+    let repo = &session.base_dir;
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init"]);
+    git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "base",
+    ]);
+    git(&["checkout", "-b", "diff-fixture"]);
+    std::fs::write(repo.join("change.txt"), "<script>alert(1)</script>\n").expect("write fixture");
+    external_edit(&harness, &session.id, |state| {
+        state.worktree_branch = Some("diff-fixture".to_string());
+        state.worktree_path = Some(repo.clone());
+    });
+    let (status, _, html) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(
+        html.contains(&format!("id=\"tab-diff-{}\"", session.id)),
+        "{html}"
+    );
+    assert!(
+        html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{html}"
+    );
+    assert!(!html.contains("<script>alert(1)</script>"), "{html}");
+    let added_line = html
+        .split('\n')
+        .find(|line| line.contains("&lt;script&gt;alert(1)"))
+        .expect("added line");
+    assert!(added_line.contains("text-green-"), "{added_line}");
+}
+
+#[tokio::test]
+async fn diff_tab_navigation_contract() {
+    let harness = harness();
+    let session = create_session(&harness);
+    assert_eq!(super::pages::normalize_tab(Some("diff")), "diff");
+    assert_eq!(super::pages::normalize_tab(Some("bogus")), "info");
+    let (status, _, html) = get(&harness, &format!("/sessions/{}?tab=diff", session.id), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert_eq!(html.matches("role=\"tab\"").count(), 5, "{html}");
+    let diff_button = html
+        .split("<button")
+        .find(|button| {
+            button
+                .split("</button>")
+                .next()
+                .and_then(|body| body.split_once('>'))
+                .is_some_and(|(_, text)| text.trim() == "Diff")
+        })
+        .expect("Diff tab");
+    assert!(
+        diff_button.contains("aria-selected=\"true\""),
+        "{diff_button}"
+    );
+}
+
+#[tokio::test]
+async fn diff_tab_is_not_in_sync_partials() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let sync = super::partials::session_sync_partials(&harness.state, &session.id, "1")
+        .expect("sync partials");
+    assert!(!sync.contains("tab-diff-"), "{sync}");
+}
+
 async fn get(
     harness: &Harness,
     uri: &str,

@@ -6,6 +6,7 @@ pub mod artifacts;
 pub mod ask_handler;
 pub mod attachments;
 pub mod backend;
+pub mod branch_diff;
 pub mod batch_run;
 pub mod builtin_workflows;
 pub mod cancellation;
