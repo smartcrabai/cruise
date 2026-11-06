@@ -3309,33 +3309,43 @@ exit 97
     );
 }
 
-#[test]
-fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
-    let collector = Collector::start();
-    let (fixture, env) = builtin_wait_ci_fixture(
-        &collector,
-        r#"#!/bin/sh
+fn failed_check_details_fake_gh_script() -> &'static str {
+    r#"#!/bin/sh
 if [ "$1" = repo ]; then
   printf 'owner/repo\n'
   exit 0
 fi
 if [ "$1" = api ] && [ "$2" = graphql ]; then
   head=$(git rev-parse HEAD) || exit 97
-  calls=$(cat .fake-gh-graphql-calls 2>/dev/null || printf '0')
-  calls=$((calls + 1))
-  printf '%s\n' "$calls" > .fake-gh-graphql-calls || exit 97
-  if [ "$calls" -eq 1 ]; then
-    printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"state":"FAILURE","contexts":{"totalCount":4}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
-    exit 0
-  fi
-  printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"contexts":{"totalCount":4,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"successful-check-not-exported","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://url-user-secret:url-pass-secret@github.com/owner/repo/actions/runs/789/job/456?token=url-query-secret#url-fragment-secret","checkSuite":{"workflowRun":{"databaseId":789}}},{"__typename":"StatusContext","context":"successful-context-not-exported","state":"SUCCESS"},{"__typename":"StatusContext","context":"deploy-prod","state":"ERROR","targetUrl":"https://status-user-secret:status-pass-secret@example.test/deploy/42?private_token=status-query-secret#status-fragment-secret"}]}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
-  printf 'Authorization: Bearer private-provider-stderr-secret\n' >&2
-  exit 0
+  query_kind=unknown
+  for argument in "$@"; do
+    case "$argument" in
+      *'contexts(first:1)'*) query_kind=summary ;;
+      *'contexts(first:100'*) query_kind=details ;;
+    esac
+  done
+  case "$query_kind" in
+    summary)
+      printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"state":"FAILURE","contexts":{"totalCount":4}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
+      exit 0 ;;
+    details)
+      printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"contexts":{"totalCount":4,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"successful-check-not-exported","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://url-user-secret:url-pass-secret@github.com/owner/repo/actions/runs/789/job/456?token=url-query-secret#url-fragment-secret","checkSuite":{"workflowRun":{"databaseId":789}}},{"__typename":"StatusContext","context":"successful-context-not-exported","state":"SUCCESS"},{"__typename":"StatusContext","context":"deploy-prod","state":"ERROR","targetUrl":"https://status-user-secret:status-pass-secret@example.test/deploy/42?private_token=status-query-secret#status-fragment-secret"}]}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
+      printf 'Authorization: Bearer private-provider-stderr-secret\n' >&2
+      exit 0 ;;
+    *)
+      printf 'unexpected fake gh GraphQL query with secret details\n' >&2
+      exit 97 ;;
+  esac
 fi
 printf 'unexpected fake gh invocation with secret details\n' >&2
 exit 97
-"#,
-    );
+"#
+}
+
+#[test]
+fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
+    let collector = Collector::start();
+    let (fixture, env) = builtin_wait_ci_fixture(&collector, failed_check_details_fake_gh_script());
     let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-prompt-secret");
     assert!(
         !output.status.success(),
