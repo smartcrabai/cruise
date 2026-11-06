@@ -1,6 +1,7 @@
 //! Resolve and validate existing pull requests for review-fix sessions.
 use crate::error::{CruiseError, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 
 pub const BUILTIN_SELECTOR: &str = "builtin:pr-review-fix";
 
@@ -30,7 +31,9 @@ pub(crate) fn validate_origin(target: &PrTarget, dir: &std::path::Path) -> Resul
         || segments[2] != "pull"
         || segments[3].parse::<u64>().ok() != Some(target.number)
     {
-        return Err(CruiseError::Other("invalid resolved pull request URL".into()));
+        return Err(CruiseError::Other(
+            "invalid resolved pull request URL".into(),
+        ));
     }
     let expected_host = url.host_str().unwrap_or_default();
     let expected_repo = format!("{}/{}", segments[0], segments[1]);
@@ -40,10 +43,16 @@ pub(crate) fn validate_origin(target: &PrTarget, dir: &std::path::Path) -> Resul
         if push {
             command.arg("--push");
         }
-        let output = command.arg("origin").current_dir(dir).output()
+        let output = command
+            .arg("origin")
+            .current_dir(dir)
+            .output()
             .map_err(|e| CruiseError::Other(format!("failed to inspect origin: {e}")))?;
         if !output.status.success() {
-            return Err(CruiseError::Other(format!("failed to inspect origin: {}", String::from_utf8_lossy(&output.stderr).trim())));
+            return Err(CruiseError::Other(format!(
+                "failed to inspect origin: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
         let urls = std::str::from_utf8(&output.stdout)
             .map_err(|_| CruiseError::Other("invalid origin URL".into()))?;
@@ -56,20 +65,34 @@ pub(crate) fn validate_origin(target: &PrTarget, dir: &std::path::Path) -> Resul
             if remote.contains("://")
                 && url::Url::parse(remote).map_or(true, |remote| remote.port().is_some())
             {
-                return Err(CruiseError::Other("cannot verify origin repository against resolved pull request".into()));
+                return Err(CruiseError::Other(
+                    "cannot verify origin repository against resolved pull request".into(),
+                ));
             }
-            let identity = crate::forge::resolve_remote(remote, Some(crate::forge::ForgeKind::GitHub))
-                .map_err(|_| CruiseError::Other("cannot verify origin repository against resolved pull request".into()))?;
+            let identity =
+                crate::forge::resolve_remote(remote, Some(crate::forge::ForgeKind::GitHub))
+                    .map_err(|_| {
+                        CruiseError::Other(
+                            "cannot verify origin repository against resolved pull request".into(),
+                        )
+                    })?;
             if !identity.host.eq_ignore_ascii_case(expected_host)
                 || !identity.repository.eq_ignore_ascii_case(&expected_repo)
             {
-                return Err(CruiseError::Other(format!("origin {} repository does not match resolved pull request repository", if push { "push" } else { "fetch" })));
+                return Err(CruiseError::Other(format!(
+                    "origin {} repository does not match resolved pull request repository",
+                    if push { "push" } else { "fetch" }
+                )));
             }
         }
     }
     Ok(())
 }
 
+/// Parse and validate a `gh pr view` response.
+///
+/// # Errors
+/// Returns an error for invalid output, a mismatched PR, or an unsupported PR.
 pub fn parse_pr_view(json: &[u8], requested: u64) -> Result<PrTarget> {
     let v: serde_json::Value = serde_json::from_slice(json)
         .map_err(|e| CruiseError::Other(format!("invalid gh pr view output: {e}")))?;
@@ -118,10 +141,18 @@ pub fn parse_pr_view(json: &[u8], requested: u64) -> Result<PrTarget> {
     })
 }
 
+/// Resolve an existing GitHub pull request.
+///
+/// # Errors
+/// Returns an error if the repository or PR is unsupported or resolution fails.
 pub fn resolve_pr_target(number: u64, repo: Option<&str>) -> Result<PrTarget> {
     resolve_pr_target_in_dir(number, repo, None)
 }
 
+/// Resolve an existing GitHub pull request from an optional working directory.
+///
+/// # Errors
+/// Returns an error if the repository or PR is unsupported or resolution fails.
 pub fn resolve_pr_target_in_dir(
     number: u64,
     repo: Option<&str>,
@@ -181,6 +212,10 @@ pub fn resolve_pr_target_in_dir(
     parse_pr_view(&output.stdout, number)
 }
 
+/// Validate that a workflow supports PR review fixes.
+///
+/// # Errors
+/// Returns an error when the required PR creation or review step is missing.
 pub fn validate_workflow(config: &crate::config::WorkflowConfig) -> Result<()> {
     if config.create_pr
         && config.after_pr.values().any(|step| {
@@ -198,6 +233,9 @@ pub fn validate_workflow(config: &crate::config::WorkflowConfig) -> Result<()> {
 }
 
 /// Require at least one review step that will not be disabled at execution.
+///
+/// # Errors
+/// Returns an error if PR creation or an enabled review-all step is missing.
 pub fn validate_effective_workflow(
     workflow: &crate::workflow::CompiledWorkflow,
     flags: &crate::flags::FlagValues,
@@ -207,9 +245,10 @@ pub fn validate_effective_workflow(
         && workflow.after_pr.iter().any(|(name, step)| {
             !skipped_steps.contains(name)
                 && !crate::flags::is_disabled(step.flag.as_ref(), flags)
-                && step.github_review.as_ref().is_some_and(|review| {
-                    review.reviewers == crate::config::ReviewerScope::All
-                })
+                && step
+                    .github_review
+                    .as_ref()
+                    .is_some_and(|review| review.reviewers == crate::config::ReviewerScope::All)
         })
     {
         Ok(())
@@ -220,6 +259,8 @@ pub fn validate_effective_workflow(
     }
 }
 
+/// Build the plan for a pull request review-fix session.
+#[must_use]
 pub fn plan_text(target: &PrTarget, extra: &str) -> String {
     let title: String = target
         .title
@@ -231,10 +272,7 @@ pub fn plan_text(target: &PrTarget, extra: &str) -> String {
         target.number, title, target.url, target.head_branch
     );
     if !extra.trim().is_empty() {
-        plan.push_str(&format!(
-            "\n## Additional instruction\n\n{}\n",
-            extra.trim()
-        ));
+        let _ = writeln!(plan, "\n## Additional instruction\n\n{}", extra.trim());
     }
     plan
 }
@@ -312,7 +350,10 @@ mod tests {
         assert!(validate_effective_workflow(&compiled, &flags, &skip_second).is_err());
         flags.insert("review".into(), true);
         assert!(validate_effective_workflow(&compiled, &flags, &skip_second).is_ok());
-        assert!(validate_effective_workflow(&compiled, &flags, &["first".into(), "second".into()]).is_err());
+        assert!(
+            validate_effective_workflow(&compiled, &flags, &["first".into(), "second".into()])
+                .is_err()
+        );
         flags.insert("review".into(), false);
         assert!(validate_effective_workflow(&compiled, &flags, &[]).is_ok());
     }

@@ -255,10 +255,14 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
     let (raw_input, from_interactive) = if let Some(pr) = &pr_target {
         let extra = match args.input.take() {
             Some(input) if input != "stdin" => input,
-            Some(_) if !noninteractive => return Err(CruiseError::Other("stdin requires piped input".into())),
+            Some(_) if !noninteractive => {
+                return Err(CruiseError::Other("stdin requires piped input".into()));
+            }
             _ if noninteractive => {
                 let mut input = String::new();
-                std::io::stdin().read_to_string(&mut input).map_err(|e| CruiseError::Other(format!("failed to read stdin: {e}")))?;
+                std::io::stdin()
+                    .read_to_string(&mut input)
+                    .map_err(|e| CruiseError::Other(format!("failed to read stdin: {e}")))?;
                 input
             }
             _ => String::new(),

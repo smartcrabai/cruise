@@ -137,6 +137,9 @@ pub(crate) fn setup_session_worktree_with_ref(
 }
 
 /// Create or reuse a worktree on an existing PR head without resetting its branch.
+///
+/// # Errors
+/// Returns an error if the branch is invalid or diverged, or git or file I/O fails.
 pub fn setup_pr_worktree(
     base_dir: &Path,
     session_id: &str,
@@ -186,24 +189,8 @@ pub fn setup_pr_worktree(
     let local_ref = format!("refs/heads/{head_branch}");
     let remote_ref = format!("refs/remotes/origin/{head_branch}");
     let exists = git_status(base_dir, &["show-ref", "--verify", "--quiet", &local_ref])?;
-    let mut fast_forward = false;
-    if exists {
-        if !git_status(
-            base_dir,
-            &["merge-base", "--is-ancestor", &remote_ref, &local_ref],
-        )? {
-            if git_status(
-                base_dir,
-                &["merge-base", "--is-ancestor", &local_ref, &remote_ref],
-            )? {
-                fast_forward = true;
-            } else {
-                return Err(CruiseError::WorktreeError(format!(
-                    "local branch {head_branch} has diverged from origin/{head_branch}"
-                )));
-            }
-        }
-    }
+    let fast_forward =
+        pr_branch_needs_fast_forward(base_dir, head_branch, &local_ref, &remote_ref, exists)?;
     fs::create_dir_all(worktrees_dir)?;
     let path_arg = path.to_str().ok_or_else(|| {
         CruiseError::WorktreeError("worktree path is not valid UTF-8".to_string())
@@ -246,6 +233,32 @@ pub fn setup_pr_worktree(
         return Err(error);
     }
     Ok((ctx, false))
+}
+
+fn pr_branch_needs_fast_forward(
+    base_dir: &Path,
+    head_branch: &str,
+    local_ref: &str,
+    remote_ref: &str,
+    exists: bool,
+) -> Result<bool> {
+    if exists
+        && !git_status(
+            base_dir,
+            &["merge-base", "--is-ancestor", remote_ref, local_ref],
+        )?
+    {
+        if git_status(
+            base_dir,
+            &["merge-base", "--is-ancestor", local_ref, remote_ref],
+        )? {
+            return Ok(true);
+        }
+        return Err(CruiseError::WorktreeError(format!(
+            "local branch {head_branch} has diverged from origin/{head_branch}"
+        )));
+    }
+    Ok(false)
 }
 
 fn git_output(dir: &Path, args: &[&str]) -> Result<String> {

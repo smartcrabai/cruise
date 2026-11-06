@@ -1746,19 +1746,31 @@ mod tests {
         let manager = SessionManager::new(tmp.path().join("data"));
         let config = include_str!("../builtin/pr-review-fix.yaml")
             .replace("create_pr: true", "flags:\n  review: {}\ncreate_pr: true")
-            .replace("  address-review:\n", "  address-review:\n    flag: review\n");
-        for (id, skipped, enabled) in [("20261024000011", true, true), ("20261024000012", false, false)] {
+            .replace(
+                "  address-review:\n",
+                "  address-review:\n    flag: review\n",
+            );
+        for (id, skipped, enabled) in [
+            ("20261024000011", true, true),
+            ("20261024000012", false, false),
+        ] {
             let mut session = SessionState::new(
-                id.to_string(), tmp.path().to_path_buf(),
+                id.to_string(),
+                tmp.path().to_path_buf(),
                 crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                 "review".to_string(),
             );
             session.phase = SessionPhase::Planned;
             session.pr_target = Some(crate::pr_review_fix::PrTarget {
-                number: 1, title: "test".into(), url: "https://github.com/a/b/pull/1".into(),
-                head_branch: "feature".into(), base_branch: "main".into(),
+                number: 1,
+                title: "test".into(),
+                url: "https://github.com/a/b/pull/1".into(),
+                head_branch: "feature".into(),
+                base_branch: "main".into(),
             });
-            if skipped { session.skipped_steps.push("address-review".into()); }
+            if skipped {
+                session.skipped_steps.push("address-review".into());
+            }
             manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
             write_config(&manager, id, &config);
             let (session, initial_fingerprint) = manager.load_with_fingerprint(id).unwrap();
@@ -1767,13 +1779,29 @@ mod tests {
             args.flags.push(("review".into(), enabled));
             let mut workflow_failed = false;
             let result = run_single_loaded(
-                args, WorkspaceOverride::RespectSession, &NoOpOptionHandler,
-                CancellationToken::new(), &NoopObserver,
-                LoadedRunSession { manager: manager.clone(), session_id: id.into(), session, initial_fingerprint },
+                args,
+                WorkspaceOverride::RespectSession,
+                &NoOpOptionHandler,
+                CancellationToken::new(),
+                &NoopObserver,
+                LoadedRunSession {
+                    manager: manager.clone(),
+                    session_id: id.into(),
+                    session,
+                    initial_fingerprint,
+                },
                 &mut workflow_failed,
-            ).await;
-            let Err(error) = result else { panic!("unavailable review must reject CLI execution") };
-            assert!(error.to_string().contains("enabled, unskipped github-review"), "{error}");
+            )
+            .await;
+            let Err(error) = result else {
+                panic!("unavailable review must reject CLI execution")
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("enabled, unskipped github-review"),
+                "{error}"
+            );
         }
         assert!(!manager.worktrees_dir().exists());
     }

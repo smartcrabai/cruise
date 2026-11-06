@@ -555,13 +555,18 @@ fn create_session_inner(
             &request.attachments,
         )?);
     manager.save(&state)?;
+    record_new_session_history(&state, &request.input, requested);
+    Ok(state)
+}
+
+fn record_new_session_history(state: &SessionState, input: &str, requested: Option<String>) {
     let resolved_config_key = state
         .config
         .stable_identity(state.repo.as_deref(), &state.id);
     let mut history = NewSessionHistory::load_best_effort();
     history.record_selection(crate::new_session_history::NewSessionHistoryEntry {
         selected_at: crate::session::current_iso8601(),
-        input: request.input.trim().to_string(),
+        input: input.trim().to_string(),
         requested_config_path: requested,
         working_dir: if state.repo.is_some() {
             String::new()
@@ -573,7 +578,6 @@ fn create_session_inner(
         skipped_steps: state.skipped_steps.clone(),
     });
     history.save_best_effort();
-    Ok(state)
 }
 
 fn filter_skipped_steps(
@@ -4722,6 +4726,7 @@ mod tests {
             config_path: None,
             config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
             repo: None,
+            pr_number: None,
             workspace_mode: WorkspaceMode::Worktree,
             allow_dirty_working_tree: false,
             attachments: vec![],
@@ -4774,14 +4779,14 @@ mod tests {
         let _path = issue_test_repo(
             temp.path(),
             "https://github.com/example/project.git",
-            r##"#!/bin/sh
+            r#"#!/bin/sh
 case "$*" in
   *issues/42/comments*) printf '%s\n' '[{"user":{"login":"alice"},"body":"A comment"}]' ;;
   *issues/42*) printf '%s\n' '{"number":42,"title":"Fix the bug","body":"Issue body","html_url":"https://github.com/example/project/issues/42","labels":[{"name":"bug"}]}' ;;
   --version) echo 'gh version 2.0' ;;
   *) exit 1 ;;
 esac
-"##,
+"#,
         );
         let manager = SessionManager::new(temp.path().join("sessions"));
         let app = CruiseApplication::new(manager.clone());
@@ -4925,6 +4930,7 @@ after-pr:
                     .to_string(),
                 ),
                 repo: None,
+                pr_number: None,
                 workspace_mode: WorkspaceMode::Worktree,
                 allow_dirty_working_tree: false,
                 attachments: vec![],
@@ -5014,32 +5020,60 @@ after-pr:
         let _home = isolate_application_config(temp.path());
         let _skip_auth = crate::test_support::EnvGuard::set("CRUISE_SKIP_AGENT_AUTH_CHECK", "1");
         let manager = SessionManager::new(temp.path().join("data"));
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let config = include_str!("../builtin/pr-review-fix.yaml")
             .replace("create_pr: true", "flags:\n  review: {}\ncreate_pr: true")
-            .replace("  address-review:\n", "  address-review:\n    flag: review\n");
-        for (id, skipped, enabled) in [("20261024000013", true, true), ("20261024000014", false, false)] {
+            .replace(
+                "  address-review:\n",
+                "  address-review:\n    flag: review\n",
+            );
+        for (id, skipped, enabled) in [
+            ("20261024000013", true, true),
+            ("20261024000014", false, false),
+        ] {
             let mut state = SessionState::new(
-                id.to_string(), temp.path().to_path_buf(),
+                id.to_string(),
+                temp.path().to_path_buf(),
                 crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
                 "review".into(),
             );
             state.phase = SessionPhase::Planned;
             state.pr_target = Some(crate::pr_review_fix::PrTarget {
-                number: 1, title: "test".into(), url: "https://github.com/a/b/pull/1".into(),
-                head_branch: "feature".into(), base_branch: "main".into(),
+                number: 1,
+                title: "test".into(),
+                url: "https://github.com/a/b/pull/1".into(),
+                head_branch: "feature".into(),
+                base_branch: "main".into(),
             });
             state.flags.insert("review".into(), enabled);
-            if skipped { state.skipped_steps.push("address-review".into()); }
+            if skipped {
+                state.skipped_steps.push("address-review".into());
+            }
             manager.create(&state).unwrap();
             let session_dir = manager.sessions_dir().join(id);
             std::fs::write(session_dir.join("config.yaml"), &config).unwrap();
             std::fs::write(session_dir.join("plan.md"), "# Plan\n").unwrap();
             let result = setup_run_blocking(
-                &manager, runtime.handle(), id, &CancellationToken::new(), None, None, 0,
+                &manager,
+                runtime.handle(),
+                id,
+                &CancellationToken::new(),
+                None,
+                None,
+                0,
             );
-            let Err(error) = result else { panic!("unavailable review must reject application execution") };
-            assert!(error.to_string().contains("enabled, unskipped github-review"), "{error}");
+            let Err(error) = result else {
+                panic!("unavailable review must reject application execution")
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("enabled, unskipped github-review"),
+                "{error}"
+            );
         }
         assert!(!manager.worktrees_dir().exists());
     }
@@ -5636,6 +5670,7 @@ after-pr:
                 config_path: None,
                 config_yaml: Some("command: [cat]\nsteps:\n  s1:\n    prompt: plan\n".to_string()),
                 repo: None,
+                pr_number: None,
                 workspace_mode: WorkspaceMode::Worktree,
                 allow_dirty_working_tree: false,
                 attachments: vec![],
@@ -6332,6 +6367,7 @@ after-pr:
                 "command: [sh, -c, 'cat']\nmodel: '{model}'\nsteps:\n  s1:\n    prompt: model logging\n"
             )),
             repo: None,
+            pr_number: None,
             workspace_mode: WorkspaceMode::Worktree,
             allow_dirty_working_tree: false,
             attachments: vec![],

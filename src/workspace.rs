@@ -443,8 +443,24 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         init_git_repo(&source);
         let clone = tmp.path().join("clone");
-        assert!(Command::new("git").arg("clone").arg(&source).arg(&clone).status().unwrap().success());
-        run_git_ok(&clone, &["remote", "set-url", "origin", "https://github.com/other/repo.git"]);
+        assert!(
+            Command::new("git")
+                .arg("clone")
+                .arg(&source)
+                .arg(&clone)
+                .status()
+                .unwrap()
+                .success()
+        );
+        run_git_ok(
+            &clone,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/other/repo.git",
+            ],
+        );
         let manager = SessionManager::new(tmp.path().join("data"));
         let mut session = make_session("pr-mismatch", &clone);
         session.pr_target = Some(crate::pr_review_fix::PrTarget {
@@ -458,16 +474,44 @@ mod tests {
         let before = fs::read(&fetch_head).ok();
         let error = prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
             .unwrap_err();
-        assert!(error.to_string().contains("origin fetch repository does not match"));
+        assert!(
+            error
+                .to_string()
+                .contains("origin fetch repository does not match")
+        );
         assert_eq!(fs::read(&fetch_head).ok(), before);
         assert!(!manager.worktrees_dir().join("pr-mismatch").exists());
 
-        run_git_ok(&clone, &["remote", "set-url", "origin", "git@github.com:owner/repo.git"]);
-        assert!(crate::pr_review_fix::validate_origin(session.pr_target.as_ref().unwrap(), &clone).is_ok());
-        run_git_ok(&clone, &["remote", "set-url", "--push", "origin", "https://github.com/other/repo.git"]);
+        run_git_ok(
+            &clone,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:owner/repo.git",
+            ],
+        );
+        assert!(
+            crate::pr_review_fix::validate_origin(session.pr_target.as_ref().unwrap(), &clone)
+                .is_ok()
+        );
+        run_git_ok(
+            &clone,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                "https://github.com/other/repo.git",
+            ],
+        );
         let error = prepare_execution_workspace(&manager, &mut session, WorkspaceMode::Worktree)
             .unwrap_err();
-        assert!(error.to_string().contains("origin push repository does not match"));
+        assert!(
+            error
+                .to_string()
+                .contains("origin push repository does not match")
+        );
         assert_eq!(fs::read(&fetch_head).ok(), before);
         assert!(!manager.worktrees_dir().join("pr-mismatch").exists());
     }

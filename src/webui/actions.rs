@@ -64,7 +64,8 @@ pub(crate) fn session_actions(
         && session.plan_available;
     let usable_plan = session.plan_available && !has_plan_error;
     let show_approve = awaiting_approval_with_plan && !has_plan_error;
-    let show_publish_issue = session.pr_target.is_none() && (session.phase == "Awaiting Approval" || session.phase == "Planned")
+    let show_publish_issue = session.pr_target.is_none()
+        && (session.phase == "Awaiting Approval" || session.phase == "Planned")
         && usable_plan
         && !is_locally_running
         && !is_active_run;
@@ -140,6 +141,7 @@ mod tests {
             worktree_branch: None,
             workspace_mode: WorkspaceMode::Worktree,
             pr_url: None,
+            pr_target: None,
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,

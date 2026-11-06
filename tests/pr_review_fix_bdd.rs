@@ -76,7 +76,12 @@ mod contracts {
                 "-m",
                 "fixture",
             ][..],
-            &["remote", "add", "origin", "https://github.com/acme/repo.git"][..],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/repo.git",
+            ][..],
             &["update-ref", "refs/remotes/origin/feature", "HEAD"][..],
         ] {
             let output = std::process::Command::new("git")

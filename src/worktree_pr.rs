@@ -179,26 +179,7 @@ pub async fn handle_worktree_pr_with_persistence(
         vars.set_named_value(PR_URL_VAR, target.url.clone());
         session.pr_url = Some(target.url);
         session.pr_skipped_reason = None;
-        if worktree_has_changes(ctx, cancel_token).await? {
-            return Err(CruiseError::Other(
-                "PR review fix worktree has uncommitted changes".to_string(),
-            ));
-        }
-        let range = format!("origin/{}..HEAD", target.head_branch);
-        let count = git_stdout(
-            &ctx.path,
-            &["rev-list", "--count", &range],
-            "git rev-list failed",
-            cancel_token,
-        )
-        .await?;
-        let count: u64 = count
-            .trim()
-            .parse()
-            .map_err(|_| CruiseError::Other("invalid git rev-list count".to_string()))?;
-        if count > 0 {
-            push_branch(&ctx.path, &target.head_branch, cancel_token).await?;
-        }
+        ensure_review_fix_committed_and_push(ctx, &target.head_branch, cancel_token).await?;
         return run_after_pr_steps(
             compiled,
             vars,
@@ -214,18 +195,7 @@ pub async fn handle_worktree_pr_with_persistence(
         )
         .await;
     }
-    let skipped_reason = if compiled.create_pr {
-        session.pr_skipped_reason = None;
-        pr_creation_skip_reason(
-            ctx,
-            session.worktree_base_ref.as_deref(),
-            session.worktree_base_branch.as_deref(),
-            cancel_token,
-        )
-        .await?
-    } else {
-        Some(crate::session::PrSkippedReason::Disabled)
-    };
+    let skipped_reason = session_pr_skip_reason(ctx, compiled, session, cancel_token).await?;
     if let Some(reason) = skipped_reason {
         mark_pr_skipped(session, compiled, flags, skipped_steps, reason);
         return Ok(());
@@ -233,15 +203,7 @@ pub async fn handle_worktree_pr_with_persistence(
     let operation = crate::telemetry::Operation::phase("pull_request");
     let mut pr_creation_failed = false;
     let result: Result<()> = async {
-        // Repo-backed sessions need forge availability before execution to clone
-        // private repositories; local worktrees defer this until PR processing is
-        // actually needed.
-        if session.repo.is_none() {
-            crate::forge::ensure_forge_available(crate::forge::session_forge(session))?;
-        }
-        if let Some(on_pr_processing) = on_pr_processing {
-            on_pr_processing()?;
-        }
+        prepare_pr_processing(session, on_pr_processing)?;
 
         let pr_attempt = create_pr_attempt(
             ctx,
@@ -281,12 +243,12 @@ pub async fn handle_worktree_pr_with_persistence(
                 Ok(())
             }
             PrAttemptOutcome::SkippedNoCommits => {
-                session.pr_skipped_reason = Some(crate::session::PrSkippedReason::NoCommits);
-                log_after_pr_skipped(
+                mark_pr_skipped(
+                    session,
                     compiled,
                     flags,
                     skipped_steps,
-                    "the worktree has no commits or changes to open a pull request",
+                    crate::session::PrSkippedReason::NoCommits,
                 );
                 Ok(())
             }
@@ -309,6 +271,68 @@ pub async fn handle_worktree_pr_with_persistence(
         operation.finish_result(&result);
     }
     result
+}
+
+fn prepare_pr_processing(
+    session: &SessionState,
+    on_pr_processing: Option<&PrProcessingCallback<'_>>,
+) -> Result<()> {
+    // Local worktrees defer forge checks until PR processing is needed.
+    if session.repo.is_none() {
+        crate::forge::ensure_forge_available(crate::forge::session_forge(session))?;
+    }
+    if let Some(on_pr_processing) = on_pr_processing {
+        on_pr_processing()?;
+    }
+    Ok(())
+}
+
+async fn session_pr_skip_reason(
+    ctx: &worktree::WorktreeContext,
+    compiled: &CompiledWorkflow,
+    session: &mut SessionState,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<Option<crate::session::PrSkippedReason>> {
+    if compiled.create_pr {
+        session.pr_skipped_reason = None;
+        pr_creation_skip_reason(
+            ctx,
+            session.worktree_base_ref.as_deref(),
+            session.worktree_base_branch.as_deref(),
+            cancel_token,
+        )
+        .await
+    } else {
+        Ok(Some(crate::session::PrSkippedReason::Disabled))
+    }
+}
+
+async fn ensure_review_fix_committed_and_push(
+    ctx: &worktree::WorktreeContext,
+    head_branch: &str,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<()> {
+    if worktree_has_changes(ctx, cancel_token).await? {
+        return Err(CruiseError::Other(
+            "PR review fix worktree has uncommitted changes".to_string(),
+        ));
+    }
+    let range = format!("origin/{head_branch}..HEAD");
+    let count = git_stdout(
+        &ctx.path,
+        &["rev-list", "--count", &range],
+        "git rev-list failed",
+        cancel_token,
+    )
+    .await?;
+    let count: u64 = count
+        .trim()
+        .parse()
+        .map_err(|_| CruiseError::Other("invalid git rev-list count".to_string()))?;
+    if count > 0 {
+        push_branch(&ctx.path, head_branch, cancel_token).await?;
+    }
+    Ok(())
 }
 
 fn record_created_pr(session: &mut SessionState, vars: &mut VariableStore, url: String) {
@@ -1396,6 +1420,7 @@ mod tests {
             path,
             original_dir: original,
             branch: "cruise/test".to_string(),
+            owns_branch: true,
         }
     }
 
@@ -2259,6 +2284,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             path: tmp.path().to_path_buf(),
             branch: "main".to_string(),
             original_dir: tmp.path().to_path_buf(),
+            owns_branch: false,
         };
         let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
         let mut session = SessionState::new(
@@ -2603,6 +2629,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             path: worktree_path,
             branch: "cruise/test".to_string(),
             original_dir,
+            owns_branch: true,
         };
         let mut tracker = FileTracker::with_root(ctx.path.clone());
         let mut session = SessionState::new(

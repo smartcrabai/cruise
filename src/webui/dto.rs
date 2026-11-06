@@ -615,6 +615,7 @@ mod tests {
             worktree_branch: None,
             workspace_mode: WorkspaceMode::Worktree,
             pr_url: None,
+            pr_target: None,
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,
