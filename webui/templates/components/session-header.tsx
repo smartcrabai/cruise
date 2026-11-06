@@ -12,6 +12,7 @@ export default function SessionHeader(props) {
       {props.prIsLink && <a href={props.prUrl} target="_blank" rel="noopener noreferrer" class="break-all text-blue-600 dark:text-blue-400 hover:text-blue-500">{props.prUrl}</a>}
       {props.prUrl && !props.prIsLink && <span class="break-all text-sm text-gray-600 dark:text-gray-400">{props.prUrl}</span>}
       {props.phaseError && <div role="alert" class="break-words rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-sm text-red-700 dark:text-red-300">{props.badge.label === "PR Failed" ? "PR failed" : "Run failed"}: {props.phaseError}</div>}
+      {props.autoRequeueCount > 0 && <div class="text-sm text-gray-500 dark:text-gray-400">Auto-requeued {props.autoRequeueCount}</div>}
       {props.planError && <div role="alert" class="break-words rounded border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-sm text-red-700 dark:text-red-300">Planning failed: {props.planError}</div>}
       <div class="flex gap-2 flex-wrap">
         {props.actions.showApprove && <button type="button" hx-post={`${props.baseUrl}/approve`} hx-target="#session-detail" hx-swap="none" hx-disable="this" class="px-4 py-2 bg-green-700 text-white rounded text-sm hover:bg-green-600">Approve</button>}

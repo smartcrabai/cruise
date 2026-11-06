@@ -6,6 +6,20 @@ After installing the pinned dependencies and Chromium as described below, build 
 
 The test saves stage success, dirty-base error, and merge success screenshots under `target/formal-reports/local-merge-browser/` (override with `WEBUI_LOCAL_MERGE_REPORT_DIR`). The existing WebUI CI workflow runs this contract and uploads the report directory.
 
+## Auto-requeue browser coverage
+
+With Node 26.12.1 and Rust 1.99.1, from the repository root run:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+tests/webui/node_modules/.bin/playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/auto-requeue.mjs all
+node tests/webui/auto-requeue.mjs header
+```
+
+On Linux install Chromium's system dependencies as described below. The test isolates its HOME and session data and saves screenshots to `target/formal-reports/auto-requeue-browser/`. It checks settings persistence and validation, counter display and a Run All retry. The retry uses a scripted command provider, so it does not verify a real external provider. The existing responsive WebUI CI workflow runs both scenarios and uploads the reports.
+
 ## PR retry browser boundaries
 
 With Node 26.12.1, Rust 1.99.1, Git and the GitHub CLI installed, run from the repository root:

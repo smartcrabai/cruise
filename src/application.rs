@@ -186,6 +186,12 @@ pub enum ApplicationEvent {
     BatchSessionStarted {
         id: String,
     },
+    AutoRequeued {
+        session_id: String,
+        attempt: u32,
+        max_attempts: u32,
+        error: String,
+    },
     BatchSessionFinished {
         id: String,
         phase: String,
@@ -3353,6 +3359,7 @@ impl CruiseApplication {
         P: Fn() -> Result<usize> + Send + Sync + 'static,
     {
         let parallelism = batch_parallelism(&parallelism_provider)?;
+        let max_attempts = self.app_config()?.run_all_auto_requeue_max_attempts;
         let batch = self.runtime.try_begin_batch()?;
         let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
         let candidates = self.manager.run_all_candidates()?;
@@ -3389,6 +3396,7 @@ impl CruiseApplication {
             self,
             &batch,
             &parallelism_provider,
+            max_attempts,
             &sink,
             log_sink.as_ref(),
             &mut run,
@@ -4576,6 +4584,7 @@ async fn schedule_batch_workers<P>(
     app: &CruiseApplication,
     batch: &BatchClaim,
     parallelism_provider: &P,
+    max_attempts: u32,
     sink: &Arc<dyn ApplicationEventSink>,
     log_sink: Option<&Arc<dyn LogSink>>,
     run: &mut BatchRunState,
@@ -4620,29 +4629,50 @@ where
         let index = run.next_index;
         run.next_index += 1;
         run.running.spawn(async move {
-            let outcome = if let Ok(outcome) = std::panic::AssertUnwindSafe(worker_app.run_claimed(
-                &id,
-                &claim,
-                RunRequest::default(),
-                worker_sink,
-                worker_log_sink,
-                true,
-            ))
-            .catch_unwind()
-            .await
-            {
-                outcome
-            } else {
-                let mut state = worker_app
-                    .manager
-                    .load(&id)
-                    .unwrap_or_else(|_| scheduled.clone());
-                state.phase = SessionPhase::Suspended;
-                state.pr_skipped_reason = None;
-                state.clear_pending_input();
-                state.clear_runner();
-                let _ = worker_app.manager.save(&state);
-                Err(CruiseError::Other("batch worker panicked".to_string()))
+            let outcome = loop {
+                let outcome = if let Ok(outcome) =
+                    std::panic::AssertUnwindSafe(worker_app.run_claimed(
+                        &id,
+                        &claim,
+                        RunRequest::default(),
+                        Arc::clone(&worker_sink),
+                        worker_log_sink.clone(),
+                        true,
+                    ))
+                    .catch_unwind()
+                    .await
+                {
+                    outcome
+                } else {
+                    let mut state = worker_app
+                        .manager
+                        .load(&id)
+                        .unwrap_or_else(|_| scheduled.clone());
+                    state.phase = SessionPhase::Suspended;
+                    state.pr_skipped_reason = None;
+                    state.clear_pending_input();
+                    state.clear_runner();
+                    let _ = worker_app.manager.save(&state);
+                    Err(CruiseError::Other("batch worker panicked".to_string()))
+                };
+                if let Err(error) = &outcome
+                    && let Ok(Some(attempt)) = crate::auto_requeue::try_record_requeue(
+                        &worker_app.manager,
+                        &id,
+                        error,
+                        max_attempts,
+                        claim.token().is_cancelled(),
+                    )
+                {
+                    let _ = worker_sink.send(ApplicationEvent::AutoRequeued {
+                        session_id: id.clone(),
+                        attempt,
+                        max_attempts,
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
+                break outcome;
             };
             (index, id, scheduled, outcome)
         });
@@ -4757,6 +4787,7 @@ async fn run_batch_loop<P>(
     app: &CruiseApplication,
     batch: &BatchClaim,
     parallelism_provider: &P,
+    max_attempts: u32,
     sink: &Arc<dyn ApplicationEventSink>,
     log_sink: Option<&Arc<dyn LogSink>>,
     run: &mut BatchRunState,
@@ -4765,7 +4796,16 @@ where
     P: Fn() -> Result<usize> + Send + Sync + 'static,
 {
     loop {
-        schedule_batch_workers(app, batch, parallelism_provider, sink, log_sink, run).await?;
+        schedule_batch_workers(
+            app,
+            batch,
+            parallelism_provider,
+            max_attempts,
+            sink,
+            log_sink,
+            run,
+        )
+        .await?;
         if batch.token().is_cancelled() {
             cancel_queued_batch_sessions(batch, run, sink).await?;
         } else if run.queued.is_empty() && queue_late_batch_sessions(app, batch, run, sink).await? {
@@ -4945,6 +4985,53 @@ mod tests {
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn batch_default_retry_budget_reports_one_final_failure() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _home = isolate_application_config(temp.path());
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let id = SessionManager::new_session_id();
+        let mut state = SessionState::new(
+            id.clone(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::File {
+                path: temp.path().join("missing-workflow.yaml"),
+            },
+            "batch failure".to_string(),
+        );
+        state.phase = SessionPhase::Planned;
+        manager.create(&state).unwrap_or_else(|e| panic!("{e}"));
+        let events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+        let captured = Arc::clone(&events);
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event| {
+            captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+            Ok(())
+        });
+
+        let result = app
+            .run_all_with_parallelism_provider(|| Ok(1), sink, None)
+            .await
+            .unwrap_or_else(|e| panic!("batch failed: {e}"));
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            manager.load(&id).unwrap_or_else(|e| panic!("{e}")).phase,
+            SessionPhase::Failed(_)
+        ));
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(events.iter().filter(|event| matches!(event, ApplicationEvent::BatchSessionFinished { id: event_id, .. } if event_id == &id)).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event, ApplicationEvent::RunFailed { session_id, .. } if session_id == &id)).count(), 1);
+        assert!(!events.iter().any(|event| {
+            serde_json::to_value(event).unwrap_or_else(|e| panic!("{e}"))["event"] == "autoRequeued"
+        }));
+    }
 
     // Deserialize through the persisted representation so these contract tests compile
     // even before the new phase and action variants have been implemented.

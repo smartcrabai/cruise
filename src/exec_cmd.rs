@@ -71,6 +71,7 @@ pub(crate) async fn run_resolved(
             session: Some(session.id.clone()),
             all: false,
             parallelism: None,
+            auto_requeue_max_attempts: None,
             max_retries: req.max_retries,
             rate_limit_retries: req.rate_limit_retries,
             dry_run: false,
