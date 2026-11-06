@@ -247,7 +247,7 @@ fn untracked_non_utf8_path_is_passed_to_git_unchanged() -> Result<()> {
         let script = mock.path().join("git");
         fs::write(
             &script,
-            r##"#!/bin/sh
+            r#"#!/bin/sh
 if [ "$3" = ls-files ]; then
     printf 'invalid-\377.txt\000'
     exit 0
@@ -268,7 +268,7 @@ if [ "$no_index" = 1 ]; then
     exit 1
 fi
 exec "$CRUISE_TEST_REAL_GIT" "$@"
-"##,
+"#,
         )?;
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
         let path = std::env::join_paths(std::iter::once(mock.path().to_path_buf()).chain(
