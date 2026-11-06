@@ -3358,9 +3358,8 @@ steps:
                 None,
             )
             .await;
-            let error = match result {
-                Err(error) => error,
-                Ok(_) => panic!("expected missing title error"),
+            let Err(error) = result else {
+                panic!("expected missing title error");
             };
             assert!(
                 error
