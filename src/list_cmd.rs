@@ -289,13 +289,13 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     let sink = std::sync::Arc::new(|event| {
                         match event {
                             crate::application::ApplicationEvent::RunPhase { phase, .. } => {
-                                eprintln!("{phase}")
+                                eprintln!("{phase}");
                             }
                             crate::application::ApplicationEvent::PrCreated { url, .. } => {
-                                eprintln!("PR created: {url}")
+                                eprintln!("PR created: {url}");
                             }
                             crate::application::ApplicationEvent::RunFailed { error, .. } => {
-                                eprintln!("PR creation failed: {error}")
+                                eprintln!("PR creation failed: {error}");
                             }
                             _ => {}
                         }

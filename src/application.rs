@@ -4847,7 +4847,11 @@ mod tests {
                 .create(&state)
                 .unwrap_or_else(|error| panic!("create session: {error}"));
             let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_: ApplicationEvent| Ok(()));
-            let error = app.create_pr(&state.id, sink, None).await.unwrap_err();
+            let error = app
+                .create_pr(&state.id, sink, None)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("Create PR should be rejected"));
             assert!(error.to_string().contains(phase.label()));
             assert_eq!(
                 manager
@@ -5118,7 +5122,11 @@ mod tests {
                 .push(event);
             Ok(())
         });
-        let error = app.create_pr(&state.id, sink, None).await.unwrap_err();
+        let error = app
+            .create_pr(&state.id, sink, None)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("Create PR should fail"));
         assert!(
             matches!(error, CruiseError::PrPublicationFailed(_)),
             "{error:?}"
@@ -5164,7 +5172,11 @@ mod tests {
                 .push(event);
             Ok(())
         });
-        let error = app.create_pr(&state.id, sink, None).await.unwrap_err();
+        let error = app
+            .create_pr(&state.id, sink, None)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("Create PR should fail"));
         assert!(matches!(error, CruiseError::Interrupted));
         assert_eq!(
             manager
