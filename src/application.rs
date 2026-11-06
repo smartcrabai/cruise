@@ -1321,6 +1321,8 @@ pub enum SessionAction {
     Resume,
     OpenPr,
     MergePr,
+    StageLocalMerge,
+    MergeLocally,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1387,6 +1389,8 @@ pub enum CurrentStepUpdateDto {
     Clear,
     Set(String),
 }
+
+pub use crate::local_merge::{LocalMergeMode, LocalMergeOutcome};
 
 /// The shared application façade.
 #[derive(Clone)]
@@ -2950,6 +2954,12 @@ impl CruiseApplication {
                     actions.push(SessionAction::OpenPr);
                     actions.push(SessionAction::MergePr);
                 }
+                if crate::local_merge::can_stage_locally(state) {
+                    actions.push(SessionAction::StageLocalMerge);
+                }
+                if crate::local_merge::can_merge_locally(state) {
+                    actions.push(SessionAction::MergeLocally);
+                }
                 actions.extend([SessionAction::ResetToPlanned, SessionAction::Delete]);
             }
         }
@@ -3318,6 +3328,25 @@ impl CruiseApplication {
         self.cleanup_session_workspace(&state)?;
         self.manager.delete(id)?;
         Ok(MergePrOutcome::Cleaned)
+    }
+
+    /// Squash the session branch into its base checkout, optionally cleaning up.
+    ///
+    /// # Errors
+    /// Returns an error if the session is busy, ineligible, or the merge fails.
+    pub fn local_merge(&self, id: &str, mode: LocalMergeMode) -> Result<LocalMergeOutcome> {
+        let _claim = self.runtime.try_begin(id, OperationKind::Mutate)?;
+        let mut state = self.manager.load(id)?;
+        let outcome = crate::local_merge::merge_session(
+            &mut state,
+            mode,
+            |state| self.manager.save(state),
+            crate::worktree::cleanup_worktree,
+        )?;
+        if matches!(outcome, LocalMergeOutcome::Merged) {
+            self.manager.delete(id)?;
+        }
+        Ok(outcome)
     }
 
     fn mergeable_pr_url(state: &SessionState) -> Result<String> {

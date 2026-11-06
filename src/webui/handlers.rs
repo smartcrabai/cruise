@@ -823,6 +823,65 @@ pub(crate) async fn reset(State(state): State<WebState>, Path(id): Path<String>)
     })
 }
 
+pub(crate) async fn stage_local(State(state): State<WebState>, Path(id): Path<String>) -> Response {
+    local_merge_response(&state, &id, crate::application::LocalMergeMode::Stage)
+}
+
+pub(crate) async fn merge_locally(
+    State(state): State<WebState>,
+    Path(id): Path<String>,
+) -> Response {
+    local_merge_response(
+        &state,
+        &id,
+        crate::application::LocalMergeMode::MergeAndCleanup,
+    )
+}
+
+fn local_merge_response(
+    state: &WebState,
+    id: &str,
+    mode: crate::application::LocalMergeMode,
+) -> Response {
+    use crate::application::LocalMergeOutcome;
+    run(state, "Local merge", || {
+        match state.application.local_merge(id, mode)? {
+            LocalMergeOutcome::Merged => {
+                let mut body = partials::toast(
+                    state,
+                    &ToastVm::new(ToastKind::Completed, "Merged locally", None),
+                );
+                body.push_str(&partials::by_id(
+                    "main",
+                    &super::pages::empty_state_html(state)?,
+                ));
+                body.push_str(&partials::sidebar_list_partial(state, None)?);
+                Ok(push_url(html(body), "/"))
+            }
+            LocalMergeOutcome::Staged => {
+                let mut body = partials::header_and_row(state, id, None)?;
+                body.push_str(&partials::toast(
+                    state,
+                    &ToastVm::new(ToastKind::Completed, "Local merge staged", None),
+                ));
+                Ok(html(body))
+            }
+            LocalMergeOutcome::MergedCleanupFailed { error } => {
+                let mut body = partials::header_and_row(state, id, None)?;
+                body.push_str(&partials::toast(
+                    state,
+                    &ToastVm::new(
+                        ToastKind::Failed,
+                        "Merged locally, but cleanup failed",
+                        Some(error.to_string()),
+                    ),
+                ));
+                Ok(html(body))
+            }
+        }
+    })
+}
+
 fn settings_request(fields: &Fields) -> SessionSettingsRequest {
     let current_step_update = match fields.get("currentStep") {
         None | Some("__unchanged__") => CurrentStepUpdateDto::Unchanged,

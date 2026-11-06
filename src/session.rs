@@ -70,6 +70,16 @@ pub enum WorkspaceMode {
     CurrentBranch,
 }
 
+/// Commit identity recorded before invoking Git's squash commit.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct LocalMergeIntent {
+    pub base_parent: String,
+    pub source_commit: String,
+    pub squash_tree: String,
+    #[serde(default)]
+    pub token: String,
+}
+
 /// Persisted state for a single session.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[expect(
@@ -100,6 +110,18 @@ pub struct SessionState {
     pub worktree_path: Option<PathBuf>,
     /// Worktree branch name (set during run phase).
     pub worktree_branch: Option<String>,
+    /// Attached base branch when the session worktree was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_branch: Option<String>,
+    /// Durable description of the squash commit expected before cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_merge_intent: Option<LocalMergeIntent>,
+    /// Persisted squash commit, allowing cleanup to be retried safely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_merge_commit: Option<String>,
+    /// Source commit included in the local squash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_merge_source_commit: Option<String>,
     /// Where this session should run.
     #[serde(default)]
     pub workspace_mode: WorkspaceMode,
@@ -247,6 +269,10 @@ impl SessionState {
             completed_at: None,
             worktree_path: None,
             worktree_branch: None,
+            forked_from_branch: None,
+            local_merge_intent: None,
+            local_merge_commit: None,
+            local_merge_source_commit: None,
             workspace_mode: WorkspaceMode::Worktree,
             target_branch: None,
             allow_dirty_working_tree: false,
@@ -1919,6 +1945,60 @@ mod tests {
 
         // Then: no cleanup override is set by default
         assert_eq!(state.cleanup_after_pr_override, None);
+    }
+
+    #[test]
+    fn session_state_local_merge_fields_legacy_defaults_are_omitted() {
+        let legacy = serde_json::json!({
+            "id": "20260622000000001",
+            "base_dir": "/repo",
+            "phase": "Completed",
+            "config": {"kind": "file", "path": "/repo/cruise.yaml"},
+            "input": "old task",
+            "current_step": null,
+            "created_at": "2026-06-22T00:00:00Z",
+            "completed_at": null,
+            "worktree_path": null,
+            "worktree_branch": null
+        });
+        let state: SessionState = serde_json::from_value(legacy).unwrap();
+        let saved = serde_json::to_value(&state).unwrap();
+        assert!(saved.get("forked_from_branch").is_none());
+        assert!(saved.get("local_merge_commit").is_none());
+        assert!(saved.get("local_merge_intent").is_none());
+
+        // Explicit nulls must also deserialize as None and be omitted on save.
+        let mut with_nulls = saved;
+        with_nulls["forked_from_branch"] = serde_json::Value::Null;
+        with_nulls["local_merge_commit"] = serde_json::Value::Null;
+        let state: SessionState = serde_json::from_value(with_nulls).unwrap();
+        let saved = serde_json::to_value(state).unwrap();
+        assert!(saved.get("forked_from_branch").is_none());
+        assert!(saved.get("local_merge_commit").is_none());
+    }
+
+    #[test]
+    fn session_state_local_merge_fields_roundtrip() {
+        let state = SessionState::new(
+            "20260622000000002".to_string(),
+            PathBuf::from("/repo"),
+            SessionConfigRef::File {
+                path: PathBuf::from("/repo/cruise.yaml"),
+            },
+            "task".to_string(),
+        );
+        let mut json = serde_json::to_value(state).unwrap();
+        json["forked_from_branch"] = serde_json::json!("feature/base");
+        json["local_merge_commit"] = serde_json::json!("0123456789abcdef0123456789abcdef01234567");
+        json["local_merge_intent"] = serde_json::json!({"base_parent": "parent", "source_commit": "source", "squash_tree": "tree"});
+        let state: SessionState = serde_json::from_value(json).unwrap();
+        let saved = serde_json::to_value(state).unwrap();
+        assert_eq!(saved["forked_from_branch"], "feature/base");
+        assert_eq!(saved["local_merge_intent"]["squash_tree"], "tree");
+        assert_eq!(
+            saved["local_merge_commit"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub mod new_session_history;
 pub mod option_handler;
 pub mod paths;
 pub mod planning;
+pub mod local_merge;
 pub mod pr_merge;
 pub mod repo_clone;
 pub mod resolver;

@@ -912,7 +912,7 @@ fn setup_planning_worktree(manager: &SessionManager, session: &mut SessionState)
         &worktrees_dir,
         session.worktree_branch.as_deref(),
     ) {
-        Ok((ctx, _reused)) => {
+        Ok((ctx, reused)) => {
             eprintln!(
                 "{} worktree: {} (planning)",
                 style("->").cyan(),
@@ -920,6 +920,9 @@ fn setup_planning_worktree(manager: &SessionManager, session: &mut SessionState)
             );
             session.worktree_path = Some(ctx.path.clone());
             session.worktree_branch = Some(ctx.branch.clone());
+            if !reused && session.forked_from_branch.is_none() {
+                session.forked_from_branch = crate::worktree::attached_branch(&session.base_dir);
+            }
             manager.save(session)?;
         }
         Err(CruiseError::NotGitRepository) => {

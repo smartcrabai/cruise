@@ -11,6 +11,21 @@ pub struct WorktreeContext {
     pub original_dir: PathBuf,
 }
 
+/// Return the attached branch name, or None for detached HEAD or a git error.
+pub(crate) fn attached_branch(repo: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(repo)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (!branch.is_empty()).then_some(branch)
+}
+
 /// Generate the default branch name for a session worktree.
 fn default_branch_name(session_id: &str, input: &str) -> String {
     if input.is_empty() {

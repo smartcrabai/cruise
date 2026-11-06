@@ -23,6 +23,8 @@ pub(crate) struct SessionActionsVm {
     pub show_cancel: bool,
     pub show_generate_plan: bool,
     pub show_merge_pr: bool,
+    pub show_stage_local_merge: bool,
+    pub show_merge_locally: bool,
     pub status: String,
 }
 
@@ -114,6 +116,8 @@ pub(crate) fn session_actions(
         show_cancel,
         show_generate_plan,
         show_merge_pr,
+        show_stage_local_merge: session.can_stage_locally && active_operation.is_none(),
+        show_merge_locally: session.can_merge_locally && active_operation.is_none(),
         status: status.to_string(),
     }
 }
@@ -140,6 +144,8 @@ mod tests {
             worktree_branch: None,
             workspace_mode: WorkspaceMode::Worktree,
             pr_url: None,
+            can_merge_locally: false,
+            can_stage_locally: false,
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,
@@ -413,6 +419,24 @@ mod tests {
     }
 
     #[test]
+    fn local_merge_actions_follow_capabilities_and_busy_state() {
+        let mut session = make_session("Completed");
+        session.can_stage_locally = true;
+        session.can_merge_locally = true;
+        let actions = session_actions(&session, None, false);
+        assert!(actions.show_stage_local_merge && actions.show_merge_locally);
+        let actions = session_actions(&session, Some(OperationKind::Mutate), false);
+        assert!(!actions.show_stage_local_merge && !actions.show_merge_locally);
+        session.can_stage_locally = false;
+        let actions = session_actions(&session, None, false);
+        assert!(!actions.show_stage_local_merge && actions.show_merge_locally);
+        session.can_merge_locally = false;
+        session.pr_url = Some("https://example.com/pr".to_string());
+        let actions = session_actions(&session, None, false);
+        assert!(!actions.show_stage_local_merge && !actions.show_merge_locally);
+    }
+
+    #[test]
     fn serializes_all_fields_in_camel_case() {
         let Ok(value) = serde_json::to_value(actions("Draft", false, None, false)) else {
             panic!("actions serialize");
@@ -432,6 +456,8 @@ mod tests {
             "showCancel",
             "showGeneratePlan",
             "showMergePr",
+            "showStageLocalMerge",
+            "showMergeLocally",
             "status",
         ] {
             assert!(value.get(key).is_some(), "missing {key}");

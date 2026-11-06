@@ -304,6 +304,19 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         session = reloaded;
                     }
                 }
+                "Stage local merge" | "Merge locally & cleanup" => {
+                    let mode = if action == "Stage local merge" {
+                        crate::application::LocalMergeMode::Stage
+                    } else {
+                        crate::application::LocalMergeMode::MergeAndCleanup
+                    };
+                    if local_merge_interactive(&manager, &session, mode)? {
+                        break;
+                    }
+                    if let Ok(reloaded) = manager.load(&session.id) {
+                        session = reloaded;
+                    }
+                }
                 "Edit Settings" => {
                     match edit_session_settings_interactive(
                         &manager,
@@ -449,12 +462,66 @@ fn session_actions_with_plan_availability(
                 actions.push("Open PR");
                 actions.push("Merge PR");
             }
+            if crate::local_merge::can_stage_locally(session) {
+                actions.push("Stage local merge");
+            }
+            if crate::local_merge::can_merge_locally(session) {
+                actions.push("Merge locally & cleanup");
+            }
             actions.push("Reset to Planned");
         }
     }
     actions.push("Delete");
     actions.push("Back");
     actions
+}
+
+fn local_merge_interactive(
+    manager: &SessionManager,
+    session: &SessionState,
+    mode: crate::application::LocalMergeMode,
+) -> Result<bool> {
+    use crate::application::{CruiseApplication, LocalMergeMode, LocalMergeOutcome};
+
+    let branch = session.worktree_branch.as_deref().unwrap_or("unknown");
+    let target = crate::local_merge::merge_target_branch(session).unwrap_or("unknown");
+    let prompt = match mode {
+        LocalMergeMode::Stage => format!("Stage squash of {branch} into {target}?"),
+        LocalMergeMode::MergeAndCleanup => format!(
+            "Squash {branch} into {target}, commit, and delete the worktree, branch, and session?"
+        ),
+    };
+    match inquire::Confirm::new(&prompt).with_default(false).prompt() {
+        Ok(true) => {}
+        Ok(false) | Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            return Ok(false);
+        }
+        Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+    }
+    match CruiseApplication::new(manager.clone()).local_merge(&session.id, mode) {
+        Ok(LocalMergeOutcome::Staged) => {
+            eprintln!(
+                "{} Squash staged in base checkout; session retained.",
+                style("v").green()
+            );
+            Ok(false)
+        }
+        Ok(LocalMergeOutcome::Merged) => {
+            eprintln!("{} Merged locally; session cleaned up.", style("v").green());
+            Ok(true)
+        }
+        Ok(LocalMergeOutcome::MergedCleanupFailed { error }) => {
+            eprintln!(
+                "{} Merge committed but cleanup failed: {error}. Retry cleanup from this session.",
+                style("!").yellow()
+            );
+            Ok(false)
+        }
+        Err(e) => {
+            eprintln!("{} {e}", style("x").red());
+            Ok(false)
+        }
+    }
 }
 
 fn plan_available_for_session(session: &SessionState, manager: &SessionManager) -> bool {
@@ -794,6 +861,40 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn local_merge_menu_order_and_retry_marker() {
+        let mut session = make_session("20260306143000", "task", SessionPhase::Completed);
+        session.worktree_branch = Some("cruise/task".into());
+        session.forked_from_branch = Some("main".into());
+        assert_eq!(
+            session_actions_with_plan_availability(&session, false),
+            vec![
+                "Stage local merge",
+                "Merge locally & cleanup",
+                "Reset to Planned",
+                "Delete",
+                "Back"
+            ]
+        );
+
+        session.local_merge_commit = Some("abc123".into());
+        assert_eq!(
+            session_actions_with_plan_availability(&session, false),
+            vec![
+                "Merge locally & cleanup",
+                "Reset to Planned",
+                "Delete",
+                "Back"
+            ]
+        );
+
+        session.pr_url = Some("https://example.com/pr/1".into());
+        assert_eq!(
+            session_actions_with_plan_availability(&session, false),
+            vec!["Open PR", "Merge PR", "Reset to Planned", "Delete", "Back"]
+        );
+    }
 
     // -----------------------------------------------------------------------
     // session_actions

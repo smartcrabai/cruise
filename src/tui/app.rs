@@ -2773,6 +2773,22 @@ impl TuiApp {
                     message,
                 });
             }
+            SessionAction::StageLocalMerge | SessionAction::MergeLocally => {
+                let Some(session) = self.active_session() else {
+                    return;
+                };
+                let branch = session.worktree_branch.as_deref().unwrap_or("unknown");
+                let target = crate::local_merge::merge_target_branch(session).unwrap_or("unknown");
+                let message = if action == SessionAction::StageLocalMerge {
+                    format!("Stage squash of {branch} into {target}?")
+                } else {
+                    format!("Squash {branch} into {target}, commit, and delete the worktree, branch, and session?")
+                };
+                self.modal = Some(Modal::Confirm {
+                    command: PendingCommand::Session(action),
+                    message,
+                });
+            }
             SessionAction::Publish => {
                 let trigger_cruise = self.active_session().is_some_and(|session| {
                     matches!(&session.phase, crate::session::SessionPhase::Planned)
@@ -3064,6 +3080,34 @@ impl TuiApp {
                 Err(error) => self.set_error(error.to_string()),
             },
             SessionAction::MergePr => self.open_merge_pr_preview(),
+            SessionAction::StageLocalMerge | SessionAction::MergeLocally => {
+                use crate::application::{LocalMergeMode, LocalMergeOutcome};
+                let mode = if action == SessionAction::StageLocalMerge {
+                    LocalMergeMode::Stage
+                } else {
+                    LocalMergeMode::MergeAndCleanup
+                };
+                match self.application.local_merge(&id, mode) {
+                    Ok(outcome) => {
+                        self.invalidate(&id, true, true, true);
+                        self.refresh();
+                        match outcome {
+                            LocalMergeOutcome::Staged => {
+                                self.status = Some(
+                                    "Squash staged in base checkout; session retained".to_string(),
+                                );
+                            }
+                            LocalMergeOutcome::Merged => {
+                                self.status = Some(format!("Merged locally and cleaned up {id}"));
+                            }
+                            LocalMergeOutcome::MergedCleanupFailed { error } => {
+                                self.set_error(format!("Merge committed but cleanup failed: {error}. Retry cleanup from this session."));
+                            }
+                        }
+                    }
+                    Err(error) => self.set_error(error.to_string()),
+                }
+            }
             SessionAction::OpenPr => match self.application.open_pr(&id) {
                 Ok(url) => match open_url(&url) {
                     Ok(()) => self.status = Some(format!("Opening {url}")),
@@ -3493,6 +3537,8 @@ pub fn action_label(action: SessionAction) -> &'static str {
         SessionAction::Resume => "Resume",
         SessionAction::OpenPr => "Open Pull Request",
         SessionAction::MergePr => "Merge PR",
+        SessionAction::StageLocalMerge => "Stage Local Merge",
+        SessionAction::MergeLocally => "Merge Locally & Cleanup",
     }
 }
 
@@ -3503,6 +3549,40 @@ mod tests {
     use crate::session::SessionPhase;
     use crate::test_support::{EnvGuard, lock_process};
     use tempfile::TempDir;
+
+    #[test]
+    fn local_merge_actions_confirm_with_branch_and_target_and_cancel() {
+        let mut app = app();
+        add_session(&mut app, "local", SessionPhase::Completed);
+        app.sessions[0].worktree_branch = Some("cruise/task".into());
+        app.sessions[0].forked_from_branch = Some("main".into());
+
+        for (action, label) in [
+            (SessionAction::StageLocalMerge, "Stage Local Merge"),
+            (SessionAction::MergeLocally, "Merge Locally & Cleanup"),
+        ] {
+            assert_eq!(action_label(action), label);
+            app.apply_action(action);
+            let modal = app
+                .modal
+                .take()
+                .expect("local merge must require confirmation");
+            match &modal {
+                Modal::Confirm {
+                    command: PendingCommand::Session(pending),
+                    message,
+                } => {
+                    assert_eq!(*pending, action);
+                    assert!(message.contains("cruise/task"));
+                    assert!(message.contains("main"));
+                }
+                _ => panic!("expected local merge confirmation"),
+            }
+            app.handle_modal_action(modal, Action::Escape);
+            assert!(app.modal.is_none());
+            assert_eq!(app.sessions.len(), 1);
+        }
+    }
 
     fn app_for(application: CruiseApplication) -> TuiApp {
         let (events, _) = tokio::sync::mpsc::unbounded_channel();

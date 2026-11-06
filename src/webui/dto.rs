@@ -43,6 +43,8 @@ pub struct SessionDto {
     pub worktree_branch: Option<String>,
     pub workspace_mode: WorkspaceMode,
     pub pr_url: Option<String>,
+    pub can_merge_locally: bool,
+    pub can_stage_locally: bool,
     pub updated_at: Option<String>,
     pub awaiting_input: bool,
     pub pending_ask_question: Option<String>,
@@ -67,6 +69,8 @@ pub(crate) fn session_dto(
     resolve_current_step: bool,
 ) -> SessionDto {
     let plan_available = session_plan_available(&state);
+    let can_merge_locally = crate::local_merge::can_merge_locally(&state);
+    let can_stage_locally = crate::local_merge::can_stage_locally(&state);
     let (phase, phase_error) = match &state.phase {
         SessionPhase::Failed(message) => ("Failed".to_string(), Some(message.clone())),
         phase => (phase.label().to_string(), None),
@@ -104,6 +108,8 @@ pub(crate) fn session_dto(
         worktree_branch: state.worktree_branch,
         workspace_mode: state.workspace_mode,
         pr_url: state.pr_url,
+        can_merge_locally,
+        can_stage_locally,
         updated_at: state.updated_at,
         awaiting_input: state.awaiting_input,
         pending_ask_question: state.pending_ask_question,
@@ -613,6 +619,8 @@ mod tests {
             worktree_branch: None,
             workspace_mode: WorkspaceMode::Worktree,
             pr_url: None,
+            can_merge_locally: false,
+            can_stage_locally: false,
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,

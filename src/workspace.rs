@@ -55,6 +55,9 @@ pub fn prepare_execution_workspace(
                 &worktrees_dir,
                 session.worktree_branch.as_deref(),
             )?;
+            if !reused && session.forked_from_branch.is_none() {
+                session.forked_from_branch = worktree::attached_branch(&session.base_dir);
+            }
             Ok(ExecutionWorkspace::Worktree { ctx, reused })
         }
         WorkspaceMode::CurrentBranch => {
@@ -127,7 +130,7 @@ fn current_branch_name(repo_dir: &Path) -> Result<String> {
     Ok(branch)
 }
 
-fn is_working_tree_dirty(repo_dir: &Path) -> Result<bool> {
+pub(crate) fn is_working_tree_dirty(repo_dir: &Path) -> Result<bool> {
     Ok(!git_stdout(
         repo_dir,
         &["status", "--porcelain", "--untracked-files=no"],
