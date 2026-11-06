@@ -922,7 +922,9 @@ async fn run_single_loaded(
                     ExecutionWorkspace::Worktree { ctx, .. } => {
                         session.pr_workflow_vars = Some(vars.clone());
                         let expected = *lock_unpoisoned(&session_fingerprint);
-                        let fingerprint = save_session_state_with_conflict_resolution(&manager, session, expected)?;
+                        let fingerprint = save_session_state_with_conflict_resolution(
+                            &manager, session, expected,
+                        )?;
                         *lock_unpoisoned(&session_fingerprint) = fingerprint;
                         let on_pr_processing = || {
                             observer.on_phase(&session_id, RunPhase::CreatingPr);
@@ -1011,44 +1013,54 @@ async fn run_single_loaded(
 
         // Persist completion with workspace metadata before destructive cleanup.
         let expected = *lock_unpoisoned(&session_fingerprint);
-        let saved_fingerprint = match save_session_state_with_conflict_resolution(&manager, session, expected) {
-          Ok(fingerprint) => fingerprint,
-          Err(error) => {
-            if matches!(overall_result, Ok(()))
-                && let Some(url) = session.pr_url.clone()
-            {
-                let message = format!("PR created at {url} but saving the session failed: {error}");
-                session.phase = SessionPhase::PrFailed(message.clone());
-                // A conflict or an explicit abort must never be bypassed by retrying
-                // a save. Other failures may be transient, so try to persist the
-                // retryable phase using the same conflict protection.
-                return Err(match error {
-                    CruiseError::SessionStateConflict(_) => {
-                        CruiseError::SessionStateConflict(message)
+        let saved_fingerprint =
+            match save_session_state_with_conflict_resolution(&manager, session, expected) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    if matches!(overall_result, Ok(()))
+                        && let Some(url) = session.pr_url.clone()
+                    {
+                        let message =
+                            format!("PR created at {url} but saving the session failed: {error}");
+                        session.phase = SessionPhase::PrFailed(message.clone());
+                        // A conflict or an explicit abort must never be bypassed by retrying
+                        // a save. Other failures may be transient, so try to persist the
+                        // retryable phase using the same conflict protection.
+                        return Err(match error {
+                            CruiseError::SessionStateConflict(_) => {
+                                CruiseError::SessionStateConflict(message)
+                            }
+                            CruiseError::SessionStateConflictAborted(_) => {
+                                CruiseError::SessionStateConflictAborted(message)
+                            }
+                            _ => {
+                                let _ = save_session_state_with_conflict_resolution(
+                                    &manager, session, expected,
+                                );
+                                CruiseError::PrPublicationFailed(message)
+                            }
+                        });
                     }
-                    CruiseError::SessionStateConflictAborted(_) => {
-                        CruiseError::SessionStateConflictAborted(message)
-                    }
-                    _ => {
-                        let _ = save_session_state_with_conflict_resolution(
-                            &manager, session, expected,
-                        );
-                        CruiseError::PrPublicationFailed(message)
-                    }
-                });
-            }
-            return Err(error);
-          }
-        };
+                    return Err(error);
+                }
+            };
         // Repo-backed sessions: drop the temporary clone (and its worktree) once
         // the PR has been created.
         if cleanup_repo {
             match crate::repo_clone::cleanup_session_workspace(&manager, session) {
                 Ok(()) => {
                     session.worktree_path = None;
-                    crate::status_eprintln!("{} removed temporary clone for {}", style("->").cyan(), session.id);
+                    crate::status_eprintln!(
+                        "{} removed temporary clone for {}",
+                        style("->").cyan(),
+                        session.id
+                    );
                 }
-                Err(e) => crate::status_eprintln!("{} warning: post-PR cleanup failed: {}", style("!").yellow(), e),
+                Err(e) => crate::status_eprintln!(
+                    "{} warning: post-PR cleanup failed: {}",
+                    style("!").yellow(),
+                    e
+                ),
             }
         }
         // Non-repo worktree sessions: remove the worktree and branch when configured.

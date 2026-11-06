@@ -1718,6 +1718,7 @@ mod tests {
             "",
             "",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1740,6 +1741,7 @@ mod tests {
             "branch",
             "",
             "",
+            None,
             None,
         )
         .await;
@@ -1766,6 +1768,7 @@ mod tests {
             "",
             "",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1787,7 +1790,9 @@ mod tests {
         let env_file = tmp.path().join("env");
         let _env = crate::test_support::EnvGuard::set("CRUISE_TEST_PROMPT_ENV", &env_file);
         push_branch(tmp.path(), "branch", None).await.unwrap();
-        create_mr(tmp.path(), "branch", "", "", None).await.unwrap();
+        create_mr(tmp.path(), "branch", "", "", None, None)
+            .await
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(env_file).unwrap(),
             "0 never 1 1\n0 never 1 1\n"

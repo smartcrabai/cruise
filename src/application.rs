@@ -3320,6 +3320,10 @@ impl CruiseApplication {
     }
 
     /// Retry publication without executing the workflow again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session cannot be published, saved, or is cancelled.
     pub async fn create_pr(
         &self,
         id: &str,
@@ -3367,8 +3371,9 @@ impl CruiseApplication {
             ))
         })?;
         let sessions_dir = self.manager.sessions_dir();
-        let mut vars = state.pr_workflow_vars.clone().unwrap_or_else(||
-            crate::variable::VariableStore::new(state.template_input(&sessions_dir)));
+        let mut vars = state.pr_workflow_vars.clone().unwrap_or_else(|| {
+            crate::variable::VariableStore::new(state.template_input(&sessions_dir))
+        });
         vars.set_named_file(crate::session::PLAN_VAR, state.plan_path(&sessions_dir));
         vars.set_artifacts_root(state.artifacts_path(&sessions_dir));
         let mut tracker = crate::file_tracker::FileTracker::with_root(ctx.path.clone());
@@ -3416,10 +3421,7 @@ impl CruiseApplication {
                 Some(&persist),
             )
             .await?;
-            if matches!(
-                outcome,
-                crate::worktree_pr::PublicationOutcome::Created
-            ) {
+            if matches!(outcome, crate::worktree_pr::PublicationOutcome::Created) {
                 crate::worktree_pr::run_after_pr_steps(
                     &compiled,
                     &mut vars,
@@ -3438,6 +3440,22 @@ impl CruiseApplication {
             Ok(())
         })
         .await;
+        self.finish_create_pr(id, claim, sink.as_ref(), state, (&compiled, &ctx), result)
+    }
+
+    fn finish_create_pr(
+        &self,
+        id: &str,
+        claim: &OperationClaim,
+        sink: &dyn ApplicationEventSink,
+        mut state: SessionState,
+        publication: (
+            &crate::workflow::CompiledWorkflow,
+            &crate::worktree::WorktreeContext,
+        ),
+        result: Result<()>,
+    ) -> Result<SessionState> {
+        let (compiled, ctx) = publication;
         if matches!(result, Err(CruiseError::Interrupted)) || claim.token().is_cancelled() {
             sink.send(ApplicationEvent::RunCancelled {
                 session_id: id.to_string(),
@@ -3473,7 +3491,7 @@ impl CruiseApplication {
             // Persist completion before destructive cleanup, then persist any cleared
             // workspace metadata while the same claim still owns the commit gate.
             self.manager.save(&state)?;
-            cleanup_completed_pr(&self.manager, &mut state, &compiled, Some(&ctx));
+            cleanup_completed_pr(&self.manager, &mut state, compiled, Some(ctx));
             if let Err(error) = self.manager.save(&state) {
                 crate::status_eprintln!("warning: failed to save cleanup metadata: {error}");
             }
@@ -4070,7 +4088,11 @@ impl WorktreeRun<'_> {
             return Ok(());
         }
         setup.state.pr_workflow_vars = Some(inputs.vars.clone());
-        if !self.claim.runtime.persist_if_active(self.claim, || self.manager.save(&setup.state))? {
+        if !self
+            .claim
+            .runtime
+            .persist_if_active(self.claim, || self.manager.save(&setup.state))?
+        {
             return Err(CruiseError::Interrupted);
         }
         let processing_sink = Arc::clone(self.sink);
@@ -4272,7 +4294,7 @@ fn complete_run(
     setup.state.current_step = None;
     let ctx = match &setup.workspace {
         crate::workspace::ExecutionWorkspace::Worktree { ctx, .. } => Some(ctx),
-        _ => None,
+        crate::workspace::ExecutionWorkspace::CurrentBranch { .. } => None,
     };
     let committed = runtime.commit_if_active(claim, || {
         // A published PR must be durably recorded before its workspace is removed.
@@ -4847,6 +4869,7 @@ mod tests {
             "publication",
             &temp.path().join("worktrees"),
             None,
+            &crate::worktree::WorktreeBase::default(),
         )
         .unwrap();
         let workflow_marker = temp.path().join("workflow-ran");
@@ -4887,13 +4910,31 @@ mod tests {
             "command: [cat]\ncreate_pr: true\ncleanup_after_pr: false\nsteps:\n  implement:\n    command: 'printf x >> {}; touch change.txt'\nafter-pr:\n  verify:\n    command: 'printf %s {{prev.success}} > {}'\n",
             marker.display(), after.display()
         )).unwrap();
-        crate::test_support::run_git_ok(&repo, &["remote", "set-url", "origin", "/nonexistent/cruise-pr-test.git"]);
+        crate::test_support::run_git_ok(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "/nonexistent/cruise-pr-test.git",
+            ],
+        );
         let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_: ApplicationEvent| Ok(()));
-        assert!(app.run_with_log_sink(id, RunRequest::default(), Arc::clone(&sink), None).await.is_err());
-        assert!(matches!(manager.load(id).unwrap().phase, SessionPhase::PrFailed(_)));
+        assert!(
+            app.run_with_log_sink(id, RunRequest::default(), Arc::clone(&sink), None)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            manager.load(id).unwrap().phase,
+            SessionPhase::PrFailed(_)
+        ));
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
         let origin = temp.path().join("origin.git");
-        crate::test_support::run_git_ok(&repo, &["remote", "set-url", "origin", origin.to_str().unwrap()]);
+        crate::test_support::run_git_ok(
+            &repo,
+            &["remote", "set-url", "origin", origin.to_str().unwrap()],
+        );
         let result = app.create_pr(id, sink, None).await.unwrap();
         assert_eq!(result.phase, SessionPhase::Completed);
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "x");

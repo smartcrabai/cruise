@@ -815,13 +815,21 @@ pub(crate) async fn create_pr(State(state): State<WebState>, Path(id): Path<Stri
             let event_sink = sink.clone();
             let tracking_sink: std::sync::Arc<dyn crate::application::ApplicationEventSink> =
                 std::sync::Arc::new(move |event: crate::application::ApplicationEvent| {
-                    if matches!(event, crate::application::ApplicationEvent::RunFailed { .. } | crate::application::ApplicationEvent::RunCancelled { .. }) {
+                    if matches!(
+                        event,
+                        crate::application::ApplicationEvent::RunFailed { .. }
+                            | crate::application::ApplicationEvent::RunCancelled { .. }
+                    ) {
                         seen.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                     event_sink.send(event)
                 });
-            let result = application.create_pr(&spawn_id, tracking_sink, Some(log_sink)).await;
-            if let Err(error) = &result && !terminal.load(std::sync::atomic::Ordering::SeqCst) {
+            let result = application
+                .create_pr(&spawn_id, tracking_sink, Some(log_sink))
+                .await;
+            if let Err(error) = &result
+                && !terminal.load(std::sync::atomic::Ordering::SeqCst)
+            {
                 let _ = sink.send(crate::application::ApplicationEvent::RunFailed {
                     session_id: spawn_id,
                     error: error.to_string(),

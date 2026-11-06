@@ -67,6 +67,7 @@ fn fixture(w: &mut World, phase: SessionPhase) {
         "publication",
         &temp.path().join("worktrees"),
         None,
+        &cruise::worktree::WorktreeBase::default(),
     )
     .expect("worktree");
     let marker = temp.path().join("workflow-ran");
