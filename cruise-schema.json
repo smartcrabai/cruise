@@ -347,11 +347,15 @@
           "type": ["object", "null"],
           "description": "Opt-in GitHub review bot loop. Only valid directly in after-pr; requires exactly one of prompt or prompt_file and a timeout bounding the whole loop. Cannot be combined with command, option, parallel, group, or workflow_call.",
           "additionalProperties": false,
-          "required": ["bots"],
           "properties": {
+            "reviewers": {
+              "type": "string",
+              "enum": ["bots", "all"],
+              "default": "bots",
+              "description": "bots waits for a listed bot review; all immediately processes threads from authors with write access."
+            },
             "bots": {
               "type": "array",
-              "minItems": 1,
               "uniqueItems": true,
               "items": { "type": "string", "minLength": 1 },
               "description": "Bot logins (case-insensitive, no duplicates). Any one reviewing the current PR head commit ends the wait."

@@ -224,7 +224,9 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
                 config_source: session.config_source.clone(),
                 flags,
                 flags_note,
-                location_label: if session.repo.is_some() {
+                location_label: if let Some(target) = &session.pr_target {
+                    format!("PR #{}", target.number)
+                } else if session.repo.is_some() {
                     "Repository".to_string()
                 } else {
                     "Base dir".to_string()
@@ -499,7 +501,9 @@ pub(crate) fn run_all_vm(state: &WebState) -> RunAllVm {
             title: truncate(&result.title, 80),
             phase: result.phase.clone(),
             error: result.error.clone(),
-            failed: result.phase == "Failed" || result.phase == "Busy",
+            failed: result.phase == "Failed"
+                || result.phase == "PR Failed"
+                || result.phase == "Busy",
         })
         .collect();
     let finished = results.len();
