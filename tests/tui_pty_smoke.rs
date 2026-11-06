@@ -762,9 +762,10 @@ fn tui_parallelism_edit_persists_and_is_loaded_after_restart() {
 }
 
 #[test]
-fn tui_auto_requeue_setting_persists_and_is_loaded_after_restart() {
+fn tui_auto_requeue_setting_persists_and_is_loaded_after_restart()
+-> Result<(), Box<dyn std::error::Error>> {
     if !tui_available() {
-        return;
+        return Ok(());
     }
     let fixture = Fixture::new();
     let mut tui = fixture.start(120, 30, true);
@@ -785,10 +786,8 @@ fn tui_auto_requeue_setting_persists_and_is_loaded_after_restart() {
     tui.send(b"q");
     let (status, transcript) = tui.finish();
     assert!(status.success(), "cruise failed in PTY: {transcript}");
-    let config: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(fixture.app_config_path()).expect("saved app config"),
-    )
-    .expect("valid app config");
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.app_config_path())?)?;
     assert_eq!(config["runAllAutoRequeueMaxAttempts"], 2);
 
     let mut restarted = fixture.start(120, 30, true);
@@ -805,12 +804,14 @@ fn tui_auto_requeue_setting_persists_and_is_loaded_after_restart() {
         status.success(),
         "restarted cruise failed in PTY: {transcript}"
     );
+    Ok(())
 }
 
 #[test]
-fn tui_session_info_displays_nonzero_auto_requeue_count() {
+fn tui_session_info_displays_nonzero_auto_requeue_count() -> Result<(), Box<dyn std::error::Error>>
+{
     if !tui_available() {
-        return;
+        return Ok(());
     }
     let fixture = Fixture::new();
     let id = fixture.seed_display_session(
@@ -821,10 +822,9 @@ fn tui_session_info_displays_nonzero_auto_requeue_count() {
         None,
     );
     let path = fixture.manager.state_path(&id);
-    let mut state: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut state: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
     state["auto_requeue_count"] = 2.into();
-    std::fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
+    std::fs::write(path, serde_json::to_vec(&state)?)?;
 
     let mut tui = fixture.start(120, 30, true);
     tui.wait_for_output("retry display", START_TIMEOUT);
@@ -832,6 +832,7 @@ fn tui_session_info_displays_nonzero_auto_requeue_count() {
     tui.send(b"q");
     let (status, transcript) = tui.finish();
     assert!(status.success(), "cruise failed in PTY: {transcript}");
+    Ok(())
 }
 
 #[test]

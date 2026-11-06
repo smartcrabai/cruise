@@ -105,7 +105,8 @@ fn auto_requeue_config_defaults_to_zero_and_persists_updates() {
 }
 
 #[test]
-fn auto_requeue_config_accepts_both_names_and_rejects_negative_values() {
+fn auto_requeue_config_accepts_both_names_and_rejects_negative_values()
+-> Result<(), Box<dyn std::error::Error>> {
     for extension in ["json", "yaml"] {
         for key in [
             "runAllAutoRequeueMaxAttempts",
@@ -114,7 +115,7 @@ fn auto_requeue_config_accepts_both_names_and_rejects_negative_values() {
             let fixture = Fixture::new();
             let value = serde_json::json!({key: 2});
             let contents = if extension == "yaml" {
-                serde_yaml::to_string(&value).unwrap()
+                serde_yaml::to_string(&value)?
             } else {
                 value.to_string()
             };
@@ -141,6 +142,7 @@ fn auto_requeue_config_accepts_both_names_and_rejects_negative_values() {
             output_text(&shown)
         );
     }
+    Ok(())
 }
 
 #[test]
