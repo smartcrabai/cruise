@@ -3,7 +3,7 @@ use cruise::error::CruiseError;
 use cruise::workflow::compile;
 use serde_json::json;
 
-fn config(extra: &str) -> Result<WorkflowConfig, CruiseError> {
+fn config(extra: &str) -> Result<WorkflowConfig, serde_yaml::Error> {
     WorkflowConfig::from_yaml(&format!("{extra}\nsteps:\n  main:\n    command: echo ok\n"))
 }
 
