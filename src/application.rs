@@ -4262,22 +4262,22 @@ where
                     let _ = worker_app.manager.save(&state);
                     Err(CruiseError::Other("batch worker panicked".to_string()))
                 };
-                if let Err(error) = &outcome {
-                    if let Ok(Some(attempt)) = crate::auto_requeue::try_record_requeue(
+                if let Err(error) = &outcome
+                    && let Ok(Some(attempt)) = crate::auto_requeue::try_record_requeue(
                         &worker_app.manager,
                         &id,
                         error,
                         max_attempts,
                         claim.token().is_cancelled(),
-                    ) {
-                        let _ = worker_sink.send(ApplicationEvent::AutoRequeued {
-                            session_id: id.clone(),
-                            attempt,
-                            max_attempts,
-                            error: error.to_string(),
-                        });
-                        continue;
-                    }
+                    )
+                {
+                    let _ = worker_sink.send(ApplicationEvent::AutoRequeued {
+                        session_id: id.clone(),
+                        attempt,
+                        max_attempts,
+                        error: error.to_string(),
+                    });
+                    continue;
                 }
                 break outcome;
             };
@@ -4616,7 +4616,7 @@ mod tests {
         let sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event| {
             captured
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(event);
             Ok(())
         });
@@ -4630,7 +4630,9 @@ mod tests {
             manager.load(&id).unwrap_or_else(|e| panic!("{e}")).phase,
             SessionPhase::Failed(_)
         ));
-        let events = events.lock().unwrap_or_else(|e| e.into_inner());
+        let events = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(events.iter().filter(|event| matches!(event, ApplicationEvent::BatchSessionFinished { id: event_id, .. } if event_id == &id)).count(), 1);
         assert_eq!(events.iter().filter(|event| matches!(event, ApplicationEvent::RunFailed { session_id, .. } if session_id == &id)).count(), 1);
         assert!(!events.iter().any(|event| {
@@ -4813,14 +4815,14 @@ mod tests {
         let _path = issue_test_repo(
             temp.path(),
             "https://github.com/example/project.git",
-            r##"#!/bin/sh
+            r#"#!/bin/sh
 case "$*" in
   *issues/42/comments*) printf '%s\n' '[{"user":{"login":"alice"},"body":"A comment"}]' ;;
   *issues/42*) printf '%s\n' '{"number":42,"title":"Fix the bug","body":"Issue body","html_url":"https://github.com/example/project/issues/42","labels":[{"name":"bug"}]}' ;;
   --version) echo 'gh version 2.0' ;;
   *) exit 1 ;;
 esac
-"##,
+"#,
         );
         let manager = SessionManager::new(temp.path().join("sessions"));
         let app = CruiseApplication::new(manager.clone());
