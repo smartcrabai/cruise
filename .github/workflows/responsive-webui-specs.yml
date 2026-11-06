@@ -54,6 +54,10 @@ jobs:
         run: |
           node tests/webui/auto-requeue.mjs all
           node tests/webui/auto-requeue.mjs header
+      - name: PR retry real browser boundaries
+        run: node tests/webui/pr-failed-real.mjs
+      - name: Production PR form browser test
+        run: node tests/webui/pr-form.mjs
       - name: Upload specification evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

@@ -375,9 +375,16 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
             Span::raw(session.input.as_str()),
         ));
     }
-    if let SessionPhase::Failed(error) = &session.phase {
+    if let SessionPhase::Failed(error) | SessionPhase::PrFailed(error) = &session.phase {
         lines.push(Line::from(vec![
-            Span::styled("Run error", error_style(app)),
+            Span::styled(
+                if matches!(&session.phase, SessionPhase::PrFailed(_)) {
+                    "PR error"
+                } else {
+                    "Run error"
+                },
+                error_style(app),
+            ),
             Span::raw(format!(" {error}")),
         ]));
     }
@@ -872,6 +879,7 @@ fn step_question(step: Step) -> &'static str {
         Step::Source => "Where is the code?",
         Step::WorkingDirectory => "Which directory? (blank = current directory)",
         Step::Repository => "Which repository? (owner/name, group/project, or URL)",
+        Step::PullRequest => "Pull request number? (optional, GitHub only)",
         Step::Config => "Which workflow config? (blank = auto-detect)",
         Step::SkippedSteps => "Skip any workflow steps?",
         Step::Flags => "Which optional workflow flags should be enabled?",
@@ -907,6 +915,7 @@ fn step_hint(app: &TuiApp) -> String {
                 format!("Enter next · ↑↓ gh repos ({found}) · {BACK}")
             }
         }
+        Step::PullRequest => format!("Enter next · {BACK}"),
         Step::Config => format!("↑↓ select · type path · Tab complete · Enter next · {BACK}"),
         Step::SkippedSteps if !app.has_skip_choices() => {
             format!("Comma-separated step ids · Enter next · {BACK}")
@@ -934,6 +943,7 @@ fn render_step_control(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Step::Attachments => return render_step_editor(frame, app, area, &form.attachments),
         Step::WorkingDirectory => return render_step_editor(frame, app, area, &form.working_dir),
         Step::Repository => return render_step_editor(frame, app, area, &form.repository),
+        Step::PullRequest => return render_step_editor(frame, app, area, &form.pull_request),
         Step::Config => return render_config_choices(frame, app, area),
         Step::SkippedSteps => return render_skip_choices(frame, app, area),
         Step::Flags => return render_flag_choices(frame, app, area),
@@ -1613,7 +1623,7 @@ fn focus_panel<'a>(app: &TuiApp, title: impl Into<Line<'a>>, focused: bool) -> B
 fn phase_style(app: &TuiApp, phase: &SessionPhase) -> Style {
     match phase {
         SessionPhase::Completed => success(app),
-        SessionPhase::Failed(_) => error_style(app),
+        SessionPhase::Failed(_) | SessionPhase::PrFailed(_) => error_style(app),
         SessionPhase::Running => warning(app),
         SessionPhase::Suspended => colored(app, Color::Rgb(192, 132, 252)),
         _ => muted(app),
@@ -1629,7 +1639,9 @@ pub(crate) fn sidebar_status_style(app: &TuiApp, status: SidebarStatus) -> Style
         SidebarStatus::Running | SidebarStatus::Planning => warning(app),
         SidebarStatus::Draft | SidebarStatus::Completed => success(app),
         SidebarStatus::Planned => colored(app, Color::Rgb(96, 165, 250)),
-        SidebarStatus::Failed | SidebarStatus::PlanFailed => error_style(app),
+        SidebarStatus::Failed | SidebarStatus::PrFailed | SidebarStatus::PlanFailed => {
+            error_style(app)
+        }
         SidebarStatus::Suspended => colored(app, Color::Rgb(192, 132, 252)),
     }
 }

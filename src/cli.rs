@@ -59,7 +59,8 @@ mod issue_entrypoint_tests {
             if let Some(input) = input {
                 args.push(input);
             }
-            let cli = Cli::try_parse_from(args).expect("plan --issue should parse");
+            let cli =
+                Cli::try_parse_from(args).unwrap_or_else(|error| panic!("plan --issue: {error}"));
             let Some(Commands::Plan(plan)) = cli.command else {
                 panic!("expected plan command");
             };
@@ -74,7 +75,8 @@ mod issue_entrypoint_tests {
             if let Some(input) = input {
                 args.push(input);
             }
-            let cli = Cli::try_parse_from(args).expect("draft --issue should parse");
+            let cli =
+                Cli::try_parse_from(args).unwrap_or_else(|error| panic!("draft --issue: {error}"));
             let Some(Commands::Draft(draft)) = cli.command else {
                 panic!("expected draft command");
             };
@@ -96,9 +98,11 @@ mod issue_entrypoint_tests {
 
     #[test]
     fn root_issue_inputs_are_forwarded_verbatim_and_exec_does_not_accept_issue_flag() {
-        let positional = Cli::try_parse_from(["cruise", "#12\nextra"]).unwrap();
+        let positional = Cli::try_parse_from(["cruise", "#12\nextra"])
+            .unwrap_or_else(|error| panic!("parse root issue input: {error}"));
         assert_eq!(positional.input.as_deref(), Some("#12\nextra"));
-        let background = Cli::try_parse_from(["cruise", "--plan", "#12\nextra"]).unwrap();
+        let background = Cli::try_parse_from(["cruise", "--plan", "#12\nextra"])
+            .unwrap_or_else(|error| panic!("parse background issue input: {error}"));
         assert_eq!(background.plan.as_deref(), Some("#12\nextra"));
         assert!(Cli::try_parse_from(["cruise", "exec", "--issue", "12"]).is_err());
     }
@@ -280,6 +284,10 @@ pub struct UpdateArgs {
 pub struct PlanArgs {
     /// Task description.
     pub input: Option<String>,
+
+    /// Fix review threads on an existing GitHub pull request.
+    #[arg(long, value_name = "NUMBER", conflicts_with_all = ["grill", "images", "issue"])]
+    pub pr: Option<u64>,
 
     /// Use a GitHub issue as the task.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]

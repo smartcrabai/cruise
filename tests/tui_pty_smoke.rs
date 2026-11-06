@@ -579,8 +579,8 @@ fn new_session_config_candidates_are_visible_selectable_and_persist_arbitrary_pa
 
     tui.send(b"\x1b[B");
     tui.wait_for_output("▸ ./cruise.yaml", START_TIMEOUT);
-    // Local config -> user workflow -> six built-ins -> Auto-detect.
-    for _ in 0..6 {
+    // Local config -> user workflow -> seven built-ins -> Auto-detect.
+    for _ in 0..7 {
         tui.send(b"\x1b[B");
     }
     tui.wait_for_output("▸ Built-in research:", START_TIMEOUT);

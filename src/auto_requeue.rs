@@ -37,6 +37,7 @@ pub(crate) fn is_eligible_error(error: &CruiseError) -> bool {
         | CruiseError::SessionStateConflictAborted(_)
         | CruiseError::StepTimeout { .. }
         | CruiseError::GitHubReviewFailed { .. }
+        | CruiseError::PrPublicationFailed(_)
         | CruiseError::Interrupted
         | CruiseError::SquashMergeFailed(_)
         | CruiseError::CommitGuardViolation(_)
@@ -155,6 +156,9 @@ mod tests {
             "work".into()
         )));
         assert!(!is_eligible_error(&CruiseError::Interrupted));
+        assert!(!is_eligible_error(&CruiseError::PrPublicationFailed(
+            "failure".into()
+        )));
         assert!(!is_eligible_error(&CruiseError::Other("failure".into())));
     }
 

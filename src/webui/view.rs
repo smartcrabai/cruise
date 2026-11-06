@@ -66,7 +66,7 @@ impl PhaseBadgeVm {
             "Planned" => "planned",
             "Running" => "running",
             "Completed" => "completed",
-            "Failed" => "failed",
+            "Failed" | "PR Failed" => "failed",
             "Suspended" => "suspended",
             _ => "draft",
         };
@@ -299,9 +299,10 @@ impl ConfigSelectVm {
                 value: super::dto::BUILTIN_CONFIG_PATH.to_string(),
                 label: format!(
                     "Built-in tdd \u{2014} {}",
-                    crate::builtin_workflows::BUILTIN_WORKFLOWS
-                        .first()
-                        .map_or("", |w| w.description)
+                    crate::builtin_workflows::find_builtin(
+                        crate::builtin_workflows::DEFAULT_BUILTIN_NAME
+                    )
+                    .map_or("", |w| w.description)
                 ),
                 selected: selected == super::dto::BUILTIN_CONFIG_PATH,
             },

@@ -1321,7 +1321,10 @@ fn github_ci_details_response(
 )]
 fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     let old_head = "1111111111111111111111111111111111111111";
-    for workflow in cruise::builtin_workflows::BUILTIN_WORKFLOWS {
+    for workflow in cruise::builtin_workflows::BUILTIN_WORKFLOWS
+        .iter()
+        .filter(|workflow| workflow.name != "pr-review-fix")
+    {
         let fixture = GithubWaitCiFixture::new();
         let command = builtin_wait_ci_command(workflow.name);
         let output = fixture.run(

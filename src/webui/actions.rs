@@ -15,6 +15,7 @@ pub(crate) struct SessionActionsVm {
     pub show_ask: bool,
     pub show_create_worktree: bool,
     pub show_run: bool,
+    pub show_create_pr: bool,
     pub run_label: String,
     pub show_reset: bool,
     pub show_replan: bool,
@@ -33,7 +34,12 @@ pub(crate) fn session_actions(
 ) -> SessionActionsVm {
     let is_locally_running = matches!(
         active_operation,
-        Some(OperationKind::Run | OperationKind::BatchRun | OperationKind::BatchQueued)
+        Some(
+            OperationKind::Run
+                | OperationKind::CreatePr
+                | OperationKind::BatchRun
+                | OperationKind::BatchQueued
+        )
     );
     let is_fixing = matches!(
         active_operation,
@@ -64,7 +70,8 @@ pub(crate) fn session_actions(
         && session.plan_available;
     let usable_plan = session.plan_available && !has_plan_error;
     let show_approve = awaiting_approval_with_plan && !has_plan_error;
-    let show_publish_issue = (session.phase == "Awaiting Approval" || session.phase == "Planned")
+    let show_publish_issue = session.pr_target.is_none()
+        && (session.phase == "Awaiting Approval" || session.phase == "Planned")
         && usable_plan
         && !is_locally_running
         && !is_active_run;
@@ -75,6 +82,8 @@ pub(crate) fn session_actions(
         && !is_awaiting_refresh
         && usable_plan
         && (session.phase == "Suspended" || session.phase == "Failed");
+    let show_create_pr =
+        session.phase == "PR Failed" && active_operation.is_none() && !is_active_run;
     let run_label = if session.phase == "Failed" {
         "Retry"
     } else {
@@ -84,8 +93,9 @@ pub(crate) fn session_actions(
         && !is_awaiting_refresh
         && (session.phase == "Suspended"
             || session.phase == "Failed"
+            || session.phase == "PR Failed"
             || session.phase == "Completed");
-    let show_replan = !is_active_run && session.phase == "Planned";
+    let show_replan = session.pr_target.is_none() && !is_active_run && session.phase == "Planned";
     let show_discard = !is_locally_running && session.phase == "Awaiting Approval";
     let show_delete =
         !is_locally_running && session.phase != "Running" && session.phase != "Awaiting Approval";
@@ -106,6 +116,7 @@ pub(crate) fn session_actions(
         show_ask,
         show_create_worktree,
         show_run,
+        show_create_pr,
         run_label: run_label.to_string(),
         show_reset,
         show_replan,
@@ -141,6 +152,7 @@ mod tests {
             worktree_branch: None,
             workspace_mode: WorkspaceMode::Worktree,
             pr_url: None,
+            pr_target: None,
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,
@@ -269,6 +281,20 @@ mod tests {
         assert!(value.show_delete);
         assert!(!value.show_create_worktree);
         assert!(!value.show_run);
+    }
+
+    #[test]
+    fn pr_failed_offers_create_pr_only_when_idle() {
+        let idle = actions("PR Failed", true, None, false);
+        assert!(idle.show_create_pr && idle.show_reset && idle.show_delete);
+        assert!(!idle.show_run);
+        let active = actions("PR Failed", true, Some(OperationKind::CreatePr), false);
+        assert!(
+            !active.show_create_pr && !active.show_run && !active.show_reset && !active.show_delete
+        );
+        assert!(active.show_cancel);
+        assert_eq!(active.status, "running");
+        assert!(!actions("Completed", true, None, false).show_create_pr);
     }
 
     #[test]
@@ -425,6 +451,7 @@ mod tests {
             "showAsk",
             "showCreateWorktree",
             "showRun",
+            "showCreatePr",
             "runLabel",
             "showReset",
             "showReplan",
