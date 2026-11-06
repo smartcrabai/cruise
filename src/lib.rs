@@ -7,6 +7,7 @@ pub mod ask_handler;
 pub mod attachments;
 pub mod backend;
 pub mod batch_run;
+pub mod branch_diff;
 pub mod builtin_workflows;
 pub mod cancellation;
 pub(crate) mod commit_guard;

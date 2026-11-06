@@ -1321,6 +1321,7 @@ pub enum SessionAction {
     Resume,
     OpenPr,
     MergePr,
+    ViewDiff,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2220,6 +2221,15 @@ impl CruiseApplication {
             .map_err(|e| CruiseError::Other(format!("failed to read plan for {id}: {e}")))
     }
 
+    /// Read the current branch diff for a session.
+    ///
+    /// # Errors
+    /// Returns an error if the session cannot be loaded or its branch diff cannot be generated.
+    pub fn session_branch_diff(&self, id: &str) -> Result<crate::branch_diff::BranchDiff> {
+        let state = self.manager.load(id)?;
+        crate::branch_diff::session_branch_diff(&state, false)
+    }
+
     /// Report whether a session has non-empty, readable plan markdown.
     #[must_use]
     pub fn session_plan_available(&self, state: &SessionState) -> bool {
@@ -2887,6 +2897,9 @@ impl CruiseApplication {
         let usable_plan =
             state.plan_error.is_none() && state.has_usable_plan(&self.manager.sessions_dir());
         let mut actions = Vec::new();
+        if state.worktree_branch.is_some() {
+            actions.push(SessionAction::ViewDiff);
+        }
         match &state.phase {
             SessionPhase::Draft => actions.extend([SessionAction::Generate, SessionAction::Delete]),
             SessionPhase::AwaitingInput => {
