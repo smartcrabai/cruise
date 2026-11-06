@@ -49,6 +49,7 @@ impl Fixture {
         fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("{error}"));
         let log = temp.path().join("provider.log");
         let effects = temp.path().join("effects.log");
+        let merged = temp.path().join("merged");
         let gh_identity = temp.path().join("gh_identity.json");
         let gh_identity_after = temp.path().join("gh_identity_after.json");
         let gh_identity_sequence = temp.path().join("gh_identity_sequence.jsonl");
@@ -60,6 +61,7 @@ impl Fixture {
         let gh_suites = temp.path().join("gh_suites.json");
         let gh_suites_sequence = temp.path().join("gh_suites_sequence.jsonl");
         let gh_suites_calls = temp.path().join("gh_suites_calls");
+        let gh_rules = temp.path().join("gh_rules.json");
         let gl_mr = temp.path().join("gl_mr.json");
         let gl_mr_after = temp.path().join("gl_mr_after.json");
         let gl_mr_seen = temp.path().join("gl_mr_seen");
