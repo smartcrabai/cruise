@@ -2526,8 +2526,7 @@ steps:
             &ctx,
             crate::forge::ForgeKind::GitHub,
             "test task",
-            "",
-            "",
+            ("", ""),
             None,
             None,
             None,
@@ -2561,8 +2560,7 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "add feature",
-            "",
-            "",
+            ("", ""),
             None,
             None,
             None,
@@ -2621,8 +2619,7 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "task",
-            "",
-            &body,
+            ("", &body),
             None,
             None,
             None,
@@ -2650,8 +2647,7 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "task",
-            "",
-            "Summary.",
+            ("", "Summary."),
             None,
             None,
             None,
@@ -2684,8 +2680,7 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "add feature",
-            "",
-            "",
+            ("", ""),
             None,
             None,
             None,
@@ -2726,8 +2721,7 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "fallback",
-            "title",
-            "body",
+            ("title", "body"),
             Some("feat: title [session]"),
             None,
             None,
@@ -2767,8 +2761,7 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "rerun without changes",
-            "",
-            "",
+            ("", ""),
             None,
             None,
             None,
@@ -3057,9 +3050,18 @@ steps:
 
     // Exercise the real handler rather than a test-only renderer: the template must
     // survive workflow compilation and reach both git and the forge invocation.
-    async fn run_pr_template_entrypoint_case(template: &str, generated: &str, id: &str, forge: crate::forge::ForgeKind) {
+    async fn run_pr_template_entrypoint_case(
+        template: &str,
+        generated: &str,
+        id: &str,
+        forge: crate::forge::ForgeKind,
+    ) {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let url = if forge == crate::forge::ForgeKind::GitLab { "https://gitlab.com/owner/repo/-/merge_requests/19" } else { "https://github.com/owner/repo/pull/19" };
+        let url = if forge == crate::forge::ForgeKind::GitLab {
+            "https://gitlab.com/owner/repo/-/merge_requests/19"
+        } else {
+            "https://github.com/owner/repo/pull/19"
+        };
         let f = setup_pr_test(&tmp, id, url);
         #[cfg(unix)]
         fs::copy(tmp.path().join("bin/gh"), tmp.path().join("bin/glab")).unwrap();
@@ -3121,7 +3123,11 @@ steps:
                 args.contains("--title") && args.contains("first line"),
                 "{args}"
             );
-            let body_arg = if forge == crate::forge::ForgeKind::GitLab { "--description" } else { "--body" };
+            let body_arg = if forge == crate::forge::ForgeKind::GitLab {
+                "--description"
+            } else {
+                "--body"
+            };
             assert!(args.contains(body_arg) && args.contains("BODY"), "{args}");
             assert!(args.contains("Closes #"), "{args}");
             assert!(!args.contains("--fill"), "{args}");
@@ -3159,7 +3165,8 @@ steps:
             "---\ntitle: ''\n---\nBODY",
             "20260310prtemplategitlab",
             crate::forge::ForgeKind::GitLab,
-        ).await;
+        )
+        .await;
     }
 
     #[cfg(unix)]
@@ -3184,21 +3191,59 @@ steps:
             vars.set_named_file(PLAN_VAR, plan);
             let mut tracker = FileTracker::with_root(f.ctx.path.clone());
             let mut session = SessionState::new(
-                id.to_string(), f.repo.clone(),
-                crate::session_config::SessionConfigRef::File { path: tmp.path().join("workflow.yaml") },
+                id.to_string(),
+                f.repo.clone(),
+                crate::session_config::SessionConfigRef::File {
+                    path: tmp.path().join("workflow.yaml"),
+                },
                 " \n ".to_string(),
             );
             session.title = Some("  ".to_string());
             session.forge = Some(forge);
             let error = crate::worktree_pr::handle_worktree_pr_with_persistence(
-                &f.ctx, &compiled, &mut vars, &mut tracker, &mut session, 0, 0, &[],
-                &crate::flags::NO_FLAGS, None, &NoOpOptionHandler, None, None, None,
-            ).await.unwrap_err();
-            assert!(error.to_string().contains("pr_body_template requires a nonempty generated or session title"), "{error}");
+                &f.ctx,
+                &compiled,
+                &mut vars,
+                &mut tracker,
+                &mut session,
+                0,
+                0,
+                &[],
+                &crate::flags::NO_FLAGS,
+                None,
+                &NoOpOptionHandler,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("pr_body_template requires a nonempty generated or session title"),
+                "{error}"
+            );
             assert_eq!(git_stdout_ok(&f.ctx.path, &["rev-parse", "HEAD"]), before);
-            assert!(!Command::new("git").args(["--git-dir", tmp.path().join("origin.git").to_str().unwrap(), "show-ref", "--verify", "--quiet", &format!("refs/heads/{}", f.ctx.branch)]).status().unwrap().success());
+            assert!(
+                !Command::new("git")
+                    .args([
+                        "--git-dir",
+                        tmp.path().join("origin.git").to_str().unwrap(),
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{}", f.ctx.branch)
+                    ])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
             let calls = fs::read_to_string(&f.log_path).unwrap_or_default();
-            assert!(!calls.contains("pr create") && !calls.contains("mr create"), "{calls}");
+            assert!(
+                !calls.contains("pr create") && !calls.contains("mr create"),
+                "{calls}"
+            );
             worktree::cleanup_worktree(&f.ctx).unwrap();
         }
     }
@@ -3217,8 +3262,7 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             "implement user icon feature",
-            pr_title,
-            "",
+            (pr_title, ""),
             None,
             None,
             None,
@@ -3260,8 +3304,7 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             fallback,
-            "",
-            "",
+            ("", ""),
             None,
             None,
             None,
@@ -3303,8 +3346,7 @@ steps:
             &f.ctx,
             crate::forge::ForgeKind::GitHub,
             fallback,
-            "   ",
-            "",
+            ("   ", ""),
             None,
             None,
             None,

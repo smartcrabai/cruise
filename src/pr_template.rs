@@ -132,7 +132,8 @@ mod tests {
 
     fn compiled(extra: &str) -> CompiledWorkflow {
         let yaml = format!("{extra}\nsteps:\n  main:\n    command: echo ok\n");
-        crate::workflow::compile(WorkflowConfig::from_yaml(&yaml).unwrap()).unwrap()
+        crate::workflow::compile(WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e}")))
+            .unwrap_or_else(|e| panic!("{e}"))
     }
 
     fn session(input: &str) -> SessionState {
@@ -146,8 +147,8 @@ mod tests {
 
     #[test]
     fn preserves_legacy_text_and_fill_behavior() {
-        let texts =
-            render_pr_texts(&compiled(""), &session("input"), "branch", "  ", " body \n").unwrap();
+        let texts = render_pr_texts(&compiled(""), &session("input"), "branch", "  ", " body \n")
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(texts.title, "");
         assert_eq!(texts.body, " body \n");
         assert_eq!(texts.commit_message, None);
@@ -165,7 +166,7 @@ mod tests {
             "",
             " body {plan} ",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(texts.title, "task first");
         assert_eq!(texts.body, "{x} body {plan} session-1");
         assert_eq!(
@@ -177,8 +178,8 @@ mod tests {
     #[test]
     fn commit_only_preserves_pr_fill_and_rejects_empty_message() {
         let workflow = compiled("commit_message_template: '{title}'");
-        let texts =
-            render_pr_texts(&workflow, &session("task"), "feature", " ", " original ").unwrap();
+        let texts = render_pr_texts(&workflow, &session("task"), "feature", " ", " original ")
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(texts.title, "");
         assert_eq!(texts.body, " original ");
         assert_eq!(texts.commit_message.as_deref(), Some("task"));

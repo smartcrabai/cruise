@@ -345,8 +345,7 @@ async fn create_pr_attempt(
         ctx,
         crate::forge::session_forge(session),
         session.input_or_title(),
-        &texts.title,
-        pr_body,
+        (&texts.title, pr_body),
         texts.commit_message.as_deref(),
         (
             session.worktree_base_ref.as_deref(),
@@ -615,8 +614,7 @@ pub(crate) async fn attempt_pr_creation(
     ctx: &worktree::WorktreeContext,
     forge: crate::forge::ForgeKind,
     message: &str,
-    title: &str,
-    body: &str,
+    pr_text: (&str, &str),
     commit_message_override: Option<&str>,
     base_branch: Option<&str>,
     cancel_token: Option<&CancellationToken>,
@@ -625,8 +623,7 @@ pub(crate) async fn attempt_pr_creation(
         ctx,
         forge,
         message,
-        title,
-        body,
+        pr_text,
         commit_message_override,
         (None, base_branch),
         cancel_token,
@@ -638,12 +635,12 @@ async fn attempt_pr_creation_with_ref(
     ctx: &worktree::WorktreeContext,
     forge: crate::forge::ForgeKind,
     message: &str,
-    title: &str,
-    body: &str,
+    pr_text: (&str, &str),
     commit_message_override: Option<&str>,
     base: (Option<&str>, Option<&str>),
     cancel_token: Option<&CancellationToken>,
 ) -> Result<PrAttemptOutcome> {
+    let (title, body) = pr_text;
     let (base_ref, base_branch) = base;
     let trimmed_title = title.trim();
     let commit_message = if let Some(override_message) = commit_message_override {
@@ -1378,8 +1375,7 @@ mod tests {
                 &ctx,
                 crate::forge::ForgeKind::GitHub,
                 "task",
-                "",
-                "",
+                ("", ""),
                 None,
                 Some("develop"),
                 None
@@ -1417,8 +1413,7 @@ mod tests {
                 &ctx,
                 crate::forge::ForgeKind::GitHub,
                 "task",
-                "",
-                "",
+                ("", ""),
                 None,
                 Some("develop"),
                 None
@@ -1453,8 +1448,7 @@ mod tests {
                 &ctx,
                 crate::forge::ForgeKind::GitHub,
                 "task",
-                "",
-                "",
+                ("", ""),
                 None,
                 (selected, Some("develop")),
                 None
@@ -1491,8 +1485,7 @@ mod tests {
                 &ctx,
                 crate::forge::ForgeKind::GitHub,
                 "task",
-                "",
-                "",
+                ("", ""),
                 None,
                 Some("develop"),
                 None

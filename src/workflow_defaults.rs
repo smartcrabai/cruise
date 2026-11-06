@@ -740,7 +740,7 @@ mod tests {
         );
         let mut config = workflow("");
         applied(&env, &mut config);
-        let values = serde_json::to_value(&config).unwrap();
+        let values = serde_json::to_value(&config).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(values["pr_body_template"], "user-body");
         assert_eq!(values["commit_message_template"], "user-commit");
 
@@ -750,14 +750,14 @@ mod tests {
         );
         let mut config = workflow("");
         applied(&env, &mut config);
-        let values = serde_json::to_value(&config).unwrap();
+        let values = serde_json::to_value(&config).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(values["pr_body_template"], "project-body");
         assert_eq!(values["commit_message_template"], "project-commit");
 
         let mut config =
             workflow("pr_body_template: workflow-body\ncommit_message_template: workflow-commit");
         applied(&env, &mut config);
-        let values = serde_json::to_value(&config).unwrap();
+        let values = serde_json::to_value(&config).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(values["pr_body_template"], "workflow-body");
         assert_eq!(values["commit_message_template"], "workflow-commit");
     }
