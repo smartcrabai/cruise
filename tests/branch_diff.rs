@@ -1,4 +1,4 @@
-//! Branch diff contract tests. Each fixture uses a real, isolated git repository.
+//! Branch diff contract tests. Fixtures use isolated git repositories.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -232,12 +232,83 @@ fn large_tracked_patch_is_bounded_and_git_finishes() -> Result<()> {
 #[cfg(unix)]
 #[test]
 fn untracked_non_utf8_path_is_passed_to_git_unchanged() -> Result<()> {
-    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+    use std::{
+        ffi::OsStr,
+        os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    };
+
+    // Run the mock in a separate process so its PATH cannot affect parallel tests.
+    // It also exercises the fallback on filesystems that accept non-UTF-8 names.
+    if std::env::var_os("CRUISE_TEST_NON_UTF8_GIT").is_none() {
+        let mock = TempDir::new()?;
+        let real_git = Command::new("which").arg("git").output()?;
+        assert!(real_git.status.success());
+        let real_git = String::from_utf8(real_git.stdout)?.trim().to_owned();
+        let script = mock.path().join("git");
+        fs::write(
+            &script,
+            r##"#!/bin/sh
+if [ "$3" = ls-files ]; then
+    printf 'invalid-\377.txt\000'
+    exit 0
+fi
+for arg do
+    if [ "$arg" = --no-index ]; then
+        no_index=1
+    fi
+    last=$arg
+done
+if [ "$no_index" = 1 ]; then
+    expected=$(printf 'invalid-\377.txt')
+    if [ "$last" != "$expected" ]; then
+        echo 'non-UTF-8 path was not passed unchanged' >&2
+        exit 2
+    fi
+    printf '+native path content\n'
+    exit 1
+fi
+exec "$CRUISE_TEST_REAL_GIT" "$@"
+"##,
+        )?;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+        let path = std::env::join_paths(std::iter::once(mock.path().to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))?;
+        let output = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "untracked_non_utf8_path_is_passed_to_git_unchanged",
+                "--nocapture",
+            ])
+            .env("CRUISE_TEST_NON_UTF8_GIT", "1")
+            .env("CRUISE_TEST_REAL_GIT", real_git)
+            .env("PATH", path)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "mock git subprocess failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "mock git subprocess did not run the test: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
     let r = Repo::new()?;
-    fs::write(
-        r.wt.join(OsStr::from_bytes(b"invalid-\xff.txt")),
-        "native path content\n",
-    )?;
+    if std::env::var_os("CRUISE_TEST_NON_UTF8_GIT").is_none() {
+        match fs::write(
+            r.wt.join(OsStr::from_bytes(b"invalid-\xff.txt")),
+            "native path content\n",
+        ) {
+            Ok(()) => {}
+            // The subprocess above already checked the complete Git interaction.
+            Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    }
     let diff = session_branch_diff(&r.state, false)?;
     assert!(diff.patch.contains("+native path content"));
     assert!(!diff.truncated);
