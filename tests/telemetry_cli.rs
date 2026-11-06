@@ -3309,12 +3309,8 @@ exit 97
     );
 }
 
-#[test]
-fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
-    let collector = Collector::start();
-    let (fixture, env) = builtin_wait_ci_fixture(
-        &collector,
-        r#"#!/bin/sh
+fn failed_check_details_fake_gh_script() -> &'static str {
+    r#"#!/bin/sh
 if [ "$1" = repo ]; then
   printf 'owner/repo\n'
   exit 0
@@ -3343,7 +3339,15 @@ if [ "$1" = api ] && [ "$2" = graphql ]; then
 fi
 printf 'unexpected fake gh invocation with secret details\n' >&2
 exit 97
-"#,
+"#
+}
+
+#[test]
+fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
+    let collector = Collector::start();
+    let (fixture, env) = builtin_wait_ci_fixture(
+        &collector,
+        failed_check_details_fake_gh_script(),
     );
     let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-prompt-secret");
     assert!(
