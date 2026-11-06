@@ -43,6 +43,8 @@ impl Fixture {
         git(&base, &["init"]);
         git(&base, &["config", "user.name", "Test"]);
         git(&base, &["config", "user.email", "test@example.com"]);
+        // Keep checkout contents deterministic even when Git for Windows enables autocrlf.
+        git(&base, &["config", "core.autocrlf", "false"]);
         std::fs::write(base.join("shared.txt"), "original\n").unwrap();
         git(&base, &["add", "."]);
         git(&base, &["commit", "-m", "initial"]);
