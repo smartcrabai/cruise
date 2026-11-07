@@ -36,17 +36,34 @@ pub fn resolve(provider: Provider) -> Result<Resolved> {
     resolve_with_path(provider, std::env::var_os("PATH").as_deref(), None)
 }
 
-pub(crate) fn resolve_with_path(provider: Provider, path: Option<&OsStr>, cwd: Option<&Path>) -> Result<Resolved> {
+pub(crate) fn resolve_with_path(
+    provider: Provider,
+    path: Option<&OsStr>,
+    cwd: Option<&Path>,
+) -> Result<Resolved> {
     let value = std::env::var_os(provider.env_override());
     let dirs: Vec<PathBuf> = path
-        .map(|p| std::env::split_paths(p).map(|dir| {
-            if dir.is_relative() { cwd.unwrap_or_else(|| Path::new(".")).join(dir) } else { dir }
-        }).collect())
+        .map(|p| {
+            std::env::split_paths(p)
+                .map(|dir| {
+                    if dir.is_relative() {
+                        cwd.unwrap_or_else(|| Path::new(".")).join(dir)
+                    } else {
+                        dir
+                    }
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let root = crate::paths::data_dir().ok();
     let target = target::detect_target_key(provider).unwrap_or("");
     resolve_optional_root(
-        provider, value.as_deref(), root.as_deref(), &dirs, target, true,
+        provider,
+        value.as_deref(),
+        root.as_deref(),
+        &dirs,
+        target,
+        true,
     )
 }
 
@@ -75,7 +92,14 @@ pub(crate) fn resolve_in_impl(
     target_key: &str,
     warn: bool,
 ) -> Result<Resolved> {
-    resolve_optional_root(provider, env_override, Some(data_root), path_dirs, target_key, warn)
+    resolve_optional_root(
+        provider,
+        env_override,
+        Some(data_root),
+        path_dirs,
+        target_key,
+        warn,
+    )
 }
 
 fn resolve_optional_root(
@@ -108,13 +132,16 @@ fn resolve_optional_root(
         let dir = data_root.join("providers").join(provider.as_str());
         let record_path = dir.join("install.json");
         match record::read_record(&record_path) {
-            Ok(rec) if record::record_valid(provider, pins::pin(provider), target_key, &dir, &rec) => {
+            Ok(rec)
+                if record::record_valid(provider, pins::pin(provider), target_key, &dir, &rec) =>
+            {
                 return Ok(Resolved {
                     program: dir.join(rec.relative_path),
                     source: Source::Managed,
                 });
             }
-            Err(CruiseError::IoError(ref error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(CruiseError::IoError(ref error))
+                if error.kind() == std::io::ErrorKind::NotFound => {}
             _ if warn => warn_invalid(provider),
             _ => {}
         }
@@ -169,19 +196,41 @@ mod tests {
         let resolve = |value: Option<&OsStr>, dirs: &[PathBuf]| {
             resolve_optional_root(Provider::Jcode, value, None, dirs, "", false)
         };
-        assert_eq!(resolve(Some(binary.as_os_str()), &[]).unwrap().source, Source::Override);
-        assert_eq!(resolve(None, &[root.path().to_path_buf()]).unwrap().source, Source::Path);
-        assert!(resolve(None, &[]).unwrap_err().to_string().contains("cruise install jcode"));
+        assert_eq!(
+            resolve(Some(binary.as_os_str()), &[]).unwrap().source,
+            Source::Override
+        );
+        assert_eq!(
+            resolve(None, &[root.path().to_path_buf()]).unwrap().source,
+            Source::Path
+        );
+        assert!(
+            resolve(None, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("cruise install jcode")
+        );
     }
 
     #[test]
     fn relative_override_becomes_absolute() {
         let cwd = std::env::current_dir().unwrap();
-        let temp = tempfile::Builder::new().prefix(".cruise-override-test-").tempdir_in(&cwd).unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix(".cruise-override-test-")
+            .tempdir_in(&cwd)
+            .unwrap();
         let binary = temp.path().join("provider");
         fs::write(&binary, b"fixture").unwrap();
         let relative = binary.strip_prefix(&cwd).unwrap();
-        let resolved = resolve_optional_root(Provider::Jcode, Some(relative.as_os_str()), None, &[], "", false).unwrap();
+        let resolved = resolve_optional_root(
+            Provider::Jcode,
+            Some(relative.as_os_str()),
+            None,
+            &[],
+            "",
+            false,
+        )
+        .unwrap();
         assert_eq!(resolved.program, binary);
     }
 

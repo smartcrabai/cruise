@@ -210,9 +210,11 @@ fn publish_install(
     record_path: &Path,
     rec: &record::InstallRecord,
 ) -> Result<()> {
-    let final_dir = dir.join(Path::new(&rec.relative_path).parent().ok_or_else(|| {
-        CruiseError::Other("install path has no parent".into())
-    })?);
+    let final_dir = dir.join(
+        Path::new(&rec.relative_path)
+            .parent()
+            .ok_or_else(|| CruiseError::Other("install path has no parent".into()))?,
+    );
     fs::rename(staging, &final_dir)?;
     if let Err(e) = record::write_record_atomic(record_path, rec) {
         let _ = fs::remove_dir_all(&final_dir);
@@ -465,8 +467,19 @@ mod tests {
             temp.path(),
             &rec
         ));
-        rec.relative_path = format!("{}-../{}/{}", pin.version, pin.version, Provider::Claude.binary_name());
-        assert!(!record::record_valid(Provider::Claude, pin, "test", temp.path(), &rec));
+        rec.relative_path = format!(
+            "{}-../{}/{}",
+            pin.version,
+            pin.version,
+            Provider::Claude.binary_name()
+        );
+        assert!(!record::record_valid(
+            Provider::Claude,
+            pin,
+            "test",
+            temp.path(),
+            &rec
+        ));
         fs::write(binary, b"modified").unwrap();
         assert!(!record::record_valid(
             Provider::Claude,
@@ -489,9 +502,15 @@ mod tests {
         let record_path = temp.path().join("install.json");
         fs::create_dir(&record_path).unwrap();
         let rec = record::InstallRecord {
-            schema: 1, provider: "claude".into(), version: "1.0".into(),
-            target: "test".into(), relative_path: "new/claude".into(),
-            sha256: String::new(), len: 3, mtime_unix_nanos: 0, source_url: String::new(),
+            schema: 1,
+            provider: "claude".into(),
+            version: "1.0".into(),
+            target: "test".into(),
+            relative_path: "new/claude".into(),
+            sha256: String::new(),
+            len: 3,
+            mtime_unix_nanos: 0,
+            source_url: String::new(),
         };
         assert!(publish_install(temp.path(), &staging, &record_path, &rec).is_err());
         assert_eq!(fs::read(old.join("claude")).unwrap(), b"old");

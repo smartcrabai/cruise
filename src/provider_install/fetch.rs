@@ -235,7 +235,12 @@ pub(crate) fn probe(provider: Provider, binary: &Path, expected: &str) -> Result
     probe_with_timeout(provider, binary, expected, Duration::from_secs(30))
 }
 
-fn probe_with_timeout(provider: Provider, binary: &Path, expected: &str, timeout: Duration) -> Result<()> {
+fn probe_with_timeout(
+    provider: Provider,
+    binary: &Path,
+    expected: &str,
+    timeout: Duration,
+) -> Result<()> {
     let mut cmd = Command::new(binary);
     match provider {
         Provider::Jcode => {
@@ -261,7 +266,9 @@ fn probe_with_timeout(provider: Provider, binary: &Path, expected: &str, timeout
             let mut buf = [0u8; 4096];
             loop {
                 let n = stdout.read(&mut buf)?;
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 if output.len() < 65536 {
                     let keep = n.min(65536 - output.len());
                     output.extend_from_slice(&buf[..keep]);
@@ -278,7 +285,9 @@ fn probe_with_timeout(provider: Provider, binary: &Path, expected: &str, timeout
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            std::thread::spawn(move || { let _ = child.wait(); });
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
             return Err(err("provider version probe timed out"));
         }
         std::thread::sleep(Duration::from_millis(25));
@@ -291,7 +300,9 @@ fn probe_with_timeout(provider: Provider, binary: &Path, expected: &str, timeout
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|e| match e {
             std::sync::mpsc::RecvTimeoutError::Timeout => err("provider version probe timed out"),
-            std::sync::mpsc::RecvTimeoutError::Disconnected => err("provider probe output reader failed"),
+            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                err("provider probe output reader failed")
+            }
         })??;
     let text = String::from_utf8_lossy(&output);
     let version = match provider {
@@ -335,40 +346,76 @@ mod tests {
             tar.append_data(&mut header, name, &b"x"[..]).unwrap();
         }
         tar.into_inner().unwrap().finish().unwrap();
-        let target = TargetPin { key: "test", url: "https://example.com/test", archive: Archive::TarGz { root: Some("package") }, entry: "package/bin/opencode", digest: Digest::Sha256("unused") };
-        assert!(extract_archive(&target, &dir.path().join("binary"), &archive).unwrap_err().to_string().contains("unexpected archive entry"));
+        let target = TargetPin {
+            key: "test",
+            url: "https://example.com/test",
+            archive: Archive::TarGz {
+                root: Some("package"),
+            },
+            entry: "package/bin/opencode",
+            digest: Digest::Sha256("unused"),
+        };
+        assert!(
+            extract_archive(&target, &dir.path().join("binary"), &archive)
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected archive entry")
+        );
     }
 
     #[test]
     fn sha512_mismatch_rejects_download() {
         let body = b"payload";
-        let sri: &'static str = Box::leak(format!("sha512-{}", b64(&Sha512::digest(b"other"))).into_boxed_str());
-        let target = TargetPin { key: "test", url: "https://example.com/test", archive: Archive::Raw, entry: "test", digest: Digest::Sha512Sri(sri) };
+        let sri: &'static str =
+            Box::leak(format!("sha512-{}", b64(&Sha512::digest(b"other"))).into_boxed_str());
+        let target = TargetPin {
+            key: "test",
+            url: "https://example.com/test",
+            archive: Archive::Raw,
+            entry: "test",
+            digest: Digest::Sha512Sri(sri),
+        };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 1024];
             let _ = stream.read(&mut request);
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
             stream.write_all(body).unwrap();
         });
         let dir = tempfile::tempdir().unwrap();
-        let error = fetch_and_verify(&target, &dir.path().join("binary"), &[], Some(&base)).unwrap_err();
+        let error =
+            fetch_and_verify(&target, &dir.path().join("binary"), &[], Some(&base)).unwrap_err();
         assert!(error.to_string().contains("SHA512 mismatch"));
         server.join().unwrap();
     }
 
     #[test]
     fn truncated_content_length_rejects_download() {
-        let target = TargetPin { key: "test", url: "https://example.com/test", archive: Archive::Raw, entry: "test", digest: Digest::Sha256("unused") };
+        let target = TargetPin {
+            key: "test",
+            url: "https://example.com/test",
+            archive: Archive::Raw,
+            entry: "test",
+            digest: Digest::Sha256("unused"),
+        };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 1024];
             let _ = stream.read(&mut request);
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nshort").unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nshort",
+                )
+                .unwrap();
         });
         let dir = tempfile::tempdir().unwrap();
         assert!(fetch_and_verify(&target, &dir.path().join("binary"), &[], Some(&base)).is_err());
@@ -383,7 +430,12 @@ mod tests {
         fs::write(&binary, b"#!/bin/sh\nsleep 2 &\nprintf '1.0.0\\n'\n").unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         let start = Instant::now();
-        let result = probe_with_timeout(Provider::Claude, &binary, "1.0.0", Duration::from_millis(100));
+        let result = probe_with_timeout(
+            Provider::Claude,
+            &binary,
+            "1.0.0",
+            Duration::from_millis(100),
+        );
         assert!(result.unwrap_err().to_string().contains("timed out"));
         assert!(start.elapsed() < Duration::from_secs(1));
     }

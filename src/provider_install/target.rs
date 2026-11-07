@@ -1,9 +1,15 @@
 use super::Provider;
 use crate::error::{CruiseError, Result};
 fn musl_from_maps(maps: &str) -> Option<bool> {
-    if maps.lines().any(|line| line.contains("ld-musl-") || line.contains("libc.musl-")) {
+    if maps
+        .lines()
+        .any(|line| line.contains("ld-musl-") || line.contains("libc.musl-"))
+    {
         Some(true)
-    } else if maps.lines().any(|line| line.contains("libc.so.6") || line.contains("ld-linux")) {
+    } else if maps
+        .lines()
+        .any(|line| line.contains("libc.so.6") || line.contains("ld-linux"))
+    {
         Some(false)
     } else {
         None
@@ -16,9 +22,11 @@ fn musl_from_maps(maps: &str) -> Option<bool> {
 /// Returns an error if this OS, architecture, or libc has no pinned build.
 pub fn detect_target_key(provider: Provider) -> Result<&'static str> {
     let arch = std::env::consts::ARCH;
-    let musl = cfg!(target_os = "linux") && std::fs::read_to_string("/proc/self/maps")
-        .ok().and_then(|maps| musl_from_maps(&maps))
-        .unwrap_or(cfg!(target_env = "musl"));
+    let musl = cfg!(target_os = "linux")
+        && std::fs::read_to_string("/proc/self/maps")
+            .ok()
+            .and_then(|maps| musl_from_maps(&maps))
+            .unwrap_or(cfg!(target_env = "musl"));
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     let avx2 = std::is_x86_feature_detected!("avx2");
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -91,7 +99,10 @@ mod tests {
     #[test]
     fn libc_detection_uses_loaded_libraries() {
         assert_eq!(musl_from_maps("/lib/ld-musl-x86_64.so.1"), Some(true));
-        assert_eq!(musl_from_maps("/lib/x86_64-linux-gnu/libc.so.6"), Some(false));
+        assert_eq!(
+            musl_from_maps("/lib/x86_64-linux-gnu/libc.so.6"),
+            Some(false)
+        );
         assert_eq!(musl_from_maps(""), None);
     }
     #[test]

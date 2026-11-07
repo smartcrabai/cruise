@@ -53,7 +53,9 @@ pub(crate) fn record_valid(
     rec: &InstallRecord,
 ) -> bool {
     let legacy = format!("{}/{}", pin.version, provider.binary_name());
-    let generated = rec.relative_path.strip_prefix(&format!("{}-", pin.version))
+    let generated = rec
+        .relative_path
+        .strip_prefix(&format!("{}-", pin.version))
         .and_then(|rest| rest.strip_suffix(&format!("/{}", provider.binary_name())))
         .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id));
     rec.schema == 1
