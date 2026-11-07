@@ -3203,6 +3203,7 @@ steps:
             None,
             None,
             None,
+            None,
         )
         .await;
         assert!(result.is_ok(), "{result:?}");
@@ -3316,6 +3317,7 @@ steps:
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -3421,6 +3423,7 @@ steps:
                 &crate::flags::NO_FLAGS,
                 None,
                 &NoOpOptionHandler,
+                None,
                 None,
                 None,
                 None,

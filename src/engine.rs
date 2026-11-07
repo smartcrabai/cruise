@@ -1188,7 +1188,9 @@ async fn execute_step_kind_inner(
                 current_step,
                 has_nfc_condition,
                 allow_commit,
-                lease.as_ref().map(|lease| lease.block_text()),
+                lease
+                    .as_ref()
+                    .map(crate::instruction_inbox::Lease::block_text),
             ))
             .await;
             finish_instruction_lease(ctx, lease, current_step, &result);
@@ -1522,10 +1524,10 @@ pub(crate) fn finish_instruction_lease<T>(
             .join(", ");
         match result {
             Ok(_) => {
-                if lease.ack() {
-                    if let Some(log) = ctx.on_step_log {
-                        log("info", &format!("tell: delivered {ids} at step {step}"));
-                    }
+                if lease.ack()
+                    && let Some(log) = ctx.on_step_log
+                {
+                    log("info", &format!("tell: delivered {ids} at step {step}"));
                 }
             }
             Err(error) => lease.release(&error.to_string()),

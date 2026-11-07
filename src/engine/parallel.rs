@@ -37,7 +37,10 @@ pub(super) async fn run_parallel_step(
     for child in children.values() {
         if matches!(StepKind::try_from(child.clone()), Ok(StepKind::Prompt(_)))
             && matches!(should_skip(child.skip.as_ref(), vars), Ok(false))
-            && matches!(should_skip_due_to_when(child.when.as_ref(), vars, ctx.working_dir), Ok(false))
+            && matches!(
+                should_skip_due_to_when(child.when.as_ref(), vars, ctx.working_dir),
+                Ok(false)
+            )
         {
             has_prompt = true;
             break;
@@ -111,7 +114,10 @@ pub(super) async fn run_parallel_step(
             )
         })
         .fold((false, true), |(dispatched, success), (_, result)| {
-            (dispatched || matches!(result, Ok(output) if !output.skipped), success && result.is_ok())
+            (
+                dispatched || matches!(result, Ok(output) if !output.skipped),
+                success && result.is_ok(),
+            )
         });
     let delivered = if dispatched && prompt_success {
         Ok(())
@@ -125,6 +131,17 @@ pub(super) async fn run_parallel_step(
     {
         return Err(CruiseError::Interrupted);
     }
+    finish_parallel_step(children, results, vars, has_if_fail, parent_name, timed_out)
+}
+
+fn finish_parallel_step(
+    children: &IndexMap<String, StepConfig>,
+    results: Vec<Result<ChildResult>>,
+    vars: &mut VariableStore,
+    has_if_fail: bool,
+    parent_name: &str,
+    timed_out: bool,
+) -> Result<StepExecOutcome> {
     let mut outputs = IndexMap::new();
     let mut fatal_error = None;
     let mut stderr = Vec::new();

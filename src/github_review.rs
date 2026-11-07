@@ -813,7 +813,9 @@ async fn run_loop(
             step_name,
             false,
             allow_commit,
-            lease.as_ref().map(|lease| lease.block_text()),
+            lease
+                .as_ref()
+                .map(crate::instruction_inbox::Lease::block_text),
         ))
         .await;
         crate::engine::finish_instruction_lease(ctx, lease, step_name, &prompt_result);

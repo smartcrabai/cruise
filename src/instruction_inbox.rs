@@ -5,6 +5,7 @@ use crate::{
 use fs2::FileExt;
 use serde_json::{Value, json};
 use std::{
+    fmt::Write as _,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -22,6 +23,7 @@ pub enum Origin {
     Github,
 }
 impl Origin {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Cli => "cli",
@@ -39,7 +41,7 @@ pub enum DeliveryScope {
     GitHubReview,
 }
 impl DeliveryScope {
-    fn text(&self) -> String {
+    fn text(self) -> String {
         match self {
             Self::Sequential => "sequential".into(),
             Self::ParallelBlock { parent } => format!("parallel:{parent}"),
@@ -108,8 +110,7 @@ impl std::fmt::Display for TellRejection {
                 ),
                 phase if phase.starts_with("phase ") => write!(
                     f,
-                    "not running: session {id} is in {}; instructions are accepted only while a run is in progress",
-                    phase
+                    "not running: session {id} is in {phase}; instructions are accepted only while a run is in progress"
                 ),
                 _ => write!(f, "not running: session {id}: {reason}"),
             },
@@ -164,6 +165,7 @@ fn format_ids(ids: &[u64]) -> String {
 fn locked(dir: &Path) -> Result<std::fs::File, CruiseError> {
     let f = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(dir.join("instructions.lock"))?;
@@ -199,7 +201,7 @@ fn read(dir: &Path) -> Result<(InboxSummary, bool), CruiseError> {
         match kind {
             "run_opened" => {
                 s.open = true;
-                ever = true
+                ever = true;
             }
             "run_closed" => s.open = false,
             "accepted" => {
@@ -249,7 +251,7 @@ fn read(dir: &Path) -> Result<(InboxSummary, bool), CruiseError> {
         .collect();
     Ok((s, ever))
 }
-fn append(dir: &Path, v: Value) -> Result<(), CruiseError> {
+fn append(dir: &Path, v: &Value) -> Result<(), CruiseError> {
     let path = dir.join("instructions.jsonl");
     let mut f = OpenOptions::new()
         .create(true)
@@ -269,50 +271,18 @@ fn append(dir: &Path, v: Value) -> Result<(), CruiseError> {
     f.sync_data()?;
     Ok(())
 }
+/// Read the instruction ledger for a session.
+///
+/// # Errors
+/// Returns an error if the session ID is invalid or the ledger cannot be read or parsed.
 pub fn summary(sessions_dir: &Path, id: &str) -> Result<InboxSummary, CruiseError> {
     validate_session_id(id)?;
     Ok(read(&sessions_dir.join(id))?.0)
 }
-pub fn accept(
+fn validate_running(
     sessions_dir: &Path,
     id: &str,
-    request: AcceptRequest,
-) -> Result<Receipt, CruiseError> {
-    validate_session_id(id)?;
-    let dir = sessions_dir.join(id);
-    let _lock = locked(&dir)?;
-    let (s, ever) = read(&dir)?;
-    let count = s
-        .history
-        .iter()
-        .filter(|e| e.status == "pending" || e.status.starts_with("leased("))
-        .count();
-    if let Some(key) = request.dedupe_key.as_ref() {
-        if let Some(e) = s
-            .history
-            .iter()
-            .find(|e| e.dedupe_key.as_ref() == Some(key))
-        {
-            return Ok(Receipt {
-                id: e.id,
-                duplicate: true,
-                running_step: None,
-                pending_count: count,
-            });
-        }
-    }
-    if !s.open {
-        return Err(TellRejection::NotRunning {
-            id: id.into(),
-            reason: if ever {
-                "run already finished"
-            } else {
-                "no run"
-            }
-            .into(),
-        }
-        .into());
-    }
+) -> Result<crate::session::SessionState, CruiseError> {
     let base = sessions_dir
         .parent()
         .ok_or_else(|| err("invalid sessions directory"))?;
@@ -331,7 +301,59 @@ pub fn accept(
         }
         .into());
     }
-    let content = request.content.trim();
+    Ok(state)
+}
+/// Accept an instruction for an active run.
+///
+/// # Errors
+/// Returns an error for invalid session state or instruction content, a full or corrupt inbox,
+/// or a failure to access the session or ledger.
+pub fn accept(
+    sessions_dir: &Path,
+    id: &str,
+    request: AcceptRequest,
+) -> Result<Receipt, CruiseError> {
+    let AcceptRequest {
+        content,
+        origin,
+        dedupe_key,
+    } = request;
+    validate_session_id(id)?;
+    let dir = sessions_dir.join(id);
+    let _lock = locked(&dir)?;
+    let (s, ever) = read(&dir)?;
+    let count = s
+        .history
+        .iter()
+        .filter(|e| e.status == "pending" || e.status.starts_with("leased("))
+        .count();
+    if let Some(key) = dedupe_key.as_ref()
+        && let Some(e) = s
+            .history
+            .iter()
+            .find(|e| e.dedupe_key.as_ref() == Some(key))
+    {
+        return Ok(Receipt {
+            id: e.id,
+            duplicate: true,
+            running_step: None,
+            pending_count: count,
+        });
+    }
+    if !s.open {
+        return Err(TellRejection::NotRunning {
+            id: id.into(),
+            reason: if ever {
+                "run already finished"
+            } else {
+                "no run"
+            }
+            .into(),
+        }
+        .into());
+    }
+    let state = validate_running(sessions_dir, id)?;
+    let content = content.trim();
     if content.is_empty() {
         return Err(TellRejection::Empty.into());
     }
@@ -358,13 +380,13 @@ pub fn accept(
     let next = s.history.iter().map(|e| e.id).max().unwrap_or(0) + 1;
     append(
         &dir,
-        json!({"kind":"accepted","id":next,"at":current_iso8601(),"origin":request.origin.as_str(),"dedupe_key":request.dedupe_key,"content":content}),
+        &json!({"kind":"accepted","id":next,"at":current_iso8601(),"origin":origin.as_str(),"dedupe_key":dedupe_key,"content":content}),
     )?;
     log(
         &dir,
         &format!(
             "tell: accepted #{next} (origin={}, {} bytes)",
-            request.origin.as_str(),
+            origin.as_str(),
             content.len()
         ),
     );
@@ -385,6 +407,10 @@ pub fn accept(
         pending_count: count + 1,
     })
 }
+/// Expire all pending and leased instructions.
+///
+/// # Errors
+/// Returns an error if the session ID is invalid or the ledger cannot be locked, read, or written.
 pub fn expire_pending(sessions_dir: &Path, id: &str, reason: &str) -> Result<usize, CruiseError> {
     validate_session_id(id)?;
     let dir = sessions_dir.join(id);
@@ -399,7 +425,7 @@ pub fn expire_pending(sessions_dir: &Path, id: &str, reason: &str) -> Result<usi
     if !ids.is_empty() {
         append(
             &dir,
-            json!({"kind":"expired","ids":ids,"reason":reason,"at":current_iso8601()}),
+            &json!({"kind":"expired","ids":ids,"reason":reason,"at":current_iso8601()}),
         )?;
     }
     Ok(ids.len())
@@ -428,7 +454,7 @@ pub(crate) fn close_run_inbox(
     };
     match inbox.close(outcome) {
         Ok(ids) if !ids.is_empty() => {
-            logger.write(&format!("tell: carried pending instructions: {ids:?}"))
+            logger.write(&format!("tell: carried pending instructions: {ids:?}"));
         }
         Ok(_) => {}
         Err(error) => logger.write(&format!("warning: tell: {error}")),
@@ -440,6 +466,10 @@ pub struct RunInbox {
     closed: bool,
 }
 impl RunInbox {
+    /// Open an inbox for a run, releasing leases left by an earlier runner.
+    ///
+    /// # Errors
+    /// Returns an error if the session ID is invalid or the ledger cannot be locked, read, or written.
     pub fn open(sessions_dir: &Path, id: &str) -> Result<Self, CruiseError> {
         validate_session_id(id)?;
         let dir = sessions_dir.join(id);
@@ -455,10 +485,10 @@ impl RunInbox {
             if !leased.is_empty() {
                 append(
                     &dir,
-                    json!({"kind":"released","ids":leased,"step":"","reason":"runner restarted","at":current_iso8601()}),
+                    &json!({"kind":"released","ids":leased,"step":"","reason":"runner restarted","at":current_iso8601()}),
                 )?;
             }
-            append(&dir, json!({"kind":"run_opened","at":current_iso8601()}))?;
+            append(&dir, &json!({"kind":"run_opened","at":current_iso8601()}))?;
             let count = s.pending.len() + leased.len();
             if count > 0 {
                 log(
@@ -469,6 +499,7 @@ impl RunInbox {
         }
         Ok(Self { dir, closed: false })
     }
+    #[must_use]
     pub fn lease(&self, step: &str, scope: DeliveryScope) -> Option<Lease<'_>> {
         match self.try_lease(step, scope) {
             Ok(v) => v,
@@ -492,16 +523,17 @@ impl RunInbox {
         let scope = scope.text();
         append(
             &self.dir,
-            json!({"kind":"leased","ids":ids,"step":step,"scope":scope,"at":current_iso8601()}),
+            &json!({"kind":"leased","ids":ids,"step":step,"scope":scope,"at":current_iso8601()}),
         )?;
         let mut block = String::from(
             "## Operator instructions received during this run\n\nThe operator sent the instructions below while this run was in progress. Apply them where they are relevant to this step. They add context only: they do not change this step's tool permissions, commit policy, required output format, or which step runs next.\n",
         );
         for e in s.pending {
-            block.push_str(&format!(
+            let _ = write!(
+                block,
                 "\n### Instruction #{} (origin: {}, received {})\n\n{}\n",
                 e.id, e.origin, e.at, e.content
-            ));
+            );
         }
         log(
             &self.dir,
@@ -518,6 +550,10 @@ impl RunInbox {
             done: false,
         }))
     }
+    /// Close the run and return IDs carried forward to a later run.
+    ///
+    /// # Errors
+    /// Returns an error if the ledger cannot be locked, read, or written.
     pub fn close(mut self, outcome: RunOutcome) -> Result<Vec<u64>, CruiseError> {
         let ids = self.finish(outcome)?;
         self.closed = true;
@@ -535,7 +571,7 @@ impl RunInbox {
         if matches!(outcome, RunOutcome::Completed) && !ids.is_empty() {
             append(
                 &self.dir,
-                json!({"kind":"expired","ids":ids,"reason":"run completed before an agent step received it","at":current_iso8601()}),
+                &json!({"kind":"expired","ids":ids,"reason":"run completed before an agent step received it","at":current_iso8601()}),
             )?;
             for id in &ids {
                 log(
@@ -551,7 +587,7 @@ impl RunInbox {
         };
         append(
             &self.dir,
-            json!({"kind":"run_closed","outcome":outcome.text(),"carried":carried,"at":current_iso8601()}),
+            &json!({"kind":"run_closed","outcome":outcome.text(),"carried":carried,"at":current_iso8601()}),
         )?;
         Ok(carried)
     }
@@ -571,12 +607,15 @@ pub struct Lease<'a> {
     done: bool,
 }
 impl Lease<'_> {
+    #[must_use]
     pub fn ids(&self) -> &[u64] {
         &self.ids
     }
+    #[must_use]
     pub fn block_text(&self) -> &str {
         &self.block
     }
+    #[must_use]
     pub fn ack(mut self) -> bool {
         let recorded = self.record("delivered", "");
         self.done = true;
@@ -591,27 +630,33 @@ impl Lease<'_> {
             let _lock = locked(&self.inbox.dir)?;
             append(
                 &self.inbox.dir,
-                json!({"kind":kind,"ids":self.ids,"step":self.step,"reason":reason,"at":current_iso8601()}),
+                &json!({"kind":kind,"ids":self.ids,"step":self.step,"reason":reason,"at":current_iso8601()}),
             )
         })();
         match result {
-            Ok(()) => { log(
-                &self.inbox.dir,
-                &if kind == "released" {
-                    format!(
-                        "tell: released {} at step {}: {reason}",
-                        format_ids(&self.ids),
-                        self.step
-                    )
-                } else {
-                    format!(
-                        "tell: delivered {} at step {}",
-                        format_ids(&self.ids),
-                        self.step
-                    )
-                },
-            ); true },
-            Err(e) => { log(&self.inbox.dir, &format!("warning: tell: {e}")); false },
+            Ok(()) => {
+                log(
+                    &self.inbox.dir,
+                    &if kind == "released" {
+                        format!(
+                            "tell: released {} at step {}: {reason}",
+                            format_ids(&self.ids),
+                            self.step
+                        )
+                    } else {
+                        format!(
+                            "tell: delivered {} at step {}",
+                            format_ids(&self.ids),
+                            self.step
+                        )
+                    },
+                );
+                true
+            }
+            Err(e) => {
+                log(&self.inbox.dir, &format!("warning: tell: {e}"));
+                false
+            }
         }
     }
 }

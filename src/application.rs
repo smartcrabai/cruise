@@ -2962,6 +2962,10 @@ impl CruiseApplication {
     }
 
     /// Submit an instruction without acquiring the run's application claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session cannot be loaded or the instruction cannot be accepted.
     pub fn tell(
         &self,
         id: &str,
@@ -2981,6 +2985,10 @@ impl CruiseApplication {
     }
 
     /// Read the instruction ledger summary for a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session cannot be loaded or its instruction ledger cannot be read.
     pub fn pending_summary(&self, id: &str) -> Result<crate::instruction_inbox::InboxSummary> {
         self.manager.load(id)?;
         crate::instruction_inbox::summary(&self.manager.sessions_dir(), id)
@@ -3163,7 +3171,14 @@ impl CruiseApplication {
                 actions.extend([SessionAction::ResetToPlanned, SessionAction::Delete]);
             }
         }
-        let planning_claim = matches!(
+        if self.has_planning_claim(state) && !actions.contains(&SessionAction::Cancel) {
+            actions.push(SessionAction::Cancel);
+        }
+        actions
+    }
+
+    fn has_planning_claim(&self, state: &SessionState) -> bool {
+        matches!(
             self.runtime.active_operation(&state.id),
             Some(
                 OperationKind::Generate
@@ -3173,11 +3188,7 @@ impl CruiseApplication {
                     | OperationKind::Run
                     | OperationKind::CreatePr
             )
-        );
-        if planning_claim && !actions.contains(&SessionAction::Cancel) {
-            actions.push(SessionAction::Cancel);
-        }
-        actions
+        )
     }
 
     fn add_local_merge_actions(state: &SessionState, actions: &mut Vec<SessionAction>) {
@@ -3908,25 +3919,10 @@ impl CruiseApplication {
             let cancelled: Result<()> = Err(CruiseError::Interrupted);
             prepare.finish_result(&cancelled);
             let finalize = crate::telemetry::Operation::phase("finalize");
-            let result: Result<SessionState> = async {
-                let _ = cleanup_new_execution_workspace(
-                    &self.manager,
-                    &mut setup.state,
-                    &setup.workspace,
-                    setup.repo_clone_created,
-                );
-                setup.state.phase = SessionPhase::Suspended;
-                setup.state.pr_skipped_reason = None;
-                setup.state.clear_pending_input();
-                setup.state.clear_runner();
-                self.manager.save(&setup.state)?;
-                sink.send(ApplicationEvent::RunCancelled {
-                    session_id: id.to_string(),
-                })?;
-                Err(CruiseError::Interrupted)
-            }
-            .with_context(finalize.context())
-            .await;
+            let result: Result<SessionState> =
+                async { self.persist_cancelled_run(id, &mut setup, &*sink) }
+                    .with_context(finalize.context())
+                    .await;
             finalize.finish_result(&result);
             return result;
         }
@@ -3964,8 +3960,7 @@ impl CruiseApplication {
             &mut setup,
             &mut inputs,
             sink.clone(),
-            log_sink,
-            batch_started,
+            (log_sink, batch_started),
             instructions.as_ref(),
         )
         .await;
@@ -3992,6 +3987,29 @@ impl CruiseApplication {
         );
         finalize.finish_result(&result);
         result
+    }
+
+    fn persist_cancelled_run(
+        &self,
+        id: &str,
+        setup: &mut RunSetup,
+        sink: &dyn ApplicationEventSink,
+    ) -> Result<SessionState> {
+        let _ = cleanup_new_execution_workspace(
+            &self.manager,
+            &mut setup.state,
+            &setup.workspace,
+            setup.repo_clone_created,
+        );
+        setup.state.phase = SessionPhase::Suspended;
+        setup.state.pr_skipped_reason = None;
+        setup.state.clear_pending_input();
+        setup.state.clear_runner();
+        self.manager.save(&setup.state)?;
+        sink.send(ApplicationEvent::RunCancelled {
+            session_id: id.to_string(),
+        })?;
+        Err(CruiseError::Interrupted)
     }
 }
 
@@ -4368,10 +4386,10 @@ async fn execute_run(
     setup: &mut RunSetup,
     inputs: &mut RunInputs,
     sink: Arc<dyn ApplicationEventSink>,
-    log_sink: Option<Arc<dyn LogSink>>,
-    batch_started: bool,
+    logging: (Option<Arc<dyn LogSink>>, bool),
     instructions: Option<&crate::instruction_inbox::RunInbox>,
 ) -> Result<bool> {
+    let (log_sink, batch_started) = logging;
     let id = claim.session_id();
     let option = RuntimeOptionHandler {
         runtime: Arc::clone(&claim.runtime),
