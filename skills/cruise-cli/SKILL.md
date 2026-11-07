@@ -250,7 +250,7 @@ The interactive menu changes with the session's phase:
 | **Awaiting Input** | Generate Plan, Delete, Back |
 | **Awaiting Approval** | Approve, Publish as Issue, Edit Settings, Delete, Back |
 | **Planned** | Run, Publish as Issue, Edit Settings, Replan, Delete, Back |
-| **Running** | Resume, Reset to Planned, Delete, Back |
+| **Running** | Resume, Tell (live runner only), Reset to Planned, Delete, Back |
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
 | **PR Failed** | Create PR, Open PR*, Reset to Planned, Delete, Back |
@@ -269,6 +269,7 @@ The interactive menu changes with the session's phase:
 - Current-branch sessions have no worktree branch to compare. PR cleanup can remove the branch, including with default `builtin:tdd`; use **Open PR** after cleanup. The TUI and WebUI Diff tabs show the same comparison. Press `r` in the TUI or use **Refresh** in the WebUI to reload it.
 
 - **Merge PR** previews the PR (state, mergeability, review decision, checks), asks for a method (`Squash` default, `Merge`, `Rebase`), confirms, then runs `gh pr merge <url> <method flag>` (never `--auto`/`--admin`/`--delete-branch`). If the PR is then Closed/Merged, that session and its worktree are removed; if it is still Open (merge queue), the session is kept and `cruise clean` re-checks later. Closed/Merged PRs are not merged again: use `cruise clean`.
+- **Tell** sends text to a live running session: `cruise tell <id> "instruction"`, or pipe text to `cruise tell <id> -`. Inspect history with `cruise tell <id> --log`; TUI and WebUI also offer Tell. Accepted text reaches the next agent prompt, not the current step or command/option steps, and does not change permissions or transitions. Completed runs expire pending text; failed or suspended runs retain it, reset expires it, and crash recovery can redeliver. Limits are 8,192 bytes per instruction, 20 pending, and 65,536 pending bytes.
 - **Stage local merge** commits outstanding worktree changes to the session branch and stages its squash in the base checkout, retaining the session without committing the base.
 - **Merge locally & cleanup** makes one base squash commit and removes the worktree, branch and session. A cleanup failure retains the session for retry without another squash. An initial squash requires the recorded target checked out, a clean tracked base and no behind upstream. Cruise does not pull. A cleanup retry requires the recorded source commit, an unchanged branch, and an expected retained worktree with no tracked or untracked changes. Cruise reports conflicts, attempts rollback, and reports rollback failure. These actions exclude `--repo` and current-branch sessions and ignore `cleanup_after_pr` and the `merge` flag.
 - **Reset to Planned** clears the current step so the session re-runs from the start — the go-to recovery for a wedged `Running`/`Failed` session.
@@ -283,7 +284,7 @@ cruise
 
 Typical flow: run `cruise`, press `n` to open **New Session**, choose the Source, working directory or repository, and workflow config, then type the task. Press `Ctrl-P` for normal planning, `Ctrl-G` for grill planning, or `Ctrl-U` to use the input directly as the plan, or press `Tab` to answer the remaining questions one at a time and pick the launch mode at the end. After Task, the remaining questions are Images, declared workflow flags (if any), Skipped steps (flag-disabled steps are hidden), Workspace (Directory sessions only), Dirty tree when applicable, and Launch. Press `1` to inspect or act on sessions, then `3` to run the planned queue in **Run All**.
 
-Bare `cruise` opens the official keyboard-only client beside the CLI and WebUI. It exposes the WebUI's session-management workflows in a terminal. It requires an interactive TTY on macOS, Linux, or Windows (Ctrl+C is handled on Windows); non-TTY use is not supported. On Windows, desktop notifications are not sent, `cruise ssh` needs the Windows OpenSSH client, herdr reporting is limited, and `command:` steps run through `cmd.exe /C`. GitHub-backed workflows use the external `gh` CLI; current-branch-only work does not require `gh` (`glab` for GitLab repositories).
+Bare `cruise` opens the official keyboard-only client beside the CLI and WebUI. It exposes the WebUI's session-management workflows in a terminal. It requires an interactive TTY on macOS, Linux, or Windows (Ctrl+C is handled on Windows); non-TTY use is not supported. On Windows, desktop notifications and notification sounds are unavailable, but configured webhooks are sent; `cruise ssh` needs the Windows OpenSSH client, herdr reporting is limited, and `command:` steps run through `cmd.exe /C`. GitHub-backed workflows use the external `gh` CLI; current-branch-only work does not require `gh` (`glab` for GitLab repositories).
 
 ### TUI screens and workflows
 
@@ -337,7 +338,7 @@ Keys are fixed and cannot be configured:
 - `NO_COLOR` is honored, and labels/statuses are never conveyed by color alone.
 - Idle updates are event-driven; external state is polled every 3 seconds; active work uses a 100 ms spinner.
 - In-memory logs are bounded: the session log keeps the latest 10,000 lines and Run All keeps the latest 2,000. Complete per-session output remains at `$XDG_DATA_HOME/cruise/sessions/<session-id>/run.log` (default `~/.local/share/cruise/sessions/<session-id>/run.log`).
-- A child process never shares TUI stdin. Interactive child commands therefore cannot prompt through the TUI. Set `CRUISE_DISABLE_NOTIFICATIONS=1` in the process environment to suppress desktop notifications (only the exact value `1` disables them).
+- A child process never shares TUI stdin. Interactive child commands therefore cannot prompt through the TUI. Set `CRUISE_DISABLE_NOTIFICATIONS=1` in the process environment to suppress desktop, sound, and webhook delivery (only the exact value `1` disables them). WebUI browser notifications are not suppressed by this variable.
 - Distinct sessions may run concurrently within one TUI process, but duplicate work for one session is rejected. Concurrent mutation of the same session by separate cruise processes is unsupported.
 
 Use the CLI as the canonical client for automation, JSON, and CI/non-interactive use. `cruise list` and all existing CLI commands remain documented below; `cruise list --json` is the machine-readable session-state interface.
@@ -382,7 +383,7 @@ jcode. `JCODE_MODEL` and jcode's configured default do not fill the Cruise
 setting. File-backed sessions reload defaults; snapshot sessions do not, so
 recreate a snapshot session after changing its model configuration.
 
-These process environment variables are read directly at runtime and are not workflow-config overrides. `CRUISE_RUNTIME` overrides the launcher’s runtime executable path; `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` append a `Co-authored-by:` trailer when both are set; `CRUISE_DISABLE_NOTIFICATIONS=1` disables desktop notifications; `CRUISE_DISABLE_HERDR=1` disables herdr reporting. When `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_BIN_PATH` are set, the TUI and `cruise plan` / `cruise run` / `cruise exec` report lifecycle states to herdr.
+These process environment variables are read directly at runtime and are not workflow-config overrides. `CRUISE_RUNTIME` overrides the launcher’s runtime executable path; `CRUISE_COMMIT_COAUTHOR_NAME` and `CRUISE_COMMIT_COAUTHOR_EMAIL` append a `Co-authored-by:` trailer when both are set; `CRUISE_DISABLE_NOTIFICATIONS=1` disables desktop, sound, and webhook delivery (not WebUI browser notifications); `CRUISE_NOTIFY_WEBHOOK` supplies the secret Slack Incoming Webhook URL, never a configuration-file value; `CRUISE_DISABLE_HERDR=1` disables herdr reporting. When `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_BIN_PATH` are set, the TUI and `cruise plan` / `cruise run` / `cruise exec` report lifecycle states to herdr.
 
 `CRUISE_SKIP_AGENT_AUTH_CHECK=1` bypasses the file-only OAuth expiration preflight before session planning/execution (`cruise plan`, `cruise run`, `cruise exec`, and TUI/WebUI equivalents). Only the exact process-environment value `1` opts out, not `true` or whitespace-padded values. The check covers applicable Claude SDK and explicit jcode Claude/OpenAI OAuth candidates, including effective fallbacks and step overrides, not every installed provider. It stops only for expired access tokens with no refresh token or a known expired refresh token. Refreshable expired access tokens pass without warning. Command backends, dry-runs, OpenCode, API-key/unsupported providers, bare jcode models, and unreadable or indeterminate credential files are skipped. This does not validate server-side revocation or Keychain credentials; step-level `env` API keys are not considered. See [SDK authentication details](../cruise-config/references/sdk.md#startup-oauth-expiration-checks) for credential paths, Claude environment bypasses, and limitations.
 
@@ -393,7 +394,7 @@ These process environment variables are read directly at runtime and are not wor
 | Kind | Path (default) |
 |------|----------------|
 | User workflow YAML configs (`workflows/*.yaml` / `*.yml`) | `$XDG_CONFIG_HOME/cruise/workflows/` → `~/.config/cruise/workflows/` |
-| App settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` → `~/.config/cruise/` |
+| App settings (`config.json` or `config.yaml`, including `notifications`) | `$XDG_CONFIG_HOME/cruise/` → `~/.config/cruise/` |
 | Sessions + worktrees + `--repo` clones | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` (sessions with no filesystem config path, including `-c __builtin__`, keep a `sessions/<id>/config.yaml` snapshot; the execution graph is persisted as `sessions/<id>/dag.json`) |
 | State (`history.json`, `new_session_draft.json`, per-installation `installations/<installation-id>/update-transaction.json`) | `$XDG_STATE_HOME/cruise/` → `~/.local/state/cruise/` |
 | Usage records | `$XDG_STATE_HOME/cruise/usage.ndjson` → `~/.local/state/cruise/usage.ndjson` |

@@ -51,6 +51,7 @@ mod graph;
 mod herdr;
 mod install_identity;
 mod instant_exec;
+mod instruction_inbox;
 mod issue_images;
 mod issue_input;
 mod issue_publish;
@@ -62,6 +63,8 @@ mod model_selection;
 mod multiline_input;
 pub mod new_session_draft;
 mod new_session_history;
+mod notification_sound;
+mod notification_webhook;
 mod option_handler;
 mod paths;
 mod plan_cmd;
@@ -85,6 +88,7 @@ mod spinner;
 mod ssh_cmd;
 mod step;
 pub mod telemetry;
+mod tell_cmd;
 #[cfg(test)]
 mod test_binary_support;
 #[cfg(test)]
@@ -172,6 +176,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Plan(args)) => Box::pin(plan_cmd::run(args)).await,
         Some(cli::Commands::Draft(args)) => draft_cmd::run(args),
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
+        Some(cli::Commands::Tell(args)) => tell_cmd::run(args),
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
         Some(cli::Commands::Diff(args)) => diff_cmd::run(&args),
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),

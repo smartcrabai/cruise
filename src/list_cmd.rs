@@ -38,6 +38,7 @@ struct ListSessionJson {
     updated_at: Option<String>,
     awaiting_input: bool,
     plan_available: bool,
+    pending_instructions: usize,
     auto_requeue_count: u32,
 }
 
@@ -88,6 +89,7 @@ fn session_to_json_with_plan_availability(
         updated_at: session.updated_at,
         awaiting_input: session.awaiting_input,
         plan_available,
+        pending_instructions: 0,
     }
 }
 
@@ -112,7 +114,11 @@ fn write_sessions_json_with_manager<W: Write>(
         .into_iter()
         .map(|session| {
             let plan_available = plan_available_for_session(&session, manager);
-            session_to_json_with_plan_availability(session, plan_available)
+            let pending = crate::instruction_inbox::summary(&manager.sessions_dir(), &session.id)
+                .map_or(0, |summary| summary.pending.len());
+            let mut dto = session_to_json_with_plan_availability(session, plan_available);
+            dto.pending_instructions = pending;
+            dto
         })
         .collect();
     serde_json::to_writer_pretty(&mut writer, &dtos)
@@ -281,6 +287,21 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     };
                     return crate::run_cmd::run(run_args).await;
                 }
+                "Tell" => {
+                    let text = match prompt_multiline("Instruction:")? {
+                        InputResult::Submitted(t) => t,
+                        InputResult::Cancelled => continue,
+                    };
+                    let application = crate::application::CruiseApplication::new(manager.clone());
+                    match application.tell(
+                        &session.id,
+                        text,
+                        crate::instruction_inbox::Origin::List,
+                    ) {
+                        Ok(receipt) => eprintln!("Instruction #{} accepted", receipt.id),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                }
                 "Replan" => {
                     let text = match prompt_multiline("Describe the changes needed:")? {
                         InputResult::Submitted(t) => t,
@@ -376,6 +397,11 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     }
                 }
                 "Reset to Planned" => {
+                    crate::instruction_inbox::expire_pending(
+                        &manager.sessions_dir(),
+                        &session.id,
+                        "reset to planned",
+                    )?;
                     session.reset_to_planned();
                     manager.save(&session)?;
                     eprintln!(
@@ -490,6 +516,9 @@ fn session_actions_with_plan_availability(
         }
         SessionPhase::Running => {
             actions.push("Resume");
+            if session.is_runner_alive() {
+                actions.push("Tell");
+            }
             actions.push("Reset to Planned");
         }
         SessionPhase::Suspended => {
@@ -927,6 +956,28 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn running_live_session_offers_tell_before_reset() {
+        let mut session = make_session("20260306143000", "task", SessionPhase::Running);
+        session.set_runner_to_current_process();
+        assert!(session.is_runner_alive(), "fixture requires a live runner");
+        let actions = session_actions(&session);
+        let tell = actions
+            .iter()
+            .position(|action| *action == "Tell")
+            .unwrap_or_else(|| panic!("live run must offer Tell"));
+        assert_eq!(actions.get(tell + 1), Some(&"Reset to Planned"));
+    }
+
+    #[test]
+    fn tell_is_not_offered_without_a_live_running_session() {
+        let stale = make_session("20260306143000", "task", SessionPhase::Running);
+        assert!(!session_actions(&stale).contains(&"Tell"));
+        let mut planned = make_session("20260306143001", "task", SessionPhase::Planned);
+        planned.set_runner_to_current_process();
+        assert!(!session_actions(&planned).contains(&"Tell"));
+    }
 
     #[test]
     fn local_merge_menu_order_and_retry_marker() {

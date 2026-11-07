@@ -16,7 +16,7 @@ Then open an issue, or comment on one, with `@cruise plan <what you want>`. See 
 
 ## Commands
 
-After the trigger phrase, the first token **on the same line as the mention** (with or without a leading `/`, case-insensitive, trailing punctuation like `.`/`,`/`:` stripped before matching) selects what happens. `plan`, `fix`, `exec`, and `run` select that command; no token or an unknown token defaults to `run`. For the `issues` event, the trigger phrase is matched against the issue title and body concatenated (title first), so a phrase at the end of the title takes its command token from the rest of that title line, not from the body's first line.
+After the trigger phrase, parsing skips leading whitespace and punctuation, then the first token (with or without a leading `/`, case-insensitive, trailing punctuation like `.`/`,`/`:` stripped before matching) selects what happens. This can cross a newline. `plan`, `fix`, `exec`, and `run` select that command; `/tell` requires its slash. No token or an unknown token defaults to `run`. For the `issues` event, the trigger phrase is matched against the issue title and body concatenated (title first), so a phrase at the end of the title may take its command token from the body's first line.
 
 | Mention | Command | What happens |
 |---|---|---|
@@ -24,6 +24,7 @@ After the trigger phrase, the first token **on the same line as the mention** (w
 | `@cruise exec <request>`, `@cruise /exec` | **exec** | Resolve the plan (same as `run`, extra instructions included), then run it directly on the already-checked-out default branch and **push straight to that branch** (no PR). Advanced/opt-in -- see [exec caveats](#exec-caveats). |
 | `@cruise plan <request>`, `@cruise /plan` | **plan** | Run an LLM planning call (`cruise plan`) on the issue's title + body and post the result as a new **plan-tracking comment**. Nothing is executed. (The text typed after `plan` in the triggering comment itself is currently not included -- only the issue's title/body feed the plan.) |
 | `@cruise fix <feedback>`, `@cruise /fix <feedback>` | **fix** | Revise the most recent *trusted* plan-tracking comment using `<feedback>`, then **edit that same comment in place** with the revised plan. Fails with a clear message if there is no existing plan comment. |
+| `@cruise /tell <instruction>` | **tell** | Send an instruction to a live `run` job on this issue. Issue comments only; it does not start a run. |
 
 **Plan resolution** (used by `run` and `exec`): the action looks at every comment on the issue for the last one that contains the `<!-- cruise:plan -->` marker and was posted by a **bot account** (`user.type == "Bot"`) whose login is one of its fixed allowlisted identities (`cruise-agent[bot]` or `github-actions[bot]`); a comment posted under any other identity (including a PAT or custom App token) is not reused, and resolution falls back to the issue's own title + body. If a trusted plan comment exists, its plan content is used, otherwise the issue's own title + body is used. Either way, any text typed after the command word in the comment/issue that triggered this run is appended as a "## Additional instructions from the triggering comment" section.
 
@@ -33,7 +34,7 @@ Plan-tracking **comment bodies** are capped at 60,000 characters (GitHub's own l
 
 Command parsing is intentionally strict and mechanical, not natural-language understanding:
 
-- Only the **first whitespace-delimited word on the mention's own line** is checked against `run`/`exec`/`plan`/`fix` (optionally prefixed with `/`, case-insensitive, trailing `.,!?;:` stripped). Everything else in the message -- including the next line and further sentences -- has no bearing on which command runs.
+- After leading whitespace and `.,!?;:` punctuation, the **first whitespace-delimited word** is checked against `run`/`exec`/`plan`/`fix` (optionally prefixed with `/`) or `/tell` (slash required), case-insensitive, trailing `.,!?;:` stripped. Leading whitespace may include a newline. Bare `@cruise tell ...` remains a `run` request for backwards compatibility.
 - If the body has **multiple `@cruise` mentions** (e.g. a quoted reply that includes an earlier message), the **last** one is used, so replying to an old mention doesn't resurrect its command.
 - Because matching is purely lexical, a plain-English sentence that happens to start with a command word after the mention is parsed as that command -- e.g. `@cruise fix the flaky test` is parsed as the **`fix` command** with feedback `the flaky test`, not as a free-form request to `run`. If there is no existing plan comment yet, this fails with a message telling you to run `@cruise plan` first, rather than silently doing something else.
 - To avoid this kind of ambiguity, prefer the explicit slash form (`@cruise /run <request>`, `@cruise /exec <request>`) for free-form requests, and reserve the bare word form (`@cruise plan ...` / `@cruise fix ...`) for when you actually mean the `plan`/`fix` commands.
@@ -57,11 +58,15 @@ An end-to-end example, planning first:
 5. **Review and ready it**: if a PR was created, Cruise always opens it as a **draft**, regardless of which command created it. Open the PR, review the diff, then mark it "Ready for review" (or `gh pr ready <number>`) before merging. A successful no-commit or no-PR run has no PR to review.
 
 > [!WARNING]
-> If the issue's own title or body already contains the trigger phrase, the `issues: [opened]` event fires immediately. The token immediately after the phrase, on the same line, selects `plan`, `fix`, `exec`, or `run`; only a missing or unknown token defaults to `run`. Keep the trigger phrase out of the issue itself when you want to review a plan first; only type it in a follow-up comment.
+> If the issue's own title or body already contains the trigger phrase, the `issues: [opened]` event fires immediately. The first token after leading whitespace and punctuation, even across a newline, selects `plan`, `fix`, `exec`, or `run`; only a missing or unknown token defaults to `run`. Keep the trigger phrase out of the issue itself when you want to review a plan first; only type it in a follow-up comment.
 
 That immediate-run behavior is also a shortcut when you don't need a review step: a trigger phrase in the issue title/body followed by `run` (or by no token or an unknown token, which defaults to `run`) skips the planning call entirely -- the issue's title + body becomes the plan directly, with any text after the trigger phrase appended as additional instructions.
 
 Multiple mentions on the same issue queue rather than race each other: a `plan` comment followed immediately by `fix` and then `run` still runs one at a time, in order (see the `concurrency:` block in [examples/cruise.yml](../examples/cruise.yml)) -- it's safe to keep commenting without waiting for each run to finish first.
+
+While a `run` job is active, its in-job poller checks authorized issue comments about every 15 seconds, independently of the queued trigger job. Accepted or rejected comments receive an eyes reaction; acceptance queues text for the next agent prompt, not the currently running prompt. A final sweep handles comments near shutdown. `exec`, planning, and fixing jobs do not run this poller. The same collaborator permission and `allowed_bots` rules apply, and GitHub-sourced text is sanitized. Delivery has the same limits and at-least-once caveat as [`cruise tell`](../README.md#cruise-tell).
+
+**No response to a tell?** Check that the comment used `/tell`, the author is authorized, and a `run` job for that issue was active. Allow for the polling interval and check the job logs and reaction. A queued trigger job cannot itself reach the other job's process; a late comment may be rejected after the run ends. The eyes reaction indicates handling, not necessarily delivery to an agent prompt.
 
 ## Setup
 

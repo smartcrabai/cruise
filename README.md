@@ -18,7 +18,7 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 - [`claude` CLI](https://code.claude.com/docs/en/quickstart) -- required whenever an effective execution or planning candidate uses claude, including SDK-qualified array entries. Cruise drives it in-process. Verified against 2.1.250; a `:effort` model suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'` (a permanent error, not retried). Authentication is the CLI's own, unrelated to `jcode login`.
 - `opencode` CLI with the V2 API, required whenever an effective execution or planning candidate uses opencode, including SDK-qualified array entries. Cruise starts and stops it locally and uses your existing OpenCode provider configuration and authentication. V1 is not supported.
 - An OpenSSH client (`ssh`) on the local `PATH` for `cruise ssh`.
-- On Windows: [Git for Windows](https://gitforwindows.org/) (`git` on `PATH`). `command:` steps run through `cmd.exe /C`, so use cmd.exe syntax (or invoke `powershell -Command ...` / `bash -c ...` explicitly) rather than POSIX shell syntax. Desktop notifications are not sent on Windows, `cruise ssh` needs the Windows OpenSSH client, and herdr reporting is limited to what the herdr environment variables provide.
+- On Windows: [Git for Windows](https://gitforwindows.org/) (`git` on `PATH`). `command:` steps run through `cmd.exe /C`, so use cmd.exe syntax (or invoke `powershell -Command ...` / `bash -c ...` explicitly) rather than POSIX shell syntax. Desktop notifications and notification sounds are unavailable, but configured webhooks are sent. `cruise ssh` needs the Windows OpenSSH client, and herdr reporting is limited to what the herdr environment variables provide.
 - A compatible `cruise` version and its usual workflow prerequisites on the SSH destination, including any required `gh`, `jcode`, `claude`, or `opencode` CLI for the selected workflow. The remote host performs the workflow and owns its authentication, configuration, sessions, worktrees, and clones.
 
 ## Installation
@@ -202,13 +202,13 @@ The `ssh` subcommand reserves the exact legacy input `ssh`; to plan a task whose
 entire text is `ssh`, use `cruise plan "ssh"`.
 The hidden `mcp-bridge` entry point likewise reserves the exact input
 `mcp-bridge`; use `cruise plan "mcp-bridge"` to plan that task.
+The `tell` subcommand is also reserved; use `cruise plan "tell"` to plan that text.
 
-On macOS and Linux, the CLI and TUI send best-effort desktop notifications for
+The CLI and TUI support best-effort desktop, sound, and Slack webhook notifications for
 **Action required**, **Plan ready**, **Completed**, and **Failed** workflow events.
-Notifications require a desktop session, and a missing notification service or
-permission never changes workflow success, failure, or exit status. Set
-`CRUISE_DISABLE_NOTIFICATIONS=1` in CI, headless environments, or tests to
-disable them.
+Desktop notifications require a macOS or Linux desktop session; sound is off by default.
+Delivery failures never change workflow results or exit status. Set
+`CRUISE_DISABLE_NOTIFICATIONS=1` to disable all three channels. See [Notifications](#notifications) for settings and WebUI behavior.
 
 ### herdr integration
 
@@ -220,6 +220,7 @@ steps, `blocked` while waiting for an answer, an option selection, or plan
 review, and `idle` otherwise. Authority is released on exit. Reporting is
 best-effort and never changes workflow success, failure, or exit status. Set
 `CRUISE_DISABLE_HERDR=1` to disable it.
+From a herdr pane, use `cruise tell <session-id> "instruction"` to instruct a running session.
 
 ### TUI (Interactive Keyboard Client)
 
@@ -291,7 +292,7 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 - The in-memory session log is bounded to the latest 10,000 lines; the Run All view is bounded to the latest 2,000 lines. Complete per-session run output remains at `$XDG_DATA_HOME/cruise/sessions/<session-id>/run.log` (by default `~/.local/share/cruise/sessions/<session-id>/run.log`).
 - The TUI cannot hand its stdin to an interactive child command: child processes never share TUI stdin, so such commands cannot prompt through the TUI.
 - Concurrent mutation of the same session by separate cruise processes is unsupported. Within one TUI process, distinct sessions can run concurrently, and Run All uses the configured run-all parallelism.
-- On macOS/Linux desktop sessions, the TUI sends best-effort notifications for action-required prompts, ready plans, completed runs, and failures. Notification delivery is asynchronous and never blocks rendering or changes workflow state. Set `CRUISE_DISABLE_NOTIFICATIONS=1` to suppress notifications.
+- The TUI delivers configured desktop, sound, and webhook notifications asynchronously for action-required prompts, ready plans, completed runs, and failures, without blocking rendering or changing workflow state. Set `CRUISE_DISABLE_NOTIFICATIONS=1` to suppress all three channels.
 
 The CLI remains the canonical client for automation, JSON (`cruise list --json`), and CI/non-interactive use. See the [CLI Reference](#cli-reference) for the existing command workflows.
 
@@ -327,6 +328,7 @@ Commands:
   plan         Create an implementation plan for a task
   draft        Save a task description as a draft without generating a plan
   run          Execute a planned session
+  tell         Send an instruction to a running session
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs
   usage        Summarize locally recorded token usage
@@ -454,7 +456,7 @@ Options:
 
 `cruise plan` creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` before invoking the LLM, so plan-phase edits never touch your working copy. The same worktree is reused by `cruise run` in Worktree mode, or cleaned up automatically when you pick Current-branch mode or cancel planning (`--repo` sessions drop it on approval and re-clone at run). Non-git directories plan in place with a warning, but `cruise run` still needs a git repository.
 
-Successful plan generation sends a best-effort **Plan ready** desktop notification. Non-cancellation generation failures send **Failed**; cancellation sends no notification, and notification delivery does not affect the existing cleanup or error path.
+Successful plan generation sends a best-effort **Plan ready** notification through enabled channels, including a configured webhook. Non-cancellation generation failures send **Failed**; cancellation sends no notification, and notification delivery does not affect the existing cleanup or error path.
 
 With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md`. A foreground `cruise plan --skip-planning` run on an interactive TTY still opens the approve-plan menu; automatic approval to `Planned` is used for non-TTY stdin and for the background root `cruise --plan --skip-planning` path. (With `force_exec: true`, the workflow executes directly instead unless issue input or another opt-out is used; pass `--no-force-exec` to opt out explicitly.) Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The WebUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button remains "Create & plan").
 
@@ -517,7 +519,7 @@ Options:
 
 `--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the summary, that session is reported as `Failed` with the state path and error, and the batch still completes. `--all` and `[SESSION]` are mutually exclusive.
 
-Each attempt that reaches a persisted `Completed` or `Failed` state sends one best-effort desktop notification, including intermediate failures before an automatic retry. A Run All batch does not send an additional aggregate notification. Option prompts and interactive planning questions send **Action required** immediately before waiting for input.
+Each attempt that reaches a persisted `Completed` or `Failed` state sends a best-effort notification through enabled channels, including a configured webhook. This includes intermediate failures before an automatic retry. A Run All batch does not send an additional aggregate notification. Option prompts and interactive planning questions send **Action required** immediately before waiting for input.
 
 `--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the other workers, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted WebUI/TUI setting (`cruise config --set-parallelism`).
 
@@ -574,6 +576,19 @@ Adding `--skip-planning` skips the background worker entirely: the input is writ
 
 With no subcommand, no `--plan`, and no positional input, a non-TTY stdin is read to the end and its trimmed contents become the positional input, so `echo "task" | cruise` takes the legacy positional path and plans like `cruise plan "task"` (`--skip-planning`, `--no-force-exec`, `--repo`, and `--image` still apply). Blank piped input is ignored, and with an interactive stdin the argument-free invocation opens the TUI instead. Pass `--plan stdin` to read piped input explicitly on the background planning path.
 
+#### `cruise tell`
+
+```sh
+cruise tell <session-id> "Also cover the timeout case"
+printf '%s\n' 'Check the logs' | cruise tell <session-id> -
+cruise tell <session-id> --log
+cruise ssh devbox --cwd /srv/project -- tell <session-id> "Check the logs"
+```
+
+Submit to a live Running session only. Omit the instruction to read non-interactive stdin; `--log` reads instruction history without submitting. Acceptance is not delivery: the currently running agent step cannot see a new instruction. It is appended to the next agent prompt, including all prompt children of a parallel block, but not command or option steps. It cannot change permissions, commit policy, output format, or workflow transitions.
+
+Instructions are trimmed and limited to 8,192 bytes each, with at most 20 pending instructions and 65,536 pending bytes. Delivered or expired items are terminal. Completed runs expire undelivered instructions; failed or suspended runs retain them for a subsequent run, and reset to planned expires them. Delivery is at least once: a crash or failure to record acknowledgement can cause redelivery. The session's XDG data directory stores `instructions.jsonl` and its lock; `--log` shows statuses. Do not put secrets in instructions.
+
 #### `cruise list`
 
 ```
@@ -583,7 +598,7 @@ Options:
       --json   Print all sessions as a JSON array to stdout instead of opening the interactive selector
 ```
 
-With no flags, opens an interactive session browser whose menu depends on each session's phase (see [`cruise list` Actions](#cruise-list-actions)). With `--json`, prints every session as a JSON array (id, phase, input, PR URL, plan-error info, ...) and exits -- useful for scripting or feeding session state to external tooling.
+With no flags, opens an interactive session browser whose menu depends on each session's phase (see [`cruise list` Actions](#cruise-list-actions)). With `--json`, prints every session as a JSON array (id, phase, input, PR URL, plan-error info, `pending_instructions`, ...) and exits -- useful for scripting or feeding session state to external tooling.
 
 #### `cruise diff`
 
@@ -618,6 +633,30 @@ Shows or updates application-level settings stored in `config.json` or `config.y
 Set `prevent_sleep: true` in the machine-level `config.yaml` (or `"prevent_sleep": true` in `config.json`) to prevent sleep during runs on macOS; the default is `false`. Cruise shares `/usr/bin/caffeinate -dis -w <pid>` across overlapping enabled runs and stops it when the last one ends. This also covers CLI, TUI, and WebUI runs, but not planning alone. Other operating systems do nothing. Failures to load the setting or start caffeinate only warn and do not fail the run; a later run retries. Changes take effect on the next run. This setting is not supported in project `default.yaml`.
 
 If both files exist, `config.json` wins; otherwise an existing `config.yaml` is used. When neither exists, settings updates create `config.json`. The files are not merged, and an invalid selected file is an error rather than a reason to try the other format. Updates write back to the selected file in its format; YAML comments are not retained.
+
+##### Notifications
+
+Set `notifications` in the application settings file, not the workflow YAML. Each channel has a master switch and optional event-specific switches:
+
+```yaml
+notifications:
+  desktop: true   # default: true
+  sound: true     # default: false
+  webhook: true   # default: true, but requires the environment variable below
+  events:
+    actionRequired: { sound: false }
+    planReady: { desktop: false }
+    completed: { webhook: false }
+    failed: { desktop: true, sound: true, webhook: true }
+```
+
+Event keys are `actionRequired`, `planReady`, `completed`, and `failed`; `action_required` and `plan_ready` are also accepted. Each event can specify `desktop`, `sound`, and `webhook`. An omitted event switch defaults to true, but cannot override a disabled channel master switch. Sound is independent of the desktop banner. On macOS and Linux it uses system sound players when available; playback failure is ignored. Windows sends neither desktop banners nor sounds, but supports webhooks.
+
+Set `CRUISE_NOTIFY_WEBHOOK` in the Cruise process environment to a Slack Incoming Webhook URL. Do not put the secret URL in the settings file. An unset, empty, or invalid HTTP(S) URL disables webhook delivery. Cruise POSTs JSON of the form `{"text":"Cruise: <event> -- <detail>"}`, escaping Slack-sensitive `&`, `<`, and `>` characters; detail is limited to 60 characters. Treat the destination as receiving potentially sensitive task details. Requests have a 10-second timeout, do not follow redirects, and are not retried.
+
+Delivery is best effort. A webhook failure is recorded without the URL in `$XDG_STATE_HOME/cruise/notification-webhook-error`; `cruise config` displays the last error classification and Unix timestamp when present, and a successful webhook clears it. Non-default notification settings also appear in `cruise config`, never the webhook URL. CLI delivery is synchronous, while TUI and WebUI delivery is dispatched off the UI path.
+
+WebUI sessions use browser notifications instead of server-side desktop banners, plus server-side sound and webhook delivery. The `desktop` master and event switches also control browser notifications, but not in-page toasts. `CRUISE_DISABLE_NOTIFICATIONS=1` disables desktop, sound, and webhook delivery, but does not suppress WebUI browser notifications. Other values do not activate this global switch.
 
 `model` and `plan_model` in either format provide optional global model defaults. Each accepts a string or an ordered array: the first entry is primary, the rest are SDK fallbacks. Both formats use the same field names and aliases. For example, `config.yaml`:
 
@@ -830,7 +869,7 @@ The interactive session list shows a menu of actions depending on the session's 
 | **AwaitingInput** | Generate Plan, Delete, Back |
 | **AwaitingApproval** | Approve, Publish as Issue, Edit Settings, Delete, Back |
 | **Planned** | Run, Publish as Issue, Edit Settings, Replan, Delete, Back |
-| **Running** | Resume, Reset to Planned, Delete, Back |
+| **Running** | Resume, Tell*, Reset to Planned, Delete, Back |
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
 | **PR Failed** | Create PR, Open PR*, Reset to Planned, Delete, Back |
@@ -839,6 +878,7 @@ The interactive session list shows a menu of actions depending on the session's 
 `cruise list` does not offer Verify, matching its existing omission of Ask.
 
 \* Open PR and Merge PR are shown only when the session has a PR URL.
+Tell is shown only while the running session's runner is alive.
 
 \** Local merge actions require an eligible local worktree session without a PR and a recorded target branch. Stage is unavailable once a merge intent or commit has been recorded; legacy sessions without a recorded target are ineligible.
 
@@ -850,6 +890,7 @@ The interactive session list shows a menu of actions depending on the session's 
 - **Approve** -- Approve the plan and transition the session to the Planned phase.
 - **Publish as Issue** -- Publish `plan.md`, unchanged, as a GitHub issue (or GitLab issue) in the resolved repo, then delete the local session. Prompts whether to also post a follow-up `@cruise run` comment so the `@cruise` GitHub Action picks it up (default: off for `AwaitingApproval`, on for `Planned`). If the issue is created but that comment fails to post, the session is kept so you can retry (the existing issue is reused, not duplicated) or comment manually (the `@cruise run` comment prompt is skipped on GitLab).
 - **Run / Resume** -- Execute (or continue) the session.
+- **Tell** -- Submit an instruction to the running session's next agent prompt. TUI and WebUI also offer Tell for a live run.
 - **Create PR** -- Retry publication for a **PR Failed** session without rerunning the workflow. Cruise commits remaining changes, pushes, and reuses an existing PR for the branch or creates one. Check the displayed error and forge authentication first (for GitHub HTTPS credentials, `gh auth setup-git` can configure Git). Publication failure or cancellation keeps the session in **PR Failed** with its worktree and any existing PR URL. A fatal after-PR error leaves it **Failed**. Success completes the session and runs configured after-PR steps only when a PR was created or reused; a no-commits skip completes without running them. Reset to Planned instead restarts the workflow, while Delete removes the session and its workspace.
 - **View Diff** -- Review the session branch's changes and return to the menu. See [`cruise diff`](#cruise-diff) for comparison and cleanup limitations.
 - **Replan** -- Provide feedback to re-generate the plan; the session stays in the Planned phase.

@@ -80,9 +80,10 @@ impl WebState {
         } else {
             Some(css::generate(&assets.templates_dir, &assets.static_dir)?)
         };
+        let hub = Arc::new(EventHub::with_notifications(application.clone()));
         Ok(Self {
             application,
-            hub: Arc::new(EventHub::default()),
+            hub,
             templates: Arc::new(Templates::new(assets.templates_dir.clone())),
             run_all: Arc::new(RunAllState::default()),
             templates_dir: assets.templates_dir.clone(),
@@ -209,6 +210,7 @@ pub(crate) fn router(state: WebState) -> Router {
         .route("/webui/sessions/{id}/fix", post(handlers::fix))
         .route("/webui/sessions/{id}/ask", post(handlers::ask))
         .route("/webui/sessions/{id}/verify", post(handlers::verify))
+        .route("/webui/sessions/{id}/tell", post(handlers::tell))
         .route("/webui/sessions/{id}/run", post(handlers::run_session))
         .route("/webui/sessions/{id}/create-pr", post(handlers::create_pr))
         .route("/webui/sessions/{id}/cancel", post(handlers::cancel))

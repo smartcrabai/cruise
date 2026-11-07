@@ -52,6 +52,7 @@ fn actions() -> SessionActionsVm {
         show_fix: true,
         show_ask: true,
         show_verify: true,
+        show_tell: false,
         show_create_worktree: true,
         show_run: true,
         show_create_pr: true,
@@ -264,6 +265,7 @@ fn tab_fixtures() -> Vec<(&'static str, Value)> {
             value(&TabInfoVm {
                 auto_requeue_count: 2,
                 id: "s1".to_string(),
+                pending_instructions: 0,
                 config_source: "builtin".to_string(),
                 flags: vec![FlagRowVm {
                     name: "e2e".to_string(),

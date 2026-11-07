@@ -1190,7 +1190,7 @@ impl SessionManager {
     }
 }
 
-fn validate_session_id(id: &str) -> Result<()> {
+pub(crate) fn validate_session_id(id: &str) -> Result<()> {
     let mut components = Path::new(id).components();
     if id.is_empty()
         || !matches!(components.next(), Some(std::path::Component::Normal(_)))
