@@ -446,8 +446,7 @@ async fn collect_gate_output(
             Err(CruiseError::Interrupted)
         }
         Drain::GraceExpired => {
-            // Large sanitized lines can outlast the pipe-drain grace; kill any
-            // remaining group writers, then give their bounded sanitizers time to finish.
+            // Large-line sanitization can outlast the initial pipe-drain grace.
             let _ = child.start_kill();
             let finished = {
                 let output = join_gate_output(
