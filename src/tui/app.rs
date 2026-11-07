@@ -3078,7 +3078,10 @@ impl TuiApp {
                     self.set_error("Instruction must not be empty".to_string());
                     return;
                 }
-                match self.application.tell(&id, value, crate::instruction_inbox::Origin::Tui) {
+                match self
+                    .application
+                    .tell(&id, value, crate::instruction_inbox::Origin::Tui)
+                {
                     Ok(receipt) => {
                         self.status = Some(format!("Instruction #{} accepted", receipt.id));
                     }
@@ -7868,9 +7871,10 @@ mod tests {
             let Some(Modal::Palette { actions, selected }) = &app.modal else {
                 panic!("palette expected for {phase:?}");
             };
-            assert_eq!(actions, &[SessionAction::Cancel]);
+            assert_eq!(actions, &[SessionAction::Tell, SessionAction::Cancel]);
             assert_eq!(*selected, 0);
             assert!(!token.is_cancelled());
+            app.handle_action(Action::Down);
             app.handle_action(Action::Enter);
             assert!(token.is_cancelled(), "Enter must cancel the live run");
             assert_eq!(app.sessions[0].phase, phase);

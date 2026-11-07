@@ -382,7 +382,11 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
     if let Some(summary) = instructions {
         for item in summary.history.iter().rev().take(5) {
             let preview = item.content.lines().next().unwrap_or("");
-            lines.push(labeled_line(app, "Tell     ", Span::raw(format!("#{} {} {}", item.id, item.status, preview))));
+            lines.push(labeled_line(
+                app,
+                "Tell     ",
+                Span::raw(format!("#{} {} {}", item.id, item.status, preview)),
+            ));
         }
     }
     if !session.input.trim().is_empty() {

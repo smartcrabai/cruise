@@ -24,9 +24,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new(steps: &str, agent: &str) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
         let repo = root.path().join("repo");
-        fs::create_dir(&repo).unwrap();
+        fs::create_dir(&repo).unwrap_or_else(|error| panic!("{error}"));
         for args in [
             vec!["init", "-q"],
             vec![
@@ -46,13 +46,14 @@ impl Fixture {
                     .current_dir(&repo)
                     .args(args)
                     .status()
-                    .unwrap()
+                    .unwrap_or_else(|error| panic!("{error}"))
                     .success()
             );
         }
         let script = root.path().join("agent.sh");
-        fs::write(&script, agent).unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&script, agent).unwrap_or_else(|error| panic!("{error}"));
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|error| panic!("{error}"));
         let manager = SessionManager::new(root.path().join("data/cruise"));
         let mut state = SessionState::new(
             ID.into(),
@@ -62,11 +63,15 @@ impl Fixture {
         );
         state.phase = SessionPhase::Planned;
         state.workspace_mode = WorkspaceMode::CurrentBranch;
-        manager.create(&state).unwrap();
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("{error}"));
         let session = manager.sessions_dir().join(ID);
-        let command = serde_json::to_string(&script.to_string_lossy()).unwrap();
-        fs::write(session.join("config.yaml"), format!("command: [{command}]\nsteps:\n  gate:\n    command: 'touch gate-ready; n=0; while [ ! -f gate-release ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done; test -f gate-release'\n{steps}")).unwrap();
-        fs::write(session.join("plan.md"), "# delivery test\n").unwrap();
+        let command = serde_json::to_string(&script.to_string_lossy())
+            .unwrap_or_else(|error| panic!("{error}"));
+        fs::write(session.join("config.yaml"), format!("command: [{command}]\nsteps:\n  gate:\n    command: 'touch gate-ready; n=0; while [ ! -f gate-release ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done; test -f gate-release'\n{steps}")).unwrap_or_else(|error| panic!("{error}"));
+        fs::write(session.join("plan.md"), "# delivery test\n")
+            .unwrap_or_else(|error| panic!("{error}"));
         Self {
             root,
             repo,
@@ -98,15 +103,19 @@ impl Fixture {
             .args(["run", ID])
             .stdout(Stdio::null())
             .stderr(Stdio::from(
-                fs::File::create(self.root.path().join("runner.stderr")).unwrap(),
+                fs::File::create(self.root.path().join("runner.stderr"))
+                    .unwrap_or_else(|error| panic!("{error}")),
             ))
             .spawn()
-            .unwrap();
+            .unwrap_or_else(|error| panic!("{error}"));
         let mut run = Running(child);
         let deadline = Instant::now() + Duration::from_secs(20);
         while !self.repo.join("gate-ready").exists() {
             assert!(
-                run.0.try_wait().unwrap().is_none(),
+                run.0
+                    .try_wait()
+                    .unwrap_or_else(|error| panic!("{error}"))
+                    .is_none(),
                 "runner exited before command rendezvous: {}",
                 fs::read_to_string(self.root.path().join("runner.stderr")).unwrap_or_default()
             );
@@ -123,7 +132,7 @@ impl Fixture {
             .command()
             .args(["tell", ID, "operator-marker"])
             .output()
-            .unwrap();
+            .unwrap_or_else(|error| panic!("{error}"));
         assert!(
             out.status.success(),
             "tell failed: {}",
@@ -132,16 +141,16 @@ impl Fixture {
     }
     fn events(&self) -> Vec<Value> {
         fs::read_to_string(self.session.join("instructions.jsonl"))
-            .unwrap()
+            .unwrap_or_else(|error| panic!("{error}"))
             .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
+            .map(|line| serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}")))
             .collect()
     }
     fn release(&self) {
-        fs::write(self.repo.join("gate-release"), "").unwrap();
+        fs::write(self.repo.join("gate-release"), "").unwrap_or_else(|error| panic!("{error}"));
     }
     fn read(&self, name: &str) -> String {
-        fs::read_to_string(self.repo.join(name)).unwrap()
+        fs::read_to_string(self.repo.join(name)).unwrap_or_else(|error| panic!("{error}"))
     }
 }
 struct Running(Child);
@@ -149,7 +158,7 @@ impl Running {
     fn finish(&mut self) -> std::process::ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if let Some(status) = self.0.try_wait().unwrap() {
+            if let Some(status) = self.0.try_wait().unwrap_or_else(|error| panic!("{error}")) {
                 return status;
             }
             assert!(Instant::now() < deadline, "runner failed to finish");
@@ -185,15 +194,25 @@ fn sequential_delivery_is_acknowledged_once_and_command_does_not_lease() {
         first.contains("FIRST-PROMPT") && first.contains("operator-marker"),
         "{first}"
     );
-    let instruction = first.find("operator-marker").unwrap();
-    assert!(instruction < first.find("do not create commits").expect("commit guard"));
+    let instruction = first
+        .find("operator-marker")
+        .unwrap_or_else(|| panic!("missing operator marker"));
+    assert!(
+        instruction
+            < first
+                .find("do not create commits")
+                .unwrap_or_else(|| panic!("missing commit guard"))
+    );
     assert!(!second.contains("operator-marker"), "{second}");
     let events = f.events();
     assert_eq!(kinds(&events, "leased"), 1);
     assert_eq!(kinds(&events, "delivered"), 1);
     assert_eq!(kinds(&events, "released"), 0);
     assert_eq!(
-        events.iter().find(|e| e["kind"] == "leased").unwrap()["step"],
+        events
+            .iter()
+            .find(|e| e["kind"] == "leased")
+            .unwrap_or_else(|| panic!("missing lease"))["step"],
         "first"
     );
 }
@@ -223,7 +242,7 @@ fn sequential_backend_error_releases_without_acknowledging() {
     );
     let mut run = f.start();
     f.tell();
-    fs::remove_file(f.root.path().join("agent.sh")).unwrap();
+    fs::remove_file(f.root.path().join("agent.sh")).unwrap_or_else(|error| panic!("{error}"));
     f.release();
     assert!(!run.finish().success());
     let events = f.events();
@@ -240,7 +259,7 @@ fn parallel_backend_error_releases_block_without_acknowledging() {
     );
     let mut run = f.start();
     f.tell();
-    fs::remove_file(f.root.path().join("agent.sh")).unwrap();
+    fs::remove_file(f.root.path().join("agent.sh")).unwrap_or_else(|error| panic!("{error}"));
     f.release();
     assert!(!run.finish().success());
     let events = f.events();
@@ -260,15 +279,15 @@ fn parallel_prompt_children_share_one_lease_and_ack() {
     f.release();
     assert!(run.finish().success());
     let captures: Vec<String> = fs::read_dir(&f.repo)
-        .unwrap()
-        .map(|e| e.unwrap().path())
+        .unwrap_or_else(|error| panic!("{error}"))
+        .map(|e| e.unwrap_or_else(|error| panic!("{error}")).path())
         .filter(|p| {
             p.file_name()
-                .unwrap()
+                .unwrap_or_else(|| panic!("missing file name"))
                 .to_string_lossy()
                 .starts_with("capture-")
         })
-        .map(|p| fs::read_to_string(p).unwrap())
+        .map(|p| fs::read_to_string(p).unwrap_or_else(|error| panic!("{error}")))
         .collect();
     assert_eq!(captures.len(), 2);
     assert!(
@@ -281,10 +300,10 @@ fn parallel_prompt_children_share_one_lease_and_ack() {
         prompt
             .split("## Operator instructions received during this run")
             .nth(1)
-            .unwrap()
+            .unwrap_or_else(|| panic!("missing instruction block"))
             .split("In this working repository")
             .next()
-            .unwrap()
+            .unwrap_or_else(|| panic!("missing instruction content"))
             .trim()
             .to_owned()
     };
@@ -295,7 +314,10 @@ fn parallel_prompt_children_share_one_lease_and_ack() {
     assert_eq!(kinds(&events, "delivered"), 1);
     assert_eq!(kinds(&events, "released"), 0);
     assert_eq!(
-        events.iter().find(|e| e["kind"] == "leased").unwrap()["scope"],
+        events
+            .iter()
+            .find(|e| e["kind"] == "leased")
+            .unwrap_or_else(|| panic!("missing lease"))["scope"],
         "parallel:checks"
     );
 }
@@ -315,7 +337,10 @@ fn all_skipped_parallel_prompts_do_not_consume_instruction() {
     let events = f.events();
     assert_eq!(kinds(&events, "leased"), 1);
     assert_eq!(
-        events.iter().find(|e| e["kind"] == "leased").unwrap()["step"],
+        events
+            .iter()
+            .find(|e| e["kind"] == "leased")
+            .unwrap_or_else(|| panic!("missing lease"))["step"],
         "after"
     );
 }
@@ -335,7 +360,10 @@ fn command_only_parallel_does_not_consume_instruction() {
     let events = f.events();
     assert_eq!(kinds(&events, "leased"), 1);
     assert_eq!(
-        events.iter().find(|e| e["kind"] == "leased").unwrap()["step"],
+        events
+            .iter()
+            .find(|e| e["kind"] == "leased")
+            .unwrap_or_else(|| panic!("missing lease"))["step"],
         "after"
     );
 }

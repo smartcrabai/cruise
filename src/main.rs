@@ -50,10 +50,10 @@ mod graph;
 mod herdr;
 mod install_identity;
 mod instant_exec;
+mod instruction_inbox;
 mod issue_images;
 mod issue_input;
 mod issue_publish;
-mod instruction_inbox;
 mod list_cmd;
 mod local_merge;
 mod metadata;
@@ -85,12 +85,12 @@ mod spinner;
 mod ssh_cmd;
 mod step;
 pub mod telemetry;
+mod tell_cmd;
 #[cfg(test)]
 mod test_binary_support;
 #[cfg(test)]
 mod test_support;
 mod timeout;
-mod tell_cmd;
 mod tool_policy;
 mod tui;
 mod update_cmd;

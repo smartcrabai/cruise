@@ -19,7 +19,8 @@ struct Fixture {
 }
 impl Fixture {
     fn new(phase: SessionPhase, alive: bool) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir()
+            .unwrap_or_else(|e| panic!("create fixture temporary directory: {e}"));
         let manager = SessionManager::new(root.path().join("data/cruise"));
         let mut state = SessionState::new(
             ID.into(),
@@ -31,16 +32,22 @@ impl Fixture {
         if alive {
             state.set_runner_to_current_process();
         }
-        manager.create(&state).unwrap();
+        manager
+            .create(&state)
+            .unwrap_or_else(|e| panic!("create fixture session: {e}"));
         let ledger = manager.sessions_dir().join(ID).join("instructions.jsonl");
         Self { root, ledger }
     }
     fn seed(&self, events: &[Value]) {
-        fs::write(
-            &self.ledger,
-            events.iter().map(|v| format!("{v}\n")).collect::<String>(),
-        )
-        .unwrap();
+        let mut data = events
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !events.is_empty() {
+            data.push('\n');
+        }
+        fs::write(&self.ledger, data).unwrap_or_else(|e| panic!("write fixture ledger: {e}"));
     }
     fn raw(&self) -> String {
         fs::read_to_string(&self.ledger).unwrap_or_default()
@@ -48,7 +55,10 @@ impl Fixture {
     fn events(&self) -> Vec<Value> {
         self.raw()
             .lines()
-            .map(|s| serde_json::from_str(s).unwrap())
+            .map(|s| {
+                serde_json::from_str(s)
+                    .unwrap_or_else(|e| panic!("parse fixture ledger event: {e}"))
+            })
             .collect()
     }
     fn run(&self, args: &[&str]) -> Output {
@@ -67,7 +77,7 @@ impl Fixture {
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
             .args(args)
             .output()
-            .unwrap()
+            .unwrap_or_else(|e| panic!("run cruise CLI: {e}"))
     }
     fn tell(&self, text: &str) -> Output {
         self.run(&["tell", ID, text])
@@ -98,7 +108,13 @@ fn i1_i6_accept_trims_and_audits_and_empty_is_rejected() {
     let out = f.tell("  a  ");
     assert!(out.status.success(), "{}", error(&out));
     assert_eq!(f.events()[1]["content"], "a");
-    let log = fs::read_to_string(f.ledger.parent().unwrap().join("run.log")).unwrap();
+    let log = fs::read_to_string(
+        f.ledger
+            .parent()
+            .unwrap_or_else(|| panic!("ledger has no parent directory"))
+            .join("run.log"),
+    )
+    .unwrap_or_else(|e| panic!("read run log: {e}"));
     assert!(log.contains("tell: accepted #1 (origin=cli, 1 bytes)"));
     let before = f.raw();
     assert_rejected(&f.tell(" \n "), "instruction is empty");
@@ -151,7 +167,13 @@ fn i7_byte_limit_counts_trimmed_utf8_bytes() {
     let valid = format!("  {}  ", "é".repeat(4096));
     let out = f.tell(&valid);
     assert!(out.status.success(), "{}", error(&out));
-    assert_eq!(f.events()[1]["content"].as_str().unwrap().len(), 8192);
+    assert_eq!(
+        f.events()[1]["content"]
+            .as_str()
+            .unwrap_or_else(|| panic!("content is not a string"))
+            .len(),
+        8192
+    );
     let before = f.raw();
     assert_rejected(
         &f.tell(&("é".repeat(4096) + "x")),
@@ -215,7 +237,7 @@ fn i15_corrupt_middle_is_rejected_but_truncated_tail_can_be_read() {
         &f.ledger,
         format!("{}\n{{bad\n{}\n", opened(), accepted(1, "x", None)),
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("write corrupt ledger: {e}"));
     let before = f.raw();
     assert_rejected(&f.tell("y"), "instruction ledger is corrupt");
     assert_eq!(f.raw(), before);
@@ -223,7 +245,7 @@ fn i15_corrupt_middle_is_rejected_but_truncated_tail_can_be_read() {
         &f.ledger,
         format!("{}\n{}\n{{\"kind\":", opened(), accepted(1, "x", None)),
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("write truncated ledger: {e}"));
     let out = f.run(&["tell", ID, "--log"]);
     assert!(out.status.success(), "{}", error(&out));
     assert!(String::from_utf8_lossy(&out.stdout).contains("#1"));

@@ -1,6 +1,7 @@
 #![cfg(unix)]
 //! Real executable contracts for plan C-1 through C-5.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -21,7 +22,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(phase: SessionPhase) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
         let manager = SessionManager::new(root.path().join("data/cruise"));
         let mut state = SessionState::new(
             ID.into(),
@@ -31,7 +32,9 @@ impl Fixture {
         );
         state.phase = phase;
         state.set_runner_to_current_process();
-        manager.create(&state).unwrap();
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("{error}"));
         Self { root, manager }
     }
 
@@ -45,9 +48,9 @@ impl Fixture {
     fn seed(&self, events: &[Value]) {
         let mut data = String::new();
         for event in events {
-            data.push_str(&format!("{event}\n"));
+            writeln!(data, "{event}").unwrap_or_else(|error| panic!("{error}"));
         }
-        fs::write(self.ledger(), data).unwrap();
+        fs::write(self.ledger(), data).unwrap_or_else(|error| panic!("{error}"));
     }
 
     fn command(&self) -> Command {
@@ -79,16 +82,18 @@ impl Fixture {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .unwrap();
+            .unwrap_or_else(|error| panic!("{error}"));
         if let Some(input) = stdin {
             child
                 .stdin
                 .take()
-                .unwrap()
+                .unwrap_or_else(|| panic!("child stdin was not piped"))
                 .write_all(input.as_bytes())
-                .unwrap();
+                .unwrap_or_else(|error| panic!("{error}"));
         }
-        child.wait_with_output().unwrap()
+        child
+            .wait_with_output()
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 }
 
@@ -118,12 +123,14 @@ fn c1_accepts_argument_dash_and_implicit_stdin() {
         assert!(result.status.success(), "{}", err(&result));
         assert_eq!(
             out(&result).trim(),
-            format!("instruction #1 accepted for {ID}; queued for the next agent prompt, if one runs.")
+            format!(
+                "instruction #1 accepted for {ID}; queued for the next agent prompt, if one runs."
+            )
         );
         let events: Vec<Value> = fs::read_to_string(f.ledger())
-            .unwrap()
+            .unwrap_or_else(|error| panic!("{error}"))
             .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|error| panic!("{error}")))
             .collect();
         assert_eq!(events.len(), 2);
         assert_eq!(events[1]["kind"], "accepted");
@@ -139,7 +146,9 @@ fn c1_missing_text_on_tty_is_rejected() {
     use std::io::Read;
     let f = Fixture::new(SessionPhase::Running);
     f.seed(&[opened()]);
-    let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+    let pair = native_pty_system()
+        .openpty(PtySize::default())
+        .unwrap_or_else(|error| panic!("{error}"));
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_cruise"));
     cmd.args(["tell", ID]);
     cmd.cwd(f.root.path());
@@ -148,15 +157,18 @@ fn c1_missing_text_on_tty_is_rejected() {
     cmd.env("XDG_CONFIG_HOME", f.root.path().join("config"));
     cmd.env("XDG_STATE_HOME", f.root.path().join("state"));
     cmd.env("NO_COLOR", "1");
-    let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .unwrap_or_else(|error| panic!("{error}"));
     drop(pair.slave);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
+        if let Some(status) = child.try_wait().unwrap_or_else(|error| panic!("{error}")) {
             break status;
         }
         if std::time::Instant::now() >= deadline {
-            child.kill().unwrap();
+            child.kill().unwrap_or_else(|error| panic!("{error}"));
             let _ = child.wait();
             panic!("tell without text blocked on a TTY");
         }
@@ -166,7 +178,7 @@ fn c1_missing_text_on_tty_is_rejected() {
     let _ = pair
         .master
         .try_clone_reader()
-        .unwrap()
+        .unwrap_or_else(|error| panic!("{error}"))
         .read_to_string(&mut text);
     assert!(!status.success(), "{text}");
     assert!(text.contains("instruction text is required"), "{text}");
@@ -182,7 +194,7 @@ fn c2_log_formats_history_without_mutating_ledger() {
         json!({"kind":"leased","ids":[2],"step":"build","scope":"sequential","at":AT}),
         json!({"kind":"delivered","ids":[2],"step":"build","at":AT}),
     ]);
-    let before = fs::read(f.ledger()).unwrap();
+    let before = fs::read(f.ledger()).unwrap_or_else(|error| panic!("{error}"));
     let result = f.run(&["tell", ID, "--log"], None);
     assert!(result.status.success(), "{}", err(&result));
     let text = out(&result);
@@ -196,18 +208,24 @@ fn c2_log_formats_history_without_mutating_ledger() {
             .any(|l| l == format!("#2  {AT}  cli  delivered@build  second")),
         "{text}"
     );
-    assert_eq!(before, fs::read(f.ledger()).unwrap());
+    assert_eq!(
+        before,
+        fs::read(f.ledger()).unwrap_or_else(|error| panic!("{error}"))
+    );
 }
 
 #[test]
 fn c3_planned_session_rejects_instruction() {
     let f = Fixture::new(SessionPhase::Planned);
     f.seed(&[opened()]);
-    let before = fs::read(f.ledger()).unwrap();
+    let before = fs::read(f.ledger()).unwrap_or_else(|error| panic!("{error}"));
     let result = f.run(&["tell", ID, "x"], None);
     assert_eq!(result.status.code(), Some(1), "{}", err(&result));
     assert!(err(&result).contains(&format!("not running: session {ID} is in phase Planned; instructions are accepted only while a run is in progress")), "{}", err(&result));
-    assert_eq!(before, fs::read(f.ledger()).unwrap());
+    assert_eq!(
+        before,
+        fs::read(f.ledger()).unwrap_or_else(|error| panic!("{error}"))
+    );
 }
 
 #[test]
@@ -229,16 +247,24 @@ fn c5_list_json_adds_pending_count_without_changing_existing_fields() {
     let list = || -> Value {
         let result = f.run(&["list", "--json"], None);
         assert!(result.status.success(), "{}", err(&result));
-        let items: Vec<Value> = serde_json::from_slice(&result.stdout).unwrap();
-        items.into_iter().find(|item| item["id"] == ID).unwrap()
+        let items: Vec<Value> =
+            serde_json::from_slice(&result.stdout).unwrap_or_else(|error| panic!("{error}"));
+        items
+            .into_iter()
+            .find(|item| item["id"] == ID)
+            .unwrap_or_else(|| panic!("session not found"))
     };
     let mut zero = list();
     assert_eq!(zero["pending_instructions"], 0);
     f.seed(&[opened(), accepted(1, "one"), accepted(2, "two")]);
     let mut two = list();
     assert_eq!(two["pending_instructions"], 2);
-    zero.as_object_mut().unwrap().remove("pending_instructions");
-    two.as_object_mut().unwrap().remove("pending_instructions");
+    zero.as_object_mut()
+        .unwrap_or_else(|| panic!("list item is not an object"))
+        .remove("pending_instructions");
+    two.as_object_mut()
+        .unwrap_or_else(|| panic!("list item is not an object"))
+        .remove("pending_instructions");
     assert_eq!(zero, two, "existing list fields changed when inbox changed");
     assert_eq!(zero["id"], ID);
     assert_eq!(zero["phase"], "Running");
