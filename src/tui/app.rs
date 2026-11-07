@@ -3244,16 +3244,7 @@ impl TuiApp {
             return;
         };
         match action {
-            SessionAction::Verify => {
-                if self
-                    .registry
-                    .verify(self.application.clone(), id, self.events.clone())
-                {
-                    self.status = Some("Verifying plan".to_string());
-                } else {
-                    self.set_error("An operation is already active for this session".to_string());
-                }
-            }
+            SessionAction::Verify => self.start_verify(id),
             SessionAction::Generate => {
                 let request = PlanRequest {
                     interactive: Interactive::new(true),
@@ -3340,6 +3331,17 @@ impl TuiApp {
                 },
                 Err(error) => self.set_error(error.to_string()),
             },
+        }
+    }
+
+    fn start_verify(&mut self, id: String) {
+        if self
+            .registry
+            .verify(self.application.clone(), id, self.events.clone())
+        {
+            self.status = Some("Verifying plan".to_string());
+        } else {
+            self.set_error("An operation is already active for this session".to_string());
         }
     }
 
