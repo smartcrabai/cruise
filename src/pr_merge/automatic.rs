@@ -859,6 +859,59 @@ fn parse_github_ci_page(pr: &Value) -> Result<GitHubCiPage, AutoSquashError> {
     parse_github_ci_context_page(contexts, check_state, check_commit_oid, rollup_status)
 }
 
+fn parse_github_check_suite_status(
+    suite: &Value,
+) -> Result<GitHubCheckStatus, AutoSquashError> {
+    let workflow_run = suite.get("workflowRun").ok_or_else(|| {
+        AutoSquashError::Rejected("GitHub CI workflow run is unavailable".into())
+    })?;
+    if workflow_run.is_null() {
+        return Ok(GitHubCheckStatus::Green);
+    }
+    if !workflow_run.is_object() {
+        return Err(AutoSquashError::Rejected(
+            "GitHub CI workflow run is malformed".into(),
+        ));
+    }
+    match required_str(suite, "status")? {
+        "QUEUED" | "IN_PROGRESS" | "WAITING" | "REQUESTED" | "PENDING" => {
+            Ok(GitHubCheckStatus::Pending)
+        }
+        "COMPLETED" => {
+            let conclusion = suite
+                .get("conclusion")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    AutoSquashError::Rejected("GitHub CI suite conclusion is unavailable".into())
+                })?;
+            if !matches!(
+                conclusion,
+                "ACTION_REQUIRED"
+                    | "CANCELLED"
+                    | "FAILURE"
+                    | "NEUTRAL"
+                    | "SKIPPED"
+                    | "STALE"
+                    | "STARTUP_FAILURE"
+                    | "SUCCESS"
+                    | "TIMED_OUT"
+            ) {
+                return Err(AutoSquashError::Rejected(
+                    "GitHub returned an unknown CI suite conclusion".to_string(),
+                ));
+            }
+            match conclusion {
+                "SUCCESS" | "NEUTRAL" | "SKIPPED" => Ok(GitHubCheckStatus::Green),
+                _ => Ok(GitHubCheckStatus::Failed),
+            }
+        }
+        _ => Err(AutoSquashError::Rejected(
+            "GitHub returned an unknown CI suite status".to_string(),
+        )),
+    }
+}
+
 fn parse_github_check_suite_page(value: &Value) -> Result<GitHubCheckSuitePage, AutoSquashError> {
     if value
         .get("errors")
@@ -905,59 +958,7 @@ fn parse_github_check_suite_page(value: &Value) -> Result<GitHubCheckSuitePage, 
     }
     let mut check_status = GitHubCheckStatus::Green;
     for suite in nodes {
-        let workflow_run = suite.get("workflowRun").ok_or_else(|| {
-            AutoSquashError::Rejected("GitHub CI workflow run is unavailable".into())
-        })?;
-        if workflow_run.is_null() {
-            continue;
-        }
-        if !workflow_run.is_object() {
-            return Err(AutoSquashError::Rejected(
-                "GitHub CI workflow run is malformed".into(),
-            ));
-        }
-        let status = match required_str(suite, "status")? {
-            "QUEUED" | "IN_PROGRESS" | "WAITING" | "REQUESTED" | "PENDING" => {
-                GitHubCheckStatus::Pending
-            }
-            "COMPLETED" => {
-                let conclusion = suite
-                    .get("conclusion")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| {
-                        AutoSquashError::Rejected(
-                            "GitHub CI suite conclusion is unavailable".into(),
-                        )
-                    })?;
-                if !matches!(
-                    conclusion,
-                    "ACTION_REQUIRED"
-                        | "CANCELLED"
-                        | "FAILURE"
-                        | "NEUTRAL"
-                        | "SKIPPED"
-                        | "STALE"
-                        | "STARTUP_FAILURE"
-                        | "SUCCESS"
-                        | "TIMED_OUT"
-                ) {
-                    return Err(AutoSquashError::Rejected(
-                        "GitHub returned an unknown CI suite conclusion".to_string(),
-                    ));
-                }
-                match conclusion {
-                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => GitHubCheckStatus::Green,
-                    _ => GitHubCheckStatus::Failed,
-                }
-            }
-            _ => {
-                return Err(AutoSquashError::Rejected(
-                    "GitHub returned an unknown CI suite status".to_string(),
-                ));
-            }
-        };
-        check_status = check_status.combine(status);
+        check_status = check_status.combine(parse_github_check_suite_status(suite)?);
     }
     Ok(GitHubCheckSuitePage {
         check_count,
@@ -1472,6 +1473,21 @@ fn validate_github_rules(
     }
     Ok(reviews_required)
 }
+fn validate_github_review_decision(
+    review_decision: Option<&str>,
+    reviews_required: bool,
+) -> Result<(), AutoSquashError> {
+    match review_decision {
+        Some("APPROVED") => Ok(()),
+        Some(_) => Err(AutoSquashError::Rejected(
+            "GitHub review requirements are not confirmed fulfilled".to_string(),
+        )),
+        None if reviews_required => Err(AutoSquashError::Rejected(
+            "GitHub required reviews are not confirmed fulfilled".to_string(),
+        )),
+        None => Ok(()),
+    }
+}
 
 fn github_merge_args(
     reference: &ProviderRef,
@@ -1809,20 +1825,10 @@ async fn github_merge_readiness(
         // The synchronous merge endpoint remains authoritative for rules this plan cannot list.
         GitHubBranchRules::UnavailableOnPlan => false,
     };
-    match snapshot.metadata.review_decision.as_deref() {
-        Some("APPROVED") => {}
-        Some(_) => {
-            return Err(AutoSquashError::Rejected(
-                "GitHub review requirements are not confirmed fulfilled".to_string(),
-            ));
-        }
-        None if reviews_required => {
-            return Err(AutoSquashError::Rejected(
-                "GitHub required reviews are not confirmed fulfilled".to_string(),
-            ));
-        }
-        None => {}
-    }
+    validate_github_review_decision(
+        snapshot.metadata.review_decision.as_deref(),
+        reviews_required,
+    )?;
     Ok(readiness)
 }
 

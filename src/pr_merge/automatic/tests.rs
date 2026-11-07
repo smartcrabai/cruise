@@ -10,179 +10,8 @@ use tempfile::TempDir;
 
 use super::{AutoSquashError, AutoSquashOutcome, AutoSquashRequest, squash_merge};
 
-struct Fixture {
-    temp: TempDir,
-    repo: PathBuf,
-    bin: PathBuf,
-    log: PathBuf,
-    effects: PathBuf,
-    merged: PathBuf,
-    gh_identity: PathBuf,
-    gh_identity_after: PathBuf,
-    gh_identity_sequence: PathBuf,
-    gh_identity_calls: PathBuf,
-    gh_status: PathBuf,
-    gh_status_after: PathBuf,
-    gh_status_sequence: PathBuf,
-    gh_status_calls: PathBuf,
-    gh_suites: PathBuf,
-    gh_suites_sequence: PathBuf,
-    gh_suites_calls: PathBuf,
-    gh_rules: PathBuf,
-    gl_mr: PathBuf,
-    gl_mr_after: PathBuf,
-    gl_mr_seen: PathBuf,
-    gl_project: PathBuf,
-    env: HashMap<String, String>,
-    head: String,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        // Setup spawns real git and snapshots PATH for later child commands.
-        // Serialize that work with tests which temporarily change process PATH.
-        let _process_lock = crate::test_support::lock_process();
-        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let repo = temp.path().join("repo");
-        let head = initialize_test_repository(&repo);
-        let bin = temp.path().join("bin");
-        fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("{error}"));
-        let log = temp.path().join("provider.log");
-        let effects = temp.path().join("effects.log");
-        let merged = temp.path().join("merged");
-        let gh_identity = temp.path().join("gh_identity.json");
-        let gh_identity_after = temp.path().join("gh_identity_after.json");
-        let gh_identity_sequence = temp.path().join("gh_identity_sequence.jsonl");
-        let gh_identity_calls = temp.path().join("gh_identity_calls");
-        let gh_status = temp.path().join("gh_status.json");
-        let gh_status_after = temp.path().join("gh_status_after.json");
-        let gh_status_sequence = temp.path().join("gh_status_sequence.jsonl");
-        let gh_status_calls = temp.path().join("gh_status_calls");
-        let gh_suites = temp.path().join("gh_suites.json");
-        let gh_suites_sequence = temp.path().join("gh_suites_sequence.jsonl");
-        let gh_suites_calls = temp.path().join("gh_suites_calls");
-        let gh_rules = temp.path().join("gh_rules.json");
-        let gl_mr = temp.path().join("gl_mr.json");
-        let gl_mr_after = temp.path().join("gl_mr_after.json");
-        let gl_mr_seen = temp.path().join("gl_mr_seen");
-        let gl_project = temp.path().join("gl_project.json");
-        let path = std::env::var("PATH").unwrap_or_default();
-        let mut env = HashMap::from([
-            ("PATH".to_string(), format!("{}:{path}", bin.display())),
-            ("FAKE_LOG".to_string(), log.display().to_string()),
-            ("FAKE_EFFECTS".to_string(), effects.display().to_string()),
-            ("FAKE_MERGED".to_string(), merged.display().to_string()),
-            ("FAKE_EXPECTED_HEAD".to_string(), head.clone()),
-            (
-                "FAKE_GH_IDENTITY".to_string(),
-                gh_identity.display().to_string(),
-            ),
-            (
-                "FAKE_GH_IDENTITY_AFTER".to_string(),
-                gh_identity_after.display().to_string(),
-            ),
-            (
-                "FAKE_GH_IDENTITY_SEQUENCE".to_string(),
-                gh_identity_sequence.display().to_string(),
-            ),
-            (
-                "FAKE_GH_IDENTITY_CALLS".to_string(),
-                gh_identity_calls.display().to_string(),
-            ),
-            (
-                "FAKE_GH_STATUS".to_string(),
-                gh_status.display().to_string(),
-            ),
-            (
-                "FAKE_GH_STATUS_AFTER".to_string(),
-                gh_status_after.display().to_string(),
-            ),
-            (
-                "FAKE_GH_STATUS_SEQUENCE".to_string(),
-                gh_status_sequence.display().to_string(),
-            ),
-            (
-                "FAKE_GH_STATUS_CALLS".to_string(),
-                gh_status_calls.display().to_string(),
-            ),
-            (
-                "FAKE_GH_SUITES".to_string(),
-                gh_suites.display().to_string(),
-            ),
-            (
-                "FAKE_GH_SUITES_SEQUENCE".to_string(),
-                gh_suites_sequence.display().to_string(),
-            ),
-            (
-                "FAKE_GH_SUITES_CALLS".to_string(),
-                gh_suites_calls.display().to_string(),
-            ),
-            ("FAKE_GH_RULES".to_string(), gh_rules.display().to_string()),
-            ("FAKE_GL_MR".to_string(), gl_mr.display().to_string()),
-            (
-                "FAKE_GL_MR_AFTER".to_string(),
-                gl_mr_after.display().to_string(),
-            ),
-            (
-                "FAKE_GL_MR_SEEN".to_string(),
-                gl_mr_seen.display().to_string(),
-            ),
-            (
-                "FAKE_GL_PROJECT".to_string(),
-                gl_project.display().to_string(),
-            ),
-        ]);
-        if let Ok(inherited_path) = std::env::var("PATH") {
-            env.insert(
-                "PATH".to_string(),
-                format!("{}:{inherited_path}", bin.display()),
-            );
-        }
-        let fixture = Self {
-            temp,
-            repo,
-            bin,
-            log,
-            effects,
-            merged,
-            gh_identity,
-            gh_identity_after,
-            gh_identity_sequence,
-            gh_identity_calls,
-            gh_status,
-            gh_status_after,
-            gh_status_sequence,
-            gh_status_calls,
-            gh_suites,
-            gh_suites_sequence,
-            gh_suites_calls,
-            gh_rules,
-            gl_mr,
-            gl_mr_after,
-            gl_mr_seen,
-            gl_project,
-            env,
-            head,
-        };
-        fixture.install_gh();
-        fixture.install_glab();
-        fixture
-    }
-
-    fn install_script(&self, name: &str, body: &str) {
-        let path = self.bin.join(name);
-        fs::write(&path, body).unwrap_or_else(|error| panic!("{error}"));
-        let mut permissions = fs::metadata(&path)
-            .unwrap_or_else(|error| panic!("{error}"))
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions).unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    fn install_gh(&self) {
-        self.install_script(
-            "gh",
-            r#"#!/bin/sh
+#[cfg(unix)]
+const FAKE_GH_SCRIPT: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_LOG"
 if [ "$1" = "api" ]; then
   args="$*"
@@ -301,8 +130,184 @@ if [ "$1" = "api" ]; then
 else
   exit 64
 fi
-"#,
-        );
+"#;
+
+struct Fixture {
+    temp: TempDir,
+    repo: PathBuf,
+    bin: PathBuf,
+    log: PathBuf,
+    effects: PathBuf,
+    merged: PathBuf,
+    gh_identity: PathBuf,
+    gh_identity_after: PathBuf,
+    gh_identity_sequence: PathBuf,
+    gh_identity_calls: PathBuf,
+    gh_status: PathBuf,
+    gh_status_after: PathBuf,
+    gh_status_sequence: PathBuf,
+    gh_status_calls: PathBuf,
+    gh_suites: PathBuf,
+    gh_suites_sequence: PathBuf,
+    gh_suites_calls: PathBuf,
+    gh_rules: PathBuf,
+    gl_mr: PathBuf,
+    gl_mr_after: PathBuf,
+    gl_mr_seen: PathBuf,
+    gl_project: PathBuf,
+    env: HashMap<String, String>,
+    head: String,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        // Setup spawns real git and snapshots PATH for later child commands.
+        // Serialize that work with tests which temporarily change process PATH.
+        let _process_lock = crate::test_support::lock_process();
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let repo = temp.path().join("repo");
+        let head = initialize_test_repository(&repo);
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("{error}"));
+        let log = temp.path().join("provider.log");
+        let effects = temp.path().join("effects.log");
+        let merged = temp.path().join("merged");
+        let gh_identity = temp.path().join("gh_identity.json");
+        let gh_identity_after = temp.path().join("gh_identity_after.json");
+        let gh_identity_sequence = temp.path().join("gh_identity_sequence.jsonl");
+        let gh_identity_calls = temp.path().join("gh_identity_calls");
+        let gh_status = temp.path().join("gh_status.json");
+        let gh_status_after = temp.path().join("gh_status_after.json");
+        let gh_status_sequence = temp.path().join("gh_status_sequence.jsonl");
+        let gh_status_calls = temp.path().join("gh_status_calls");
+        let gh_suites = temp.path().join("gh_suites.json");
+        let gh_suites_sequence = temp.path().join("gh_suites_sequence.jsonl");
+        let gh_suites_calls = temp.path().join("gh_suites_calls");
+        let gh_rules = temp.path().join("gh_rules.json");
+        let gl_mr = temp.path().join("gl_mr.json");
+        let gl_mr_after = temp.path().join("gl_mr_after.json");
+        let gl_mr_seen = temp.path().join("gl_mr_seen");
+        let gl_project = temp.path().join("gl_project.json");
+        let mut fixture = Self {
+            temp,
+            repo,
+            bin,
+            log,
+            effects,
+            merged,
+            gh_identity,
+            gh_identity_after,
+            gh_identity_sequence,
+            gh_identity_calls,
+            gh_status,
+            gh_status_after,
+            gh_status_sequence,
+            gh_status_calls,
+            gh_suites,
+            gh_suites_sequence,
+            gh_suites_calls,
+            gh_rules,
+            gl_mr,
+            gl_mr_after,
+            gl_mr_seen,
+            gl_project,
+            env: HashMap::new(),
+            head,
+        };
+        fixture.env = fixture.child_env();
+        fixture.install_gh();
+        fixture.install_glab();
+        fixture
+    }
+
+    fn child_env(&self) -> HashMap<String, String> {
+        let path = std::env::var("PATH").unwrap_or_default();
+        let mut env = HashMap::from([
+            ("PATH".to_string(), format!("{}:{path}", self.bin.display())),
+            ("FAKE_LOG".to_string(), self.log.display().to_string()),
+            ("FAKE_EFFECTS".to_string(), self.effects.display().to_string()),
+            ("FAKE_MERGED".to_string(), self.merged.display().to_string()),
+            ("FAKE_EXPECTED_HEAD".to_string(), self.head.clone()),
+            (
+                "FAKE_GH_IDENTITY".to_string(),
+                self.gh_identity.display().to_string(),
+            ),
+            (
+                "FAKE_GH_IDENTITY_AFTER".to_string(),
+                self.gh_identity_after.display().to_string(),
+            ),
+            (
+                "FAKE_GH_IDENTITY_SEQUENCE".to_string(),
+                self.gh_identity_sequence.display().to_string(),
+            ),
+            (
+                "FAKE_GH_IDENTITY_CALLS".to_string(),
+                self.gh_identity_calls.display().to_string(),
+            ),
+            (
+                "FAKE_GH_STATUS".to_string(),
+                self.gh_status.display().to_string(),
+            ),
+            (
+                "FAKE_GH_STATUS_AFTER".to_string(),
+                self.gh_status_after.display().to_string(),
+            ),
+            (
+                "FAKE_GH_STATUS_SEQUENCE".to_string(),
+                self.gh_status_sequence.display().to_string(),
+            ),
+            (
+                "FAKE_GH_STATUS_CALLS".to_string(),
+                self.gh_status_calls.display().to_string(),
+            ),
+            (
+                "FAKE_GH_SUITES".to_string(),
+                self.gh_suites.display().to_string(),
+            ),
+            (
+                "FAKE_GH_SUITES_SEQUENCE".to_string(),
+                self.gh_suites_sequence.display().to_string(),
+            ),
+            (
+                "FAKE_GH_SUITES_CALLS".to_string(),
+                self.gh_suites_calls.display().to_string(),
+            ),
+            ("FAKE_GH_RULES".to_string(), self.gh_rules.display().to_string()),
+            ("FAKE_GL_MR".to_string(), self.gl_mr.display().to_string()),
+            (
+                "FAKE_GL_MR_AFTER".to_string(),
+                self.gl_mr_after.display().to_string(),
+            ),
+            (
+                "FAKE_GL_MR_SEEN".to_string(),
+                self.gl_mr_seen.display().to_string(),
+            ),
+            (
+                "FAKE_GL_PROJECT".to_string(),
+                self.gl_project.display().to_string(),
+            ),
+        ]);
+        if let Ok(inherited_path) = std::env::var("PATH") {
+            env.insert(
+                "PATH".to_string(),
+                format!("{}:{inherited_path}", self.bin.display()),
+            );
+        }
+        env
+    }
+
+    fn install_script(&self, name: &str, body: &str) {
+        let path = self.bin.join(name);
+        fs::write(&path, body).unwrap_or_else(|error| panic!("{error}"));
+        let mut permissions = fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn install_gh(&self) {
+        self.install_script("gh", FAKE_GH_SCRIPT);
     }
     fn install_glab(&self) {
         self.install_script(
@@ -372,7 +377,7 @@ esac
         }
     }
 
-    fn write_json_sequence(&self, path: &Path, values: &[Value]) {
+    fn write_json_sequence(path: &Path, values: &[Value]) {
         let sequence = values
             .iter()
             .map(|value| serde_json::to_string(value).unwrap_or_else(|error| panic!("{error}")))
@@ -386,15 +391,15 @@ esac
             .first()
             .unwrap_or_else(|| panic!("GitHub status sequence must not be empty"));
         self.configure_github(identity, initial, rules);
-        self.write_json_sequence(&self.gh_status_sequence, statuses);
+        Self::write_json_sequence(&self.gh_status_sequence, statuses);
     }
 
     fn configure_github_identity_sequence(&self, identities: &[Value]) {
-        self.write_json_sequence(&self.gh_identity_sequence, identities);
+        Self::write_json_sequence(&self.gh_identity_sequence, identities);
     }
 
     fn configure_github_suite_sequence(&self, suites: &[Value]) {
-        self.write_json_sequence(&self.gh_suites_sequence, suites);
+        Self::write_json_sequence(&self.gh_suites_sequence, suites);
     }
 
     fn github_identity_call_count(&self) -> usize {

@@ -1039,8 +1039,9 @@ case " $* " in
   *) printf 'GraphQL request did not identify PR 42: %s\n' "$*" >&2; exit 93 ;;
 esac
 case "$*" in
-  *'pullRequest(number:$number)'*'object(oid:$head)'*statusCheckRollup*) ;;
-  *) printf 'GraphQL request did not correlate the PR head with its commit rollup: %s\n' "$*" >&2; exit 94 ;;
+  *'pullRequest(number:$number)'*'object(oid:$head)'*statusCheckRollup*|\
+  *'pullRequest(number:$number)'*'object(oid:$head)'*checkSuites*) ;;
+  *) printf 'GraphQL request did not correlate the PR head with its commit CI data: %s\n' "$*" >&2; exit 94 ;;
 esac
 typed_owner=false
 typed_name=false
