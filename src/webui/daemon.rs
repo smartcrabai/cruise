@@ -174,10 +174,9 @@ fn spawn_daemon(
             HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
         };
         use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
-        // CreateProcess inherits every inheritable handle, not just the stdio
-        // handles configured above. In particular, the CLI's captured output
-        // pipes would otherwise remain open for the lifetime of the daemon.
-        // Command duplicates its configured log handles as inheritable itself.
+        // The launcher clears its original captured-pipe handles before
+        // launching this runtime. Clear the std-handle copies inherited here;
+        // Command duplicates the configured log handles for the daemon.
         for handle in [
             std::io::stdin().as_raw_handle(),
             std::io::stdout().as_raw_handle(),
