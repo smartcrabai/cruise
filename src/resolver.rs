@@ -753,10 +753,7 @@ mod tests {
         // Keep this entrypoint fixture hermetic even under a configured developer HOME.
         let home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let _home = crate::test_support::set_fake_home(home.path());
-        let _model_env: Vec<_> = ["CRUISE_MODEL", "CRUISE_PLAN_MODEL", "CRUISE_SDK"]
-            .into_iter()
-            .map(EnvGuard::remove)
-            .collect();
+        let _model_env = crate::test_support::clear_config_override_envs();
         // Given: an explicit config file and a prompt file beside it.
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         std::env::set_current_dir(dir.path()).unwrap_or_else(|e| panic!("{e:?}"));

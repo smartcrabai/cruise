@@ -222,6 +222,7 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
             let vm = TabInfoVm {
                 auto_requeue_count: session.auto_requeue_count,
                 id: id.to_string(),
+                pending_instructions: session.pending_instructions,
                 config_source: session.config_source.clone(),
                 flags,
                 flags_note,

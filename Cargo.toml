@@ -168,6 +168,11 @@ vt100 = "=0.18.1"
 
 [[test]]
 harness = false
+name = "config_env_bdd"
+path = "tests/config_env_bdd.rs"
+
+[[test]]
+harness = false
 name = "workflow_flags_bdd"
 path = "tests/workflow_flags_bdd.rs"
 test = false
@@ -183,6 +188,13 @@ test = false
 harness = false
 name = "checkpoint_bdd"
 path = "tests/checkpoint_bdd.rs"
+
+[[test]]
+harness = false
+name = "instruction_inbox_bdd"
+path = "tests/instruction_inbox_bdd.rs"
+# Requires Unix subprocess fixtures, run explicitly.
+test = false
 
 [[test]]
 harness = false

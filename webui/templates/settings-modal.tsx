@@ -6,6 +6,7 @@ export default function SettingsModal(props) {
         <div class="space-y-1.5">
           <label for="run-all-parallelism" class="text-sm text-gray-500 dark:text-gray-400">Run All Parallelism</label>
           <input id="run-all-parallelism" name="runAllParallelism" type="number" min="1" value={props.runAllParallelism} class="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-1.5 text-base md:text-sm text-gray-800 dark:text-gray-200 outline-none focus:border-blue-500" />
+          <p class="text-sm text-gray-500 dark:text-gray-400">Effective Run All parallelism: {props.effectiveRunAllParallelism}</p>
           {props.error && <p class="text-sm text-red-600 dark:text-red-400">{props.error}</p>}
         </div>
         <div class="space-y-1.5">

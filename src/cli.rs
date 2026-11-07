@@ -6,6 +6,7 @@ pub(crate) const PLAN_STDIN_SENTINEL: &str = "stdin";
 #[derive(Parser, Debug)]
 #[command(
     name = "cruise",
+    bin_name = "cruise",
     version,
     about = "YAML-driven coding agent workflow orchestrator",
     args_conflicts_with_subcommands = true
@@ -118,6 +119,8 @@ pub enum Commands {
     Draft(DraftArgs),
     /// Execute a planned session.
     Run(RunArgs),
+    /// Send an instruction to a running session.
+    Tell(TellArgs),
     /// List and manage sessions interactively.
     List(ListArgs),
     /// Show the changes in a session branch and worktree.
@@ -144,6 +147,18 @@ pub enum Commands {
     /// Removed MCP bridge, kept so stale jcode registrations fail instead of planning.
     #[command(name = "mcp-bridge", hide = true, disable_help_flag = true)]
     McpBridge(LegacyMcpBridgeArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct TellArgs {
+    pub session_id: String,
+    pub instruction: Option<String>,
+    #[arg(long, conflicts_with = "instruction")]
+    pub log: bool,
+    #[arg(long, hide = true, default_value = "cli", value_parser = ["cli", "github"])]
+    pub origin: String,
+    #[arg(long, hide = true)]
+    pub dedupe_key: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -677,6 +692,16 @@ pub fn parse_cli() -> Cli {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn explicit_plan_accepts_tell_as_input() {
+        let cli = Cli::try_parse_from(["cruise", "plan", "tell"])
+            .unwrap_or_else(|error| panic!("failed to parse plan command: {error}"));
+        match cli.command {
+            Some(Commands::Plan(args)) => assert_eq!(args.input.as_deref(), Some("tell")),
+            _ => panic!("expected plan command"),
+        }
+    }
 
     #[test]
     fn diff_contract_parses_session_and_optional_stat() {

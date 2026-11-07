@@ -32,6 +32,8 @@ const WORKSPACE_WORKTREE_LABEL: &str = "Create worktree (new branch)";
 const WORKSPACE_CURRENT_BRANCH_LABEL: &str = "Use current branch";
 const OPTION_NOTIFICATION_DETAIL: &str = "Waiting for an option selection";
 
+use crate::instruction_inbox::{close_run_inbox, open_run_inbox};
+
 fn notification_kind_for_run_result(
     phase: &SessionPhase,
     result: &Result<()>,
@@ -777,6 +779,11 @@ async fn run_single_loaded(
     workspace_operation.finish_result(&workspace);
     let (execution_workspace, initial_fingerprint) = workspace?;
 
+    if session.exec {
+        eprintln!("{}", style(format!("Session: {session_id}")).dim());
+    }
+    let mut instructions = open_run_inbox(&manager, &session_id);
+
     let plan_path = session.plan_path(&manager.sessions_dir());
     let mut vars = VariableStore::new(session.template_input(&manager.sessions_dir()));
     vars.set_named_file(PLAN_VAR, plan_path);
@@ -838,6 +845,7 @@ async fn run_single_loaded(
                 working_dir: Some(execution_workspace.path()),
                 skipped_steps: &skipped_steps,
                 flags: &flag_values,
+                instructions: instructions.as_ref(),
             };
             crate::retry::with_active_policy(retry_policy.clone(), async {
                 let execution = execute_steps_with_graph(
@@ -973,6 +981,7 @@ async fn run_single_loaded(
                                     Some(&on_step_log),
                                     Some(&on_pr_processing),
                                     Some(&persist_pr),
+                                    instructions.as_ref(),
                                 ),
                             ) => result,
                             _ = tokio::signal::ctrl_c() => {
@@ -1003,6 +1012,7 @@ async fn run_single_loaded(
             session.clear_runner();
             session.phase = SessionPhase::Suspended;
             session.pr_skipped_reason = None;
+            close_run_inbox(instructions.take(), &session.phase, &logger);
             manager.save(session)?;
             return Err(CruiseError::Interrupted);
         }
@@ -1064,6 +1074,7 @@ async fn run_single_loaded(
                     return Err(error);
                 }
             };
+        close_run_inbox(instructions.take(), &session.phase, &logger);
         // Repo-backed sessions: drop the temporary clone (and its worktree) once
         // the PR has been created.
         if cleanup_repo {
@@ -3037,6 +3048,7 @@ steps:
             None,
             Some(&on_pr_processing),
             None,
+            None,
         )
         .await;
 
@@ -3128,6 +3140,7 @@ steps:
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -3188,6 +3201,7 @@ steps:
             &crate::flags::NO_FLAGS,
             None,
             &NoOpOptionHandler,
+            None,
             None,
             None,
             None,
@@ -3304,6 +3318,7 @@ steps:
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -3409,6 +3424,7 @@ steps:
                 &crate::flags::NO_FLAGS,
                 None,
                 &NoOpOptionHandler,
+                None,
                 None,
                 None,
                 None,
