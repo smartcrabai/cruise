@@ -44,6 +44,7 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 - **AwaitingInput** means SDK planning has persisted an unanswered question. Answering it resumes planning; `cruise list` offers **Generate Plan**, which regenerates the plan and moves the session to `AwaitingApproval`.
 - `cruise plan`/`--plan`/`draft` *create* sessions; `cruise run` *executes* them; `cruise list` *manages* them; `cruise clean` *garbage-collects* them.
 - `cruise exec` is the **odd one out**: it runs a workflow against the current directory with a **transient session**, no worktree, and no PR. Terminal exec sessions are removed automatically; paused or interrupted sessions remain resumable by ID. `force_exec: true` enables the same path for direct plan entry points; `--no-force-exec` opts out once.
+- `cruise exec --instant "task"` explicitly builds an in-memory single-agent workflow without a workflow YAML. Ordinary `exec` still resolves configuration: with no config file, interactive terminals offer built-in workflows in the categorized selector, while non-interactive execution selects `tdd` automatically, not instant.
 - Bare `cruise` opens the official interactive keyboard client for the full WebUI-domain session workflows; use it for interactive management, while `cruise list` remains available as the CLI selector.
 
 ## Existing PR review fixes
@@ -73,6 +74,7 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | Execute or resume a non-exec session (Planned, Running, Failed, or Suspended; prompts when multiple) | `cruise run` |
 | Execute a specific session | `cruise run <session-id>` |
 | Run a config right here, no plan/worktree/PR | `cruise exec "task"` (or `cruise "task"` with `force_exec: true`; use `cruise plan "ssh"` or `cruise plan "mcp-bridge"` when the task text is exactly `ssh` or `mcp-bridge`, respectively) |
+| Run one agent without writing workflow YAML | `cruise exec --instant "task"` |
 | Execute every Planned or Suspended session back-to-back (live dashboard on TTY for non-dry runs) | `cruise run --all` |
 | Run all planned or suspended sessions with bounded concurrency (one run) | `cruise run --all --parallelism 4` |
 | Retry eligible Run All failures once (one run) | `cruise run --all --auto-requeue-max-attempts 1` |
@@ -94,6 +96,12 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | Show / change app-level settings (e.g. WebUI/TUI parallelism; displays `prevent_sleep`) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / inspect what's configured | `jcode login <provider>` / `jcode auth status` (cruise has no login command of its own) |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
+
+### Instant execution
+
+`cruise exec --instant --review --review-rounds 2 --verify 'cargo test' --verify 'cargo clippy' "task"` runs implement, optional review, then verification commands in order. The task must be nonblank. Review repeats only when its pass changes files, up to the positive pass limit (default 2); changes in the final pass are not reviewed again. A failed verification command fails the run rather than triggering a repair loop. Blank verification commands and commands containing braces are rejected.
+
+Use `--sdk jcode|claude|opencode` and `--model <MODEL>` to select the backend and model. Workflow defaults and environment overrides still apply, including `CRUISE_SDK` and `CRUISE_MODEL` taking precedence over these options. Instant bypasses workflow config discovery, including `CRUISE_CONFIG`, but uses the existing inline session snapshot, not a generated repository file. `--instant` conflicts with `-c/--config` and `-f/--flag`; the other instant options require it, and `--review-rounds` requires `--review`. Existing `--dry-run`, `--max-retries`, and `--rate-limit-retries` work; the retry budget cannot be lower than the review limit. Like other exec runs, it requires a git repository on an attached branch, allows existing changes, and retains paused/interrupted sessions for explicit resume. Remote example: `cruise ssh <host> -- exec --instant "task"`.
 
 ### Updating Cruise
 
@@ -339,7 +347,7 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 1. `-c/--config <path>` (must exist; no prompt). `__builtin__` and `builtin:tdd` select `tdd`; `builtin:<name>` selects a named catalog workflow. The former selectors `builtin:default`, `builtin:simple`, and `builtin:review` are unsupported. `cruise workflow list` prints the catalog; `cruise workflow eject <name> [--to user|project]` copies a catalog workflow without overwriting an existing file.
 2. `CRUISE_CONFIG` env var (must exist; no prompt)
 3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted, excluding top-level `./.cruise/default.yaml`), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml` and members of valid locked bundles. Candidates are offered in an interactive picker (TTY) or the highest-priority candidate is picked automatically (non-interactive). Application `workflow_categories` affects only interactive picker display, not resolution priority.
-4. None found → the built-in `tdd` workflow (`builtin/tdd.yaml` in the source tree, embedded at build time), adopted without prompting.
+4. No config file found → an interactive terminal offers built-in workflows in the selector; non-interactive execution automatically selects the embedded `tdd` workflow (`builtin/tdd.yaml` in the source tree).
 The built-in names are `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, `security`, and `pr-review-fix`; use one with `builtin:<name>` to select it.
 
 

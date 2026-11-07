@@ -520,6 +520,30 @@ pub struct ExecArgs {
     /// Task description bound to {input}. Optional if your config doesn't reference {input}.
     pub input: Option<String>,
 
+    /// Run an in-memory workflow without a workflow config.
+    #[arg(long, conflicts_with_all = ["config", "flags"])]
+    pub instant: bool,
+
+    /// Agent SDK for instant execution.
+    #[arg(long, requires = "instant", value_name = "NAME")]
+    pub sdk: Option<String>,
+
+    /// Model for instant execution.
+    #[arg(long, requires = "instant")]
+    pub model: Option<String>,
+
+    /// Review and fix confirmed defects after implementation.
+    #[arg(long, requires = "instant")]
+    pub review: bool,
+
+    /// Maximum number of review passes (default: 2).
+    #[arg(long, requires = "review", value_name = "N")]
+    pub review_rounds: Option<usize>,
+
+    /// Verification command, repeatable and run in order.
+    #[arg(long, requires = "instant", value_name = "COMMAND")]
+    pub verify: Vec<String>,
+
     /// Path to the workflow config file. The special value `__builtin__`
     /// selects the built-in default workflow, and `builtin:<name>` selects a
     /// named built-in workflow.

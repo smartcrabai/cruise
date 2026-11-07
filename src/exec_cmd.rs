@@ -17,6 +17,24 @@ pub(crate) struct ExecRequest {
 }
 
 pub async fn run(args: ExecArgs) -> Result<()> {
+    if args.instant {
+        let yaml = crate::instant_exec::build_yaml(&args)?;
+        let source = ConfigSource::Inline;
+        let config = load_config_from_source(&yaml, &source)?;
+        return run_resolved(
+            &config,
+            &yaml,
+            &source,
+            ExecRequest {
+                input: args.input.clone().unwrap_or_default(),
+                max_retries: args.max_retries,
+                rate_limit_retries: args.rate_limit_retries,
+                dry_run: args.dry_run,
+                flags: Vec::new(),
+            },
+        )
+        .await;
+    }
     let (yaml, source) = resolve_config(args.config.as_deref())?;
     let config = load_config_from_source(&yaml, &source)?;
     run_resolved(
@@ -305,6 +323,12 @@ mod tests {
     fn exec_args_no_op(config_path: &Path) -> ExecArgs {
         ExecArgs {
             input: Some("test task".to_string()),
+            instant: false,
+            sdk: None,
+            model: None,
+            review: false,
+            review_rounds: None,
+            verify: vec![],
             config: Some(
                 config_path
                     .to_str()
@@ -321,6 +345,42 @@ mod tests {
     // ---------------------------------------------------------------------------
     // Unit tests: setup_exec_session
     // ---------------------------------------------------------------------------
+
+    #[test]
+    fn instant_inline_session_persists_snapshot_and_empty_plan()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
+        let process = ProcessStateGuard::new(tmp.path());
+        let repo = create_repo_with_origin(&tmp);
+        process.set_current_dir(&repo);
+        let manager = SessionManager::new(crate::paths::data_dir()?);
+        let mut args = exec_args_no_op(&tmp.path().join("unused"));
+        args.instant = true;
+        args.config = None;
+        let yaml = crate::instant_exec::build_yaml(&args)?;
+        let id = SessionManager::new_session_id();
+        let session = setup_exec_session(
+            &manager,
+            &ConfigSource::Inline,
+            &yaml,
+            "instant task".into(),
+            &id,
+        )?;
+        let saved = manager.load(&id)?;
+        assert_eq!(saved.config, SessionConfigRef::InlineSnapshot);
+        assert_eq!(saved.input, "instant task");
+        assert!(saved.exec && saved.allow_dirty_working_tree);
+        assert_eq!(saved.workspace_mode, WorkspaceMode::CurrentBranch);
+        assert!(matches!(saved.phase, SessionPhase::Planned));
+        assert_eq!(
+            fs::read_to_string(session.plan_path(&manager.sessions_dir()))?,
+            ""
+        );
+        let snapshot = fs::read_to_string(manager.sessions_dir().join(id).join("config.yaml"))?;
+        let config = load_config_from_source(&snapshot, &ConfigSource::Inline)?;
+        assert!(config.steps.contains_key("implement"));
+        Ok(())
+    }
 
     #[test]
     fn test_exec_creates_session_with_current_branch_mode() {
@@ -780,6 +840,12 @@ steps:
 
         let args = ExecArgs {
             input: None,
+            instant: false,
+            sdk: None,
+            model: None,
+            review: false,
+            review_rounds: None,
+            verify: vec![],
             config: Some(
                 config_path
                     .to_str()

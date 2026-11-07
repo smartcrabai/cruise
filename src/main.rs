@@ -49,6 +49,7 @@ mod github_review;
 mod graph;
 mod herdr;
 mod install_identity;
+mod instant_exec;
 mod issue_images;
 mod issue_input;
 mod issue_publish;
