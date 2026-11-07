@@ -39,13 +39,17 @@ jobs:
     timeout-minutes: 180
     env:
       RUSTUP_TOOLCHAIN: '1.99.1'
-      JCODE_HOME: ${{ runner.temp }}/prompt-eval-jcode-home
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Configure jcode home
+        env:
+          JCODE_HOME: ${{ runner.temp }}/prompt-eval-jcode-home
+        run: echo "JCODE_HOME=$JCODE_HOME" >> "$GITHUB_ENV"
 
       - name: Install pinned Rust
         run: rustup toolchain install 1.99.1 --profile minimal
