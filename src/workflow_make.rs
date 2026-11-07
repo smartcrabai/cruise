@@ -248,47 +248,68 @@ impl Conversation {
         let parsed = run_with_repairs(
             base,
             |prompt| async move {
-            let spinner = (std::io::stderr().is_terminal() && !crate::console_mode::is_quiet())
-                .then(|| crate::spinner::Spinner::start("Drafting workflow..."));
-            let outcome = {
-                let operation = run_prompt(
-                    config,
-                    &prompt,
-                    PermissionMode::ReadOnly,
-                    Some(cwd),
-                    Some(token_ref),
-                );
-                tokio::pin!(operation);
-                tokio::select! {
-                    result = &mut operation => result,
-                    _ = tokio::signal::ctrl_c() => {
-                        token_ref.cancel();
-                        let _ = operation.await;
-                        Err(CruiseError::Interrupted)
+                let spinner = (std::io::stderr().is_terminal() && !crate::console_mode::is_quiet())
+                    .then(|| crate::spinner::Spinner::start("Drafting workflow..."));
+                let outcome = {
+                    let operation = run_prompt(
+                        config,
+                        &prompt,
+                        PermissionMode::ReadOnly,
+                        Some(cwd),
+                        Some(token_ref),
+                    );
+                    tokio::pin!(operation);
+                    tokio::select! {
+                        result = &mut operation => result,
+                        _ = tokio::signal::ctrl_c() => {
+                            token_ref.cancel();
+                            let _ = operation.await;
+                            Err(CruiseError::Interrupted)
+                        }
                     }
-                }
-            };
-            drop(spinner);
-            outcome
+                };
+                drop(spinner);
+                outcome
             },
-            |reply| parse_reply(reply).and_then(|p| {
-                if let Some(yaml) = &p.workflow {
-                    validate_generated_yaml(yaml, self.dest.parent().unwrap_or(&self.cwd))
-                        .map_err(|e| e.to_string())?;
-                }
-                Ok(p)
-            }).map_err(CruiseError::Other),
-            |reply, err| build_turn_prompt(
-                TEMPLATE, SCHEMA, self.reference.as_deref().map(|s| ("Reference", s)),
-                &transcript, draft.as_deref(), request, Some((reply, &err.to_string())),
-            ),
-        ).await;
+            |reply| {
+                parse_reply(reply)
+                    .and_then(|p| {
+                        if let Some(yaml) = &p.workflow {
+                            validate_generated_yaml(yaml, self.dest.parent().unwrap_or(&self.cwd))
+                                .map_err(|e| e.to_string())?;
+                        }
+                        Ok(p)
+                    })
+                    .map_err(CruiseError::Other)
+            },
+            |reply, err| {
+                build_turn_prompt(
+                    TEMPLATE,
+                    SCHEMA,
+                    self.reference.as_deref().map(|s| ("Reference", s)),
+                    &transcript,
+                    draft.as_deref(),
+                    request,
+                    Some((reply, &err.to_string())),
+                )
+            },
+        )
+        .await;
+        self.finish_submit(request, parsed)
+    }
+    fn finish_submit(
+        &mut self,
+        request: &str,
+        parsed: std::result::Result<ParsedReply, RepairError>,
+    ) -> Result<()> {
         match parsed {
             Ok(p) => {
                 if let Some(yaml) = &p.workflow {
                     crate::planning::write_plan_atomically(&self.draft, yaml.as_bytes())?;
                     if let Err(e) = self.log("draft_updated", "validated draft") {
-                        eprintln!("Warning: could not append draft update to conversation log: {e}");
+                        eprintln!(
+                            "Warning: could not append draft update to conversation log: {e}"
+                        );
                     }
                     println!("Draft updated: {}", self.draft.display());
                 } else {
@@ -350,7 +371,7 @@ impl Conversation {
                 break;
             };
             match request.trim() {
-                "" => continue,
+                "" => (),
                 "/show" => match std::fs::read_to_string(&self.draft) {
                     Ok(s) => crate::display::print_bordered(&s, Some("Workflow draft")),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("No draft yet."),
@@ -612,7 +633,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     }
 
     struct Fixture {
-        _temp: tempfile::TempDir,
+        temp: tempfile::TempDir,
         conversation: Conversation,
         calls: PathBuf,
     }
@@ -645,7 +666,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
                 turns: Vec::new(),
             };
             Self {
-                _temp: temp,
+                temp,
                 conversation,
                 calls,
             }
@@ -689,10 +710,9 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     }
     impl MakeInput for Scripted {
         fn read_request(&mut self, _prompt: &str) -> Result<Option<String>> {
-            Ok(self
-                .requests
+            self.requests
                 .pop_front()
-                .expect("unexpected request prompt"))
+                .ok_or_else(|| CruiseError::Other("unexpected request prompt".into()))
         }
         fn choose_approval(&mut self, dest: &Path) -> Result<Approval> {
             self.approval_calls += 1;
@@ -700,7 +720,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
                 match self
                     .choices
                     .pop_front()
-                    .expect("unexpected approval prompt")
+                    .ok_or_else(|| CruiseError::Other("unexpected approval prompt".into()))?
                 {
                     Choice::Plain(choice) => choice,
                     Choice::TamperDraft(path, content) => {
@@ -797,11 +817,19 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         let mut f = Fixture::new("exit 1");
         let log = f.conversation.staging.join("conversation.jsonl");
         crate::test_support::write_executable_script(
-            &f._temp.path().join("backend.sh"),
-            &format!("#!/bin/sh\ncat >/dev/null\nrm '{}'\nmkdir '{}'\nprintf 'Ready\\n<cruise-workflow>\\n{}\\n</cruise-workflow>\\n'\n", log.display(), log.display(), VALID),
+            &f.temp.path().join("backend.sh"),
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\nrm '{}'\nmkdir '{}'\nprintf 'Ready\\n<cruise-workflow>\\n{}\\n</cruise-workflow>\\n'\n",
+                log.display(),
+                log.display(),
+                VALID
+            ),
         );
         f.conversation.submit("create it").await.unwrap();
-        assert_eq!(fs::read_to_string(&f.conversation.draft).unwrap().trim(), VALID.trim());
+        assert_eq!(
+            fs::read_to_string(&f.conversation.draft).unwrap().trim(),
+            VALID.trim()
+        );
         assert_eq!(f.conversation.turns.len(), 2);
         assert_eq!(f.conversation.turns[0].text, "create it");
         assert_eq!(f.conversation.turns[1].text, "Ready");
@@ -891,7 +919,15 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     fn production_prompt_includes_repair_context_only_when_requested() {
         let plain = build_turn_prompt(TEMPLATE, "schema", None, "history", None, "request", None);
         assert!(!plain.contains("## Previous attempt"));
-        let repair = build_turn_prompt(TEMPLATE, "schema", None, "history", None, "request", Some(("unique reply", "unique diagnostic")));
+        let repair = build_turn_prompt(
+            TEMPLATE,
+            "schema",
+            None,
+            "history",
+            None,
+            "request",
+            Some(("unique reply", "unique diagnostic")),
+        );
         assert_eq!(repair.matches("unique reply").count(), 1);
         assert_eq!(repair.matches("unique diagnostic").count(), 1);
         assert_eq!(repair.matches("## Previous attempt").count(), 1);
@@ -906,7 +942,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             },
             Turn {
                 role: Role::Assistant,
-                text: "新".into(),
+                text: "\u{65b0}".into(),
             },
         ];
         let newest = format!("Assistant: {}\n", turns[1].text);
@@ -920,19 +956,37 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     #[test]
     fn transcript_skips_oversized_newest_and_retains_older() {
         let turns = vec![
-            Turn { role: Role::User, text: "fits".into() },
-            Turn { role: Role::Assistant, text: "too large".repeat(20) },
+            Turn {
+                role: Role::User,
+                text: "fits".into(),
+            },
+            Turn {
+                role: Role::Assistant,
+                text: "too large".repeat(20),
+            },
         ];
-        assert_eq!(render_transcript(&turns, "User: fits\n".len()),
-            "(earlier turns omitted: 1)\nUser: fits\n");
+        assert_eq!(
+            render_transcript(&turns, "User: fits\n".len()),
+            "(earlier turns omitted: 1)\nUser: fits\n"
+        );
 
         let turns = vec![
-            Turn { role: Role::Assistant, text: "新".into() },
-            Turn { role: Role::User, text: "大".repeat(20) },
+            Turn {
+                role: Role::Assistant,
+                text: "\u{65b0}".into(),
+            },
+            Turn {
+                role: Role::User,
+                text: "\u{5927}".repeat(20),
+            },
         ];
-        assert_eq!(render_transcript(&turns, "Assistant: 新\n".len()),
-            "(earlier turns omitted: 1)\nAssistant: 新\n");
-        assert_eq!(render_transcript(&turns, "Assistant: 新\n".len() - 1),
-            "(earlier turns omitted: 2)\n");
+        assert_eq!(
+            render_transcript(&turns, "Assistant: \u{65b0}\n".len()),
+            "(earlier turns omitted: 1)\nAssistant: \u{65b0}\n"
+        );
+        assert_eq!(
+            render_transcript(&turns, "Assistant: \u{65b0}\n".len() - 1),
+            "(earlier turns omitted: 2)\n"
+        );
     }
 }

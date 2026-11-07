@@ -175,28 +175,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::Webui(args)) => webui::run(args).await,
         Some(cli::Commands::Update(args)) => update_cmd::run(&args),
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::List)) => workflow_cmd::list(),
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Eject(args))) => {
-            workflow_cmd::eject(&args.name, args.to == cli::EjectDestination::Project)
-        }
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Generate(args))) => {
-            workflow_generate::run(args).await
-        }
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Make(args))) => {
-            workflow_make::run(args).await
-        }
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Doctor(_))) => {
-            unreachable!("workflow doctor exits before runtime initialization")
-        }
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Add(args))) => {
-            workflow_cmd::add(&args.spec, args.name, args.yes)
-        }
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Update(args))) => {
-            workflow_cmd::update(&args.name, args.yes)
-        }
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Remove(args))) => {
-            workflow_cmd::remove(&args.name)
-        }
+        Some(cli::Commands::Workflow(command)) => run_workflow(command).await,
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::SyncBase { pr_number, url },
         })) => match worktree_pr::sync_base(&pr_number, url.as_deref()) {
@@ -251,5 +230,22 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             };
             Box::pin(plan_cmd::run(plan_args)).await
         }
+    }
+}
+
+async fn run_workflow(command: cli::WorkflowCommand) -> error::Result<()> {
+    match command {
+        cli::WorkflowCommand::List => workflow_cmd::list(),
+        cli::WorkflowCommand::Eject(args) => {
+            workflow_cmd::eject(&args.name, args.to == cli::EjectDestination::Project)
+        }
+        cli::WorkflowCommand::Generate(args) => workflow_generate::run(args).await,
+        cli::WorkflowCommand::Make(args) => workflow_make::run(args).await,
+        cli::WorkflowCommand::Doctor(_) => {
+            unreachable!("workflow doctor exits before runtime initialization")
+        }
+        cli::WorkflowCommand::Add(args) => workflow_cmd::add(&args.spec, args.name, args.yes),
+        cli::WorkflowCommand::Update(args) => workflow_cmd::update(&args.name, args.yes),
+        cli::WorkflowCommand::Remove(args) => workflow_cmd::remove(&args.name),
     }
 }

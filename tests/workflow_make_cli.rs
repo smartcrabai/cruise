@@ -1,11 +1,12 @@
 #![cfg(unix)]
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
 
-fn cruise(home: &Path, project: &Path, args: &[&str]) -> Output {
+fn cruise(home: &Path, project: &Path, args: &[&str]) -> std::io::Result<Output> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("CRUISE_") {
@@ -22,7 +23,6 @@ fn cruise(home: &Path, project: &Path, args: &[&str]) -> Output {
         .stdin(Stdio::null())
         .args(args)
         .output()
-        .expect("run cruise")
 }
 
 fn output_text(output: &Output) -> String {
@@ -34,10 +34,10 @@ fn output_text(output: &Output) -> String {
 }
 
 #[test]
-fn workflow_help_lists_make_and_make_help_describes_arguments() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let output = cruise(home.path(), project.path(), &["workflow", "--help"]);
+fn workflow_help_lists_make_and_make_help_describes_arguments() -> std::io::Result<()> {
+    let home = TempDir::new()?;
+    let project = TempDir::new()?;
+    let output = cruise(home.path(), project.path(), &["workflow", "--help"])?;
     assert!(output.status.success(), "{}", output_text(&output));
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("make"),
@@ -45,7 +45,7 @@ fn workflow_help_lists_make_and_make_help_describes_arguments() {
         output_text(&output)
     );
 
-    let output = cruise(home.path(), project.path(), &["workflow", "make", "--help"]);
+    let output = cruise(home.path(), project.path(), &["workflow", "make", "--help"])?;
     assert!(output.status.success(), "{}", output_text(&output));
     let help = String::from_utf8_lossy(&output.stdout);
     for expected in ["--name", "--user", "--config", "--from", "DESCRIPTION"] {
@@ -55,12 +55,13 @@ fn workflow_help_lists_make_and_make_help_describes_arguments() {
             output_text(&output)
         );
     }
+    Ok(())
 }
 
 #[test]
-fn make_requires_a_valid_name_before_terminal_check() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+fn make_requires_a_valid_name_before_terminal_check() -> std::io::Result<()> {
+    let home = TempDir::new()?;
+    let project = TempDir::new()?;
     for (args, expected) in [
         (vec!["workflow", "make"], "--name"),
         (
@@ -68,7 +69,7 @@ fn make_requires_a_valid_name_before_terminal_check() {
             "invalid workflow name",
         ),
     ] {
-        let output = cruise(home.path(), project.path(), &args);
+        let output = cruise(home.path(), project.path(), &args)?;
         assert!(!output.status.success(), "{}", output_text(&output));
         assert!(
             String::from_utf8_lossy(&output.stderr).contains(expected),
@@ -78,12 +79,13 @@ fn make_requires_a_valid_name_before_terminal_check() {
         assert!(!project.path().join(".cruise").exists());
         assert!(!home.path().join("data/cruise/workflow-make").exists());
     }
+    Ok(())
 }
 
 #[test]
-fn make_rejects_non_terminal_without_side_effects_or_backend_call() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+fn make_rejects_non_terminal_without_side_effects_or_backend_call() -> std::io::Result<()> {
+    let home = TempDir::new()?;
+    let project = TempDir::new()?;
     let marker = home.path().join("backend-called");
     let backend = home.path().join("backend");
     std::fs::write(
@@ -92,10 +94,8 @@ fn make_rejects_non_terminal_without_side_effects_or_backend_call() {
             "#!/bin/sh\ntouch '{}'\necho BACKEND_OUTPUT\n",
             marker.display()
         ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755)).unwrap();
+    )?;
+    std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755))?;
     let config = home.path().join("backend.yaml");
     std::fs::write(
         &config,
@@ -103,8 +103,7 @@ fn make_rejects_non_terminal_without_side_effects_or_backend_call() {
             "command: ['{}']\nsteps:\n  s:\n    command: echo\n",
             backend.display()
         ),
-    )
-    .unwrap();
+    )?;
 
     for use_config in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
@@ -124,7 +123,7 @@ fn make_rejects_non_terminal_without_side_effects_or_backend_call() {
         if use_config {
             command.env("CRUISE_CONFIG", &config);
         }
-        let output = command.output().expect("run cruise");
+        let output = command.output()?;
         assert!(!output.status.success(), "{}", output_text(&output));
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("interactive terminal"),
@@ -140,4 +139,5 @@ fn make_rejects_non_terminal_without_side_effects_or_backend_call() {
         assert!(!project.path().join(".cruise").exists());
         assert!(!home.path().join("data/cruise/workflow-make").exists());
     }
+    Ok(())
 }

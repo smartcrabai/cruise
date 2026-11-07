@@ -23,23 +23,28 @@ struct Fixture {
 
 impl Fixture {
     fn new(responses: &[String]) -> Self {
-        let root = TempDir::new().unwrap();
+        let root =
+            TempDir::new().unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         let project = root.path().join("project");
         let home = root.path().join("home");
-        fs::create_dir_all(&project).unwrap();
-        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project)
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
+        fs::create_dir_all(&home)
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         for (i, response) in responses.iter().enumerate() {
-            fs::write(root.path().join(format!("response-{}", i + 1)), response).unwrap();
+            fs::write(root.path().join(format!("response-{}", i + 1)), response)
+                .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         }
         let backend = root.path().join("backend.sh");
         fs::write(
             &backend,
-            &format!(
+            format!(
                 "#!/bin/sh\ndir='{}'\nn=0\n[ ! -f \"$dir/count\" ] || n=$(cat \"$dir/count\")\nn=$((n + 1))\nprintf '%s' \"$n\" > \"$dir/count\"\ncat > \"$dir/prompt-$n\"\ncat \"$dir/response-$n\"\n",
                 root.path().display()
             ),
-        ).unwrap();
-        fs::set_permissions(&backend, fs::Permissions::from_mode(0o755)).unwrap();
+        ).unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
+        fs::set_permissions(&backend, fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         let config = root.path().join("config.yaml");
         fs::write(
             &config,
@@ -48,7 +53,7 @@ impl Fixture {
                 backend.display()
             ),
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         Self {
             root,
             project,
@@ -65,7 +70,7 @@ impl Fixture {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .unwrap();
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_cruise"));
         command.args(["workflow", "make", "--name", "ci", "--config"]);
         command.arg(&self.config);
@@ -82,10 +87,19 @@ impl Fixture {
         command.env("XDG_STATE_HOME", self.home.join("state"));
         command.env("TERM", "xterm-256color");
         command.env("NO_COLOR", "1");
-        let child = pair.slave.spawn_command(command).unwrap();
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         drop(pair.slave);
-        let mut reader = pair.master.try_clone_reader().unwrap();
-        let writer = pair.master.take_writer().unwrap();
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
+        let writer = pair
+            .master
+            .take_writer()
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         let output = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&output);
         thread::spawn(move || {
@@ -94,7 +108,10 @@ impl Fixture {
                 if n == 0 {
                     break;
                 }
-                captured.lock().unwrap().extend_from_slice(&buf[..n]);
+                captured
+                    .lock()
+                    .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"))
+                    .extend_from_slice(&buf[..n]);
             }
         });
         Terminal {
@@ -116,7 +133,8 @@ impl Fixture {
     }
 
     fn prompt(&self, n: usize) -> String {
-        fs::read_to_string(self.root.path().join(format!("prompt-{n}"))).unwrap()
+        fs::read_to_string(self.root.path().join(format!("prompt-{n}")))
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"))
     }
 
     fn wait_for_event(&self, terminal: &mut Terminal, event: &str) {
@@ -135,8 +153,7 @@ impl Fixture {
                         .lines()
                         .any(|line| {
                             serde_json::from_str::<serde_json::Value>(line)
-                                .ok()
-                                .is_some_and(|value| value["event"] == event)
+                                .is_ok_and(|value| value["event"] == event)
                         })
                 });
             if found {
@@ -162,11 +179,21 @@ struct Terminal {
 
 impl Terminal {
     fn raw(&self) -> String {
-        String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
+        String::from_utf8_lossy(
+            &self
+                .output
+                .lock()
+                .unwrap_or_else(|error| panic!("PTY test operation failed: {error}")),
+        )
+        .into_owned()
     }
     fn send(&mut self, text: &[u8]) {
-        self.writer.write_all(text).unwrap();
-        self.writer.flush().unwrap();
+        self.writer
+            .write_all(text)
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
+        self.writer
+            .flush()
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
     }
     fn answer_queries(&mut self) {
         let raw = self.raw();
@@ -196,7 +223,11 @@ impl Terminal {
                 Instant::now() < deadline,
                 "timed out waiting for {needle:?}:\n{raw}"
             );
-            if let Some(status) = self.child.try_wait().unwrap() {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"))
+            {
                 panic!("exited {status:?} waiting for {needle:?}:\n{raw}");
             }
             thread::sleep(Duration::from_millis(25));
@@ -219,7 +250,7 @@ fn candidate(yaml: &str) -> String {
     format!("<cruise-workflow>\n{yaml}</cruise-workflow>\n")
 }
 fn read(path: &Path) -> String {
-    fs::read_to_string(path).unwrap()
+    fs::read_to_string(path).unwrap_or_else(|error| panic!("PTY test operation failed: {error}"))
 }
 
 #[test]
@@ -228,7 +259,15 @@ fn repairs_invalid_candidate_before_staging_valid_workflow() {
     let mut terminal = fixture.start(&[]);
     terminal.request("build the project");
     terminal.wait_for("Draft updated:");
-    assert_eq!(read(&fixture.draft().unwrap()).trim(), VALID.trim());
+    assert_eq!(
+        read(
+            &fixture
+                .draft()
+                .unwrap_or_else(|| panic!("expected a staged draft"))
+        )
+        .trim(),
+        VALID.trim()
+    );
     let repair = fixture.prompt(2);
     assert!(
         repair.contains("steps: ["),
@@ -260,11 +299,17 @@ fn repeated_invalid_candidates_preserve_previous_draft() {
     let mut terminal = fixture.start(&[]);
     terminal.request("create a workflow");
     terminal.wait_for("Draft updated:");
-    let draft = fixture.draft().unwrap();
-    let before = fs::read(&draft).unwrap();
+    let draft = fixture
+        .draft()
+        .unwrap_or_else(|| panic!("expected a staged draft"));
+    let before =
+        fs::read(&draft).unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
     terminal.request("change the workflow");
     fixture.wait_for_event(&mut terminal, "rejected");
-    assert_eq!(fs::read(&draft).unwrap(), before);
+    assert_eq!(
+        fs::read(&draft).unwrap_or_else(|error| panic!("PTY test operation failed: {error}")),
+        before
+    );
     assert_eq!(read(&fixture.root.path().join("count")), "5");
     assert!(fixture.prompt(5).contains("steps: ["));
     assert!(!fixture.project.join(".cruise/ci.yaml").exists());
@@ -275,8 +320,14 @@ fn reference_is_included_without_modifying_the_source() {
     let fixture = Fixture::new(&[candidate(VALID)]);
     let reference = fixture.root.path().join("reference.yaml");
     let original = "command: [cat]\nsteps:\n  reference_marker:\n    command: echo original\n";
-    fs::write(&reference, original).unwrap();
-    let mut terminal = fixture.start(&["--from", reference.to_str().unwrap()]);
+    fs::write(&reference, original)
+        .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
+    let mut terminal = fixture.start(&[
+        "--from",
+        reference
+            .to_str()
+            .unwrap_or_else(|| panic!("reference path is not UTF-8")),
+    ]);
     terminal.request("adapt this workflow");
     terminal.wait_for("Draft updated:");
     assert!(fixture.prompt(1).contains("reference_marker"));
@@ -286,7 +337,10 @@ fn reference_is_included_without_modifying_the_source() {
 
 #[test]
 fn second_turn_contains_prior_request_message_and_draft() {
-    let fixture = Fixture::new(&[format!("First response marker\n{}", candidate(VALID)), "Second response\n".into()]);
+    let fixture = Fixture::new(&[
+        format!("First response marker\n{}", candidate(VALID)),
+        "Second response\n".into(),
+    ]);
     let mut terminal = fixture.start(&[]);
     terminal.request("first request marker");
     terminal.wait_for("Draft updated:");
@@ -303,8 +357,13 @@ fn second_turn_contains_prior_request_message_and_draft() {
 fn existing_destination_is_rejected_before_staging_or_backend() {
     let fixture = Fixture::new(&[candidate(VALID)]);
     let dest = fixture.project.join(".cruise/ci.yaml");
-    fs::create_dir_all(dest.parent().unwrap()).unwrap();
-    fs::write(&dest, "existing").unwrap();
+    fs::create_dir_all(
+        dest.parent()
+            .unwrap_or_else(|| panic!("destination must have a parent")),
+    )
+    .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
+    fs::write(&dest, "existing")
+        .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
     let mut terminal = fixture.start(&[]);
     terminal.wait_for("workflow already exists");
     assert_eq!(read(&dest), "existing");

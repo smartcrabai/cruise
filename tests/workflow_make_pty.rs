@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::num::NonZeroU16;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -23,25 +24,28 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = TempDir::new().unwrap();
+        let root =
+            TempDir::new().unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         let project = root.path().join("project");
         let home = root.path().join("home");
-        fs::create_dir_all(&project).unwrap();
-        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project)
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
+        fs::create_dir_all(&home)
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         let response = root.path().join("response.txt");
         fs::write(
             &response,
             format!("Here is a draft.\n<cruise-workflow>\n{YAML}</cruise-workflow>\n"),
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         let backend = root.path().join("backend.sh");
         fs::write(
             &backend,
             format!("#!/bin/sh\ncat '{}'\n", response.display()),
         )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&backend, fs::Permissions::from_mode(0o755)).unwrap();
+        .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
+        fs::set_permissions(&backend, fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         let config = root.path().join("config.yaml");
         fs::write(
             &config,
@@ -50,7 +54,7 @@ impl Fixture {
                 backend.display()
             ),
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         Self {
             _root: root,
             project,
@@ -67,7 +71,7 @@ impl Fixture {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .unwrap();
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_cruise"));
         command.args(["workflow", "make", "--name", "ci", "--config"]);
         command.arg(&self.config);
@@ -84,10 +88,19 @@ impl Fixture {
         command.env("GIT_CONFIG_COUNT", "0");
         command.env("TERM", "xterm-256color");
         command.env("NO_COLOR", "1");
-        let child = pair.slave.spawn_command(command).unwrap();
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         drop(pair.slave);
-        let mut reader = pair.master.try_clone_reader().unwrap();
-        let writer = pair.master.take_writer().unwrap();
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
+        let writer = pair
+            .master
+            .take_writer()
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
         let output = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&output);
         thread::spawn(move || {
@@ -96,7 +109,10 @@ impl Fixture {
                 if n == 0 {
                     break;
                 }
-                captured.lock().unwrap().extend_from_slice(&buf[..n]);
+                captured
+                    .lock()
+                    .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"))
+                    .extend_from_slice(&buf[..n]);
             }
         });
         Terminal {
@@ -115,8 +131,11 @@ impl Fixture {
     fn draft(&self) -> PathBuf {
         let dir = self.home.join("data/cruise/workflow-make");
         let entries: Vec<_> = fs::read_dir(&dir)
-            .unwrap()
-            .map(|e| e.unwrap().path())
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"))
+            .map(|e| {
+                e.unwrap_or_else(|error| panic!("PTY test operation failed: {error}"))
+                    .path()
+            })
             .collect();
         assert_eq!(
             entries.len(),
@@ -138,22 +157,37 @@ struct Terminal {
 
 impl Terminal {
     fn send(&mut self, text: &[u8]) {
-        self.writer.write_all(text).unwrap();
-        self.writer.flush().unwrap();
+        self.writer
+            .write_all(text)
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
+        self.writer
+            .flush()
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"));
     }
 
     fn screen(&self) -> String {
         let mut parser = vt100::Parser::new(
-            NonZeroU16::new(40).unwrap(),
-            NonZeroU16::new(160).unwrap(),
+            NonZeroU16::new(40).unwrap_or_else(|| panic!("terminal height must be nonzero")),
+            NonZeroU16::new(160).unwrap_or_else(|| panic!("terminal width must be nonzero")),
             1000,
         );
-        parser.process(&self.output.lock().unwrap());
+        parser.process(
+            &self
+                .output
+                .lock()
+                .unwrap_or_else(|error| panic!("PTY test operation failed: {error}")),
+        );
         parser.screen().contents()
     }
 
     fn answer_queries(&mut self) {
-        let raw = String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned();
+        let raw = String::from_utf8_lossy(
+            &self
+                .output
+                .lock()
+                .unwrap_or_else(|error| panic!("PTY test operation failed: {error}")),
+        )
+        .into_owned();
         for (i, (query, response)) in [
             ("\x1b[?u", "\x1b[?1u"),
             ("\x1b[c", "\x1b[?1;2c"),
@@ -181,9 +215,18 @@ impl Terminal {
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for {needle:?}; screen:\n{screen}\nraw:\n{}",
-                String::from_utf8_lossy(&self.output.lock().unwrap())
+                String::from_utf8_lossy(
+                    &self
+                        .output
+                        .lock()
+                        .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"))
+                )
             );
-            if let Some(status) = self.child.try_wait().unwrap() {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"))
+            {
                 panic!("process exited {status:?} before {needle:?}; screen:\n{screen}");
             }
             thread::sleep(Duration::from_millis(25));
@@ -194,7 +237,11 @@ impl Terminal {
         let deadline = Instant::now() + TIMEOUT;
         loop {
             self.answer_queries();
-            if let Some(status) = self.child.try_wait().unwrap() {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"))
+            {
                 assert!(
                     status.success(),
                     "exit {status:?}; screen:\n{}",
@@ -238,8 +285,10 @@ fn write_approved_draft() {
     terminal.send(b"\r");
     terminal.finish();
     assert_eq!(
-        fs::read(fixture.destination()).unwrap(),
-        fs::read(fixture.draft()).unwrap()
+        fs::read(fixture.destination())
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}")),
+        fs::read(fixture.draft())
+            .unwrap_or_else(|error| panic!("PTY test operation failed: {error}"))
     );
     let screen = terminal.screen();
     assert!(screen.contains("Created"), "{screen}");

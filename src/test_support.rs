@@ -18,6 +18,7 @@ pub mod workflow_authoring {
     ///
     /// # Panics
     /// Panics on an empty output list or fixture setup failure.
+    #[must_use]
     pub fn fake_backend(dir: &Path, outputs: &[&str]) -> WorkflowConfig {
         for (i, out) in outputs.iter().enumerate() {
             fs::write(dir.join(format!("out-{}.txt", i + 1)), out).unwrap();
@@ -36,6 +37,7 @@ pub mod workflow_authoring {
     ///
     /// # Panics
     /// Panics if the configuration cannot be parsed.
+    #[must_use]
     pub fn backend_config(script: &Path) -> WorkflowConfig {
         WorkflowConfig::from_yaml(&format!(
             "command: ['{}']\nsteps:\n  s:\n    command: echo\n",
@@ -48,6 +50,7 @@ pub mod workflow_authoring {
     ///
     /// # Panics
     /// Panics if the recording directory cannot be read.
+    #[must_use]
     pub fn turns(dir: &Path) -> usize {
         fs::read_dir(dir)
             .unwrap()
@@ -65,6 +68,7 @@ pub mod workflow_authoring {
     ///
     /// # Panics
     /// Panics if the prompt cannot be read.
+    #[must_use]
     pub fn prompt(dir: &Path, n: usize) -> String {
         fs::read_to_string(dir.join(format!("prompt-{n}.txt"))).unwrap()
     }
@@ -74,6 +78,7 @@ pub mod workflow_authoring {
     ///
     /// # Panics
     /// Panics if fixture setup fails.
+    #[must_use]
     pub fn run_env(tmp: &TempDir, outputs: &[&str]) -> (Vec<EnvGuard>, EnvGuard, PathBuf, PathBuf) {
         let home = tmp.path().join("home");
         let proj = tmp.path().join("proj");
