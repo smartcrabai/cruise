@@ -122,6 +122,21 @@ ordered primary-plus-fallback array. JSON takes precedence when both files
 exist; otherwise an existing YAML file is used. Settings updates preserve the
 selected format; when neither file exists, they create JSON. Invalid selected
 files fail rather than falling back to the other format.
+
+Application settings also control interactive workflow categories:
+
+```yaml
+workflow_categories:
+  Development:
+    workflows: [builtin:tdd, {refactor: Refactor code}]
+    Backend:
+      workflows: [api]
+show_others_category: true
+others_category_name: Others
+```
+
+Categories are ordered maps with optional `workflows` lists and nested category maps. Entries are names or single-key maps with selector-description overrides. Bare names match file stems and built-in names; `builtin:<name>` matches only built-ins. The same workflow may appear in multiple categories, but conflicting descriptions for the same name are invalid. Missing names and empty categories are omitted. A nonempty user tree replaces the defaults: Development (`tdd`, `refactor`), Quality (`add-tests`, `add-formal-specs`), Research (`research`), and Security (`security`). Unmatched local and environment candidates remain at the root, installed packages go to `Packages`, and other user and built-in workflows go to `Others` (renamed by `others_category_name`). `show_others_category` defaults to `true`; setting it to `false` hides only the latter unmatched workflows. These settings affect interactive display, not non-interactive resolution.
+
 These model defaults have lower precedence than either `default.yaml` layer
 or the workflow; environment overrides still win, and step models override
 the effective ordinary model. SDK mode derives fallback chains from these

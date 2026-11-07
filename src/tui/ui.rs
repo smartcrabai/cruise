@@ -11,7 +11,9 @@ use ratatui::widgets::{
 use crate::application::{OptionChoiceKind, SessionAction};
 use crate::session::{SessionPhase, WorkspaceMode};
 
-use super::app::{DetailTab, Modal, SessionsFocus, SidebarStatus, TuiApp, View, action_label};
+use super::app::{
+    ConfigRow, DetailTab, Modal, SessionsFocus, SidebarStatus, TuiApp, View, action_label,
+};
 use super::forms::{Editor, Launch, SourceKind, Step};
 pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let area = frame.area();
@@ -937,12 +939,40 @@ fn render_config_choices(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let current = app.form.config.text();
     let current = current.trim();
     let mut selected = None;
-    let mut lines = Vec::with_capacity(app.config_sources.len() + 1);
+    let mut lines = Vec::with_capacity(app.config_rows.len() + 1);
     lines.push(choice_line(app, "Auto-detect", current.is_empty()));
-    for (index, source) in app.config_sources.iter().enumerate() {
-        let source_selected = selected.is_none() && source.selection_value() == current;
-        selected = selected.or(source_selected.then_some(index + 1));
-        lines.push(choice_line(app, source.label(), source_selected));
+    for row in &app.config_rows {
+        match row {
+            ConfigRow::Header { depth, label } => lines.push(Line::from(Span::styled(
+                format!("  {}{}", "  ".repeat(*depth), label),
+                muted(app),
+            ))),
+            ConfigRow::Choice {
+                candidate,
+                depth,
+                description,
+            } => {
+                let source = &app.config_sources[*candidate];
+                let source_selected = selected.is_none() && source.selection_value() == current;
+                selected = selected.or(source_selected.then_some(lines.len()));
+                let label = match description {
+                    Some(description) => format!(
+                        "{}: {}",
+                        source
+                            .label()
+                            .split_once(": ")
+                            .map_or(source.label(), |(name, _)| name),
+                        description
+                    ),
+                    None => source.label().to_string(),
+                };
+                lines.push(choice_line(
+                    app,
+                    format!("{}{}", "  ".repeat(*depth), label),
+                    source_selected,
+                ));
+            }
+        }
     }
     let selected = current.is_empty().then_some(0).or(selected);
     let visible = usize::from(choices_area.height.max(1));
@@ -2383,6 +2413,62 @@ mod tests {
         let _home_guards = crate::test_support::set_fake_home(fake_home.path());
         rendered_lines_with_lock(width, 24, true, View::NewSession, None, None, configure)
             .join("\n")
+    }
+
+    #[test]
+    fn config_rows_render_headers_then_indented_choices() {
+        let view = rendered_hermetic_config_view_with(120, |app| {
+            let base = TempDir::new().unwrap();
+            app.form.step = Step::Config;
+            app.form
+                .working_dir
+                .set_text(&base.path().to_string_lossy());
+            app.form.config.set_text("__builtin__");
+            app.refresh();
+        });
+        let header = view
+            .lines()
+            .position(|line| line.contains("Development"))
+            .unwrap_or_else(|| panic!("missing Development header: {view}"));
+        let choice = view
+            .lines()
+            .position(|line| line.contains("Built-in tdd") && line.contains('▸'))
+            .unwrap_or_else(|| panic!("missing selected tdd: {view}"));
+        let lines: Vec<_> = view.lines().collect();
+        assert!(header < choice, "{view}");
+        assert!(!lines[header].contains('▸'), "{view}");
+        assert!(lines[choice].contains("▸   Built-in tdd"), "{view}");
+    }
+
+    #[test]
+    fn duplicate_membership_has_one_selection_marker() {
+        let _lock = lock_process();
+        let fake_home = TempDir::new().unwrap();
+        let _home_guards = crate::test_support::set_fake_home(fake_home.path());
+        let config_dir = fake_home.path().join(".config/cruise");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.json"),
+            r#"{"workflow_categories":{"First":{"workflows":["tdd"]},"Second":{"workflows":["tdd"]}},"show_others_category":false}"#).unwrap();
+        let base = TempDir::new().unwrap();
+        let view = rendered_lines_with_lock(120, 24, true, View::NewSession, None, None, |app| {
+            app.form.step = Step::Config;
+            app.form
+                .working_dir
+                .set_text(&base.path().to_string_lossy());
+            app.form.config.set_text("__builtin__");
+            app.refresh();
+        })
+        .join("\n");
+        let choices: Vec<_> = view
+            .lines()
+            .filter(|line| line.contains("Built-in tdd"))
+            .collect();
+        assert_eq!(choices.len(), 2, "{view}");
+        assert_eq!(
+            choices.iter().filter(|line| line.contains('▸')).count(),
+            1,
+            "{view}"
+        );
     }
 
     #[test]

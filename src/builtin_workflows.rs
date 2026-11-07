@@ -11,6 +11,14 @@ pub struct BuiltinWorkflow {
 /// Name of the default built-in workflow.
 pub const DEFAULT_BUILTIN_NAME: &str = "tdd";
 
+/// Default picker categories, in display order.
+pub const DEFAULT_WORKFLOW_CATEGORIES: &[(&str, &[&str])] = &[
+    ("Development", &["tdd", "refactor"]),
+    ("Quality", &["add-tests", "add-formal-specs"]),
+    ("Research", &["research"]),
+    ("Security", &["security"]),
+];
+
 /// The fixed built-in catalog.
 pub static BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[
     BuiltinWorkflow {
@@ -69,6 +77,19 @@ pub(crate) fn find_builtin_resource(key: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::resolver::{ConfigSource, resolve_workflow_config};
+
+    #[test]
+    fn every_builtin_has_a_default_category() {
+        for workflow in BUILTIN_WORKFLOWS {
+            assert!(
+                DEFAULT_WORKFLOW_CATEGORIES
+                    .iter()
+                    .any(|(_, names)| names.contains(&workflow.name)),
+                "{} has no default category",
+                workflow.name
+            );
+        }
+    }
 
     #[test]
     fn builtin_catalog_has_unique_names_descriptions_and_valid_yaml() {

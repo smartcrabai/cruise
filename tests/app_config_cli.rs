@@ -126,6 +126,59 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
 }
 
 #[test]
+fn parallelism_update_preserves_workflow_categories_in_yaml_and_json() {
+    for extension in ["yaml", "json"] {
+        let fixture = Fixture::new();
+        let expected = serde_json::json!({
+            "Development": {
+                "workflows": ["tdd", {"refactor": "Review changes"}],
+                "Backend": {"workflows": ["api"]}
+            }
+        });
+        let input = serde_json::json!({
+            "run_all_parallelism": 3,
+            "workflow_categories": expected,
+            "show_others_category": false,
+            "others_category_name": "Misc"
+        });
+        let contents = if extension == "yaml" {
+            serde_yaml::to_string(&input).unwrap()
+        } else {
+            input.to_string()
+        };
+        let path = fixture.write_app_config(extension, &contents);
+        let updated = fixture.run(&["config", "--set-parallelism", "7"]);
+        assert!(
+            updated.status.success(),
+            "{extension}: {}",
+            output_text(&updated)
+        );
+        let saved = std::fs::read_to_string(path).unwrap();
+        let actual: serde_json::Value = if extension == "yaml" {
+            serde_yaml::from_str(&saved).unwrap()
+        } else {
+            serde_json::from_str(&saved).unwrap()
+        };
+        // Existing app config serializes using camelCase; the accepted aliases
+        // must survive a read-modify-write regardless of spelling.
+        let field = |snake: &str, camel: &str| actual.get(snake).or_else(|| actual.get(camel));
+        assert_eq!(
+            field("workflow_categories", "workflowCategories"),
+            Some(&expected),
+            "{extension}: {saved}"
+        );
+        assert_eq!(
+            field("show_others_category", "showOthersCategory"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            field("others_category_name", "othersCategoryName"),
+            Some(&serde_json::json!("Misc"))
+        );
+    }
+}
+
+#[test]
 fn config_show_and_parallelism_update_preserve_mixed_sdk_candidates_in_both_formats() {
     let expected_model = serde_json::json!([
         "openai/gpt-6.1-sol:medium",

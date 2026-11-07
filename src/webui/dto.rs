@@ -340,6 +340,73 @@ pub struct ConfigEntryDto {
     pub source: Option<ConfigEntrySource>,
 }
 
+pub(crate) fn picker_candidate(
+    entry: &ConfigEntryDto,
+    base_dir: &str,
+) -> crate::workflow_categories::PickerCandidate {
+    let is_builtin =
+        entry.source == Some(ConfigEntrySource::Builtin) || entry.path == BUILTIN_CONFIG_PATH;
+    let key = if entry.path == BUILTIN_CONFIG_PATH {
+        crate::builtin_workflows::DEFAULT_BUILTIN_NAME.to_string()
+    } else if is_builtin {
+        entry
+            .path
+            .strip_prefix(crate::resolver::BUILTIN_SELECTOR_PREFIX)
+            .unwrap_or(&entry.name)
+            .to_string()
+    } else {
+        Path::new(&entry.path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&entry.name)
+            .to_string()
+    };
+    let prefix = format!("{}/", base_dir.trim_end_matches('/'));
+    let label = entry
+        .path
+        .strip_prefix(&prefix)
+        .unwrap_or(&entry.name)
+        .to_string();
+    crate::workflow_categories::PickerCandidate {
+        value: entry.path.clone(),
+        label,
+        key,
+        is_builtin,
+        is_local: entry.source != Some(ConfigEntrySource::User) && !is_builtin,
+        is_installed_package: false,
+        description: entry.description.clone(),
+    }
+}
+
+pub(crate) fn picker_candidates(
+    entries: &[ConfigEntryDto],
+    base_dir: &str,
+) -> Vec<crate::workflow_categories::PickerCandidate> {
+    let default_description = crate::builtin_workflows::BUILTIN_WORKFLOWS
+        .iter()
+        .find(|workflow| workflow.name == crate::builtin_workflows::DEFAULT_BUILTIN_NAME)
+        .map(|workflow| workflow.description.to_string());
+    let default = picker_candidate(
+        &ConfigEntryDto {
+            path: BUILTIN_CONFIG_PATH.to_string(),
+            name: crate::builtin_workflows::DEFAULT_BUILTIN_NAME.to_string(),
+            description: default_description,
+            source: Some(ConfigEntrySource::Builtin),
+        },
+        base_dir,
+    );
+    let mut candidates: Vec<_> = entries
+        .iter()
+        .map(|entry| picker_candidate(entry, base_dir))
+        .collect();
+    let builtin_start = candidates
+        .iter()
+        .position(|candidate| candidate.is_builtin)
+        .unwrap_or(candidates.len());
+    candidates.insert(builtin_start, default);
+    candidates
+}
+
 pub(crate) fn config_entries(
     application: &CruiseApplication,
     base_dir: Option<&str>,

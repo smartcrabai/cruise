@@ -95,6 +95,7 @@ mod workflow_cmd;
 mod workflow_defaults;
 mod workflow_generate;
 mod workflow_packages;
+mod workflow_categories;
 mod workspace;
 mod worktree;
 mod worktree_pr;

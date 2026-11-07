@@ -1093,7 +1093,7 @@ pub(crate) async fn start_run_all(
         let config_application = application.clone();
         let provider = move || -> Result<usize> {
             requested.map_or_else(
-                || Ok(config_application.app_config()?.run_all_parallelism),
+                || Ok(config_application.runtime_config()?.run_all_parallelism),
                 Ok,
             )
         };

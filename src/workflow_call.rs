@@ -279,7 +279,7 @@ fn finish_resolved_config(
     defaults.apply_to(&mut resolution)?;
     let config = &mut resolution.config;
     if apply_app_model_defaults {
-        let app_config = crate::app_config::AppConfig::load()?;
+        let app_config = crate::app_config::AppConfig::load_runtime()?;
         if config.model.is_none() {
             config.model = app_config.model;
         }

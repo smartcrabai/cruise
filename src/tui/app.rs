@@ -312,11 +312,58 @@ pub struct TuiApp {
     pub last_refresh: Instant,
     pub history_summary: Option<crate::application::NewSessionHistorySummary>,
     pub config_sources: Vec<crate::resolver::ConfigCandidate>,
+    pub(crate) config_rows: Vec<ConfigRow>,
     pub config_defaults: Option<crate::application::NewSessionConfigDefaults>,
     skip_defaults_context: Option<(PathBuf, String, String, bool)>,
     skip_defaults_initialized: bool,
     #[cfg(test)]
     test_process_lock: Option<crate::test_support::ProcessLock>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ConfigRow {
+    Header {
+        depth: usize,
+        label: String,
+    },
+    Choice {
+        candidate: usize,
+        depth: usize,
+        description: Option<String>,
+    },
+}
+
+fn flatten_config_rows(
+    nodes: &[crate::workflow_categories::PickerNode],
+    candidates: &[crate::resolver::ConfigCandidate],
+    depth: usize,
+    sources: &mut Vec<crate::resolver::ConfigCandidate>,
+    rows: &mut Vec<ConfigRow>,
+) {
+    use crate::workflow_categories::PickerNode;
+    for node in nodes {
+        match node {
+            PickerNode::Category { name, nodes } => {
+                rows.push(ConfigRow::Header {
+                    depth,
+                    label: name.clone(),
+                });
+                flatten_config_rows(nodes, candidates, depth + 1, sources, rows);
+            }
+            PickerNode::Workflow {
+                candidate,
+                description,
+            } => {
+                let index = sources.len();
+                sources.push(candidates[*candidate].clone());
+                rows.push(ConfigRow::Choice {
+                    candidate: index,
+                    depth,
+                    description: description.clone(),
+                });
+            }
+        }
+    }
 }
 
 impl TuiApp {
@@ -384,6 +431,7 @@ impl TuiApp {
             last_refresh: Instant::now(),
             history_summary,
             config_sources: Vec::new(),
+            config_rows: Vec::new(),
             config_defaults: None,
             skip_defaults_context: None,
             skip_defaults_initialized: false,
@@ -470,6 +518,7 @@ impl TuiApp {
             Ok(sources) => sources,
             Err(error) => {
                 self.config_sources.clear();
+                self.config_rows.clear();
                 self.config_defaults = None;
                 self.set_error(error.to_string());
                 return false;
@@ -478,7 +527,26 @@ impl TuiApp {
         if self.form.source == SourceKind::GitHub {
             sources.retain(|source| !source.is_local());
         }
-        self.config_sources = sources;
+        let installed = std::collections::HashSet::new();
+        let candidates: Vec<_> = sources
+            .iter()
+            .map(|source| source.picker_candidate(&installed))
+            .collect();
+        let tree = match self.application.workflow_picker_tree(&candidates) {
+            Ok(tree) => tree,
+            Err(error) => {
+                self.config_sources.clear();
+                self.config_rows.clear();
+                self.config_defaults = None;
+                self.set_error(error.to_string());
+                return false;
+            }
+        };
+        let mut ordered_sources = Vec::new();
+        let mut rows = Vec::new();
+        flatten_config_rows(&tree, &sources, 0, &mut ordered_sources, &mut rows);
+        self.config_sources = ordered_sources;
+        self.config_rows = rows;
         true
     }
 
@@ -561,7 +629,7 @@ impl TuiApp {
     }
 
     fn sync_batch_parallelism(&mut self, notify: bool) -> bool {
-        match self.application.app_config() {
+        match self.application.runtime_config() {
             Ok(config) => {
                 self.batch_parallelism = config.run_all_parallelism;
                 self.batch_parallelism_error = None;
@@ -3569,6 +3637,36 @@ mod tests {
     fn configured_app(parallelism: usize) -> ConfiguredTestApp {
         let content = format!(r#"{{"runAllParallelism": {parallelism}}}"#);
         configured_app_with_content(&content)
+    }
+
+    #[test]
+    fn cycling_config_skips_headers_and_follows_display_order() {
+        let mut fixture = configured_app_with_content(
+            r#"{"workflow_categories":{"First":{"workflows":["research"]},"Second":{"workflows":["refactor","tdd"]}},"show_others_category":false}"#,
+        );
+        let base = TempDir::new().unwrap();
+        let app = &mut fixture.app;
+        assert!(app.refresh_config_sources(base.path()));
+        app.view = View::NewSession;
+        app.form.step = Step::Config;
+        app.form.config.set_text("");
+        for expected in ["builtin:research", "builtin:refactor", "__builtin__", ""] {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            assert_eq!(app.form.config.text(), expected);
+        }
+    }
+
+    #[test]
+    fn invalid_workflow_categories_sets_error_on_refresh() {
+        let mut fixture =
+            configured_app_with_content(r#"{"workflow_categories":{"Development":["tdd"]}}"#);
+        let base = TempDir::new().unwrap();
+        assert!(!fixture.app.refresh_config_sources(base.path()));
+        assert!(fixture.app.config_sources.is_empty());
+        assert!(
+            fixture.app.last_error.is_some(),
+            "expected category configuration error"
+        );
     }
 
     fn open_parallelism_editor(app: &mut TuiApp) {

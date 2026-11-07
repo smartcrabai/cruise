@@ -7,7 +7,7 @@
 use serde::Serialize;
 
 use super::actions::SessionActionsVm;
-use super::dto::{ConfigEntryDto, ConfigEntrySource, SessionDto};
+use super::dto::SessionDto;
 use super::templates::RawHtml;
 use crate::application::{DirectoryEntry, OperationKind};
 
@@ -245,31 +245,13 @@ pub(crate) struct ConfigSelectVm {
 /// Sentinel `<option>` value meaning "let cruise resolve the config".
 pub(crate) const AUTO_CONFIG_VALUE: &str = "";
 
-fn dir_of(path: &str) -> &str {
-    path.rfind('/').map_or(path, |index| &path[..index])
-}
-
-fn config_option_label(entry: &ConfigEntryDto, base_dir: &str) -> String {
-    let trimmed = base_dir.trim_end_matches('/');
-    let name = if trimmed.is_empty() {
-        entry.name.clone()
-    } else {
-        let prefix = format!("{trimmed}/");
-        entry
-            .path
-            .strip_prefix(&prefix)
-            .map_or_else(|| entry.name.clone(), ToString::to_string)
-    };
-    entry
-        .description
-        .as_ref()
-        .map_or(name.clone(), |description| {
-            format!("{name} \u{2014} {description}")
-        })
-}
-
 impl ConfigSelectVm {
-    pub(crate) fn new(entries: &[ConfigEntryDto], selected: Option<&str>, base_dir: &str) -> Self {
+    pub(crate) fn new(
+        nodes: &[crate::workflow_categories::PickerNode],
+        candidates: &[crate::workflow_categories::PickerCandidate],
+        selected: Option<&str>,
+        base_dir: &str,
+    ) -> Self {
         let selected = selected.unwrap_or(AUTO_CONFIG_VALUE);
         let sentinels = vec![
             ConfigOptionVm {
@@ -288,58 +270,84 @@ impl ConfigSelectVm {
                 selected: selected == super::dto::BUILTIN_CONFIG_PATH,
             },
         ];
-        let option = |entry: &ConfigEntryDto| ConfigOptionVm {
-            value: entry.path.clone(),
-            label: config_option_label(entry, base_dir),
-            selected: selected == entry.path,
-        };
         let mut groups = Vec::new();
-        let local: Vec<ConfigOptionVm> = entries
-            .iter()
-            .filter(|entry| entry.source == Some(ConfigEntrySource::Local))
-            .map(option)
-            .collect();
-        if !local.is_empty() {
-            let label = if base_dir.is_empty() { "." } else { base_dir };
-            groups.push(ConfigGroupVm {
-                label: format!("Base dir ({label})"),
-                options: local,
-            });
+        let mut already_selected = sentinels.iter().any(|option| option.selected);
+        fn append(
+            nodes: &[crate::workflow_categories::PickerNode],
+            candidates: &[crate::workflow_categories::PickerCandidate],
+            path: &str,
+            base_dir: &str,
+            selected: &str,
+            already_selected: &mut bool,
+            groups: &mut Vec<ConfigGroupVm>,
+        ) {
+            use crate::workflow_categories::PickerNode;
+            let mut options = Vec::new();
+            for node in nodes {
+                if let PickerNode::Workflow {
+                    candidate,
+                    description,
+                } = node
+                {
+                    let item = &candidates[*candidate];
+                    let chosen = !*already_selected && selected == item.value;
+                    *already_selected |= chosen;
+                    let desc = description.as_ref().or(item.description.as_ref());
+                    options.push(ConfigOptionVm {
+                        value: item.value.clone(),
+                        label: desc.map_or_else(
+                            || item.label.clone(),
+                            |d| format!("{} \u{2014} {d}", item.label),
+                        ),
+                        selected: chosen,
+                    });
+                }
+            }
+            if !options.is_empty() {
+                let label = if path.is_empty() {
+                    format!(
+                        "Base dir ({})",
+                        if base_dir.is_empty() { "." } else { base_dir }
+                    )
+                } else {
+                    path.to_string()
+                };
+                groups.push(ConfigGroupVm { label, options });
+            }
+            for node in nodes {
+                if let PickerNode::Category { name, nodes } = node {
+                    let child = if path.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{path} › {name}")
+                    };
+                    append(
+                        nodes,
+                        candidates,
+                        &child,
+                        base_dir,
+                        selected,
+                        already_selected,
+                        groups,
+                    );
+                }
+            }
         }
-        let user_entries: Vec<&ConfigEntryDto> = entries
-            .iter()
-            .filter(|entry| entry.source == Some(ConfigEntrySource::User))
-            .collect();
-        if let Some(first) = user_entries.first() {
+        append(
+            nodes,
+            candidates,
+            "",
+            base_dir,
+            selected,
+            &mut already_selected,
+            &mut groups,
+        );
+        if !already_selected && !selected.is_empty() {
+            let label = candidates.iter().find(|item| item.value == selected)
+                .map_or_else(|| selected.to_string(), |item| item.label.clone());
             groups.push(ConfigGroupVm {
-                label: format!("User workflows ({})", dir_of(&first.path)),
-                options: user_entries.iter().map(|entry| option(entry)).collect(),
-            });
-        }
-        let builtin: Vec<ConfigOptionVm> = entries
-            .iter()
-            .filter(|entry| entry.source == Some(ConfigEntrySource::Builtin))
-            .map(|entry| ConfigOptionVm {
-                value: entry.path.clone(),
-                label: config_option_label(entry, ""),
-                selected: selected == entry.path,
-            })
-            .collect();
-        if !builtin.is_empty() {
-            groups.push(ConfigGroupVm {
-                label: "Built-in workflows".to_string(),
-                options: builtin,
-            });
-        }
-        let other: Vec<ConfigOptionVm> = entries
-            .iter()
-            .filter(|entry| entry.source.is_none())
-            .map(option)
-            .collect();
-        if !other.is_empty() {
-            groups.push(ConfigGroupVm {
-                label: "Other".to_string(),
-                options: other,
+                label: "Current workflow".to_string(),
+                options: vec![ConfigOptionVm { value: selected.to_string(), label, selected: true }],
             });
         }
         Self { sentinels, groups }
@@ -741,9 +749,80 @@ pub(crate) fn session_row(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ConfigEntryDto, ConfigEntrySource, ConfigSelectVm, dir_label, format_local_time, truncate,
-    };
+    use super::{ConfigSelectVm, dir_label, format_local_time, truncate};
+    use crate::webui::dto::{ConfigEntryDto, ConfigEntrySource};
+
+    #[test]
+    fn config_select_groups_by_category_path_and_selects_first_duplicate() {
+        use crate::workflow_categories::PickerNode;
+        let candidates = crate::webui::dto::picker_candidates(&[], "");
+        let leaf = || PickerNode::Workflow {
+            candidate: 0,
+            description: Some("Override".into()),
+        };
+        let nodes = vec![PickerNode::Category {
+            name: "Development".into(),
+            nodes: vec![
+                leaf(),
+                PickerNode::Category {
+                    name: "Backend".into(),
+                    nodes: vec![leaf()],
+                },
+            ],
+        }];
+        let view = ConfigSelectVm::new(&nodes, &candidates, Some("__builtin__"), "");
+        assert_eq!(
+            view.groups
+                .iter()
+                .map(|g| g.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Development", "Development › Backend"]
+        );
+        assert!(view.groups[0].options[0].label.contains("Override"));
+        assert_eq!(
+            view.sentinels
+                .iter()
+                .chain(view.groups.iter().flat_map(|g| &g.options))
+                .filter(|o| o.selected)
+                .count(),
+            1
+        );
+        assert!(view.sentinels[1].selected);
+    }
+
+    #[test]
+    fn package_group_and_duplicate_option_select_only_first_occurrence() {
+        use crate::workflow_categories::PickerNode;
+        let entry = ConfigEntryDto {
+            path: "/work/package.yaml".into(),
+            name: "package".into(),
+            description: None,
+            source: Some(ConfigEntrySource::User),
+        };
+        let candidates = crate::webui::dto::picker_candidates(&[entry], "");
+        let package = candidates
+            .iter()
+            .position(|candidate| candidate.value == "/work/package.yaml")
+            .unwrap();
+        let leaf = || PickerNode::Workflow {
+            candidate: package,
+            description: None,
+        };
+        let nodes = vec![
+            PickerNode::Category {
+                name: "Packages".into(),
+                nodes: vec![leaf()],
+            },
+            PickerNode::Category {
+                name: "Again".into(),
+                nodes: vec![leaf()],
+            },
+        ];
+        let view = ConfigSelectVm::new(&nodes, &candidates, Some("/work/package.yaml"), "");
+        assert_eq!(view.groups[0].label, "Packages");
+        assert!(view.groups[0].options[0].selected);
+        assert!(!view.groups[1].options[0].selected);
+    }
 
     #[test]
     fn builtin_catalog_entries_are_selectable_in_config_menu() {
@@ -757,23 +836,27 @@ mod tests {
                 source: Some(ConfigEntrySource::Builtin),
             })
             .collect();
-        let view = ConfigSelectVm::new(&entries, Some("builtin:research"), "");
-        let builtin_group = view
+        let candidates = crate::webui::dto::picker_candidates(&entries, "");
+        let nodes = crate::workflow_categories::build_picker_tree(
+            &candidates,
+            &Default::default(),
+            true,
+            "Others",
+        );
+        let view = ConfigSelectVm::new(&nodes, &candidates, Some("builtin:research"), "");
+        let values: Vec<&str> = view
             .groups
             .iter()
-            .find(|group| group.label == "Built-in workflows")
-            .unwrap_or_else(|| panic!("built-in options missing"));
-        let values: Vec<&str> = builtin_group
-            .options
-            .iter()
+            .flat_map(|group| &group.options)
             .map(|option| option.value.as_str())
             .collect();
-        let expected: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
-        assert_eq!(values, expected);
+        for entry in &entries {
+            assert!(values.contains(&entry.path.as_str()));
+        }
 
         for name in ["research", "security"] {
             let value = format!("builtin:{name}");
-            let selected_view = ConfigSelectVm::new(&entries, Some(&value), "");
+            let selected_view = ConfigSelectVm::new(&nodes, &candidates, Some(&value), "");
             let option = selected_view
                 .groups
                 .iter()

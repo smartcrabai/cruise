@@ -29,7 +29,7 @@ Config files are resolved in this priority order:
 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` (ASCII-sorted)
 6. Built-in `tdd` (`builtin/tdd.yaml` in the source tree, embedded at build time: test-first steps + verify-review group (parallel read-only analyzers → consolidate → apply) + after-PR automation; uses the fallback `jcode` backend only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied) — selected by `-c __builtin__` or `-c builtin:tdd`.
 
-The fixed built-in catalog and selector order is `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`. All six declare `after_pr` and `merge`, off when absent. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. `-f after_pr` enables the prelude without merge; `-f merge` runs the same prelude once and adds the final native synchronous squash merge. `research` stays read-only with `create_pr: false`, so merge never creates a PR or overrides its no-PR policy.
+The fixed built-in catalog is `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`. All six declare `after_pr` and `merge`, off when absent. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. `-f after_pr` enables the prelude without merge; `-f merge` runs the same prelude once and adds the final native synchronous squash merge. `research` stays read-only with `create_pr: false`, so merge never creates a PR or overrides its no-PR policy.
 
 The shared six-step after-PR prelude is embedded with the binary and is not an
 extra catalog workflow. Built-ins never fall back to local shared files, while
@@ -42,7 +42,7 @@ and file-backed sessions keep their live-reload contract.
 
 `research` provides bounded read-only research with independent review and a cited report. `security` performs scoped, parallel security audits, triages findings, repairs confirmed safe defects, and independently verifies the results. `add-tests` inventories production behavior and real user-flow coverage before implementation and reports evidence-backed coverage/gap IDs; it does not impose numeric coverage quotas.
 
-In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, an interactive selector lists all found config files and the built-in workflows with `tdd` first; with no config files found, `tdd` is adopted without prompting.
+In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. Interactive selectors organize candidates using application settings `workflow_categories`, `show_others_category`, and `others_category_name`; see [application settings](references/top-level.md) for their syntax and fallback groups. These display settings do not change non-interactive resolution.
 
 > `cruise workflow add owner/repo[/path][@ref]` installs a pinned, self-contained copy of a GitHub workflow into `~/.config/cruise/workflows/<name>.yaml` plus a `<name>.cruise-package.json` manifest. Hand-written YAMLs there are never touched by `update`/`remove`.
 

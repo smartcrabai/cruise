@@ -172,6 +172,48 @@ impl std::fmt::Display for ConfigCandidate {
 }
 
 impl ConfigCandidate {
+    pub(crate) fn picker_candidate(
+        &self,
+        installed: &std::collections::HashSet<PathBuf>,
+    ) -> crate::workflow_categories::PickerCandidate {
+        use crate::workflow_categories::PickerCandidate;
+        let (key, is_builtin, is_local, is_installed_package) = match &self.source {
+            CandidateKind::EnvVar(path) | CandidateKind::Local(path) => (
+                path.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                false,
+                true,
+                false,
+            ),
+            CandidateKind::UserDir(path) => (
+                path.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                false,
+                false,
+                installed.contains(&std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())),
+            ),
+            CandidateKind::Builtin => (
+                crate::builtin_workflows::DEFAULT_BUILTIN_NAME.to_string(),
+                true,
+                false,
+                false,
+            ),
+            CandidateKind::NamedBuiltin(name) => ((*name).to_string(), true, false, false),
+        };
+        PickerCandidate {
+            value: self.selection_value(),
+            label: self.label.clone(),
+            key,
+            is_builtin,
+            is_local,
+            is_installed_package,
+            description: None,
+        }
+    }
     /// The label shown by the CLI selector and the TUI config list.
     #[must_use]
     pub fn label(&self) -> &str {
@@ -450,7 +492,25 @@ fn resolve_config_in_dir_with_interactive(
         // Interactive: offer all candidates. Built-ins come last with the default
         // first, so cursor position 0 lands on the highest-priority file (or the
         // built-in default when no file exists) and every built-in stays selectable.
-        prompt_select_among_candidates(candidates)?
+        let config = crate::app_config::AppConfig::load()?;
+        let installed: std::collections::HashSet<_> = crate::workflow_packages::list_installed()
+            .map_err(|e| CruiseError::Other(e.to_string()))?
+            .into_iter()
+            .map(|package| {
+                std::fs::canonicalize(&package.config_path).unwrap_or(package.config_path)
+            })
+            .collect();
+        let picker_candidates: Vec<_> = candidates
+            .iter()
+            .map(|c| c.picker_candidate(&installed))
+            .collect();
+        let nodes = crate::workflow_categories::build_picker_tree(
+            &picker_candidates,
+            &config.workflow_categories,
+            config.show_others_category,
+            &config.others_category_name,
+        );
+        prompt_select_among_candidates(nodes, candidates)?
     };
 
     // 4. Read the chosen candidate and return.
@@ -485,16 +545,83 @@ fn read_config_file(path: &std::path::Path) -> Result<String> {
 }
 
 /// Present an `inquire::Select` of candidates and return the chosen one.
-fn prompt_select_among_candidates(candidates: Vec<ConfigCandidate>) -> Result<ConfigCandidate> {
-    match inquire::Select::new("Select a workflow config", candidates)
-        .with_starting_cursor(0)
-        .prompt()
-    {
-        Ok(candidate) => Ok(candidate),
-        Err(
-            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
-        ) => Err(CruiseError::Other("config selection cancelled".to_string())),
-        Err(e) => Err(CruiseError::Other(e.to_string())),
+fn prompt_select_among_candidates(
+    nodes: Vec<crate::workflow_categories::PickerNode>,
+    candidates: Vec<ConfigCandidate>,
+) -> Result<ConfigCandidate> {
+    use crate::workflow_categories::PickerNode;
+    struct MenuItem {
+        label: String,
+        index: Option<usize>,
+    }
+    impl std::fmt::Display for MenuItem {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.label)
+        }
+    }
+    let mut path = Vec::<usize>::new();
+    loop {
+        let mut current = &nodes;
+        for &index in &path {
+            if let PickerNode::Category { nodes, .. } = &current[index] {
+                current = nodes;
+            }
+        }
+        let mut options: Vec<MenuItem> = current
+            .iter()
+            .enumerate()
+            .map(|(index, node)| MenuItem {
+                index: Some(index),
+                label: match node {
+                    PickerNode::Category { name, .. } => format!("{name}/"),
+                    PickerNode::Workflow {
+                        candidate,
+                        description,
+                    } => match description {
+                        Some(description) => {
+                            let label = candidates[*candidate].label();
+                            let name = label.split_once(": ").map_or(label, |(name, _)| name);
+                            format!("{name}: {description}")
+                        }
+                        None => candidates[*candidate].label().to_string(),
+                    },
+                },
+            })
+            .collect();
+        if !path.is_empty() {
+            options.sort_by_key(|item| match item.index.map(|index| &current[index]) {
+                Some(PickerNode::Category { .. }) => 0,
+                _ => 1,
+            });
+            options.push(MenuItem {
+                label: "Back".into(),
+                index: None,
+            });
+        }
+        if options.is_empty() {
+            return Err(CruiseError::Other(
+                "no workflow configs available to select".into(),
+            ));
+        }
+        let selected = inquire::Select::new("Select a workflow config", options).prompt_skippable();
+        let selected = match selected {
+            Ok(Some(value)) => value,
+            Ok(None)
+            | Err(
+                inquire::InquireError::OperationCanceled
+                | inquire::InquireError::OperationInterrupted,
+            ) => return Err(CruiseError::Other("config selection cancelled".into())),
+            Err(e) => return Err(CruiseError::Other(e.to_string())),
+        };
+        match selected.index {
+            None => {
+                path.pop();
+            }
+            Some(index) => match &current[index] {
+                PickerNode::Category { .. } => path.push(index),
+                PickerNode::Workflow { candidate, .. } => return Ok(candidates[*candidate].clone()),
+            },
+        }
     }
 }
 

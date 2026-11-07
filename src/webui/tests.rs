@@ -127,6 +127,100 @@ async fn send(harness: &Harness, request: Request<Body>) -> (StatusCode, String,
     )
 }
 
+fn config_groups(html: &str) -> Vec<(&str, &str)> {
+    html.split("<optgroup label=\"")
+        .skip(1)
+        .map(|group| {
+            let (label, rest) = group
+                .split_once("\">")
+                .unwrap_or_else(|| panic!("optgroup label: {html}"));
+            let (options, _) = rest
+                .split_once("</optgroup>")
+                .unwrap_or_else(|| panic!("optgroup end: {html}"));
+            (label, options)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn webui_configs_and_session_settings_share_category_groups() {
+    let harness = harness();
+    let config_dir = harness.dir.path().join("xdg-config/cruise");
+    let workflows = config_dir.join("workflows");
+    std::fs::create_dir_all(&workflows)
+        .unwrap_or_else(|error| panic!("create workflows directory: {error}"));
+    std::fs::write(workflows.join("custom-x.yaml"), CONFIG_YAML)
+        .unwrap_or_else(|error| panic!("write workflow: {error}"));
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        "workflow_categories:\n  Dev:\n    workflows: [refactor, {custom-x: 'Custom description'}]\n    Backend:\n      workflows: [research]\n  Second:\n    workflows: [refactor]\n  Empty:\n    workflows: [missing-workflow]\nshow_others_category: true\nothers_category_name: Misc\n",
+    )
+    .unwrap_or_else(|error| panic!("write app config: {error}"));
+    let session = create_session(&harness);
+    let base = harness.dir.path().join("work");
+    let (status, _, configs) = get(
+        &harness,
+        &format!("/webui/configs?baseDir={}", base.display()),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{configs}");
+    let (status, _, settings) = get(
+        &harness,
+        &format!("/webui/sessions/{}/settings", session.id),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{settings}");
+    let groups = config_groups(&configs);
+    let labels: Vec<_> = groups.iter().map(|(label, _)| *label).collect();
+    assert_eq!(labels, ["Dev", "Dev › Backend", "Second", "Misc"]);
+    assert_eq!(
+        labels,
+        config_groups(&settings)
+            .iter()
+            .map(|(label, _)| *label)
+            .collect::<Vec<_>>()
+    );
+    assert!(groups[0].1.contains("builtin:refactor"), "{configs}");
+    assert!(groups[0].1.contains("custom-x.yaml"), "{configs}");
+    assert!(groups[0].1.contains("Custom description"), "{configs}");
+    assert!(groups[1].1.contains("builtin:research"), "{configs}");
+    assert!(groups[2].1.contains("builtin:refactor"), "{configs}");
+    assert!(groups[3].1.contains("__builtin__"), "{configs}");
+}
+
+#[tokio::test]
+async fn webui_configs_hide_others_but_keep_local_workflows() {
+    let harness = harness();
+    let config_dir = harness.dir.path().join("xdg-config/cruise");
+    std::fs::create_dir_all(&config_dir)
+        .unwrap_or_else(|error| panic!("create config directory: {error}"));
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        "workflow_categories:\n  Dev:\n    workflows: [refactor]\nshow_others_category: false\n",
+    )
+    .unwrap_or_else(|error| panic!("write app config: {error}"));
+    let base = harness.dir.path().join("work");
+    std::fs::create_dir_all(&base).unwrap_or_else(|error| panic!("create base directory: {error}"));
+    std::fs::write(base.join("cruise.yaml"), CONFIG_YAML)
+        .unwrap_or_else(|error| panic!("write local workflow: {error}"));
+    let (status, _, html) = get(
+        &harness,
+        &format!("/webui/configs?baseDir={}", base.display()),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let groups = config_groups(&html);
+    assert_eq!(groups.len(), 2, "{html}");
+    assert!(groups[0].0.starts_with("Base dir ("), "{html}");
+    assert!(groups[0].1.contains("cruise.yaml"), "{html}");
+    assert_eq!(groups[1].0, "Dev");
+    assert!(groups[1].1.contains("builtin:refactor"), "{html}");
+    assert!(!html.contains("builtin:research"), "{html}");
+}
+
 const FLAG_CONFIG_YAML: &str = "command: [cat]
 flags:
   e2e:

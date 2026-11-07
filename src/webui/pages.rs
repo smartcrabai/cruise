@@ -387,7 +387,23 @@ pub(crate) fn config_select_html(
         Some(base_dir),
         repo.filter(|repo| !repo.trim().is_empty()),
     );
-    let vm = super::view::ConfigSelectVm::new(&entries, selected, base_dir);
+    let mut candidates = super::dto::picker_candidates(&entries, base_dir);
+    if repo.is_none_or(|repo| repo.trim().is_empty()) {
+        let base = crate::webui::dto::expanded_path(std::path::Path::new(if base_dir.is_empty() { "." } else { base_dir }));
+        let discovered = state.application.discover_tui_config_candidates(&base)?;
+        let installed = std::collections::HashSet::new();
+        let mut ordered = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for candidate in discovered.iter().map(|item| item.picker_candidate(&installed)).chain(candidates) {
+            let key = if candidate.is_builtin { candidate.value.clone() } else {
+                std::fs::canonicalize(&candidate.value).unwrap_or_else(|_| std::path::PathBuf::from(&candidate.value)).to_string_lossy().into_owned()
+            };
+            if seen.insert(key) { ordered.push(candidate); }
+        }
+        candidates = ordered;
+    }
+    let nodes = state.application.workflow_picker_tree(&candidates)?;
+    let vm = super::view::ConfigSelectVm::new(&nodes, &candidates, selected, base_dir);
     state.templates.render("components/config-select", &vm)
 }
 
