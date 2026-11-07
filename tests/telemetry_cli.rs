@@ -3768,6 +3768,10 @@ if [ "$1" = "api" ]; then
   esac
   head=$(git rev-parse HEAD) || exit 97
   case "$*" in
+    *checkSuites*)
+      printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
+      exit 0
+      ;;
     *mergeable*)
       printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"CONFLICTING","mergeStateStatus":"BEHIND","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"SUCCESS","commit":{"oid":"%s"},"contexts":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}}\n' "$head" "$head"
       exit 0
@@ -3815,7 +3819,7 @@ if [ "$1" = "api" ]; then
       head=$(git rev-parse HEAD) || exit 97
       ready_head=$(cat "$FAKE_GH_READY_HEAD" 2>/dev/null || true)
       status_count=$(cat "$FAKE_GH_STATUS_COUNT" 2>/dev/null || printf '0')
-      if [ "$ready_head" != "$head" ] || [ "$attempts" -ne 1 ] || [ "$status_count" -lt 3 ]; then
+      if [ "$ready_head" != "$head" ] || [ "$attempts" -ne 1 ] || [ "$status_count" -lt 4 ]; then
         printf 'rejected early or duplicate merge write\n' >&2
         exit 97
       fi
@@ -3833,6 +3837,11 @@ if [ "$1" = "api" ]; then
       ;;
     *"/rules/branches/"*)
       printf '[]\n'
+      exit 0
+      ;;
+    *checkSuites*)
+      head=$(git rev-parse HEAD) || exit 97
+      printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
       exit 0
       ;;
     *statusCheckRollup*)
@@ -3883,6 +3892,10 @@ if [ "$1" = "api" ]; then
       echo 'stderr-secret-8241' >&2
       exit 1 ;;
     *"/rules/branches/"*) echo '[]'; exit 0 ;;
+    *checkSuites*)
+      head=$(git rev-parse HEAD) || exit 97
+      printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
+      exit 0 ;;
     *statusCheckRollup*)
       head=$(git rev-parse HEAD) || exit 97
       printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"SUCCESS","commit":{"oid":"%s"},"contexts":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}}}\n' "$head" "$head"
@@ -4177,16 +4190,16 @@ fn assert_expected_head_readiness(root: &std::path::Path) -> String {
         .parse::<usize>()
         .unwrap_or_else(|error| panic!("parse fake status count: {error}"));
     assert_eq!(
-        status_count, 3,
-        "native readiness should observe stale CI, current-head pending CI, then green CI"
+        status_count, 4,
+        "native readiness should observe stale CI, current-head pending CI, then two current-head green CI observations"
     );
     let status_sequence = std::fs::read_to_string(root.join("fake-gh-status-sequence"))
         .unwrap_or_else(|error| panic!("read fake status sequence: {error}"));
     let status_sequence: Vec<_> = status_sequence.lines().collect();
     assert_eq!(
         status_sequence.len(),
-        3,
-        "fake provider should observe exactly the three readiness phases: {status_sequence:?}"
+        4,
+        "fake provider should observe stale, pending, and two consecutive ready polls: {status_sequence:?}"
     );
     assert!(
         status_sequence[0].starts_with("UNKNOWN ") && status_sequence[0].ends_with(OLD_HEAD),
@@ -4206,7 +4219,12 @@ fn assert_expected_head_readiness(root: &std::path::Path) -> String {
     assert_eq!(
         status_sequence[2],
         expected_status.as_str(),
-        "native readiness should merge only after current-head green CI: {status_sequence:?}"
+        "the first current-head green poll must not merge alone: {status_sequence:?}"
+    );
+    assert_eq!(
+        status_sequence[3],
+        expected_status.as_str(),
+        "native readiness should merge after the second consecutive green poll: {status_sequence:?}"
     );
     expected_head
 }
