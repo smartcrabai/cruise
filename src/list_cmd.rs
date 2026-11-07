@@ -966,7 +966,7 @@ mod tests {
         let tell = actions
             .iter()
             .position(|action| *action == "Tell")
-            .expect("live run must offer Tell");
+            .unwrap_or_else(|| panic!("live run must offer Tell"));
         assert_eq!(actions.get(tell + 1), Some(&"Reset to Planned"));
     }
 

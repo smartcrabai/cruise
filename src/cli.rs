@@ -653,7 +653,8 @@ mod tests {
 
     #[test]
     fn explicit_plan_accepts_tell_as_input() {
-        let cli = Cli::try_parse_from(["cruise", "plan", "tell"]).unwrap();
+        let cli = Cli::try_parse_from(["cruise", "plan", "tell"])
+            .unwrap_or_else(|error| panic!("failed to parse plan command: {error}"));
         match cli.command {
             Some(Commands::Plan(args)) => assert_eq!(args.input.as_deref(), Some("tell")),
             _ => panic!("expected plan command"),

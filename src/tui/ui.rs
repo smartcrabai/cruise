@@ -319,6 +319,30 @@ fn flag_summary(app: &TuiApp, session: &crate::session::SessionState) -> String 
     }
 }
 
+fn append_instruction_history(
+    app: &TuiApp,
+    summary: &crate::instruction_inbox::InboxSummary,
+    lines: &mut Vec<Line<'_>>,
+) {
+    for item in summary.history.iter().rev().take(5) {
+        let preview = item.content.lines().next().unwrap_or("");
+        lines.push(labeled_line(
+            app,
+            "Tell     ",
+            Span::raw(format!("#{} {} {}", item.id, item.status, preview)),
+        ));
+    }
+}
+
+fn action_summary(app: &TuiApp, session: &crate::session::SessionState) -> String {
+    app.application
+        .capabilities(session)
+        .iter()
+        .map(|action| action_label(*action))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Vec<Line<'a>> {
     let instructions = app.application.pending_summary(&session.id).ok();
     let mut lines = vec![
@@ -380,14 +404,7 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
         ),
     ];
     if let Some(summary) = instructions {
-        for item in summary.history.iter().rev().take(5) {
-            let preview = item.content.lines().next().unwrap_or("");
-            lines.push(labeled_line(
-                app,
-                "Tell     ",
-                Span::raw(format!("#{} {} {}", item.id, item.status, preview)),
-            ));
-        }
+        append_instruction_history(app, &summary, &mut lines);
     }
     if !session.input.trim().is_empty() {
         lines.push(labeled_line(
@@ -421,14 +438,11 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
             Span::raw(format!(" {error}")),
         ]));
     }
-    let actions = app
-        .application
-        .capabilities(session)
-        .iter()
-        .map(|action| action_label(*action))
-        .collect::<Vec<_>>()
-        .join(", ");
-    lines.push(labeled_line(app, "Actions  ", Span::raw(actions)));
+    lines.push(labeled_line(
+        app,
+        "Actions  ",
+        Span::raw(action_summary(app, session)),
+    ));
     lines
 }
 
