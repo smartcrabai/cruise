@@ -3,6 +3,19 @@ use std::path::PathBuf;
 
 use crate::error::{CruiseError, Result};
 
+/// Return template reference names using the runtime brace tokenizer.
+#[must_use]
+pub fn referenced_names(template: &str) -> Vec<String> {
+    let mut cursor = 0;
+    let mut names = Vec::new();
+    while let Some((_, _, token)) = next_brace_token(template, &mut cursor) {
+        if let BraceToken::Reference(name) = token {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
 enum BraceToken<'a> {
     Escape(char),
     Reference(&'a str),

@@ -874,6 +874,7 @@ dependencies = [
  "ratatui",
  "ratatui-textarea",
  "reedline",
+ "regex",
  "reqwest",
  "seher-claude-agent-sdk",
  "semver",

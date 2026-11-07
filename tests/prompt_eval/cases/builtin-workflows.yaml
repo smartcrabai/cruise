@@ -1,0 +1,97 @@
+cases:
+  - id: tdd-write-tests
+    target: {workflow_step: {path: builtin/tdd.yaml, step: write-test-first}}
+    render: step
+    output: workspace_diff
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: tdd-write-tests-quality, text: 'The diff adds meaningful tests for checked addition without unrelated production changes.'}]
+  - id: tdd-implement
+    target: {workflow_step: {path: builtin/tdd.yaml, step: implement-after-tests}}
+    render: step
+    output: workspace_diff
+    workspace: tests/prompt_eval/fixtures/addition-unimplemented
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: tdd-implement-quality, text: 'The diff implements checked addition so the existing tests pass without weakening them.'}]
+  - id: tdd-formal
+    target: {workflow_step: {path: builtin/tdd.yaml, step: formal-methods}}
+    render: step
+    output: text
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: tdd-formal-quality, text: 'The response addresses formal verification or explains why it is not applicable.'}]
+  - id: tdd-browser
+    target: {workflow_step: {path: builtin/tdd.yaml, step: browser-e2e}}
+    render: step
+    output: text
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: tdd-browser-quality, text: 'The response assesses whether browser end-to-end testing applies.'}]
+  - id: refactor-baseline
+    target: {workflow_step: {path: builtin/refactor.yaml, step: baseline}}
+    render: step
+    output: text
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {input: 'Improve the addition function without changing behavior.', plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: refactor-baseline-quality, text: 'The response identifies a baseline for behavior-preserving refactoring.'}]
+  - id: refactor-audit
+    target: {workflow_step: {path: builtin/refactor.yaml, step: audit-code}}
+    render: step
+    output: text
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {input: 'Improve the addition function without changing behavior.', plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: refactor-audit-quality, text: 'The response identifies concrete refactoring opportunities without changing behavior.'}]
+  - id: add-tests-plan
+    target: {workflow_step: {path: builtin/add-tests.yaml, step: read-and-plan}}
+    render: step
+    output: text
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {input: 'Add tests for checked addition.', plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: add-tests-plan-quality, text: 'The response proposes meaningful tests for the existing behavior.'}]
+  - id: formal-audit
+    target: {workflow_step: {path: builtin/add-formal-specs.yaml, step: audit}}
+    render: step
+    output: text
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {input: 'Assess checked addition for formal specification.', plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: formal-audit-quality, text: 'The response identifies a concrete behavior or invariant suitable for specification.'}]
+  - id: research-plan
+    target: {workflow_step: {path: builtin/research.yaml, step: plan}}
+    render: step
+    output: text
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {input: 'Investigate safe integer addition.', plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: research-plan-quality, text: 'The response proposes an actionable investigation of integer overflow.'}]
+  - id: research-investigate
+    target: {workflow_step: {path: builtin/research.yaml, step: investigate}}
+    render: step
+    output: text
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {input: 'Investigate safe integer addition.', plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: research-investigate-quality, text: 'The response investigates integer addition and provides supporting evidence.'}]
+  - id: security-inventory
+    target: {workflow_step: {path: builtin/security.yaml, step: inventory}}
+    render: step
+    output: text
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {input: 'Review integer addition for security risks.', plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: security-inventory-quality, text: 'The response inventories relevant security-sensitive inputs or boundaries.'}]
+  - id: security-triage
+    target: {workflow_step: {path: builtin/security.yaml, step: triage}}
+    render: step
+    output: text
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {input: 'Review integer addition for security risks.', plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: security-triage-quality, text: 'The response prioritizes supported findings without inventing vulnerabilities.'}]

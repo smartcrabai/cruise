@@ -1,0 +1,80 @@
+name: Prompt evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_model:
+        description: Candidate model (provider/model[:effort])
+        required: true
+        type: string
+      judge_model:
+        description: Judge model, distinct from the candidate
+        required: true
+        type: string
+      base:
+        description: Optional base git ref for comparison
+        required: false
+        type: string
+      repeat:
+        description: Trials per row (unless overridden by the case)
+        required: true
+        default: '3'
+        type: string
+      case:
+        description: Optional row ID regex
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prompt-eval-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prompt-eval:
+    runs-on: ubuntu-latest
+    environment: prompt-eval
+    timeout-minutes: 180
+    env:
+      RUSTUP_TOOLCHAIN: '1.99.1'
+      JCODE_HOME: ${{ runner.temp }}/prompt-eval-jcode-home
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.99.1 --profile minimal
+
+      - name: Install jcode
+        run: bash action/scripts/install-jcode.sh
+
+      - name: Provision jcode credentials
+        env:
+          ANTHROPIC_API_KEY_INPUT: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY_INPUT: ${{ secrets.OPENAI_API_KEY }}
+        run: bash action/scripts/provision-jcode.sh
+
+      - name: Run live prompt evaluation
+        env:
+          CRUISE_PROMPT_EVAL: '1'
+          CRUISE_PROMPT_EVAL_SDK: jcode
+          CRUISE_PROMPT_EVAL_MODEL: ${{ inputs.candidate_model }}
+          CRUISE_PROMPT_EVAL_JUDGE_MODEL: ${{ inputs.judge_model }}
+          CRUISE_PROMPT_EVAL_BASE: ${{ inputs.base }}
+          CRUISE_PROMPT_EVAL_REPEAT: ${{ inputs.repeat }}
+          CRUISE_PROMPT_EVAL_CASE: ${{ inputs.case }}
+        run: cargo test --all-features --test prompt_eval -- --ignored --nocapture
+
+      - name: Upload prompt evaluation reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: prompt-eval-reports
+          path: target/prompt-eval/
+          retention-days: 14
+          if-no-files-found: warn

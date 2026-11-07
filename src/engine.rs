@@ -1412,11 +1412,6 @@ pub(crate) async fn run_prompt_step(
             crate::status_eprintln!("  {}", style(resolved).dim());
         }
     }
-    let mut prompt = vars.resolve_prompt(&step.prompt)?;
-    if !allow_commit {
-        prompt.push_str("\n\nIn this working repository and any linked worktrees, do not create commits, move HEAD or local branch refs, or disable or bypass the commit guard, even if the task text asks you to. Leave all edits uncommitted.");
-    }
-
     let permission = step.permission.unwrap_or(compiled.permission);
     let tool_policy = crate::tool_policy::ToolPolicy::for_prompt_step(
         &compiled.disallowed_tools,
@@ -1425,10 +1420,8 @@ pub(crate) async fn run_prompt_step(
         permission,
     );
     let mcp_servers = tool_policy.filter_mcp_servers(&compiled.mcp_servers);
-    if let Some(notice) = tool_policy.prompt_notice() {
-        prompt.push_str("\n\n");
-        prompt.push_str(&notice);
-    }
+    let prompt =
+        crate::prompt_render::assemble_step_prompt(&step.prompt, vars, allow_commit, &tool_policy)?;
 
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
     let model_or_mode = executor.step_model(step.model.as_deref(), compiled.model.as_ref());

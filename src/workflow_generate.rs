@@ -8,6 +8,7 @@ use crate::config::WorkflowConfig;
 use crate::error::{CruiseError, Result};
 use crate::executor::{Executor, PromptRun};
 use crate::resolver::{load_config_from_source, resolve_config};
+use crate::workflow_validate::validate_generated_yaml;
 
 const PROMPT_TEMPLATE: &str = include_str!("../prompts/workflow-generate.md");
 const SCHEMA: &str = include_str!("../cruise-schema.json");
@@ -26,9 +27,8 @@ pub(crate) async fn generate_yaml(
 ) -> Result<String> {
     let executor = Executor::new(config.sdk.as_deref(), &config.command);
     let model = Executor::plan_model(config.plan_model.as_ref(), config.model.as_ref());
-    let base_prompt = PROMPT_TEMPLATE
-        .replace("{schema}", SCHEMA)
-        .replace("{description}", description);
+    let base_prompt =
+        crate::prompt_render::render_generate_prompt(PROMPT_TEMPLATE, SCHEMA, description);
 
     let mut prompt = base_prompt.clone();
     let mut attempt = 0;
@@ -68,28 +68,6 @@ pub(crate) async fn generate_yaml(
             "{base_prompt}\n\n## Previous attempt\n\nYour previous reply was rejected. Fix it and reply with the complete corrected YAML only, with no Markdown fence.\n\nPrevious YAML:\n\n{candidate}\n\nDiagnostic:\n\n{err}\n"
         );
     }
-}
-
-/// Run the full exec preflight on a candidate YAML string.
-///
-/// # Errors
-///
-/// Returns the first parse, reference, validation, compile or graph error.
-pub(crate) fn validate_generated_yaml(yaml: &str, base_dir: &Path) -> Result<()> {
-    let config = WorkflowConfig::from_yaml(yaml)
-        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
-    let config = crate::workflow_call::resolve_workflow_calls_without_app_model_defaults(
-        config,
-        base_dir,
-        &crate::workflow_defaults::WorkflowDefaults::default(),
-    )?;
-    crate::config::validate_config(&config)?;
-    let max_retries = crate::config::resolve_effective_max_retries(None, &config);
-    crate::config::validate_group_retry_budget(&config, max_retries)?;
-    let compiled = crate::workflow::compile(config)?;
-    let graph = crate::graph::build_graph(&compiled, max_retries)?;
-    crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &[])?;
-    Ok(())
 }
 
 /// Check that `name` is a plain file stem (ASCII alphanumerics, `-`, `_`).

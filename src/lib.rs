@@ -31,6 +31,7 @@ pub mod new_session_history;
 pub mod option_handler;
 pub mod paths;
 pub mod planning;
+pub mod prompt_render;
 pub mod pr_merge;
 pub mod repo_clone;
 pub mod resolver;
@@ -49,6 +50,10 @@ pub mod timeout;
 pub mod tool_policy;
 pub mod variable;
 pub mod workflow;
+mod workflow_validate;
+pub mod workflow_generate {
+    pub use crate::workflow_validate::validate_generated_yaml;
+}
 pub mod workflow_call;
 pub mod workflow_cmd;
 pub mod workflow_defaults;

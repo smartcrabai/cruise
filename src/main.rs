@@ -63,6 +63,7 @@ mod option_handler;
 mod paths;
 mod plan_cmd;
 mod planning;
+mod prompt_render;
 mod platform;
 mod pr_merge;
 mod repo_clone;
@@ -86,6 +87,10 @@ mod timeout;
 mod tool_policy;
 mod tui;
 mod update_cmd;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "reference discovery is a public library API")
+)]
 mod variable;
 mod webui;
 mod workflow;
@@ -95,6 +100,7 @@ mod workflow_cmd;
 mod workflow_defaults;
 mod workflow_generate;
 mod workflow_packages;
+mod workflow_validate;
 mod workspace;
 mod worktree;
 mod worktree_pr;

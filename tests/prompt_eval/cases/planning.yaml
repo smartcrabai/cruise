@@ -1,0 +1,61 @@
+cases:
+  - id: plan-requirements
+    target: {prompt_file: prompts/plan.md}
+    render: plan
+    output: plan_file
+    workspace: tests/prompt_eval/fixtures/addition
+    language: {var: plan.language, values: [English, Japanese]}
+    vars: {input: 'Add a checked integer addition function with tests.'}
+    checks: [{min_chars: 100}, {matches: '[A-Za-z0-9_./-]+\.(rs|md|yaml|toml):[0-9]+'}]
+    reference: 'src/lib.rs:1 already provides checked addition. Tests are not present in the fixture.'
+    rubric:
+      - {id: plan-requirements-quality, text: 'The plan addresses implementation and testing of checked addition.'}
+      - {id: plan-requirement-verdicts, text: 'The plan distinguishes requirements already satisfied from those needing changes and supports any no-change verdict with a specific file and line.'}
+  - id: plan-sdk
+    target: {prompt_file: prompts/plan-sdk.md}
+    render: plan
+    output: text
+    workspace: tests/prompt_eval/fixtures/addition
+    language: {var: plan.language, values: [English, Japanese]}
+    vars: {input: 'Add a checked integer addition function with tests.'}
+    checks: [{min_chars: 100}]
+    rubric: [{id: plan-sdk-quality, text: 'The plan addresses implementation and testing of checked addition.'}]
+  - id: plan-grill-sdk
+    target: {prompt_file: prompts/plan-grill-sdk.md}
+    render: plan
+    output: text
+    vars: {input: 'Add a checked integer addition function with tests.'}
+    checks: [{min_chars: 40}]
+    rubric: [{id: plan-grill-quality, text: 'The response advances clarification or planning for checked addition.'}]
+  - id: ask-plan
+    target: {prompt_file: prompts/ask-plan.md}
+    render: plan
+    output: text
+    workspace: tests/prompt_eval/fixtures/existing-plan
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}, prev.input: 'What tests are planned?'}
+    checks: [{min_chars: 20}]
+    rubric: [{id: ask-plan-quality, text: 'The answer identifies tests for positive, negative and zero operands.'}]
+  - id: ask-plan-sdk
+    target: {prompt_file: prompts/ask-plan-sdk.md}
+    render: plan
+    output: text
+    workspace: tests/prompt_eval/fixtures/existing-plan
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}, prev.input: 'What tests are planned?'}
+    checks: [{min_chars: 20}]
+    rubric: [{id: ask-plan-sdk-quality, text: 'The answer identifies tests for positive, negative and zero operands without changing the plan.'}]
+  - id: fix-plan
+    target: {prompt_file: prompts/fix-plan.md}
+    render: plan
+    output: plan_file
+    workspace: tests/prompt_eval/fixtures/existing-plan
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}, prev.input: 'Add an overflow test.'}
+    checks: [{min_chars: 40}]
+    rubric: [{id: fix-plan-quality, text: 'The revised plan includes an overflow test and preserves the addition task.'}]
+  - id: fix-plan-sdk
+    target: {prompt_file: prompts/fix-plan-sdk.md}
+    render: plan
+    output: plan_file
+    workspace: tests/prompt_eval/fixtures/existing-plan
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}, prev.input: 'Add an overflow test.'}
+    checks: [{min_chars: 40}]
+    rubric: [{id: fix-plan-sdk-quality, text: 'The revised plan includes an overflow test and preserves the addition task.'}]
