@@ -32,6 +32,7 @@ use crate::backend::stream::{LimitError, StreamChunk};
 use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
+use crate::provider_install::pins::JCODE_MIN_VERSION;
 const JCODE_HOME_ENV: &str = "JCODE_HOME";
 const NO_TELEMETRY_ENV: &str = "JCODE_NO_TELEMETRY";
 const JCODE_CHECK_UPDATES_ENV: &str = "JCODE_CHECK_UPDATES";
@@ -68,6 +69,7 @@ const ROOT_LOCK_FILE: &str = ".cruise-session-prune.lock";
 /// provider credentials.
 #[derive(Default)]
 pub(crate) struct JcodeRunnerConfig {
+    pub(crate) binary: Option<PathBuf>,
     pub tool_policy: crate::tool_policy::ToolPolicy,
     pub(crate) permission: crate::config::PermissionMode,
     pub(crate) model: Option<String>,
@@ -228,6 +230,7 @@ fn launch_client(
         format!("could not clean up stale private jcode runtime: {error}")
     })?;
     let mut options = LaunchOptions {
+        binary: config.binary.clone(),
         jcode_home: Some(home.sdk_home.clone()),
         working_dir: config.cwd.clone(),
         inherit_logins: false,
@@ -304,9 +307,9 @@ fn launch_client(
                 | &jcode_sdk::ErrorKind::HandshakeFailed
                 | &jcode_sdk::ErrorKind::Harness(jcode_sdk::api::ErrorCode::UnsupportedVersion)
         ) {
-            "; install or upgrade jcode to 0.88.0 or newer"
+            format!("; install or upgrade jcode to {JCODE_MIN_VERSION} or newer with `cruise install jcode`")
         } else {
-            ""
+            String::new()
         };
         record_sdk_failure(failure_recorded, "launch", &error);
         format!("could not start the jcode SDK runtime{hint}: {error}")
@@ -608,17 +611,15 @@ fn run_client_turn(
 ) -> std::result::Result<StreamChunk, String> {
     if !client.supports("sessions") {
         record_failure(failure_recorded, "session", "sdk_sessions_unsupported");
-        return Err(
-            "the jcode harness does not support sessions; upgrade jcode to 0.88.0 or newer"
-                .to_string(),
-        );
+        return Err(format!(
+            "the jcode harness does not support sessions; upgrade jcode to {JCODE_MIN_VERSION} or newer with `cruise install jcode`"
+        ));
     }
     if !config.tools.is_empty() && !client.supports("session_tools") {
         record_failure(failure_recorded, "session", "sdk_session_tools_unsupported");
-        return Err(
-            "the jcode harness does not support session tools; upgrade jcode to 0.88.0 or newer"
-                .to_string(),
-        );
+        return Err(format!(
+            "the jcode harness does not support session tools; upgrade jcode to {JCODE_MIN_VERSION} or newer with `cruise install jcode`"
+        ));
     }
     let working_dir = config
         .cwd

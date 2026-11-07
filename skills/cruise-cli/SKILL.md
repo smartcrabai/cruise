@@ -71,12 +71,19 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Run cruise on another machine | `cruise ssh <host> [--cwd <remote-path>] [-- <cruise-args>]` |
 | Serve the local browser UI (add `-o`/`--open` to launch the browser) | `cruise webui` |
 | Update Cruise itself | `cruise update` |
+| Install a pinned provider CLI or inspect managed provider status | `cruise install <jcode\|claude\|opencode> [--force]` / `cruise install --status` |
 | Inspect in-progress update transactions across installations (read-only; no network access or changes) | `cruise update --status` |
 | Install / update / remove / list a GitHub workflow package (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path][@ref]` / `update <name>` / `remove <name>` / `list` |
 | Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
 | Show / change app-level settings (e.g. WebUI/TUI parallelism) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / inspect what's configured | `jcode login <provider>` / `jcode auth status` (cruise has no login command of its own) |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
+
+### Managed provider CLIs
+
+`cruise install <jcode|claude|opencode>` installs the version pinned by this Cruise build. Use `--force` to reinstall and `cruise install --status` for read-only, offline status. Provider authentication remains separate. Resolution prefers nonempty process environment overrides (`CRUISE_JCODE_CLI_PATH`, `CRUISE_CLAUDE_CLI_PATH`, `CRUISE_OPENCODE_CLI_PATH`), then a valid managed installation, then PATH. Invalid overrides fail instead of falling back. Workflow `env:` cannot set the explicit provider overrides, but its `PATH` controls PATH fallback for the child. Running workflows never installs providers. `cruise update` updates Cruise, not providers; rerun install when the build's pin changes.
+
+For managed-only jcode authentication, read `relative_path` from `providers/jcode/install.json` under the Cruise data directory, then invoke that binary with `login <provider>` or `auth status`. The data directory is `$XDG_DATA_HOME/cruise`, or `~/.local/share/cruise` on Unix when unset. On Windows without `XDG_DATA_HOME`, it is `%LOCALAPPDATA%\cruise\data` when `LOCALAPPDATA` is available, otherwise the home-directory fallback applies. Quote paths containing spaces.
 
 ### Updating Cruise
 

@@ -263,6 +263,11 @@ async fn run_async(config: ClaudeRunnerConfig, prompt: String, tx: &Sender<Strea
     let (_mcp_config_file, mut transport) = match connect_transport(&config).await {
         Ok(connected) => connected,
         Err(error) => {
+            let error = if error.contains("claude CLI not found") {
+                format!("{error}. Run `cruise install claude`.")
+            } else {
+                error
+            };
             send_error_with_stderr(tx, &error, &[]);
             return;
         }

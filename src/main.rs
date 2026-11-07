@@ -50,6 +50,7 @@ mod forge;
 mod github_review;
 mod graph;
 mod herdr;
+mod http_download;
 mod install_identity;
 mod issue_publish;
 mod list_cmd;
@@ -65,6 +66,8 @@ mod plan_cmd;
 mod planning;
 mod platform;
 mod pr_merge;
+#[expect(unused_imports, reason = "resolver types are part of the library API")]
+mod provider_install;
 mod repo_clone;
 mod resolver;
 mod retry;
@@ -163,6 +166,9 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::Webui(args)) => webui::run(args).await,
         Some(cli::Commands::Update(args)) => update_cmd::run(&args),
+        Some(cli::Commands::Install(args)) => {
+            provider_install::run(args.provider, args.status, args.force)
+        }
         Some(cli::Commands::Workflow(cli::WorkflowCommand::List)) => workflow_cmd::list(),
         Some(cli::Commands::Workflow(cli::WorkflowCommand::Eject(args))) => {
             workflow_cmd::eject(&args.name, args.to == cli::EjectDestination::Project)

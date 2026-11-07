@@ -1,5 +1,10 @@
 # Checkpoint contract verification
 
+For provider installation lifecycle and resolution precedence, see
+`PROVIDER_INSTALL.md` and run `bash scripts/check_provider_install_specs.sh`.
+The dedicated `provider-install-specs` CI job runs the pinned Quint checks and
+retains reports. The bounded model is not a production refinement proof.
+
 For task-scoped `subagent_model` selection, backend configuration and exclusions,
 see `SUBAGENT_MODEL.md` and run `bash scripts/check_subagent_model_specs.sh`.
 The dedicated `subagent-model-specs` PR job runs pinned Quint verification,

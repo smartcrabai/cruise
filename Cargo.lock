@@ -851,6 +851,7 @@ dependencies = [
  "crossterm",
  "cucumber",
  "encre-css",
+ "flate2",
  "fs2",
  "futures",
  "glob",

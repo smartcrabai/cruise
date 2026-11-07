@@ -20,6 +20,7 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 - An OpenSSH client (`ssh`) on the local `PATH` for `cruise ssh`.
 - On Windows: [Git for Windows](https://gitforwindows.org/) (`git` on `PATH`). `command:` steps run through `cmd.exe /C`, so use cmd.exe syntax (or invoke `powershell -Command ...` / `bash -c ...` explicitly) rather than POSIX shell syntax. Desktop notifications are not sent on Windows, `cruise ssh` needs the Windows OpenSSH client, and herdr reporting is limited to what the herdr environment variables provide.
 - A compatible `cruise` version and its usual workflow prerequisites on the SSH destination, including any required `gh`, `jcode`, `claude`, or `opencode` CLI for the selected workflow. The remote host performs the workflow and owns its authentication, configuration, sessions, worktrees, and clones.
+- Install a managed provider on that host with, for example, `cruise ssh <host> -- install jcode`.
 
 ## Installation
 
@@ -116,6 +117,26 @@ Move-Item -LiteralPath $pointer -Destination $retired -ErrorAction Stop
 ```
 
 The first `--version` above must succeed before moving the pointer. These commands only archive and move the pointer file; never delete a runtime or sidecar. Choose unused archive/retired names if those files already exist.
+
+### Managed provider CLIs
+
+Install only the providers your workflows need:
+
+```sh
+cruise install jcode
+cruise install claude
+cruise install opencode
+cruise install --status
+cruise install jcode --force
+```
+
+This build pins jcode **0.99.1**, claude **2.1.250**, and opencode **2.1.3**. Downloads are checked against digests pinned in Cruise and the extracted binary's version is checked before publication. No vendor installer, npm CLI, or shell configuration changes are required. Managed files live under `$XDG_DATA_HOME/cruise/providers/<provider>/` (normally `~/.local/share/cruise/providers/`). Each installation uses a distinct version-prefixed directory, with the active relative path recorded in `install.json`. Previous directories are retained so concurrent readers can continue using their resolved paths. Availability depends on platform. Authentication remains the provider's responsibility.
+
+When jcode is installed only by Cruise, find its active `relative_path` in `providers/jcode/install.json` under the Cruise data directory, then invoke that binary with `login <provider>` or `auth status`. On Windows, the default data directory is `%LOCALAPPDATA%\cruise\data` when `XDG_DATA_HOME` is unset and `LOCALAPPDATA` is set. If `LOCALAPPDATA` is unavailable, the home-directory fallback applies. Quote paths containing spaces.
+
+Resolution uses a nonempty process environment override first, then a valid managed installation matching the current pin, then the existing PATH lookup. The overrides are `CRUISE_JCODE_CLI_PATH`, `CRUISE_CLAUDE_CLI_PATH`, and `CRUISE_OPENCODE_CLI_PATH`. An invalid explicit override is an error, not a fallback. These are process environment variables, not workflow `env:` settings. A missing, stale, or damaged managed installation falls back to PATH. Running workflows, planning, TUI, and WebUI never download or install providers.
+
+`--status` is read-only: it does not access the network, execute provider binaries, or create files. Reinstall with `--force` when needed. Rerun `cruise install <provider>` after a Cruise update changes its pin. `cruise update` updates Cruise itself, not providers. For managed claude and opencode, Cruise disables their auto-updaters only when the respective environment variable is not already set. PATH and override installations retain their existing behavior. The GitHub Action continues to manage its own jcode installation and version input separately.
 
 ### WebUI
 
@@ -308,6 +329,7 @@ Commands:
   exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve the browser UI from this machine (pass `--open` to launch the default browser)
+  install      Install a pinned provider CLI or inspect managed provider status
   update       Update a managed native installation; `--status` lists recorded transactions read-only
   workflow     Manage workflows: list/eject built-ins, generate YAML, install GitHub packages (`add`, `remove`, `update`)
 
@@ -322,6 +344,10 @@ Options:
       --image <PATH>           Attach an image file (png/jpg/jpeg/webp/gif) to the planning input; can be repeated
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable)
 ```
+
+#### `cruise install`
+
+`cruise install <jcode|claude|opencode> [--force]` installs the build's pinned provider version. `cruise install --status` inspects managed installations without network access or side effects. See [Managed provider CLIs](#managed-provider-clis) for resolution and authentication details.
 
 #### `cruise workflow generate`
 
@@ -1143,7 +1169,7 @@ interactive_planning: false   # tool-less, file-based planning
 
 #### `sdk: opencode` - the OpenCode V2 client
 
-Cruise includes a Rust client for the workflow-required OpenCode V2 API, not a Python/Node SDK dependency or a provider-specific LLM client. Install and authenticate the OpenCode CLI separately. Cruise owns a short-lived loopback `opencode serve --stdio` process and stops it after each attempt. It does not connect to an external server, install the CLI, authenticate for you, or fall back to V1.
+Cruise includes a Rust client for the workflow-required OpenCode V2 API, not a Python/Node SDK dependency or a provider-specific LLM client. Install the OpenCode CLI explicitly with `cruise install opencode` or separately, and authenticate it. Cruise owns a short-lived loopback `opencode serve --stdio` process and stops it after each attempt. Workflow execution does not connect to an external server, install the CLI, authenticate for you, or fall back to V1.
 
 ```yaml
 sdk: opencode
@@ -1226,6 +1252,8 @@ defaults, or `CRUISE_MODEL` / `CRUISE_PLAN_MODEL` as appropriate. Claude and
 command workflows retain their existing no-model behavior.
 
 ### Environment Variables
+
+`CRUISE_JCODE_CLI_PATH`, `CRUISE_CLAUDE_CLI_PATH`, and `CRUISE_OPENCODE_CLI_PATH` select provider executables from the Cruise process environment. They are not workflow configuration keys and cannot be supplied through workflow `env:`; see [Managed provider CLIs](#managed-provider-clis).
 
 Environment variables can be set at workflow and step level. Step-level values override workflow-level values for that step only. Parallel children add a third level: workflow < parallel block < child. Values support template variable substitution; each child resolves its own values against the variables from before the block.
 
