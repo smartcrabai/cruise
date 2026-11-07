@@ -228,6 +228,7 @@ async fn run_child_inner(
                     super::PromptStepOutput::Redirect(log),
                     timeout,
                     name,
+                    ctx.usage_session_id,
                     false,
                     false,
                 )

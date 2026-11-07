@@ -267,6 +267,7 @@ mod contracts {
         };
         let result = executor
             .run(PromptRun {
+                usage: None,
                 prompt: "SUBAGENT_COMMAND_DEFENSE",
                 model: None,
                 subagent_model: c.subagent_model.as_ref(),
