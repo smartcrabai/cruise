@@ -135,7 +135,7 @@ pub enum Commands {
     Exec(ExecArgs),
     /// Run a cruise command on a remote host through OpenSSH.
     Ssh(SshArgs),
-    /// Serve the browser UI from this machine (pass `--open` to launch the default browser).
+    /// Serve or manage the browser UI on this machine.
     Webui(WebuiArgs),
     /// Update Cruise itself or inspect an in-progress update.
     Update(UpdateArgs),
@@ -292,6 +292,17 @@ pub struct InternalArgs {
 pub enum InternalCommand {
     /// Enforce this prompt's jcode pre-tool shell policy.
     JcodePreTool,
+    /// Serve a detached `WebUI` instance.
+    WebuiServe {
+        #[arg(long)]
+        instance_id: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        port: u16,
+        #[arg(long)]
+        webui_dir: Option<std::path::PathBuf>,
+    },
     /// Merge the PR base branch into the current branch.
     SyncBase {
         /// Pull request number.
@@ -309,14 +320,31 @@ pub enum EjectDestination {
 }
 
 #[derive(Parser, Debug)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct WebuiArgs {
+    #[command(flatten)]
+    pub serve: ServeArgs,
+    #[command(subcommand)]
+    pub action: Option<WebuiAction>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebuiAction {
+    Start(ServeArgs),
+    Stop(StopArgs),
+    Restart(ServeArgs),
+    Status(StatusArgs),
+}
+
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct ServeArgs {
     /// Interface to bind. Non-loopback values expose an unauthenticated UI.
-    #[arg(long, default_value = "127.0.0.1")]
-    pub host: String,
+    #[arg(long)]
+    pub host: Option<String>,
 
     /// TCP port to listen on.
-    #[arg(long, default_value_t = 8484)]
-    pub port: u16,
+    #[arg(long)]
+    pub port: Option<u16>,
 
     /// Open the `WebUI` in the default browser after the server starts.
     #[arg(short = 'o', long)]
@@ -327,6 +355,18 @@ pub struct WebuiArgs {
     /// re-read on every request (development: `--webui-dir webui`).
     #[arg(long, value_name = "DIR")]
     pub webui_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct StopArgs {
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct StatusArgs {
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1052,6 +1092,111 @@ mod tests {
     #[test]
     fn test_webui_no_open_flag_is_rejected() {
         assert!(Cli::try_parse_from(["cruise", "webui", "--no-open"]).is_err());
+    }
+
+    fn webui_matches(argv: &[&str]) -> Result<clap::ArgMatches, clap::Error> {
+        use clap::CommandFactory;
+        Cli::command().try_get_matches_from(argv)
+    }
+
+    fn webui_sub(matches: &clap::ArgMatches) -> &clap::ArgMatches {
+        matches
+            .subcommand_matches("webui")
+            .unwrap_or_else(|| panic!("webui subcommand"))
+    }
+
+    #[test]
+    fn webui_start_parses_host_port_open() {
+        let m = webui_matches(&["cruise", "webui", "start", "--port", "0", "-o"])
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+        let (name, start) = webui_sub(&m)
+            .subcommand()
+            .unwrap_or_else(|| panic!("webui action"));
+        assert_eq!(name, "start");
+        assert_eq!(start.get_one::<u16>("port"), Some(&0));
+        assert_eq!(start.get_one::<bool>("open"), Some(&true));
+        assert_eq!(start.get_one::<String>("host"), None);
+    }
+
+    #[test]
+    fn webui_restart_accepts_serve_flags() {
+        let m = webui_matches(&["cruise", "webui", "restart", "--host", "0.0.0.0"])
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+        let (name, restart) = webui_sub(&m)
+            .subcommand()
+            .unwrap_or_else(|| panic!("webui action"));
+        assert_eq!(name, "restart");
+        assert_eq!(
+            restart.get_one::<String>("host").map(String::as_str),
+            Some("0.0.0.0")
+        );
+        assert_eq!(restart.get_one::<u16>("port"), None);
+    }
+
+    #[test]
+    fn webui_without_subcommand_leaves_host_and_port_unresolved() {
+        let m = webui_matches(&["cruise", "webui"]).unwrap_or_else(|e| panic!("parse: {e}"));
+        let webui = webui_sub(&m);
+        assert!(webui.subcommand().is_none());
+        assert_eq!(webui.get_one::<String>("host"), None);
+        assert_eq!(webui.get_one::<u16>("port"), None);
+    }
+
+    #[test]
+    fn webui_flags_before_subcommand_are_rejected() {
+        assert!(webui_matches(&["cruise", "webui", "--port", "1", "start"]).is_err());
+    }
+
+    #[test]
+    fn webui_stop_accepts_force_only() {
+        let m = webui_matches(&["cruise", "webui", "stop", "--force"])
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+        let (_, stop) = webui_sub(&m)
+            .subcommand()
+            .unwrap_or_else(|| panic!("webui action"));
+        assert_eq!(stop.get_one::<bool>("force"), Some(&true));
+        assert!(webui_matches(&["cruise", "webui", "stop", "--port", "1"]).is_err());
+    }
+
+    #[test]
+    fn webui_status_json_flag() {
+        let m = webui_matches(&["cruise", "webui", "status", "--json"])
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+        let (name, status) = webui_sub(&m)
+            .subcommand()
+            .unwrap_or_else(|| panic!("webui action"));
+        assert_eq!(name, "status");
+        assert_eq!(status.get_one::<bool>("json"), Some(&true));
+    }
+
+    #[test]
+    fn internal_webui_serve_requires_instance_id() {
+        assert!(
+            Cli::try_parse_from([
+                "cruise",
+                "internal",
+                "webui-serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "cruise",
+                "internal",
+                "webui-serve",
+                "--instance-id",
+                "abc",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0"
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

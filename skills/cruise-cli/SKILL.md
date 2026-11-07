@@ -1,6 +1,6 @@
 ---
 name: cruise-cli
-description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / ssh / webui / update / update --status), GitHub issue input, planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), workflow catalog and flags, bounded `run --all --parallelism` execution, the live dashboard, the TUI's WebUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, runtime file layout. Trigger whenever the user asks how to start a cruise session, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is stuck, failed, or not picked up by `cruise run`.
+description: Use when running, operating, or troubleshooting the `cruise` CLI or its default interactive keyboard client — the YAML-driven coding-agent workflow orchestrator that wraps coding-agent CLIs. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / ssh / webui start, stop, restart, status / update / update --status), GitHub issue input, planning variants (--skip-planning / --grill / --no-interactive-planning / --image / --repo), workflow catalog and flags, bounded `run --all --parallelism` execution, the live dashboard, the TUI's WebUI-domain session workflows, session lifecycle and phases, workspace modes, config resolution, runtime file layout. Trigger whenever the user asks how to start a cruise session, manage the WebUI daemon, run or resume a workflow, manage or clean sessions, use the TUI, pick a workspace mode, or debug why a session is stuck, failed, or not picked up by `cruise run`.
 ---
 
 cruise is a CLI that drives coding-agent CLIs (like `claude -p`) through a declarative YAML workflow: **plan → approve → run (write tests → implement → test → review) → usually open a PR → after-pr automation when a PR is created**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
@@ -89,6 +89,7 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | Summarize locally recorded token usage | `cruise usage [--by step,backend,model] [--session ID] [--format text\|json\|csv]` |
 | Run cruise on another machine | `cruise ssh <host> [--cwd <remote-path>] [-- <cruise-args>]` |
 | Serve the local browser UI (add `-o`/`--open` to launch the browser) | `cruise webui` |
+| Manage the background browser UI | `cruise webui start`, `cruise webui status [--json]`, `cruise webui restart`, `cruise webui stop [--force]` |
 | Update Cruise itself | `cruise update` |
 | Install a pinned provider CLI or inspect managed provider status | `cruise install <jcode\|claude\|opencode> [--force]` / `cruise install --status` |
 | Inspect in-progress update transactions across installations (read-only; no network access or changes) | `cruise update --status` |

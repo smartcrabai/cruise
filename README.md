@@ -86,6 +86,8 @@ The downloaded release is checked over HTTPS against its release manifest and SH
 
 If Cruise reports that an update was applied but transaction completion or cleanup warned, the new runtime is already active; it was not rolled back. Inspect `cruise update --status`, then retry `cruise update` to recover or clean the recorded transaction. A status phase is metadata, not proof of activation; check the running version with `cruise --version`.
 
+Updating Cruise does not replace the code in an already running WebUI process. After an update, use `cruise webui status` to compare its version with the current runtime and `cruise webui restart` to load the updated runtime. Restart cancels active WebUI operations, so choose a suitable time.
+
 Versioned runtimes can coexist in `$CARGO_HOME/bin` (on Windows, `%USERPROFILE%\.cargo\bin` by default). To pin one already-installed version, verify that exact versioned sibling with `--version`, ensure its adjacent `.json` sidecar belongs to the current fixed launcher/runtime baseline, then set `.cruise-runtime-active` to that runtime’s exact basename. Do not delete the other runtime files. The baseline is the fixed launcher/runtime size-and-mtime stamp: a reinstall that changes it invalidates the overlay, while a same-size, same-mtime replacement is not detected. Legacy pointers or pinning an older launcher may still require manual retirement. To retire the pointer, first verify the fixed sibling directly; archive and move the pointer only then:
 
 ```sh
@@ -145,6 +147,24 @@ Start the server-rendered browser UI with:
 ```sh
 cruise webui
 ```
+
+This runs in the foreground. To manage a background instance instead:
+
+```sh
+cruise webui start --port 8484
+cruise webui status
+cruise webui status --json
+cruise webui restart --port 8484
+cruise webui stop
+```
+
+`start` and `restart` accept the same server options shown below; put them after the subcommand. `stop --force` permits forced termination if graceful shutdown cannot complete. Status reports a stopped instance with a nonzero exit status. Stopping the WebUI is not a request to delete sessions. The lifecycle commands manage the local instance, not a system service or an automatic startup watcher.
+
+Foreground and background servers share one registry per state directory, even if `XDG_DATA_HOME` differs. Use the same `XDG_STATE_HOME` to manage the instance you started. A repeated `start` reports the running instance; specifying a different host or port requires `restart`. `status --json` reports fields including `running`, `stale`, `mode`, `origin`, `pid`, `version`, `started_at`, `log_path`, and `outdated`. Status does not remove a stale record; `stop` removes a stale record without signalling a reused PID.
+
+`restart` reuses the previous host and port unless overridden. It starts in the invoking command's current working directory, not necessarily the original server's directory. Pass `--webui-dir` again if using development assets, and run from the intended directory for relative paths. Stop and restart request cancellation of active WebUI operations; running sessions are suspended so they can be resumed, rather than deleted. Forced termination may prevent graceful cleanup.
+
+The registry, lock and background log live under `$XDG_STATE_HOME/cruise/webui/` (normally `~/.local/state/cruise/webui/`). The instance record contains a control credential and should be kept private. The background log is `webui.log`, rotated to `webui.log.1` on a later start when larger than 5 MiB. On Windows the default state directory is `%LOCALAPPDATA%\cruise\state` when `XDG_STATE_HOME` is unset. Detached start, status, stop and restart are available on Windows as well as Unix; on Windows a failed graceful control request may require `stop --force`.
 
 The default URL is `http://127.0.0.1:8484/`. Use these flags to customize it:
 
@@ -356,7 +376,7 @@ Commands:
   config       Show or update application-level configuration (`config.json` or `config.yaml`)
   exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
-  webui        Serve the browser UI from this machine (pass `--open` to launch the default browser)
+  webui        Serve or manage the local browser UI (start, stop, restart, status)
   install      Install a pinned provider CLI or inspect managed provider status
   update       Update a managed native installation; `--status` lists recorded transactions read-only
   workflow     Manage workflows: list/eject built-ins, generate, interactively make or check YAML (`doctor`), install GitHub packages (`add`, `remove`, `update`)
@@ -803,6 +823,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 | Application settings (`config.json` or `config.yaml`) | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
 | Sessions, worktrees, and temporary `--repo` clones | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
 | State files (`history.json`, `new_session_draft.json`, per-installation `installations/<installation-id>/update-transaction.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
+| WebUI instance registry, lock, and daemon logs | `$XDG_STATE_HOME/cruise/webui/` (`instance.json`, `instance.lock`, `webui.log`, and optionally `webui.log.1`) |
 | Usage records | `$XDG_STATE_HOME/cruise/usage.ndjson` (default: `~/.local/state/cruise/usage.ndjson`) |
 
 On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cruise` (config), `%LOCALAPPDATA%\cruise\data` (data), and `%LOCALAPPDATA%\cruise\state` (state). If those variables are missing, the `~/` defaults above apply, and `~\` is expanded like `~/`.
