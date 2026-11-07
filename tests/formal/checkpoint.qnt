@@ -14,14 +14,14 @@
 module checkpoint {
   type State = { current: int, pending: int, total: int, budget: int,
     forward: int, forwardBudget: int, groups: int, effects: int,
-    runtime: int, limit: int, gate: bool, saved: bool }
+    runtime: int, limit: int, gate: bool, saved: bool, feedback: bool, gateOutcome: bool }
   var s: State
   var previous: State
   var event: str
 
   pure val initial: State = { current: 0, pending: 0, total: 0, budget: 0,
     forward: 0, forwardBudget: 0, groups: 0, effects: 0,
-    runtime: 0, limit: 2, gate: false, saved: true }
+    runtime: 0, limit: 2, gate: false, saved: true, feedback: false, gateOutcome: false }
   action init = all { s' = initial, previous' = initial, event' = "init" }
   action record(updated: State, name: str): bool = all {
     previous' = s, s' = updated, event' = name,
@@ -41,7 +41,15 @@ module checkpoint {
     kind == 3 or s.effects < 4,
     val n = if (kind == 3) s.effects else s.effects + 1
     record({ ...s, pending: kind, effects: n, runtime: n,
-      gate: false, saved: false }, "execute"),
+      gate: false, saved: false, gateOutcome: false }, "execute"),
+  }
+  // A failing gate uses the existing self-edge budget, otherwise exits via
+  // goto (3) or termination (5). The outcome and feedback are saved together.
+  action gateFail(kind: int): bool = all {
+    s.current == 0, s.pending == 0, s.gate, s.effects < 4, s.groups < 2,
+    if (s.budget < s.limit and s.total < 2) kind == 1 else kind == 3 or kind == 5,
+    record({ ...s, pending: kind, effects: s.effects + 1, runtime: s.effects + 1,
+      feedback: kind == 1, gateOutcome: true, gate: false, saved: true }, "gateFail"),
   }
   // engine::accept_transition plus its successful post-transition checkpoint.
   // Failure of that checkpoint halts before another effect, represented by gate.
@@ -52,14 +60,14 @@ module checkpoint {
       record({ ...s, pending: 0, total: s.total + 1,
         budget: s.budget + 1,
         groups: s.groups + (if (s.pending == 2) 1 else 0),
-        gate: false, saved: true }, "accept"),
+        gate: false, saved: true, gateOutcome: false }, "accept"),
     } else if (s.pending <= 4) all {
       s.pending == 3 or s.forwardBudget < s.limit,
       record({ ...s, current: 1, pending: 0, forward: s.forward + 1,
         forwardBudget: s.forwardBudget + (if (s.pending == 4) 1 else 0),
-        gate: false, saved: true }, "accept"),
+        gate: false, saved: true, feedback: false, gateOutcome: false }, "accept"),
     } else record({ ...s, current: 2, pending: 0,
-      gate: false, saved: true }, "accept"),
+      gate: false, saved: true, feedback: false, gateOutcome: false }, "accept"),
   }
   action rejectBudget = all {
     (s.pending <= 2 and s.pending > 0 and s.budget >= s.limit)
@@ -76,7 +84,8 @@ module checkpoint {
   action rejectInvalid = record(s, "rejectInvalid")
   action idle = record(s, "idle")
   action step = any { authorize, checkpointFailure,
-    execute(1), execute(2), execute(3), execute(4), execute(5), accept,
+    execute(1), execute(2), execute(3), execute(4), execute(5),
+    gateFail(1), gateFail(3), gateFail(5), accept,
     rejectBudget, resume, setLimit(0), setLimit(1), setLimit(2), rejectInvalid, idle }
 
   // CP-01: engine::accept_transition counts accepted pairs, not denied requests.
@@ -129,7 +138,7 @@ module checkpoint {
     not(event == "accept" and previous.pending == 2) implies s.groups == previous.groups,
     event == "execute" and previous.current == 0 and previous.groups == 2 implies
       s.pending == 3 and s.effects == previous.effects,
-    event != "execute" implies s.runtime == previous.runtime,
+    event != "execute" and event != "gateFail" implies s.runtime == previous.runtime,
   }
   // CP-08: two fixed node identities, terminal completion has no pending work/effects.
   val cp08_completed = all {
@@ -138,8 +147,46 @@ module checkpoint {
     s.current == 2 implies s.pending == 0,
     previous.current == 2 implies s.current == 2 and s.effects == previous.effects,
   }
+  // CP-09: exhausted gate failures select only goto or termination without a new effect.
+  val cp09_gate_route = all {
+    event == "gateFail" implies previous.gate and
+      (if (previous.budget < previous.limit and previous.total < 2)
+        s.pending == 1 else s.pending == 3 or s.pending == 5),
+    event == "accept" and previous.gateOutcome implies s.effects == previous.effects,
+  }
+  // CP-10: pending retry and feedback are saved and survive resume; exits clear it.
+  val cp10_feedback = all {
+    s.gateOutcome and s.pending == 1 implies s.feedback and s.saved,
+    event == "resume" implies s.feedback == previous.feedback and s.pending == previous.pending,
+    event == "accept" and previous.pending >= 3 implies not(s.feedback),
+    event == "gateFail" and s.pending != 1 implies not(s.feedback),
+  }
+  // CP-11: accepting a gate retry spends exactly one shared budget unit.
+  val cp11_gate_budget = event == "accept" and previous.gateOutcome and previous.pending == 1 implies
+    previous.budget < previous.limit and s.budget == previous.budget + 1 and s.budget <= previous.limit
   val safety = cp01_accounting and cp02_pending and cp03_checkpoint_gate
     and cp04_skip and cp05_resume and cp06_reject and cp07_group and cp08_completed
+    and cp09_gate_route and cp10_feedback and cp11_gate_budget
+
+  run gateRetryResumeTest = init.then(authorize).then(gateFail(1)).then(resume).then(accept)
+    .expect(s.feedback and s.budget == 1 and s.effects == 1 and safety)
+  run gateExhaustGotoTest = init.then(setLimit(1)).then(authorize).then(gateFail(1)).then(accept)
+    .then(authorize).then(gateFail(3)).then(resume).then(accept)
+    .expect(s.current == 1 and not(s.feedback) and s.effects == 2 and safety)
+  run gateExhaustStopTest = init.then(setLimit(1)).then(authorize).then(gateFail(1)).then(accept)
+    .then(authorize).then(gateFail(5)).then(accept)
+    .expect(s.current == 2 and not(s.feedback) and s.effects == 2 and safety)
+  // A different retry consumes the very same edge budget before the gate runs.
+  run gateSharedBudgetTest = init.then(setLimit(1)).then(authorize).then(execute(1)).then(accept)
+    .then(authorize).then(gateFail(3)).then(accept)
+    .expect(s.current == 1 and s.budget == 1 and s.effects == 2 and safety)
+  run gateZeroBudgetTest = init.then(setLimit(0)).then(authorize).then(gateFail(5))
+    .then(resume).then(accept)
+    .expect(s.current == 2 and s.budget == 0 and s.effects == 1 and not(s.feedback) and safety)
+  // A successful next attempt drops stale feedback when its forward edge is accepted.
+  run gateFeedbackClearedTest = init.then(authorize).then(gateFail(1)).then(accept)
+    .then(resume).then(authorize).then(execute(4)).then(accept)
+    .expect(s.current == 1 and not(s.feedback) and s.budget == 1 and safety)
 
   run retryResumeTest = init.then(authorize).then(execute(1)).then(accept)
     .then(setLimit(0)).then(authorize).then(execute(1)).then(rejectBudget)

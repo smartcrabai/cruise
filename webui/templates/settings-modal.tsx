@@ -8,6 +8,10 @@ export default function SettingsModal(props) {
           <input id="run-all-parallelism" name="runAllParallelism" type="number" min="1" value={props.runAllParallelism} class="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-1.5 text-base md:text-sm text-gray-800 dark:text-gray-200 outline-none focus:border-blue-500" />
           {props.error && <p class="text-sm text-red-600 dark:text-red-400">{props.error}</p>}
         </div>
+        <div class="space-y-1.5">
+          <label for="run-all-auto-requeue" class="text-sm text-gray-500 dark:text-gray-400">Run All auto-requeue max attempts (0 disables)</label>
+          <input id="run-all-auto-requeue" name="runAllAutoRequeueMaxAttempts" type="number" min="0" value={props.runAllAutoRequeueMaxAttempts} class="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-1.5 text-base md:text-sm text-gray-800 dark:text-gray-200 outline-none focus:border-blue-500" />
+        </div>
         <div class="flex gap-2 justify-end">
           <button type="button" hx-on:click="document.getElementById('dialogs').innerHTML = ''" class="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">Cancel</button>
           <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">Save</button>

@@ -58,6 +58,7 @@ pub(crate) async fn run_resolved(
     source: &ConfigSource,
     req: ExecRequest,
 ) -> Result<()> {
+    let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
     let effective_max_retries =
         crate::config::resolve_effective_max_retries(req.max_retries, config);
     crate::config::validate_group_retry_budget(config, effective_max_retries)?;
@@ -88,6 +89,7 @@ pub(crate) async fn run_resolved(
             session: Some(session.id.clone()),
             all: false,
             parallelism: None,
+            auto_requeue_max_attempts: None,
             max_retries: req.max_retries,
             rate_limit_retries: req.rate_limit_retries,
             dry_run: false,
