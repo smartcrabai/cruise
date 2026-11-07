@@ -1165,24 +1165,55 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     {
         validate_call_argument_placement(name, step)?;
     }
-    validate_sdk(config)?;
-    validate_mcp_servers(config)?;
-    validate_flags(config)?;
-    validate_computer_use(config)?;
-    validate_permission(config)?;
-    validate_subagent_model(config)?;
-    validate_tool_restrictions(config)?;
-    validate_output_file_usage(config)?;
-    validate_squash_merge(config)?;
-    validate_github_review(config)?;
-
-    validate_parallel_steps(config)?;
-    validate_groups(config)?;
-    validate_if_conditions(config)?;
-    validate_timeouts(config)?;
-    validate_when(config)?;
-    validate_retry(config)?;
+    for check in CONFIG_CHECKS {
+        check(config)?;
+    }
     Ok(())
+}
+
+const CONFIG_CHECKS: &[fn(&WorkflowConfig) -> crate::error::Result<()>] = &[
+    validate_sdk,
+    validate_mcp_servers,
+    validate_flags,
+    validate_computer_use,
+    validate_permission,
+    validate_subagent_model,
+    validate_tool_restrictions,
+    validate_output_file_usage,
+    validate_squash_merge,
+    validate_github_review,
+    validate_parallel_steps,
+    validate_groups,
+    validate_if_conditions,
+    validate_timeouts,
+    validate_when,
+    validate_retry,
+];
+
+/// Run independent configuration checks in runtime order and collect their errors.
+pub fn validate_config_all(config: &WorkflowConfig) -> Vec<crate::error::CruiseError> {
+    let mut errors = Vec::new();
+    if let Some(input) = config.inputs.first() {
+        errors.push(crate::error::CruiseError::InvalidStepConfig(format!(
+            "root workflow missing input '{input}'"
+        )));
+    }
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        if let Err(error) = validate_call_argument_placement(name, step) {
+            errors.push(error);
+        }
+    }
+    for check in CONFIG_CHECKS {
+        if let Err(error) = check(config) {
+            errors.push(error);
+        }
+    }
+    errors
 }
 
 fn validate_call_argument_placement(name: &str, step: &StepConfig) -> crate::error::Result<()> {
@@ -2736,6 +2767,48 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         validate_config(&config)?;
         crate::workflow::compile(config).map(|_| ())
+    }
+
+    #[test]
+    fn validate_config_all_collects_independent_errors_in_runtime_order() {
+        let config = WorkflowConfig::from_yaml(
+            "command: [echo]\nflags:\n  bad name: {}\nsteps:\n  a:\n    command: echo a\n    with:\n      value: test\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let errors = validate_config_all(&config);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors[0]
+                .to_string()
+                .contains("uses with without workflow_call")
+        );
+        assert!(errors[1].to_string().contains("bad name"));
+        assert_eq!(
+            validate_config(&config).unwrap_err().to_string(),
+            errors[0].to_string()
+        );
+    }
+
+    #[test]
+    fn validate_config_all_matches_wrapper_for_valid_and_invalid_configs() {
+        for yaml in [
+            "command: [echo]\nsteps:\n  a:\n    command: echo a\n",
+            "inputs: [required]\ncommand: [echo]\nsteps:\n  a:\n    command: echo a\n",
+            "command: [echo]\nflags:\n  bad name: {}\nsteps:\n  a:\n    command: echo a\n",
+            "sdk: invalid\nsteps:\n  a:\n    prompt: hello\n",
+        ] {
+            let config =
+                WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{yaml}: {e:?}"));
+            let errors = validate_config_all(&config);
+            match validate_config(&config) {
+                Ok(()) => assert!(errors.is_empty(), "{yaml}: {errors:?}"),
+                Err(error) => assert_eq!(
+                    Some(error.to_string()),
+                    errors.first().map(ToString::to_string),
+                    "{yaml}"
+                ),
+            }
+        }
     }
 
     fn github_review_after_pr(body: &str) -> String {

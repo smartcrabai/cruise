@@ -45,13 +45,21 @@ pub fn resolve_workflow_calls_from_path_with_defaults(
     path: impl Into<PathBuf>,
     defaults: &WorkflowDefaults,
 ) -> Result<WorkflowConfig> {
+    resolve_path_with_mode(path, defaults, false)
+}
+
+pub(crate) fn resolve_path_with_mode(
+    path: impl Into<PathBuf>,
+    defaults: &WorkflowDefaults,
+    doctor: bool,
+) -> Result<WorkflowConfig> {
     let path = path.into();
     let yaml = std::fs::read_to_string(&path)?;
     let mut resolution = WorkflowConfigResolution::from_yaml(&yaml)
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
-    let mut stack = CallStack::default();
+    let mut stack = CallStack { doctor, ..CallStack::default() };
     resolution.config = load_local_workflow(&path, &mut stack)?;
-    finish_resolved_config(resolution, defaults, true)
+    finish_resolved_config(resolution, defaults, true, doctor)
 }
 
 /// Resolve `workflow_call` steps and `prompt_file` fields in an already parsed
@@ -89,6 +97,7 @@ pub fn resolve_workflow_calls_with_defaults(
         WorkflowConfigResolution::from_materialized(config),
         defaults,
         true,
+        false,
     )
 }
 
@@ -117,6 +126,7 @@ pub fn resolve_workflow_calls_without_app_model_defaults(
         WorkflowConfigResolution::from_materialized(config),
         defaults,
         false,
+        false,
     )
 }
 
@@ -127,13 +137,22 @@ pub(crate) fn resolve_workflow_calls_from_yaml_with_defaults(
     base_dir: impl Into<PathBuf>,
     defaults: &WorkflowDefaults,
 ) -> Result<WorkflowConfig> {
+    resolve_yaml_with_mode(yaml, base_dir, defaults, false)
+}
+
+pub(crate) fn resolve_yaml_with_mode(
+    yaml: &str,
+    base_dir: impl Into<PathBuf>,
+    defaults: &WorkflowDefaults,
+    doctor: bool,
+) -> Result<WorkflowConfig> {
     let base_dir = base_dir.into();
     let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
-    let mut stack = CallStack::default();
+    let mut stack = CallStack { doctor, ..CallStack::default() };
     resolution.config =
         resolve_root_workflow_calls_inner(resolution.config, &base_dir, &mut stack)?;
-    finish_resolved_config(resolution, defaults, true)
+    finish_resolved_config(resolution, defaults, true, doctor)
 }
 
 /// Fetch a GitHub-hosted workflow and fully expand its `workflow_call` steps and
@@ -159,16 +178,25 @@ pub(crate) fn resolve_embedded_workflow_with_defaults(
     resource_key: &str,
     defaults: &WorkflowDefaults,
 ) -> Result<WorkflowConfig> {
+    resolve_embedded_with_mode(yaml, resource_key, defaults, false)
+}
+
+pub(crate) fn resolve_embedded_with_mode(
+    yaml: &str,
+    resource_key: &str,
+    defaults: &WorkflowDefaults,
+    doctor: bool,
+) -> Result<WorkflowConfig> {
     let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
     resolution.config = load_embedded_workflow_yaml(
         resource_key,
         yaml,
-        &mut CallStack::default(),
+        &mut CallStack { doctor, ..CallStack::default() },
         &IndexMap::new(),
         "root",
     )?;
-    finish_resolved_config(resolution, defaults, true)
+    finish_resolved_config(resolution, defaults, true, doctor)
 }
 
 /// Produce portable builtin YAML without applying machine defaults or overrides.
@@ -271,6 +299,7 @@ fn finish_resolved_config(
     mut resolution: WorkflowConfigResolution,
     defaults: &WorkflowDefaults,
     apply_app_model_defaults: bool,
+    doctor: bool,
 ) -> Result<WorkflowConfig> {
     let config = &mut resolution.config;
     for warning in config.deprecated_language_warnings() {
@@ -291,8 +320,10 @@ fn finish_resolved_config(
     // `PromptRun` carries no policy field, so the retry policy reaches the
     // executor ambiently. Validated first, so an unusable policy is rejected
     // here instead of becoming the active one.
-    crate::config::validate_retry(config)?;
-    crate::retry::set_active_policy(config.retry.clone());
+    if !doctor {
+        crate::config::validate_retry(config)?;
+        crate::retry::set_active_policy(config.retry.clone());
+    }
     Ok(resolution.config)
 }
 
@@ -338,6 +369,7 @@ fn parse_github_url(url: &str, field: &str) -> Result<GitHubWorkflowRef> {
 
 #[derive(Default)]
 struct CallStack {
+    doctor: bool,
     local: Vec<PathBuf>,
     github: Vec<GitHubWorkflowRef>,
     embedded: Vec<String>,
@@ -561,7 +593,9 @@ fn resolve_step_map(
     let mut resolved = IndexMap::new();
 
     for (step_name, step) in steps {
-        crate::config::validate_parallel_step(&step_name, &step)?;
+        if !stack.doctor {
+            crate::config::validate_parallel_step(&step_name, &step)?;
+        }
         if step.workflow_call.is_none() {
             insert_unique(&mut resolved, step_name, step)?;
             continue;
@@ -667,7 +701,7 @@ fn load_prompt_file(step_name: &str, prompt_file: &str, base_dir: &Path) -> Resu
     })
 }
 
-fn resolve_local_prompt_path(prompt_file: &str, base_dir: &Path) -> PathBuf {
+pub(crate) fn resolve_local_prompt_path(prompt_file: &str, base_dir: &Path) -> PathBuf {
     base_dir.join(crate::new_session_history::expand_tilde(prompt_file))
 }
 

@@ -26,7 +26,9 @@ See the **cruise-config** skill for the full implicit list and backend limits.
 
 ## Generating workflow YAML
 
-`cruise workflow generate "description" --name <name> [--user] [--config <path>]` drafts a new workflow with the backend selected by normal config resolution. It saves `./.cruise/<name>.yaml` (or the user workflows dir with `--user`), never overwrites an existing file, and does not run the result or create a session. Output must be raw YAML; each candidate passes the `exec` preflight, with up to 3 repairs, and nothing is written on failure. Validation does not prove command safety, and the backend keeps its normal repository permissions, so review the YAML before running it.
+`cruise workflow generate "description" --name <name> [--user] [--config <path>]` drafts a new workflow with the backend selected by normal config resolution. It saves `./.cruise/<name>.yaml` (or the user workflows dir with `--user`), never overwrites an existing file, and does not run the result or create a session. Output must be raw YAML; each candidate passes doctor static checks with flags off and isolated defaults, with up to 3 repairs, and nothing is written on failure. Validation does not prove command safety, and the backend keeps its normal repository permissions, so review the YAML before running it.
+
+`cruise workflow doctor [--json] [--strict] [-f NAME[=on|off]]... [TARGET]...` checks workflows without running them or creating sessions. Targets are paths, `builtin:<name>`, `__builtin__`, or unambiguous user/builtin names. No targets checks project-local workflows; `--all` checks those plus user workflows and built-ins and conflicts with targets and flags. Flags default off and apply to every target. Unreachable steps under the selected flags and potentially exitless cycles are warnings; a definite lack of normal exit is an error. JSON reports use schema version 1. Exit 0 allows warnings, exit 1 indicates errors or warnings under `--strict`, and exit 2 indicates unresolved targets, no targets, or invalid arguments. Remote workflow references may require network access; this is not a backend connectivity or command safety check.
 
 ## Mental model
 
@@ -74,6 +76,7 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Inspect in-progress update transactions across installations (read-only; no network access or changes) | `cruise update --status` |
 | Install / update / remove / list a GitHub workflow package (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path][@ref]` / `update <name>` / `remove <name>` / `list` |
 | Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
+| Statically check workflows or a package | `cruise workflow doctor [--json] [--strict] [-f NAME] [TARGET]...` |
 | Show / change app-level settings (e.g. WebUI/TUI parallelism) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / inspect what's configured | `jcode login <provider>` / `jcode auth status` (cruise has no login command of its own) |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
