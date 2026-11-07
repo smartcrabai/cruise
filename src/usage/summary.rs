@@ -15,6 +15,7 @@ pub enum GroupDim {
     Model,
 }
 impl GroupDim {
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Session => "session",
@@ -101,6 +102,8 @@ pub struct Summary {
     malformed_lines: u64,
     unsupported_version_lines: u64,
 }
+/// # Errors
+/// Returns an error when the usage file cannot be read.
 pub fn summarize(
     path: &Path,
     dims: &[GroupDim],
@@ -126,12 +129,9 @@ pub fn summarize(
         if reader.read_until(b'\n', &mut line)? == 0 {
             break;
         }
-        let value: Value = match serde_json::from_slice(&line) {
-            Ok(v) => v,
-            Err(_) => {
-                result.malformed_lines += 1;
-                continue;
-            }
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+            result.malformed_lines += 1;
+            continue;
         };
         match value.get("v").and_then(Value::as_u64) {
             Some(1) => {}
@@ -144,12 +144,9 @@ pub fn summarize(
                 continue;
             }
         }
-        let record: Record = match serde_json::from_value(value) {
-            Ok(r) => r,
-            Err(_) => {
-                result.malformed_lines += 1;
-                continue;
-            }
+        let Ok(record) = serde_json::from_value::<Record>(value) else {
+            result.malformed_lines += 1;
+            continue;
         };
         if session.is_some_and(|s| record.session_id.as_deref() != Some(s)) {
             continue;
@@ -196,7 +193,7 @@ pub fn summarize(
     for (key, row) in groups {
         let mut object = match serde_json::to_value(row)? {
             Value::Object(object) => object,
-            _ => Default::default(),
+            _ => serde_json::Map::default(),
         };
         for (dim, value) in dims.iter().zip(key) {
             object.insert(dim.name().into(), json!(value));
@@ -232,9 +229,12 @@ fn escape(s: &str) -> String {
     }
 }
 impl Summary {
+    /// # Errors
+    /// Returns an error when serialization fails.
     pub fn json(&self) -> crate::error::Result<String> {
         Ok(serde_json::to_string(self)?)
     }
+    #[must_use]
     pub fn csv(&self) -> String {
         let cols: Vec<&str> = self
             .group_by
@@ -253,6 +253,7 @@ impl Summary {
         }
         lines.join("\n")
     }
+    #[must_use]
     pub fn text(&self) -> String {
         let cols: Vec<&str> = self
             .group_by
@@ -288,10 +289,10 @@ impl Summary {
                 cols.iter()
                     .map(|c| {
                         let value = row.get(*c);
-                        if *c == "cost_usd" {
-                            if let Some(n) = value.and_then(Value::as_f64) {
-                                return format!("{n:.4}");
-                            }
+                        if *c == "cost_usd"
+                            && let Some(n) = value.and_then(Value::as_f64)
+                        {
+                            return format!("{n:.4}");
                         }
                         let s = cell(value);
                         if s.is_empty() { "-".to_string() } else { s }

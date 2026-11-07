@@ -266,6 +266,10 @@ impl AskHandler for PlanningAskHandler {
 /// registered (`sdk:` planning with `register_plan_tools`) — the agent ended
 /// its turn without a successful `submit_plan` / `update_plan` call (the
 /// captured output is not a plan and is refused as a fallback).
+#[expect(
+    clippy::too_many_lines,
+    reason = "single prompt pipeline keeps the plan-tool and usage wiring in one place"
+)]
 pub async fn run_plan_prompt_template(
     ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,

@@ -96,20 +96,19 @@ impl Turn {
                 if let (Some(tokens), Some(id)) = (
                     event.data.get("tokens").filter(|v| v.is_object()),
                     event.data["assistantMessageID"].as_str(),
-                ) {
-                    if self.usage_seen.insert(id.to_owned()) {
-                        self.usage_rounds.push(crate::usage::UsageRound {
-                            model: None,
-                            counts: crate::usage::UsageCounts {
-                                input_tokens: tokens["input"].as_u64(),
-                                output_tokens: tokens["output"].as_u64(),
-                                reasoning_tokens: tokens["reasoning"].as_u64(),
-                                cache_read_input_tokens: tokens["cache"]["read"].as_u64(),
-                                cache_creation_input_tokens: tokens["cache"]["write"].as_u64(),
-                                cost_usd: event.data["cost"].as_f64(),
-                            },
-                        });
-                    }
+                ) && self.usage_seen.insert(id.to_owned())
+                {
+                    self.usage_rounds.push(crate::usage::UsageRound {
+                        model: None,
+                        counts: crate::usage::UsageCounts {
+                            input_tokens: tokens["input"].as_u64(),
+                            output_tokens: tokens["output"].as_u64(),
+                            reasoning_tokens: tokens["reasoning"].as_u64(),
+                            cache_read_input_tokens: tokens["cache"]["read"].as_u64(),
+                            cache_creation_input_tokens: tokens["cache"]["write"].as_u64(),
+                            cost_usd: event.data["cost"].as_f64(),
+                        },
+                    });
                 }
             }
             "session.execution.started" => {
@@ -193,7 +192,7 @@ mod usage_tests {
     use super::*;
     use serde_json::{Value, json};
 
-    fn step(kind: &str, fields: Value) -> Event {
+    fn step(kind: &str, fields: &Value) -> Event {
         let mut data = json!({"sessionID":"s", "assistantMessageID":"m"});
         data.as_object_mut()
             .unwrap_or_else(|| panic!("fixture data must be an object"))
@@ -211,16 +210,16 @@ mod usage_tests {
     fn opencode_step_ended_counted_only_after_inbox_delivery() {
         let mut turn = Turn::default();
         turn.apply(
-            step("session.step.ended", json!({"tokens":{"input":5}})),
+            step("session.step.ended", &json!({"tokens":{"input":5}})),
             "s",
             "i",
         )
         .unwrap_or_else(|error| panic!("event application failed: {error}"));
-        assert!(turn.usage_rounds.is_empty());
+        assert_eq!(turn.usage_rounds, []);
         turn.started = true;
         turn.delivered = true;
         turn.apply(
-            step("session.step.ended", json!({"tokens":{"input":5}})),
+            step("session.step.ended", &json!({"tokens":{"input":5}})),
             "s",
             "i",
         )
@@ -237,7 +236,7 @@ mod usage_tests {
         };
         for _ in 0..2 {
             turn.apply(
-                step("session.step.ended", json!({"tokens":{"input":5}})),
+                step("session.step.ended", &json!({"tokens":{"input":5}})),
                 "s",
                 "i",
             )
@@ -253,7 +252,7 @@ mod usage_tests {
             delivered: true,
             ..Default::default()
         };
-        turn.apply(step("session.step.ended", json!({"tokens":{"input":5,"output":6,"reasoning":7,"cache":{"read":8,"write":9}},"cost":0.25})), "s", "i").unwrap_or_else(|error| panic!("event application failed: {error}"));
+        turn.apply(step("session.step.ended", &json!({"tokens":{"input":5,"output":6,"reasoning":7,"cache":{"read":8,"write":9}},"cost":0.25})), "s", "i").unwrap_or_else(|error| panic!("event application failed: {error}"));
         let round = &turn.usage_rounds[0];
         assert_eq!(round.model, None);
         assert_eq!(round.counts.input_tokens, Some(5));
@@ -271,8 +270,8 @@ mod usage_tests {
             delivered: true,
             ..Default::default()
         };
-        turn.apply(step("session.step.failed", json!({"cost":0.25})), "s", "i")
+        turn.apply(step("session.step.failed", &json!({"cost":0.25})), "s", "i")
             .unwrap_or_else(|error| panic!("event application failed: {error}"));
-        assert!(turn.usage_rounds.is_empty());
+        assert_eq!(turn.usage_rounds, []);
     }
 }

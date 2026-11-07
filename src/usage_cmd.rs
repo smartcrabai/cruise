@@ -27,7 +27,9 @@ pub struct UsageArgs {
     #[arg(long, value_enum, default_value = "text")]
     pub format: UsageFormat,
 }
-pub fn run(args: UsageArgs) -> crate::error::Result<()> {
+/// # Errors
+/// Returns an error when the usage file cannot be read or rendered.
+pub fn run(args: &UsageArgs) -> crate::error::Result<()> {
     let summary = summary::summarize(&usage::usage_path()?, &args.by, args.session.as_deref())?;
     println!(
         "{}",

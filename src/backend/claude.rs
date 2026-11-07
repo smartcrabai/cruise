@@ -642,13 +642,13 @@ mod tests {
 
     #[test]
     fn claude_result_without_any_usage_yields_no_rounds() {
-        assert!(usage_rounds_from_result(&usage_result()).is_empty());
+        assert_eq!(usage_rounds_from_result(&usage_result()), []);
     }
 
     #[test]
     fn claude_empty_model_usage_falls_back_to_aggregate() {
         let mut result = usage_result();
-        result.model_usage = Some(Default::default());
+        result.model_usage = Some(HashMap::default());
         result.usage = Some(serde_json::json!({"input_tokens": 7}));
         let rounds = usage_rounds_from_result(&result);
         assert_eq!(rounds.len(), 1);

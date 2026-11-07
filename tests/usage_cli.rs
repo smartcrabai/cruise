@@ -1,4 +1,9 @@
 #![cfg(unix)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "isolated executable contract fixtures"
+)]
 
 use std::fs;
 use std::process::{Command, Output, Stdio};
@@ -61,7 +66,7 @@ impl Fixture {
     }
 }
 
-fn record(session: &str, step: &str, backend: &str, model: Option<&str>, usage: Value) -> Value {
+fn record(session: &str, step: &str, backend: &str, model: Option<&str>, usage: &Value) -> Value {
     json!({"v": 1, "ts": "2026-11-05T10:00:00Z", "session_id": session,
         "step": step, "purpose": "workflow_step", "backend": backend, "model": model,
         "attempt": 1, "outcome": "success", "usage": usage})
@@ -78,22 +83,22 @@ fn fixture_records() -> Vec<Value> {
             "build",
             "claude",
             Some("sonnet"),
-            json!({"status":"reported", "input_tokens":10, "output_tokens":4, "cost_usd":0.5}),
+            &json!({"status":"reported", "input_tokens":10, "output_tokens":4, "cost_usd":0.5}),
         ),
         record(
             "one",
             "build",
             "claude",
             Some("sonnet"),
-            json!({"status":"reported", "input_tokens":20, "output_tokens":6, "cost_usd":0.25}),
+            &json!({"status":"reported", "input_tokens":20, "output_tokens":6, "cost_usd":0.25}),
         ),
-        record("one", "build", "command", None, unavailable()),
+        record("one", "build", "command", None, &unavailable()),
         record(
             "other",
             "test",
             "jcode",
             Some("model-b"),
-            json!({"status":"reported", "input_tokens":7, "output_tokens":3}),
+            &json!({"status":"reported", "input_tokens":7, "output_tokens":3}),
         ),
     ]
 }
@@ -135,7 +140,7 @@ fn usage_json_groups_by_step_backend_model() {
 #[test]
 fn usage_csv_header_and_empty_cells_for_unreported() {
     let f = Fixture::new();
-    f.write_records(&[record("one", "build", "command", None, unavailable())]);
+    f.write_records(&[record("one", "build", "command", None, &unavailable())]);
     let text = f.success(&["--format", "csv"]);
     let mut lines = text.lines();
     assert_eq!(
@@ -254,7 +259,7 @@ fn summarize_propagates_read_errors() {
 #[test]
 fn summarize_by_model_expands_by_model_entries_and_preserves_totals() {
     let f = Fixture::new();
-    f.write_records(&[record("one", "build", "claude", Some("requested"), json!({"status":"reported", "input_tokens":300, "by_model":[{"model":"haiku", "input_tokens":100}, {"model":"sonnet", "input_tokens":200}]}))]);
+    f.write_records(&[record("one", "build", "claude", Some("requested"), &json!({"status":"reported", "input_tokens":300, "by_model":[{"model":"haiku", "input_tokens":100}, {"model":"sonnet", "input_tokens":200}]}))]);
     let value = f.json(&["--by", "model"]);
     let rows = value["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
@@ -294,9 +299,9 @@ fn expanded_null_model_is_default_and_record_null_stays_null() {
             "expanded",
             "claude",
             Some("requested"),
-            json!({"status":"reported", "by_model":[{"model":null, "input_tokens":5}]}),
+            &json!({"status":"reported", "by_model":[{"model":null, "input_tokens":5}]}),
         ),
-        record("one", "ordinary", "command", None, unavailable()),
+        record("one", "ordinary", "command", None, &unavailable()),
     ]);
     let text = f.success(&[]);
     assert!(
@@ -329,15 +334,15 @@ fn expanded_null_model_is_default_and_record_null_stays_null() {
 fn summarize_unavailable_is_null_not_zero() {
     let f = Fixture::new();
     f.write_records(&[
-        record("one", "mixed", "command", None, unavailable()),
+        record("one", "mixed", "command", None, &unavailable()),
         record(
             "one",
             "mixed",
             "claude",
             None,
-            json!({"status":"reported", "input_tokens":10}),
+            &json!({"status":"reported", "input_tokens":10}),
         ),
-        record("one", "unknown", "command", None, unavailable()),
+        record("one", "unknown", "command", None, &unavailable()),
     ]);
     let value = f.json(&["--by", "step"]);
     let rows = value["rows"].as_array().unwrap();
@@ -364,9 +369,9 @@ fn summarize_unavailable_is_null_not_zero() {
 fn summarize_total_tokens_requires_both_input_and_output_per_record() {
     let f = Fixture::new();
     f.write_records(&[
-        record("one", "build", "claude", None, json!({"status":"reported", "input_tokens":100})),
-        record("one", "build", "claude", None, json!({"status":"reported", "input_tokens":10, "output_tokens":5, "cache_read_input_tokens":40, "cache_creation_input_tokens":30, "reasoning_tokens":20})),
-        record("one", "partial", "claude", None, json!({"status":"reported", "input_tokens":100})),
+        record("one", "build", "claude", None, &json!({"status":"reported", "input_tokens":100})),
+        record("one", "build", "claude", None, &json!({"status":"reported", "input_tokens":10, "output_tokens":5, "cache_read_input_tokens":40, "cache_creation_input_tokens":30, "reasoning_tokens":20})),
+        record("one", "partial", "claude", None, &json!({"status":"reported", "input_tokens":100})),
     ]);
     let value = f.json(&["--by", "step"]);
     assert_eq!(value["rows"][0]["input_tokens"], 110);
@@ -377,7 +382,7 @@ fn summarize_total_tokens_requires_both_input_and_output_per_record() {
 #[test]
 fn csv_escapes_comma_quote_and_newline() {
     let f = Fixture::new();
-    f.write_records(&[record("one", "a,\"b\"\nc", "command", None, unavailable())]);
+    f.write_records(&[record("one", "a,\"b\"\nc", "command", None, &unavailable())]);
     let text = f.success(&["--format", "csv"]);
     assert!(
         text.contains("\"a,\"\"b\"\"\nc\",command,,1,1,0,,,,,,,"),

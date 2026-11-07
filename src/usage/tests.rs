@@ -248,18 +248,19 @@ fn warning_stderr_isolated_process() {
         ),
         ("write", "warning: usage record skipped:"),
     ] {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "usage::tests::warning_stderr_isolated_process",
-                "--nocapture",
-            ])
-            .env(CHILD, case)
-            .env("CRUISE_USAGE_RECORDING", "invalid")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{:?}", output);
-        let stderr = String::from_utf8(output.stderr).unwrap();
+        let output =
+            std::process::Command::new(std::env::current_exe().unwrap_or_else(|e| panic!("{e:?}")))
+                .args([
+                    "--exact",
+                    "usage::tests::warning_stderr_isolated_process",
+                    "--nocapture",
+                ])
+                .env(CHILD, case)
+                .env("CRUISE_USAGE_RECORDING", "invalid")
+                .output()
+                .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(stderr.matches(warning).count(), 1, "{stderr}");
     }
 }

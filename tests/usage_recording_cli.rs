@@ -1,4 +1,9 @@
 #![cfg(unix)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "isolated executable contract fixtures"
+)]
 
 //! Real executable contracts for local usage recording. The fake Claude CLI
 //! speaks stream-json, so no provider credentials or network are needed.

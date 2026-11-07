@@ -412,7 +412,7 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
             model,
             1,
             outcome,
-            UsageField::Unavailable {
+            &UsageField::Unavailable {
                 reason: "command_backend",
             },
         );
@@ -793,9 +793,8 @@ async fn run_sdk_with_fallback(
                 AttemptCompletion::Retry(AttemptFailure::Limited { .. })
                 | AttemptCompletion::Barrier(AttemptFailure::Limited { .. }),
             ) => Some("limited"),
-            Ok(_) => Some("error"),
             Err(CruiseError::Interrupted) => Some("interrupted"),
-            Err(_) => Some("error"),
+            Ok(_) | Err(_) => Some("error"),
         };
         if let (Some(scope), Some(outcome)) = (req.usage, outcome) {
             record_attempt(
@@ -804,7 +803,7 @@ async fn run_sdk_with_fallback(
                 model.as_deref(),
                 u64::try_from(attempt_number).unwrap_or(u64::MAX),
                 outcome,
-                usage.into_field("not_reported"),
+                &usage.into_field("not_reported"),
             );
         }
 
@@ -1518,7 +1517,7 @@ mod tests {
                     assert_eq!(rows[1]["outcome"], "success");
                     assert_eq!(rows[0]["usage"]["input_tokens"], 12);
                     assert_eq!(rows[1]["usage"]["input_tokens"], 12);
-                })
+                });
             });
         }
 
@@ -1534,8 +1533,8 @@ mod tests {
                     })
                     .await;
                     assert!(result.is_err());
-                    assert!(records().is_empty());
-                })
+                    assert_eq!(records(), Vec::<serde_json::Value>::new());
+                });
             });
         }
 
@@ -1567,7 +1566,7 @@ mod tests {
                         assert_eq!(rows[0]["outcome"], "interrupted");
                         assert_eq!(rows[0]["usage"]["status"], "reported");
                         assert_eq!(rows[0]["usage"]["input_tokens"], 12);
-                    })
+                    });
                 },
             );
         }
@@ -1587,8 +1586,8 @@ mod tests {
                     })
                     .await;
                     assert!(result.is_ok());
-                    assert!(records().is_empty());
-                })
+                    assert_eq!(records(), Vec::<serde_json::Value>::new());
+                });
             });
         }
 
@@ -1615,7 +1614,7 @@ mod tests {
                         assert_eq!(row["usage"]["reason"], "command_backend");
                         assert!(row["usage"].get("input_tokens").is_none());
                     }
-                })
+                });
             });
         }
     }

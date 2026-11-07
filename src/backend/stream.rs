@@ -265,7 +265,7 @@ mod tests {
                 assert_eq!(totals.input_tokens, Some(15));
                 assert_eq!(totals.cache_read_input_tokens, None);
             }
-            _ => panic!("expected reported usage"),
+            crate::usage::UsageField::Unavailable { .. } => panic!("expected reported usage"),
         }
     }
 

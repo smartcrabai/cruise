@@ -117,6 +117,7 @@ pub enum UsagePurpose {
     WorkflowGenerate,
 }
 impl UsagePurpose {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::WorkflowStep => "workflow_step",
@@ -170,8 +171,10 @@ struct UsageRecord<'a> {
 pub(crate) fn usage_path() -> crate::error::Result<PathBuf> {
     Ok(crate::paths::state_dir()?.join("usage.ndjson"))
 }
+static SWITCH_WARNING: OnceLock<()> = OnceLock::new();
+static WRITE_WARNING: OnceLock<()> = OnceLock::new();
+
 fn recording_enabled() -> bool {
-    static WARNING: OnceLock<()> = OnceLock::new();
     match std::env::var("CRUISE_USAGE_RECORDING") {
         Err(_) => true,
         Ok(value) => {
@@ -181,8 +184,8 @@ fn recording_enabled() -> bool {
             } else if value == "1" || value.eq_ignore_ascii_case("true") {
                 true
             } else {
-                WARNING.get_or_init(|| {
-                    eprintln!("warning: invalid CRUISE_USAGE_RECORDING value, recording enabled")
+                SWITCH_WARNING.get_or_init(|| {
+                    eprintln!("warning: invalid CRUISE_USAGE_RECORDING value, recording enabled");
                 });
                 true
             }
@@ -220,12 +223,12 @@ pub(crate) fn record_attempt(
     model: Option<&str>,
     attempt: u64,
     outcome: &str,
-    usage: UsageField,
+    usage: &UsageField,
 ) {
     if !recording_enabled() {
         return;
     }
-    let serialized = match &usage {
+    let serialized = match usage {
         UsageField::Unavailable { reason } => SerializedUsage::Unavailable { reason },
         UsageField::Reported { totals, by_model } => SerializedUsage::Reported {
             totals,
@@ -249,8 +252,7 @@ pub(crate) fn record_attempt(
         outcome,
         usage: serialized,
     };
-    static WARNING: OnceLock<()> = OnceLock::new();
-    record_attempt_with_warn_guard(&record, usage_path(), &WARNING);
+    record_attempt_with_warn_guard(&record, usage_path(), &WRITE_WARNING);
 }
 
 fn record_attempt_with_warn_guard(
