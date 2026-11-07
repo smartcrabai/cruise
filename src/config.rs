@@ -18,6 +18,19 @@ where
         .collect()
 }
 
+fn deserialize_return_labels<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<serde_yaml::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| match value {
+            serde_yaml::Value::String(label) => Ok(label),
+            _ => Err(serde::de::Error::custom("return labels must be strings")),
+        })
+        .collect()
+}
+
 fn deserialize_call_arguments<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<IndexMap<String, String>>, D::Error>
@@ -93,6 +106,13 @@ pub struct WorkflowConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub inputs: Vec<String>,
+    /// Return labels declared by a called workflow.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_return_labels",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub returns: Vec<String>,
     /// LLM invocation command (e.g. `["claude", "--model", "{model}", "-p"]`).
     ///
     /// Mutually exclusive with `sdk` (validated by [`validate_sdk`]). Defaults
@@ -480,8 +500,16 @@ pub struct StepConfig {
     /// Explicit next step name, overriding sequential order.
     pub next: Option<String>,
 
+    /// Label returned to the calling workflow instead of a local next step.
+    #[serde(default, rename = "return", skip_serializing_if = "Option::is_none")]
+    pub return_label: Option<String>,
+
     /// Skip condition: static bool or variable reference.
     pub skip: Option<SkipCondition>,
+
+    /// Guards inherited from enclosing workflow calls, evaluated before this step's guards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_guards: Vec<CallGuard>,
 
     /// Whether this step runs when any listed workflow flag is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -519,6 +547,14 @@ pub struct StepConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub with: Option<IndexMap<String, String>>,
+
+    /// Mapping from called workflow return labels to parent steps.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_call_arguments",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub on_return: Option<IndexMap<String, String>>,
 
     /// Path or supported GitHub blob/raw URL whose contents become `prompt`.
     /// Absolute, `~`-prefixed, or relative to the directory of the config file
@@ -594,6 +630,10 @@ pub struct OptionItem {
     /// `None` falls back to the step's own `next`, then to the following step
     /// in declaration order; it only ends the workflow when neither exists.
     pub next: Option<String>,
+
+    /// Label returned to the calling workflow when this item is selected.
+    #[serde(default, rename = "return", skip_serializing_if = "Option::is_none")]
+    pub return_label: Option<String>,
 }
 
 /// Action to take when no workspace file changes are detected after a step.
@@ -645,6 +685,13 @@ pub struct WhenCondition {
     /// Variable references in the glob string are resolved via `VariableStore::resolve()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exists: Option<String>,
+}
+
+/// Pre-execution guards inherited from a workflow call.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct CallGuard {
+    pub skip: Option<SkipCondition>,
+    pub when: Option<WhenCondition>,
 }
 
 /// Group configuration for grouping related steps.
@@ -4861,6 +4908,7 @@ steps:
                 "disallowed_tools",
                 "computer_use",
                 "groups",
+                "returns",
                 "steps",
                 "after-pr",
                 "mcp_servers",
@@ -5029,6 +5077,8 @@ steps:
                 "env",
                 "group",
                 "workflow_call",
+                "on_return",
+                "return",
                 "timeout",
                 "prompt_file",
                 "output_file",
@@ -5348,7 +5398,7 @@ steps:
         let option_item_props = def_properties(schema, "OptionItem");
         assert_has_fields(
             option_item_props,
-            &["selector", "text-input", "next"],
+            &["selector", "text-input", "next", "return"],
             "OptionItem",
         );
     }

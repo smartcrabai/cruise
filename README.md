@@ -1775,6 +1775,58 @@ is not an input lookup and becomes the literal `{inputs.label}` at runtime.
 The existing `{{...}}` and `}}` brace rules still apply. Inputs are template
 fragments, not a secret store or an automatic shell-quoting mechanism.
 
+#### Return labels
+
+A called workflow can declare named exits, leaving the caller to choose their
+destinations. For example, `workflows/review-gate.yaml`:
+
+```yaml
+returns: [approved, needs_fix]
+steps:
+  review:
+    command: "cargo test"
+  decide:
+    option:
+      - selector: Approve
+        return: approved
+      - selector: Request changes
+        return: needs_fix
+```
+
+The caller maps every declared label to a step in its own step map:
+
+```yaml
+steps:
+  gate:
+    workflow_call: ./workflows/review-gate.yaml
+    on_return: {approved: publish, needs_fix: fix}
+  fix:
+    prompt: "Fix the review findings in {plan}"
+  publish:
+    command: "git push"
+```
+
+`returns` is a unique list of labels matching `[A-Za-z_][A-Za-z0-9_-]*`.
+Every declared label must be used by a callee return and mapped by the caller,
+with no extra mappings. `on_return` belongs only on a `workflow_call` and null
+means omission. Destinations must exist in the same parent step map and cannot
+be workflow call sites. A callee's top-level step may use `return` instead of
+`next`; on an option step put `return` on individual options instead. A return
+cannot be combined with `next` on the same step or option, or with
+`if.file-changed` on the return-bearing step. Returns are not allowed on group
+or parallel children, call sites, or after-PR steps. Directly loaded roots cannot
+declare nonempty `returns` or use return routes, and `returns` is forbidden in
+user/project `default.yaml`.
+
+Routes are converted into explicit `next` edges at load time. Normal completion
+without a return retains the call-site `next`, or otherwise continues to the
+next parent step. A skipped return-bearing step does not return: it continues
+in declaration order, even if the call site has `next`. A call-site `next` is
+invalid when the callee's final step has a step-level return, but is allowed
+when returns are on options. Nested calls must map labels at each scope; labels
+do not propagate outward. Routes may loop to earlier parent steps, subject to
+the existing graph validation requiring a normal exit.
+
 #### Supported sources
 
 | Source | Example |
@@ -1813,7 +1865,7 @@ retain their existing live-reload behavior.
 
 #### Call-site fields
 
-A `workflow_call` step is a pure delegation point. Only `with`, `skip`, `when`, `next`, and `flag` may be set alongside `workflow_call`:
+A `workflow_call` step is a pure delegation point. Only `with`, `on_return`, `skip`, `when`, `next`, and `flag` may be set alongside `workflow_call`:
 
 - `skip` and `when` are applied to the **first** expanded step.
 - `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).

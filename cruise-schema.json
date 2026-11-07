@@ -17,6 +17,12 @@
       "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
       "description": "Workflow-only required string input names supplied by workflow_call.with. No defaults or optional inputs. A root workflow cannot declare nonempty inputs; forbidden in default.yaml."
     },
+    "returns": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$" },
+      "description": "Return labels declared by a called workflow. Nonempty declarations are invalid at the root and forbidden in default.yaml."
+    },
     "command": {
       "type": "array",
       "items": {
@@ -270,6 +276,11 @@
           "type": "string",
           "description": "Next step to execute after this one"
         },
+        "return": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$",
+          "description": "Declared callee return label, statically routed by the caller. Mutually exclusive with next."
+        },
         "parallel": {
           "type": "object",
           "minProperties": 1,
@@ -322,6 +333,11 @@
           "type": "string",
           "description": "Reference to another cruise workflow YAML file or supported GitHub URL to inline"
         },
+        "on_return": {
+          "type": ["object", "null"],
+          "additionalProperties": { "type": "string" },
+          "description": "Mapping of callee return labels to parent step names, only on workflow_call. Null is equivalent to omission."
+        },
         "with": {
           "type": ["object", "null"],
           "additionalProperties": { "type": "string" },
@@ -367,6 +383,32 @@
         }
       },
       "allOf": [
+        {
+          "if": { "required": ["on_return"], "properties": { "on_return": { "type": "object" } } },
+          "then": { "required": ["workflow_call"] }
+        },
+        {
+          "if": { "required": ["return"] },
+          "then": {
+            "not": { "anyOf": [
+              { "required": ["next"] },
+              { "required": ["workflow_call"] },
+              { "required": ["parallel"] },
+              { "required": ["group"] },
+              { "required": ["option"] },
+              { "required": ["if"], "properties": { "if": { "required": ["file-changed"] } } }
+            ] }
+          }
+        },
+        {
+          "if": {
+            "required": ["option"],
+            "properties": { "option": { "contains": { "required": ["return"] } } }
+          },
+          "then": {
+            "not": { "required": ["if"], "properties": { "if": { "required": ["file-changed"] } } }
+          }
+        },
         {
           "if": { "required": ["with"], "properties": { "with": { "type": "object" } } },
           "then": { "required": ["workflow_call"] }
@@ -696,8 +738,14 @@
         "next": {
           "type": "string",
           "description": "Next step to execute when this option is selected. Omitted, the step's own next applies; without that, the following step in declaration order runs."
+        },
+        "return": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$",
+          "description": "Declared callee return label for this selection, mutually exclusive with next."
         }
       },
+      "not": { "required": ["next", "return"] },
       "oneOf": [
         {
           "required": ["selector"]
