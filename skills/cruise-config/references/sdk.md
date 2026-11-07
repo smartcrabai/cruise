@@ -99,7 +99,7 @@ and does not use jcode's user-invoked `/subagent` model setting.
 
 The setting covers workflow prompt steps (including group, `after-pr`, parallel
 prompt child, and `github-review` prompts) and planning's plan/fix/ask turns.
-Title generation, PR metadata, and `workflow generate` do not use it. Non-prompt
+Title generation, PR metadata, `workflow generate`, and `workflow make` do not use it. Non-prompt
 steps and group/workflow-call/parallel wrappers reject it. A called workflow's
 top-level value is ignored in favor of the caller's default, but per-step
 overrides inside the callee remain. Layered `default.yaml` and
@@ -211,7 +211,7 @@ Protocol baseline: OpenCode commit `74f8d4860f49c563909e6b039b0cc8b454ebce72`, i
 
 ## Startup OAuth expiration checks
 
-Before agents start for `cruise plan`, `cruise run`, `cruise exec`, or TUI/WebUI session planning/execution, Cruise reads only credential files for the effective SDK candidates in that scope. Planning uses `plan_model` with `model` as its fallback. Execution includes workflow models and step overrides in ordinary steps, `after-pr`, groups, and parallel children. Model arrays, SDK-qualified entries, and effective `retry.fallback_chains` are included, even for candidates that may never run. There is no global check merely for opening the TUI/WebUI. Command backends, dry-runs, and `cruise workflow generate` are not checked; OpenCode is always skipped.
+Before agents start for `cruise plan`, `cruise run`, `cruise exec`, or TUI/WebUI session planning/execution, Cruise reads only credential files for the effective SDK candidates in that scope. Planning uses `plan_model` with `model` as its fallback. Execution includes workflow models and step overrides in ordinary steps, `after-pr`, groups, and parallel children. Model arrays, SDK-qualified entries, and effective `retry.fallback_chains` are included, even for candidates that may never run. There is no global check merely for opening the TUI/WebUI. Command backends, dry-runs, `cruise workflow generate`, and `cruise workflow make` are not checked; OpenCode is always skipped.
 
 For the Claude SDK, Cruise reads `$CLAUDE_CONFIG_DIR/.credentials.json`, falling back to `~/.claude/.credentials.json` when unset. It examines `claudeAiOauth.expiresAt`, `refreshToken`, and optional `refreshTokenExpiresAt`. A non-empty value in the process environment or workflow-level `env` for any of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, or `CLAUDE_CODE_USE_FOUNDRY` skips this file check. This authentication is separate from jcode credentials. Sign in again with `claude auth login`, or for the corresponding jcode provider with `jcode login claude` / `jcode login openai`.
 

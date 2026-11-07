@@ -1,5 +1,6 @@
 //! Authoring-time workflow YAML generation (`cruise workflow generate`).
 
+use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +14,87 @@ const PROMPT_TEMPLATE: &str = include_str!("../prompts/workflow-generate.md");
 const SCHEMA: &str = include_str!("../cruise-schema.json");
 const MAX_REPAIRS: usize = 3;
 
+/// Distinguish backend failures from exhausted candidate validation.
+pub(crate) enum RepairError {
+    Backend(CruiseError),
+    Rejected(CruiseError),
+}
+
+/// Run the initial prompt and up to three repairs, validating each reply.
+pub(crate) async fn run_with_repairs<T, Run, Fut, Validate, Repair>(
+    mut prompt: String,
+    mut run: Run,
+    mut validate: Validate,
+    mut repair: Repair,
+) -> std::result::Result<T, RepairError>
+where
+    Run: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<String>>,
+    Validate: FnMut(&str) -> Result<T>,
+    Repair: FnMut(&str, &CruiseError) -> String,
+{
+    for attempt in 0..=MAX_REPAIRS {
+        let candidate = run(prompt).await.map_err(RepairError::Backend)?;
+        match validate(&candidate) {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt == MAX_REPAIRS => {
+                return Err(RepairError::Rejected(CruiseError::InvalidStepConfig(
+                    format!(
+                        "generated workflow is still invalid after {MAX_REPAIRS} repairs: {err}"
+                    ),
+                )));
+            }
+            Err(err) => prompt = repair(&candidate, &err),
+        }
+    }
+    unreachable!("repair loop always returns on its final attempt")
+}
+
+/// Run one stateless authoring prompt with caller-selected permissions.
+pub(crate) async fn run_prompt(
+    config: &WorkflowConfig,
+    prompt: &str,
+    permission: crate::config::PermissionMode,
+    working_dir: Option<&Path>,
+    cancel_token: Option<&crate::cancellation::CancellationToken>,
+) -> Result<String> {
+    run_prompt_with_usage(config, prompt, permission, working_dir, cancel_token, None).await
+}
+
+async fn run_prompt_with_usage(
+    config: &WorkflowConfig,
+    prompt: &str,
+    permission: crate::config::PermissionMode,
+    working_dir: Option<&Path>,
+    cancel_token: Option<&crate::cancellation::CancellationToken>,
+    usage: Option<crate::usage::UsageScope<'_>>,
+) -> Result<String> {
+    let executor = Executor::new(config.sdk.as_deref(), &config.command);
+    let model = Executor::plan_model(config.plan_model.as_ref(), config.model.as_ref());
+    let outcome = executor
+        .run(PromptRun {
+            usage,
+            prompt,
+            model: model.as_ref(),
+            subagent_model: None,
+            max_retries: DEFAULT_RATE_LIMIT_RETRIES,
+            env: &config.env,
+            mcp_servers: &config.mcp_servers,
+            on_notice: None,
+            cancel_token,
+            working_dir,
+            stream: None,
+            tools: Vec::new(),
+            on_session_id: None,
+            resume: None,
+            permission,
+            tool_policy: crate::tool_policy::ToolPolicy::default(),
+            computer_use: false,
+        })
+        .await?;
+    Ok(outcome.result.output)
+}
+
 /// Generate YAML for `description` through the configured backend, repairing up to three times.
 ///
 /// # Errors
@@ -24,72 +106,48 @@ pub(crate) async fn generate_yaml(
     description: &str,
     destination_parent: &Path,
 ) -> Result<String> {
-    let executor = Executor::new(config.sdk.as_deref(), &config.command);
-    let model = Executor::plan_model(config.plan_model.as_ref(), config.model.as_ref());
     let base_prompt = PROMPT_TEMPLATE
         .replace("{schema}", SCHEMA)
         .replace("{description}", description);
 
-    let mut prompt = base_prompt.clone();
-    let mut attempt = 0;
-    loop {
-        let outcome = executor
-            .run(PromptRun {
-                prompt: &prompt,
-                model: model.as_ref(),
-                subagent_model: None,
-                max_retries: DEFAULT_RATE_LIMIT_RETRIES,
-                env: &config.env,
-                mcp_servers: &config.mcp_servers,
-                on_notice: None,
-                cancel_token: None,
-                working_dir: None,
-                stream: None,
-                tools: Vec::new(),
-                on_session_id: None,
-                resume: None,
-                permission: crate::config::PermissionMode::Full,
-                tool_policy: crate::tool_policy::ToolPolicy::default(),
-                computer_use: false,
-            })
-            .await?;
-        let candidate = outcome.result.output;
-        let err = match validate_generated_yaml(&candidate, destination_parent) {
-            Ok(()) => return Ok(candidate),
-            Err(err) => err,
-        };
-        if attempt >= MAX_REPAIRS {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "generated workflow is still invalid after {MAX_REPAIRS} repairs: {err}"
-            )));
-        }
-        attempt += 1;
-        prompt = format!(
+    run_with_repairs(
+        base_prompt.clone(),
+        |prompt| async move {
+            run_prompt_with_usage(
+                config,
+                &prompt,
+                crate::config::PermissionMode::Full,
+                None,
+                None,
+                Some(crate::usage::UsageScope {
+                    session_id: None,
+                    step: None,
+                    purpose: crate::usage::UsagePurpose::WorkflowGenerate,
+                }),
+            )
+            .await
+        },
+        |candidate| {
+            validate_generated_yaml(candidate, destination_parent)?;
+            Ok(candidate.to_owned())
+        },
+        |candidate, err| format!(
             "{base_prompt}\n\n## Previous attempt\n\nYour previous reply was rejected. Fix it and reply with the complete corrected YAML only, with no Markdown fence.\n\nPrevious YAML:\n\n{candidate}\n\nDiagnostic:\n\n{err}\n"
-        );
-    }
+        ),
+    )
+    .await
+    .map_err(|err| match err {
+        RepairError::Backend(err) | RepairError::Rejected(err) => err,
+    })
 }
 
-/// Run the full exec preflight on a candidate YAML string.
+/// Run doctor static checks with flags off and isolated defaults on candidate YAML.
 ///
 /// # Errors
 ///
 /// Returns the first parse, reference, validation, compile or graph error.
 pub(crate) fn validate_generated_yaml(yaml: &str, base_dir: &Path) -> Result<()> {
-    let config = WorkflowConfig::from_yaml(yaml)
-        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
-    let config = crate::workflow_call::resolve_workflow_calls_without_app_model_defaults(
-        config,
-        base_dir,
-        &crate::workflow_defaults::WorkflowDefaults::default(),
-    )?;
-    crate::config::validate_config(&config)?;
-    let max_retries = crate::config::resolve_effective_max_retries(None, &config);
-    crate::config::validate_group_retry_budget(&config, max_retries)?;
-    let compiled = crate::workflow::compile(config)?;
-    let graph = crate::graph::build_graph(&compiled, max_retries)?;
-    crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &[])?;
-    Ok(())
+    crate::workflow_doctor::check_generated_yaml(yaml, base_dir)
 }
 
 /// Check that `name` is a plain file stem (ASCII alphanumerics, `-`, `_`).
@@ -186,6 +244,9 @@ pub(crate) async fn run(args: WorkflowGenerateArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::error::CruiseError;
+    use crate::test_support::workflow_authoring::{
+        backend_config, fake_backend, prompt, run_env, turns,
+    };
     use crate::test_support::{EnvGuard, lock_process, set_fake_home, write_executable_script};
     use std::fs;
     use tempfile::TempDir;
@@ -287,47 +348,6 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     async fn mixed_sdk_generate_yaml_repair_preserves_first_claude_candidate()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         mixed_sdk_yaml_generation(true).await
-    }
-
-    /// Build a command-backend config whose script records each prompt and
-    /// replies with `outputs[n]` on turn n (the last output repeats).
-    fn fake_backend(dir: &Path, outputs: &[&str]) -> WorkflowConfig {
-        for (i, out) in outputs.iter().enumerate() {
-            fs::write(dir.join(format!("out-{}.txt", i + 1)), out).unwrap();
-        }
-        fs::write(dir.join("out-last.txt"), outputs.last().unwrap()).unwrap();
-        let d = dir.display();
-        let script = format!(
-            "#!/bin/sh\nd='{d}'\nn=$(ls \"$d\" | grep -c '^prompt-')\nn=$((n+1))\ncat > \"$d/prompt-$n.txt\"\nif [ -f \"$d/out-$n.txt\" ]; then cat \"$d/out-$n.txt\"; else cat \"$d/out-last.txt\"; fi\n"
-        );
-        let path = dir.join("backend.sh");
-        write_executable_script(&path, &script);
-        backend_config(&path)
-    }
-
-    fn backend_config(script: &Path) -> WorkflowConfig {
-        WorkflowConfig::from_yaml(&format!(
-            "command: ['{}']\nsteps:\n  s:\n    command: echo\n",
-            script.display()
-        ))
-        .unwrap()
-    }
-
-    fn turns(dir: &Path) -> usize {
-        fs::read_dir(dir)
-            .unwrap()
-            .filter(|e| {
-                e.as_ref()
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("prompt-")
-            })
-            .count()
-    }
-
-    fn prompt(dir: &Path, n: usize) -> String {
-        fs::read_to_string(dir.join(format!("prompt-{n}.txt"))).unwrap()
     }
 
     #[test]
@@ -465,6 +485,20 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     }
 
     #[test]
+    fn generated_yaml_ignores_inactive_file_changed_target() {
+        let tmp = TempDir::new().unwrap();
+        let yaml = "command: [cat]\nsteps:\n  a:\n    command: echo\n    if:\n      file-changed: missing\n";
+        assert!(validate_generated_yaml(yaml, tmp.path()).is_err());
+        assert!(
+            validate_generated_yaml(
+                &format!("{yaml}      no-file-changes: failed\n"),
+                tmp.path()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn validate_resolves_references_relative_to_base_dir() {
         let tmp = TempDir::new().unwrap();
         let yaml = "command: [cat]\nsteps:\n  a:\n    prompt_file: p.md\n";
@@ -571,32 +605,6 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             other => panic!("expected AlreadyExists io error, got {other:?}"),
         }
         assert_eq!(fs::read_to_string(&path).unwrap(), "original");
-    }
-
-    /// Set up cwd + env so `run` resolves a command-backend config via `CRUISE_CONFIG`.
-    fn run_env(tmp: &TempDir, outputs: &[&str]) -> (Vec<EnvGuard>, EnvGuard, PathBuf, PathBuf) {
-        let home = tmp.path().join("home");
-        let proj = tmp.path().join("proj");
-        let rec = tmp.path().join("rec");
-        for d in [&home, &proj, &rec] {
-            fs::create_dir_all(d).unwrap();
-        }
-        let mut guards = set_fake_home(&home);
-        let cfg = fake_backend(&rec, outputs);
-        let cfg_path = tmp.path().join("backend.yaml");
-        fs::write(
-            &cfg_path,
-            format!(
-                "command: ['{}']\nsteps:\n  s:\n    command: echo\n",
-                rec.join("backend.sh").display()
-            ),
-        )
-        .unwrap();
-        drop(cfg);
-        guards.push(EnvGuard::set("CRUISE_CONFIG", &cfg_path));
-        let cwd = EnvGuard::set("PWD", &proj);
-        std::env::set_current_dir(&proj).unwrap();
-        (guards, cwd, proj, rec)
     }
 
     fn args(name: &str, user: bool) -> WorkflowGenerateArgs {

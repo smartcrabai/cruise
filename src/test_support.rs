@@ -4,6 +4,106 @@ use std::process::Command;
 use crate::session::{SessionPhase, SessionState};
 use crate::session_config::SessionConfigRef;
 
+/// Shared command-backend fixtures for workflow authoring tests.
+#[cfg(all(test, unix))]
+#[expect(clippy::unwrap_used)]
+pub mod workflow_authoring {
+    use super::{EnvGuard, set_fake_home, write_executable_script};
+    use crate::config::WorkflowConfig;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    /// Record prompts and return successive outputs, repeating the last.
+    ///
+    /// # Panics
+    /// Panics on an empty output list or fixture setup failure.
+    #[must_use]
+    pub fn fake_backend(dir: &Path, outputs: &[&str]) -> WorkflowConfig {
+        for (i, out) in outputs.iter().enumerate() {
+            fs::write(dir.join(format!("out-{}.txt", i + 1)), out).unwrap();
+        }
+        fs::write(dir.join("out-last.txt"), outputs.last().unwrap()).unwrap();
+        let d = dir.display();
+        let script = format!(
+            "#!/bin/sh\nd='{d}'\nn=$(ls \"$d\" | grep -c '^prompt-')\nn=$((n+1))\ncat > \"$d/prompt-$n.txt\"\nif [ -f \"$d/out-$n.txt\" ]; then cat \"$d/out-$n.txt\"; else cat \"$d/out-last.txt\"; fi\n"
+        );
+        let path = dir.join("backend.sh");
+        write_executable_script(&path, &script);
+        backend_config(&path)
+    }
+
+    /// Build a command backend using `script`.
+    ///
+    /// # Panics
+    /// Panics if the configuration cannot be parsed.
+    #[must_use]
+    pub fn backend_config(script: &Path) -> WorkflowConfig {
+        WorkflowConfig::from_yaml(&format!(
+            "command: ['{}']\nsteps:\n  s:\n    command: echo\n",
+            script.display()
+        ))
+        .unwrap()
+    }
+
+    /// Count recorded backend invocations.
+    ///
+    /// # Panics
+    /// Panics if the recording directory cannot be read.
+    #[must_use]
+    pub fn turns(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("prompt-")
+            })
+            .count()
+    }
+
+    /// Read a recorded prompt.
+    ///
+    /// # Panics
+    /// Panics if the prompt cannot be read.
+    #[must_use]
+    pub fn prompt(dir: &Path, n: usize) -> String {
+        fs::read_to_string(dir.join(format!("prompt-{n}.txt"))).unwrap()
+    }
+
+    /// Set up a command backend, home and working directory.
+    /// Caller must hold the process lock and restore cwd before dropping `tmp`.
+    ///
+    /// # Panics
+    /// Panics if fixture setup fails.
+    #[must_use]
+    pub fn run_env(tmp: &TempDir, outputs: &[&str]) -> (Vec<EnvGuard>, EnvGuard, PathBuf, PathBuf) {
+        let home = tmp.path().join("home");
+        let proj = tmp.path().join("proj");
+        let rec = tmp.path().join("rec");
+        for d in [&home, &proj, &rec] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let mut guards = set_fake_home(&home);
+        drop(fake_backend(&rec, outputs));
+        let cfg_path = tmp.path().join("backend.yaml");
+        fs::write(
+            &cfg_path,
+            format!(
+                "command: ['{}']\nsteps:\n  s:\n    command: echo\n",
+                rec.join("backend.sh").display()
+            ),
+        )
+        .unwrap();
+        guards.push(EnvGuard::set("CRUISE_CONFIG", &cfg_path));
+        let cwd = EnvGuard::set("PWD", &proj);
+        std::env::set_current_dir(&proj).unwrap();
+        (guards, cwd, proj, rec)
+    }
+}
+
 pub static GLOBAL_PROCESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// RAII guard that restores a single environment variable on drop.

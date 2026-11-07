@@ -141,6 +141,8 @@ pub enum TransitionReason {
     IfFailGoto { target: String },
     /// `if.fail: { retry: true }` re-executes the current step.
     IfFailRetry,
+    /// Retry the prompt after a failed quality gate.
+    QualityGateRetry,
     /// An option item with the given label was selected.
     OptionChoice { selector: String },
     /// Group-level `if.file-changed` triggered a retry jump.
@@ -162,6 +164,7 @@ impl TransitionReason {
             Self::IfNoFileChangesFail => "if.no-file-changes: failed",
             Self::IfFailGoto { .. } => "if.fail",
             Self::IfFailRetry => "if.fail.retry",
+            Self::QualityGateRetry => "quality gate",
             Self::OptionChoice { .. } => "option",
             Self::GroupRetryExhausted => "group max retries",
             Self::SkipFallback => "skip",
@@ -184,6 +187,8 @@ impl TransitionReason {
 /// their last-visit diagnostic timestamp.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeRuntime {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_gate_feedback: Option<String>,
     pub prev_output: Option<String>,
     pub prev_input: Option<String>,
     pub prev_stderr: Option<String>,
@@ -300,6 +305,9 @@ pub fn build_graph(compiled: &CompiledWorkflow, max_retries: usize) -> Result<Ex
         // Always represent user-skippable edges; validation filters them using
         // actual skip input, rather than inventing a normal exit for every node.
         push(TransitionReason::SkipFallback, sequential)?;
+        if step.quality_gates.is_some() {
+            push(TransitionReason::QualityGateRetry, Some(name.clone()))?;
+        }
         if let Some(cond) = &step.if_condition {
             if cond.no_file_changes.is_none()
                 && let Some(target) = &cond.file_changed

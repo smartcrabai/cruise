@@ -167,11 +167,18 @@ cruise run
 # Execute a config directly in the current directory (no plan, no worktree, no PR)
 cruise exec "do this"
 
+# Run one agent without writing a workflow YAML
+cruise exec --instant "do this"
+
 # Open the full interactive keyboard client
 cruise
 
 # List and manage sessions with the CLI selector
 cruise list
+
+# Review a session's changes, or just their summary
+cruise diff <SESSION_ID>
+cruise diff <SESSION_ID> --stat
 
 # Remove closed/merged PR sessions and terminal no-PR sessions
 cruise clean
@@ -231,13 +238,13 @@ The TUI requires an interactive TTY on macOS, Linux, or Windows. It is an intera
 
 The TUI has three views:
 
-- **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, or **Log** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The Info tab shows declared workflow flags and their on/off values. The Graph tab shows its node list plus the selected node's dependency and edge details, hiding flag-disabled steps except in legacy unversioned graph checkpoints, which are displayed without filtering; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
-- **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above and the remaining questions below. The order is Source (local Directory or GitHub repository), working directory or repository, workflow config, task, images, workflow flags (shown only when the config declares flags), skipped steps (flag-disabled steps are hidden), workspace mode, dirty-tree allowance (current-branch runs only), and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and all built-in workflows with `tdd` first. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
+- **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, **Log**, or **Diff** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The Info tab shows declared workflow flags and their on/off values. The Graph tab shows its node list plus the selected node's dependency and edge details, hiding flag-disabled steps except in legacy unversioned graph checkpoints, which are displayed without filtering; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
+- **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above and the remaining questions below. The order is Source (local Directory or GitHub repository), working directory or repository, workflow config, task, images, workflow flags (shown only when the config declares flags), skipped steps (flag-disabled steps are hidden), workspace mode, dirty-tree allowance (current-branch runs only), and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question includes Auto-detect and organizes the same prioritized file candidates and built-in workflows as the CLI according to configured categories and Others visibility. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
 - **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Press `p` to edit the shared WebUI/TUI parallelism setting. Changes are saved to the app configuration and can be made while a batch is active; a new limit applies at the next scheduling point, without cancelling workers that are already running. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
 PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS, `explorer.exe` on Windows, or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `config` and `exec` operations remain available through their CLI commands rather than TUI screens.
 
-The New Session dialogue autosaves its answers 500 ms after a change. A selected session opens on its **Plan** tab while planning is active or its phase is **Awaiting Input**, **Awaiting Approval**, or **Planned**, and on **Info** otherwise. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration, and manually selected detail tabs, which are retained per session for the duration of the TUI process, including refreshes and planning updates, and they override that default. `ask_user` pauses its session without opening a modal: the session is marked **Awaiting Input**, and its question is shown only in that session's **Plan** tab. Press `o` or choose **Answer Prompt** on that session to open the Plan tab and focus the detail pane, press `Enter` to edit, `Enter` again to submit, and `Esc` to leave editing while keeping the draft. Execution-time Options remain queued in the existing modal; a single-run Option opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Merge PR (a preview modal where you pick Squash, Merge, or Rebase and press Enter), Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
+The New Session dialogue autosaves its answers 500 ms after a change. A selected session opens on its **Plan** tab while planning is active or its phase is **Awaiting Input**, **Awaiting Approval**, or **Planned**, and on **Info** otherwise. Other screen state is ephemeral, except the shared Run All parallelism setting, which is persisted in the app configuration, and manually selected detail tabs, which are retained per session for the duration of the TUI process, including refreshes and planning updates, and they override that default. `ask_user` pauses its session without opening a modal: the session is marked **Awaiting Input**, and its question is shown only in that session's **Plan** tab. Press `o` or choose **Answer Prompt** on that session to open the Plan tab and focus the detail pane, press `Enter` to edit, `Enter` again to submit, and `Esc` to leave editing while keeping the draft. Execution-time Options remain queued in the existing modal; a single-run Option opens automatically, while Run All shows a queue badge. Delete, Discard, Reset to Planned, Publish as Issue, Stage Local Merge, Merge Locally & Cleanup, Merge PR (a preview modal where you pick Squash, Merge, or Rebase and press Enter), Clean, Run All / Cancel Run All, and quitting while work is active ask for confirmation; Cancel, Approve, Run, Resume, Retry, Generate Plan, and Open PR execute immediately. Cancelling a run moves its session to `Suspended`; cancelling planning restores the prior state and plan. In New Session, a non-blank task or an image attachment is required and the GitHub source requires a repository; a blank working directory means `.` and a blank workflow config means auto-detect. Terminal state is restored on normal exit, panic, SIGTERM, and SIGHUP. Session errors stay in the app and session state; only terminal/root/event-loop failures exit the TUI.
 
 For interactive planning questions, line breaks are rendered as adjacent lines in the selected session's Plan tab. The answer field is inline, session-scoped, and not a modal. `Option` requests retain the modal queue and its existing `o`/Run All behavior.
 
@@ -263,6 +270,7 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 | `[` / `]` | Move between detail tabs |
 | `a` | Open the action palette |
 | `p` | On Run All, edit the shared parallelism setting; `Enter` saves and `Esc` cancels |
+| `e` | On Run All, edit the automatic requeue limit; `Enter` saves and `Esc` cancels |
 | `o` | In Sessions, open the selected session's Ask in its Plan tab; otherwise handle the Option queue or open a dedicated PR/Issue URL |
 | `f` | Follow the log |
 | `c` | On Sessions, ask for confirmation to Clean reclaimable and closed-PR sessions |
@@ -289,9 +297,26 @@ The CLI remains the canonical client for automation, JSON (`cruise list --json`)
 
 ### Workflow packages
 
-`cruise workflow add <owner/repo[/path][@ref]>` installs a single workflow YAML from GitHub into `~/.config/cruise/workflows/` (or `$XDG_CONFIG_HOME/cruise/workflows/`). The path defaults to `cruise.yaml` and the ref to the default branch. The ref is pinned to a commit SHA, and nested `workflow_call` steps and `prompt_file` contents are inlined, so the installed `<name>.yaml` never touches the network at run time. Provenance is stored next to it in `<name>.cruise-package.json`. Use `--name` to override the name (`[A-Za-z0-9_-]+`).
+`cruise workflow add <owner/repo[/path.yaml][@ref]>` installs from GitHub into `$XDG_CONFIG_HOME/cruise/workflows/` (default `~/.config/cruise/workflows/`). With no explicit path, a root `cruise-package.yaml` selects a bundle; otherwise the single workflow defaults to `cruise.yaml`. An explicit YAML path selects a single workflow, except that paths ending in the reserved basename `cruise-package.yaml` or `cruise-package.yml` are rejected. The ref defaults to the repository's default branch and is pinned to a commit. Use `--name` to override the package name (`[A-Za-z0-9_-]+`).
 
-`add` and `update` always print the source, commit SHA, and every command the workflow can run, warn that it may run arbitrary commands, and ask `[y/N]`. Without a TTY, pass `--yes` (the preview is still printed). Installing never runs the workflow. `update <name>` re-resolves the recorded ref, `remove <name>` deletes the YAML and manifest, and `list` shows the built-in workflows followed by installed packages. `update` and `remove` refuse packages whose YAML was edited by hand. Installed YAMLs appear in the normal config selector.
+A bundle manifest explicitly lists the workflows to install, for example:
+
+```yaml
+description: Review and implementation workflows
+workflows:
+  - name: review
+    path: workflows/review.yaml
+  - name: implement
+    path: workflows/implement.yaml
+```
+
+Names must be unique ignoring case and contain only letters, digits, `_`, or `-`. Paths are unique repository-root-relative `.yaml` or `.yml` paths without empty, `.` or `..` components or backslashes, and must not end in `cruise-package.yaml` or `cruise-package.yml`. Unknown manifest keys are rejected. Only listed workflows are installed, not every YAML in the repository. Nested `workflow_call` steps and `prompt_file` contents are inlined at installation, leaving self-contained YAMLs.
+
+Single packages retain `workflows/<name>.yaml` and `<name>.cruise-package.json`. Bundles use `workflows/<name>/<workflow>.yaml` and `.cruise-package-lock.json`, which records the source, ref, commit, and each installed YAML's SHA-256. Bundle members appear as `<name>/<workflow>.yaml` in the normal config selector. Existing single packages are not migrated to bundles.
+
+`add` and `update` preview the source, commit, workflows and commands, warn about untrusted commands, and ask `[y/N]`. Without a TTY, pass `--yes` (the preview is still printed). Installing never runs the workflow. `update <name>` re-resolves the recorded ref without changing package kind, `remove <name>` removes the package, and `list` shows built-ins and installed packages. Bundle changes are staged as a unit. `update` and `remove` refuse edited YAMLs and bundles containing extra files, protecting user changes.
+
+Use `cruise workflow doctor <name>` to check an installed package, including whether its YAML has been modified.
 
 ### CLI Reference
 
@@ -304,12 +329,13 @@ Commands:
   run          Execute a planned session
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs
+  usage        Summarize locally recorded token usage
   config       Show or update application-level configuration (`config.json` or `config.yaml`)
-  exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
+  exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve the browser UI from this machine (pass `--open` to launch the default browser)
   update       Update a managed native installation; `--status` lists recorded transactions read-only
-  workflow     Manage workflows: list/eject built-ins, generate YAML, install GitHub packages (`add`, `remove`, `update`)
+  workflow     Manage workflows: list/eject built-ins, generate, interactively make or check YAML (`doctor`), install GitHub packages (`add`, `remove`, `update`)
 
 Arguments:
   [INPUT]  Initial input (legacy: positional input without a subcommand uses `plan`)
@@ -331,10 +357,47 @@ cruise workflow generate <DESCRIPTION> --name <NAME> [--user] [--config <PATH>]
 
 Drafts a new workflow YAML from a description. The backend is chosen by the normal config resolution (`--config`, `CRUISE_CONFIG`, local files, user workflows, or the built-in `tdd` workflow). The file is saved to `./.cruise/<NAME>.yaml`, or to the user workflow directory (`~/.config/cruise/workflows/`) with `--user`. `NAME` may contain only letters, digits, `-` and `_`.
 
-- The reply must be raw YAML (no Markdown fence). Each candidate is parsed and run through the same preflight as `cruise exec` (reference resolution relative to the destination directory, config validation, retry budget, compile, graph checks). On failure the diagnostic and previous candidate are sent back for up to 3 repairs (4 backend turns in total). If it is still invalid, nothing is written.
+- The reply must be raw YAML (no Markdown fence). Each candidate receives doctor static checks with flags off and isolated defaults (reference resolution relative to the destination directory, config validation, retry budget, compile, graph checks). On failure the diagnostic and previous candidate are sent back for up to 3 repairs (4 backend turns in total). If it is still invalid, nothing is written.
 - The validated YAML is saved exactly as returned. An existing file with the same name is never overwritten, and the backend is not called in that case.
 - The generated workflow is not run and no session is created.
 - Validation does not prove that the commands are safe or that the workflow succeeds. The selected agent backend keeps its normal permissions, so it may modify the repository during generation. Review the YAML before running it.
+
+For interactive drafting and revision, use `cruise workflow make` instead.
+
+#### `cruise workflow make`
+
+```
+cruise workflow make --name <NAME> [--user] [--config <PATH>] [--from <SELECTOR>] [DESCRIPTION]
+```
+
+Create a single workflow YAML through a conversation. Both stdin and stdout must be terminals; use `workflow generate` for non-interactive drafting. An optional description is submitted as the first request. `--config` selects the backend configuration, while `--from` supplies a read-only reference workflow, for example `builtin:tdd` or a file path. Cruise reads the reference without writing it, but an unsandboxed command backend could modify it. The destination is fixed at startup: `./.cruise/<NAME>.yaml`, or the user workflow directory with `--user`. Existing destinations are never overwritten, and the reserved project name `default` cannot be used.
+
+Enter requests to create or revise the draft. The assistant may ask questions without changing it. Use `/show` to inspect the current draft and `/accept` to choose **Write workflow**, **Continue editing**, or **Cancel**. Escape or Ctrl+C at the request prompt cancels; at the approval menu they return to editing. Only choosing Write creates the destination, after re-reading and validating the staged YAML. The workflow is not run and no session is created.
+
+Candidates pass the same `exec` preflight as `workflow generate`, with up to three repairs per request. If all attempts fail, the previous draft remains unchanged. The backend reply can include explanatory text and at most one `<cruise-workflow>` block; replies without a block are conversation only. Validation does not prove command safety, so review the result before running it.
+
+Drafts and `conversation.jsonl` are retained under `$XDG_DATA_HOME/cruise/workflow-make/<id>/` (normally `~/.local/share/cruise/workflow-make/<id>/`) after writing or cancellation. The log includes requests. These directories are not removed by `cruise clean`; remove them manually when no longer needed.
+
+The backend is asked to operate read-only in the project directory. Repository changes detected during a turn cause that turn to fail, including changes made concurrently by the user. Command backends are not sandboxed: change detection is not prevention and excludes some paths. Inspect the repository if a backend may have changed it.
+
+#### `cruise workflow doctor`
+
+```sh
+cruise workflow doctor [--json] [--strict] [-f NAME[=on|off]]... [TARGET]...
+cruise workflow doctor --all [--json] [--strict]
+```
+
+Doctor statically checks workflow YAML without executing it or creating a session, worktree, or project configuration. With no targets it checks `cruise.yaml`, `cruise.yml`, `.cruise.yaml`, `.cruise.yml`, and YAML files in `.cruise/`, excluding `.cruise/default.yaml`. `--all` additionally checks user workflows and all built-ins, and cannot be combined with targets or `-f`.
+
+Targets can be paths, `builtin:<name>`, `__builtin__` (the default built-in), or bare user workflow or built-in names. A bare name matching both a user workflow and a built-in is ambiguous: use an explicit path or `builtin:<name>`. Repeat targets to check several workflows. Repeat `-f` or use comma-separated assignments to select flags for every target, for example `-f review,merge=off`. A flag not declared by a target is an error for that target. Without `-f`, flags are off.
+
+Checks include local prompt and workflow references, configuration, routing targets, retry budgets, flag names, and graph reachability. Resolution uses the same defaults and environment overrides as execution. GitHub workflow references are resolved normally and may require network access. Doctor does not test backend, model, authentication, provider connectivity, command safety, or runtime-dependent template variables.
+
+An unreachable step is a warning under the selected flags, not necessarily a defect: flag-gated paths can legitimately be unreachable. A reachable cycle that cannot reach a normal exit is an error when no normal exit is reachable from the start. If normal exit is possible but another reachable cycle cannot exit, doctor warns. Modified installed packages and deprecated language settings also produce warnings.
+
+Human-readable reports go to stdout. `--json` emits a single object with `schema_version: 1`, `ok`, `exit_code`, `summary` (`checked`, `passed`, `failed`, `errors`, `warnings`) and ordered `targets`. Each target includes its target, kind (`project`, `user`, `builtin`, or `file`), package status, path, status (`ok`, `warning`, `error`, or `unresolved`), step counts, retry limit, declared flags, and ordered diagnostics. Diagnostics contain `level`, `code`, `stage`, nullable `step`, and `message`. Automations should use `code` and `step`, not message wording.
+
+Exit status is `0` when checks pass (warnings are allowed), `1` for errors or warnings with `--strict`, and `2` for unresolved targets or no targets. Status `2` takes precedence over `1`; argument usage errors also exit `2`.
 
 #### `cruise ssh`
 
@@ -354,7 +417,7 @@ Options:
 
 Everything after `--` is passed to the remote cruise in the same order and is parsed there. In `auto` mode, a local TTY requests a PTY; piped or redirected streams do not, which keeps commands such as `cruise ssh host -- list --json` suitable for scripts. `--tty always` and `--tty never` override that choice.
 
-The remote host is the execution boundary: its sessions, config, jcode authentication, worktrees, and repository clones are stored under its XDG directories and are not shared with local `cruise` commands. `--cwd`, `--config`, `--image`, and other path arguments are interpreted on the remote host. Cruise does not upload local files, copy credentials or environment variables, install the remote binary, or synchronize repositories. The WebUI remains a local session client and does not browse remote sessions.
+The remote host is the execution boundary: its sessions, config, jcode authentication, worktrees, and repository clones are stored under its XDG directories and are not shared with local `cruise` commands. `--cwd`, `--config`, `--image`, and other path arguments are interpreted on the remote host. Issue input such as `#12` is resolved using the remote host's `gh` and authentication. Cruise does not upload local files, copy credentials or environment variables, install the remote binary, or synchronize repositories. The WebUI remains a local session client and does not browse remote sessions.
 
 #### `cruise`
 
@@ -373,6 +436,7 @@ Arguments:
   [INPUT]  Task description
 
 Options:
+      --issue <N>                  Use GitHub issue N as the task
   -c, --config <PATH>              Path to the workflow config file; use __builtin__ or builtin:<name> for a built-in workflow (see Config File Resolution)
       --dry-run                    Print the plan step without executing it
       --no-force-exec              Ignore force_exec: true and plan as usual
@@ -380,22 +444,25 @@ Options:
       --grill                      Interview-style planning: the agent asks one question at a time, then writes the plan (requires the SDK backend and a TTY; conflicts with --skip-planning)
       --no-interactive-planning    Disable interactive planning tools for this session; the agent writes plan.md directly (conflicts with --grill)
       --repo <OWNER/REPO>          Repository (owner/repository, group/sub/project, or full URL; GitHub or GitLab) to clone into a temporary directory for planning and execution
+      --pr <NUMBER>                Address reviews on an existing GitHub pull request
       --rate-limit-retries <N>     Maximum number of retries per LLM call (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --image <PATH>               Attach an image file to the planning input; can be repeated
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable)
 ```
 
+**GitHub issue input.** Use `cruise plan '#12'`, `cruise plan --issue 12 'additional instructions'`, or put `#12` on the first line followed by additional instructions on later lines. The first line must contain only the issue reference. Root positional input, `--plan`, `draft`, and the TUI and WebUI New Session task field also accept this syntax. Only `plan` and `draft` accept `--issue`, not the root command or `exec`. Issue lookup uses `gh` and the current repository origin, or `--repo` when supplied. GitLab issue input is not supported. The issue title, body, labels, and comments become task input, and supported GitHub images are saved as session attachments before user-provided images. The issue number is included in the branch and a closing reference in the PR. Issue input opts out of `force_exec`. Retrieved issue content is untrusted and can contain prompt injection.
+
 `cruise plan` creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` before invoking the LLM, so plan-phase edits never touch your working copy. The same worktree is reused by `cruise run` in Worktree mode, or cleaned up automatically when you pick Current-branch mode or cancel planning (`--repo` sessions drop it on approval and re-clone at run). Non-git directories plan in place with a warning, but `cruise run` still needs a git repository.
 
 Successful plan generation sends a best-effort **Plan ready** desktop notification. Non-cancellation generation failures send **Failed**; cancellation sends no notification, and notification delivery does not affect the existing cleanup or error path.
 
-With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md`. A foreground `cruise plan --skip-planning` run on an interactive TTY still opens the approve-plan menu; automatic approval to `Planned` is used for non-TTY stdin and for the background root `cruise --plan --skip-planning` path. (With `force_exec: true`, the workflow executes directly instead; pass `--no-force-exec`.) Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The WebUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button remains "Create & plan").
+With `--skip-planning`, no LLM is called: the (trimmed) input is written straight to `plan.md`. A foreground `cruise plan --skip-planning` run on an interactive TTY still opens the approve-plan menu; automatic approval to `Planned` is used for non-TTY stdin and for the background root `cruise --plan --skip-planning` path. (With `force_exec: true`, the workflow executes directly instead unless issue input or another opt-out is used; pass `--no-force-exec` to opt out explicitly.) Empty or whitespace-only input is rejected. Use this when you've already written the plan yourself and just want cruise to execute it. The WebUI exposes the same behavior via the **"Use input as plan (skip LLM planning)"** checkbox on the New Session form (the submit button remains "Create & plan").
 
 With `--grill`, SDK planning becomes an interview: the agent asks questions one at a time and recommends answers before writing `plan.md`. It requires an SDK backend (including the default `jcode` backend), an interactive terminal, and `interactive_planning: true`; otherwise Cruise reports an error and discards the new session. It conflicts with `--skip-planning` and applies only to initial planning; Fix/Ask turns, replans, drafts, and background planning use the standard prompt. The WebUI exposes the same behavior through the **"Grill me"** toggle on the New Session form (mutually exclusive with "Use input as plan").
 
 With `--no-interactive-planning`, SDK planning uses the direct-to-file flow even when the workflow config has `interactive_planning: true`. The agent writes `plan.md` directly, as in `command` mode. The flag conflicts with `--grill`; it is equivalent to setting `interactive_planning: false` but only affects the current session. The WebUI exposes the same behavior via the **"Non-interactive planning"** checkbox on the New Session form (mutually exclusive with "Grill me").
 
-**Built-in workflow flags.** All six built-ins (`tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`) declare `after_pr` and `merge`; every flag is off unless explicitly enabled. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. For example, `cruise plan -c builtin:tdd -f browser_e2e,app_e2e "task"` enables only the two E2E flags, while `cruise plan -c builtin:tdd -f merge "task"` opts into after-PR automation and the native synchronous squash merge. `-f browser_e2e,app_e2e,merge` combines them. `merge` runs the same after-PR prelude as `after_pr`, once; `after_pr` alone never merges. The implied prelude does not add or rewrite `after_pr` in the session's sparse saved flag map.
+**Built-in workflow flags.** The six general-purpose built-ins (`tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`) declare `after_pr` and `merge`; every flag is off unless explicitly enabled. `pr-review-fix` declares no flags. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. For example, `cruise plan -c builtin:tdd -f browser_e2e,app_e2e "task"` enables only the two E2E flags, while `cruise plan -c builtin:tdd -f merge "task"` opts into after-PR automation and the native synchronous squash merge. `-f browser_e2e,app_e2e,merge` combines them. `merge` runs the same after-PR prelude as `after_pr`, once; `after_pr` alone never merges. The implied prelude does not add or rewrite `after_pr` in the session's sparse saved flag map.
 
 - `browser_e2e` enables actual browser exercises, assertions, and failure fixing.
 - `app_e2e` enables applicable mobile and desktop native-app exercises using repository/platform-native runners.
@@ -405,7 +472,11 @@ With `--no-interactive-planning`, SDK planning uses the direct-to-file flow even
 
 `research` remains read-only with `create_pr: false`; `merge` never creates a PR or overrides that no-PR policy. If an opted-in after-PR action is unavailable because no PR is created (including `research`, `exec`, current-branch runs, or a no-commit run), Cruise skips it and prints the reason.
 
-With `--repo <owner/repository>`, the session targets a GitHub or GitLab repository instead of the current directory. The repository is cloned via `gh repo clone` (or `glab repo clone` on GitLab) into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory. Repo sessions always run in Worktree mode and still require `gh`/`glab` to access the repository. With `create_pr: false`, Cruise skips automatic commit, push, PR creation, `after-pr`, and PR-based cleanup while retaining the normal session, artifacts, and worktree/clone. Otherwise, the planning worktree and clone are removed once the plan is approved (only the branch name is kept), then `cruise run` re-clones and recreates them; the clone is removed after PR creation. A successful run with no new branch commits completes without attempting PR creation; existing branch commits remain eligible for a PR. An actual PR-creation failure still marks a `--repo` session `Failed` (retryable), while a plain local worktree session warns and completes without a PR. A config inside the clone (or the built-in `tdd` when no config file is found) is copied to `sessions/<session-id>/config.yaml` so it stays readable after clone removal, including inlined `prompt_file` contents; an external `-c` path or `CRUISE_CONFIG` file is referenced in place instead. `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The WebUI exposes the same behavior via the **Directory / Repository (GitHub or GitLab)** source toggle on the New Session form, with a repository picker backed by `gh repo list` (or `glab repo list` when `CRUISE_FORGE=gitlab`) (free-form `owner/repository` input is accepted too).
+With `--repo <owner/repository>`, the session targets a GitHub or GitLab repository instead of the current directory. The repository is cloned via `gh repo clone` (or `glab repo clone` on GitLab) into `$XDG_DATA_HOME/cruise/clones/<session-id>/`, which becomes the session's base directory. Repo sessions always run in Worktree mode and still require `gh`/`glab` to access the repository. With `create_pr: false`, Cruise skips automatic commit, push, PR creation, `after-pr`, and PR-based cleanup while retaining the normal session, artifacts, and worktree/clone. Otherwise, the planning worktree and clone are removed once the plan is approved (only the branch name is kept), then `cruise run` re-clones and recreates them; the clone is removed after PR creation. A successful run with no new branch commits completes without attempting PR creation; existing branch commits remain eligible for a PR. Publication failures in either repo or local worktree sessions enter **PR Failed** and retain the workspace for **Create PR** recovery, rather than rerunning the workflow. A config inside the clone (or the built-in `tdd` when no config file is found) is copied to `sessions/<session-id>/config.yaml` so it stays readable after clone removal, including inlined `prompt_file` contents; an external `-c` path or `CRUISE_CONFIG` file is referenced in place instead. `--repo` also works with background planning (`cruise --plan "task" --repo owner/repository`). The WebUI exposes the same behavior via the **Directory / Repository (GitHub or GitLab)** source toggle on the New Session form, with a repository picker backed by `gh repo list` (or `glab repo list` when `CRUISE_FORGE=gitlab`) (free-form `owner/repository` input is accepted too).
+
+**Fix reviews on an existing GitHub PR.** Run `cruise plan --pr 12` from the repository, or `cruise plan --repo owner/repo --pr 12 "focus on tests"`, approve the generated plan if prompted, then run `cruise run <session-id>`. The optional positional text is an additional instruction; this mode does not read stdin or use an LLM to generate the plan. TUI and WebUI new-session forms also accept a PR number for a GitHub repository. Authenticated `gh` is required. The PR must be open and have a nonempty head branch in the same repository; draft PRs are supported, but fork PRs and GitLab merge requests are not. `--grill` and `--image` cannot be combined with `--pr`.
+
+The default is `builtin:pr-review-fix`, not the project workflow. A custom `-c` workflow must enable PR handling and include an after-PR `github-review` step with `reviewers: all`. The builtin declares no flags, synchronizes the existing head with `git pull --ff-only`, and addresses reviews without creating or merging a PR. The session is pinned to an isolated worktree on the PR head branch, tracking `origin/<head>`; a diverged branch or a branch already checked out elsewhere causes an error rather than a reset. Cleanup removes the worktree but preserves the PR head branch. The review loop commits and pushes fixes, replies or resolves eligible threads, and writes `review-report.json`. Failures leave a retryable session. Publish as Issue and Replan are unavailable for PR sessions.
 
 #### `cruise draft`
 
@@ -416,6 +487,7 @@ Arguments:
   [INPUT]  Task description (omit to prompt interactively; reads from stdin when piped)
 
 Options:
+      --issue <N>                  Use GitHub issue N as the task
   -c, --config <PATH>              Path to the workflow config file; use __builtin__ or builtin:<name> for a built-in workflow (see Config File Resolution)
 ```
 
@@ -432,6 +504,7 @@ Arguments:
 Options:
       --all                        Run all planned or suspended sessions (live dashboard on interactive terminals for non-dry runs)
       --parallelism <N>            Max number of sessions `--all` executes concurrently (no flag default; 1 when omitted, must be >= 1, requires `--all`)
+      --auto-requeue-max-attempts <N>  Maximum automatic retries per session (requires `--all`)
       --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (no flag default; falls back to the workflow config's top-level `max_retries`, else 3)
       --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
@@ -444,9 +517,11 @@ Options:
 
 `--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced (even if the session was originally started in current-branch mode). After all sessions finish, a summary table is printed showing the outcome and PR link for each session. If a session state file cannot be reloaded for the summary, that session is reported as `Failed` with the state path and error, and the batch still completes. `--all` and `[SESSION]` are mutually exclusive.
 
-Each session that reaches a persisted `Completed` or `Failed` state sends one best-effort desktop notification. A Run All batch does not send an additional aggregate notification. Option prompts and interactive planning questions send **Action required** immediately before waiting for input.
+Each attempt that reaches a persisted `Completed` or `Failed` state sends one best-effort desktop notification, including intermediate failures before an automatic retry. A Run All batch does not send an additional aggregate notification. Option prompts and interactive planning questions send **Action required** immediately before waiting for input.
 
 `--parallelism <N>` is an invocation-scoped override that runs up to `N` sessions concurrently during `--all`. It defaults to `1` (sequential) when omitted, must be at least `1`, and is rejected unless `--all` is present. Each concurrent session still runs in its own worktree, failures in one session do not stop the other workers, and Ctrl+C suspends the running sessions and stops scheduling new ones. This flag does not read or modify the persisted WebUI/TUI setting (`cruise config --set-parallelism`).
+
+`--auto-requeue-max-attempts <N>` overrides the persisted auto-requeue limit for this batch only. Unlike parallelism, CLI Run All reads the persisted limit when the flag is omitted. The default is `0` (disabled).
 
 When stderr is an interactive terminal and `--dry-run` is not set, `run --all` shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output remains in that session's `sessions/{id}/run.log`. In non-TTY environments such as CI, or during `--dry-run`, it keeps the normal log output and final summary behavior.
 
@@ -460,6 +535,12 @@ Arguments:
 
 Options:
   -c, --config <PATH>              Path to the workflow config file; use __builtin__ or builtin:<name> for a built-in workflow (see Config File Resolution)
+      --instant                    Build a single-agent workflow without a workflow YAML (requires INPUT; conflicts with --config and --flag)
+      --sdk <NAME>                 Instant backend: jcode, claude, or opencode (requires --instant)
+      --model <MODEL>              Instant model (requires --instant)
+      --review                     Add a bounded review loop (requires --instant)
+      --review-rounds <N>          Maximum review passes, at least 1 (requires --review; default: 2)
+      --verify <COMMAND>           Add a verification command (requires --instant; repeatable)
       --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (no flag default; falls back to the workflow config's top-level `max_retries`, else 3)
       --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
@@ -467,7 +548,17 @@ Options:
 ```
 Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. A transient session is recorded while the workflow runs, then automatically removed when it reaches a terminal phase. Sessions paused for input (`Running`) or interrupted with Ctrl+C (`Suspended`) are kept and can be resumed with `cruise run <id>`; exec sessions are excluded from `cruise run` automatic selection and `cruise run --all`. Existing uncommitted changes are allowed; cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is still required.
 
-When `force_exec: true` is set in the workflow config, the legacy positional form `cruise "task"` (except the exact inputs `ssh` and `mcp-bridge`, which are reserved for their subcommands), `cruise plan "task"`, and `cruise --plan "task"` use the current-directory execution path without planning, worktree, or PR creation. `--no-force-exec`, `--repo`, `--grill`, and image attachments opt out; `--skip-planning` and `--no-interactive-planning` do not. Background `--plan` runs foreground because there is no plan worker for direct execution. Both `exec` and these `force_exec` entry points use the same fresh-run flag selector on TTY stdin unless `-f/--flag` is supplied; dry runs and piped input (including `--plan stdin`) do not prompt. Resuming a retained exec session by ID keeps its saved flags without prompting.
+`--instant` explicitly opts into a workflow assembled in memory instead of resolving `CRUISE_CONFIG` or a local workflow file. Without it, `cruise exec` retains normal config resolution: with no config file, an interactive terminal offers built-in workflows in the categorized selector, while non-interactive execution selects `tdd` automatically. Instant requires a nonblank task and includes one implement step. Workflow defaults can prepend command pre-steps. It does not write a workflow into the repository; the existing session retains an inline config snapshot while the session exists. Workflow defaults and environment overrides still apply, and `CRUISE_SDK` / `CRUISE_MODEL` override `--sdk` / `--model`.
+
+```sh
+cruise exec --instant --sdk jcode --model my-model --review --review-rounds 2 \
+  --verify 'cargo test' --verify 'cargo clippy' "implement the feature"
+cruise exec --instant --dry-run "implement the feature"
+```
+
+Review fixes confirmed defects and repeats when the review pass changes files, up to the specified number of passes (default 2). A pass with no changes ends the loop; edits in the final allowed pass are not reviewed again. Verification commands run in the order supplied after implementation and any review; a failed command fails the run, not an automatic repair loop. Blank verification commands and commands containing braces are rejected. `--max-retries`, `--rate-limit-retries`, and `--dry-run` also apply; a `--max-retries` budget below the review limit is invalid. Instant declares no workflow flags and cannot be combined with `-c` or `-f`. It requires a git repository with an attached branch. Remote use is available with `cruise ssh <host> -- exec --instant "task"`.
+
+When `force_exec: true` is set in the workflow config, the legacy positional form `cruise "task"` (except the exact inputs `ssh` and `mcp-bridge`, which are reserved for their subcommands), `cruise plan "task"`, and `cruise --plan "task"` use the current-directory execution path without planning, worktree, or PR creation. `--no-force-exec`, `--repo`, `--grill`, issue input, and image attachments opt out; `--skip-planning` and `--no-interactive-planning` do not. Background `--plan` runs foreground because there is no plan worker for direct execution. Both `exec` and these `force_exec` entry points use the same fresh-run flag selector on TTY stdin unless `-f/--flag` is supplied; dry runs and piped input (including `--plan stdin`) do not prompt. Resuming a retained exec session by ID keeps its saved flags without prompting.
 
 #### `cruise --plan`
 
@@ -477,7 +568,7 @@ cruise --plan <INPUT|stdin> [--skip-planning] [--no-force-exec] [--repo <OWNER/R
 
 Creates the session immediately, starts plan generation in a detached worker, and returns the new session ID. While the worker is still running, `cruise list` shows the session as `Planning`. If generation fails, the session remains in `AwaitingApproval` phase internally but `cruise list` shows `Plan Failed`, and approval stays disabled until planning succeeds.
 
-Adding `--skip-planning` skips the background worker entirely: the input is written directly as `plan.md` and the session is created already in `Planned` — no approval step needed (with `force_exec: true` the workflow executes directly instead; pass `--no-force-exec`). The flag also works without `--plan` (e.g. `cruise --skip-planning "task"`), in which case it behaves like `cruise plan --skip-planning "task"`.
+Adding `--skip-planning` skips the background worker entirely: the input is written directly as `plan.md` and the session is created already in `Planned` — no approval step needed (with `force_exec: true` the workflow executes directly instead unless issue input or another opt-out is used; pass `--no-force-exec` to opt out explicitly). The flag also works without `--plan` (e.g. `cruise --skip-planning "task"`), in which case it behaves like `cruise plan --skip-planning "task"`.
 
 `--repo <owner>/<repository>` is accepted here too and behaves as described under [`cruise plan`](#cruise-plan): the repository is cloned into a temporary directory and the session targets the clone. `--grill` is not available on this path — background planning has no interactive user to interview.
 
@@ -494,6 +585,18 @@ Options:
 
 With no flags, opens an interactive session browser whose menu depends on each session's phase (see [`cruise list` Actions](#cruise-list-actions)). With `--json`, prints every session as a JSON array (id, phase, input, PR URL, plan-error info, ...) and exits -- useful for scripting or feeding session state to external tooling.
 
+#### `cruise diff`
+
+```
+cruise diff <SESSION_ID> [--stat]
+```
+
+Review a session branch's patch, or use `--stat` for a summary. The comparison starts at the merge-base of the session branch and the base repository's current HEAD. As HEAD moves, the comparison base may change. When the worktree exists, the diff includes committed and uncommitted tracked changes and untracked files, excluding untracked paths listed in the base repository's `.worktreeinclude` and nested repositories. Tracked changes are included even when listed in `.worktreeinclude`. If the worktree is missing, only committed branch changes are shown. Patch output is limited to 1 MiB and at most 200 untracked files are included; truncation is reported.
+
+The full patch uses `less -R` on a terminal when available, otherwise it is written directly to stdout. `--stat` is written directly to stdout. The list's **View Diff** action returns to the menu afterwards. The TUI and WebUI also have a Diff detail tab; refresh the TUI with `r` or use the WebUI tab's **Refresh** button to reload it.
+
+A session needs a worktree branch for this feature. Current-branch sessions are not supported, and the branch may be removed during cleanup after PR creation (including the default `builtin:tdd` workflow). After cleanup, use **Open PR** to review the changes instead. Diff output is text, not JSON.
+
 #### `cruise config`
 
 ```
@@ -504,9 +607,15 @@ Options:
           Set the maximum number of sessions the WebUI and TUI run concurrently in `run --all` mode.
 
           Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
+      --set-auto-requeue-max-attempts <N>
+          Set the automatic retry limit for Run All (0 disables it).
 ```
 
 Shows or updates application-level settings stored in `config.json` or `config.yaml` under `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI and TUI** execute in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
+
+`cruise config --set-auto-requeue-max-attempts <N>` sets `run_all_auto_requeue_max_attempts` for CLI, TUI and WebUI Run All. The CLI flag `--auto-requeue-max-attempts <N>` overrides it for one batch. The limit is read once when a batch starts.
+
+Set `prevent_sleep: true` in the machine-level `config.yaml` (or `"prevent_sleep": true` in `config.json`) to prevent sleep during runs on macOS; the default is `false`. Cruise shares `/usr/bin/caffeinate -dis -w <pid>` across overlapping enabled runs and stops it when the last one ends. This also covers CLI, TUI, and WebUI runs, but not planning alone. Other operating systems do nothing. Failures to load the setting or start caffeinate only warn and do not fail the run; a later run retries. Changes take effect on the next run. This setting is not supported in project `default.yaml`.
 
 If both files exist, `config.json` wins; otherwise an existing `config.yaml` is used. When neither exists, settings updates create `config.json`. The files are not merged, and an invalid selected file is an error rather than a reason to try the other format. Updates write back to the selected file in its format; YAML comments are not retained.
 
@@ -523,6 +632,22 @@ plan_model:
 ```
 
 Workflow and `default.yaml` model settings override these defaults; environment overrides still win. If no layer sets `plan_model`, planning uses the effective `model`. SDK arrays use the existing [fallback behavior](#sdk-mode); command mode uses only the primary. `planModel` is accepted as an alias for `plan_model`. Missing parallelism defaults to `1`, so model-only settings are valid. Updating parallelism through the CLI, WebUI, or TUI preserves both model settings.
+
+The same application settings file can organize interactive workflow selectors:
+
+```yaml
+workflow_categories:
+  Development:
+    workflows:
+      - builtin:tdd
+      - refactor: Refactor an existing codebase
+    Backend:
+      workflows: [api]
+show_others_category: true
+others_category_name: Others
+```
+
+`workflow_categories` is an ordered tree of category maps. Each category may contain a `workflows` list and nested categories. Entries are names or single-key maps whose value overrides the selector description. `show_others_category` defaults to `true`, and `others_category_name` defaults to `Others`. These settings belong in application `config.yaml` or `config.json`, not workflow files or `default.yaml`. See [config file resolution](#config-file-resolution) for matching and fallback behavior.
 
 Both workflow and application settings support SDK-qualified entries in `model` and `plan_model` arrays:
 
@@ -578,6 +703,10 @@ Checks each Completed session's PR status via `gh pr view` (or `glab mr view` on
 
 > **Note:** A session may lack a PR URL if `gh pr create` failed or was not reached. PR-backed sessions without a PR URL are retained; inspect the session logs or re-run PR creation manually with `gh pr create`.
 
+#### `cruise usage`
+
+`cruise usage [--by session,step,purpose,backend,model] [--session ID] [--format text|json|csv]` summarizes local attempt records. The default grouping is `step,backend,model` and the default format is text. Missing provider values are unknown, not zero; totals include input and output only. Command backends are recorded as unavailable. Costs are provider-reported, not estimates. OpenCode auxiliary title and compaction usage is excluded, so usage may be undercounted. Command backend internal retries are recorded as one call. `cruise ssh` records usage on the remote host, not locally.
+
 ## Session Management
 
 Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.local/share/cruise/sessions/`). Each `state.json` has one tagged `config` reference:
@@ -609,6 +738,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 | Application settings (`config.json` or `config.yaml`) | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
 | Sessions, worktrees, and temporary `--repo` clones | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
 | State files (`history.json`, `new_session_draft.json`, per-installation `installations/<installation-id>/update-transaction.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
+| Usage records | `$XDG_STATE_HOME/cruise/usage.ndjson` (default: `~/.local/state/cruise/usage.ndjson`) |
 
 On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cruise` (config), `%LOCALAPPDATA%\cruise\data` (data), and `%LOCALAPPDATA%\cruise\state` (state). If those variables are missing, the `~/` defaults above apply, and `~\` is expanded like `~/`.
 
@@ -630,17 +760,19 @@ On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cru
 
    After choosing **Approve** or **Execute now**, declared workflow flags are selected first when no `-f/--flag` was supplied. Then a **step skip selector** lists only steps enabled by those values (grouped steps appear as a parent with children); no selector is shown when there are no candidates. Toggle any steps you want to skip for this run. Only selections from the visible candidates are persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected for the next session using the same config. Cancelling either selector returns to the approve-plan menu without saving partial flag changes, approving, or executing the session. Execute now forwards the approval-time flag values as explicit assignments, suppressing another flag prompt at execution start. After Approve, a later `cruise run` still offers the fresh-execution flag selector and does not ask for skips again (see [Workflow flags](#cruise-run)).
 
-5. **`cruise run`** -- Without an ID, picks a pending session (Planned, Running, Failed, or Suspended; prompts when several qualify), reuses (or creates) the git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, and executes the workflow. By default it creates a PR when the run leaves branch commits, then runs configured `after-pr` steps. In built-in workflows, `-f after_pr` enables that prelude without merging; `-f merge` enables the same prelude once plus the final native synchronous squash merge. If a successful run has no new branch commits, PR creation is skipped without error (existing branch commits are still eligible), and opted-in after-PR actions are skipped with a reason. Workflow-level `create_pr: false` skips automatic commit, push, PR creation, `after-pr`, and PR-based cleanup, while preserving the normal session, artifacts, and worktree; opted-in actions are skipped with a reason and merge never overrides the no-PR setting. Explicit `if.no-file-changes` failure/retry behavior is unchanged. An actual PR-creation failure still makes a `--repo` session `Failed`; a plain worktree session logs a warning and completes without a PR, skipping `after-pr`.
+5. **`cruise run`** -- Without an ID, picks a pending session (Planned, Running, Failed, or Suspended; prompts when several qualify), reuses (or creates) the git worktree under `$XDG_DATA_HOME/cruise/worktrees/<session-id>/`, and executes the workflow. By default it creates a PR when the run leaves branch commits, then runs configured `after-pr` steps. In built-in workflows, `-f after_pr` enables that prelude without merging; `-f merge` enables the same prelude once plus the final native synchronous squash merge. If a successful run has no new branch commits, PR creation is skipped without error (existing branch commits are still eligible), and opted-in after-PR actions are skipped with a reason. Workflow-level `create_pr: false` skips automatic commit, push, PR creation, `after-pr`, and PR-based cleanup, while preserving the normal session, artifacts, and worktree; opted-in actions are skipped with a reason and merge never overrides the no-PR setting. Explicit `if.no-file-changes` failure/retry behavior is unchanged. Publication failures enter **PR Failed** for both repo and local worktree sessions; use **Create PR** to retry publication without rerunning the workflow.
 
-GitHub built-in CI waits pin the local `HEAD` and require the PR head and CI rollup to match that commit. They poll every 5 seconds for up to 29 minutes (1740 seconds) within a 30-minute step timeout; unregistered or pending checks are not success. Existing snapshot sessions retain their saved wait command and timeout until explicitly updated; changing a built-in does not rewrite them.
+GitHub built-in `wait-ci` steps pin the local `HEAD`. Readiness requires the PR head and CI rollup commit to match that expected commit, an existing `statusCheckRollup.state` of `SUCCESS`, and every GitHub Actions check suite on the commit with a `workflowRun` to be `COMPLETED`. A completed suite with a failing conclusion fails CI; a suite without `workflowRun` (for example, from a third-party app) does not block. Readiness must hold for two consecutive polls; any non-ready poll resets the streak. A PR-head mismatch stays pending for a 90-second grace period to allow API propagation; if it catches up in time, the wait can succeed, but a persistent mismatch after the grace or overall deadline fails with the existing `head_mismatch` diagnostic. The built-in polls every 5 seconds for up to 29 minutes (1740 seconds) within a 30-minute step timeout; unregistered or pending checks are not success. Existing snapshot sessions retain their saved wait command and timeout until explicitly updated; changing a built-in does not rewrite them.
 
-Native GitHub squash merge also waits for current-head CI registration/completion and GitHub's `UNKNOWN` mergeability to resolve, polling every 2 seconds for up to 10 minutes (a shorter step timeout still applies). This runtime check also protects existing saved workflow snapshots without rewriting them. Conflicts, current-head CI failures, changed heads, malformed responses, and unmet policy or review requirements still reject the merge; the final merge request remains single-shot and SHA-pinned.
+Native GitHub squash merge applies the same CI readiness gate: the PR head and an existing rollup commit must match the expected local `HEAD`, the rollup state must be `SUCCESS`, and every GitHub Actions check suite on that commit with a `workflowRun` must be `COMPLETED`; a completed suite with a failing conclusion fails CI, while suites without `workflowRun` do not block. Readiness must hold for two consecutive polls; any non-ready poll resets the streak. A PR-head mismatch remains pending for up to 90 seconds for API propagation; a transient mismatch that catches up can succeed, while one persisting past the grace or overall readiness deadline fails. The built-in `wait-ci` retains its existing `head_mismatch` diagnostic. The merge also waits for GitHub's `UNKNOWN` mergeability to resolve, polling every 2 seconds for up to 10 minutes (a shorter step timeout still applies). This runtime check protects existing saved workflow snapshots without rewriting them. Conflicts, malformed responses, and unmet policy or review requirements still reject the merge; the final merge request remains single-shot and SHA-pinned.
 
 A refused final merge records only a fixed reason and available HTTP status and command exit code, after confirming the PR remains open at the expected head. Confirmed merges and other confirmation errors take precedence over refusal diagnostics.
 
 `MERGEABLE/UNSTABLE` is transient only while the pinned commit's CI is pending or not yet registered/current; it is never merge-ready. A current-head CI failure still rejects immediately, and green CI with a remaining `UNSTABLE` state is also rejected.
 
 PR-backed sessions remain in `$XDG_DATA_HOME/cruise/sessions/` until their PR is closed or merged, after which `cruise clean` can remove them. A normal session configured with `create_pr: false` retains its session, artifacts, and worktree without waiting for a PR.
+
+Eligible local worktree sessions without a PR can instead stage a squash merge while retaining the session, or explicitly merge and clean up the worktree, branch, and session.
 
 ### Model and Fallback Notices
 
@@ -698,9 +830,14 @@ The interactive session list shows a menu of actions depending on the session's 
 | **Running** | Resume, Reset to Planned, Delete, Back |
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
-| **Completed** | Open PR*, Merge PR*, Reset to Planned, Delete, Back |
+| **PR Failed** | Create PR, Open PR*, Reset to Planned, Delete, Back |
+| **Completed** | Open PR*, Merge PR*, Stage local merge**, Merge locally & cleanup**, Reset to Planned, Delete, Back |
 
 \* Open PR and Merge PR are shown only when the session has a PR URL.
+
+\** Local merge actions require an eligible local worktree session without a PR and a recorded target branch. Stage is unavailable once a merge intent or commit has been recorded; legacy sessions without a recorded target are ineligible.
+
+**View Diff** is additionally available in every phase when the session has a worktree branch. The branch can still have been deleted, in which case viewing the diff reports an error.
 
 `cruise list` may also show `Planning` while `--plan` is still running, or `Plan Failed` when background planning wrote a durable `plan_error`. These display states are backed by `AwaitingApproval`: `Edit Settings`, `Delete`, and `Back` are always available, while `Approve` and `Publish as Issue` appear only when a non-empty `plan.md` is available and there is no `plan_error`.
 
@@ -708,9 +845,13 @@ The interactive session list shows a menu of actions depending on the session's 
 - **Approve** -- Approve the plan and transition the session to the Planned phase.
 - **Publish as Issue** -- Publish `plan.md`, unchanged, as a GitHub issue (or GitLab issue) in the resolved repo, then delete the local session. Prompts whether to also post a follow-up `@cruise run` comment so the `@cruise` GitHub Action picks it up (default: off for `AwaitingApproval`, on for `Planned`). If the issue is created but that comment fails to post, the session is kept so you can retry (the existing issue is reused, not duplicated) or comment manually (the `@cruise run` comment prompt is skipped on GitLab).
 - **Run / Resume** -- Execute (or continue) the session.
+- **Create PR** -- Retry publication for a **PR Failed** session without rerunning the workflow. Cruise commits remaining changes, pushes, and reuses an existing PR for the branch or creates one. Check the displayed error and forge authentication first (for GitHub HTTPS credentials, `gh auth setup-git` can configure Git). Publication failure or cancellation keeps the session in **PR Failed** with its worktree and any existing PR URL. A fatal after-PR error leaves it **Failed**. Success completes the session and runs configured after-PR steps only when a PR was created or reused; a no-commits skip completes without running them. Reset to Planned instead restarts the workflow, while Delete removes the session and its workspace.
+- **View Diff** -- Review the session branch's changes and return to the menu. See [`cruise diff`](#cruise-diff) for comparison and cleanup limitations.
 - **Replan** -- Provide feedback to re-generate the plan; the session stays in the Planned phase.
 - **Open PR** -- Open the session's pull request in the browser via `gh pr view --web`.
 - **Merge PR** -- Human-initiated merge of the session's pull request (also available in the TUI and WebUI). Cruise first shows the PR's state, mergeability, review decision, and each CI check. You then choose `Squash` (the default), `Merge`, or `Rebase` and confirm; the confirmation names the chosen method. Cruise runs `gh pr merge <url> --squash|--merge|--rebase` and never adds `--auto`, `--admin`, or `--delete-branch`. If GitHub reports the PR as Closed or Merged afterwards, only that session and its worktree (and any `--repo` clone) are cleaned up, as `cruise clean` would. If the PR is still Open (for example in a merge queue) the session is kept and `cruise clean` can remove it later. A PR that is already Closed or Merged is not merged again: run `cruise clean`. This remains the human-confirmed, GitHub-only route; built-in `-f merge` is a separate native synchronous squash path. See [after-pr](skills/cruise-config/references/after-pr.md) for its checks and constraints.
+- **Stage local merge** -- Squash the session branch into the base checkout's index without committing or removing the session. Uncommitted worktree changes are committed to the session branch first.
+- **Merge locally & cleanup** -- Squash into one base commit, then remove the worktree, branch, and session. Cleanup failure retains the session for retry without repeating the squash. An initial squash requires the recorded target checked out locally, a clean tracked base and no behind upstream; Cruise does not fetch or pull. A cleanup retry checks that the recorded source commit is available, the branch has not changed, and any retained worktree is the expected checkout with no tracked or untracked changes. Conflicts are reported, rollback is attempted, and rollback failure is reported; AI does not resolve them. These actions exclude `--repo` and current-branch sessions and do not depend on `cleanup_after_pr` or the `merge` flag.
 - **Reset to Planned** -- Reset the session back to the Planned phase, clearing the current step and allowing it to be re-run from the beginning.
 - **Delete** -- Permanently remove the session.
 - **Back** -- Return to the session list.
@@ -729,6 +870,7 @@ cruise resolves the workflow config as follows:
    | `add-formal-specs` | Add executable Quint, Alloy, and Gherkin specs with CI; fix real spec/source defects |
    | `research` | Bounded, read-only investigation with source-backed evidence, independent review, and a cited report |
    | `security` | Scoped security inventory and parallel audits, triage, safe fixes for confirmed defects, and independent verification |
+   | `pr-review-fix` | Address eligible review threads on an existing GitHub PR head branch |
 
    `refactor`, `add-tests`, `add-formal-specs`, and `security` set `force_exec: true` by default: local planning runs directly in the current directory without an outer plan/session, worktree, or automatic PR. Pass `--no-force-exec` to use the normal plan/session path instead.
 
@@ -766,7 +908,7 @@ cruise resolves the workflow config as follows:
 
    The research workflow and security inventory/audit/triage phases require SDK permissions for read-only work. When neither `command:` nor `sdk:` remains set after workflow and applicable user/project defaults are resolved, Cruise uses its default `sdk: jcode`; a `command:` backend cannot be confined to read-only mode and is rejected for restricted-permission steps.
 
-   Interactive selectors (CLI, TUI, WebUI) list every built-in with its description after config files, with `tdd` first. Non-interactive resolution with no config file uses `tdd`.
+   Interactive selectors (CLI, TUI, WebUI) organize built-ins and other candidates into categories. Non-interactive resolution with no config file uses `tdd`.
 
    `create_pr` is a workflow-only boolean that defaults to `true`. Setting it to `false` skips Cruise's automatic commit, push, PR creation, `after-pr`, and PR-based cleanup, while retaining a normal session, its artifacts, and its worktree; local no-PR worktrees do not need `gh`/`glab`, but `--repo` still needs the forge CLI for repository access. With PR creation enabled, a successful run with no new branch commits skips PR creation without error, while existing branch commits remain eligible; opted-in after-PR actions are skipped with a reason if no PR is created. `merge` never overrides `create_pr: false` or a read-only workflow such as `research`; explicit `if.no-file-changes` failure/retry guards still apply. `create_pr` is rejected in user and project `default.yaml` files; it is not a CLI option.
 
@@ -774,12 +916,16 @@ cruise resolves the workflow config as follows:
 3. Otherwise, cruise collects every candidate from the following locations and presents them as choices:
    - `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` (current directory)
    - `./.cruise/*.yaml` / `*.yml` (current directory), sorted by filename; the top-level `./.cruise/default.yaml` is excluded
-   - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` (default: `~/.config/cruise/workflows/`), sorted by filename
+   - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` and members of valid locked bundle directories (default: `~/.config/cruise/workflows/`), sorted by relative path
 
-   When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. The built-in workflows are always offered at the end of the list, with `tdd` first, so they remain selectable even when config files are found; on a TTY with only built-ins the picker still starts at `tdd`. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
-4. **No candidate found** -- cruise falls back to the built-in `tdd` workflow (`builtin/tdd.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.
+   When stdin and stdout are both TTYs, candidates and built-in workflows are presented in a categorized interactive selector. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
+4. **No config file found** -- an interactive terminal offers built-in workflows in the selector; non-interactive resolution selects the embedded `tdd` workflow (`builtin/tdd.yaml` in the source tree) automatically. No config file is required.
 
-The `description:` field of each config file is shown next to its filename in both the CLI selector and the WebUI, making it easier to tell similar files apart. The WebUI's config selector offers every built-in workflow with its description alongside *Auto* so a session can be pinned to an embedded workflow regardless of discovered files.
+Interactive selectors use the configured `workflow_categories` tree, or, when it is empty or absent, the defaults: Development (`tdd`, `refactor`), Quality (`add-tests`, `add-formal-specs`), Research (`research`), and Security (`security`). A nonempty user tree replaces those defaults rather than merging with them. Categories and workflow entries each retain their declaration order; CLI submenus display subcategories before workflow entries. A workflow can appear in multiple categories.
+
+A bare entry matches a file's stem (filename without extension) and a built-in name. For example, `refactor` matches both `refactor.yaml` and the built-in, while `builtin:refactor` matches only the built-in. Matching files from different sources all appear. Missing names are ignored, and empty categories are omitted. An entry such as `{refactor: "Custom description"}` supplies the selector description and overrides the workflow's `description:` in WebUI. The CLI picker does not load file workflow descriptions. Conflicting descriptions for the same workflow, including bare and prefixed names for a built-in, are invalid. Picker settings are validated when opening a picker and do not prevent runtime model or parallelism defaults from loading.
+
+Uncategorized local and `CRUISE_CONFIG` candidates remain available at the root (in WebUI, under `Base dir (...)`). Uncategorized installed packages appear in `Packages`, followed by uncategorized user-directory and built-in workflows in `Others` or the configured `others_category_name`. Setting `show_others_category: false` hides those uncategorized user and built-in choices, but not local, environment, or installed package candidates. WebUI also retains its *Auto* and built-in `tdd` choices and the current session workflow when it is otherwise filtered out. Categories affect interactive display only, not explicit selection or non-interactive resolution priority.
 
 ### Workflow defaults (`default.yaml`)
 
@@ -804,6 +950,7 @@ fresh snapshot session to use updated settings.
 - `env` and `mcp_servers` merge per key (higher layer wins).
 - `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
 - Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
+- Worktree settings `base_branch` and `auto_fetch` are defaults-only keys, with project values overriding user values. `auto_fetch: true` requires a nonempty `base_branch` after merging.
 - `description`, `steps`, `groups`, and `after-pr` are workflow-only and are a load error in `default.yaml`. Unknown keys are errors too.
 - If defaults name a backend (`command` / `sdk`) of a different kind than the workflow's own, validation fails when they would fill an unset backend-specific `model`, `plan_model`, `subagent_model`, or `retry`, add a missing `mcp_servers` entry, or fill an unset `computer_use`, `permission`, or `disallowed_tools` field, regardless of its value. Set the field in the workflow or remove it from `default.yaml`. The check runs before `CRUISE_SDK` overrides, which are not considered.
 
@@ -849,6 +996,8 @@ plan_model: opus          # model used for the built-in plan step (optional)
 languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
   plan: English           # language used by built-in planning prompts
+# commit_message_template: "{title} [{session_id}]" # host-created commit message
+# pr_body_template: "## Summary\n{body}"            # generated PR body wrapper
 # force_exec: false       # execute direct plan entry points in place (use --no-force-exec to opt out)
 # permission: full        # prompt permission: read-only | edit | full (default full)
 # disallowed_tools: [web, subagent, "shell:npm publish"] # SDK prompt deny list
@@ -923,7 +1072,7 @@ Instead of spawning an external CLI via `command`, prompt steps can be driven th
 
 #### Startup OAuth expiration checks
 
-Before starting agents for `cruise plan`, `cruise run`, or `cruise exec`, and for session planning/execution in the TUI or WebUI, Cruise checks local OAuth credential files for the applicable SDK candidates only. Planning uses the effective `plan_model` (falling back to `model`); execution includes workflow models and step overrides, including `after-pr`, groups, and parallel children. Model arrays, SDK-qualified entries, and effective retry fallback chains are included, even if a fallback is not ultimately used. This is not a global check at TUI/WebUI startup. Command backends, dry-runs, and `cruise workflow generate` are outside this check.
+Before starting agents for `cruise plan`, `cruise run`, or `cruise exec`, and for session planning/execution in the TUI or WebUI, Cruise checks local OAuth credential files for the applicable SDK candidates only. Planning uses the effective `plan_model` (falling back to `model`); execution includes workflow models and step overrides, including `after-pr`, groups, and parallel children. Model arrays, SDK-qualified entries, and effective retry fallback chains are included, even if a fallback is not ultimately used. This is not a global check at TUI/WebUI startup. Command backends, dry-runs, `cruise workflow generate`, and `cruise workflow make` are outside this check.
 
 - **Claude SDK:** reads `$CLAUDE_CONFIG_DIR/.credentials.json`, or `~/.claude/.credentials.json` when unset, using `claudeAiOauth.expiresAt`, `refreshToken`, and optional `refreshTokenExpiresAt`.
 - **Jcode SDK:** checks only explicit providers `claude`, `claude-oauth`, and `claude-subprocess` in the source home's `auth.json`, and `openai` and `openai-oauth` in `openai-auth.json`. The source home is the process `JCODE_HOME`, or `~/.jcode` when unset. With multiple accounts, it stops only if every account is conclusively expired.
@@ -988,7 +1137,7 @@ steps:
   as `:free` remain part of the model ID. jcode requires a valid nonempty model.
 - Applies to workflow prompt steps, including groups, `after-pr`, parallel
   prompt children, and `github-review`, plus planning's plan/fix/ask turns.
-  It does not apply to title generation, PR metadata, or `workflow generate`.
+  It does not apply to title generation, PR metadata, `workflow generate`, or `workflow make`.
   Non-prompt steps and group/workflow-call/parallel wrappers cannot set it.
 - A called workflow's top-level value is ignored in favor of the caller's
   default; the callee's per-step overrides are retained.
@@ -1214,6 +1363,28 @@ plan_language: Japanese   # Deprecated; use languages.plan instead.
 
 The effective values are available to built-in templates as `{pr.language}` and `{plan.language}`.
 
+### Commit and PR Templates
+
+Optional top-level string keys `commit_message_template` and `pr_body_template` customize the host-created commit and PR body in the worktree PR creation path. Set them in the workflow or in user `<config_dir>/default.yaml` or project `.cruise/default.yaml`. Precedence is workflow > project defaults > user defaults > unset. They are not CLI options or environment overrides.
+
+```yaml
+commit_message_template: "{title} [{session_id}]"
+pr_body_template: |
+  ## Summary
+  {body}
+```
+
+| Template | Allowed variables |
+|----------|-------------------|
+| `commit_message_template` | `{title}`, `{issue}`, `{session_id}`, `{branch}` |
+| `pr_body_template` | `{title}`, `{body}`, `{issue}`, `{session_id}`, `{branch}` |
+
+`{title}` is the trimmed LLM-generated PR title, or the first non-empty trimmed line of the session input or title if generation yields an empty title. `{body}` is the trimmed LLM-generated PR body, or an empty string if generation fails. `{issue}` currently always expands to an empty string, `{session_id}` is the session ID, and `{branch}` is the worktree branch name. No issue closing text is added automatically by these templates.
+
+Unknown variables and malformed syntax are rejected at workflow load/compile time. Escape literal braces as `{{` and `}}`; expanded values are not expanded again. The rendered body and commit message are trimmed. An empty rendered commit message is an error; the configured Co-authored-by trailer is appended separately. When a PR body template is set, Cruise supplies the title and body explicitly rather than using `--fill`.
+
+When both templates are unset, existing behavior is unchanged: the commit uses the generated PR title or existing input fallback, and an empty PR title uses `--fill`. These settings do not affect current-branch runs, `create_pr: false`, agent-created commits, or squash-merge messages.
+
 ### Session Title Generation
 
 After plan approval, cruise generates a concise session title (up to 80 characters) shown in `cruise list` and the WebUI sidebar instead of the raw task input. The behavior depends on the backend:
@@ -1280,6 +1451,8 @@ The keys `env`, `mcp_servers`, and `pre_steps` are excluded because they contain
 
 `CRUISE_SKIP_AGENT_AUTH_CHECK=1` bypasses the SDK startup OAuth expiration check described under SDK Mode. It is a process-only runtime switch, not a workflow-config override. Only the exact value `1` skips the check.
 
+`CRUISE_USAGE_RECORDING` is a process-only runtime switch. Set it to `0` or `false` to disable local usage recording; `1`, `true`, or an unset value enables it. Values are trimmed and case-insensitive. Other values enable recording with a warning.
+
 
 ```yaml
 env:                        # top-level: applied to all steps
@@ -1297,6 +1470,8 @@ steps:
 ### Step Types
 
 #### Prompt Step (LLM call)
+
+Prompt steps can declare `quality_gates` to verify a successful attempt before advancing; see [Quality gates](#quality-gates-quality_gates).
 
 ```yaml
 steps:
@@ -1489,6 +1664,8 @@ steps:
 
 ### Post-PR Automation (`after-pr`)
 
+For host-created commit and PR body formatting, see [Commit and PR Templates](#commit-and-pr-templates).
+
 Prompt steps here, including `github-review` prompts, inherit workflow
 `disallowed_tools` and may add step restrictions. Native `squash-merge` is not
 a prompt and cannot carry a nonempty `disallowed_tools` list.
@@ -1517,9 +1694,9 @@ after-pr:
 
 Prompt steps in `after-pr` are guarded by the same default, with the same repository scope and the same fail-closed behaviour. The built-in `resolve-conflict` and `fix-ci-error` prompts explicitly set `allow_commit: true` because they are intentionally expected to commit fixes to the PR branch. Other after-PR prompts must opt in individually when they need to advance `HEAD` in the session repository; command and option steps are unaffected.
 
-#### Review bot loop (`github-review`)
+#### Review loop (`github-review`)
 
-An explicit, opt-in `after-pr` step lets review bots such as CodeRabbit be handled without a human in the loop. It is never added to the built-in workflow.
+An explicit `after-pr` step can handle review bots such as CodeRabbit. The general-purpose built-ins do not add it; `builtin:pr-review-fix` uses it for an existing PR.
 
 ```yaml
 after-pr:
@@ -1535,7 +1712,9 @@ after-pr:
     output_file: review-report.json # optional iteration report in the session artifacts
 ```
 
-Each iteration waits for a review of the current head commit by a listed bot, fetches the unresolved threads started by those bots (all pages), and runs the prompt with the head OID and thread data appended. The prompt must answer with JSON only: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`. Only listed thread IDs are accepted, each at most once, with a non-empty `reply` or `resolve: true`, and only where `viewerCanReply` / `viewerCanResolve` allow it. Cruise itself posts the replies and resolves the threads through `gh api graphql` (requires an authenticated `gh`). Commits made by the prompt are pushed; uncommitted changes fail the step. The loop ends when no unresolved bot threads remain and fails when they remain after `max-iterations`, on timeout, or on any API or response error. Unlike other `after-pr` errors, which are warning-only, this `github-review` failure marks the run `Failed`; cancellation and missing-model errors from jcode after-pr prompts also propagate, with missing-model errors failing the run/session. Rerunning resumes safely because replies carry an idempotency marker. The step is valid only directly in `after-pr`.
+In bot mode, each iteration waits for a review of the current head commit by a listed bot, then fetches unresolved threads started by those bots (all pages). In all-reviewer mode, it immediately fetches eligible unresolved threads without waiting for a review. Either mode runs the prompt with the head OID and thread data appended. The prompt must answer with JSON only: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`. Only listed thread IDs are accepted, each at most once, with a non-empty `reply` or `resolve: true`, and only where `viewerCanReply` / `viewerCanResolve` allow it. Cruise itself posts the replies and resolves the threads through `gh api graphql` (requires an authenticated `gh`). Commits made by the prompt are pushed; uncommitted changes fail the step. The loop ends when no eligible unresolved threads remain and fails when eligible threads remain after `max-iterations`, on timeout, or on any API or response error. Unlike other `after-pr` errors, which are warning-only, this `github-review` failure marks the run `Failed`; cancellation and missing-model errors from jcode after-pr prompts also propagate, with missing-model errors failing the run/session. Rerunning resumes safely because replies carry an idempotency marker. The step is valid only directly in `after-pr`.
+
+The default `reviewers: bots` preserves that behavior and requires a nonempty, unique `bots` list. To process existing human and bot feedback instead, use `github-review: { reviewers: all, max-iterations: 3 }` and omit `bots` or specify an empty list. This mode does not wait for a new review. Before passing thread text to the agent, Cruise checks each author's repository collaborator permission: only `write`, `maintain`, or `admin` authors are eligible. A 404 means no permission; other permission lookup failures fail the step. Excluded unresolved thread IDs are recorded in the report and do not block success. The loop succeeds when no eligible unresolved threads remain, fails if an iteration leaves the eligible ID set unchanged, and fails if the iteration limit is reached with eligible threads remaining. The builtin PR review workflow uses this mode with a 60-minute timeout, three iterations, and `allow_commit: true`.
 
 ### Flow Control
 
@@ -1690,6 +1869,36 @@ Conditional cycles are allowed when a normal exit is possible. Execution preflig
 - `if.fail` is rejected at the group level and in `after-pr` steps.
 - Can be combined with other `if:` keys (`file-changed`, `no-file-changes`) on the same step.
 
+#### Quality gates (`quality_gates`)
+
+Use a non-empty list of commands to check a prompt step's work before its transition is applied:
+
+```yaml
+max_retries: 2
+steps:
+  implement:
+    prompt: Implement the requested change.
+    quality_gates:
+      - command: cargo test
+      - command: cargo clippy
+        timeout: 10m
+    if:
+      fail: recover
+    next: done
+  recover:
+    prompt: Investigate the failed implementation.
+  done:
+    command: echo done
+```
+
+Each entry requires a nonblank `command` and may specify a positive `timeout` using the usual seconds, `m`, or `h` syntax. Commands run in order after a successful prompt attempt, including the final step, and stop at the first failure. Exit zero without a timeout or signal passes. Skipped steps, failed prompt attempts, and attempts discarded by `if.no-file-changes: retry` do not run gates. A pending `if.file-changed` transition is applied only if the gates pass.
+
+A failed gate retries the same prompt step before applying its normal transition. The next prompt receives a sanitized, bounded excerpt of the command output as untrusted data. When available, a sanitized log is stored under the session's `artifacts/quality-gates/` directory, outside the repository, subject to the artifact size limit. Feedback survives checkpoint/resume and is cleared after the retry is no longer pending. Gate output does not replace `{prev.*}`.
+
+Retries use the existing per-edge budget (`--max-retries`, then `max_retries`, then 3), shared with other self-retries on that step. With no prior self-retries, at most `1 + max_retries` gate attempts run; zero means the first failure exhausts the budget. On exhaustion, `if.fail: <step>` jumps to that step; otherwise cruise stops with `QualityGateExhausted`. The mapping `if.fail: {retry: true}` does not add another gate retry budget.
+
+Gates are allowed on prompt and `prompt_file` steps, including individual steps inside a group. They are rejected on parallel parents and children, `after-pr` steps, group or `workflow_call` call sites, and non-prompt steps. Gate commands execute shell commands, just like ordinary `command` steps; only use trusted workflow configurations.
+
 ### Step Groups
 
 Steps can be grouped to coordinate retry loops across multiple steps. A group retries all its member steps together when the `if: file-changed` condition triggers.
@@ -1813,6 +2022,58 @@ is not an input lookup and becomes the literal `{inputs.label}` at runtime.
 The existing `{{...}}` and `}}` brace rules still apply. Inputs are template
 fragments, not a secret store or an automatic shell-quoting mechanism.
 
+#### Return labels
+
+A called workflow can declare named exits, leaving the caller to choose their
+destinations. For example, `workflows/review-gate.yaml`:
+
+```yaml
+returns: [approved, needs_fix]
+steps:
+  review:
+    command: "cargo test"
+  decide:
+    option:
+      - selector: Approve
+        return: approved
+      - selector: Request changes
+        return: needs_fix
+```
+
+The caller maps every declared label to a step in its own step map:
+
+```yaml
+steps:
+  gate:
+    workflow_call: ./workflows/review-gate.yaml
+    on_return: {approved: publish, needs_fix: fix}
+  fix:
+    prompt: "Fix the review findings in {plan}"
+  publish:
+    command: "git push"
+```
+
+`returns` is a unique list of labels matching `[A-Za-z_][A-Za-z0-9_-]*`.
+Every declared label must be used by a callee return and mapped by the caller,
+with no extra mappings. `on_return` belongs only on a `workflow_call` and null
+means omission. Destinations must exist in the same parent step map and cannot
+be workflow call sites. A callee's top-level step may use `return` instead of
+`next`; on an option step put `return` on individual options instead. A return
+cannot be combined with `next` on the same step or option, or with
+`if.file-changed` on the return-bearing step. Returns are not allowed on group
+or parallel children, call sites, or after-PR steps. Directly loaded roots cannot
+declare nonempty `returns` or use return routes, and `returns` is forbidden in
+user/project `default.yaml`.
+
+Routes are converted into explicit `next` edges at load time. Normal completion
+without a return retains the call-site `next`, or otherwise continues to the
+next parent step. A skipped return-bearing step does not return: it continues
+in declaration order, even if the call site has `next`. A call-site `next` is
+invalid when the callee's final step has a step-level return, but is allowed
+when returns are on options. Nested calls must map labels at each scope; labels
+do not propagate outward. Routes may loop to earlier parent steps, subject to
+the existing graph validation requiring a normal exit.
+
 #### Supported sources
 
 | Source | Example |
@@ -1830,7 +2091,7 @@ its supplied base directory for local dependencies, not the embedded registry.
 The shared after-PR resource is internal and is not a catalog entry or a new
 public `workflow_call` source syntax.
 
-All six built-ins call the same six-step after-PR prelude in order:
+The six general-purpose built-ins call the same six-step after-PR prelude in order:
 `pr-ready` → `sync-base` → `resolve-conflict` → `push-after-sync` → `wait-ci` →
 `fix-ci-error`. Each root supplies its workflow-specific conflict and CI prompts
 through `with`. The `follow-up` call's `flag: [after_pr, merge]` gates all six
@@ -1851,7 +2112,7 @@ retain their existing live-reload behavior.
 
 #### Call-site fields
 
-A `workflow_call` step is a pure delegation point. Only `with`, `skip`, `when`, `next`, and `flag` may be set alongside `workflow_call`:
+A `workflow_call` step is a pure delegation point. Only `with`, `on_return`, `skip`, `when`, `next`, and `flag` may be set alongside `workflow_call`:
 
 - `skip` and `when` are applied to the **first** expanded step.
 - `next` is applied to the **last** expanded step (when it has no explicit `next` of its own).
@@ -1872,6 +2133,8 @@ steps:
 ```
 
 ### Variable Reference
+
+Commit and PR templates use a separate [allowed vocabulary](#commit-and-pr-templates), which does not include `{plan}`. The `{plan}` below remains a session plan file path.
 
 | Variable | Description |
 |----------|-------------|
@@ -1905,7 +2168,7 @@ When `cruise run` starts a new session, it prompts you to choose a workspace mod
 
 | Mode | Description |
 |------|-------------|
-| **Worktree** (default) | Creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` (default: `~/.local/share/cruise/worktrees/<session-id>/`). A new branch `cruise/<session-id>-<sanitized-input>` is checked out. Requires `gh` CLI for PR creation (`glab` for GitLab repositories). |
+| **Worktree** (default) | Creates an isolated git worktree at `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` (default: `~/.local/share/cruise/worktrees/<session-id>/`). A new branch `cruise/<session-id>-<sanitized-input>` is checked out from HEAD or the configured `base_branch` as described below. Requires `gh` CLI for PR creation (`glab` for GitLab repositories). |
 | **Current branch** | Executes directly in the current repository on the active branch. No worktree or PR is created automatically, and no automatic merge runs. If `after_pr` or `merge` is opted in, its unavailable after-PR actions are skipped with a reason. |
 
 With `--all`, worktree mode is always used; a single `cruise run` keeps the workspace mode already recorded on the session, and in non-interactive environments (piped stdin) fresh sessions default to worktree mode. Sessions created with `--repo` (or the WebUI repository picker) are always pinned to Worktree mode — the prompt is skipped and current-branch mode is not available, since a PR is the only way the work leaves the temporary clone.
@@ -1918,8 +2181,11 @@ With `--all`, worktree mode is always used; a single `cruise run` keeps the work
 
 ### Worktree isolation
 
-- The worktree is retained until the PR is closed or merged; run `cruise clean` to delete it.
+- For PR-backed sessions, the worktree is retained until the PR is closed or merged; run `cruise clean` to delete it. Eligible sessions without a PR can instead use local merge cleanup.
 - Set `cleanup_after_pr: true` in the config (or pass `--cleanup-after-pr` at runtime) to automatically delete the local worktree and branch immediately after the PR is created. Use `--no-cleanup-after-pr` to override the config setting and keep them.
+- An explicit **Merge locally & cleanup** also removes the eligible local worktree and branch after the squash commit, independently of `cleanup_after_pr`.
+
+New worktrees start at the repository's current HEAD unless `base_branch` is set in user or project `default.yaml`. With a base configured, Cruise prefers the local branch, then `origin/<base>`; with `auto_fetch: true`, it fetches only that branch from `origin` and prefers the updated remote-tracking ref. A failed fetch warns and falls back to local refs; a missing base is an error. The configured base is saved with the session and used as the PR or MR target; without it, the forge CLI chooses its default. Existing worktrees are reused without fetching or resolving the base again.
 
 ### Copying files into the worktree
 
@@ -2072,9 +2338,10 @@ During `cruise run`, the config file is checked for changes between each step. I
 
 ## Rate Limit Retry
 
-Without an SDK fallback policy, when a rate-limit error is detected (HTTP 429 or rate-limit text; SDK backends also treat `usage limit`, `session limit`, and `overloaded` as limits)
-in a prompt or command step, cruise retries the same model with exponential
-backoff:
+Without an SDK fallback policy, cruise retries the same model with exponential
+backoff when command stderr contains rate-limit wording or a standalone `429`
+token (not incidental `429` substrings). SDK backends also treat `usage limit`,
+`session limit`, and `overloaded` as limits:
 
 - Initial delay: 2 seconds
 - Maximum delay: 60 seconds
@@ -2120,6 +2387,10 @@ Normal resume and prompt/model reloads retain counters. `--max-retries` applies 
 The compatibility filename `dag.json` and IPC name `get_session_dag` remain. Unversioned legacy graphs are viewable but cannot resume with guessed counters. Missing, corrupt and unknown-version checkpoints stop resume without deleting data. Explicitly restart the session to run from the beginning. Main and after-pr use separate graphs and counters. This does not add an independently resumable after-pr phase.
 
 ## Parallel Session Execution
+
+Run All can automatically retry eligible failures from the failed step within the same worker. Set the non-negative limit in WebUI settings, with `e` in the TUI Run All view, or with `cruise config --set-auto-requeue-max-attempts <N>`. It defaults to `0`, disabling retries. Unclassified command errors and eligible provider errors and no-file-changes errors may retry, while cancellation, configuration, authentication and authorization errors do not. An attempt's normal failure notification still appears. Completed runs with failed steps are not reclassified as failures.
+
+The persisted per-session count is a lifetime budget across batches. Manual Run or Retry does not reset it, but Reset to Planned does. Failed sessions are not picked up at batch start, single-session runs and exec sessions are not automatically retried, and lowering the limit does not erase the count. Counts appear in session details, CLI list JSON and batch summaries.
 
 The WebUI, TUI, and CLI support running multiple sessions concurrently during `run --all`.
 
@@ -2250,7 +2521,7 @@ The built-in `follow-up/sync-base` command exports `cruise.sync_base.failure_rea
 
 Errors classified as `loop_protection` annotate each result-based enclosing span with `cruise.loop.from`, `cruise.loop.to`, `cruise.loop.max_retries`, `cruise.loop.traversals` (accepted budgeted traversals of that edge, before the refused transition), and `cruise.loop.skipped_step_count`. Step IDs follow the existing step-name privacy policy; full edge tables, skipped-step lists, and exception messages are not exported. The retry budget and workflow behavior are unchanged.
 
-Metrics are `cruise.operation.count` and `cruise.operation.duration` (seconds), labeled only by `cruise.operation` and `cruise.outcome`, plus `cruise.retry.count`, labeled only by `cruise.retry.action` and `cruise.retry.reason`. Session/workflow/model identifiers are trace-only, not metric labels. Token usage and cost are not exported.
+Metrics are `cruise.operation.count` and `cruise.operation.duration` (seconds), labeled only by `cruise.operation` and `cruise.outcome`, plus `cruise.retry.count`, labeled only by `cruise.retry.action` and `cruise.retry.reason`. Session/workflow/model identifiers are trace-only, not metric labels. Token usage and cost are not exported to OpenTelemetry; they are recorded locally as described under `cruise usage`.
 
 Prompt/input text, agent output, command bodies, working paths, and exception messages are not automatically attached to spans or metrics. Session IDs, workflow file names, step/model names, CI check/job names and references, and explicitly supplied resource attributes are exported; keep secrets out of those values.
 

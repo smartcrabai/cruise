@@ -638,6 +638,7 @@ steps:
             prev_input: Some("input".to_string()),
             prev_stderr: Some("stderr".to_string()),
             prev_success: Some(true),
+            quality_gate_feedback: None,
             file_snapshots: snapshots,
             visited_at: Some("2026-06-23T00:00:00Z".to_string()),
         };

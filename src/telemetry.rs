@@ -27,7 +27,7 @@ use opentelemetry_sdk::{
     trace::SdkTracerProvider,
 };
 
-mod stderr;
+pub(crate) mod stderr;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static INITIALIZED: AtomicBool = AtomicBool::new(false);

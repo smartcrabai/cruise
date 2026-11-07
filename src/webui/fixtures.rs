@@ -10,12 +10,12 @@ use super::actions::SessionActionsVm;
 use super::templates::RawHtml;
 use super::view::{
     AskPanelVm, AttachmentListVm, AttachmentVm, ChoiceVm, ConfigGroupVm, ConfigOptionVm,
-    ConfigSelectVm, DirectorySuggestionsVm, EditorVm, EmptyStateVm, ErrorPageVm, FlagRowVm,
-    MergeCheckVm, MergePrDialogVm, NewSessionVm, OptionDialogVm, PhaseBadgeVm, PublishDialogVm,
-    RepoOptionsVm, RunAllControlVm, RunAllResultVm, RunAllRunningVm, RunAllVm, SessionDetailVm,
-    SessionHeaderVm, SessionRowVm, SessionSettingsVm, SessionSyncVm, SettingsVm, ShellVm,
-    SidebarVm, StepRowVm, StepTreeVm, TabDagVm, TabHrefs, TabInfoVm, TabLogVm, TabPlanVm,
-    ToastKind, ToastVm,
+    ConfigSelectVm, DiffLineVm, DirectorySuggestionsVm, EditorVm, EmptyStateVm, ErrorPageVm,
+    FlagRowVm, MergeCheckVm, MergePrDialogVm, NewSessionVm, OptionDialogVm, PhaseBadgeVm,
+    PublishDialogVm, RepoOptionsVm, RunAllControlVm, RunAllResultVm, RunAllRunningVm, RunAllVm,
+    SessionDetailVm, SessionHeaderVm, SessionRowVm, SessionSettingsVm, SessionSyncVm, SettingsVm,
+    ShellVm, SidebarVm, StepRowVm, StepTreeVm, TabDagVm, TabDiffVm, TabHrefs, TabInfoVm, TabLogVm,
+    TabPlanVm, ToastKind, ToastVm,
 };
 use crate::application::DirectoryEntry;
 
@@ -53,6 +53,7 @@ fn actions() -> SessionActionsVm {
         show_ask: true,
         show_create_worktree: true,
         show_run: true,
+        show_create_pr: true,
         run_label: "Retry".to_string(),
         show_reset: true,
         show_replan: true,
@@ -61,6 +62,8 @@ fn actions() -> SessionActionsVm {
         show_cancel: true,
         show_generate_plan: true,
         show_merge_pr: true,
+        show_stage_local_merge: true,
+        show_merge_locally: true,
         status: "idle".to_string(),
     }
 }
@@ -207,6 +210,7 @@ fn shell_fixtures() -> Vec<(&'static str, Value)> {
         (
             "components/session-header",
             value(&SessionHeaderVm {
+                auto_requeue_count: 2,
                 id: "s1".to_string(),
                 title: "Add a WebUI".to_string(),
                 input: Some("add a webui".to_string()),
@@ -238,12 +242,14 @@ fn shell_fixtures() -> Vec<(&'static str, Value)> {
                     dag: "/webui/sessions/s1/tab/dag".to_string(),
                     plan: "/webui/sessions/s1/tab/plan".to_string(),
                     log: "/webui/sessions/s1/tab/log".to_string(),
+                    diff: "/webui/sessions/s1/tab/diff".to_string(),
                 },
                 push_hrefs: TabHrefs {
                     info: "/sessions/s1?tab=info".to_string(),
                     dag: "/sessions/s1?tab=dag".to_string(),
                     plan: "/sessions/s1?tab=plan".to_string(),
                     log: "/sessions/s1?tab=log".to_string(),
+                    diff: "/sessions/s1?tab=diff".to_string(),
                 },
             }),
         ),
@@ -255,6 +261,7 @@ fn tab_fixtures() -> Vec<(&'static str, Value)> {
         (
             "tab-info",
             value(&TabInfoVm {
+                auto_requeue_count: 2,
                 id: "s1".to_string(),
                 config_source: "builtin".to_string(),
                 flags: vec![FlagRowVm {
@@ -288,6 +295,18 @@ fn tab_fixtures() -> Vec<(&'static str, Value)> {
                 id: "s1".to_string(),
                 mermaid_source: Some("flowchart TD\n  a --> b".to_string()),
                 message: None,
+            }),
+        ),
+        (
+            "tab-diff",
+            value(&TabDiffVm {
+                id: "s1".to_string(),
+                lines: vec![DiffLineVm {
+                    text: "+added line".to_string(),
+                    class: "add",
+                }],
+                message: None,
+                truncated: false,
             }),
         ),
         (
@@ -447,6 +466,7 @@ fn run_all_fixtures() -> Vec<(&'static str, Value)> {
             value(&SettingsVm {
                 run_all_parallelism: 4,
                 effective_run_all_parallelism: 4,
+                run_all_auto_requeue_max_attempts: 2,
                 error: Some("Must be at least 1".to_string()),
             }),
         ),

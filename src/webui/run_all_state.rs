@@ -150,6 +150,17 @@ impl RunAllState {
             ApplicationEvent::PrCreated { session_id, url } => {
                 push_log(&mut guard.log, format!("[{session_id}] PR created: {url}"));
             }
+            ApplicationEvent::AutoRequeued {
+                session_id,
+                attempt,
+                max_attempts,
+                error,
+            } => {
+                push_log(
+                    &mut guard.log,
+                    format!("Auto-requeued {session_id} ({attempt}/{max_attempts}): {error}"),
+                );
+            }
             ApplicationEvent::BatchSessionFinished { id, phase, error } => {
                 let title = guard
                     .running

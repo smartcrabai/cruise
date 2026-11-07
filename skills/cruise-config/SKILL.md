@@ -10,6 +10,7 @@ callee `inputs` with string-valued caller `with` mappings. See
 [steps.md](references/steps.md#workflow-call-inputs) for complete caller/callee
 examples and [variables.md](references/variables.md#load-time-workflow-inputs)
 for lexical scope, explicit forwarding, and preserved runtime escapes.
+For named callee exits and caller routing, see [return labels](references/steps.md#workflow-call-return-labels).
 
 ## When to use
 
@@ -26,10 +27,12 @@ Config files are resolved in this priority order:
 2. `CRUISE_CONFIG` environment variable (error if the file does not exist; never prompts)
 3. Current directory: `./cruise.yaml` → `./cruise.yml` → `./.cruise.yaml` → `./.cruise.yml`
 4. Current `.cruise/` directory: `*.yaml` / `*.yml` (ASCII-sorted), excluding the top-level `.cruise/default.yaml`
-5. `~/.config/cruise/workflows/*.yaml` / `*.yml` (ASCII-sorted)
+5. `~/.config/cruise/workflows/*.yaml` / `*.yml` and members of valid locked bundle directories (sorted by relative path)
 6. Built-in `tdd` (`builtin/tdd.yaml` in the source tree, embedded at build time: test-first steps + verify-review group (parallel read-only analyzers → consolidate → apply) + after-PR automation; uses the fallback `jcode` backend only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied) — selected by `-c __builtin__` or `-c builtin:tdd`.
 
-The fixed built-in catalog and selector order is `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`. All six declare `after_pr` and `merge`, off when absent. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. `-f after_pr` enables the prelude without merge; `-f merge` runs the same prelude once and adds the final native synchronous squash merge. `research` stays read-only with `create_pr: false`, so merge never creates a PR or overrides its no-PR policy.
+The built-in catalog contains `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, `security`, and `pr-review-fix`. The first six declare `after_pr` and `merge`, off when absent; `pr-review-fix` declares no flags and addresses an existing PR instead of creating or merging one. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. `-f after_pr` enables the prelude without merge; `-f merge` runs the same prelude once and adds the final native synchronous squash merge. `research` stays read-only with `create_pr: false`, so merge never creates a PR or overrides its no-PR policy.
+
+`cruise plan --pr NUMBER` defaults to `builtin:pr-review-fix` instead of normal config discovery. A custom workflow for a PR session must set `create_pr: true` and have a direct after-PR `github-review` step with `reviewers: all`; see [after-pr.md](references/after-pr.md#github-review) for the permission filter and loop rules.
 
 The shared six-step after-PR prelude is embedded with the binary and is not an
 extra catalog workflow. Built-ins never fall back to local shared files, while
@@ -42,9 +45,9 @@ and file-backed sessions keep their live-reload contract.
 
 `research` provides bounded read-only research with independent review and a cited report. `security` performs scoped, parallel security audits, triages findings, repairs confirmed safe defects, and independently verifies the results. `add-tests` inventories production behavior and real user-flow coverage before implementation and reports evidence-backed coverage/gap IDs; it does not impose numeric coverage quotas.
 
-In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, an interactive selector lists all found config files and the built-in workflows with `tdd` first; with no config files found, `tdd` is adopted without prompting.
+In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. Interactive selectors organize candidates using application settings `workflow_categories`, `show_others_category`, and `others_category_name`; see [application settings](references/top-level.md) for their syntax and fallback groups. These display settings do not change non-interactive resolution.
 
-> `cruise workflow add owner/repo[/path][@ref]` installs a pinned, self-contained copy of a GitHub workflow into `~/.config/cruise/workflows/<name>.yaml` plus a `<name>.cruise-package.json` manifest. Hand-written YAMLs there are never touched by `update`/`remove`.
+> `cruise workflow add owner/repo[/path.yaml][@ref]` installs pinned, self-contained GitHub workflows. A root `cruise-package.yaml` lists bundle members explicitly; without it, or with an explicit YAML path, a single workflow is installed. Singles use `workflows/<name>.yaml` plus `<name>.cruise-package.json`; bundles use `workflows/<name>/<workflow>.yaml` plus `.cruise-package-lock.json`. Bundle members are selectable as `<name>/<workflow>.yaml`. Hand-edited members and extra bundle files block `update`/`remove`.
 
 > User workflow YAMLs left directly in `~/.config/cruise/` are no longer discovered. Cruise emits a one-time warning and tells you to move them into `~/.config/cruise/workflows/`.
 
@@ -90,11 +93,11 @@ The full spec is split into the files below. Load only the sections you need.
 
 | Doc | Contents |
 |-----|----------|
-| [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, workflow-only `create_pr`, `force_exec`, hot-reload, rate-limit retry |
+| [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, workflow-only `create_pr`, `commit_message_template`, `pr_body_template`, `force_exec`, hot-reload, rate-limit retry |
 | [references/sdk.md](references/sdk.md) | SDK backends: jcode SDK (default, requires jcode CLI v0.88.0+), claude-agent-sdk, and OpenCode V2; model references, session tools, workflow-level MCP servers, and differences from command mode |
-| [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, `output_file`, command, option, parallel, `github-review` (after-pr only); child restrictions, `instruction`, `timeout` |
+| [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, `output_file`, `quality_gates`, command, option, parallel, `github-review` (after-pr only); child restrictions, `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{file:...}`, `{plan.language}`, `{pr.*}` |
-| [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `timeout` / migration from the removed `fail-if-no-file-changes` |
+| [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.no-file-changes` / `if.fail` / `quality_gates` / `timeout` / migration from the removed `fail-if-no-file-changes` |
 | [references/groups.md](references/groups.md) | Step group definitions, call sites, validation rules |
 | [references/after-pr.md](references/after-pr.md) | Steps that run after PR creation, plus constraints |
 | [references/env-and-llm.md](references/env-and-llm.md) | Env-var merge/override rules, jcode OpenAI priority processing (`JCODE_OPENAI_SERVICE_TIER`), and SDK/command session-title generation |
@@ -121,7 +124,10 @@ After writing or editing a config, verify each of the following:
 10. **`when.exists`**: is the glob non-empty and syntactically valid? (Globs containing `{...}` variables are only validated at runtime.)
 11. **YAML order**: steps execute in declaration order, except children within a `parallel` block run concurrently and join before the next step — does that match the intended flow?
 12. **Retry loops**: Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
+13. **`quality_gates`**: if present, is the list non-empty with nonblank commands and valid optional timeouts? Use it only on prompt steps outside parallel and `after-pr`, not on call sites. Check the shared retry budget and exhaustion behavior in [references/flow-control.md](references/flow-control.md#quality_gates--prompt-step-verification).
+
+Run `cruise workflow doctor <path>` to check references, routing and graph diagnostics without executing the workflow. Its unreachable-step warning is relative to the selected flags, which default to off; use `-f NAME` to inspect another flag selection. A reachable exitless cycle is an error if the start cannot reach a normal exit, or a warning if another path can exit. `--strict` makes warnings fail the check. These static checks do not establish command safety or resolve all runtime-dependent variables.
 
 ## Generated configs
 
-`cruise workflow generate` drafts a workflow with an LLM and saves it only after the `exec` preflight passes. Preflight does not catch unknown top-level keys (silently ignored) and does not prove command safety. Review any generated YAML against the authoring checklist above before running it.
+`cruise workflow generate` and the interactive `cruise workflow make` draft workflows with an LLM and save them only after doctor static checks pass with flags off and isolated defaults. `make` additionally requires explicit approval to write. These checks do not catch unknown top-level keys (silently ignored) and do not prove command safety. Review any generated YAML against the authoring checklist above before running it.
