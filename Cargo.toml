@@ -167,6 +167,11 @@ vt100 = "=0.18.1"
 
 [[test]]
 harness = false
+name = "config_env_bdd"
+path = "tests/config_env_bdd.rs"
+
+[[test]]
+harness = false
 name = "workflow_flags_bdd"
 path = "tests/workflow_flags_bdd.rs"
 test = false

@@ -2170,9 +2170,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             "JCODE_HOME",
             tmp.path().join("jcode-home"),
         ));
-        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            guards.push(crate::test_support::EnvGuard::remove(key));
-        }
+        guards.push(crate::test_support::EnvGuard::remove("JCODE_MODEL"));
+        guards.extend(crate::test_support::clear_config_override_envs());
         let original_dir = tmp.path().join("original");
         let worktree_path = tmp.path().join("worktree");
         std::fs::create_dir_all(&original_dir).unwrap_or_else(|error| panic!("{error}"));
@@ -2273,9 +2272,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             "JCODE_HOME",
             tmp.path().join("jcode-home"),
         ));
-        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            guards.push(crate::test_support::EnvGuard::remove(key));
-        }
+        guards.push(crate::test_support::EnvGuard::remove("JCODE_MODEL"));
+        guards.extend(crate::test_support::clear_config_override_envs());
         let config = crate::config::WorkflowConfig::from_yaml(
             "sdk: jcode\nsteps:\n  main:\n    command: echo done\nafter-pr:\n  final-check:\n    prompt: verify the change\n",
         )

@@ -3739,11 +3739,12 @@ steps:
             "JCODE_HOME",
             tmp.path().join("jcode-home"),
         ));
-        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            process
-                .env_guards
-                .push(crate::test_support::EnvGuard::remove(key));
-        }
+        process
+            .env_guards
+            .push(crate::test_support::EnvGuard::remove("JCODE_MODEL"));
+        process
+            .env_guards
+            .extend(crate::test_support::clear_config_override_envs());
         let manager = SessionManager::new(tmp.path().join("sessions"));
         let mut session = SessionState::new(
             "title-model-required".to_string(),

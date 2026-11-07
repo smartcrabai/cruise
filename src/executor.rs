@@ -1639,9 +1639,7 @@ mod tests {
         }
         guards.push(EnvGuard::set("JCODE_HOME", home.path().join("jcode-home")));
         guards.push(EnvGuard::set("JCODE_MODEL", "backend/default-model"));
-        for key in ["CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            guards.push(EnvGuard::remove(key));
-        }
+        guards.extend(crate::test_support::clear_config_override_envs());
         let env = HashMap::new();
         let mut req = base_req(&env);
         req.resume = Some(SdkSessionId {
@@ -1675,9 +1673,8 @@ mod tests {
         let config_root = home.path().join("config");
         guards.push(EnvGuard::set("XDG_CONFIG_HOME", &config_root));
         guards.push(EnvGuard::set("JCODE_HOME", home.path().join("jcode-home")));
-        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            guards.push(EnvGuard::remove(key));
-        }
+        guards.push(EnvGuard::remove("JCODE_MODEL"));
+        guards.extend(crate::test_support::clear_config_override_envs());
         std::fs::write(&config_root, "not a directory").unwrap_or_else(|error| panic!("{error}"));
         let user_file = config_root.join("cruise/default.yaml");
         let env = HashMap::new();
@@ -1726,14 +1723,10 @@ mod tests {
         std::fs::set_permissions(&executable, permissions)
             .unwrap_or_else(|error| panic!("{error}"));
         guards.push(prepend_to_path(&bin));
-        for key in [
-            "JCODE_MODEL",
-            "JCODE_HOME",
-            "CRUISE_MODEL",
-            "CRUISE_PLAN_MODEL",
-        ] {
+        for key in ["JCODE_MODEL", "JCODE_HOME"] {
             guards.push(EnvGuard::remove(key));
         }
+        guards.extend(crate::test_support::clear_config_override_envs());
 
         let token = CancellationToken::new();
         token.cancel();
@@ -1767,9 +1760,8 @@ mod tests {
         guards.push(EnvGuard::set("JCODE_HOME", root.path().join("jcode-home")));
         let xdg = root.path().join("workspace-config");
         guards.push(EnvGuard::set("XDG_CONFIG_HOME", xdg.as_os_str()));
-        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            guards.push(EnvGuard::remove(key));
-        }
+        guards.push(EnvGuard::remove("JCODE_MODEL"));
+        guards.extend(crate::test_support::clear_config_override_envs());
         let env = HashMap::new();
         let mut req = base_req(&env);
         req.working_dir = Some(root.path());
@@ -2633,9 +2625,8 @@ mod tests {
         let _process = lock_process();
         let home = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
         let mut guards = set_fake_home(home.path());
-        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            guards.push(EnvGuard::remove(key));
-        }
+        guards.push(EnvGuard::remove("JCODE_MODEL"));
+        guards.extend(crate::test_support::clear_config_override_envs());
         let env = HashMap::new();
         let mut req = base_req(&env);
         req.model = fixture_model(Some("provider/"));

@@ -608,18 +608,7 @@ mod tests {
         let lock = lock_process();
         let home = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let mut guards = set_fake_home(home.path());
-        for key in [
-            "CRUISE_MODEL",
-            "CRUISE_PLAN_MODEL",
-            "CRUISE_SDK",
-            "CRUISE_LANGUAGE_PR",
-            "CRUISE_LANGUAGE_PLAN",
-            "CRUISE_CLEANUP_AFTER_PR",
-            "CRUISE_INTERACTIVE_PLANNING",
-            "CRUISE_FORCE_EXEC",
-        ] {
-            guards.push(EnvGuard::remove(key));
-        }
+        guards.extend(crate::test_support::clear_config_override_envs());
         let project = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
         let user_dir = crate::paths::config_dir().unwrap_or_else(|e| panic!("{e:?}"));
         std::fs::create_dir_all(&user_dir).unwrap_or_else(|e| panic!("{e:?}"));

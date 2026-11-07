@@ -17,8 +17,18 @@ pub fn run(args: &ConfigArgs) -> Result<()> {
         config.save()?;
         println!("run_all_parallelism = {parallelism}");
     } else {
-        let config = crate::app_config::AppConfig::load()?;
-        println!("run_all_parallelism = {}", config.run_all_parallelism);
+        let config = crate::app_config::AppConfig::load()?.with_env_overrides()?;
+        let source = if std::env::var("CRUISE_RUN_ALL_PARALLELISM")
+            .is_ok_and(|value| !value.trim().is_empty())
+        {
+            " (from CRUISE_RUN_ALL_PARALLELISM)"
+        } else {
+            ""
+        };
+        println!(
+            "run_all_parallelism = {}{source}",
+            config.run_all_parallelism
+        );
         if let Some(model) = config.model.as_ref() {
             println!("model = {}", serde_json::to_string(model)?);
         }

@@ -83,6 +83,9 @@ impl Fixture {
     }
 
     fn configure(&self, command: &mut Command, no_color: bool) {
+        for key in cruise::config_env::all_override_names() {
+            command.env_remove(key);
+        }
         command
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join("config"))
@@ -93,14 +96,6 @@ impl Fixture {
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
             .env_remove("HERDR_ENV")
             .env_remove("CRUISE_CONFIG")
-            .env_remove("CRUISE_MODEL")
-            .env_remove("CRUISE_PLAN_MODEL")
-            .env_remove("CRUISE_SDK")
-            .env_remove("CRUISE_LANGUAGE_PR")
-            .env_remove("CRUISE_LANGUAGE_PLAN")
-            .env_remove("CRUISE_CLEANUP_AFTER_PR")
-            .env_remove("CRUISE_INTERACTIVE_PLANNING")
-            .env_remove("CRUISE_FORCE_EXEC")
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("ANTHROPIC_AUTH_TOKEN")
             .env_remove("CLAUDE_CODE_OAUTH_TOKEN");

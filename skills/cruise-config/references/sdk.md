@@ -102,9 +102,9 @@ prompt child, and `github-review` prompts) and planning's plan/fix/ask turns.
 Title generation, PR metadata, and `workflow generate` do not use it. Non-prompt
 steps and group/workflow-call/parallel wrappers reject it. A called workflow's
 top-level value is ignored in favor of the caller's default, but per-step
-overrides inside the callee remain. Layered `default.yaml` supports it;
-application `config.json` / `config.yaml` defaults and
-`CRUISE_SUBAGENT_MODEL` overrides are not provided.
+overrides inside the callee remain. Layered `default.yaml` and
+`CRUISE_SUBAGENT_MODEL` overrides support it; application `config.json` /
+`config.yaml` model defaults do not.
 
 ```yaml
 sdk: claude

@@ -5197,9 +5197,8 @@ steps:
             guards.push(crate::test_support::install_exiting_jcode_stub(&bin));
         }
         guards.push(EnvGuard::set("JCODE_HOME", home.path().join("jcode-home")));
-        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            guards.push(EnvGuard::remove(key));
-        }
+        guards.push(EnvGuard::remove("JCODE_MODEL"));
+        guards.extend(crate::test_support::clear_config_override_envs());
         let yaml = r"
 sdk: jcode
 steps:

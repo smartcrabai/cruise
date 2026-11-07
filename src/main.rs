@@ -15,6 +15,7 @@ mod cli;
 mod commit_guard;
 mod condition;
 mod config;
+mod config_env;
 mod config_cmd;
 mod configs;
 mod console_mode;

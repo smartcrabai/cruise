@@ -1,5 +1,9 @@
 # Checkpoint contract verification
 
+For the planned workflow environment override precedence and snapshot model,
+see `CONFIG_ENV_OVERRIDE.md` and run `bash scripts/check_config_env_specs.sh`.
+This standalone Quint model is not a production conformance test.
+
 For task-scoped `subagent_model` selection, backend configuration and exclusions,
 see `SUBAGENT_MODEL.md` and run `bash scripts/check_subagent_model_specs.sh`.
 The dedicated `subagent-model-specs` PR job runs pinned Quint verification,

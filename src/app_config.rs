@@ -51,6 +51,24 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// Apply process overrides to an in-memory copy, without changing persisted configuration.
+    pub fn with_env_overrides(mut self) -> Result<Self> {
+        for spec in crate::config_env::APP_ENV_KEYS {
+            let Ok(raw) = std::env::var(spec.var) else {
+                continue;
+            };
+            let Some(value) = crate::config_env::parse_override(spec.var, spec.kind, &raw)? else {
+                continue;
+            };
+            self.run_all_parallelism = serde_json::from_value(value).map_err(|error| {
+                CruiseError::Other(format!("invalid value for {}: {error}", spec.var))
+            })?;
+            self.validate().map_err(|error| {
+                CruiseError::Other(format!("invalid value for {}: {error}", spec.var))
+            })?;
+        }
+        Ok(self)
+    }
     /// Return the canonical app config path under `$XDG_CONFIG_HOME/cruise`
     /// (defaulting to `$HOME/.config/cruise`).
     ///
@@ -216,6 +234,43 @@ mod tests {
     use super::*;
     use crate::test_support::{EnvGuard, lock_process};
     use tempfile::TempDir;
+
+    #[test]
+    fn env_parallelism_is_validated_and_never_implicitly_persisted() {
+        let _lock = lock_process();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.json");
+        AppConfig::default().save_to(&path).unwrap();
+        let _env = EnvGuard::set("CRUISE_RUN_ALL_PARALLELISM", "4");
+        let raw = AppConfig::load_from(&path).unwrap();
+        assert_eq!(
+            raw.clone()
+                .with_env_overrides()
+                .unwrap()
+                .run_all_parallelism,
+            4
+        );
+        raw.save_to(&path).unwrap();
+        assert_eq!(AppConfig::load_from(&path).unwrap().run_all_parallelism, 1);
+        for value in ["0", "abc", "-1"] {
+            let _invalid = EnvGuard::set("CRUISE_RUN_ALL_PARALLELISM", value);
+            assert!(
+                AppConfig::default()
+                    .with_env_overrides()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("CRUISE_RUN_ALL_PARALLELISM")
+            );
+        }
+        let _blank = EnvGuard::set("CRUISE_RUN_ALL_PARALLELISM", "  ");
+        assert_eq!(
+            AppConfig::default()
+                .with_env_overrides()
+                .unwrap()
+                .run_all_parallelism,
+            1
+        );
+    }
 
     // -- Helpers --------------------------------------------------------------
 

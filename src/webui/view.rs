@@ -569,6 +569,7 @@ impl ToastVm {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsVm {
     pub(crate) run_all_parallelism: usize,
+    pub(crate) effective_run_all_parallelism: usize,
     pub(crate) error: Option<String>,
 }
 
