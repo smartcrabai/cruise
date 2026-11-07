@@ -24,6 +24,8 @@ mod console_mode;
 )]
 mod dag;
 mod desktop_notifications;
+mod notification_sound;
+mod notification_webhook;
 mod display;
 mod draft_cmd;
 #[cfg_attr(

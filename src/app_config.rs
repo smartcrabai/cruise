@@ -34,6 +34,58 @@ pub struct AppConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub plan_model: Option<crate::config::ModelSpec>,
+
+    /// Per-channel and per-event notification preferences.
+    #[serde(default, skip_serializing_if = "NotificationSettings::is_default")]
+    pub notifications: NotificationSettings,
+}
+
+/// Master switches and event-specific overrides for notifications.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct NotificationSettings {
+    pub desktop: bool,
+    pub sound: bool,
+    pub webhook: bool,
+    pub events: NotificationEvents,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            desktop: true,
+            sound: false,
+            webhook: true,
+            events: NotificationEvents::default(),
+        }
+    }
+}
+
+impl NotificationSettings {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Event-specific channel overrides, with absent values inheriting the master switch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct NotificationEvents {
+    #[serde(alias = "action_required")]
+    pub action_required: EventChannels,
+    #[serde(alias = "plan_ready")]
+    pub plan_ready: EventChannels,
+    pub completed: EventChannels,
+    pub failed: EventChannels,
+}
+
+/// Optional channel overrides for one notification event.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct EventChannels {
+    pub desktop: Option<bool>,
+    pub sound: Option<bool>,
+    pub webhook: Option<bool>,
 }
 
 fn is_yaml_config_path(path: &Path) -> bool {
@@ -46,6 +98,7 @@ impl Default for AppConfig {
             run_all_parallelism: 1,
             model: None,
             plan_model: None,
+            notifications: NotificationSettings::default(),
         }
     }
 }
@@ -490,6 +543,7 @@ mod tests {
                 "plan-primary".into(),
                 "plan-fallback".into(),
             ])),
+            ..AppConfig::default()
         };
         // When: save then load
         original
@@ -529,6 +583,7 @@ mod tests {
                         "plan-primary".into(),
                         "plan-fallback".into(),
                     ])),
+                    ..AppConfig::default()
                 },
             ),
             (
@@ -540,6 +595,7 @@ mod tests {
                         "fallback".into(),
                     ])),
                     plan_model: Some(crate::config::ModelSpec::Single("plan-primary".to_string())),
+                    ..AppConfig::default()
                 },
             ),
         ];

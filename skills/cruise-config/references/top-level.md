@@ -122,6 +122,10 @@ ordered primary-plus-fallback array. JSON takes precedence when both files
 exist; otherwise an existing YAML file is used. Settings updates preserve the
 selected format; when neither file exists, they create JSON. Invalid selected
 files fail rather than falling back to the other format.
+The application-level `notifications` setting controls desktop, sound, and
+webhook channels and their per-event switches. It is not a workflow key; the
+secret Slack webhook URL is supplied only through `CRUISE_NOTIFY_WEBHOOK`.
+See the README Notifications section for defaults and examples.
 These model defaults have lower precedence than either `default.yaml` layer
 or the workflow; environment overrides still win, and step models override
 the effective ordinary model. SDK mode derives fallback chains from these

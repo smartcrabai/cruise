@@ -1,5 +1,9 @@
 # Responsive WebUI executable specifications
 
+## Per-event notifications browser regression
+
+Run `cargo +1.99.1 build --locked --all-features --bin cruise-runtime` and `node tests/webui/notifications.mjs` from the repository root after installing the pinned Playwright dependencies and Chromium. The existing responsive WebUI CI job runs this test and uploads screenshots under `target/formal-reports/notification-browser/`. `WEBUI_BDD_BIN` selects a different runtime. Seven real workflows run through the browser in an isolated temporary Git repository, including option dialogs and deterministic no-file-changes failures. A browser EventSource observes production SSE and a local HTTP server receives real webhook POSTs. The test checks completed, action-required, and failed event opt-out and opt-in, plus a disabled master with completed-event opt-in, alongside the corresponding visible toasts. The option scenarios also answer the real dialog and complete their workflows. Negative SSE assertions observe a bounded 500 ms window after the toast. This does not exercise OS desktop notification display, sound, or plan-ready events.
+
 ## Graph flag browser regression
 
 After installing the pinned browser dependencies, run `cargo +1.99.1 build --locked --all-features --bin cruise-runtime` followed by `node tests/webui/graph-flags.mjs` from the repository root. The existing WebUI CI job runs this test and uploads `target/formal-reports/graph-browser/`. `WEBUI_BDD_BIN` can select another runtime and `WEBUI_GRAPH_REPORT_DIR` changes the screenshot directory. The test uses a temporary HOME/XDG tree and changes persisted flags externally, exercising real Graph tab HTMX requests for off, on, off again, and an all-disabled graph. It asserts the server's Mermaid source and projected edges, not that the externally loaded Mermaid CDN successfully rendered SVG. Screenshots capture the browser state at the swap and may show Mermaid source if the CDN has not loaded.

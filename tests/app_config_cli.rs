@@ -86,6 +86,135 @@ fn output_text(output: &Output) -> String {
     )
 }
 
+fn displayed_notifications(output: &Output) -> serde_json::Value {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("notifications = "))
+        .unwrap_or_else(|| panic!("missing notifications line: {stdout}"));
+    serde_json::from_str(value)
+        .unwrap_or_else(|error| panic!("invalid notifications JSON: {error}"))
+}
+
+#[test]
+fn notification_defaults_remain_invisible_and_are_not_saved() {
+    for input in [
+        r#"{"runAllParallelism":2}"#,
+        r#"{"runAllParallelism":2,"notifications":{}}"#,
+    ] {
+        let fixture = Fixture::new();
+        let path = fixture.write_app_config("json", input);
+        let shown = fixture.run(&["config"]);
+        assert!(shown.status.success(), "{}", output_text(&shown));
+        assert_eq!(
+            String::from_utf8_lossy(&shown.stdout),
+            "run_all_parallelism = 2\n"
+        );
+        let updated = fixture.run(&["config", "--set-parallelism", "3"]);
+        assert!(updated.status.success(), "{}", output_text(&updated));
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(saved.get("notifications").is_none(), "{saved}");
+    }
+}
+
+#[test]
+fn notification_settings_accept_aliases_and_survive_config_updates() {
+    let cases = [
+        (
+            "json",
+            r#"{"notifications":{"sound":true,"events":{"plan_ready":{"sound":false}}}}"#,
+        ),
+        (
+            "json",
+            r#"{"notifications":{"sound":true,"events":{"planReady":{"sound":false}}}}"#,
+        ),
+        (
+            "yaml",
+            "notifications:\n  sound: true\n  events:\n    plan_ready:\n      sound: false\n",
+        ),
+    ];
+    for (extension, input) in cases {
+        let fixture = Fixture::new();
+        fixture.write_app_config(extension, input);
+        let shown = fixture.run(&["config"]);
+        assert!(shown.status.success(), "{}", output_text(&shown));
+        let before = displayed_notifications(&shown);
+        assert_eq!(before["sound"], true);
+        assert_eq!(before["events"]["planReady"]["sound"], false);
+        let updated = fixture.run(&["config", "--set-parallelism", "7"]);
+        assert!(updated.status.success(), "{}", output_text(&updated));
+        let after = fixture.run(&["config"]);
+        assert!(after.status.success(), "{}", output_text(&after));
+        assert!(String::from_utf8_lossy(&after.stdout).contains("run_all_parallelism = 7\n"));
+        assert_eq!(displayed_notifications(&after), before);
+    }
+}
+
+#[test]
+fn notification_yaml_failed_override_is_displayed() {
+    let fixture = Fixture::new();
+    fixture.write_app_config(
+        "yaml",
+        "notifications:\n  events:\n    failed:\n      webhook: false\n",
+    );
+    let shown = fixture.run(&["config"]);
+    assert!(shown.status.success(), "{}", output_text(&shown));
+    assert_eq!(
+        displayed_notifications(&shown)["events"]["failed"]["webhook"],
+        false
+    );
+}
+
+#[test]
+fn notification_unknown_keys_are_rejected() {
+    let fixture = Fixture::new();
+    fixture.write_app_config("json", r#"{"notifications":{"sond":true}}"#);
+    let invalid = fixture.run(&["config"]);
+    assert!(!invalid.status.success(), "{}", output_text(&invalid));
+    assert!(
+        output_text(&invalid).contains("sond"),
+        "{}",
+        output_text(&invalid)
+    );
+}
+
+#[test]
+fn config_reports_webhook_error_without_exposing_webhook_url() {
+    let fixture = Fixture::new();
+    fixture.write_app_config("json", r#"{"notifications":{"sound":true}}"#);
+    let state = fixture.root.path().join("state/cruise");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("notification-webhook-error"),
+        "1700000000 transport error\n",
+    )
+    .unwrap();
+    let secret = "https://hooks.example.test/services/SECRET123";
+    let output = fixture
+        .command()
+        .env("CRUISE_NOTIFY_WEBHOOK", secret)
+        .arg("config")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", output_text(&output));
+    let text = output_text(&output);
+    assert!(
+        text.contains("notification_webhook_error = transport error at 1700000000"),
+        "{text}"
+    );
+    assert_eq!(displayed_notifications(&output)["sound"], true);
+    assert!(
+        !text.contains(secret) && !text.contains("SECRET123"),
+        "{text}"
+    );
+    assert!(
+        !std::fs::read_to_string(fixture.app_config("json"))
+            .unwrap()
+            .contains("SECRET123")
+    );
+}
+
 #[test]
 fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
     let fixture = Fixture::new();
