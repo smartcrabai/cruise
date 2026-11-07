@@ -1,5 +1,18 @@
 # Responsive WebUI executable specifications
 
+## Workflow category browser regression
+
+From the repository root, install the locked dependencies and browser, build the production runtime, and run the isolated browser test:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+npx --prefix tests/webui playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/workflow-categories.mjs
+```
+
+On Linux, use `playwright install --with-deps chromium` if system libraries are missing. Screenshots are written to `target/formal-reports/workflow-categories/` and uploaded by the existing responsive WebUI CI job. The test creates and removes its own HOME, XDG directories, workflow files, and session fixtures. It uses the production server, templates, and HTMX endpoints, without external credentials.
+
 ## Local merge browser contract
 
 After installing the pinned dependencies and Chromium as described below, build the runtime with `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, then run `node tests/webui/local-merge.mjs` from the repository root. Set `WEBUI_BDD_BIN` to use a different prebuilt runtime. This runs the production server and real Chromium against disposable Git repositories and isolated HOME/XDG directories. It covers confirmation cancellation, staging committed and uncommitted work, dirty-base rejection, and squash merge with cleanup, checking browser feedback and Git/session state. It never modifies the checkout running the test.

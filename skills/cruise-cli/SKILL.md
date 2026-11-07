@@ -42,7 +42,7 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 - **AwaitingInput** means SDK planning has persisted an unanswered question. Answering it resumes planning; `cruise list` offers **Generate Plan**, which regenerates the plan and moves the session to `AwaitingApproval`.
 - `cruise plan`/`--plan`/`draft` *create* sessions; `cruise run` *executes* them; `cruise list` *manages* them; `cruise clean` *garbage-collects* them.
 - `cruise exec` is the **odd one out**: it runs a workflow against the current directory with a **transient session**, no worktree, and no PR. Terminal exec sessions are removed automatically; paused or interrupted sessions remain resumable by ID. `force_exec: true` enables the same path for direct plan entry points; `--no-force-exec` opts out once.
-- `cruise exec --instant "task"` explicitly builds an in-memory single-agent workflow without a workflow YAML. Ordinary `exec` still resolves configuration: with no config file, interactive terminals offer built-in workflows with `tdd` selected by default, while non-interactive execution selects `tdd` automatically, not instant.
+- `cruise exec --instant "task"` explicitly builds an in-memory single-agent workflow without a workflow YAML. Ordinary `exec` still resolves configuration: with no config file, interactive terminals offer built-in workflows in the categorized selector, while non-interactive execution selects `tdd` automatically, not instant.
 - Bare `cruise` opens the official interactive keyboard client for the full WebUI-domain session workflows; use it for interactive management, while `cruise list` remains available as the CLI selector.
 
 ## Existing PR review fixes
@@ -343,8 +343,8 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 
 1. `-c/--config <path>` (must exist; no prompt). `__builtin__` and `builtin:tdd` select `tdd`; `builtin:<name>` selects a named catalog workflow. The former selectors `builtin:default`, `builtin:simple`, and `builtin:review` are unsupported. `cruise workflow list` prints the catalog; `cruise workflow eject <name> [--to user|project]` copies a catalog workflow without overwriting an existing file.
 2. `CRUISE_CONFIG` env var (must exist; no prompt)
-3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted, excluding top-level `./.cruise/default.yaml`), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml` and members of valid locked bundles. Multiple candidates → interactive picker with the built-in `tdd` entry first (TTY) or highest-priority auto-pick (non-interactive).
-4. None found → an interactive terminal offers the built-in workflows with `tdd` selected by default; non-interactive execution automatically selects the embedded `tdd` workflow (`builtin/tdd.yaml` in the source tree).
+3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted, excluding top-level `./.cruise/default.yaml`), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml` and members of valid locked bundles. Candidates are offered in an interactive picker (TTY) or the highest-priority candidate is picked automatically (non-interactive). Application `workflow_categories` affects only interactive picker display, not resolution priority.
+4. No config file found → an interactive terminal offers built-in workflows in the selector; non-interactive execution automatically selects the embedded `tdd` workflow (`builtin/tdd.yaml` in the source tree).
 The built-in names are `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, `security`, and `pr-review-fix`; use one with `builtin:<name>` to select it.
 
 

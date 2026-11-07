@@ -239,7 +239,7 @@ The TUI requires an interactive TTY on macOS, Linux, or Windows. It is an intera
 The TUI has three views:
 
 - **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, **Log**, or **Diff** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The Info tab shows declared workflow flags and their on/off values. The Graph tab shows its node list plus the selected node's dependency and edge details, hiding flag-disabled steps except in legacy unversioned graph checkpoints, which are displayed without filtering; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
-- **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above and the remaining questions below. The order is Source (local Directory or GitHub repository), working directory or repository, workflow config, task, images, workflow flags (shown only when the config declares flags), skipped steps (flag-disabled steps are hidden), workspace mode, dirty-tree allowance (current-branch runs only), and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and all built-in workflows with `tdd` first. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
+- **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above and the remaining questions below. The order is Source (local Directory or GitHub repository), working directory or repository, workflow config, task, images, workflow flags (shown only when the config declares flags), skipped steps (flag-disabled steps are hidden), workspace mode, dirty-tree allowance (current-branch runs only), and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question includes Auto-detect and organizes the same prioritized file candidates and built-in workflows as the CLI according to configured categories and Others visibility. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
 - **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Press `p` to edit the shared WebUI/TUI parallelism setting. Changes are saved to the app configuration and can be made while a batch is active; a new limit applies at the next scheduling point, without cancelling workers that are already running. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
 PR and Issue URLs are shown as text; a successful Publish as Issue also opens the new issue URL automatically. The dedicated PR/Issue URL action opens them with `open` on macOS, `explorer.exe` on Windows, or `xdg-open` on Linux; other Markdown links remain textual. CLI-only `config` and `exec` operations remain available through their CLI commands rather than TUI screens.
@@ -529,7 +529,7 @@ Options:
 ```
 Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. A transient session is recorded while the workflow runs, then automatically removed when it reaches a terminal phase. Sessions paused for input (`Running`) or interrupted with Ctrl+C (`Suspended`) are kept and can be resumed with `cruise run <id>`; exec sessions are excluded from `cruise run` automatic selection and `cruise run --all`. Existing uncommitted changes are allowed; cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is still required.
 
-`--instant` explicitly opts into a workflow assembled in memory instead of resolving `CRUISE_CONFIG` or a local workflow file. Without it, `cruise exec` retains normal config resolution: with no config file, an interactive terminal offers built-in workflows with `tdd` selected by default, while non-interactive execution selects `tdd` automatically. Instant requires a nonblank task and includes one implement step. Workflow defaults can prepend command pre-steps. It does not write a workflow into the repository; the existing session retains an inline config snapshot while the session exists. Workflow defaults and environment overrides still apply, and `CRUISE_SDK` / `CRUISE_MODEL` override `--sdk` / `--model`.
+`--instant` explicitly opts into a workflow assembled in memory instead of resolving `CRUISE_CONFIG` or a local workflow file. Without it, `cruise exec` retains normal config resolution: with no config file, an interactive terminal offers built-in workflows in the categorized selector, while non-interactive execution selects `tdd` automatically. Instant requires a nonblank task and includes one implement step. Workflow defaults can prepend command pre-steps. It does not write a workflow into the repository; the existing session retains an inline config snapshot while the session exists. Workflow defaults and environment overrides still apply, and `CRUISE_SDK` / `CRUISE_MODEL` override `--sdk` / `--model`.
 
 ```sh
 cruise exec --instant --sdk jcode --model my-model --review --review-rounds 2 \
@@ -613,6 +613,22 @@ plan_model:
 ```
 
 Workflow and `default.yaml` model settings override these defaults; environment overrides still win. If no layer sets `plan_model`, planning uses the effective `model`. SDK arrays use the existing [fallback behavior](#sdk-mode); command mode uses only the primary. `planModel` is accepted as an alias for `plan_model`. Missing parallelism defaults to `1`, so model-only settings are valid. Updating parallelism through the CLI, WebUI, or TUI preserves both model settings.
+
+The same application settings file can organize interactive workflow selectors:
+
+```yaml
+workflow_categories:
+  Development:
+    workflows:
+      - builtin:tdd
+      - refactor: Refactor an existing codebase
+    Backend:
+      workflows: [api]
+show_others_category: true
+others_category_name: Others
+```
+
+`workflow_categories` is an ordered tree of category maps. Each category may contain a `workflows` list and nested categories. Entries are names or single-key maps whose value overrides the selector description. `show_others_category` defaults to `true`, and `others_category_name` defaults to `Others`. These settings belong in application `config.yaml` or `config.json`, not workflow files or `default.yaml`. See [config file resolution](#config-file-resolution) for matching and fallback behavior.
 
 Both workflow and application settings support SDK-qualified entries in `model` and `plan_model` arrays:
 
@@ -868,7 +884,7 @@ cruise resolves the workflow config as follows:
 
    The research workflow and security inventory/audit/triage phases require SDK permissions for read-only work. When neither `command:` nor `sdk:` remains set after workflow and applicable user/project defaults are resolved, Cruise uses its default `sdk: jcode`; a `command:` backend cannot be confined to read-only mode and is rejected for restricted-permission steps.
 
-   Interactive selectors (CLI, TUI, WebUI) list every built-in with its description after config files, with `tdd` first. Non-interactive resolution with no config file uses `tdd`.
+   Interactive selectors (CLI, TUI, WebUI) organize built-ins and other candidates into categories. Non-interactive resolution with no config file uses `tdd`.
 
    `create_pr` is a workflow-only boolean that defaults to `true`. Setting it to `false` skips Cruise's automatic commit, push, PR creation, `after-pr`, and PR-based cleanup, while retaining a normal session, its artifacts, and its worktree; local no-PR worktrees do not need `gh`/`glab`, but `--repo` still needs the forge CLI for repository access. With PR creation enabled, a successful run with no new branch commits skips PR creation without error, while existing branch commits remain eligible; opted-in after-PR actions are skipped with a reason if no PR is created. `merge` never overrides `create_pr: false` or a read-only workflow such as `research`; explicit `if.no-file-changes` failure/retry guards still apply. `create_pr` is rejected in user and project `default.yaml` files; it is not a CLI option.
 
@@ -878,10 +894,14 @@ cruise resolves the workflow config as follows:
    - `./.cruise/*.yaml` / `*.yml` (current directory), sorted by filename; the top-level `./.cruise/default.yaml` is excluded
    - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` and members of valid locked bundle directories (default: `~/.config/cruise/workflows/`), sorted by relative path
 
-   When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. The built-in workflows are always offered at the end of the list, with `tdd` first, so they remain selectable even when config files are found; on a TTY with only built-ins the picker still starts at `tdd`. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
-4. **No config file found** -- an interactive terminal offers the built-in workflows with `tdd` selected by default; non-interactive resolution selects the embedded `tdd` workflow automatically. No config file is required.
+   When stdin and stdout are both TTYs, candidates and built-in workflows are presented in a categorized interactive selector. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
+4. **No config file found** -- an interactive terminal offers built-in workflows in the selector; non-interactive resolution selects the embedded `tdd` workflow (`builtin/tdd.yaml` in the source tree) automatically. No config file is required.
 
-The `description:` field of each config file is shown next to its filename in both the CLI selector and the WebUI, making it easier to tell similar files apart. The WebUI's config selector offers every built-in workflow with its description alongside *Auto* so a session can be pinned to an embedded workflow regardless of discovered files.
+Interactive selectors use the configured `workflow_categories` tree, or, when it is empty or absent, the defaults: Development (`tdd`, `refactor`), Quality (`add-tests`, `add-formal-specs`), Research (`research`), and Security (`security`). A nonempty user tree replaces those defaults rather than merging with them. Categories and workflow entries each retain their declaration order; CLI submenus display subcategories before workflow entries. A workflow can appear in multiple categories.
+
+A bare entry matches a file's stem (filename without extension) and a built-in name. For example, `refactor` matches both `refactor.yaml` and the built-in, while `builtin:refactor` matches only the built-in. Matching files from different sources all appear. Missing names are ignored, and empty categories are omitted. An entry such as `{refactor: "Custom description"}` supplies the selector description and overrides the workflow's `description:` in WebUI. The CLI picker does not load file workflow descriptions. Conflicting descriptions for the same workflow, including bare and prefixed names for a built-in, are invalid. Picker settings are validated when opening a picker and do not prevent runtime model or parallelism defaults from loading.
+
+Uncategorized local and `CRUISE_CONFIG` candidates remain available at the root (in WebUI, under `Base dir (...)`). Uncategorized installed packages appear in `Packages`, followed by uncategorized user-directory and built-in workflows in `Others` or the configured `others_category_name`. Setting `show_others_category: false` hides those uncategorized user and built-in choices, but not local, environment, or installed package candidates. WebUI also retains its *Auto* and built-in `tdd` choices and the current session workflow when it is otherwise filtered out. Categories affect interactive display only, not explicit selection or non-interactive resolution priority.
 
 ### Workflow defaults (`default.yaml`)
 
