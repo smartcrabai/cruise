@@ -235,6 +235,16 @@ pub(crate) fn probe(provider: Provider, binary: &Path, expected: &str) -> Result
     probe_with_timeout(provider, binary, expected, Duration::from_secs(30))
 }
 
+#[cfg(target_os = "linux")]
+fn executable_busy(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ETXTBSY)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn executable_busy(_error: &std::io::Error) -> bool {
+    false
+}
+
 fn probe_with_timeout(
     provider: Provider,
     binary: &Path,
@@ -254,7 +264,23 @@ fn probe_with_timeout(
             cmd.arg("--version").env("OPENCODE_DISABLE_AUTOUPDATE", "1");
         }
     }
-    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+    let deadline = Instant::now() + timeout;
+    let mut child = loop {
+        match cmd.spawn() {
+            Ok(child) => break child,
+            // A concurrent fork can temporarily inherit the just-closed writable
+            // download descriptor until exec closes it. Linux rejects execution
+            // during that window, even though this process closed its handle.
+            Err(e) if executable_busy(&e) && Instant::now() < deadline => {
+                std::thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
     let mut stdout = child
         .stdout
         .take()
@@ -278,7 +304,6 @@ fn probe_with_timeout(
         })();
         let _ = sender.send(result);
     });
-    let deadline = Instant::now() + timeout;
     loop {
         if child.try_wait()?.is_some() {
             break;
@@ -330,6 +355,47 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_retries_text_file_busy_until_writer_closes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("tool");
+        fs::write(&binary, b"#!/bin/sh\necho '2.1.250 (Claude Code)'\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let writer = fs::OpenOptions::new().write(true).open(&binary).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(writer);
+        });
+        let result =
+            probe_with_timeout(Provider::Claude, &binary, "2.1.250", Duration::from_secs(2));
+        release.join().unwrap();
+        result.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_does_not_retry_busy_file_indefinitely() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("tool");
+        fs::write(&binary, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let _writer = fs::OpenOptions::new().write(true).open(&binary).unwrap();
+        let start = Instant::now();
+        assert!(
+            probe_with_timeout(
+                Provider::Claude,
+                &binary,
+                "2.1.250",
+                Duration::from_millis(100)
+            )
+            .is_err()
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn archive_rejects_extra_regular_file() {

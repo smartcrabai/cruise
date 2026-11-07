@@ -118,10 +118,10 @@ fn traversal_and_links_are_rejected() {
 
 #[test]
 fn excessive_entries_and_missing_binary_are_rejected() {
-    let entries = vec![("package/other", tar::EntryType::Regular); MAX_ARCHIVE_ENTRIES + 1];
+    let entries = vec![("package", tar::EntryType::Directory); MAX_ARCHIVE_ENTRIES + 1];
     rejected_archive(archive(&entries), "too many archive entries");
     rejected_archive(
-        archive(&[("package/other", tar::EntryType::Regular)]),
+        archive(&[("package", tar::EntryType::Directory)]),
         "expected binary missing",
     );
 }

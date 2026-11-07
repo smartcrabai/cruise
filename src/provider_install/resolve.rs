@@ -57,14 +57,10 @@ pub(crate) fn resolve_with_path(
         .unwrap_or_default();
     let root = crate::paths::data_dir().ok();
     let target = target::detect_target_key(provider).unwrap_or("");
-    resolve_optional_root(
-        provider,
-        value.as_deref(),
-        root.as_deref(),
-        &dirs,
-        target,
-        true,
-    )
+    match root.as_deref() {
+        Some(root) => resolve_in(provider, value.as_deref(), root, &dirs, target),
+        None => resolve_optional_root(provider, value.as_deref(), None, &dirs, target, true),
+    }
 }
 
 pub(crate) fn resolve_in(

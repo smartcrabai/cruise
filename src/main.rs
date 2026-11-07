@@ -70,8 +70,7 @@ mod platform;
 mod pr_merge;
 mod pr_review_fix;
 mod pr_template;
-#[expect(unused_imports, reason = "resolver types are part of the library API")]
-mod provider_install;
+pub mod provider_install;
 mod quality_gate;
 mod repo_clone;
 mod resolver;

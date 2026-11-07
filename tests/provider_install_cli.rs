@@ -29,10 +29,10 @@ fn run(root: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
-fn status_lists_all_pins_without_creating_data_or_executing_providers() {
-    let temp = TempDir::new().unwrap();
+fn status_lists_all_pins_without_creating_data_or_executing_providers() -> std::io::Result<()> {
+    let temp = TempDir::new()?;
     let root = temp.path();
-    fs::create_dir(root.join("bin")).unwrap();
+    fs::create_dir(root.join("bin"))?;
     for provider in ["jcode", "claude", "opencode"] {
         let path = root.join("bin").join(provider);
         fs::write(
@@ -41,9 +41,8 @@ fn status_lists_all_pins_without_creating_data_or_executing_providers() {
                 "#!/bin/sh\necho invoked >> '{}'\n",
                 root.join("executed").display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        )?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
     let output = run(root, &["install", "--status"]);
     assert!(
@@ -67,29 +66,31 @@ fn status_lists_all_pins_without_creating_data_or_executing_providers() {
     }
     assert!(!root.join("data").exists());
     assert!(!root.join("executed").exists());
+    Ok(())
 }
 
 #[test]
-fn status_preserves_existing_data() {
-    let temp = TempDir::new().unwrap();
+fn status_preserves_existing_data() -> std::io::Result<()> {
+    let temp = TempDir::new()?;
     let dir = temp.path().join("data/cruise/providers/jcode");
-    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&dir)?;
     let record = dir.join("install.json");
-    fs::write(&record, b"invalid record\n").unwrap();
-    let before = fs::metadata(&record).unwrap().modified().unwrap();
+    fs::write(&record, b"invalid record\n")?;
+    let before = fs::metadata(&record)?.modified()?;
     let output = run(temp.path(), &["install", "--status"]);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(fs::read(&record).unwrap(), b"invalid record\n");
-    assert_eq!(fs::metadata(&record).unwrap().modified().unwrap(), before);
-    assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+    assert_eq!(fs::read(&record)?, b"invalid record\n");
+    assert_eq!(fs::metadata(&record)?.modified()?, before);
+    assert_eq!(fs::read_dir(&dir)?.count(), 1);
+    Ok(())
 }
 
 #[test]
-fn install_rejects_invalid_argument_combinations_before_doing_work() {
+fn install_rejects_invalid_argument_combinations_before_doing_work() -> std::io::Result<()> {
     for args in [
         vec!["install"],
         vec!["install", "--force"],
@@ -98,7 +99,7 @@ fn install_rejects_invalid_argument_combinations_before_doing_work() {
         vec!["install", "unknown"],
         vec!["install", "jcode", "claude"],
     ] {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new()?;
         let output = run(temp.path(), &args);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "unexpected success for {args:?}");
@@ -110,4 +111,5 @@ fn install_rejects_invalid_argument_combinations_before_doing_work() {
         }
         assert!(!temp.path().join("data").exists(), "{args:?} created data");
     }
+    Ok(())
 }
