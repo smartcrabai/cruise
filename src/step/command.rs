@@ -506,9 +506,20 @@ pub(crate) async fn run_process_output_cancelled(
     cwd: Option<&std::path::Path>,
     cancel_token: Option<&crate::cancellation::CancellationToken>,
 ) -> Result<std::process::Output> {
+    run_process_output_cancelled_with_env(program, args, cwd, cancel_token, &[]).await
+}
+
+pub(crate) async fn run_process_output_cancelled_with_env(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    cancel_token: Option<&crate::cancellation::CancellationToken>,
+    env: &[(&str, &str)],
+) -> Result<std::process::Output> {
     let mut builder = Command::new(program);
     builder
         .args(args)
+        .envs(env.iter().copied())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

@@ -175,6 +175,10 @@ pub struct CompiledWorkflow {
     pub pr_language: String,
     /// Language to use for planning prompts.
     pub plan_language: String,
+    /// Optional template for the generated commit subject.
+    pub commit_message_template: Option<String>,
+    /// Optional template for the generated pull request body.
+    pub pr_body_template: Option<String>,
     /// MCP servers made available to every SDK prompt run.
     pub mcp_servers: crate::config::McpServers,
     /// Whether successful worktree runs commit, push, and create a pull request.
@@ -216,6 +220,8 @@ impl CompiledWorkflow {
             env: self.env.clone(),
             pr_language: self.pr_language.clone(),
             plan_language: self.plan_language.clone(),
+            commit_message_template: self.commit_message_template.clone(),
+            pr_body_template: self.pr_body_template.clone(),
             mcp_servers: self.mcp_servers.clone(),
             create_pr: self.create_pr,
             cleanup_after_pr: self.cleanup_after_pr,
@@ -246,6 +252,7 @@ impl CompiledWorkflow {
 pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
     crate::config::validate_quality_gates(&config)?;
     crate::config::validate_squash_merge(&config)?;
+    crate::pr_template::validate_config(&config)?;
     crate::config::validate_output_file_usage(&config)?;
     crate::config::validate_parallel_steps(&config)?;
     let (steps, invocations, step_to_invocation) = expand_steps(&config.steps, &config.groups)?;
@@ -267,6 +274,8 @@ pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
         env: config.env,
         pr_language,
         plan_language,
+        commit_message_template: config.commit_message_template,
+        pr_body_template: config.pr_body_template,
         mcp_servers: config.mcp_servers,
         create_pr: config.create_pr,
         cleanup_after_pr,
@@ -436,6 +445,18 @@ mod tests {
 
     fn compiled(yaml: &str) -> CompiledWorkflow {
         compile(parsed(yaml)).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    #[test]
+    fn pr_templates_survive_compile_and_after_pr() {
+        let workflow = compiled(
+            "commit_message_template: '{title}'\npr_body_template: '{body}'\nsteps:\n  main:\n    command: echo ok\n",
+        );
+        let after = workflow.to_after_pr_compiled();
+        for value in [&workflow, &after] {
+            assert_eq!(value.commit_message_template.as_deref(), Some("{title}"));
+            assert_eq!(value.pr_body_template.as_deref(), Some("{body}"));
+        }
     }
 
     #[test]

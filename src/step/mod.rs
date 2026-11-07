@@ -293,11 +293,13 @@ mod tests {
                     selector: Some("Continue".to_string()),
                     text_input: None,
                     next: Some("next_step".to_string()),
+                    return_label: None,
                 },
                 OptionItem {
                     selector: Some("Cancel".to_string()),
                     text_input: None,
                     next: None,
+                    return_label: None,
                 },
             ]),
             plan: Some("{plan}".to_string()),
@@ -450,6 +452,7 @@ mod tests {
                 selector: None,
                 text_input: Some("Enter text".to_string()),
                 next: Some("next".to_string()),
+                return_label: None,
             }]),
             ..Default::default()
         };
@@ -483,6 +486,7 @@ mod tests {
                 selector: Some("Pick".to_string()),
                 text_input: Some("Enter".to_string()),
                 next: None,
+                return_label: None,
             }]),
             ..Default::default()
         };
@@ -510,6 +514,7 @@ mod tests {
                 selector: None,
                 text_input: None,
                 next: None,
+                return_label: None,
             }]),
             ..Default::default()
         };

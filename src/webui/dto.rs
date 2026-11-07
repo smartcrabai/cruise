@@ -31,6 +31,7 @@ pub struct SessionDto {
     pub id: String,
     pub phase: String,
     pub phase_error: Option<String>,
+    pub auto_requeue_count: u32,
     pub config_source: String,
     pub config_path: Option<String>,
     pub base_dir: String,
@@ -43,6 +44,9 @@ pub struct SessionDto {
     pub worktree_branch: Option<String>,
     pub workspace_mode: WorkspaceMode,
     pub pr_url: Option<String>,
+    pub can_merge_locally: bool,
+    pub can_stage_locally: bool,
+    pub pr_target: Option<crate::pr_review_fix::PrTarget>,
     pub updated_at: Option<String>,
     pub awaiting_input: bool,
     pub pending_ask_question: Option<String>,
@@ -67,8 +71,11 @@ pub(crate) fn session_dto(
     resolve_current_step: bool,
 ) -> SessionDto {
     let plan_available = session_plan_available(&state);
+    let can_merge_locally = crate::local_merge::can_merge_locally(&state);
+    let can_stage_locally = crate::local_merge::can_stage_locally(&state);
     let (phase, phase_error) = match &state.phase {
         SessionPhase::Failed(message) => ("Failed".to_string(), Some(message.clone())),
+        SessionPhase::PrFailed(message) => ("PR Failed".to_string(), Some(message.clone())),
         phase => (phase.label().to_string(), None),
     };
     let config_path = state.config.selection_value();
@@ -92,6 +99,7 @@ pub(crate) fn session_dto(
         id: state.id,
         phase,
         phase_error,
+        auto_requeue_count: state.auto_requeue_count,
         config_source,
         config_path,
         base_dir: state.base_dir.to_string_lossy().into_owned(),
@@ -104,6 +112,9 @@ pub(crate) fn session_dto(
         worktree_branch: state.worktree_branch,
         workspace_mode: state.workspace_mode,
         pr_url: state.pr_url,
+        can_merge_locally,
+        can_stage_locally,
+        pr_target: state.pr_target,
         updated_at: state.updated_at,
         awaiting_input: state.awaiting_input,
         pending_ask_question: state.pending_ask_question,
@@ -602,6 +613,7 @@ mod tests {
             id: "session-1".to_string(),
             phase: "Planned".to_string(),
             phase_error: None,
+            auto_requeue_count: 0,
             config_source: crate::resolver::ConfigSource::Builtin.display_string(),
             config_path: Some(BUILTIN_CONFIG_PATH.to_string()),
             base_dir: "/tmp/project".to_string(),
@@ -614,6 +626,9 @@ mod tests {
             worktree_branch: None,
             workspace_mode: WorkspaceMode::Worktree,
             pr_url: None,
+            can_merge_locally: false,
+            can_stage_locally: false,
+            pr_target: None,
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,

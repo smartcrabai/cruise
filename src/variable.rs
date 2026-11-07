@@ -91,7 +91,7 @@ pub(crate) fn resolve_template_with_lookup(
 }
 
 /// Holds all runtime variables for a workflow execution.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VariableStore {
     /// Initial input from the CLI argument or stdin.
     input: String,
@@ -118,7 +118,7 @@ pub struct VariableStore {
 }
 
 /// A named variable value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NamedVariable {
     /// A file path - resolves to the path string itself (not the file contents).
     FilePath(std::path::PathBuf),

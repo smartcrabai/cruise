@@ -1,5 +1,30 @@
 # Checkpoint contract verification
 
+For local squash merge lifecycle safety, run `bash scripts/check_local_merge_specs.sh`.
+The dedicated `local-merge-specs` CI job runs the pinned Quint tests, simulation
+and bounded verification, all Alloy assertions and witnesses with receipt
+validation, and the local merge Gherkin target. Fresh evidence is retained under
+`target/formal-reports/local-merge.*`.
+The models cover refusal and rollback, at-most-one commit, marker-before-cleanup,
+session deletion after cleanup, and safe commit guards, including a cleanup-failure
+retry witness. Quint explores eight steps; Alloy uses eight ordered states.
+Exact commands, pins, local results and receipt details are recorded in
+`LOCAL_MERGE_VERIFICATION.md`.
+These are bounded abstractions, not a proof of the Rust implementation. In
+particular, failure or crash between the base commit and marker persistence is
+not modeled, and the modeled cleanup failure leaves both resources intact.
+
+For bounded batch auto-requeue safety, see `AUTO_REQUEUE.md` and run
+`bash scripts/check_auto_requeue_specs.sh`. The dedicated `auto-requeue-specs`
+CI job retains verification receipts and traces.
+
+For the bounded PR publication recovery lifecycle, run `bash scripts/check_pr_failed_specs.sh` with the pinned toolchain described below. The suite checks that Create PR does not rerun the workflow, cancellation retains PR Failed, worktrees remain available, and completion has a PR or a no-commits skip. It includes Quint, Alloy assertion and witness receipts, and executable production application scenarios. These bounded abstractions are not a proof of the production implementation. Reports are retained under `target/formal-reports/pr-failed.*`, and the `agent-auth-specs` CI job runs the suite independently of the preceding authentication check.
+
+For PR review-fix permission filtering and bounded termination, see
+`PR_REVIEW_FIX.md` and run `bash scripts/check_pr_review_fix_specs.sh`.
+The `pr-review-fix-specs` CI job runs Quint, Alloy receipt checks and
+production-connected Gherkin.
+
 For task-scoped `subagent_model` selection, backend configuration and exclusions,
 see `SUBAGENT_MODEL.md` and run `bash scripts/check_subagent_model_specs.sh`.
 The dedicated `subagent-model-specs` PR job runs pinned Quint verification,
