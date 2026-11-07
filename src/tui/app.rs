@@ -2834,7 +2834,7 @@ impl TuiApp {
         let running =
             self.application.runtime().active_operation(&state.id) == Some(OperationKind::Run);
         let mut actions = if running {
-            vec![SessionAction::Tell, SessionAction::Cancel]
+            vec![SessionAction::Cancel, SessionAction::Tell]
         } else {
             self.application.capabilities(state)
         };
@@ -7871,10 +7871,9 @@ mod tests {
             let Some(Modal::Palette { actions, selected }) = &app.modal else {
                 panic!("palette expected for {phase:?}");
             };
-            assert_eq!(actions, &[SessionAction::Tell, SessionAction::Cancel]);
+            assert_eq!(actions, &[SessionAction::Cancel, SessionAction::Tell]);
             assert_eq!(*selected, 0);
             assert!(!token.is_cancelled());
-            app.handle_action(Action::Down);
             app.handle_action(Action::Enter);
             assert!(token.is_cancelled(), "Enter must cancel the live run");
             assert_eq!(app.sessions[0].phase, phase);

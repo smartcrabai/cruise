@@ -150,6 +150,9 @@ fn c1_missing_text_on_tty_is_rejected() {
         .openpty(PtySize::default())
         .unwrap_or_else(|error| panic!("{error}"));
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_cruise"));
+    // A controlling terminal is unnecessary for isatty and is hung up when
+    // its session leader exits on macOS, potentially discarding output.
+    cmd.set_controlling_tty(false);
     cmd.args(["tell", ID]);
     cmd.cwd(f.root.path());
     cmd.env("HOME", f.root.path().join("home"));
@@ -161,26 +164,60 @@ fn c1_missing_text_on_tty_is_rejected() {
         .slave
         .spawn_command(cmd)
         .unwrap_or_else(|error| panic!("{error}"));
-    drop(pair.slave);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap_or_else(|error| panic!("{error}")) {
-            break status;
-        }
-        if std::time::Instant::now() >= deadline {
-            child.kill().unwrap_or_else(|error| panic!("{error}"));
-            let _ = child.wait();
-            panic!("tell without text blocked on a TTY");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    };
-    let mut text = String::new();
-    let _ = pair
+    // Keep the slave open until the output has been read.
+    let mut reader = pair
         .master
         .try_clone_reader()
-        .unwrap_or_else(|error| panic!("{error}"))
-        .read_to_string(&mut text);
-    assert!(!status.success(), "{text}");
+        .unwrap_or_else(|error| panic!("{error}"));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = [0; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(Ok(buffer[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut status = None;
+    let mut output = Vec::new();
+    loop {
+        if status.is_none() {
+            status = child.try_wait().unwrap_or_else(|error| panic!("{error}"));
+        }
+        if status.is_some()
+            && String::from_utf8_lossy(&output).contains("instruction text is required")
+        {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            if status.is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            panic!(
+                "tell did not exit with the expected TTY output: {}",
+                String::from_utf8_lossy(&output)
+            );
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(20)) {
+            Ok(Ok(bytes)) => output.extend(bytes),
+            Ok(Err(error)) => panic!("PTY read failed: {error}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(error) => panic!("PTY reader stopped unexpectedly: {error}"),
+        }
+    }
+    let text = String::from_utf8_lossy(&output);
+    assert!(status.is_some_and(|status| !status.success()), "{text}");
     assert!(text.contains("instruction text is required"), "{text}");
 }
 
