@@ -859,12 +859,10 @@ fn parse_github_ci_page(pr: &Value) -> Result<GitHubCiPage, AutoSquashError> {
     parse_github_ci_context_page(contexts, check_state, check_commit_oid, rollup_status)
 }
 
-fn parse_github_check_suite_status(
-    suite: &Value,
-) -> Result<GitHubCheckStatus, AutoSquashError> {
-    let workflow_run = suite.get("workflowRun").ok_or_else(|| {
-        AutoSquashError::Rejected("GitHub CI workflow run is unavailable".into())
-    })?;
+fn parse_github_check_suite_status(suite: &Value) -> Result<GitHubCheckStatus, AutoSquashError> {
+    let workflow_run = suite
+        .get("workflowRun")
+        .ok_or_else(|| AutoSquashError::Rejected("GitHub CI workflow run is unavailable".into()))?;
     if workflow_run.is_null() {
         return Ok(GitHubCheckStatus::Green);
     }

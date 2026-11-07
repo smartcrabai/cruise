@@ -225,7 +225,10 @@ impl Fixture {
         let mut env = HashMap::from([
             ("PATH".to_string(), format!("{}:{path}", self.bin.display())),
             ("FAKE_LOG".to_string(), self.log.display().to_string()),
-            ("FAKE_EFFECTS".to_string(), self.effects.display().to_string()),
+            (
+                "FAKE_EFFECTS".to_string(),
+                self.effects.display().to_string(),
+            ),
             ("FAKE_MERGED".to_string(), self.merged.display().to_string()),
             ("FAKE_EXPECTED_HEAD".to_string(), self.head.clone()),
             (
@@ -272,7 +275,10 @@ impl Fixture {
                 "FAKE_GH_SUITES_CALLS".to_string(),
                 self.gh_suites_calls.display().to_string(),
             ),
-            ("FAKE_GH_RULES".to_string(), self.gh_rules.display().to_string()),
+            (
+                "FAKE_GH_RULES".to_string(),
+                self.gh_rules.display().to_string(),
+            ),
             ("FAKE_GL_MR".to_string(), self.gl_mr.display().to_string()),
             (
                 "FAKE_GL_MR_AFTER".to_string(),
