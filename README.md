@@ -202,6 +202,7 @@ The `ssh` subcommand reserves the exact legacy input `ssh`; to plan a task whose
 entire text is `ssh`, use `cruise plan "ssh"`.
 The hidden `mcp-bridge` entry point likewise reserves the exact input
 `mcp-bridge`; use `cruise plan "mcp-bridge"` to plan that task.
+The `tell` subcommand is also reserved; use `cruise plan "tell"` to plan that text.
 
 The CLI and TUI support best-effort desktop, sound, and Slack webhook notifications for
 **Action required**, **Plan ready**, **Completed**, and **Failed** workflow events.
@@ -219,6 +220,7 @@ steps, `blocked` while waiting for an answer, an option selection, or plan
 review, and `idle` otherwise. Authority is released on exit. Reporting is
 best-effort and never changes workflow success, failure, or exit status. Set
 `CRUISE_DISABLE_HERDR=1` to disable it.
+From a herdr pane, use `cruise tell <session-id> "instruction"` to instruct a running session.
 
 ### TUI (Interactive Keyboard Client)
 
@@ -326,6 +328,7 @@ Commands:
   plan         Create an implementation plan for a task
   draft        Save a task description as a draft without generating a plan
   run          Execute a planned session
+  tell         Send an instruction to a running session
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs
   usage        Summarize locally recorded token usage
@@ -573,6 +576,19 @@ Adding `--skip-planning` skips the background worker entirely: the input is writ
 
 With no subcommand, no `--plan`, and no positional input, a non-TTY stdin is read to the end and its trimmed contents become the positional input, so `echo "task" | cruise` takes the legacy positional path and plans like `cruise plan "task"` (`--skip-planning`, `--no-force-exec`, `--repo`, and `--image` still apply). Blank piped input is ignored, and with an interactive stdin the argument-free invocation opens the TUI instead. Pass `--plan stdin` to read piped input explicitly on the background planning path.
 
+#### `cruise tell`
+
+```sh
+cruise tell <session-id> "Also cover the timeout case"
+printf '%s\n' 'Check the logs' | cruise tell <session-id> -
+cruise tell <session-id> --log
+cruise ssh devbox --cwd /srv/project -- tell <session-id> "Check the logs"
+```
+
+Submit to a live Running session only. Omit the instruction to read non-interactive stdin; `--log` reads instruction history without submitting. Acceptance is not delivery: the currently running agent step cannot see a new instruction. It is appended to the next agent prompt, including all prompt children of a parallel block, but not command or option steps. It cannot change permissions, commit policy, output format, or workflow transitions.
+
+Instructions are trimmed and limited to 8,192 bytes each, with at most 20 pending instructions and 65,536 pending bytes. Delivered or expired items are terminal. Completed runs expire undelivered instructions; failed or suspended runs retain them for a subsequent run, and reset to planned expires them. Delivery is at least once: a crash or failure to record acknowledgement can cause redelivery. The session's XDG data directory stores `instructions.jsonl` and its lock; `--log` shows statuses. Do not put secrets in instructions.
+
 #### `cruise list`
 
 ```
@@ -582,7 +598,7 @@ Options:
       --json   Print all sessions as a JSON array to stdout instead of opening the interactive selector
 ```
 
-With no flags, opens an interactive session browser whose menu depends on each session's phase (see [`cruise list` Actions](#cruise-list-actions)). With `--json`, prints every session as a JSON array (id, phase, input, PR URL, plan-error info, ...) and exits -- useful for scripting or feeding session state to external tooling.
+With no flags, opens an interactive session browser whose menu depends on each session's phase (see [`cruise list` Actions](#cruise-list-actions)). With `--json`, prints every session as a JSON array (id, phase, input, PR URL, plan-error info, `pending_instructions`, ...) and exits -- useful for scripting or feeding session state to external tooling.
 
 #### `cruise diff`
 
@@ -850,13 +866,14 @@ The interactive session list shows a menu of actions depending on the session's 
 | **AwaitingInput** | Generate Plan, Delete, Back |
 | **AwaitingApproval** | Approve, Publish as Issue, Edit Settings, Delete, Back |
 | **Planned** | Run, Publish as Issue, Edit Settings, Replan, Delete, Back |
-| **Running** | Resume, Reset to Planned, Delete, Back |
+| **Running** | Resume, Tell*, Reset to Planned, Delete, Back |
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
 | **PR Failed** | Create PR, Open PR*, Reset to Planned, Delete, Back |
 | **Completed** | Open PR*, Merge PR*, Stage local merge**, Merge locally & cleanup**, Reset to Planned, Delete, Back |
 
 \* Open PR and Merge PR are shown only when the session has a PR URL.
+Tell is shown only while the running session's runner is alive.
 
 \** Local merge actions require an eligible local worktree session without a PR and a recorded target branch. Stage is unavailable once a merge intent or commit has been recorded; legacy sessions without a recorded target are ineligible.
 
@@ -868,6 +885,7 @@ The interactive session list shows a menu of actions depending on the session's 
 - **Approve** -- Approve the plan and transition the session to the Planned phase.
 - **Publish as Issue** -- Publish `plan.md`, unchanged, as a GitHub issue (or GitLab issue) in the resolved repo, then delete the local session. Prompts whether to also post a follow-up `@cruise run` comment so the `@cruise` GitHub Action picks it up (default: off for `AwaitingApproval`, on for `Planned`). If the issue is created but that comment fails to post, the session is kept so you can retry (the existing issue is reused, not duplicated) or comment manually (the `@cruise run` comment prompt is skipped on GitLab).
 - **Run / Resume** -- Execute (or continue) the session.
+- **Tell** -- Submit an instruction to the running session's next agent prompt. TUI and WebUI also offer Tell for a live run.
 - **Create PR** -- Retry publication for a **PR Failed** session without rerunning the workflow. Cruise commits remaining changes, pushes, and reuses an existing PR for the branch or creates one. Check the displayed error and forge authentication first (for GitHub HTTPS credentials, `gh auth setup-git` can configure Git). Publication failure or cancellation keeps the session in **PR Failed** with its worktree and any existing PR URL. A fatal after-PR error leaves it **Failed**. Success completes the session and runs configured after-PR steps only when a PR was created or reused; a no-commits skip completes without running them. Reset to Planned instead restarts the workflow, while Delete removes the session and its workspace.
 - **View Diff** -- Review the session branch's changes and return to the menu. See [`cruise diff`](#cruise-diff) for comparison and cleanup limitations.
 - **Replan** -- Provide feedback to re-generate the plan; the session stays in the Planned phase.

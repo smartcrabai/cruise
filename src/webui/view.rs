@@ -179,6 +179,7 @@ pub(crate) struct SessionDetailVm {
 pub(crate) struct TabInfoVm {
     pub(crate) auto_requeue_count: u32,
     pub(crate) id: String,
+    pub(crate) pending_instructions: usize,
     pub(crate) config_source: String,
     /// Declared workflow flags with this session's values; absent values are off.
     pub(crate) flags: Vec<FlagRowVm>,

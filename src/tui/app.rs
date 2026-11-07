@@ -2834,7 +2834,7 @@ impl TuiApp {
         let running =
             self.application.runtime().active_operation(&state.id) == Some(OperationKind::Run);
         let mut actions = if running {
-            vec![SessionAction::Cancel]
+            vec![SessionAction::Cancel, SessionAction::Tell]
         } else {
             self.application.capabilities(state)
         };
@@ -3007,6 +3007,10 @@ impl TuiApp {
                 });
                 self.modal = Some(Modal::Publish { trigger_cruise });
             }
+            SessionAction::Tell => self.open_input(
+                "Instruction",
+                PendingCommand::Session(SessionAction::Tell),
+            ),
             SessionAction::Fix => self.open_input(
                 "Describe the plan fix",
                 PendingCommand::Session(SessionAction::Fix),
@@ -3069,6 +3073,21 @@ impl TuiApp {
             return;
         };
         match command {
+            PendingCommand::Session(SessionAction::Tell) => {
+                if value.trim().is_empty() {
+                    self.set_error("Instruction must not be empty".to_string());
+                    return;
+                }
+                match self
+                    .application
+                    .tell(&id, value, crate::instruction_inbox::Origin::Tui)
+                {
+                    Ok(receipt) => {
+                        self.status = Some(format!("Instruction #{} accepted", receipt.id));
+                    }
+                    Err(error) => self.set_error(error.to_string()),
+                }
+            }
             PendingCommand::Session(SessionAction::Fix) => {
                 if value.trim().is_empty() {
                     self.set_error("Fix feedback must not be empty".to_string());
@@ -3269,6 +3288,7 @@ impl TuiApp {
             SessionAction::Fix
             | SessionAction::ViewDiff
             | SessionAction::Ask
+            | SessionAction::Tell
             | SessionAction::EditSettings
             | SessionAction::EditCurrentStep
             | SessionAction::Replan => self.apply_action(action),
@@ -3785,6 +3805,7 @@ pub fn action_label(action: SessionAction) -> &'static str {
         SessionAction::Publish => "Publish Issue",
         SessionAction::Fix => "Fix Plan",
         SessionAction::Ask => "Ask About Plan",
+        SessionAction::Tell => "Tell",
         SessionAction::Discard => "Discard",
         SessionAction::RunWorktree => "Run in Worktree",
         SessionAction::RunCurrentBranch => "Run on Current Branch",
@@ -7850,7 +7871,7 @@ mod tests {
             let Some(Modal::Palette { actions, selected }) = &app.modal else {
                 panic!("palette expected for {phase:?}");
             };
-            assert_eq!(actions, &[SessionAction::Cancel]);
+            assert_eq!(actions, &[SessionAction::Cancel, SessionAction::Tell]);
             assert_eq!(*selected, 0);
             assert!(!token.is_cancelled());
             app.handle_action(Action::Enter);

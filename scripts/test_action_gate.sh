@@ -228,6 +228,10 @@ gate_command_case "an unknown word after the mention defaults to run, kept verba
 gate_command_case "multiple mentions: the LAST one wins" \
   "@cruise plan first thing
 @cruise fix second thing" "fix" "second thing"
+gate_command_case "bare tell remains run" "@cruise tell instructions" "run" "tell instructions"
+gate_command_case "slash tell" "@cruise /tell instructions" "tell" "instructions"
+assert_eq "gate: slash tell does not start a new run" "false" "$(out proceed)"
+gate_command_case "slash tell is case-insensitive" "@cruise /TELL x" "tell" "x"
 reset_gate_env
 
 # =============================================================================

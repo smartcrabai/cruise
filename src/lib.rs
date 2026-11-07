@@ -24,6 +24,7 @@ pub mod flags;
 pub(crate) mod forge;
 pub mod github_review;
 pub mod graph;
+pub mod instruction_inbox;
 pub(crate) mod issue_images;
 pub(crate) mod issue_input;
 pub mod issue_publish;

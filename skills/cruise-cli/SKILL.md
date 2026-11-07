@@ -249,7 +249,7 @@ The interactive menu changes with the session's phase:
 | **Awaiting Input** | Generate Plan, Delete, Back |
 | **Awaiting Approval** | Approve, Publish as Issue, Edit Settings, Delete, Back |
 | **Planned** | Run, Publish as Issue, Edit Settings, Replan, Delete, Back |
-| **Running** | Resume, Reset to Planned, Delete, Back |
+| **Running** | Resume, Tell (live runner only), Reset to Planned, Delete, Back |
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
 | **PR Failed** | Create PR, Open PR*, Reset to Planned, Delete, Back |
@@ -268,6 +268,7 @@ The interactive menu changes with the session's phase:
 - Current-branch sessions have no worktree branch to compare. PR cleanup can remove the branch, including with default `builtin:tdd`; use **Open PR** after cleanup. The TUI and WebUI Diff tabs show the same comparison. Press `r` in the TUI or use **Refresh** in the WebUI to reload it.
 
 - **Merge PR** previews the PR (state, mergeability, review decision, checks), asks for a method (`Squash` default, `Merge`, `Rebase`), confirms, then runs `gh pr merge <url> <method flag>` (never `--auto`/`--admin`/`--delete-branch`). If the PR is then Closed/Merged, that session and its worktree are removed; if it is still Open (merge queue), the session is kept and `cruise clean` re-checks later. Closed/Merged PRs are not merged again: use `cruise clean`.
+- **Tell** sends text to a live running session: `cruise tell <id> "instruction"`, or pipe text to `cruise tell <id> -`. Inspect history with `cruise tell <id> --log`; TUI and WebUI also offer Tell. Accepted text reaches the next agent prompt, not the current step or command/option steps, and does not change permissions or transitions. Completed runs expire pending text; failed or suspended runs retain it, reset expires it, and crash recovery can redeliver. Limits are 8,192 bytes per instruction, 20 pending, and 65,536 pending bytes.
 - **Stage local merge** commits outstanding worktree changes to the session branch and stages its squash in the base checkout, retaining the session without committing the base.
 - **Merge locally & cleanup** makes one base squash commit and removes the worktree, branch and session. A cleanup failure retains the session for retry without another squash. An initial squash requires the recorded target checked out, a clean tracked base and no behind upstream. Cruise does not pull. A cleanup retry requires the recorded source commit, an unchanged branch, and an expected retained worktree with no tracked or untracked changes. Cruise reports conflicts, attempts rollback, and reports rollback failure. These actions exclude `--repo` and current-branch sessions and ignore `cleanup_after_pr` and the `merge` flag.
 - **Reset to Planned** clears the current step so the session re-runs from the start — the go-to recovery for a wedged `Running`/`Failed` session.

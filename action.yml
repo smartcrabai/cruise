@@ -248,7 +248,9 @@ runs:
       id: timer
       if: steps.gate.outputs.proceed == 'true'
       shell: bash
-      run: echo "start_ts=$(date +%s)" >> "$GITHUB_OUTPUT"
+      run: |
+        echo "start_ts=$(date +%s)" >> "$GITHUB_OUTPUT"
+        echo "start_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
     - name: Post tracking comment
       id: comment_start
@@ -310,6 +312,9 @@ runs:
       env:
         GH_TOKEN: ${{ steps.token.outputs.token }}
         COMMAND: ${{ steps.gate.outputs.command }}
+        TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
+        ALLOWED_BOTS: ${{ inputs.allowed_bots }}
+        POLL_SINCE: ${{ steps.timer.outputs.start_iso }}
         ENTITY_NUMBER: ${{ steps.gate.outputs.entity_number }}
         TRIGGER_ACTOR: ${{ steps.gate.outputs.actor }}
         TRIGGER_ACTOR_ID: ${{ steps.gate.outputs.actor_id }}

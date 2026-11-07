@@ -185,6 +185,13 @@ path = "tests/checkpoint_bdd.rs"
 
 [[test]]
 harness = false
+name = "instruction_inbox_bdd"
+path = "tests/instruction_inbox_bdd.rs"
+# Requires Unix subprocess fixtures, run explicitly.
+test = false
+
+[[test]]
+harness = false
 name = "local_merge_bdd"
 path = "tests/local_merge_bdd.rs"
 

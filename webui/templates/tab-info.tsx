@@ -2,6 +2,10 @@ export default function TabInfo(props) {
   return <div id={`tab-info-${props.id}`} role="tabpanel" class="p-4 md:p-6 space-y-3 text-sm text-gray-500 dark:text-gray-400">
     <dl class="space-y-3">
       <div>
+        <dt class="text-xs uppercase tracking-wide">Pending instructions</dt>
+        <dd class="text-gray-700 dark:text-gray-300 mt-0.5">{props.pendingInstructions}</dd>
+      </div>
+      <div>
         <dt class="text-xs uppercase tracking-wide">Config</dt>
         <dd class="break-all font-mono text-gray-700 dark:text-gray-300 mt-0.5">{props.configSource}</dd>
       </div>

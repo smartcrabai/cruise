@@ -50,6 +50,10 @@ jobs:
           cargo +1.99.1 build --locked --all-features --bin cruise-runtime
           node tests/webui/graph-flags.mjs
           node tests/webui/diff-browser.mjs
+      - name: Production Tell browser test
+        run: |
+          node tests/webui/tell-dialog.mjs
+          node tests/webui/tell-negative.mjs
       - name: Auto-requeue WebUI browser test
         run: |
           node tests/webui/auto-requeue.mjs all

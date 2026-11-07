@@ -1403,6 +1403,7 @@ pub enum SessionAction {
     Generate,
     Answer,
     Cancel,
+    Tell,
     Delete,
     Approve,
     Publish,
@@ -2961,6 +2962,39 @@ impl CruiseApplication {
         use_input_as_plan_inner(&self.manager, &self.runtime, id, &claim, state, sink)
     }
 
+    /// Submit an instruction without acquiring the run's application claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session cannot be loaded or the instruction cannot be accepted.
+    pub fn tell(
+        &self,
+        id: &str,
+        content: String,
+        origin: crate::instruction_inbox::Origin,
+    ) -> Result<crate::instruction_inbox::Receipt> {
+        self.manager.load(id)?;
+        crate::instruction_inbox::accept(
+            &self.manager.sessions_dir(),
+            id,
+            crate::instruction_inbox::AcceptRequest {
+                content,
+                origin,
+                dedupe_key: None,
+            },
+        )
+    }
+
+    /// Read the instruction ledger summary for a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session cannot be loaded or its instruction ledger cannot be read.
+    pub fn pending_summary(&self, id: &str) -> Result<crate::instruction_inbox::InboxSummary> {
+        self.manager.load(id)?;
+        crate::instruction_inbox::summary(&self.manager.sessions_dir(), id)
+    }
+
     /// Reset a session to its planned state.
     ///
     /// # Errors
@@ -2982,6 +3016,11 @@ impl CruiseApplication {
                 state.phase.label()
             )));
         }
+        crate::instruction_inbox::expire_pending(
+            &self.manager.sessions_dir(),
+            id,
+            "reset to planned",
+        )?;
         state.reset_to_planned();
         self.manager.save(&state)?;
         Ok(state)
@@ -3095,6 +3134,9 @@ impl CruiseApplication {
                 if self.runtime.active_identity(&state.id).is_some() {
                     actions.push(SessionAction::Cancel);
                 }
+                if self.runtime.active_identity(&state.id).is_some() || state.is_runner_alive() {
+                    actions.push(SessionAction::Tell);
+                }
             }
             SessionPhase::Failed(_) => actions.extend([
                 SessionAction::Retry,
@@ -3130,7 +3172,14 @@ impl CruiseApplication {
                 actions.extend([SessionAction::ResetToPlanned, SessionAction::Delete]);
             }
         }
-        let planning_claim = matches!(
+        if self.has_planning_claim(state) && !actions.contains(&SessionAction::Cancel) {
+            actions.push(SessionAction::Cancel);
+        }
+        actions
+    }
+
+    fn has_planning_claim(&self, state: &SessionState) -> bool {
+        matches!(
             self.runtime.active_operation(&state.id),
             Some(
                 OperationKind::Generate
@@ -3140,11 +3189,7 @@ impl CruiseApplication {
                     | OperationKind::Run
                     | OperationKind::CreatePr
             )
-        );
-        if planning_claim && !actions.contains(&SessionAction::Cancel) {
-            actions.push(SessionAction::Cancel);
-        }
-        actions
+        )
     }
 
     fn add_local_merge_actions(state: &SessionState, actions: &mut Vec<SessionAction>) {
@@ -3585,6 +3630,7 @@ impl CruiseApplication {
                     Some(&claim.token),
                     &option,
                     Some(&on_log),
+                    None,
                 )
                 .await?;
             }
@@ -3875,25 +3921,10 @@ impl CruiseApplication {
             let cancelled: Result<()> = Err(CruiseError::Interrupted);
             prepare.finish_result(&cancelled);
             let finalize = crate::telemetry::Operation::phase("finalize");
-            let result: Result<SessionState> = async {
-                let _ = cleanup_new_execution_workspace(
-                    &self.manager,
-                    &mut setup.state,
-                    &setup.workspace,
-                    setup.repo_clone_created,
-                );
-                setup.state.phase = SessionPhase::Suspended;
-                setup.state.pr_skipped_reason = None;
-                setup.state.clear_pending_input();
-                setup.state.clear_runner();
-                self.manager.save(&setup.state)?;
-                sink.send(ApplicationEvent::RunCancelled {
-                    session_id: id.to_string(),
-                })?;
-                Err(CruiseError::Interrupted)
-            }
-            .with_context(finalize.context())
-            .await;
+            let result: Result<SessionState> =
+                async { self.persist_cancelled_run(id, &mut setup, &*sink) }
+                    .with_context(finalize.context())
+                    .await;
             finalize.finish_result(&result);
             return result;
         }
@@ -3920,6 +3951,7 @@ impl CruiseApplication {
             return result;
         }
         let mut inputs = inputs_result?;
+        let instructions = crate::instruction_inbox::open_run_inbox(&self.manager, id);
         let started = emit_run_started(&self.manager, id, &*sink, &mut setup, batch_started);
         prepare.finish_result(&started);
         started?;
@@ -3930,8 +3962,8 @@ impl CruiseApplication {
             &mut setup,
             &mut inputs,
             sink.clone(),
-            log_sink,
-            batch_started,
+            (log_sink, batch_started),
+            instructions.as_ref(),
         )
         .await;
         *unresolved_failed_steps = execution_result.as_ref().is_ok_and(|failed| *failed);
@@ -3950,8 +3982,36 @@ impl CruiseApplication {
         }
         .with_context(finalize.context())
         .await;
+        crate::instruction_inbox::close_run_inbox(
+            instructions,
+            &setup.state.phase,
+            &crate::session::SessionLogger::new(self.manager.run_log_path(id)),
+        );
         finalize.finish_result(&result);
         result
+    }
+
+    fn persist_cancelled_run(
+        &self,
+        id: &str,
+        setup: &mut RunSetup,
+        sink: &dyn ApplicationEventSink,
+    ) -> Result<SessionState> {
+        let _ = cleanup_new_execution_workspace(
+            &self.manager,
+            &mut setup.state,
+            &setup.workspace,
+            setup.repo_clone_created,
+        );
+        setup.state.phase = SessionPhase::Suspended;
+        setup.state.pr_skipped_reason = None;
+        setup.state.clear_pending_input();
+        setup.state.clear_runner();
+        self.manager.save(&setup.state)?;
+        sink.send(ApplicationEvent::RunCancelled {
+            session_id: id.to_string(),
+        })?;
+        Err(CruiseError::Interrupted)
     }
 }
 
@@ -4242,6 +4302,7 @@ async fn run_engine_steps(
 }
 
 struct WorktreeRun<'a> {
+    instructions: Option<&'a crate::instruction_inbox::RunInbox>,
     manager: &'a SessionManager,
     sink: &'a Arc<dyn ApplicationEventSink>,
     worktree: &'a crate::worktree::WorktreeContext,
@@ -4314,6 +4375,7 @@ impl WorktreeRun<'_> {
                 Some(on_log),
                 Some(&on_pr_processing),
                 Some(&persist_pr),
+                self.instructions,
             ),
         )
         .await
@@ -4326,9 +4388,10 @@ async fn execute_run(
     setup: &mut RunSetup,
     inputs: &mut RunInputs,
     sink: Arc<dyn ApplicationEventSink>,
-    log_sink: Option<Arc<dyn LogSink>>,
-    batch_started: bool,
+    logging: (Option<Arc<dyn LogSink>>, bool),
+    instructions: Option<&crate::instruction_inbox::RunInbox>,
 ) -> Result<bool> {
+    let (log_sink, batch_started) = logging;
     let id = claim.session_id();
     let option = RuntimeOptionHandler {
         runtime: Arc::clone(&claim.runtime),
@@ -4367,6 +4430,7 @@ async fn execute_run(
             flags: &inputs.flags,
             on_step_log: Some(&on_log),
             on_step_start: &on_start,
+            instructions,
         };
         run_engine_steps(
             &ctx,
@@ -4398,6 +4462,7 @@ async fn execute_run(
                 crate::workspace::ExecutionWorkspace::Worktree { ctx, .. } => ctx.clone(),
             };
             WorktreeRun {
+                instructions,
                 manager,
                 sink: &sink,
                 worktree: &worktree,
