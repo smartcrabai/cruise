@@ -1,6 +1,6 @@
-mod catalog;
 #[cfg(test)]
 mod r#assert;
+mod catalog;
 #[cfg(test)]
 mod contract;
 #[cfg(test)]
@@ -29,13 +29,15 @@ use std::{
 
 const PROMPT_EVAL_VERSION: &str = "1";
 type Result<T> = std::result::Result<T, String>;
+type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
-pub fn catalog_contract() {
-    let cases = load().unwrap_or_else(|e| panic!("catalog: {e}"));
-    validate(&cases).unwrap_or_else(|e| panic!("catalog: {e}"));
-    let text =
-        fs::read_to_string(root().join("tests/prompt_eval/canaries.yaml")).expect("read canaries");
-    let canaries: Canaries = serde_yaml::from_str(&text).expect("parse canaries");
+pub fn catalog_contract() -> TestResult {
+    let cases = load().map_err(|e| format!("load catalog: {e}"))?;
+    validate(&cases).map_err(|e| format!("validate catalog: {e}"))?;
+    let text = fs::read_to_string(root().join("tests/prompt_eval/canaries.yaml"))
+        .map_err(|e| format!("read canaries: {e}"))?;
+    let canaries: Canaries =
+        serde_yaml::from_str(&text).map_err(|e| format!("parse canaries: {e}"))?;
     let expected: HashSet<_> = cases
         .iter()
         .flat_map(|c| &c.rubric)
@@ -58,6 +60,7 @@ pub fn catalog_contract() {
             );
         }
     }
+    Ok(())
 }
 #[test]
 fn deterministic_checks() {
@@ -73,8 +76,11 @@ fn deterministic_checks() {
         },
         "aa"
     ));
-    assert!(check_output(&Check::MinChars { min_chars: 2 }, "日本"));
-    assert!(language_ok("Japanese", "日本語"));
+    assert!(check_output(
+        &Check::MinChars { min_chars: 2 },
+        "\u{65e5}\u{672c}"
+    ));
+    assert!(language_ok("Japanese", "\u{65e5}\u{672c}\u{8a9e}"));
     assert!(language_ok("English", "hello"));
     assert!(!language_ok("English", ""));
 }
@@ -157,12 +163,20 @@ fn git(args: &[&str], dir: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 fn hash(data: &[u8]) -> String {
-    Sha256::digest(data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(64);
+    for b in Sha256::digest(data) {
+        text.push(char::from(HEX[usize::from(b >> 4)]));
+        text.push(char::from(HEX[usize::from(b & 15)]));
+    }
+    text
 }
-fn template_hashes(dir: &Path, rows: &[Row], base: Option<&str>, hashes: &mut BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
+fn template_hashes(
+    dir: &Path,
+    rows: &[Row],
+    base: Option<&str>,
+    hashes: &mut BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
     let mut errors = BTreeMap::new();
     for row in rows {
         let case = &row.case;
@@ -172,8 +186,12 @@ fn template_hashes(dir: &Path, rows: &[Row], base: Option<&str>, hashes: &mut BT
         hashes.insert(format!("{}:{}", path, case.id), hash(text.as_bytes()));
         if let Some(base) = base {
             match read_source_at(dir, path, Some(base)).and_then(|data| template(case, &data)) {
-                Ok((text, _, _)) => { hashes.insert(format!("base:{}:{}", path, case.id), hash(text.as_bytes())); }
-                Err(error) => { errors.insert(row.id.clone(), error); }
+                Ok((text, _, _)) => {
+                    hashes.insert(format!("base:{}:{}", path, case.id), hash(text.as_bytes()));
+                }
+                Err(error) => {
+                    errors.insert(row.id.clone(), error);
+                }
             }
         }
     }
@@ -221,33 +239,72 @@ fn setup_workspace(c: &Case, work: &Path) -> Result<()> {
         git(&["add", "-A"], work)?;
         fixture_commit(work, "fixture")?;
         if c.id == "create-pr" {
-            fs::copy(root().join("tests/prompt_eval/fixtures/addition/src/lib.rs"), work.join("src/lib.rs")).map_err(|e| e.to_string())?;
+            fs::copy(
+                root().join("tests/prompt_eval/fixtures/addition/src/lib.rs"),
+                work.join("src/lib.rs"),
+            )
+            .map_err(|e| e.to_string())?;
             git(&["add", "src/lib.rs"], work)?;
             fixture_commit(work, "Implement checked addition")?;
             fs::create_dir_all(work.join("tests")).map_err(|e| e.to_string())?;
-            fs::copy(root().join("tests/prompt_eval/fixtures/addition-unimplemented/tests/add.rs"), work.join("tests/add.rs")).map_err(|e| e.to_string())?;
+            fs::copy(
+                root().join("tests/prompt_eval/fixtures/addition-unimplemented/tests/add.rs"),
+                work.join("tests/add.rs"),
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
     Ok(())
 }
 fn fixture_commit(work: &Path, message: &str) -> Result<()> {
-    git(&["-c", "user.name=prompt-eval", "-c", "user.email=prompt-eval@invalid", "commit", "-q", "--allow-empty", "-m", message], work)?;
+    git(
+        &[
+            "-c",
+            "user.name=prompt-eval",
+            "-c",
+            "user.email=prompt-eval@invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            message,
+        ],
+        work,
+    )?;
     Ok(())
 }
 #[test]
-fn create_pr_fixture_contract() {
-    let cases = load().unwrap();
-    let case = cases.iter().find(|c| c.id == "create-pr").unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    setup_workspace(case, dir.path()).unwrap();
+fn create_pr_fixture_contract() -> TestResult {
+    let cases = load()?;
+    let case = cases
+        .iter()
+        .find(|c| c.id == "create-pr")
+        .ok_or("missing create-pr")?;
+    let dir = tempfile::tempdir()?;
+    setup_workspace(case, dir.path())?;
     let work = dir.path();
-    let committed = git(&["diff", "HEAD~1..HEAD"], work).unwrap();
+    let committed = git(&["diff", "HEAD~1..HEAD"], work)?;
     assert!(committed.contains("src/lib.rs") && committed.contains("checked_add"));
-    let status = git(&["status", "--short"], work).unwrap();
+    let status = git(&["status", "--short"], work)?;
     assert!(status.contains("tests/"));
-    let tests = fs::read_to_string(work.join("tests/add.rs")).unwrap();
-    for value in ["add(2, 3)", "add(-2, 1)", "add(0, 0)", "i32::MAX"] { assert!(tests.contains(value)); }
-    for claim in ["committed", "checked addition", "src/lib.rs", "uncommitted", "tests/add.rs", "positive", "negative", "zero", "overflow"] { assert!(case.reference.contains(claim)); }
+    let tests = fs::read_to_string(work.join("tests/add.rs"))?;
+    for value in ["add(2, 3)", "add(-2, 1)", "add(0, 0)", "i32::MAX"] {
+        assert!(tests.contains(value));
+    }
+    for claim in [
+        "committed",
+        "checked addition",
+        "src/lib.rs",
+        "uncommitted",
+        "tests/add.rs",
+        "positive",
+        "negative",
+        "zero",
+        "overflow",
+    ] {
+        assert!(case.reference.contains(claim));
+    }
+    Ok(())
 }
 async fn execute(
     sdk: &str,
@@ -260,10 +317,14 @@ async fn execute(
 ) -> Result<(String, Vec<String>)> {
     let executor = Executor::new(Some(sdk), &[]);
     let model = ModelSpec::Single(model.into());
-    let env = Default::default();
-    let mcp = Default::default();
+    let env = std::collections::HashMap::default();
+    let mcp = indexmap::IndexMap::default();
     let notices = Mutex::new(Vec::new());
-    let notice = |s: &str| notices.lock().unwrap().push(s.to_owned());
+    let notice = |s: &str| {
+        if let Ok(mut notices) = notices.lock() {
+            notices.push(s.to_owned());
+        }
+    };
     let run = executor.run(PromptRun {
         prompt,
         model: Some(&model),
@@ -287,7 +348,12 @@ async fn execute(
         .await
         .map_err(|_| "trial timeout".to_owned())?
         .map_err(|e| e.to_string())?;
-    Ok((result.result.output, notices.into_inner().unwrap()))
+    Ok((
+        result.result.output,
+        notices
+            .into_inner()
+            .map_err(|e| format!("notice lock poisoned: {e}"))?,
+    ))
 }
 fn judge_prompt(
     template: &str,
@@ -358,7 +424,7 @@ async fn calibrate(
     }
     fs::write(
         report.join("canaries.json"),
-        serde_json::to_vec_pretty(&results).unwrap(),
+        serde_json::to_vec_pretty(&results).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
     for r in cases.iter().flat_map(|c| &c.rubric) {
@@ -382,86 +448,158 @@ struct Row {
 fn select_rows(cases: &[Case], filter: Option<&regex::Regex>) -> Vec<Row> {
     let mut rows = Vec::new();
     for case in cases {
-        let languages: Vec<Option<String>> = case.language.as_ref()
-            .map(|l| l.values.iter().cloned().map(Some).collect())
-            .unwrap_or_else(|| vec![None]);
+        let languages: Vec<Option<String>> = case.language.as_ref().map_or_else(
+            || vec![None],
+            |l| l.values.iter().cloned().map(Some).collect(),
+        );
         for language in languages {
-            let id = language.as_ref()
+            let id = language
+                .as_ref()
                 .map_or_else(|| case.id.clone(), |l| format!("{}@{l}", case.id));
             if filter.is_none_or(|r| r.is_match(&id)) {
-                rows.push(Row { case: case.clone(), id, language });
+                rows.push(Row {
+                    case: case.clone(),
+                    id,
+                    language,
+                });
             }
         }
     }
     rows
 }
 #[tokio::test]
-async fn comparison_hashes_selected_rows_with_missing_base() {
-    let cases = load().unwrap();
-    let mut prompts = cases.iter().filter(|c| c.target.prompt_file.is_some() && c.language.is_none());
-    let valid = prompts.next().unwrap().clone();
-    let mut missing = prompts.find(|c| source(c).unwrap() != source(&valid).unwrap()).unwrap().clone();
-    missing.workspace = None;
-    let dir = tempfile::tempdir().unwrap();
-    git(&["init", "-q"], dir.path()).unwrap();
-    for case in [&valid, &missing] {
-        let path = source(case).unwrap();
-        let dest = dir.path().join(path);
-        fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        fs::copy(root().join(path), dest).unwrap();
+async fn comparison_hashes_selected_rows_with_missing_base() -> TestResult {
+    let cases = load()?;
+    let mut prompts = cases
+        .iter()
+        .filter(|c| c.target.prompt_file.is_some() && c.language.is_none());
+    let valid = prompts.next().ok_or("missing prompt")?.clone();
+    let valid_source = source(&valid)?;
+    let mut missing = None;
+    for case in prompts {
+        if source(case)? != valid_source {
+            missing = Some(case.clone());
+            break;
+        }
     }
-    git(&["add", source(&valid).unwrap()], dir.path()).unwrap();
-    fixture_commit(dir.path(), "base").unwrap();
-    let filter = regex::Regex::new(&format!("^({}|{})$", valid.id, missing.id)).unwrap();
+    let mut missing = missing.ok_or("missing distinct prompt")?;
+    missing.workspace = None;
+    let dir = tempfile::tempdir()?;
+    git(&["init", "-q"], dir.path())?;
+    for case in [&valid, &missing] {
+        let path = source(case)?;
+        let dest = dir.path().join(path);
+        fs::create_dir_all(dest.parent().ok_or("missing parent")?)?;
+        fs::copy(root().join(path), dest)?;
+    }
+    git(&["add", source(&valid)?], dir.path())?;
+    fixture_commit(dir.path(), "base")?;
+    let filter = regex::Regex::new(&format!("^({}|{})$", valid.id, missing.id))?;
     let rows = select_rows(&[valid.clone(), missing.clone()], Some(&filter));
     let mut hashes = BTreeMap::new();
-    let errors = template_hashes(dir.path(), &rows, Some("HEAD"), &mut hashes).unwrap();
-    assert!(hashes.contains_key(&format!("base:{}:{}", source(&valid).unwrap(), valid.id)));
-    assert!(!hashes.contains_key(&format!("base:{}:{}", source(&missing).unwrap(), missing.id)));
-    assert!(hashes.contains_key(&format!("{}:{}", source(&missing).unwrap(), missing.id)));
-    let filter = regex::Regex::new(&format!("^{}$", valid.id)).unwrap();
+    let errors = template_hashes(dir.path(), &rows, Some("HEAD"), &mut hashes)?;
+    assert!(hashes.contains_key(&format!("base:{}:{}", source(&valid)?, valid.id)));
+    assert!(!hashes.contains_key(&format!("base:{}:{}", source(&missing)?, missing.id)));
+    assert!(hashes.contains_key(&format!("{}:{}", source(&missing)?, missing.id)));
+    let filter = regex::Regex::new(&format!("^{}$", valid.id))?;
     let selected = select_rows(&[valid.clone(), missing.clone()], Some(&filter));
     let mut filtered = BTreeMap::new();
-    template_hashes(dir.path(), &selected, Some("HEAD"), &mut filtered).unwrap();
+    template_hashes(dir.path(), &selected, Some("HEAD"), &mut filtered)?;
     assert_eq!(filtered.len(), 2);
-    assert!(!filtered.contains_key(&format!("{}:{}", source(&missing).unwrap(), missing.id)));
+    assert!(!filtered.contains_key(&format!("{}:{}", source(&missing)?, missing.id)));
     let manifest = serde_json::json!({"hashes": hashes});
-    fs::write(dir.path().join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_vec(&manifest)?,
+    )?;
     let settings = Settings {
-        sdk: "jcode".into(), candidate: "candidate".into(), judge: "judge".into(),
-        timeout: 30, judge_template: String::new(), report: dir.path().to_path_buf(),
+        sdk: "jcode".into(),
+        candidate: "candidate".into(),
+        judge: "judge".into(),
+        timeout: 30,
+        judge_template: String::new(),
+        report: dir.path().to_path_buf(),
         source_root: dir.path().to_path_buf(),
     };
-    let missing_row = rows.iter().find(|r| r.id == missing.id).unwrap().clone();
-    let base_error = trial(missing_row, "base", Some("HEAD"), 1, &settings, errors.get(&missing.id)).await;
+    let missing_row = rows
+        .iter()
+        .find(|r| r.id == missing.id)
+        .ok_or("missing row")?
+        .clone();
+    let base_error = trial(
+        missing_row,
+        "base",
+        Some("HEAD"),
+        1,
+        &settings,
+        errors.get(&missing.id),
+    )
+    .await;
+    verify_base_error(&base_error);
+    // Successful trials are represented explicitly so this contract needs no model provider.
+    let results = vec![
+        passed_trial(&missing.id, "candidate"),
+        base_error,
+        passed_trial(&valid.id, "candidate"),
+        passed_trial(&valid.id, "base"),
+    ];
+    verify_comparison_results(dir.path(), &results, &missing, &valid)?;
+    Ok(())
+}
+#[cfg(test)]
+fn verify_base_error(base_error: &Trial) {
     assert_eq!(base_error.status, "error");
     assert!(base_error.error.as_ref().is_some_and(|e| !e.is_empty()));
-    // Successful trials are represented explicitly so this contract needs no model provider.
-    let passed = |row: &str, side: &str| Trial {
-        side: side.into(), row: row.into(), trial: 1, status: "pass".into(),
-        checks: vec![], rubric: serde_json::json!([]), judge_raw: None,
-        notices: vec![], error: None, output_path: None, output_source: None,
-    };
-    let results = vec![passed(&missing.id, "candidate"), base_error,
-        passed(&valid.id, "candidate"), passed(&valid.id, "base")];
-    let failed = write_results(dir.path(), &results).unwrap();
-    assert!(failed.is_empty());
-    let records: Vec<serde_json::Value> = fs::read_to_string(dir.path().join("results.jsonl"))
-        .unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+}
+#[cfg(test)]
+fn verify_comparison_results(
+    dir: &Path,
+    results: &[Trial],
+    missing: &Case,
+    valid: &Case,
+) -> TestResult {
+    let failed = write_results(dir, results)?;
+    assert_eq!(failed, Vec::<String>::new());
+    let records: Vec<serde_json::Value> = fs::read_to_string(dir.join("results.jsonl"))?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
     assert_eq!(records.len(), 4);
-    assert!(records.iter().any(|r| r["row"] == missing.id && r["side"] == "base" && r["status"] == "error" && r["error"].is_string()));
-    let summary = fs::read_to_string(dir.path().join("summary.md")).unwrap();
+    assert!(records.iter().any(|r| r["row"] == missing.id
+        && r["side"] == "base"
+        && r["status"] == "error"
+        && r["error"].is_string()));
+    let summary = fs::read_to_string(dir.join("summary.md"))?;
     assert!(summary.contains(&missing.id));
     assert!(summary.contains(&valid.id));
     assert!(summary.contains("base error"));
-    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(dir.path().join("manifest.json")).unwrap()).unwrap();
-    assert!(manifest["hashes"][format!("base:{}:{}", source(&valid).unwrap(), valid.id)].is_string());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("manifest.json"))?)?;
+    assert!(manifest["hashes"][format!("base:{}:{}", source(valid)?, valid.id)].is_string());
+    Ok(())
+}
+#[cfg(test)]
+fn passed_trial(row: &str, side: &str) -> Trial {
+    Trial {
+        side: side.into(),
+        row: row.into(),
+        number: 1,
+        status: "pass".into(),
+        checks: vec![],
+        rubric: serde_json::json!([]),
+        judge_raw: None,
+        notices: vec![],
+        error: None,
+        output_path: None,
+        output_source: None,
+    }
 }
 #[derive(Serialize)]
 struct Trial {
     side: String,
     row: String,
-    trial: usize,
+    #[serde(rename = "trial")]
+    number: usize,
     status: String,
     checks: Vec<serde_json::Value>,
     rubric: serde_json::Value,
@@ -480,11 +618,18 @@ struct Settings {
     report: PathBuf,
     source_root: PathBuf,
 }
-async fn trial(row: Row, side: &str, base: Option<&str>, n: usize, settings: &Settings, base_error: Option<&String>) -> Trial {
+async fn trial(
+    row: Row,
+    side: &str,
+    base: Option<&str>,
+    n: usize,
+    settings: &Settings,
+    base_error: Option<&String>,
+) -> Trial {
     let mut record = Trial {
         side: side.into(),
         row: row.id.clone(),
-        trial: n,
+        number: n,
         status: "error".into(),
         checks: vec![],
         rubric: serde_json::json!("skipped"),
@@ -496,14 +641,24 @@ async fn trial(row: Row, side: &str, base: Option<&str>, n: usize, settings: &Se
     };
     if let Some(error) = base_error {
         record.error = Some(error.clone());
-    } else if let Err(e) = trial_deadline(Duration::from_secs(settings.timeout as u64), trial_inner(&row, base, settings, &mut record)).await {
+    } else if let Err(e) = trial_deadline(
+        Duration::from_secs(settings.timeout as u64),
+        trial_inner(&row, base, settings, &mut record),
+    )
+    .await
+    {
         record.error = Some(e);
     }
     record
 }
 
-async fn trial_deadline<T>(duration: Duration, work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    tokio::time::timeout(duration, work).await.map_err(|_| "trial timeout".to_owned())?
+async fn trial_deadline<T>(
+    duration: Duration,
+    work: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::time::timeout(duration, work)
+        .await
+        .map_err(|_| "trial timeout".to_owned())?
 }
 
 #[tokio::test]
@@ -512,8 +667,9 @@ async fn deadline_covers_sequential_candidate_and_judge() {
         tokio::time::sleep(Duration::from_millis(60)).await;
         tokio::time::sleep(Duration::from_millis(60)).await;
         Ok(())
-    }).await;
-    assert_eq!(result.unwrap_err(), "trial timeout");
+    })
+    .await;
+    assert_eq!(result, Err("trial timeout".to_owned()));
 }
 pub async fn run() -> Result<()> {
     let sdk = std::env::var("CRUISE_PROMPT_EVAL_SDK").unwrap_or_else(|_| "jcode".into());
@@ -552,21 +708,7 @@ pub async fn run() -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs();
-    let stamp = Command::new("date")
-        .args(["-u", "+%Y%m%dT%H%M%SZ"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_else(|| started.to_string());
-    let output_root = std::env::var("CRUISE_PROMPT_EVAL_OUTPUT").ok();
-    let report = live::output_root(&root(), output_root.as_deref()).join(format!(
-        "{}-{}{}",
-        stamp,
-        &sha[..sha.len().min(8)],
-        if dirty { "-dirty" } else { "" }
-    ));
-    fs::create_dir_all(&report).map_err(|e| e.to_string())?;
+    let report = report_directory(started, &sha, dirty)?;
     let cases = load()?;
     validate(&cases)?;
     let rows = select_rows(&cases, filter.as_ref());
@@ -590,7 +732,7 @@ pub async fn run() -> Result<()> {
     let write_manifest = |m: &serde_json::Value| -> Result<()> {
         fs::write(
             report.join("manifest.json"),
-            serde_json::to_vec_pretty(m).unwrap(),
+            serde_json::to_vec_pretty(m).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())
     };
@@ -613,36 +755,52 @@ pub async fn run() -> Result<()> {
         report: report.clone(),
         source_root: root(),
     };
-    let mut jobs = Vec::new();
-    for row in rows {
-        for n in 1..=row.case.repeat.unwrap_or(repeat) {
-            jobs.push((row.clone(), "candidate", n));
-            if base.is_some() {
-                jobs.push((row.clone(), "base", n));
-            }
-        }
-    }
-    let results: Vec<Trial> = stream::iter(jobs.into_iter().map(|(row, side, n)| {
-        let settings = &settings;
-        let sha = if side == "base" {
-            base.as_deref()
-        } else {
-            None
-        };
-        let error = if side == "base" { base_errors.get(&row.id) } else { None };
-        async move { trial(row, side, sha, n, settings, error).await }
-    }))
-    .buffer_unordered(concurrency)
-    .collect()
+    let results = execute_trials(
+        rows,
+        repeat,
+        concurrency,
+        base.as_deref(),
+        &base_errors,
+        &settings,
+    )
     .await;
-    let failed = write_results(&report, &results)?;
+    finish_report(&report, &results, &mut manifest)
+}
+
+fn report_directory(started: u64, sha: &str, dirty: bool) -> Result<PathBuf> {
+    let stamp = Command::new("date")
+        .args(["-u", "+%Y%m%dT%H%M%SZ"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map_or_else(
+            || started.to_string(),
+            |o| String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+        );
+    let output_root = std::env::var("CRUISE_PROMPT_EVAL_OUTPUT").ok();
+    let report = live::output_root(&root(), output_root.as_deref()).join(format!(
+        "{}-{}{}",
+        stamp,
+        &sha[..sha.len().min(8)],
+        if dirty { "-dirty" } else { "" }
+    ));
+    fs::create_dir_all(&report).map_err(|e| e.to_string())?;
+    Ok(report)
+}
+
+fn finish_report(report: &Path, results: &[Trial], manifest: &mut serde_json::Value) -> Result<()> {
+    let failed = write_results(report, results)?;
     manifest["finished_unix"] = serde_json::json!(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .map_err(|e| e.to_string())?
             .as_secs()
     );
-    write_manifest(&manifest)?;
+    fs::write(
+        report.join("manifest.json"),
+        serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     println!("{}", report.join("summary.md").display());
     if !failed.is_empty() {
         return Err(format!(
@@ -654,11 +812,43 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
+async fn execute_trials(
+    rows: Vec<Row>,
+    repeat: usize,
+    concurrency: usize,
+    base: Option<&str>,
+    base_errors: &BTreeMap<String, String>,
+    settings: &Settings,
+) -> Vec<Trial> {
+    let mut jobs = Vec::new();
+    for row in rows {
+        for n in 1..=row.case.repeat.unwrap_or(repeat) {
+            jobs.push((row.clone(), "candidate", n));
+            if base.is_some() {
+                jobs.push((row.clone(), "base", n));
+            }
+        }
+    }
+    let results: Vec<Trial> = stream::iter(jobs.into_iter().map(|(row, side, n)| {
+        let sha = if side == "base" { base } else { None };
+        let error = if side == "base" {
+            base_errors.get(&row.id)
+        } else {
+            None
+        };
+        async move { trial(row, side, sha, n, settings, error).await }
+    }))
+    .buffer_unordered(concurrency)
+    .collect()
+    .await;
+    results
+}
+
 fn write_results(report: &Path, results: &[Trial]) -> Result<Vec<String>> {
     let mut jsonl = String::new();
     let mut counts: BTreeMap<String, BTreeMap<String, (usize, usize, bool)>> = BTreeMap::new();
     for t in results {
-        jsonl.push_str(&serde_json::to_string(t).unwrap());
+        jsonl.push_str(&serde_json::to_string(t).map_err(|e| e.to_string())?);
         jsonl.push('\n');
         let count = counts
             .entry(t.row.clone())
@@ -697,18 +887,7 @@ async fn trial_inner(
     };
     let mut vars = VariableStore::new(String::new());
     vars.set_artifacts_root(work.to_path_buf());
-    for (name, value) in &c.vars {
-        match value {
-            Var::Text(value) => {
-                if name == "input" {
-                    vars.set_input(value.clone());
-                } else {
-                    vars.set_named_value(name, value.clone());
-                }
-            }
-            Var::File { file } => vars.set_named_file(name, root().join(file)),
-        }
-    }
+    set_case_variables(c, &mut vars);
     if let (Some(language), Some(value)) = (&c.language, &row.language) {
         vars.set_named_value(&language.var, value.clone());
         if language.var == "plan.language" {
@@ -759,7 +938,7 @@ async fn trial_inner(
         .join("trials")
         .join(&record.side)
         .join(&record.row)
-        .join(record.trial.to_string());
+        .join(record.number.to_string());
     fs::create_dir_all(&artifact).map_err(|e| e.to_string())?;
     fs::write(artifact.join("prompt.md"), &prompt).map_err(|e| e.to_string())?;
     let (stdout, notices) = execute(
@@ -775,9 +954,7 @@ async fn trial_inner(
     record.notices = notices;
     let output = match c.output.as_str() {
         "plan_file" => plan_output(&plan_path, stdout, &mut record.output_source),
-        "workspace_diff" => {
-            workspace_diff(work)?
-        }
+        "workspace_diff" => workspace_diff(work)?,
         _ => stdout,
     };
     let filename = if c.output == "workspace_diff" {
@@ -788,29 +965,21 @@ async fn trial_inner(
     let path = artifact.join(filename);
     fs::write(&path, &output).map_err(|e| e.to_string())?;
     record.output_path = Some(path.to_string_lossy().into_owned());
-    for check in &c.checks {
-        record.checks.push(
-            serde_json::json!({"check":format!("{check:?}"),"pass":check_output(check,&output)}),
-        );
-    }
-    if let Some(lang) = &row.language {
-        record
-            .checks
-            .push(serde_json::json!({"check":"language","pass":language_ok(lang,&output)}));
-    }
-    if c.output == "pr_metadata" {
-        let (title, body) = cruise::worktree_pr::parse_pr_metadata(&output);
-        record.checks.push(serde_json::json!({"check":"pr_metadata","pass":!title.trim().is_empty() && !body.trim().is_empty()}));
-    }
-    if c.output == "workflow_yaml" {
-        let validation = cruise::workflow_generate::validate_generated_yaml(&output, work);
-        record.checks.push(serde_json::json!({"check":"workflow_yaml","pass":validation.is_ok(),"error":validation.err().map(|e|e.to_string())}));
-    }
-    if record.checks.iter().any(|v| v["pass"] == false) {
-        record.status = "fail".into();
+    if !check_trial_output(row, work, &output, record) {
         return Ok(());
     }
-    let judge_prompt = judge_prompt(&s.judge_template, &c.rubric, &c.reference, &output)?;
+    judge_trial(s, c, work, &artifact, &output, record).await
+}
+
+async fn judge_trial(
+    s: &Settings,
+    c: &Case,
+    work: &Path,
+    artifact: &Path,
+    output: &str,
+    record: &mut Trial,
+) -> Result<()> {
+    let judge_prompt = judge_prompt(&s.judge_template, &c.rubric, &c.reference, output)?;
     let (raw, notices) = execute(
         &s.sdk,
         &s.judge,
@@ -830,8 +999,45 @@ async fn trial_inner(
         "fail"
     }
     .into();
-    record.rubric = serde_json::to_value(verdict.verdicts).unwrap();
+    record.rubric = serde_json::to_value(verdict.verdicts).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn set_case_variables(c: &Case, vars: &mut VariableStore) {
+    for (name, value) in &c.vars {
+        match value {
+            Var::Text(value) if name == "input" => vars.set_input(value.clone()),
+            Var::Text(value) => vars.set_named_value(name, value.clone()),
+            Var::File { file } => vars.set_named_file(name, root().join(file)),
+        }
+    }
+}
+
+fn check_trial_output(row: &Row, work: &Path, output: &str, record: &mut Trial) -> bool {
+    let c = &row.case;
+    for check in &c.checks {
+        record.checks.push(
+            serde_json::json!({"check":format!("{check:?}"),"pass":check_output(check,output)}),
+        );
+    }
+    if let Some(lang) = &row.language {
+        record
+            .checks
+            .push(serde_json::json!({"check":"language","pass":language_ok(lang,output)}));
+    }
+    if c.output == "pr_metadata" {
+        let (title, body) = cruise::worktree_pr::parse_pr_metadata(output);
+        record.checks.push(serde_json::json!({"check":"pr_metadata","pass":!title.trim().is_empty() && !body.trim().is_empty()}));
+    }
+    if c.output == "workflow_yaml" {
+        let validation = cruise::workflow_generate::validate_generated_yaml(output, work);
+        record.checks.push(serde_json::json!({"check":"workflow_yaml","pass":validation.is_ok(),"error":validation.err().map(|e|e.to_string())}));
+    }
+    if record.checks.iter().any(|v| v["pass"] == false) {
+        record.status = "fail".into();
+        return false;
+    }
+    true
 }
 
 fn workspace_diff(work: &Path) -> Result<String> {
@@ -840,85 +1046,156 @@ fn workspace_diff(work: &Path) -> Result<String> {
         return Ok("no-change".into());
     }
     git(&["add", "--intent-to-add", "--all"], work)?;
-    Ok(format!("{}\n{}", status, git(&["diff", "--no-ext-diff", "HEAD"], work)?))
+    Ok(format!(
+        "{}\n{}",
+        status,
+        git(&["diff", "--no-ext-diff", "HEAD"], work)?
+    ))
 }
 
 fn plan_output(path: &Path, stdout: String, source: &mut Option<String>) -> String {
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            *source = Some("plan_file".into());
-            content
-        }
-        Err(_) => {
-            *source = Some("stdout".into());
-            stdout
-        }
+    if let Ok(content) = fs::read_to_string(path) {
+        *source = Some("plan_file".into());
+        content
+    } else {
+        *source = Some("stdout".into());
+        stdout
     }
 }
 
 #[test]
-fn missing_plan_falls_back_to_stdout() {
-    let dir = tempfile::tempdir().unwrap();
+fn missing_plan_falls_back_to_stdout() -> TestResult {
+    let dir = tempfile::tempdir()?;
     let mut source = None;
-    assert_eq!(plan_output(&dir.path().join("missing"), "candidate output".into(), &mut source), "candidate output");
+    assert_eq!(
+        plan_output(
+            &dir.path().join("missing"),
+            "candidate output".into(),
+            &mut source
+        ),
+        "candidate output"
+    );
     assert_eq!(source.as_deref(), Some("stdout"));
+    Ok(())
 }
 
 #[test]
-fn git_base_and_workspace_diff_contracts() {
-    let dir = tempfile::tempdir().unwrap();
+fn git_base_and_workspace_diff_contracts() -> TestResult {
+    let dir = tempfile::tempdir()?;
     let p = dir.path();
-    git(&["init", "-q"], p).unwrap();
-    fs::write(p.join("prompt.md"), "old").unwrap();
-    git(&["add", "-A"], p).unwrap();
-    git(&["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qm", "first"], p).unwrap();
-    let base = git(&["rev-parse", "HEAD"], p).unwrap();
-    fs::write(p.join("prompt.md"), "new").unwrap();
-    git(&["add", "-A"], p).unwrap();
-    git(&["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qm", "second"], p).unwrap();
-    assert_eq!(read_source_at(p, "prompt.md", Some(base.trim())).unwrap(), "old");
-    assert_eq!(read_source_at(p, "prompt.md", None).unwrap(), "new");
-    let mut case = load().unwrap().into_iter().find(|c| c.id == "create-pr").unwrap();
+    git(&["init", "-q"], p)?;
+    fs::write(p.join("prompt.md"), "old")?;
+    git(&["add", "-A"], p)?;
+    git(
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "first",
+        ],
+        p,
+    )?;
+    let base = git(&["rev-parse", "HEAD"], p)?;
+    fs::write(p.join("prompt.md"), "new")?;
+    git(&["add", "-A"], p)?;
+    git(
+        &[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "second",
+        ],
+        p,
+    )?;
+    assert_eq!(read_source_at(p, "prompt.md", Some(base.trim()))?, "old");
+    assert_eq!(read_source_at(p, "prompt.md", None)?, "new");
+    let mut case = load()?
+        .into_iter()
+        .find(|c| c.id == "create-pr")
+        .ok_or("missing create-pr")?;
     case.target.prompt_file = Some("prompt.md".into());
     let mut hashes = BTreeMap::new();
     let rows = select_rows(&[case], None);
-    template_hashes(p, &rows, Some(base.trim()), &mut hashes).unwrap();
+    template_hashes(p, &rows, Some(base.trim()), &mut hashes)?;
     let manifest = serde_json::json!({"hashes": hashes});
     assert_eq!(manifest["hashes"]["prompt.md:create-pr"], hash(b"new"));
     assert_eq!(manifest["hashes"]["base:prompt.md:create-pr"], hash(b"old"));
     assert!(read_source_at(p, "prompt.md", Some("invalid-ref")).is_err());
-    assert_eq!(workspace_diff(p).unwrap(), "no-change");
-    fs::write(p.join("added.txt"), "added content\n").unwrap();
-    let diff = workspace_diff(p).unwrap();
+    assert_eq!(workspace_diff(p)?, "no-change");
+    fs::write(p.join("added.txt"), "added content\n")?;
+    let diff = workspace_diff(p)?;
     assert!(diff.contains("added.txt") && diff.contains("+added content"));
+    Ok(())
 }
 
 #[test]
 fn malformed_judgment_is_retained() {
-    let mut record = Trial { side: "candidate".into(), row: "test".into(), trial: 0, status: "error".into(), checks: vec![], rubric: serde_json::json!("skipped"), judge_raw: None, notices: vec![], error: None, output_path: None, output_source: None };
+    let mut record = Trial {
+        side: "candidate".into(),
+        row: "test".into(),
+        number: 0,
+        status: "error".into(),
+        checks: vec![],
+        rubric: serde_json::json!("skipped"),
+        judge_raw: None,
+        notices: vec![],
+        error: None,
+        output_path: None,
+        output_source: None,
+    };
     assert!(record_judgment(&mut record, "not json".into(), &[]).is_err());
     assert_eq!(record.judge_raw.as_deref(), Some("not json"));
 }
 
 #[test]
-fn step_context_preserves_instruction_and_feedback_order() {
+fn step_context_preserves_instruction_and_feedback_order() -> TestResult {
     let vars = VariableStore::new(String::new());
     let prompt = prompt_render::assemble_step_prompt_with_context(
-        "task", &vars, false, &ToolPolicy::default(), Some("delivered"), Some("feedback"),
-    ).unwrap();
-    assert_eq!(prompt, format!("task\n\ndelivered{}\n\nfeedback", prompt_render::COMMIT_GUARD_PROMPT_NOTICE));
+        "task",
+        &vars,
+        false,
+        &ToolPolicy::default(),
+        Some("delivered"),
+        Some("feedback"),
+    )?;
+    assert_eq!(
+        prompt,
+        format!(
+            "task\n\ndelivered{}\n\nfeedback",
+            prompt_render::COMMIT_GUARD_PROMPT_NOTICE
+        )
+    );
+    Ok(())
 }
 
 #[test]
-fn implement_case_renders_literal_examples() {
-    let cases = load().unwrap();
-    let c = cases.iter().find(|c| c.id == "implement-after-tests-file").unwrap();
-    let (text, _, _) = template(c, &read_source(source(c).unwrap(), None).unwrap()).unwrap();
+fn implement_case_renders_literal_examples() -> TestResult {
+    let cases = load()?;
+    let c = cases
+        .iter()
+        .find(|c| c.id == "implement-after-tests-file")
+        .ok_or("missing implement case")?;
+    let (text, _, _) = template(c, &read_source(source(c)?, None)?)?;
     let mut vars = VariableStore::new(String::new());
-    let Var::File { file } = &c.vars["plan"] else { panic!("expected plan file") };
+    let Var::File { file } = &c.vars["plan"] else {
+        return Err("expected plan file".into());
+    };
     vars.set_named_file("plan", root().join(file));
-    let rendered = prompt_render::assemble_step_prompt(&text, &vars, false, &ToolPolicy::default()).unwrap();
-    for example in ["{Summary of work performed}", "{Summary of changes made}", "{Build execution results}", "{Test execution command and results}"] {
+    let rendered =
+        prompt_render::assemble_step_prompt(&text, &vars, false, &ToolPolicy::default())?;
+    for example in [
+        "{Summary of work performed}",
+        "{Summary of changes made}",
+        "{Build execution results}",
+        "{Test execution command and results}",
+    ] {
         assert!(rendered.contains(example));
     }
+    Ok(())
 }

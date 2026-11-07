@@ -140,7 +140,7 @@ pub fn template(
 pub fn validate(cases: &[Case]) -> Result<(), String> {
     let mut ids = HashSet::new();
     let mut rubrics = HashSet::new();
-    let id_re = regex::Regex::new(r"^[a-z0-9]+(?:-[a-z0-9]+)*$").unwrap();
+    let id_re = regex::Regex::new(r"^[a-z0-9]+(?:-[a-z0-9]+)*$").map_err(|e| e.to_string())?;
     for c in cases {
         if !id_re.is_match(&c.id) || !ids.insert(&c.id) {
             return Err(format!("invalid or duplicate case id {}", c.id));
@@ -160,10 +160,10 @@ pub fn validate(cases: &[Case]) -> Result<(), String> {
         if c.repeat == Some(0) || c.rubric.is_empty() {
             return Err(format!("{}: empty repeat or rubric", c.id));
         }
-        if let Some(l) = &c.language {
-            if l.values.is_empty() || l.values.iter().any(|v| v != "English" && v != "Japanese") {
-                return Err(format!("{}: invalid language", c.id));
-            }
+        if let Some(l) = &c.language
+            && (l.values.is_empty() || l.values.iter().any(|v| v != "English" && v != "Japanese"))
+        {
+            return Err(format!("{}: invalid language", c.id));
         }
         for r in &c.rubric {
             if !id_re.is_match(&r.id) || !rubrics.insert(&r.id) {
@@ -183,16 +183,16 @@ pub fn validate(cases: &[Case]) -> Result<(), String> {
         let data = fs::read_to_string(root().join(path)).map_err(|e| format!("{path}: {e}"))?;
         template(c, &data)?;
         for var in c.vars.values() {
-            if let Var::File { file } = var {
-                if !root().join(file).is_file() {
-                    return Err(format!("missing fixture {file}"));
-                }
+            if let Var::File { file } = var
+                && !root().join(file).is_file()
+            {
+                return Err(format!("missing fixture {file}"));
             }
         }
-        if let Some(w) = &c.workspace {
-            if !root().join(w).is_dir() {
-                return Err(format!("missing workspace {w}"));
-            }
+        if let Some(w) = &c.workspace
+            && !root().join(w).is_dir()
+        {
+            return Err(format!("missing workspace {w}"));
         }
     }
     Ok(())
@@ -217,10 +217,9 @@ pub fn language_ok(lang: &str, output: &str) -> bool {
         .chars()
         .filter(|c| ('\u{3040}'..='\u{30ff}').contains(c) || ('\u{4e00}'..='\u{9fff}').contains(c))
         .count();
-    let ratio = japanese as f64 / total as f64;
     match lang {
-        "Japanese" => ratio >= 0.10,
-        "English" => ratio <= 0.01,
+        "Japanese" => japanese >= total.div_ceil(10),
+        "English" => japanese <= total / 100,
         _ => false,
     }
 }

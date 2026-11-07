@@ -1584,9 +1584,18 @@ pub(crate) async fn run_prompt_step(
         permission,
     );
     let mcp_servers = tool_policy.filter_mcp_servers(&compiled.mcp_servers);
-    let prompt = crate::prompt_render::assemble_step_prompt_with_context(
-        &step.prompt, vars, allow_commit, &tool_policy, delivered, vars.quality_gate_feedback(),
-    )?;
+    let prompt = if delivered.is_none() && vars.quality_gate_feedback().is_none() {
+        crate::prompt_render::assemble_step_prompt(&step.prompt, vars, allow_commit, &tool_policy)?
+    } else {
+        crate::prompt_render::assemble_step_prompt_with_context(
+            &step.prompt,
+            vars,
+            allow_commit,
+            &tool_policy,
+            delivered,
+            vars.quality_gate_feedback(),
+        )?
+    };
 
     let executor = crate::executor::Executor::new(compiled.sdk.as_deref(), &compiled.command);
     let model_or_mode = executor.step_model(step.model.as_deref(), compiled.model.as_ref());

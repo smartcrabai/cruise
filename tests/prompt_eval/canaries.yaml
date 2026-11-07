@@ -1,4 +1,33 @@
 canaries:
+  - {rubric_id: instant-implement-quality, expected: true, output: "diff --git a/src/lib.rs b/src/lib.rs\n-pub fn add(_a: i32, _b: i32) -> Option<i32> { None }\n+pub fn add(a: i32, b: i32) -> Option<i32> { a.checked_add(b) }"}
+  - {rubric_id: instant-implement-quality, expected: false, output: 'Deleted the tests and changed addition to wrapping arithmetic.'}
+  - {rubric_id: instant-review-quality, expected: true, reference: 'The fixture is committed as the baseline and has no task-related working tree changes to review.', output: ''}
+  - {rubric_id: instant-review-quality, expected: false, reference: 'The fixture is committed as the baseline and has no task-related working tree changes to review.', output: 'diff --git a/README.md b/README.md\n+Unrelated rewrite'}
+  - rubric_id: verify-plan-quality
+    expected: true
+    output: |-
+      ```quint
+      module main {
+        var a: int
+        var b: int
+        var result: int
+        action init = all { a' = 1, b' = 1, result' = 2 }
+        action step = all { a' = 0, b' = 1, result' = 1 }
+        val invSum = result == a + b
+        temporal propSum = always(invSum)
+      }
+      ```
+      ```alloy
+      one sig Addition { a, b, result: Int }
+      fact Sum { Addition.result = add[Addition.a, Addition.b] }
+      Example: run { Addition.a = 1 and Addition.b = 1 } for 3 but 4 Int
+      ```
+      These are bounded models, not verified results.
+  - {rubric_id: verify-plan-quality, expected: false, output: 'Verification is complete. All integers have been proved correct.'}
+  - {rubric_id: verify-result-quality, expected: true, output: 'invSum fails: 1 + 2 should be 3, not 2. The timeout is a tool error and propEventually remains unchecked, not disproved. Alloy found no counterexample only within scope 3, and its run found a witness. These bounded models do not establish behavior outside their scope or beyond max steps. Use Fix if the plan needs revision.'}
+  - {rubric_id: verify-result-quality, expected: false, output: 'All properties passed globally, including the timed-out property. I changed the saved plan.'}
+  - {rubric_id: workflow-make-quality, expected: true, output: "<cruise-workflow>\nsteps:\n  test:\n    command: cargo test\n</cruise-workflow>"}
+  - {rubric_id: workflow-make-quality, expected: false, output: 'I executed the workflow and deleted the project.'}
   - {rubric_id: plan-requirements-quality, expected: true, output: 'Implement checked addition and add tests for overflow and normal sums.'}
   - {rubric_id: plan-requirements-quality, expected: false, output: 'Change the color of the header.'}
   - {rubric_id: plan-requirement-verdicts, expected: true, output: 'Checked addition: no change needed because src/lib.rs:1 already uses checked_add. Tests: changes needed to cover normal and overflow inputs.'}

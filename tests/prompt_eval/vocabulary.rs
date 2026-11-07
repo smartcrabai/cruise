@@ -22,7 +22,9 @@ fn check_text(path: &Path, text: &str, vocabulary: &Vocabulary, generate: bool, 
             vocabulary.runtime.contains(&name)
                 || name.starts_with("file:")
                 || (vocabulary.workflow_inputs.contains(&name)
-                    && name.strip_prefix("inputs.").is_some_and(|input| inputs.iter().any(|declared| declared == input)))
+                    && name
+                        .strip_prefix("inputs.")
+                        .is_some_and(|input| inputs.iter().any(|declared| declared == input)))
         };
         assert!(
             allowed,
@@ -46,11 +48,11 @@ fn check_step(path: &Path, step: &StepConfig, vocabulary: &Vocabulary, inputs: &
         }
     }
 }
-fn walk(path: &Path, vocabulary: &Vocabulary) {
-    for entry in fs::read_dir(path).unwrap() {
-        let path = entry.unwrap().path();
+fn walk(path: &Path, vocabulary: &Vocabulary) -> Result<(), Box<dyn std::error::Error>> {
+    for entry in fs::read_dir(path)? {
+        let path = entry?.path();
         if path.is_dir() {
-            walk(&path, vocabulary);
+            walk(&path, vocabulary)?;
             continue;
         }
         if !matches!(
@@ -59,9 +61,9 @@ fn walk(path: &Path, vocabulary: &Vocabulary) {
         ) {
             continue;
         }
-        let text = fs::read_to_string(&path).unwrap();
+        let text = fs::read_to_string(&path)?;
         let workflow =
-            WorkflowConfig::from_yaml(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            WorkflowConfig::from_yaml(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         for step in workflow.steps.values().chain(workflow.after_pr.values()) {
             check_step(&path, step, vocabulary, &workflow.inputs);
         }
@@ -71,54 +73,90 @@ fn walk(path: &Path, vocabulary: &Vocabulary) {
             }
         }
     }
+    Ok(())
 }
-fn vocabulary() -> Vocabulary {
+fn vocabulary() -> Result<Vocabulary, Box<dyn std::error::Error>> {
     let path = super::root().join("tests/prompt_eval/vocabulary.yaml");
-    serde_yaml::from_str(&fs::read_to_string(path).expect("read vocabulary"))
-        .expect("parse vocabulary")
+    Ok(serde_yaml::from_str(&fs::read_to_string(path)?)?)
 }
 #[test]
-fn all_prompt_vocabulary_is_known() {
+fn all_prompt_vocabulary_is_known() -> Result<(), Box<dyn std::error::Error>> {
     let root = super::root();
-    let vocabulary = vocabulary();
-    for entry in fs::read_dir(root.join("prompts")).unwrap() {
-        let path = entry.unwrap().path();
+    let vocabulary = vocabulary()?;
+    for entry in fs::read_dir(root.join("prompts"))? {
+        let path = entry?.path();
         if path.extension().and_then(|s| s.to_str()) == Some("md") {
-            if path.file_name().is_some_and(|name| name == "workflow-make.md") {
-                for name in referenced_names(&fs::read_to_string(&path).unwrap()) {
-                    assert!(vocabulary.workflow_make.contains(&name), "{}: unknown prompt variable {{{name}}}", path.display());
+            if path
+                .file_name()
+                .is_some_and(|name| name == "workflow-make.md")
+            {
+                for name in referenced_names(&fs::read_to_string(&path)?) {
+                    assert!(
+                        vocabulary.workflow_make.contains(&name),
+                        "{}: unknown prompt variable {{{name}}}",
+                        path.display()
+                    );
                 }
                 continue;
             }
-            let generate = path.file_name().is_some_and(|name| name == "workflow-generate.md");
-            check_text(&path, &fs::read_to_string(&path).unwrap(), &vocabulary, generate, &[]);
+            let generate = path
+                .file_name()
+                .is_some_and(|name| name == "workflow-generate.md");
+            check_text(
+                &path,
+                &fs::read_to_string(&path)?,
+                &vocabulary,
+                generate,
+                &[],
+            );
         }
     }
-    walk(&root.join("builtin"), &vocabulary);
+    walk(&root.join("builtin"), &vocabulary)?;
+    Ok(())
 }
 #[test]
-fn escaped_braces_are_not_references() {
+fn escaped_braces_are_not_references() -> Result<(), Box<dyn std::error::Error>> {
     check_text(
         Path::new("test"),
         "{{headRefOid}} {input} {file:plan.md}",
-        &vocabulary(),
+        &vocabulary()?,
         false,
         &[],
     );
+    Ok(())
 }
 #[test]
 #[should_panic(expected = "unknown prompt variable {inputs.typo}")]
 fn unknown_workflow_inputs_are_rejected() {
-    check_text(Path::new("test"), "{inputs.typo}", &vocabulary(), false, &[]);
+    check_text(
+        Path::new("test"),
+        "{inputs.typo}",
+        &vocabulary().unwrap_or_else(|e| panic!("vocabulary fixture: {e}")),
+        false,
+        &[],
+    );
 }
 
 #[test]
-fn generation_schema_is_accepted() {
-    check_text(Path::new("workflow-generate.md"), "{schema}", &vocabulary(), true, &[]);
+fn generation_schema_is_accepted() -> Result<(), Box<dyn std::error::Error>> {
+    check_text(
+        Path::new("workflow-generate.md"),
+        "{schema}",
+        &vocabulary()?,
+        true,
+        &[],
+    );
+    Ok(())
 }
 
 #[test]
 #[should_panic(expected = "unknown prompt variable {schema}")]
 fn runtime_schema_is_rejected() {
-    check_text(Path::new("runtime-step"), "{schema}", &vocabulary(), false, &[]);
+    check_text(
+        Path::new("runtime-step"),
+        "{schema}",
+        &vocabulary().unwrap_or_else(|e| panic!("vocabulary fixture: {e}")),
+        false,
+        &[],
+    );
 }

@@ -71,11 +71,11 @@ mod option_handler;
 mod paths;
 mod plan_cmd;
 mod planning;
-mod prompt_render;
 mod platform;
 mod pr_merge;
 mod pr_review_fix;
 mod pr_template;
+mod prompt_render;
 pub mod provider_install;
 mod quality_gate;
 mod repo_clone;
@@ -103,11 +103,7 @@ mod tui;
 mod update_cmd;
 mod usage;
 mod usage_cmd;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "reference discovery is a public library API")
-)]
-mod variable;
+pub mod variable;
 mod webui;
 mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]

@@ -1,5 +1,6 @@
 //! Helpers for live evaluation reporting.
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 pub(super) fn output_root(repo: &Path, configured: Option<&str>) -> PathBuf {
@@ -53,19 +54,21 @@ pub(super) fn summary(
         } else {
             format!("{}/{}", candidate.0, candidate.1)
         };
-        text.push_str(&format!(
-            "| {row} | {candidate_text} | {base_text} | {change} |\n"
-        ));
+        let _ = writeln!(
+            text,
+            "| {row} | {candidate_text} | {base_text} | {change} |"
+        );
     }
     for (label, rows) in [("Regressions", regressions), ("Improvements", improvements)] {
-        text.push_str(&format!(
-            "\n{label}: {}\n",
+        let _ = writeln!(
+            text,
+            "\n{label}: {}",
             if rows.is_empty() {
                 "none".to_owned()
             } else {
                 rows.join(", ")
             }
-        ));
+        );
     }
     (text, failed)
 }
@@ -106,7 +109,7 @@ mod tests {
             ]),
         )]);
         let (text, failed) = summary(&counts);
-        assert!(failed.is_empty());
+        assert_eq!(failed, [] as [String; 0]);
         assert!(text.contains("base error"));
         assert!(text.contains("Improvements: none"));
     }

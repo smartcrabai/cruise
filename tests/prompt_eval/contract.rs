@@ -2,9 +2,9 @@
 use super::catalog::{Check, load, validate};
 
 #[test]
-fn rejects_invalid_case_settings_and_duplicate_rubrics() {
-    let cases = load().expect("load catalog");
-    validate(&cases).expect("valid catalog");
+fn rejects_invalid_case_settings_and_duplicate_rubrics() -> Result<(), String> {
+    let cases = load()?;
+    validate(&cases)?;
     let mut invalid = cases.clone();
     invalid[0].repeat = Some(0);
     assert!(validate(&invalid).is_err());
@@ -21,9 +21,10 @@ fn rejects_invalid_case_settings_and_duplicate_rubrics() {
     let language = invalid
         .iter_mut()
         .find_map(|c| c.language.as_mut())
-        .expect("language case");
+        .ok_or("missing language case")?;
     language.values.push("French".into());
     assert!(validate(&invalid).is_err());
+    Ok(())
 }
 
 #[test]
@@ -33,20 +34,38 @@ fn case_unknown_fields_are_rejected() {
 }
 
 #[test]
-fn repository_cases_have_fixtures_and_edit_cases_capture_diffs() {
-    let cases = load().unwrap();
+fn repository_cases_have_fixtures_and_edit_cases_capture_diffs() -> Result<(), String> {
+    let cases = load()?;
     for case in &cases {
         if case.target.workflow_step.is_some() {
-            assert!(case.workspace.as_ref().is_some_and(|w| super::root().join(w).join("src/lib.rs").is_file()), "{}", case.id);
+            assert!(
+                case.workspace
+                    .as_ref()
+                    .is_some_and(|w| super::root().join(w).join("src/lib.rs").is_file()),
+                "{}",
+                case.id
+            );
         }
     }
-    for id in ["tdd-write-tests", "tdd-implement", "implement-after-tests-file"] {
-        let case = cases.iter().find(|c| c.id == id).unwrap();
+    for id in [
+        "tdd-write-tests",
+        "tdd-implement",
+        "implement-after-tests-file",
+    ] {
+        let case = cases
+            .iter()
+            .find(|c| c.id == id)
+            .ok_or_else(|| format!("missing case {id}"))?;
         assert_eq!(case.output, "workspace_diff", "{id}");
-        let workspace = super::root().join(case.workspace.as_ref().unwrap());
+        let workspace = super::root().join(
+            case.workspace
+                .as_ref()
+                .ok_or_else(|| format!("missing workspace for {id}"))?,
+        );
         assert!(workspace.join("Cargo.toml").is_file());
         if id != "tdd-write-tests" {
             assert!(workspace.join("tests/add.rs").is_file());
         }
     }
+    Ok(())
 }

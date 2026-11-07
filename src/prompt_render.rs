@@ -54,7 +54,6 @@ pub fn render_generate_prompt(template: &str, schema: &str, description: &str) -
 ///
 /// # Errors
 /// Returns an error if a template or file reference cannot be resolved.
-#[allow(dead_code, reason = "public evaluation API is not used by the runtime binary")]
 pub fn assemble_step_prompt(
     template: &str,
     vars: &VariableStore,

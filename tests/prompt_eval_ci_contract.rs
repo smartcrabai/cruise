@@ -1,20 +1,20 @@
 //! Contract for the manually invoked, opt-in live prompt evaluation workflow.
 use serde_yaml::Value;
-use std::{fs, path::PathBuf};
+use std::{error::Error, fs, path::PathBuf};
 
-fn workflow() -> Value {
+fn workflow() -> Result<Value, Box<dyn Error>> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
     let mut matches = Vec::new();
-    for entry in fs::read_dir(dir).expect("read GitHub workflows") {
-        let path = entry.expect("workflow directory entry").path();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
         if !matches!(
             path.extension().and_then(|x| x.to_str()),
             Some("yml" | "yaml")
         ) {
             continue;
         }
-        let doc: Value = serde_yaml::from_str(&fs::read_to_string(&path).expect("read workflow"))
-            .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+        let doc: Value = serde_yaml::from_str(&fs::read_to_string(&path)?)
+            .map_err(|e| format!("parse {}: {e}", path.display()))?;
         if doc["jobs"].as_mapping().is_some_and(|jobs| {
             jobs.values().any(|job| {
                 job["steps"].as_sequence().is_some_and(|steps| {
@@ -34,13 +34,13 @@ fn workflow() -> Value {
         1,
         "expected exactly one workflow running the live prompt evaluation"
     );
-    matches.pop().unwrap().1
+    Ok(matches.pop().ok_or("missing evaluation workflow")?.1)
 }
 
-fn eval_job(doc: &Value) -> &Value {
+fn eval_job(doc: &Value) -> Result<&Value, Box<dyn Error>> {
     doc["jobs"]
         .as_mapping()
-        .unwrap()
+        .ok_or("missing jobs mapping")?
         .values()
         .find(|job| {
             job["steps"].as_sequence().is_some_and(|steps| {
@@ -51,23 +51,29 @@ fn eval_job(doc: &Value) -> &Value {
                 })
             })
         })
-        .unwrap()
+        .ok_or_else(|| "missing evaluation job".into())
 }
 
 #[test]
-fn workflow_is_manual_and_least_privilege() {
-    let doc = workflow();
-    let triggers = doc["on"].as_mapping().expect("manual trigger mapping");
+fn workflow_is_manual_and_least_privilege() -> Result<(), Box<dyn Error>> {
+    let doc = workflow()?;
+    let triggers = doc["on"].as_mapping().ok_or("manual trigger mapping")?;
     assert_eq!(triggers.len(), 1, "workflow must only run manually");
     assert!(triggers.contains_key(Value::String("workflow_dispatch".into())));
     let permissions = doc["permissions"]
         .as_mapping()
-        .expect("explicit workflow permissions");
+        .ok_or("explicit workflow permissions")?;
     assert_eq!(permissions.len(), 1, "grant only repository read access");
     assert_eq!(doc["permissions"]["contents"].as_str(), Some("read"));
-    let job = eval_job(&doc);
+    let job = eval_job(&doc)?;
     if !job["permissions"].is_null() {
-        assert_eq!(job["permissions"].as_mapping().unwrap().len(), 1);
+        assert_eq!(
+            job["permissions"]
+                .as_mapping()
+                .ok_or("job permissions mapping")?
+                .len(),
+            1
+        );
         assert_eq!(job["permissions"]["contents"].as_str(), Some("read"));
     }
     let env = &job["environment"];
@@ -75,13 +81,14 @@ fn workflow_is_manual_and_least_privilege() {
         env.as_str().or_else(|| env["name"].as_str()),
         Some("prompt-eval")
     );
+    Ok(())
 }
 
 #[test]
-fn checkout_and_live_evaluation_are_explicit() {
-    let doc = workflow();
-    let job = eval_job(&doc);
-    let steps = job["steps"].as_sequence().unwrap();
+fn checkout_and_live_evaluation_are_explicit() -> Result<(), Box<dyn Error>> {
+    let doc = workflow()?;
+    let job = eval_job(&doc)?;
+    let steps = job["steps"].as_sequence().ok_or("steps sequence")?;
     let checkout = steps
         .iter()
         .find(|s| {
@@ -89,7 +96,7 @@ fn checkout_and_live_evaluation_are_explicit() {
                 .as_str()
                 .is_some_and(|u| u.starts_with("actions/checkout@"))
         })
-        .expect("checkout step");
+        .ok_or("checkout step")?;
     assert_eq!(checkout["with"]["fetch-depth"].as_i64(), Some(0));
     assert_eq!(
         checkout["with"]["persist-credentials"].as_bool(),
@@ -102,8 +109,8 @@ fn checkout_and_live_evaluation_are_explicit() {
                 .as_str()
                 .is_some_and(|r| r.contains("--test prompt_eval"))
         })
-        .unwrap();
-    let run = live["run"].as_str().unwrap();
+        .ok_or("live evaluation step")?;
+    let run = live["run"].as_str().ok_or("live evaluation command")?;
     assert!(
         run.contains("cargo test")
             && run.contains("--all-features")
@@ -122,12 +129,15 @@ fn checkout_and_live_evaluation_are_explicit() {
             .any(|v| v.as_str() == Some("1") || v.as_i64() == Some(1)),
         "live evaluation must be explicitly opted in"
     );
+    Ok(())
 }
 
 #[test]
-fn evaluation_artifacts_upload_even_on_failure() {
-    let doc = workflow();
-    let steps = eval_job(&doc)["steps"].as_sequence().unwrap();
+fn evaluation_artifacts_upload_even_on_failure() -> Result<(), Box<dyn Error>> {
+    let doc = workflow()?;
+    let steps = eval_job(&doc)?["steps"]
+        .as_sequence()
+        .ok_or("steps sequence")?;
     let upload = steps
         .iter()
         .find(|s| {
@@ -135,7 +145,7 @@ fn evaluation_artifacts_upload_even_on_failure() {
                 .as_str()
                 .is_some_and(|u| u.starts_with("actions/upload-artifact@"))
         })
-        .expect("upload evaluation artifacts");
+        .ok_or("upload evaluation artifacts")?;
     assert!(
         upload["if"]
             .as_str()
@@ -146,4 +156,5 @@ fn evaluation_artifacts_upload_even_on_failure() {
     assert_eq!(upload["with"]["name"].as_str(), Some("prompt-eval-reports"));
     assert_eq!(upload["with"]["retention-days"].as_i64(), Some(14));
     assert_eq!(upload["with"]["if-no-files-found"].as_str(), Some("warn"));
+    Ok(())
 }

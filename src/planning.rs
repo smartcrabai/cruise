@@ -305,7 +305,11 @@ async fn run_plan_prompt_template_with_conversation(
     retain_turn_conversation: bool,
 ) -> Result<PromptResult> {
     let prompt = crate::prompt_render::render_plan_template(
-        template, vars, ctx.config, ctx.plan_path, ctx.interactive,
+        template,
+        vars,
+        ctx.config,
+        ctx.plan_path,
+        ctx.interactive,
     )?;
     let executor = ctx.executor();
     ensure_agents_authenticated(ctx.config, AuthScope::Planning, ctx.working_dir)?;

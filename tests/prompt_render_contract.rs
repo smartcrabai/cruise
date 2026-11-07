@@ -9,11 +9,10 @@ use cruise::tool_policy::ToolPolicy;
 use cruise::variable::{VariableStore, referenced_names};
 
 #[test]
-fn plan_renders_path_language_and_interactive_guidance() {
+fn plan_renders_path_language_and_interactive_guidance() -> Result<(), Box<dyn std::error::Error>> {
     let config = WorkflowConfig::from_yaml(
         "languages:\n  plan: Japanese\nsteps:\n  example:\n    command: echo hi\n",
-    )
-    .unwrap();
+    )?;
     let path = Path::new("plans/example.md");
     for (interactive, expected) in [(false, "This run is non-interactive"), (true, "ask_user")] {
         let mut vars = VariableStore::default();
@@ -23,19 +22,19 @@ fn plan_renders_path_language_and_interactive_guidance() {
             &config,
             path,
             interactive,
-        )
-        .unwrap();
+        )?;
         assert!(
             rendered.starts_with("plans/example.md|Japanese|"),
             "{rendered}"
         );
         assert!(rendered.contains(expected), "{rendered}");
     }
+    Ok(())
 }
 
 #[test]
-fn plan_rejects_undefined_variable() {
-    let config = WorkflowConfig::from_yaml("steps:\n  example:\n    command: echo hi\n").unwrap();
+fn plan_rejects_undefined_variable() -> Result<(), Box<dyn std::error::Error>> {
+    let config = WorkflowConfig::from_yaml("steps:\n  example:\n    command: echo hi\n")?;
     assert!(
         render_plan_template(
             "{nope}",
@@ -46,16 +45,19 @@ fn plan_rejects_undefined_variable() {
         )
         .is_err()
     );
+    Ok(())
 }
 
 #[test]
-fn pr_uses_requested_language_and_rejects_missing_variables() {
+fn pr_uses_requested_language_and_rejects_missing_variables()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut vars = VariableStore::default();
     assert_eq!(
-        render_pr_template("Write in {pr.language}", &mut vars, "Japanese").unwrap(),
+        render_pr_template("Write in {pr.language}", &mut vars, "Japanese")?,
         "Write in Japanese"
     );
     assert!(render_pr_template("{pr.number}", &mut vars, "English").is_err());
+    Ok(())
 }
 
 #[test]
@@ -67,21 +69,22 @@ fn generate_replaces_schema_before_description() {
 }
 
 #[test]
-fn step_commit_guard_is_conditional_and_exact() {
+fn step_commit_guard_is_conditional_and_exact() -> Result<(), Box<dyn std::error::Error>> {
     let vars = VariableStore::new("task".into());
     let policy = ToolPolicy::default();
     assert_eq!(
-        assemble_step_prompt("{input}", &vars, true, &policy).unwrap(),
+        assemble_step_prompt("{input}", &vars, true, &policy)?,
         "task"
     );
     assert_eq!(
-        assemble_step_prompt("{input}", &vars, false, &policy).unwrap(),
+        assemble_step_prompt("{input}", &vars, false, &policy)?,
         format!("task{COMMIT_GUARD_PROMPT_NOTICE}")
     );
+    Ok(())
 }
 
 #[test]
-fn step_appends_tool_notice_after_commit_guard() {
+fn step_appends_tool_notice_after_commit_guard() -> Result<(), Box<dyn std::error::Error>> {
     let vars = VariableStore::new("task".into());
     let policy = ToolPolicy {
         deny_web: true,
@@ -89,31 +92,34 @@ fn step_appends_tool_notice_after_commit_guard() {
     };
     let notice = policy
         .prompt_notice()
-        .expect("web denial must produce a notice");
+        .ok_or("web denial must produce a notice")?;
     assert_eq!(
-        assemble_step_prompt("{input}", &vars, false, &policy).unwrap(),
+        assemble_step_prompt("{input}", &vars, false, &policy)?,
         format!("task{COMMIT_GUARD_PROMPT_NOTICE}\n\n{notice}")
     );
     assert_eq!(
-        assemble_step_prompt("{input}", &vars, true, &policy).unwrap(),
+        assemble_step_prompt("{input}", &vars, true, &policy)?,
         format!("task\n\n{notice}")
     );
+    Ok(())
 }
 
 #[test]
-fn step_file_references_are_literal_and_require_artifact_root() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join("research")).unwrap();
-    std::fs::write(dir.path().join("research/plan.md"), "artifact {x}").unwrap();
+fn step_file_references_are_literal_and_require_artifact_root()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    std::fs::create_dir(dir.path().join("research"))?;
+    std::fs::write(dir.path().join("research/plan.md"), "artifact {x}")?;
     let policy = ToolPolicy::default();
     let mut vars = VariableStore::default();
     assert!(assemble_step_prompt("{file:research/plan.md}", &vars, true, &policy).is_err());
     vars.set_named_value("x", "expanded".into());
     vars.set_artifacts_root(dir.path().to_path_buf());
     assert_eq!(
-        assemble_step_prompt("before {file:research/plan.md} after", &vars, true, &policy).unwrap(),
+        assemble_step_prompt("before {file:research/plan.md} after", &vars, true, &policy)?,
         "before artifact {x} after"
     );
+    Ok(())
 }
 
 #[test]
@@ -122,6 +128,6 @@ fn referenced_names_uses_runtime_brace_tokenization() {
         referenced_names("{a} {file:x.md} {{a}} }}"),
         vec!["a", "file:x.md"]
     );
-    assert!(referenced_names("unclosed {").is_empty());
+    assert_eq!(referenced_names("unclosed {"), Vec::<String>::new());
     assert_eq!(referenced_names("{a} } {b}"), vec!["a", "b"]);
 }
