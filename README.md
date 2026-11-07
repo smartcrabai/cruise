@@ -167,6 +167,9 @@ cruise run
 # Execute a config directly in the current directory (no plan, no worktree, no PR)
 cruise exec "do this"
 
+# Run one agent without writing a workflow YAML
+cruise exec --instant "do this"
+
 # Open the full interactive keyboard client
 cruise
 
@@ -305,7 +308,7 @@ Commands:
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs
   config       Show or update application-level configuration (`config.json` or `config.yaml`)
-  exec         Execute the workflow config directly in the current directory (no plan, no worktree, no PR)
+  exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve the browser UI from this machine (pass `--open` to launch the default browser)
   update       Update a managed native installation; `--status` lists recorded transactions read-only
@@ -460,12 +463,28 @@ Arguments:
 
 Options:
   -c, --config <PATH>              Path to the workflow config file; use __builtin__ or builtin:<name> for a built-in workflow (see Config File Resolution)
+      --instant                    Build a single-agent workflow without a workflow YAML (requires INPUT; conflicts with --config and --flag)
+      --sdk <NAME>                 Instant backend: jcode, claude, or opencode (requires --instant)
+      --model <MODEL>              Instant model (requires --instant)
+      --review                     Add a bounded review loop (requires --instant)
+      --review-rounds <N>          Maximum review passes, at least 1 (requires --review; default: 2)
+      --verify <COMMAND>           Add a verification command (requires --instant; repeatable)
       --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (no flag default; falls back to the workflow config's top-level `max_retries`, else 3)
       --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
   -f, --flag <NAME[,NAME...]>     Enable named workflow flags; NAME=on|off|true|false also works (repeatable; see Workflow flags)
 ```
 Runs the workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. A transient session is recorded while the workflow runs, then automatically removed when it reaches a terminal phase. Sessions paused for input (`Running`) or interrupted with Ctrl+C (`Suspended`) are kept and can be resumed with `cruise run <id>`; exec sessions are excluded from `cruise run` automatic selection and `cruise run --all`. Existing uncommitted changes are allowed; cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is still required.
+
+`--instant` explicitly opts into a workflow assembled in memory instead of resolving `CRUISE_CONFIG` or a local workflow file. Without it, `cruise exec` retains normal config resolution: with no config file, an interactive terminal offers built-in workflows with `tdd` selected by default, while non-interactive execution selects `tdd` automatically. Instant requires a nonblank task and includes one implement step. Workflow defaults can prepend command pre-steps. It does not write a workflow into the repository; the existing session retains an inline config snapshot while the session exists. Workflow defaults and environment overrides still apply, and `CRUISE_SDK` / `CRUISE_MODEL` override `--sdk` / `--model`.
+
+```sh
+cruise exec --instant --sdk jcode --model my-model --review --review-rounds 2 \
+  --verify 'cargo test' --verify 'cargo clippy' "implement the feature"
+cruise exec --instant --dry-run "implement the feature"
+```
+
+Review fixes confirmed defects and repeats when the review pass changes files, up to the specified number of passes (default 2). A pass with no changes ends the loop; edits in the final allowed pass are not reviewed again. Verification commands run in the order supplied after implementation and any review; a failed command fails the run, not an automatic repair loop. Blank verification commands and commands containing braces are rejected. `--max-retries`, `--rate-limit-retries`, and `--dry-run` also apply; a `--max-retries` budget below the review limit is invalid. Instant declares no workflow flags and cannot be combined with `-c` or `-f`. It requires a git repository with an attached branch. Remote use is available with `cruise ssh <host> -- exec --instant "task"`.
 
 When `force_exec: true` is set in the workflow config, the legacy positional form `cruise "task"` (except the exact inputs `ssh` and `mcp-bridge`, which are reserved for their subcommands), `cruise plan "task"`, and `cruise --plan "task"` use the current-directory execution path without planning, worktree, or PR creation. `--no-force-exec`, `--repo`, `--grill`, and image attachments opt out; `--skip-planning` and `--no-interactive-planning` do not. Background `--plan` runs foreground because there is no plan worker for direct execution. Both `exec` and these `force_exec` entry points use the same fresh-run flag selector on TTY stdin unless `-f/--flag` is supplied; dry runs and piped input (including `--plan stdin`) do not prompt. Resuming a retained exec session by ID keeps its saved flags without prompting.
 
@@ -777,7 +796,7 @@ cruise resolves the workflow config as follows:
    - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` (default: `~/.config/cruise/workflows/`), sorted by filename
 
    When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. The built-in workflows are always offered at the end of the list, with `tdd` first, so they remain selectable even when config files are found; on a TTY with only built-ins the picker still starts at `tdd`. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
-4. **No candidate found** -- cruise falls back to the built-in `tdd` workflow (`builtin/tdd.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.
+4. **No config file found** -- an interactive terminal offers the built-in workflows with `tdd` selected by default; non-interactive resolution selects the embedded `tdd` workflow automatically. No config file is required.
 
 The `description:` field of each config file is shown next to its filename in both the CLI selector and the WebUI, making it easier to tell similar files apart. The WebUI's config selector offers every built-in workflow with its description alongside *Auto* so a session can be pinned to an embedded workflow regardless of discovered files.
 

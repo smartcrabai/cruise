@@ -51,6 +51,7 @@ mod github_review;
 mod graph;
 mod herdr;
 mod install_identity;
+mod instant_exec;
 mod issue_publish;
 mod list_cmd;
 mod metadata;
