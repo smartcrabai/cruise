@@ -96,6 +96,8 @@ pub enum WorkflowCommand {
     Eject(WorkflowEjectArgs),
     /// Generate a new workflow YAML file from a description using the configured backend.
     Generate(WorkflowGenerateArgs),
+    /// Start a conversation to create or revise a workflow YAML (interactive terminal only).
+    Make(WorkflowMakeArgs),
     /// Install a workflow from GitHub: `owner/repo[/path][@ref]`.
     Add(WorkflowAddArgs),
     /// Remove an installed workflow package.
@@ -130,6 +132,24 @@ pub struct WorkflowGenerateArgs {
     /// Backend config used for generation.
     #[arg(long)]
     pub config: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+pub struct WorkflowMakeArgs {
+    /// Initial description of the workflow to create.
+    pub description: Option<String>,
+    /// File stem for the new workflow (`<name>.yaml`).
+    #[arg(long, value_parser = crate::workflow_generate::validate_name)]
+    pub name: String,
+    /// Save into the user workflow directory instead of `./.cruise`.
+    #[arg(long)]
+    pub user: bool,
+    /// Backend config used for generation.
+    #[arg(long)]
+    pub config: Option<String>,
+    /// Read an existing workflow as a reference.
+    #[arg(long)]
+    pub from: Option<String>,
 }
 
 #[derive(Parser, Debug)]

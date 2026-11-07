@@ -28,6 +28,8 @@ See the **cruise-config** skill for the full implicit list and backend limits.
 
 `cruise workflow generate "description" --name <name> [--user] [--config <path>]` drafts a new workflow with the backend selected by normal config resolution. It saves `./.cruise/<name>.yaml` (or the user workflows dir with `--user`), never overwrites an existing file, and does not run the result or create a session. Output must be raw YAML; each candidate passes the `exec` preflight, with up to 3 repairs, and nothing is written on failure. Validation does not prove command safety, and the backend keeps its normal repository permissions, so review the YAML before running it.
 
+For interactive creation or revision use `cruise workflow make --name <name> [--user] [--config <path>] [--from <selector>] [description]`. Both stdin and stdout must be terminals. `--from` provides a reference that Cruise reads without writing it. Submit requests, inspect with `/show`, and use `/accept` to write, continue editing, or cancel. Only an approved write creates the destination, without overwriting. Drafts pass the same preflight and up to 3 repairs, and are retained with the conversation log under the XDG data directory in `cruise/workflow-make/`, outside `cruise clean`. The workflow is not run and no session is created. The backend is asked to operate read-only, but command backends are not sandboxed; detected project changes, including concurrent user edits, fail the turn. Review the YAML before running it.
+
 ## Mental model
 
 Work flows through **sessions**, each with a phase. The normal path is:
@@ -74,6 +76,7 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Inspect in-progress update transactions across installations (read-only; no network access or changes) | `cruise update --status` |
 | Install / update / remove / list a GitHub workflow package (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path][@ref]` / `update <name>` / `remove <name>` / `list` |
 | Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
+| Interactively create or revise workflow YAML | `cruise workflow make --name <name> [--user] [--config <path>] [--from <selector>] [description]` |
 | Show / change app-level settings (e.g. WebUI/TUI parallelism) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / inspect what's configured | `jcode login <provider>` / `jcode auth status` (cruise has no login command of its own) |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |

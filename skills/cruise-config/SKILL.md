@@ -124,4 +124,4 @@ After writing or editing a config, verify each of the following:
 
 ## Generated configs
 
-`cruise workflow generate` drafts a workflow with an LLM and saves it only after the `exec` preflight passes. Preflight does not catch unknown top-level keys (silently ignored) and does not prove command safety. Review any generated YAML against the authoring checklist above before running it.
+`cruise workflow generate` and the interactive `cruise workflow make` draft workflows with an LLM and save them only after the `exec` preflight passes. `make` additionally requires explicit approval to write. Preflight does not catch unknown top-level keys (silently ignored) and does not prove command safety. Review any generated YAML against the authoring checklist above before running it.

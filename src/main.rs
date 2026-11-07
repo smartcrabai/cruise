@@ -94,6 +94,7 @@ mod workflow_call;
 mod workflow_cmd;
 mod workflow_defaults;
 mod workflow_generate;
+mod workflow_make;
 mod workflow_packages;
 mod workspace;
 mod worktree;
@@ -169,6 +170,9 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         }
         Some(cli::Commands::Workflow(cli::WorkflowCommand::Generate(args))) => {
             workflow_generate::run(args).await
+        }
+        Some(cli::Commands::Workflow(cli::WorkflowCommand::Make(args))) => {
+            workflow_make::run(args).await
         }
         Some(cli::Commands::Workflow(cli::WorkflowCommand::Add(args))) => {
             workflow_cmd::add(&args.spec, args.name, args.yes)

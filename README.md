@@ -309,7 +309,7 @@ Commands:
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve the browser UI from this machine (pass `--open` to launch the default browser)
   update       Update a managed native installation; `--status` lists recorded transactions read-only
-  workflow     Manage workflows: list/eject built-ins, generate YAML, install GitHub packages (`add`, `remove`, `update`)
+  workflow     Manage workflows: list/eject built-ins, generate or interactively make YAML, install GitHub packages (`add`, `remove`, `update`)
 
 Arguments:
   [INPUT]  Initial input (legacy: positional input without a subcommand uses `plan`)
@@ -335,6 +335,24 @@ Drafts a new workflow YAML from a description. The backend is chosen by the norm
 - The validated YAML is saved exactly as returned. An existing file with the same name is never overwritten, and the backend is not called in that case.
 - The generated workflow is not run and no session is created.
 - Validation does not prove that the commands are safe or that the workflow succeeds. The selected agent backend keeps its normal permissions, so it may modify the repository during generation. Review the YAML before running it.
+
+For interactive drafting and revision, use `cruise workflow make` instead.
+
+#### `cruise workflow make`
+
+```
+cruise workflow make --name <NAME> [--user] [--config <PATH>] [--from <SELECTOR>] [DESCRIPTION]
+```
+
+Create a single workflow YAML through a conversation. Both stdin and stdout must be terminals; use `workflow generate` for non-interactive drafting. An optional description is submitted as the first request. `--config` selects the backend configuration, while `--from` supplies a read-only reference workflow, for example `builtin:tdd` or a file path. Cruise reads the reference without writing it, but an unsandboxed command backend could modify it. The destination is fixed at startup: `./.cruise/<NAME>.yaml`, or the user workflow directory with `--user`. Existing destinations are never overwritten, and the reserved project name `default` cannot be used.
+
+Enter requests to create or revise the draft. The assistant may ask questions without changing it. Use `/show` to inspect the current draft and `/accept` to choose **Write workflow**, **Continue editing**, or **Cancel**. Escape or Ctrl+C at the request prompt cancels; at the approval menu they return to editing. Only choosing Write creates the destination, after re-reading and validating the staged YAML. The workflow is not run and no session is created.
+
+Candidates pass the same `exec` preflight as `workflow generate`, with up to three repairs per request. If all attempts fail, the previous draft remains unchanged. The backend reply can include explanatory text and at most one `<cruise-workflow>` block; replies without a block are conversation only. Validation does not prove command safety, so review the result before running it.
+
+Drafts and `conversation.jsonl` are retained under `$XDG_DATA_HOME/cruise/workflow-make/<id>/` (normally `~/.local/share/cruise/workflow-make/<id>/`) after writing or cancellation. The log includes requests. These directories are not removed by `cruise clean`; remove them manually when no longer needed.
+
+The backend is asked to operate read-only in the project directory. Repository changes detected during a turn cause that turn to fail, including changes made concurrently by the user. Command backends are not sandboxed: change detection is not prevention and excludes some paths. Inspect the repository if a backend may have changed it.
 
 #### `cruise ssh`
 
@@ -923,7 +941,7 @@ Instead of spawning an external CLI via `command`, prompt steps can be driven th
 
 #### Startup OAuth expiration checks
 
-Before starting agents for `cruise plan`, `cruise run`, or `cruise exec`, and for session planning/execution in the TUI or WebUI, Cruise checks local OAuth credential files for the applicable SDK candidates only. Planning uses the effective `plan_model` (falling back to `model`); execution includes workflow models and step overrides, including `after-pr`, groups, and parallel children. Model arrays, SDK-qualified entries, and effective retry fallback chains are included, even if a fallback is not ultimately used. This is not a global check at TUI/WebUI startup. Command backends, dry-runs, and `cruise workflow generate` are outside this check.
+Before starting agents for `cruise plan`, `cruise run`, or `cruise exec`, and for session planning/execution in the TUI or WebUI, Cruise checks local OAuth credential files for the applicable SDK candidates only. Planning uses the effective `plan_model` (falling back to `model`); execution includes workflow models and step overrides, including `after-pr`, groups, and parallel children. Model arrays, SDK-qualified entries, and effective retry fallback chains are included, even if a fallback is not ultimately used. This is not a global check at TUI/WebUI startup. Command backends, dry-runs, `cruise workflow generate`, and `cruise workflow make` are outside this check.
 
 - **Claude SDK:** reads `$CLAUDE_CONFIG_DIR/.credentials.json`, or `~/.claude/.credentials.json` when unset, using `claudeAiOauth.expiresAt`, `refreshToken`, and optional `refreshTokenExpiresAt`.
 - **Jcode SDK:** checks only explicit providers `claude`, `claude-oauth`, and `claude-subprocess` in the source home's `auth.json`, and `openai` and `openai-oauth` in `openai-auth.json`. The source home is the process `JCODE_HOME`, or `~/.jcode` when unset. With multiple accounts, it stops only if every account is conclusively expired.
@@ -988,7 +1006,7 @@ steps:
   as `:free` remain part of the model ID. jcode requires a valid nonempty model.
 - Applies to workflow prompt steps, including groups, `after-pr`, parallel
   prompt children, and `github-review`, plus planning's plan/fix/ask turns.
-  It does not apply to title generation, PR metadata, or `workflow generate`.
+  It does not apply to title generation, PR metadata, `workflow generate`, or `workflow make`.
   Non-prompt steps and group/workflow-call/parallel wrappers cannot set it.
 - A called workflow's top-level value is ignored in favor of the caller's
   default; the callee's per-step overrides are retained.
