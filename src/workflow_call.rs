@@ -518,6 +518,11 @@ fn bind_step_inputs(
             }
         }
     }
+    if let Some(gates) = &mut step.quality_gates {
+        for gate in gates {
+            bind(&mut gate.command)?;
+        }
+    }
     for value in step.env.values_mut() {
         bind(value)?;
     }
@@ -602,6 +607,7 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
         ("option", step.option.is_some()),
         ("command", step.command.is_some()),
         ("parallel", step.parallel.is_some()),
+        ("quality_gates", step.quality_gates.is_some()),
         ("group", step.group.is_some()),
         ("if", step.if_condition.is_some()),
         ("timeout", step.timeout.is_some()),

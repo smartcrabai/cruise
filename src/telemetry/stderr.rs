@@ -16,15 +16,57 @@ const REDACTED: &str = "[REDACTED]";
 const REDACTED_PRIVATE_KEY: &str = "[REDACTED PRIVATE KEY]";
 const MAX_PEM_MARKER_SCAN_BYTES: usize = 128;
 
-pub(super) struct SanitizedStderr {
-    pub(super) body: String,
-    pub(super) truncated: bool,
+pub(crate) struct SanitizedStderr {
+    pub(crate) body: String,
+    pub(crate) truncated: bool,
+}
+
+/// Incrementally decode complete lines, preserving redaction state across reads.
+pub(crate) struct StreamSanitizer {
+    pending: Vec<u8>,
+    state: ScanState,
+    output: BoundedOutput,
+}
+
+impl StreamSanitizer {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self { pending: Vec::new(), state: ScanState::default(), output: BoundedOutput::new(limit) }
+    }
+
+    pub(crate) fn push(&mut self, bytes: &[u8]) {
+        for part in bytes.split_inclusive(|b| *b == b'\n') {
+            self.pending.extend_from_slice(part);
+            if part.last() == Some(&b'\n') {
+                self.line(true);
+            }
+        }
+    }
+
+    fn line(&mut self, newline: bool) {
+        if newline { self.pending.pop(); }
+        let line = String::from_utf8_lossy(&self.pending);
+        if !is_machine_diagnostic_line(&line) {
+            sanitize_line(&line, &mut self.state, &mut self.output);
+        }
+        if newline { self.output.push('\n'); }
+        self.pending.clear();
+    }
+
+    pub(crate) fn finish(mut self) -> String {
+        if !self.pending.is_empty() { self.line(false); }
+        let (body, _, meaningful) = self.output.finish();
+        if meaningful { body } else { String::new() }
+    }
 }
 
 /// Remove recognized credentials, terminal controls, and URL secrets without retaining an
 /// unbounded copy of the input. Text selection is done only after the full input is scanned.
-pub(super) fn sanitize(input: &str) -> SanitizedStderr {
-    let mut output = BoundedOutput::new();
+pub(crate) fn sanitize(input: &str) -> SanitizedStderr {
+    sanitize_with_limit(input, MAX_STDERR_LOG_BYTES)
+}
+
+pub(crate) fn sanitize_with_limit(input: &str, limit: usize) -> SanitizedStderr {
+    let mut output = BoundedOutput::new(limit);
     let mut state = ScanState::default();
 
     for raw_line in input.split_inclusive('\n') {
@@ -973,6 +1015,9 @@ fn emit_clean(text: &str, output: &mut BoundedOutput) {
 }
 
 struct BoundedOutput {
+    limit: usize,
+    head_limit: usize,
+    tail_limit: usize,
     full: Option<String>,
     head: String,
     tail: VecDeque<char>,
@@ -982,11 +1027,25 @@ struct BoundedOutput {
 }
 
 impl BoundedOutput {
-    fn new() -> Self {
+    fn new(limit: usize) -> Self {
+        let available = limit.saturating_sub(EXCERPT_MARKER.len());
+        let head_limit = if limit == MAX_STDERR_LOG_BYTES {
+            EXCERPT_HEAD_BYTES
+        } else {
+            available / 2
+        };
+        let tail_limit = if limit == MAX_STDERR_LOG_BYTES {
+            EXCERPT_TAIL_BYTES
+        } else {
+            available - head_limit
+        };
         Self {
-            full: Some(String::with_capacity(MAX_STDERR_LOG_BYTES)),
-            head: String::with_capacity(EXCERPT_HEAD_BYTES),
-            tail: VecDeque::with_capacity(EXCERPT_TAIL_BYTES),
+            limit,
+            head_limit,
+            tail_limit,
+            full: Some(String::with_capacity(limit)),
+            head: String::with_capacity(head_limit),
+            tail: VecDeque::with_capacity(tail_limit),
             tail_bytes: 0,
             truncated: false,
             meaningful: false,
@@ -1002,16 +1061,15 @@ impl BoundedOutput {
     fn push(&mut self, character: char) {
         self.meaningful |= !character.is_whitespace();
         if let Some(full) = self.full.as_mut()
-            && full.len() + character.len_utf8() <= MAX_STDERR_LOG_BYTES
+            && full.len() + character.len_utf8() <= self.limit
         {
             full.push(character);
             return;
         }
 
         if let Some(full) = self.full.take() {
-            self.head
-                .push_str(prefix_by_bytes(&full, EXCERPT_HEAD_BYTES));
-            for character in suffix_by_bytes(&full, EXCERPT_TAIL_BYTES).chars() {
+            self.head.push_str(prefix_by_bytes(&full, self.head_limit));
+            for character in suffix_by_bytes(&full, self.tail_limit).chars() {
                 self.tail.push_back(character);
                 self.tail_bytes += character.len_utf8();
             }
@@ -1020,7 +1078,7 @@ impl BoundedOutput {
 
         self.tail.push_back(character);
         self.tail_bytes += character.len_utf8();
-        while self.tail_bytes > EXCERPT_TAIL_BYTES {
+        while self.tail_bytes > self.tail_limit {
             if let Some(removed) = self.tail.pop_front() {
                 self.tail_bytes -= removed.len_utf8();
             }
@@ -1034,11 +1092,11 @@ impl BoundedOutput {
             return (full, false, meaningful);
         }
         let mut body =
-            String::with_capacity(EXCERPT_HEAD_BYTES + EXCERPT_MARKER.len() + EXCERPT_TAIL_BYTES);
+            String::with_capacity(self.head_limit + EXCERPT_MARKER.len() + self.tail_limit);
         body.push_str(&self.head);
-        body.push_str(EXCERPT_MARKER);
+        body.push_str(prefix_by_bytes(EXCERPT_MARKER, self.limit));
         body.extend(self.tail);
-        debug_assert!(body.len() <= MAX_STDERR_LOG_BYTES);
+        debug_assert!(body.len() <= self.limit);
         (body, truncated, meaningful)
     }
 }

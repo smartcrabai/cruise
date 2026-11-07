@@ -1260,6 +1260,8 @@ steps:
 
 #### Prompt Step (LLM call)
 
+Prompt steps can declare `quality_gates` to verify a successful attempt before advancing; see [Quality gates](#quality-gates-quality_gates).
+
 ```yaml
 steps:
   planning:
@@ -1651,6 +1653,36 @@ Conditional cycles are allowed when a normal exit is possible. Execution preflig
 **Constraints:**
 - `if.fail` is rejected at the group level and in `after-pr` steps.
 - Can be combined with other `if:` keys (`file-changed`, `no-file-changes`) on the same step.
+
+#### Quality gates (`quality_gates`)
+
+Use a non-empty list of commands to check a prompt step's work before its transition is applied:
+
+```yaml
+max_retries: 2
+steps:
+  implement:
+    prompt: Implement the requested change.
+    quality_gates:
+      - command: cargo test
+      - command: cargo clippy
+        timeout: 10m
+    if:
+      fail: recover
+    next: done
+  recover:
+    prompt: Investigate the failed implementation.
+  done:
+    command: echo done
+```
+
+Each entry requires a nonblank `command` and may specify a positive `timeout` using the usual seconds, `m`, or `h` syntax. Commands run in order after a successful prompt attempt, including the final step, and stop at the first failure. Exit zero without a timeout or signal passes. Skipped steps, failed prompt attempts, and attempts discarded by `if.no-file-changes: retry` do not run gates. A pending `if.file-changed` transition is applied only if the gates pass.
+
+A failed gate retries the same prompt step before applying its normal transition. The next prompt receives a sanitized, bounded excerpt of the command output as untrusted data. When available, a sanitized log is stored under the session's `artifacts/quality-gates/` directory, outside the repository, subject to the artifact size limit. Feedback survives checkpoint/resume and is cleared after the retry is no longer pending. Gate output does not replace `{prev.*}`.
+
+Retries use the existing per-edge budget (`--max-retries`, then `max_retries`, then 3), shared with other self-retries on that step. With no prior self-retries, at most `1 + max_retries` gate attempts run; zero means the first failure exhausts the budget. On exhaustion, `if.fail: <step>` jumps to that step; otherwise cruise stops with `QualityGateExhausted`. The mapping `if.fail: {retry: true}` does not add another gate retry budget.
+
+Gates are allowed on prompt and `prompt_file` steps, including individual steps inside a group. They are rejected on parallel parents and children, `after-pr` steps, group or `workflow_call` call sites, and non-prompt steps. Gate commands execute shell commands, just like ordinary `command` steps; only use trusted workflow configurations.
 
 ### Step Groups
 

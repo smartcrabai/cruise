@@ -65,6 +65,7 @@ mod plan_cmd;
 mod planning;
 mod platform;
 mod pr_merge;
+mod quality_gate;
 mod repo_clone;
 mod resolver;
 mod retry;

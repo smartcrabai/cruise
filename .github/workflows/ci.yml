@@ -279,8 +279,8 @@ jobs:
       - name: Install pinned Rust
         run: rustup toolchain install 1.99.1 --profile minimal
 
-      - name: Formal models and checkpoint behavior
-        run: scripts/check_formal.sh
+      - name: Checkpoint and quality-gate Quint, Alloy and production BDD contracts
+        run: bash scripts/check_formal.sh
 
       - name: OpenCode V2 Quint, Alloy and production BDD contracts
         if: ${{ !cancelled() }}

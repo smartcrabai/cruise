@@ -76,6 +76,13 @@ pub enum CruiseError {
     #[error("step '{0}' made no workspace file changes (if.no-file-changes: failed)")]
     StepMadeNoFileChanges(String),
 
+    #[error("quality gate exhausted for step '{step}' after {attempts} attempts: {command}")]
+    QualityGateExhausted {
+        step: String,
+        command: String,
+        attempts: usize,
+    },
+
     #[error("step '{step}' timed out after {after_secs}s")]
     StepTimeout { step: String, after_secs: u64 },
 
@@ -128,6 +135,7 @@ impl CruiseError {
             Self::SessionStateConflict(_) => "session_state_conflict",
             Self::SessionStateConflictAborted(_) => "session_state_conflict_aborted",
             Self::StepMadeNoFileChanges(_) => "step_no_file_changes",
+            Self::QualityGateExhausted { .. } => "quality_gate_exhausted",
             Self::StepTimeout { .. } => "timeout",
             Self::GitHubReviewFailed { .. } => "github_review_failed",
             Self::Interrupted => "cancelled",
