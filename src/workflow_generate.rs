@@ -456,7 +456,13 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         let tmp = TempDir::new().unwrap();
         let yaml = "command: [cat]\nsteps:\n  a:\n    command: echo\n    if:\n      file-changed: missing\n";
         assert!(validate_generated_yaml(yaml, tmp.path()).is_err());
-        assert!(validate_generated_yaml(&format!("{yaml}      no-file-changes: failed\n"), tmp.path()).is_ok());
+        assert!(
+            validate_generated_yaml(
+                &format!("{yaml}      no-file-changes: failed\n"),
+                tmp.path()
+            )
+            .is_ok()
+        );
     }
 
     #[test]

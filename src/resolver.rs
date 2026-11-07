@@ -86,9 +86,7 @@ pub(crate) fn resolve_workflow_config_with_mode(
             )
         }
         ConfigSource::Inline => {
-            crate::workflow_call::resolve_yaml_with_mode(
-                yaml, base_dir, &defaults, doctor,
-            )
+            crate::workflow_call::resolve_yaml_with_mode(yaml, base_dir, &defaults, doctor)
         }
         ConfigSource::Explicit(path)
         | ConfigSource::EnvVar(path)

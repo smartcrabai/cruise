@@ -142,8 +142,9 @@ pub(crate) fn resolve_targets(targets: &[String], all: bool, cwd: &Path) -> Vec<
                 };
                 if target.contains('/')
                     || target.contains('\\')
-                    || target.ends_with(".yaml")
-                    || target.ends_with(".yml")
+                    || path.extension().is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml")
+                    })
                     || absolute.exists()
                 {
                     return file(target, absolute, "file", cwd, &packages);
@@ -172,34 +173,61 @@ pub(crate) fn resolve_targets(targets: &[String], all: bool, cwd: &Path) -> Vec<
             })
             .collect();
     }
+    discover_targets(all, cwd, user_dir, &packages)
+}
+
+fn discover_targets(
+    all: bool,
+    cwd: &Path,
+    user_dir: Option<PathBuf>,
+    packages: &[crate::workflow_packages::InstalledPackage],
+) -> Vec<TargetResolution> {
     let mut result = Vec::new();
     for candidate in crate::resolver::collect_local_candidates(cwd) {
         if let CandidateKind::Local(path) = candidate.source {
-            result.push(file(&candidate.label, path, "project", cwd, &packages));
+            result.push(file(&candidate.label, path, "project", cwd, packages));
         }
     }
     let local_dir = cwd.join(".cruise");
-    if let Err(e) = std::fs::read_dir(&local_dir).and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>()) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            result.push(error(&local_dir.to_string_lossy(), "invalid_target", format!("cannot read {}: {e}", local_dir.display())));
-        }
+    if let Err(e) = std::fs::read_dir(&local_dir)
+        .and_then(std::iter::Iterator::collect::<std::io::Result<Vec<_>>>)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        result.push(error(
+            &local_dir.to_string_lossy(),
+            "invalid_target",
+            format!("cannot read {}: {e}", local_dir.display()),
+        ));
     }
     if all {
         if let Some(dir) = user_dir {
-            let entries = std::fs::read_dir(&dir).and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>());
+            let entries = std::fs::read_dir(&dir)
+                .and_then(std::iter::Iterator::collect::<std::io::Result<Vec<_>>>);
             match entries {
                 Ok(entries) => {
-                    let mut paths: Vec<_> = entries.into_iter().map(|entry| entry.path()).filter(|path| {
-                        path.is_file() && matches!(path.extension().and_then(|ext| ext.to_str()), Some("yaml" | "yml"))
-                    }).collect();
+                    let mut paths: Vec<_> = entries
+                        .into_iter()
+                        .map(|entry| entry.path())
+                        .filter(|path| {
+                            path.is_file()
+                                && matches!(
+                                    path.extension().and_then(|ext| ext.to_str()),
+                                    Some("yaml" | "yml")
+                                )
+                        })
+                        .collect();
                     paths.sort_by_key(|path| path.file_name().unwrap_or_default().to_os_string());
                     for path in paths {
                         let label = path.to_string_lossy().into_owned();
-                        result.push(file(&label, path, "user", cwd, &packages));
+                        result.push(file(&label, path, "user", cwd, packages));
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => result.push(error(&dir.to_string_lossy(), "invalid_target", format!("cannot read {}: {e}", dir.display()))),
+                Err(e) => result.push(error(
+                    &dir.to_string_lossy(),
+                    "invalid_target",
+                    format!("cannot read {}: {e}", dir.display()),
+                )),
             }
         }
         for workflow in crate::builtin_workflows::BUILTIN_WORKFLOWS {
@@ -220,37 +248,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_discovery_excludes_defaults_and_orders_candidates() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join(".cruise")).unwrap();
+    fn local_discovery_excludes_defaults_and_orders_candidates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join(".cruise"))?;
         for path in [
             "cruise.yaml",
             ".cruise/z.yml",
             ".cruise/a.yaml",
             ".cruise/default.yaml",
         ] {
-            std::fs::write(dir.path().join(path), "steps: {}\n").unwrap();
+            std::fs::write(dir.path().join(path), "steps: {}\n")?;
         }
         let targets = resolve_targets(&[], false, dir.path());
         let names: Vec<_> = targets
             .iter()
-            .map(|t| t.as_ref().unwrap().target.as_str())
-            .collect();
+            .map(|t| t.as_ref().map(|target| target.target.as_str()))
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("unexpected unresolved target: {e:?}"))?;
         assert_eq!(
             names,
             ["./cruise.yaml", "./.cruise/a.yaml", "./.cruise/z.yml"]
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_local_and_missing_and_builtin_selectors() {
-        let dir = tempfile::tempdir().unwrap();
+    fn empty_local_and_missing_and_builtin_selectors() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
         assert_eq!(
             resolve_targets(&[], false, dir.path())[0]
                 .as_ref()
-                .unwrap_err()
-                .code,
-            "no_targets"
+                .err()
+                .map(|e| e.code),
+            Some("no_targets")
         );
         let names = vec![
             "builtin:tdd".into(),
@@ -259,9 +290,16 @@ mod tests {
             "__builtin__".into(),
         ];
         let targets = resolve_targets(&names, false, dir.path());
-        assert_eq!(targets[0].as_ref().unwrap().kind, "builtin");
-        assert_eq!(targets[1].as_ref().unwrap_err().code, "target_not_found");
-        assert_eq!(targets[2].as_ref().unwrap_err().code, "target_not_found");
-        assert_eq!(targets[3].as_ref().unwrap().kind, "builtin");
+        assert_eq!(targets[0].as_ref().ok().map(|t| t.kind), Some("builtin"));
+        assert_eq!(
+            targets[1].as_ref().err().map(|e| e.code),
+            Some("target_not_found")
+        );
+        assert_eq!(
+            targets[2].as_ref().err().map(|e| e.code),
+            Some("target_not_found")
+        );
+        assert_eq!(targets[3].as_ref().ok().map(|t| t.kind), Some("builtin"));
+        Ok(())
     }
 }

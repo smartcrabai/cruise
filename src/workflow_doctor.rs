@@ -158,7 +158,9 @@ fn routing(compiled: &CompiledWorkflow) -> Vec<Diagnostic> {
             }
         }
         if let Some(cond) = &step.if_condition {
-            if cond.no_file_changes.is_none() && let Some(target) = &cond.file_changed {
+            if cond.no_file_changes.is_none()
+                && let Some(target) = &cond.file_changed
+            {
                 check(name, "if.file-changed", target);
             }
             if let Some(FailAction::Goto(target)) = &cond.fail {
@@ -246,41 +248,71 @@ fn check_resolved(
     if !result.diagnostics.is_empty() {
         return result;
     }
-    let graph = match crate::graph::build_graph(&compiled, max_retries) {
+    add_graph_diagnostics(&compiled, max_retries, values, &mut result.diagnostics);
+    result
+}
+
+fn add_graph_diagnostics(
+    compiled: &CompiledWorkflow,
+    max_retries: usize,
+    values: &FlagValues,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let graph = match crate::graph::build_graph(compiled, max_retries) {
         Ok(g) => g,
         Err(e) => {
-            result.diagnostics.push(Diagnostic::error("graph", e));
-            return result;
+            diagnostics.push(Diagnostic::error("graph", e));
+            return;
         }
     };
-    let skips = crate::flags::preflight_skips(&compiled, values, &[]);
-    let main = crate::graph::validation::analyze_phase(&graph, &compiled, &graph.start, &skips, "main");
-    let mut phases = vec![main];
+    let skips = crate::flags::preflight_skips(compiled, values, &[]);
+    let mut phases = if compiled.after_pr.is_empty() {
+        match crate::graph::validation::analyze_workflow(compiled, &graph, &graph.start, &skips) {
+            Ok(phases) => phases.into_iter().map(Ok).collect(),
+            Err(error) => vec![Err(error)],
+        }
+    } else {
+        vec![crate::graph::validation::analyze_phase(
+            &graph,
+            compiled,
+            &graph.start,
+            &skips,
+            "main",
+        )]
+    };
     if phases[0].is_ok() && !compiled.after_pr.is_empty() {
         let after = compiled.to_after_pr_compiled();
-        phases.push(crate::graph::build_graph(&after, max_retries).and_then(|after_graph| {
-            crate::graph::validation::analyze_phase(&after_graph, &after, &after_graph.start, &skips, "after-pr")
-        }));
+        phases.push(
+            crate::graph::build_graph(&after, max_retries).and_then(|after_graph| {
+                crate::graph::validation::analyze_phase(
+                    &after_graph,
+                    &after,
+                    &after_graph.start,
+                    &skips,
+                    "after-pr",
+                )
+            }),
+        );
     }
     for phase in phases {
         match phase {
-        Ok(phase) => {
-            let enabled = values
-                .iter()
-                .filter(|(_, v)| **v)
-                .map(|(k, _)| k.as_str())
-                .collect::<Vec<_>>();
-            let flags = if enabled.is_empty() {
-                "none".to_owned()
-            } else {
-                enabled.join(", ")
-            };
+            Ok(phase) => {
+                let enabled = values
+                    .iter()
+                    .filter(|(_, v)| **v)
+                    .map(|(k, _)| k.as_str())
+                    .collect::<Vec<_>>();
+                let flags = if enabled.is_empty() {
+                    "none".to_owned()
+                } else {
+                    enabled.join(", ")
+                };
                 for step in phase.unreachable_steps {
                     let message = format!(
                         "{} step '{step}' is unreachable under flags: {flags}",
                         phase.phase
                     );
-                    result.diagnostics.push(Diagnostic::new(
+                    diagnostics.push(Diagnostic::new(
                         "warning",
                         "unreachable_step",
                         "graph",
@@ -289,7 +321,7 @@ fn check_resolved(
                     ));
                 }
                 if let Some(message) = phase.cycle_without_exit {
-                    result.diagnostics.push(Diagnostic::new(
+                    diagnostics.push(Diagnostic::new(
                         "warning",
                         "cycle_may_not_exit",
                         "graph",
@@ -297,20 +329,19 @@ fn check_resolved(
                         message,
                     ));
                 }
-        }
-        Err(e) => {
-            let mut diagnostic = Diagnostic::error("graph", e);
-            if matches!(
-                diagnostic.original_error.as_ref(),
-                Some(CruiseError::InvalidStepConfig(_))
-            ) {
-                diagnostic.code = "no_normal_exit";
             }
-            result.diagnostics.push(diagnostic);
-        }
+            Err(e) => {
+                let mut diagnostic = Diagnostic::error("graph", e);
+                if matches!(
+                    diagnostic.original_error.as_ref(),
+                    Some(CruiseError::InvalidStepConfig(_))
+                ) {
+                    diagnostic.code = "no_normal_exit";
+                }
+                diagnostics.push(diagnostic);
+            }
         }
     }
-    result
 }
 fn check_target(
     target: ResolvedTarget,
@@ -318,7 +349,10 @@ fn check_target(
     values: &FlagValues,
     flag_error: Option<&CruiseError>,
 ) -> TargetReport {
-    let canonical = target.path.as_ref().and_then(|path| path.canonicalize().ok());
+    let canonical = target
+        .path
+        .as_ref()
+        .and_then(|path| path.canonicalize().ok());
     let base = canonical.as_deref().and_then(Path::parent).unwrap_or(cwd);
     let mut report = TargetReport {
         target: target.target,
@@ -450,10 +484,8 @@ pub(crate) fn run(args: &WorkflowDoctorArgs) -> i32 {
         .count();
     let exit_code = if targets.iter().any(|t| t.status == "unresolved") {
         2
-    } else if errors > 0 || args.strict && warnings > 0 {
-        1
     } else {
-        0
+        i32::from(errors > 0 || args.strict && warnings > 0)
     };
     let report = Report {
         schema_version: 1,
@@ -475,58 +507,62 @@ pub(crate) fn run(args: &WorkflowDoctorArgs) -> i32 {
         }
         println!();
     } else {
-        for target in &report.targets {
-            let detail = if target.status == "ok" {
-                format!(
-                    "{} steps, {} after-pr steps",
-                    target.steps, target.after_pr_steps
-                )
-            } else if target.status == "unresolved" {
-                String::new()
-            } else {
-                let errors = target
-                    .diagnostics
-                    .iter()
-                    .filter(|d| d.level == "error")
-                    .count();
-                let warnings = target
-                    .diagnostics
-                    .iter()
-                    .filter(|d| d.level == "warning")
-                    .count();
-                format!("{errors} errors, {warnings} warnings")
-            };
-            println!(
-                "{:<10} {}  {}",
-                target.status,
-                crate::batch_dashboard::sanitize_terminal_text(&target.target),
-                detail
-            );
-            for d in &target.diagnostics {
-                println!(
-                    "             {:<7} {:<20} {}",
-                    d.level,
-                    d.code,
-                    crate::batch_dashboard::sanitize_terminal_text(&d.message)
-                );
-            }
-        }
-        let unresolved = report
-            .targets
-            .iter()
-            .filter(|t| t.status == "unresolved")
-            .count();
-        println!(
-            "\nChecked {} workflows: {} passed, {} failed ({} unresolved); {} errors, {} warnings",
-            report.summary.checked,
-            report.summary.passed,
-            report.summary.failed,
-            unresolved,
-            report.summary.errors,
-            report.summary.warnings
-        );
+        print_report(&report);
     }
     exit_code
+}
+
+fn print_report(report: &Report) {
+    for target in &report.targets {
+        let detail = if target.status == "ok" {
+            format!(
+                "{} steps, {} after-pr steps",
+                target.steps, target.after_pr_steps
+            )
+        } else if target.status == "unresolved" {
+            String::new()
+        } else {
+            let errors = target
+                .diagnostics
+                .iter()
+                .filter(|d| d.level == "error")
+                .count();
+            let warnings = target
+                .diagnostics
+                .iter()
+                .filter(|d| d.level == "warning")
+                .count();
+            format!("{errors} errors, {warnings} warnings")
+        };
+        println!(
+            "{:<10} {}  {}",
+            target.status,
+            crate::batch_dashboard::sanitize_terminal_text(&target.target),
+            detail
+        );
+        for d in &target.diagnostics {
+            println!(
+                "             {:<7} {:<20} {}",
+                d.level,
+                d.code,
+                crate::batch_dashboard::sanitize_terminal_text(&d.message)
+            );
+        }
+    }
+    let unresolved = report
+        .targets
+        .iter()
+        .filter(|t| t.status == "unresolved")
+        .count();
+    println!(
+        "\nChecked {} workflows: {} passed, {} failed ({} unresolved); {} errors, {} warnings",
+        report.summary.checked,
+        report.summary.passed,
+        report.summary.failed,
+        unresolved,
+        report.summary.errors,
+        report.summary.warnings
+    );
 }
 
 #[cfg(test)]
@@ -534,8 +570,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prescan_collects_missing_references_across_all_step_kinds() {
-        let dir = tempfile::tempdir().unwrap();
+    fn prescan_collects_missing_references_across_all_step_kinds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
         let yaml = "steps:\n  a:\n    prompt_file: missing-a\n  d:\n    workflow_call: ./missing.yaml\n  remote:\n    workflow_call: https://github.com/a/b/blob/main/w.yaml\ngroups:\n  g:\n    steps:\n      b:\n        prompt_file: missing-b\nafter-pr:\n  c:\n    prompt_file: missing-c\n";
         let diagnostics = prescan(yaml, dir.path());
         assert_eq!(diagnostics.len(), 4);
@@ -546,13 +583,15 @@ mod tests {
                     .any(|d| d.step.as_deref() == Some(name) && d.stage == "refs")
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn routing_collects_independent_missing_destinations() {
+    fn routing_collects_independent_missing_destinations() -> Result<(), Box<dyn std::error::Error>>
+    {
         let yaml = "steps:\n  a:\n    command: echo a\n    next: missing1\n  b:\n    option:\n      - selector: x\n        next: missing2\n  c:\n    command: echo c\n    if:\n      fail: missing3\n";
-        let config = WorkflowConfig::from_yaml(yaml).unwrap();
-        let compiled = crate::workflow::compile(config).unwrap();
+        let config = WorkflowConfig::from_yaml(yaml)?;
+        let compiled = crate::workflow::compile(config)?;
         let diagnostics = routing(&compiled);
         assert_eq!(diagnostics.len(), 3);
         for name in ["a", "b", "c"] {
@@ -562,5 +601,6 @@ mod tests {
                     .any(|d| d.step.as_deref() == Some(name) && d.code == "step_not_found")
             );
         }
+        Ok(())
     }
 }

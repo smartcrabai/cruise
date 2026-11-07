@@ -119,10 +119,6 @@ fn live_edges(
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "iterative SCC analysis shares indexed topology"
-)]
 pub(crate) fn analyze_phase(
     graph: &ExecutionGraph,
     compiled: &CompiledWorkflow,
@@ -245,6 +241,9 @@ fn reachable_from(edges: &[Vec<usize>], seeds: impl IntoIterator<Item = usize>) 
 }
 
 /// Analyze main and after-pr phases without emitting warnings.
+///
+/// # Errors
+/// Propagates graph construction errors and definite nontermination diagnostics.
 pub fn analyze_workflow(
     compiled: &CompiledWorkflow,
     graph: &ExecutionGraph,
@@ -299,32 +298,34 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_respects_skipped_steps() {
+    fn unreachable_respects_skipped_steps() -> Result<()> {
         let yaml = "command: [echo]\nsteps:\n  a:\n    command: echo a\n    next: c\n  b:\n    command: echo b\n  c:\n    command: echo c\n";
-        let normal = analyze(yaml, &[]).unwrap();
+        let normal = analyze(yaml, &[])?;
         assert_eq!(normal[0].phase, "main");
         assert_eq!(normal[0].unreachable_steps, ["b"]);
-        let skipped = analyze(yaml, &["a".into()]).unwrap();
-        assert!(skipped[0].unreachable_steps.is_empty());
+        let skipped = analyze(yaml, &["a".into()])?;
+        assert_eq!(skipped[0].unreachable_steps, [] as [String; 0]);
+        Ok(())
     }
 
     #[test]
     fn reports_definite_nontermination() {
         let yaml = "command: [echo]\nsteps:\n  a:\n    command: echo a\n    next: b\n  b:\n    command: echo b\n    next: a\n";
-        let error = analyze(yaml, &[]).unwrap_err();
-        assert!(
+        let error = analyze(yaml, &[]).err();
+        assert!(error.is_some_and(|error| {
             error
                 .to_string()
                 .contains("has no normal exit and reaches a cycle")
-        );
+        }));
     }
 
     #[test]
-    fn analyzes_after_pr_independently() {
+    fn analyzes_after_pr_independently() -> Result<()> {
         let yaml = "command: [echo]\nsteps:\n  a:\n    command: echo a\nafter-pr:\n  x:\n    command: echo x\n    next: z\n  y:\n    command: echo y\n  z:\n    command: echo z\n";
-        let phases = analyze(yaml, &[]).unwrap();
+        let phases = analyze(yaml, &[])?;
         assert_eq!(phases.len(), 2);
         assert_eq!(phases[1].phase, "after-pr");
         assert_eq!(phases[1].unreachable_steps, ["y"]);
+        Ok(())
     }
 }

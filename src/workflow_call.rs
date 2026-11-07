@@ -57,7 +57,10 @@ pub(crate) fn resolve_path_with_mode(
     let yaml = std::fs::read_to_string(&path)?;
     let mut resolution = WorkflowConfigResolution::from_yaml(&yaml)
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
-    let mut stack = CallStack { doctor, ..CallStack::default() };
+    let mut stack = CallStack {
+        doctor,
+        ..CallStack::default()
+    };
     resolution.config = load_local_workflow(&path, &mut stack)?;
     finish_resolved_config(resolution, defaults, true, doctor)
 }
@@ -130,16 +133,6 @@ pub fn resolve_workflow_calls_without_app_model_defaults(
     )
 }
 
-/// Resolve calls from raw YAML so field presence survives until defaults are
-/// applied. This is used by internal source-based resolution.
-pub(crate) fn resolve_workflow_calls_from_yaml_with_defaults(
-    yaml: &str,
-    base_dir: impl Into<PathBuf>,
-    defaults: &WorkflowDefaults,
-) -> Result<WorkflowConfig> {
-    resolve_yaml_with_mode(yaml, base_dir, defaults, false)
-}
-
 pub(crate) fn resolve_yaml_with_mode(
     yaml: &str,
     base_dir: impl Into<PathBuf>,
@@ -149,7 +142,10 @@ pub(crate) fn resolve_yaml_with_mode(
     let base_dir = base_dir.into();
     let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
-    let mut stack = CallStack { doctor, ..CallStack::default() };
+    let mut stack = CallStack {
+        doctor,
+        ..CallStack::default()
+    };
     resolution.config =
         resolve_root_workflow_calls_inner(resolution.config, &base_dir, &mut stack)?;
     finish_resolved_config(resolution, defaults, true, doctor)
@@ -169,18 +165,6 @@ pub fn resolve_github_workflow_for_install(
     load_github_workflow(reference, &mut CallStack::default())
 }
 
-/// Resolve a builtin resource with runtime defaults and environment overrides.
-///
-/// # Errors
-/// Returns an error for invalid resources, arguments, dependency graphs or defaults.
-pub(crate) fn resolve_embedded_workflow_with_defaults(
-    yaml: &str,
-    resource_key: &str,
-    defaults: &WorkflowDefaults,
-) -> Result<WorkflowConfig> {
-    resolve_embedded_with_mode(yaml, resource_key, defaults, false)
-}
-
 pub(crate) fn resolve_embedded_with_mode(
     yaml: &str,
     resource_key: &str,
@@ -192,7 +176,10 @@ pub(crate) fn resolve_embedded_with_mode(
     resolution.config = load_embedded_workflow_yaml(
         resource_key,
         yaml,
-        &mut CallStack { doctor, ..CallStack::default() },
+        &mut CallStack {
+            doctor,
+            ..CallStack::default()
+        },
         &IndexMap::new(),
         "root",
     )?;

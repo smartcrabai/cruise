@@ -43,13 +43,6 @@ mod error;
 mod exec_cmd;
 mod executor;
 mod file_tracker;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "NO_FLAGS is part of the public library flags API but unused by the CLI binary"
-    )
-)]
 mod flags;
 mod forge;
 mod github_review;

@@ -2806,8 +2806,10 @@ steps:
         );
         assert!(errors[1].to_string().contains("bad name"));
         assert_eq!(
-            validate_config(&config).unwrap_err().to_string(),
-            errors[0].to_string()
+            validate_config(&config)
+                .err()
+                .map(|error| error.to_string()),
+            Some(errors[0].to_string())
         );
     }
 

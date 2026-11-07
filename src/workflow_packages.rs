@@ -402,8 +402,8 @@ pub fn prepare_update(name: &str) -> Result<PreparedPackage, WorkflowPackageErro
 }
 
 pub fn remove(name: &str) -> Result<(), WorkflowPackageError> {
+    verify_unmodified(name)?;
     let dir = workflows_dir()?;
-    load_unmodified(&dir, name)?;
     std::fs::remove_file(yaml_path(&dir, name))?;
     std::fs::remove_file(manifest_path(&dir, name))?;
     Ok(())
