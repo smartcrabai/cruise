@@ -1,5 +1,14 @@
 # Checkpoint contract verification
 
+For the WebUI daemon lifecycle, see `WEBUI_DAEMON.md` and run `bash scripts/check_webui_daemon_specs.sh`.
+The `webui_daemon.qnt` model checks single ownership, start eligibility,
+identity-checked signals, session preservation and status at the observation
+point. Its two-PID, two-generation bounded abstraction does not model network
+authentication, timeouts, or prove the implementation correct. The script also
+runs the real CLI and control endpoint integration tests. Reports and command
+logs are written under `target/formal-reports/`; the dedicated CI workflow
+uploads them even on failure.
+
 For provider installation lifecycle and resolution precedence, see
 `PROVIDER_INSTALL.md` and run `bash scripts/check_provider_install_specs.sh`.
 The dedicated `provider-install-specs` CI job runs the pinned Quint checks and

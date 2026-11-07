@@ -194,6 +194,15 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         }
         Some(cli::Commands::Workflow(command)) => run_workflow(command).await,
         Some(cli::Commands::Internal(cli::InternalArgs {
+            command:
+                cli::InternalCommand::WebuiServe {
+                    instance_id,
+                    host,
+                    port,
+                    webui_dir,
+                },
+        })) => webui::run_daemon(instance_id, host, port, webui_dir).await,
+        Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::SyncBase { pr_number, url },
         })) => match worktree_pr::sync_base(&pr_number, url.as_deref()) {
             Ok(()) => Ok(()),
