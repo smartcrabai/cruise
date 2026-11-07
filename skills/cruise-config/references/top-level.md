@@ -247,7 +247,7 @@ subagent models, and `command:` backends are rejected.
 
 Layered `default.yaml` supports this field; application model defaults and a
 `CRUISE_SUBAGENT_MODEL` environment override do not. Title generation, PR
-metadata, and `workflow generate` do not use it. A called workflow's top-level
+metadata, `workflow generate`, and `workflow make` do not use it. A called workflow's top-level
 value is ignored, but its step overrides survive. See [sdk.md](sdk.md) for
 Claude's forced model, jcode's swarm default, and fallback behavior.
 

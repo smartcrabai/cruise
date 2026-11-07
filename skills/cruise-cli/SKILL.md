@@ -30,6 +30,8 @@ See the **cruise-config** skill for the full implicit list and backend limits.
 
 `cruise workflow doctor [--json] [--strict] [-f NAME[=on|off]]... [TARGET]...` checks workflows without running them or creating sessions. Targets are paths, `builtin:<name>`, `__builtin__`, or unambiguous user/builtin names. No targets checks project-local workflows; `--all` checks those plus user workflows and built-ins and conflicts with targets and flags. Flags default off and apply to every target. Unreachable steps under the selected flags and potentially exitless cycles are warnings; a definite lack of normal exit is an error. JSON reports use schema version 1. Exit 0 allows warnings, exit 1 indicates errors or warnings under `--strict`, and exit 2 indicates unresolved targets, no targets, or invalid arguments. Remote workflow references may require network access; this is not a backend connectivity or command safety check.
 
+For interactive creation or revision use `cruise workflow make --name <name> [--user] [--config <path>] [--from <selector>] [description]`. Both stdin and stdout must be terminals. `--from` provides a reference that Cruise reads without writing it. Submit requests, inspect with `/show`, and use `/accept` to write, continue editing, or cancel. Only an approved write creates the destination, without overwriting. Drafts pass the same preflight and up to 3 repairs, and are retained with the conversation log under the XDG data directory in `cruise/workflow-make/`, outside `cruise clean`. The workflow is not run and no session is created. The backend is asked to operate read-only, but command backends are not sandboxed; detected project changes, including concurrent user edits, fail the turn. Review the YAML before running it.
+
 ## Mental model
 
 Work flows through **sessions**, each with a phase. The normal path is:
@@ -87,6 +89,7 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | Inspect in-progress update transactions across installations (read-only; no network access or changes) | `cruise update --status` |
 | Install / update / remove / list a GitHub workflow package, including root-manifest bundles (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path.yaml][@ref]` / `update <name>` / `remove <name>` / `list` |
 | Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
+| Interactively create or revise workflow YAML | `cruise workflow make --name <name> [--user] [--config <path>] [--from <selector>] [description]` |
 | Statically check workflows or a package | `cruise workflow doctor [--json] [--strict] [-f NAME] [TARGET]...` |
 | Show / change app-level settings (e.g. WebUI/TUI parallelism; displays `prevent_sleep`) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / inspect what's configured | `jcode login <provider>` / `jcode auth status` (cruise has no login command of its own) |

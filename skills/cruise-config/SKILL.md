@@ -130,4 +130,4 @@ Run `cruise workflow doctor <path>` to check references, routing and graph diagn
 
 ## Generated configs
 
-`cruise workflow generate` drafts a workflow with an LLM and saves it only after doctor static checks pass with flags off and isolated defaults. These checks do not catch unknown top-level keys (silently ignored) and do not prove command safety. Review any generated YAML against the authoring checklist above before running it.
+`cruise workflow generate` and the interactive `cruise workflow make` draft workflows with an LLM and save them only after doctor static checks pass with flags off and isolated defaults. `make` additionally requires explicit approval to write. These checks do not catch unknown top-level keys (silently ignored) and do not prove command safety. Review any generated YAML against the authoring checklist above before running it.
