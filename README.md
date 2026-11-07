@@ -294,9 +294,24 @@ The CLI remains the canonical client for automation, JSON (`cruise list --json`)
 
 ### Workflow packages
 
-`cruise workflow add <owner/repo[/path][@ref]>` installs a single workflow YAML from GitHub into `~/.config/cruise/workflows/` (or `$XDG_CONFIG_HOME/cruise/workflows/`). The path defaults to `cruise.yaml` and the ref to the default branch. The ref is pinned to a commit SHA, and nested `workflow_call` steps and `prompt_file` contents are inlined, so the installed `<name>.yaml` never touches the network at run time. Provenance is stored next to it in `<name>.cruise-package.json`. Use `--name` to override the name (`[A-Za-z0-9_-]+`).
+`cruise workflow add <owner/repo[/path.yaml][@ref]>` installs from GitHub into `$XDG_CONFIG_HOME/cruise/workflows/` (default `~/.config/cruise/workflows/`). With no explicit path, a root `cruise-package.yaml` selects a bundle; otherwise the single workflow defaults to `cruise.yaml`. An explicit YAML path selects a single workflow, except that paths ending in the reserved basename `cruise-package.yaml` or `cruise-package.yml` are rejected. The ref defaults to the repository's default branch and is pinned to a commit. Use `--name` to override the package name (`[A-Za-z0-9_-]+`).
 
-`add` and `update` always print the source, commit SHA, and every command the workflow can run, warn that it may run arbitrary commands, and ask `[y/N]`. Without a TTY, pass `--yes` (the preview is still printed). Installing never runs the workflow. `update <name>` re-resolves the recorded ref, `remove <name>` deletes the YAML and manifest, and `list` shows the built-in workflows followed by installed packages. `update` and `remove` refuse packages whose YAML was edited by hand. Installed YAMLs appear in the normal config selector.
+A bundle manifest explicitly lists the workflows to install, for example:
+
+```yaml
+description: Review and implementation workflows
+workflows:
+  - name: review
+    path: workflows/review.yaml
+  - name: implement
+    path: workflows/implement.yaml
+```
+
+Names must be unique ignoring case and contain only letters, digits, `_`, or `-`. Paths are unique repository-root-relative `.yaml` or `.yml` paths without empty, `.` or `..` components or backslashes, and must not end in `cruise-package.yaml` or `cruise-package.yml`. Unknown manifest keys are rejected. Only listed workflows are installed, not every YAML in the repository. Nested `workflow_call` steps and `prompt_file` contents are inlined at installation, leaving self-contained YAMLs.
+
+Single packages retain `workflows/<name>.yaml` and `<name>.cruise-package.json`. Bundles use `workflows/<name>/<workflow>.yaml` and `.cruise-package-lock.json`, which records the source, ref, commit, and each installed YAML's SHA-256. Bundle members appear as `<name>/<workflow>.yaml` in the normal config selector. Existing single packages are not migrated to bundles.
+
+`add` and `update` preview the source, commit, workflows and commands, warn about untrusted commands, and ask `[y/N]`. Without a TTY, pass `--yes` (the preview is still printed). Installing never runs the workflow. `update <name>` re-resolves the recorded ref without changing package kind, `remove <name>` removes the package, and `list` shows built-ins and installed packages. Bundle changes are staged as a unit. `update` and `remove` refuse edited YAMLs and bundles containing extra files, protecting user changes.
 
 Use `cruise workflow doctor <name>` to check an installed package, including whether its YAML has been modified.
 
@@ -842,7 +857,7 @@ cruise resolves the workflow config as follows:
 3. Otherwise, cruise collects every candidate from the following locations and presents them as choices:
    - `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml` (current directory)
    - `./.cruise/*.yaml` / `*.yml` (current directory), sorted by filename; the top-level `./.cruise/default.yaml` is excluded
-   - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` (default: `~/.config/cruise/workflows/`), sorted by filename
+   - `$XDG_CONFIG_HOME/cruise/workflows/*.yaml` / `*.yml` and members of valid locked bundle directories (default: `~/.config/cruise/workflows/`), sorted by relative path
 
    When stdin and stdout are both TTYs, candidates are shown in an interactive selector and the user picks one. The built-in workflows are always offered at the end of the list, with `tdd` first, so they remain selectable even when config files are found; on a TTY with only built-ins the picker still starts at `tdd`. In non-interactive contexts (piped stdin, scripts) the highest-priority candidate is taken automatically without a prompt.
 4. **No candidate found** -- cruise falls back to the built-in `tdd` workflow (`builtin/tdd.yaml` in the source tree, embedded at build time); no config file is required, but you'll usually want one.

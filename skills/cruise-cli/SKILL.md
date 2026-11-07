@@ -85,7 +85,7 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | Serve the local browser UI (add `-o`/`--open` to launch the browser) | `cruise webui` |
 | Update Cruise itself | `cruise update` |
 | Inspect in-progress update transactions across installations (read-only; no network access or changes) | `cruise update --status` |
-| Install / update / remove / list a GitHub workflow package (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path][@ref]` / `update <name>` / `remove <name>` / `list` |
+| Install / update / remove / list a GitHub workflow package, including root-manifest bundles (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path.yaml][@ref]` / `update <name>` / `remove <name>` / `list` |
 | Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
 | Statically check workflows or a package | `cruise workflow doctor [--json] [--strict] [-f NAME] [TARGET]...` |
 | Show / change app-level settings (e.g. WebUI/TUI parallelism; displays `prevent_sleep`) | `cruise config` |
@@ -335,7 +335,7 @@ Use the CLI as the canonical client for automation, JSON, and CI/non-interactive
 
 1. `-c/--config <path>` (must exist; no prompt). `__builtin__` and `builtin:tdd` select `tdd`; `builtin:<name>` selects a named catalog workflow. The former selectors `builtin:default`, `builtin:simple`, and `builtin:review` are unsupported. `cruise workflow list` prints the catalog; `cruise workflow eject <name> [--to user|project]` copies a catalog workflow without overwriting an existing file.
 2. `CRUISE_CONFIG` env var (must exist; no prompt)
-3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted, excluding top-level `./.cruise/default.yaml`), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml`. Multiple candidates → interactive picker with the built-in `tdd` entry first (TTY) or highest-priority auto-pick (non-interactive).
+3. Current dir: `./cruise.yaml` → `.yml` → `./.cruise.yaml` → `./.cruise.yml`, then `./.cruise/*.yaml|*.yml` (ASCII-sorted, excluding top-level `./.cruise/default.yaml`), then `$XDG_CONFIG_HOME/cruise/workflows/*.yaml|*.yml` and members of valid locked bundles. Multiple candidates → interactive picker with the built-in `tdd` entry first (TTY) or highest-priority auto-pick (non-interactive).
 4. None found → the built-in `tdd` workflow (`builtin/tdd.yaml` in the source tree, embedded at build time), adopted without prompting.
 The built-in names are `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, `security`, and `pr-review-fix`; use one with `builtin:<name>` to select it.
 

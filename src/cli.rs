@@ -161,7 +161,7 @@ pub enum WorkflowCommand {
     Generate(WorkflowGenerateArgs),
     /// Validate workflow YAML without running it (static checks).
     Doctor(WorkflowDoctorArgs),
-    /// Install a workflow from GitHub: `owner/repo[/path][@ref]`.
+    /// Install a workflow or manifest bundle from GitHub: `owner/repo[/path][@ref]`.
     Add(WorkflowAddArgs),
     /// Remove an installed workflow package.
     Remove(WorkflowNameArgs),
@@ -218,7 +218,7 @@ pub struct WorkflowGenerateArgs {
 
 #[derive(Parser, Debug)]
 pub struct WorkflowAddArgs {
-    /// Package spec `owner/repo[/path][@ref]`.
+    /// Package spec `owner/repo[/path][@ref]`; a root manifest installs its entire bundle.
     pub spec: String,
     /// Install under this name instead of the default.
     #[arg(long)]
