@@ -18,6 +18,7 @@ pub fn parse_timeout(s: &str) -> Result<Duration> {
     let (num_part, multiplier) = match s.as_bytes()[s.len() - 1] {
         b'h' => (&s[..s.len() - 1], 3600u64),
         b'm' => (&s[..s.len() - 1], 60u64),
+        b's' => (&s[..s.len() - 1], 1u64),
         _ => (s, 1u64),
     };
 
@@ -43,6 +44,16 @@ mod tests {
     fn parse_timeout_plain_digits() {
         let result = parse_timeout("30").unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(result, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn parse_timeout_seconds_suffix() {
+        assert_eq!(
+            parse_timeout("1s").unwrap_or_else(|e| panic!("{e:?}")),
+            Duration::from_secs(1)
+        );
+        assert!(parse_timeout("0s").is_err());
+        assert!(parse_timeout("s").is_err());
     }
 
     #[test]

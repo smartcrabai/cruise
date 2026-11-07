@@ -27,6 +27,11 @@ pub static BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[
         yaml: include_str!("../builtin/tdd.yaml"),
     },
     BuiltinWorkflow {
+        name: "pr-review-fix",
+        description: "Address review threads on an existing pull request",
+        yaml: include_str!("../builtin/pr-review-fix.yaml"),
+    },
+    BuiltinWorkflow {
         name: "refactor",
         description: "Audit and improve code, tests, and structure, then verify",
         yaml: include_str!("../builtin/refactor.yaml"),
@@ -98,6 +103,7 @@ mod tests {
             names,
             vec![
                 "tdd",
+                "pr-review-fix",
                 "refactor",
                 "add-tests",
                 "add-formal-specs",

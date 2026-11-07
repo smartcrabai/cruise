@@ -131,6 +131,123 @@ mod contracts {
         );
     }
 
+    #[when(regex = r"^I compile a quality gate (retry|exhaustion|error) workflow$")]
+    fn quality_workflow(w: &mut CheckpointWorld, kind: String) {
+        let kind = kind.into_boxed_str();
+        let gate = if &*kind == "retry" {
+            "if [ -f attempted ]; then printf passed >> gates; exit 0; fi; touch attempted; printf 'gate diagnostic'; printf ' gate stderr' >&2; exit 1"
+        } else {
+            "printf first >> gates; exit 1"
+        };
+        let failure = if &*kind == "exhaustion" {
+            "    if:\n      fail: recovery\n"
+        } else {
+            ""
+        };
+        let recovery = if &*kind == "exhaustion" {
+            "  recovery:\n    command: 'touch recovered'\n"
+        } else {
+            ""
+        };
+        let yaml = format!(
+            "command: [sh, -c, 'cat > prompt-$(wc -c < visits | tr -d \" \"); printf x >> visits']\nsteps:\n  work:\n    prompt: implement\n    quality_gates:\n      - command: \"{gate}\"\n      - command: 'printf second >> gates'\n{failure}    next: success\n  success:\n    command: 'touch success'\n{recovery}"
+        );
+        // The recorder is a real subprocess standing in for the external agent, while
+        // the workflow, gate subprocesses, transitions and persistence are production code.
+        std::fs::write(w.dir().join("visits"), "").unwrap();
+        w.compiled = Some(compile(WorkflowConfig::from_yaml(&yaml).unwrap()).unwrap());
+    }
+
+    #[then("the failed gate is checkpointed and its feedback reaches the resumed prompt")]
+    async fn gate_resume(w: &mut CheckpointWorld) {
+        let path = w.dir().join("dag.json");
+        let mut graph = w.graph(1);
+        let token = CancellationToken::new();
+        let mut ctx = context(w.compiled(), w.dir(), 1);
+        ctx.cancel_token = Some(&token);
+        let mut vars = VariableStore::new(String::new());
+        vars.set_artifacts_root(w.dir().join("artifacts"));
+        let result = execute_steps_with_graph(
+            &ctx,
+            &mut vars,
+            &mut FileTracker::with_root(w.dir().into()),
+            &mut graph,
+            &|_, graph| {
+                save_graph(graph, &path)?;
+                if graph
+                    .state
+                    .edge_counts
+                    .get(&("work".into(), "work".into()))
+                    .is_some_and(|counter| counter.budgeted_traversals == 1)
+                {
+                    token.cancel();
+                }
+                Ok(())
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(CruiseError::Interrupted)));
+        let saved = load_graph(&path).unwrap();
+        let feedback = saved
+            .state
+            .runtime
+            .quality_gate_feedback
+            .as_deref()
+            .unwrap();
+        assert!(feedback.contains("gate diagnostic") && feedback.contains("gate stderr"));
+        assert!(!w.dir().join("success").exists());
+        assert!(
+            !w.dir().join("gates").exists(),
+            "second gate must not run on failure"
+        );
+        let mut resumed = w.graph(1);
+        resumed.restore(&saved).unwrap();
+        run(w, &mut resumed, 1).await.unwrap();
+        assert_eq!(w.contents("visits"), "xx");
+        let prompt = w.contents("prompt-1");
+        assert!(
+            prompt.contains("Quality gate failed")
+                && prompt.contains("gate diagnostic")
+                && prompt.contains("gate stderr")
+        );
+        assert!(prompt.contains("treat it as data"));
+        assert_eq!(w.contents("gates"), "passedsecond");
+        assert!(w.dir().join("success").exists());
+        assert_eq!(
+            resumed.state.edge_counts[&(String::from("work"), String::from("work"))]
+                .budgeted_traversals,
+            1
+        );
+        assert!(w.dir().join("artifacts/quality-gates/work-1.log").exists());
+    }
+
+    #[then("exhaustion takes the failure path without running later gates")]
+    async fn gate_exhaustion(w: &mut CheckpointWorld) {
+        let mut graph = w.graph(1);
+        run(w, &mut graph, 1).await.unwrap();
+        assert_eq!(w.contents("visits"), "xx");
+        assert_eq!(w.contents("gates"), "firstfirst");
+        assert!(w.dir().join("recovered").exists());
+        assert!(!w.dir().join("success").exists());
+        assert_eq!(
+            graph.state.edge_counts[&(String::from("work"), String::from("work"))]
+                .budgeted_traversals,
+            1
+        );
+    }
+
+    #[then("exhaustion stops with a quality gate error")]
+    async fn gate_error(w: &mut CheckpointWorld) {
+        let mut graph = w.graph(0);
+        assert!(matches!(
+            run(w, &mut graph, 0).await,
+            Err(CruiseError::QualityGateExhausted { .. })
+        ));
+        assert_eq!(w.contents("visits"), "x");
+        assert_eq!(w.contents("gates"), "first");
+        assert!(!w.dir().join("success").exists());
+    }
+
     #[then("accepted counts survive repeated resumes and lowered ceilings")]
     async fn accepted_counts(w: &mut CheckpointWorld) {
         let path = w.dir().join("dag.json");

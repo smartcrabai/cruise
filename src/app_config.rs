@@ -22,6 +22,8 @@ pub struct AppConfig {
     /// Must be >= 1. Defaults to `1` (preserves backward-compatible sequential behaviour).
     #[serde(alias = "run_all_parallelism")]
     pub run_all_parallelism: usize,
+    #[serde(alias = "run_all_auto_requeue_max_attempts")]
+    pub run_all_auto_requeue_max_attempts: u32,
 
     /// Default model reference or ordered primary-plus-fallback list.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -34,6 +36,10 @@ pub struct AppConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub plan_model: Option<crate::config::ModelSpec>,
+
+    /// Prevent idle sleep during runs on macOS.
+    #[serde(rename = "prevent_sleep", alias = "preventSleep")]
+    pub prevent_sleep: bool,
 
     #[serde(
         rename = "workflow_categories",
@@ -55,6 +61,10 @@ pub struct AppConfig {
 struct RuntimeConfig {
     #[serde(alias = "run_all_parallelism", default = "default_parallelism")]
     run_all_parallelism: usize,
+    #[serde(alias = "run_all_auto_requeue_max_attempts")]
+    run_all_auto_requeue_max_attempts: u32,
+    #[serde(rename = "prevent_sleep", alias = "preventSleep")]
+    prevent_sleep: bool,
     model: Option<crate::config::ModelSpec>,
     #[serde(rename = "plan_model", alias = "planModel")]
     plan_model: Option<crate::config::ModelSpec>,
@@ -99,11 +109,13 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             run_all_parallelism: 1,
+            run_all_auto_requeue_max_attempts: 0,
             model: None,
             plan_model: None,
             workflow_categories: indexmap::IndexMap::new(),
             show_others_category: true,
             others_category_name: crate::workflow_categories::OTHERS_CATEGORY_NAME.into(),
+            prevent_sleep: false,
         }
     }
 }
@@ -122,7 +134,7 @@ impl AppConfig {
         } else {
             serde_json::from_str(&content).map_err(|error| CruiseError::Other(format!("invalid config JSON in {}: {error}", path.display())))?
         };
-        let config = Self { run_all_parallelism: runtime.run_all_parallelism, model: runtime.model, plan_model: runtime.plan_model, ..Self::default() };
+        let config = Self { run_all_parallelism: runtime.run_all_parallelism, run_all_auto_requeue_max_attempts: runtime.run_all_auto_requeue_max_attempts, prevent_sleep: runtime.prevent_sleep, model: runtime.model, plan_model: runtime.plan_model, ..Self::default() };
         config.validate()?;
         Ok(config)
     }
@@ -582,6 +594,7 @@ mod tests {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let path = tmp.path().join("config.json");
         let original = AppConfig {
+            run_all_auto_requeue_max_attempts: 0,
             run_all_parallelism: 8,
             model: Some(crate::config::ModelSpec::Multiple(vec![
                 "primary".into(),
@@ -591,6 +604,7 @@ mod tests {
                 "plan-primary".into(),
                 "plan-fallback".into(),
             ])),
+            prevent_sleep: true,
             ..AppConfig::default()
         };
         // When: save then load
@@ -625,6 +639,7 @@ mod tests {
             (
                 "runAllParallelism: 8\nmodel: primary\nplan_model:\n  - plan-primary\n  - plan-fallback\n",
                 AppConfig {
+                    run_all_auto_requeue_max_attempts: 0,
                     run_all_parallelism: 8,
                     model: Some(crate::config::ModelSpec::Single("primary".to_string())),
                     plan_model: Some(crate::config::ModelSpec::Multiple(vec![
@@ -637,6 +652,7 @@ mod tests {
             (
                 "run_all_parallelism: 4\nmodel:\n  - primary\n  - fallback\nplanModel: plan-primary\n",
                 AppConfig {
+                    run_all_auto_requeue_max_attempts: 0,
                     run_all_parallelism: 4,
                     model: Some(crate::config::ModelSpec::Multiple(vec![
                         "primary".into(),

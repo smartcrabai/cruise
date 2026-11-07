@@ -384,6 +384,11 @@ fn load_unmodified(dir: &Path, name: &str) -> Result<Manifest, WorkflowPackageEr
     Ok(manifest)
 }
 
+/// Verify that an installed package still matches its manifest.
+pub fn verify_unmodified(name: &str) -> Result<(), WorkflowPackageError> {
+    load_unmodified(&workflows_dir()?, name).map(|_| ())
+}
+
 pub fn prepare_update(name: &str) -> Result<PreparedPackage, WorkflowPackageError> {
     let m = load_unmodified(&workflows_dir()?, name)?;
     build_package(
@@ -397,8 +402,8 @@ pub fn prepare_update(name: &str) -> Result<PreparedPackage, WorkflowPackageErro
 }
 
 pub fn remove(name: &str) -> Result<(), WorkflowPackageError> {
+    verify_unmodified(name)?;
     let dir = workflows_dir()?;
-    load_unmodified(&dir, name)?;
     std::fs::remove_file(yaml_path(&dir, name))?;
     std::fs::remove_file(manifest_path(&dir, name))?;
     Ok(())
