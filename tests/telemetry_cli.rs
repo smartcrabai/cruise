@@ -2428,7 +2428,11 @@ fn execute_now_finishes_plan_root_before_separate_run_root() {
         &borrowed,
     );
     wait_for_pty_text(&mut pty, "Action:", Duration::from_secs(30));
-    send_pty(&mut pty, b"\x1b[B\x1b[B\x1b[B\x1b[B\r", "select Execute now");
+    send_pty(
+        &mut pty,
+        b"\x1b[B\x1b[B\x1b[B\x1b[B\r",
+        "select Execute now",
+    );
     wait_for_pty_text(&mut pty, "Steps to skip", Duration::from_secs(15));
     send_pty(&mut pty, b"\r", "confirm empty skip selection");
     wait_for_pty_text(
