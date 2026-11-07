@@ -312,6 +312,9 @@ fn stale_record_is_replaced_by_start() -> TestResult {
         u64::from(dead_pid)
     );
     assert_eq!(h.status()?["running"], true);
+    // On Windows the process object stays openable while this handle is held,
+    // even though wait() has confirmed that the process exited.
+    drop(exited);
     Ok(())
 }
 

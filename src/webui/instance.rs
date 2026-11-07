@@ -100,13 +100,18 @@ fn process_definitely_absent(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn process_definitely_absent(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
     unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
         if !handle.is_null() {
+            // An exited process remains openable while another process holds a
+            // handle to it. A signaled process handle proves it has exited.
+            let exited = WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
             CloseHandle(handle);
-            return false;
+            return exited;
         }
         io::Error::last_os_error().raw_os_error() == Some(87)
     }
