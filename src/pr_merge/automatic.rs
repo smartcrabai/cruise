@@ -1841,6 +1841,7 @@ async fn perform_github(
         expected_head,
         GITHUB_READINESS_TIMEOUT,
         GITHUB_READINESS_POLL_INTERVAL,
+        GITHUB_HEAD_MISMATCH_GRACE,
     )
     .await
 }
@@ -1851,6 +1852,7 @@ async fn perform_github_with_timing(
     expected_head: &str,
     readiness_timeout: Duration,
     poll_interval: Duration,
+    head_mismatch_grace: Duration,
 ) -> Result<AutoSquashOutcome, AutoSquashError> {
     let deadline = tokio::time::Instant::now() + readiness_timeout;
     let mut observation = GitHubReadinessObservation::new();
@@ -1895,7 +1897,7 @@ async fn perform_github_with_timing(
                 ready_observations = 0;
                 let now = tokio::time::Instant::now();
                 let started = *head_mismatch_since.get_or_insert(now);
-                if now.duration_since(started) >= GITHUB_HEAD_MISMATCH_GRACE {
+                if now.duration_since(started) >= head_mismatch_grace {
                     return Err(observation.deadline_error(true));
                 }
             }
@@ -1919,7 +1921,7 @@ async fn perform_github_with_timing(
             return Err(observation.deadline_error(head_mismatch_since.is_some()));
         }
         let grace_remaining = head_mismatch_since.map_or(Duration::MAX, |started| {
-            GITHUB_HEAD_MISMATCH_GRACE.saturating_sub(now.duration_since(started))
+            head_mismatch_grace.saturating_sub(now.duration_since(started))
         });
         let wait = poll_interval.min(remaining).min(grace_remaining);
         tokio::select! {

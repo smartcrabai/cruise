@@ -562,11 +562,35 @@ async fn run_github_with_timing(
     timeout: Duration,
     poll_interval: Duration,
 ) -> Result<AutoSquashOutcome, AutoSquashError> {
+    run_github_with_head_mismatch_grace(
+        fixture,
+        cancel_token,
+        timeout,
+        poll_interval,
+        super::GITHUB_HEAD_MISMATCH_GRACE,
+    )
+    .await
+}
+
+async fn run_github_with_head_mismatch_grace(
+    fixture: &Fixture,
+    cancel_token: Option<&crate::cancellation::CancellationToken>,
+    timeout: Duration,
+    poll_interval: Duration,
+    head_mismatch_grace: Duration,
+) -> Result<AutoSquashOutcome, AutoSquashError> {
     let url = "https://github.com/acme/service/pull/7";
     let request = fixture.request(url, cancel_token);
     let reference = super::parse_provider_ref(url).unwrap_or_else(|error| panic!("{error}"));
-    super::perform_github_with_timing(&reference, &request, &fixture.head, timeout, poll_interval)
-        .await
+    super::perform_github_with_timing(
+        &reference,
+        &request,
+        &fixture.head,
+        timeout,
+        poll_interval,
+        head_mismatch_grace,
+    )
+    .await
 }
 
 async fn wait_for_github_status_calls(fixture: &Fixture, expected: usize) {
@@ -977,11 +1001,12 @@ async fn github_blocks_drafts_conflicts_and_head_races() {
         &json!([]),
     );
     fixture.configure_github_identity_sequence(&[github_open_identity(other_head)]);
-    let result = run_github_with_timing(
+    let result = run_github_with_head_mismatch_grace(
         &fixture,
         None,
         Duration::from_secs(5),
         Duration::from_millis(5),
+        Duration::ZERO,
     )
     .await;
     assert_eq!(
@@ -991,7 +1016,7 @@ async fn github_blocks_drafts_conflicts_and_head_races() {
         ))
     );
     assert_eq!(fixture.effect_lines(), Vec::<String>::new());
-    assert!(fixture.github_identity_call_count() >= 2);
+    assert!(fixture.github_identity_call_count() >= 1);
 }
 
 #[tokio::test]
@@ -1077,13 +1102,12 @@ async fn github_current_head_ci_failure_wins_over_unstable_mergeability() {
         json!("FAILURE");
     fixture.configure_github(&github_open_identity(&fixture.head), &failed, &json!([]));
 
-    let result = run_github_with_timing(
-        &fixture,
-        None,
-        Duration::from_millis(500),
-        Duration::from_millis(5),
-    )
-    .await;
+    let url = "https://github.com/acme/service/pull/7";
+    let request = fixture.request(url, None);
+    let reference = super::parse_provider_ref(url).unwrap_or_else(|error| panic!("{error}"));
+    let mut observation = super::GitHubReadinessObservation::new();
+    let result =
+        super::github_merge_readiness(&reference, &request, &fixture.head, &mut observation).await;
 
     let reason = match result {
         Err(AutoSquashError::Rejected(reason)) => reason,
@@ -1377,7 +1401,7 @@ async fn github_transient_head_mismatch_waits_then_merges_after_matching_head() 
 }
 
 #[tokio::test]
-async fn github_persistent_head_mismatch_uses_existing_diagnostic_at_deadline() {
+async fn github_persistent_head_mismatch_uses_existing_diagnostic_after_grace() {
     let fixture = Fixture::new();
     let other_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     fixture.configure_github_sequence(
@@ -1387,11 +1411,12 @@ async fn github_persistent_head_mismatch_uses_existing_diagnostic_at_deadline() 
     );
     fixture.configure_github_identity_sequence(&[github_open_identity(other_head)]);
 
-    let result = run_github_with_timing(
+    let result = run_github_with_head_mismatch_grace(
         &fixture,
         None,
-        Duration::from_millis(500),
+        Duration::from_secs(5),
         Duration::from_millis(5),
+        Duration::ZERO,
     )
     .await;
 
@@ -1402,12 +1427,12 @@ async fn github_persistent_head_mismatch_uses_existing_diagnostic_at_deadline() 
         ))
     );
     assert_eq!(fixture.github_status_call_count(), 0);
-    assert!(fixture.github_identity_call_count() >= 2);
+    assert!(fixture.github_identity_call_count() >= 1);
     assert_eq!(fixture.effect_lines(), Vec::<String>::new());
 }
 
 #[tokio::test]
-async fn github_repeated_unknown_times_out_with_latest_observed_values() {
+async fn github_repeated_unknown_times_out_without_merging() {
     let fixture = Fixture::new();
     let mut unknown = github_status(&fixture.head);
     unknown["data"]["repository"]["pullRequest"]["mergeable"] = json!("UNKNOWN");
@@ -1425,13 +1450,33 @@ async fn github_repeated_unknown_times_out_with_latest_observed_values() {
         Err(AutoSquashError::Rejected(reason)) => reason,
         other => panic!("expected bounded readiness timeout, got {other:?}"),
     };
+    assert!(reason.starts_with("GitHub readiness timed out"), "{reason}");
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn github_timeout_diagnostic_uses_latest_observation() {
+    let fixture = Fixture::new();
+    let mut unknown = github_status(&fixture.head);
+    unknown["data"]["repository"]["pullRequest"]["mergeable"] = json!("UNKNOWN");
+    fixture.configure_github(&github_open_identity(&fixture.head), &unknown, &json!([]));
+
+    let url = "https://github.com/acme/service/pull/7";
+    let request = fixture.request(url, None);
+    let reference = super::parse_provider_ref(url).unwrap_or_else(|error| panic!("{error}"));
+    let mut observation = super::GitHubReadinessObservation::new();
+    let readiness =
+        super::github_merge_readiness(&reference, &request, &fixture.head, &mut observation).await;
+
+    assert!(
+        matches!(readiness, Ok(super::GitHubReadiness::Pending)),
+        "expected pending readiness, got {readiness:?}"
+    );
+    let reason = observation.timeout_message();
     assert!(reason.contains("mergeable=UNKNOWN"), "{reason}");
     assert!(reason.contains("mergeStateStatus=CLEAN"), "{reason}");
     assert!(reason.contains("CI state=SUCCESS"), "{reason}");
-    assert!(
-        reason.contains(&format!("CI head={}", fixture.head)),
-        "{reason}"
-    );
+    assert!(reason.contains(&format!("CI head={}", fixture.head)), "{reason}");
     assert_eq!(fixture.effect_lines(), Vec::<String>::new());
 }
 
