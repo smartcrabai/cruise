@@ -13,9 +13,9 @@ fn validator() -> &'static jsonschema::Validator {
     })
 }
 
-fn check(document: Value, expected: bool) {
+fn check(document: &Value, expected: bool) {
     let errors: Vec<_> = validator()
-        .iter_errors(&document)
+        .iter_errors(document)
         .map(|e| e.to_string())
         .collect();
     assert_eq!(
@@ -33,15 +33,15 @@ fn schema_accepts_prompt_forms_and_group_internal_gates() {
             {"command": "cargo clippy", "timeout": "10m"}
         ]});
         step[field] = json!("example");
-        check(json!({"steps": {"main": step}}), true);
+        check(&json!({"steps": {"main": step}}), true);
     }
     check(
-        json!({"groups": {"review": {"steps": {"inspect": {
+        &json!({"groups": {"review": {"steps": {"inspect": {
         "prompt": "inspect", "quality_gates": [{"command": "true"}]
     }}}}, "steps": {"run": {"group": "review"}}}),
         true,
     );
-    check(json!({"steps": {"main": {"prompt": "no gates"}}}), true);
+    check(&json!({"steps": {"main": {"prompt": "no gates"}}}), true);
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn schema_rejects_invalid_gate_arrays_and_items() {
         json!([{"command": "true", "unexpected": true}]),
     ] {
         check(
-            json!({"steps": {"main": {"prompt": "work", "quality_gates": gates}}}),
+            &json!({"steps": {"main": {"prompt": "work", "quality_gates": gates}}}),
             false,
         );
     }
@@ -82,6 +82,6 @@ fn schema_requires_prompt_and_excludes_other_step_kinds() {
     ] {
         let mut step = step;
         step["quality_gates"] = json!([{"command": "true"}]);
-        check(json!({"steps": {"main": step}}), false);
+        check(&json!({"steps": {"main": step}}), false);
     }
 }

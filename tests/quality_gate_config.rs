@@ -8,8 +8,9 @@ fn parse(yaml: &str) -> WorkflowConfig {
 
 fn assert_invalid_gate(yaml: &str, expected: &str) {
     let config = parse(yaml);
-    let error =
-        validate_config(&config).expect_err("quality gate configuration should be rejected");
+    let error = validate_config(&config)
+        .err()
+        .unwrap_or_else(|| panic!("quality gate configuration should be rejected"));
     match error {
         CruiseError::InvalidStepConfig(message) => {
             assert!(message.contains("quality_gates"), "{message}");
@@ -24,8 +25,9 @@ fn prompt_gates_parse_validate_and_compile() {
     let config = parse(
         "command: [echo]\nsteps:\n  implement:\n    prompt: implement\n    quality_gates:\n      - command: cargo test\n      - command: cargo clippy\n        timeout: 10m\n",
     );
-    validate_config(&config).expect("prompt gates should validate");
-    compile(config).expect("prompt gates should compile");
+    validate_config(&config)
+        .unwrap_or_else(|error| panic!("prompt gates should validate: {error}"));
+    compile(config).unwrap_or_else(|error| panic!("prompt gates should compile: {error}"));
 }
 
 #[test]
@@ -33,8 +35,9 @@ fn group_internal_prompt_gates_are_allowed() {
     let config = parse(
         "command: [echo]\ngroups:\n  review:\n    steps:\n      inspect:\n        prompt: inspect\n        quality_gates: [{command: 'true'}]\nsteps:\n  run:\n    group: review\n",
     );
-    validate_config(&config).expect("group internal gate should validate");
-    compile(config).expect("group internal gate should compile");
+    validate_config(&config)
+        .unwrap_or_else(|error| panic!("group internal gate should validate: {error}"));
+    compile(config).unwrap_or_else(|error| panic!("group internal gate should compile: {error}"));
 }
 
 #[test]
@@ -67,14 +70,18 @@ fn zero_gate_timeout_is_rejected() {
 #[test]
 fn unknown_gate_field_is_rejected_by_yaml_parser() {
     let yaml = "steps:\n  implement:\n    prompt: implement\n    quality_gates: [{command: 'true', retries: 2}]\n";
-    let error = WorkflowConfig::from_yaml(yaml).expect_err("unknown gate field must be rejected");
+    let error = WorkflowConfig::from_yaml(yaml)
+        .err()
+        .unwrap_or_else(|| panic!("unknown gate field must be rejected"));
     assert!(error.to_string().contains("retries"), "{error}");
 }
 
 #[test]
 fn missing_gate_command_is_rejected_by_yaml_parser() {
     let yaml = "steps:\n  implement:\n    prompt: implement\n    quality_gates: [{timeout: 10m}]\n";
-    let error = WorkflowConfig::from_yaml(yaml).expect_err("gate command is required");
+    let error = WorkflowConfig::from_yaml(yaml)
+        .err()
+        .unwrap_or_else(|| panic!("gate command is required"));
     assert!(error.to_string().contains("command"), "{error}");
 }
 
@@ -119,7 +126,7 @@ fn gates_are_rejected_on_non_prompt_and_reserved_locations() {
         let result = validate_config(&config).and_then(|()| compile(config).map(|_| ()));
         match result {
             Err(CruiseError::InvalidStepConfig(message)) => {
-                assert!(message.contains("quality_gates"), "{name}: {message}")
+                assert!(message.contains("quality_gates"), "{name}: {message}");
             }
             other => panic!("{name}: expected quality_gates InvalidStepConfig, got {other:?}"),
         }

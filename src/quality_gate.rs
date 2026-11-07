@@ -127,8 +127,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn spawn_failure_is_feedback_with_unavailable_artifact(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    async fn spawn_failure_feedback() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let missing = dir.path().join("missing");
         let gates = [ResolvedGate {
@@ -141,7 +140,7 @@ mod tests {
         let feedback = format_feedback(&failure, "step", 1, 2, None);
         assert!(feedback.contains("Sanitized log (may be truncated): unavailable"));
         assert!(!feedback.contains("exit code"));
-        assert!(!failure.output.is_empty());
+        assert_ne!(failure.output, "");
         assert!(feedback.contains(&failure.output));
         Ok(())
     }

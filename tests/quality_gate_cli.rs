@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use tempfile::TempDir;
 
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
 struct Fixture {
-    _root: TempDir,
+    root: TempDir,
     repo: PathBuf,
     home: PathBuf,
     config: PathBuf,
@@ -14,14 +16,14 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(gate: &str, retries: usize, extra: &str) -> Self {
-        let root = tempfile::tempdir().unwrap();
+    fn new(gate: &str, retries: usize, extra: &str) -> TestResult<Self> {
+        let root = tempfile::tempdir()?;
         let repo = root.path().join("repo");
         let home = root.path().join("home");
         let data = root.path().join("data");
-        std::fs::create_dir_all(&repo).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
-        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(&repo)?;
+        std::fs::create_dir_all(&home)?;
+        git(&repo, &["init", "-q", "-b", "main"])?;
         git(
             &repo,
             &[
@@ -39,23 +41,26 @@ impl Fixture {
                 "-m",
                 "fixture",
             ],
-        );
-        std::fs::write(home.join("agent.sh"), "echo attempt >> \"$HOME/attempts\"\nn=$(wc -l < \"$HOME/attempts\" | tr -d ' ')\ncat > \"$HOME/prompt-$n\"\npath=$(awk '/^- Sanitized log \\(may be truncated\\): / { sub(/^- Sanitized log \\(may be truncated\\): /, \"\"); print; exit }' \"$HOME/prompt-$n\")\nif [ -n \"$path\" ] && [ -f \"$path\" ]; then cp \"$path\" \"$HOME/gate-log-$n\"; fi\necho done\n").unwrap();
-        std::fs::write(home.join("gate.sh"), gate).unwrap();
+        )?;
+        std::fs::write(
+            home.join("agent.sh"),
+            "echo attempt >> \"$HOME/attempts\"\nn=$(wc -l < \"$HOME/attempts\" | tr -d ' ')\ncat > \"$HOME/prompt-$n\"\npath=$(awk '/^- Sanitized log \\(may be truncated\\): / { sub(/^- Sanitized log \\(may be truncated\\): /, \"\"); print; exit }' \"$HOME/prompt-$n\")\nif [ -n \"$path\" ] && [ -f \"$path\" ]; then cp \"$path\" \"$HOME/gate-log-$n\"; fi\necho done\n",
+        )?;
+        std::fs::write(home.join("gate.sh"), gate)?;
         let config = root.path().join("workflow.yaml");
         // The command array is executed directly, not by a shell.
         let yaml = format!("command: [sh, \"$HOME/agent.sh\"]\nmax_retries: {retries}\nsteps:\n  implement:\n    prompt: implement the task\n    quality_gates:\n      - command: 'sh \"$HOME/gate.sh\"'\n{extra}").replace(
             "$HOME/agent.sh",
             &home.join("agent.sh").display().to_string(),
         );
-        std::fs::write(&config, yaml).unwrap();
-        Self {
-            _root: root,
+        std::fs::write(&config, yaml)?;
+        Ok(Self {
+            root,
             repo,
             home,
             config,
             data,
-        }
+        })
     }
 
     fn command(&self) -> Command {
@@ -67,9 +72,9 @@ impl Fixture {
         }
         cmd.current_dir(&self.repo)
             .env("HOME", &self.home)
-            .env("XDG_CONFIG_HOME", self._root.path().join("config"))
+            .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("XDG_DATA_HOME", &self.data)
-            .env("XDG_STATE_HOME", self._root.path().join("state"))
+            .env("XDG_STATE_HOME", self.root.path().join("state"))
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
             .env_remove("HERDR_ENV")
             .env("NO_COLOR", "1")
@@ -80,8 +85,8 @@ impl Fixture {
         cmd
     }
 
-    fn exec(&self) -> Output {
-        self.command().output().unwrap()
+    fn exec(&self) -> TestResult<Output> {
+        Ok(self.command().output()?)
     }
 
     fn attempts(&self) -> usize {
@@ -90,22 +95,24 @@ impl Fixture {
             .lines()
             .count()
     }
-    fn prompt(&self, n: usize) -> String {
-        std::fs::read_to_string(self.home.join(format!("prompt-{n}"))).unwrap()
+    fn prompt(&self, n: usize) -> TestResult<String> {
+        Ok(std::fs::read_to_string(
+            self.home.join(format!("prompt-{n}")),
+        )?)
     }
 }
-fn git(repo: &Path, args: &[&str]) {
+fn git(repo: &Path, args: &[&str]) -> TestResult {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
         .env("GIT_CONFIG_COUNT", "0")
-        .output()
-        .unwrap();
+        .output()?;
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
 }
 fn text(out: &Output) -> String {
     format!(
@@ -116,39 +123,41 @@ fn text(out: &Output) -> String {
 }
 
 #[test]
-fn passing_gate_runs_once() {
-    let f = Fixture::new("exit 0\n", 2, "");
-    let out = f.exec();
+fn passing_gate_runs_once() -> TestResult {
+    let f = Fixture::new("exit 0\n", 2, "")?;
+    let out = f.exec()?;
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(f.attempts(), 1);
     assert!(!text(&out).to_lowercase().contains("quality gate failed"));
+    Ok(())
 }
 
 #[test]
-fn failure_retries_with_feedback_and_clears_it_for_next_step() {
+fn failure_retries_with_feedback_and_clears_it_for_next_step() -> TestResult {
     let f = Fixture::new(
         "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; echo gate-diagnostic; exit 1; fi\n",
         2,
         "  next-step:\n    prompt: subsequent step\n",
-    );
-    let out = f.exec();
+    )?;
+    let out = f.exec()?;
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(f.attempts(), 3);
-    let retry = f.prompt(2);
+    let retry = f.prompt(2)?;
     assert!(retry.contains("## Quality gate failed"), "{retry}");
     assert!(retry.contains("exit code 1"), "{retry}");
     assert!(retry.contains("gate-diagnostic"), "{retry}");
-    assert!(!f.prompt(3).contains("## Quality gate failed"));
+    assert!(!f.prompt(3)?.contains("## Quality gate failed"));
+    Ok(())
 }
 
 #[test]
-fn exhaustion_stops_without_running_the_next_step() {
+fn exhaustion_stops_without_running_the_next_step() -> TestResult {
     let f = Fixture::new(
         "echo broken; exit 1\n",
         2,
         "  later:\n    command: 'touch later-ran'\n",
-    );
-    let out = f.exec();
+    )?;
+    let out = f.exec()?;
     assert!(!out.status.success(), "{}", text(&out));
     assert_eq!(f.attempts(), 3, "{}", text(&out));
     assert!(!f.repo.join("later-ran").exists());
@@ -157,64 +166,68 @@ fn exhaustion_stops_without_running_the_next_step() {
         message.contains("quality gate") && message.contains("implement"),
         "{message}"
     );
+    Ok(())
 }
 
 #[test]
-fn zero_budget_fails_without_retry() {
-    let f = Fixture::new("exit 1\n", 0, "");
-    let out = f.exec();
+fn zero_budget_fails_without_retry() -> TestResult {
+    let f = Fixture::new("exit 1\n", 0, "")?;
+    let out = f.exec()?;
     assert!(!out.status.success(), "{}", text(&out));
     assert_eq!(f.attempts(), 1, "{}", text(&out));
     assert!(text(&out).to_lowercase().contains("quality gate"));
+    Ok(())
 }
 
 #[test]
-fn exhausted_gate_uses_fail_goto() {
+fn exhausted_gate_uses_fail_goto() -> TestResult {
     let f = Fixture::new(
         "exit 1\n",
         2,
         "    if:\n      fail: recover\n  recover:\n    command: 'touch recovered'\n",
-    );
-    let out = f.exec();
+    )?;
+    let out = f.exec()?;
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(f.attempts(), 3);
     assert!(f.repo.join("recovered").exists());
+    Ok(())
 }
 
 #[test]
-fn feedback_masks_secrets() {
+fn feedback_masks_secrets() -> TestResult {
     let f = Fixture::new(
         "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; echo 'password=hunter2'; echo 'Authorization: Bearer abc.def'; exit 1; fi\n",
         1,
         "",
-    );
-    let out = f.exec();
+    )?;
+    let out = f.exec()?;
     assert!(out.status.success(), "{}", text(&out));
-    let retry = f.prompt(2);
+    let retry = f.prompt(2)?;
     assert!(retry.contains("[REDACTED]"), "{retry}");
     assert!(
         !retry.contains("hunter2") && !retry.contains("abc.def"),
         "{retry}"
     );
+    Ok(())
 }
 
 #[test]
-fn large_output_preserves_both_ends_in_feedback_and_artifact() {
+fn large_output_preserves_both_ends_in_feedback_and_artifact() -> TestResult {
     let f = Fixture::new(
         "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; echo BEGIN_MARKER; echo 'password=hunter2'; head -c 5000000 /dev/zero | tr '\\0' x; echo; echo END_MARKER; exit 1; fi\n",
         1,
         "",
-    );
-    let out = f.exec();
+    )?;
+    let out = f.exec()?;
     assert!(out.status.success(), "{}", text(&out));
-    let retry = f.prompt(2);
+    let retry = f.prompt(2)?;
     let path = retry
         .lines()
         .find_map(|line| line.strip_prefix("- Sanitized log (may be truncated): "))
-        .unwrap();
+        .ok_or("missing sanitized log path")?;
     let path = Path::new(path);
     assert!(!path.starts_with(&f.repo));
-    let log = std::fs::read_to_string(f.home.join("gate-log-2")).unwrap();
+    let log = std::fs::read_to_string(f.home.join("gate-log-2"))?;
     assert!(log.len() <= 1024 * 1024);
     for output in [&retry, &log] {
         assert!(output.contains("BEGIN_MARKER") && output.contains("END_MARKER"));
@@ -226,108 +239,120 @@ fn large_output_preserves_both_ends_in_feedback_and_artifact() {
             &Command::new("git")
                 .args(["status", "--porcelain"])
                 .current_dir(&f.repo)
-                .output()
-                .unwrap()
+                .output()?
                 .stdout
         )
         .is_empty()
     );
+    Ok(())
 }
 
 #[test]
-fn omitted_private_key_context_is_redacted_in_feedback_and_artifact() {
+fn omitted_private_key_context_is_redacted_in_feedback_and_artifact() -> TestResult {
     let f = Fixture::new(
         "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; head -c 2500000 /dev/zero | tr '\\0' x; echo; echo '-----BEGIN PRIVATE KEY-----'; head -c 2500000 /dev/zero | tr '\\0' y; echo KEY_BODY_MUST_NOT_ESCAPE; echo '-----END PRIVATE KEY-----'; echo FINAL_SAFE_DIAGNOSTIC; exit 1; fi\n",
         1,
         "",
-    );
-    let out = f.exec();
+    )?;
+    let out = f.exec()?;
     assert!(out.status.success(), "{}", text(&out));
-    let retry = f.prompt(2);
-    let log = std::fs::read_to_string(f.home.join("gate-log-2")).unwrap();
+    let retry = f.prompt(2)?;
+    let log = std::fs::read_to_string(f.home.join("gate-log-2"))?;
     for output in [&retry, &log] {
         assert!(!output.contains("KEY_BODY_MUST_NOT_ESCAPE"));
         assert!(output.contains("FINAL_SAFE_DIAGNOSTIC"));
     }
+    Ok(())
 }
 
 #[test]
-fn seconds_timeout_kills_gate_and_reports_feedback() {
+fn seconds_timeout_kills_gate_and_reports_feedback() -> TestResult {
     let f = Fixture::new(
         "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; sleep 5; touch \"$HOME/leaked\"; else exit 0; fi\n",
         1,
         "",
-    );
-    let yaml = std::fs::read_to_string(&f.config).unwrap().replace(
+    )?;
+    let yaml = std::fs::read_to_string(&f.config)?.replace(
         "      - command: 'sh \"$HOME/gate.sh\"'",
         "      - command: 'sh \"$HOME/gate.sh\"'\n        timeout: '1s'",
     );
-    std::fs::write(&f.config, yaml).unwrap();
+    std::fs::write(&f.config, yaml)?;
     let start = std::time::Instant::now();
-    let out = f.exec();
+    let out = f.exec()?;
     assert!(out.status.success(), "{}", text(&out));
     assert!(start.elapsed() < std::time::Duration::from_secs(4));
-    assert!(f.prompt(2).contains("timed out after 1s"));
+    assert!(f.prompt(2)?.contains("timed out after 1s"));
     std::thread::sleep(std::time::Duration::from_secs(5));
     assert!(!f.home.join("leaked").exists());
+    Ok(())
 }
 
 #[test]
-fn no_changes_retries_before_running_gate() {
+fn no_changes_retries_before_running_gate() -> TestResult {
     let f = Fixture::new(
         "echo gate >> \"$HOME/gates\"\n",
         2,
         "    if:\n      no-file-changes: retry\n",
-    );
-    std::fs::write(f.home.join("agent.sh"), "echo attempt >> \"$HOME/attempts\"\nn=$(wc -l < \"$HOME/attempts\" | tr -d ' ')\ncat > \"$HOME/prompt-$n\"\nif [ \"$n\" -gt 1 ]; then touch changed; fi\necho done\n").unwrap();
-    let out = f.exec();
+    )?;
+    std::fs::write(
+        f.home.join("agent.sh"),
+        "echo attempt >> \"$HOME/attempts\"\nn=$(wc -l < \"$HOME/attempts\" | tr -d ' ')\ncat > \"$HOME/prompt-$n\"\nif [ \"$n\" -gt 1 ]; then touch changed; fi\necho done\n",
+    )?;
+    let out = f.exec()?;
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(f.attempts(), 2);
     assert_eq!(
-        std::fs::read_to_string(f.home.join("gates"))
-            .unwrap()
+        std::fs::read_to_string(f.home.join("gates"))?
             .lines()
             .count(),
         1
     );
+    Ok(())
 }
 
 #[test]
-fn failed_gate_suppresses_file_changed_route() {
+fn failed_gate_suppresses_file_changed_route() -> TestResult {
     let f = Fixture::new(
         "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; exit 1; fi\n",
         1,
         "    if:\n      file-changed: other\n  other:\n    command: 'touch routed'\n",
-    );
-    std::fs::write(f.home.join("agent.sh"), "echo attempt >> \"$HOME/attempts\"\nn=$(wc -l < \"$HOME/attempts\" | tr -d ' ')\ncat > \"$HOME/prompt-$n\"\necho \"$n\" >> changed\necho done\n").unwrap();
-    let out = f.exec();
+    )?;
+    std::fs::write(
+        f.home.join("agent.sh"),
+        "echo attempt >> \"$HOME/attempts\"\nn=$(wc -l < \"$HOME/attempts\" | tr -d ' ')\ncat > \"$HOME/prompt-$n\"\necho \"$n\" >> changed\necho done\n",
+    )?;
+    let out = f.exec()?;
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(f.attempts(), 2);
-    assert!(f.prompt(2).contains("Quality gate failed"));
+    assert!(f.prompt(2)?.contains("Quality gate failed"));
     assert!(f.repo.join("routed").exists());
+    Ok(())
 }
 
 #[test]
-fn cancellation_cleans_up_gate_process_group() {
+fn cancellation_cleans_up_gate_process_group() -> TestResult {
     let f = Fixture::new(
         "echo $$ > \"$HOME/gate-pid\"; sleep 5; touch \"$HOME/leaked\"\n",
         1,
         "",
-    );
+    )?;
     let mut child = f
         .command()
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .spawn()?;
     let start = std::time::Instant::now();
     while !f.home.join("gate-pid").exists() && start.elapsed() < std::time::Duration::from_secs(10)
     {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(f.home.join("gate-pid").exists());
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
-    assert!(!child.wait().unwrap().success());
+    assert_eq!(
+        unsafe { libc::kill(libc::pid_t::try_from(child.id())?, libc::SIGINT,) },
+        0
+    );
+    assert!(!child.wait()?.success());
     std::thread::sleep(std::time::Duration::from_secs(5));
     assert!(!f.home.join("leaked").exists());
+    Ok(())
 }

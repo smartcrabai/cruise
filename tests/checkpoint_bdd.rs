@@ -133,17 +133,18 @@ mod contracts {
 
     #[when(regex = r"^I compile a quality gate (retry|exhaustion|error) workflow$")]
     fn quality_workflow(w: &mut CheckpointWorld, kind: String) {
-        let gate = if kind == "retry" {
+        let kind = kind.into_boxed_str();
+        let gate = if &*kind == "retry" {
             "if [ -f attempted ]; then printf passed >> gates; exit 0; fi; touch attempted; printf 'gate diagnostic'; printf ' gate stderr' >&2; exit 1"
         } else {
             "printf first >> gates; exit 1"
         };
-        let failure = if kind == "exhaustion" {
+        let failure = if &*kind == "exhaustion" {
             "    if:\n      fail: recovery\n"
         } else {
             ""
         };
-        let recovery = if kind == "exhaustion" {
+        let recovery = if &*kind == "exhaustion" {
             "  recovery:\n    command: 'touch recovered'\n"
         } else {
             ""
