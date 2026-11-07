@@ -561,9 +561,9 @@ fn build_claude_config_with(
         &PromptRun<'_>,
     ) -> Result<crate::provider_install::Resolved>,
 ) -> Result<ClaudeRunnerConfig> {
-    let resolved = resolver(crate::provider_install::Provider::Claude, req)?;
+    let installation = resolver(crate::provider_install::Provider::Claude, req)?;
     let mut env = req.env.clone();
-    if resolved.is_managed() && std::env::var_os("DISABLE_AUTOUPDATER").is_none() {
+    if installation.is_managed() && std::env::var_os("DISABLE_AUTOUPDATER").is_none() {
         env.entry("DISABLE_AUTOUPDATER".to_string())
             .or_insert_with(|| "1".to_string());
     }
@@ -578,7 +578,7 @@ fn build_claude_config_with(
         env,
         mcp_servers: req.mcp_servers.clone(),
         cancel: req.cancel_token.cloned(),
-        cli_path: resolved.explicit_path(),
+        cli_path: installation.explicit_path(),
         permission: req.permission,
         tool_policy: req.tool_policy.clone(),
     })
@@ -1095,12 +1095,11 @@ mod tests {
 
     fn fixture_resolver(
         provider: crate::provider_install::Provider,
-        _: &PromptRun<'_>,
-    ) -> Result<crate::provider_install::Resolved> {
-        Ok(crate::provider_install::Resolved {
+    ) -> crate::provider_install::Resolved {
+        crate::provider_install::Resolved {
             program: provider.binary_name().into(),
             source: crate::provider_install::Source::Path,
-        })
+        }
     }
 
     fn build_claude_config(
@@ -1108,7 +1107,9 @@ mod tests {
         model: Option<&str>,
         subagent: Option<&str>,
     ) -> Result<ClaudeRunnerConfig> {
-        super::build_claude_config_with(req, model, subagent, fixture_resolver)
+        super::build_claude_config_with(req, model, subagent, |provider, _| {
+            Ok(fixture_resolver(provider))
+        })
     }
 
     fn build_jcode_config(
@@ -1116,7 +1117,9 @@ mod tests {
         model: Option<&str>,
         subagent: Option<&str>,
     ) -> Result<JcodeRunnerConfig> {
-        super::build_jcode_config_with(req, model, subagent, fixture_resolver)
+        super::build_jcode_config_with(req, model, subagent, |provider, _| {
+            Ok(fixture_resolver(provider))
+        })
     }
     use std::sync::{LazyLock, Mutex};
 
