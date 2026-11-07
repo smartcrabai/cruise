@@ -11,6 +11,11 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::error::{CruiseError, Result};
+#[cfg(test)]
+use crate::http_download::copy_limited;
+use crate::http_download::{
+    MAX_ARCHIVE_ENTRIES, UrlTrust, download_archive, get_bounded, normalize_archive_path,
+};
 
 pub(super) const BUILD_TARGET: &str = env!("CRUISE_BUILD_TARGET");
 
@@ -18,11 +23,8 @@ const API_RELEASE_URL: &str = "https://api.github.com/repos/smartcrabai/cruise/r
 const DOWNLOAD_ROOT: &str = "https://github.com/smartcrabai/cruise/releases/download/";
 const MAX_API_SIZE: u64 = 1024 * 1024;
 const MAX_MANIFEST_SIZE: u64 = 2 * 1024 * 1024;
-const MAX_ARCHIVE_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_EXPANDED_SIZE: u64 = 512 * 1024 * 1024;
 const MAX_XZ_MEMORY: u64 = 128 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES: usize = 32;
-const MAX_REDIRECTS: usize = 5;
 const COPY_BUFFER_SIZE: usize = 16 * 1024;
 const TARGETS: &[&str] = &[
     "aarch64-apple-darwin",
@@ -91,13 +93,6 @@ struct ServiceUrls {
     api_release: Url,
     download_root: Url,
     loopback: Option<Url>,
-}
-
-#[derive(Clone, Copy)]
-enum UrlTrust<'a> {
-    GitHubApi,
-    GitHubDownload,
-    Loopback(&'a Url),
 }
 
 pub(super) fn acquire(
@@ -477,188 +472,11 @@ fn parse_sha256(value: &str) -> Result<String> {
     Ok(value.to_ascii_lowercase())
 }
 
-fn get_bounded(
-    agent: &ureq::Agent,
-    url: &Url,
-    trust: UrlTrust<'_>,
-    accept: &str,
-    limit: u64,
-) -> Result<Vec<u8>> {
-    let response = open_response(agent, url, trust, accept)?;
-    let expected_length = checked_content_length(&response, limit)?;
-    let mut bytes = Vec::new();
-    let size = copy_limited(response.into_body().into_reader(), &mut bytes, limit, None)?;
-    if expected_length.is_some_and(|expected| expected != size) {
-        return Err(invalid("release response ended before its Content-Length"));
-    }
-    Ok(bytes)
-}
-
-fn download_archive(
-    agent: &ureq::Agent,
-    url: &Url,
-    trust: UrlTrust<'_>,
-    path: &Path,
-    created: &mut bool,
-) -> Result<(u64, String)> {
-    let response = open_response(agent, url, trust, "application/octet-stream")?;
-    let expected_length = checked_content_length(&response, MAX_ARCHIVE_SIZE)?;
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    *created = true;
-    let mut digest = Sha256::new();
-    let size = copy_limited(
-        response.into_body().into_reader(),
-        &mut file,
-        MAX_ARCHIVE_SIZE,
-        Some(&mut digest),
-    )?;
-    let sha256 = hex_digest(&digest.finalize());
-    if expected_length.is_some_and(|expected| expected != size) {
-        return Err(invalid("release archive ended before its Content-Length"));
-    }
-    file.flush()?;
-    Ok((size, sha256))
-}
-
 fn verify_archive_checksum(actual: &str, expected: &str) -> Result<()> {
     if actual != expected {
         return Err(invalid(
             "downloaded release archive failed its SHA256 check",
         ));
-    }
-    Ok(())
-}
-
-fn copy_limited<R: Read, W: Write>(
-    mut input: R,
-    output: &mut W,
-    limit: u64,
-    mut digest: Option<&mut Sha256>,
-) -> Result<u64> {
-    let mut buffer = [0; COPY_BUFFER_SIZE];
-    let mut size = 0_u64;
-    loop {
-        let count = input.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        size = size
-            .checked_add(count as u64)
-            .filter(|size| *size <= limit)
-            .ok_or_else(|| invalid("release response exceeded its size limit"))?;
-        output.write_all(&buffer[..count])?;
-        if let Some(digest) = digest.as_mut() {
-            digest.update(&buffer[..count]);
-        }
-    }
-    Ok(size)
-}
-
-fn content_length(response: &ureq::http::Response<ureq::Body>) -> Result<Option<u64>> {
-    response
-        .headers()
-        .get(ureq::http::header::CONTENT_LENGTH)
-        .map(|value| {
-            value
-                .to_str()
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .ok_or_else(|| invalid("release response has an invalid Content-Length"))
-        })
-        .transpose()
-}
-
-fn checked_content_length(
-    response: &ureq::http::Response<ureq::Body>,
-    limit: u64,
-) -> Result<Option<u64>> {
-    let length = content_length(response)?;
-    if length.is_some_and(|length| length > limit) {
-        return Err(invalid("release response exceeds its size limit"));
-    }
-    Ok(length)
-}
-
-fn open_response(
-    agent: &ureq::Agent,
-    url: &Url,
-    trust: UrlTrust<'_>,
-    accept: &str,
-) -> Result<ureq::http::Response<ureq::Body>> {
-    let mut current = url.clone();
-    for redirects in 0..=MAX_REDIRECTS {
-        validate_url(&current, trust)?;
-        let response = agent
-            .get(current.as_str())
-            .header("Accept", accept)
-            .header("User-Agent", "cruise-native-updater")
-            .call()
-            .map_err(|error| invalid(&format!("release request failed: {error}")))?;
-        let status = response.status().as_u16();
-        if (300..400).contains(&status) {
-            if redirects == MAX_REDIRECTS {
-                return Err(invalid("release server exceeded the redirect limit"));
-            }
-            let location = response
-                .headers()
-                .get(ureq::http::header::LOCATION)
-                .and_then(|value| value.to_str().ok())
-                .ok_or_else(|| invalid("release redirect has no Location header"))?;
-            current = current
-                .join(location)
-                .map_err(|error| invalid(&format!("invalid release redirect URL: {error}")))?;
-            validate_url(&current, trust)?;
-            continue;
-        }
-        if status != 200 {
-            return Err(invalid(&format!("release server returned HTTP {status}")));
-        }
-        return Ok(response);
-    }
-    Err(invalid("release server exceeded the redirect limit"))
-}
-
-fn validate_url(url: &Url, trust: UrlTrust<'_>) -> Result<()> {
-    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
-        return Err(invalid(
-            "release URL contains forbidden credentials or fragment",
-        ));
-    }
-    match trust {
-        UrlTrust::GitHubApi => {
-            if url.scheme() != "https"
-                || url.host_str() != Some("api.github.com")
-                || url.port_or_known_default() != Some(443)
-            {
-                return Err(invalid(
-                    "release API URL is not an official HTTPS GitHub URL",
-                ));
-            }
-        }
-        UrlTrust::GitHubDownload => {
-            let official_host = matches!(
-                url.host_str(),
-                Some(
-                    "github.com"
-                        | "release-assets.githubusercontent.com"
-                        | "objects.githubusercontent.com"
-                        | "github-cloud.s3.amazonaws.com"
-                )
-            );
-            if url.scheme() != "https" || !official_host || url.port_or_known_default() != Some(443)
-            {
-                return Err(invalid(
-                    "release download URL is not an official HTTPS GitHub URL",
-                ));
-            }
-        }
-        UrlTrust::Loopback(base) => {
-            if url.origin() != base.origin() {
-                return Err(invalid(
-                    "test release redirect left the configured loopback server",
-                ));
-            }
-        }
     }
     Ok(())
 }
@@ -855,30 +673,6 @@ fn extract_zip(
         }
     }
     runtime_hash.ok_or_else(|| invalid("release archive is missing cruise-runtime"))
-}
-
-fn normalize_archive_path(path: &str, is_dir: bool) -> Result<String> {
-    if path.len() > 1024
-        || path.is_empty()
-        || path.starts_with('/')
-        || path.starts_with('\\')
-        || path.contains('\\')
-        || path.contains('\0')
-    {
-        return Err(invalid("release archive contains an unsafe path"));
-    }
-    let path = if is_dir {
-        path.strip_suffix('/').unwrap_or(path)
-    } else {
-        path
-    };
-    if path
-        .split('/')
-        .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return Err(invalid("release archive contains an unsafe path"));
-    }
-    Ok(path.to_string())
 }
 
 fn allowed_archive_file(filename: &str, runtime_name: &str) -> bool {

@@ -26,6 +26,11 @@ pub(crate) mod forge;
 pub mod formal_verify;
 pub mod github_review;
 pub mod graph;
+#[expect(
+    dead_code,
+    reason = "the binary-only updater also uses these shared download helpers"
+)]
+mod http_download;
 pub mod instruction_inbox;
 pub(crate) mod issue_images;
 pub(crate) mod issue_input;
@@ -42,6 +47,7 @@ pub mod planning;
 pub mod pr_merge;
 pub mod pr_review_fix;
 mod pr_template;
+pub mod provider_install;
 pub mod quality_gate;
 pub mod repo_clone;
 pub mod resolver;

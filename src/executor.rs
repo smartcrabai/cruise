@@ -532,26 +532,56 @@ async fn stream_to_outcome(
 ///
 /// Built fresh per attempt because [`crate::backend::claude::stream_agent`]
 /// consumes the config.
+fn resolve_for_request(
+    provider: crate::provider_install::Provider,
+    req: &PromptRun<'_>,
+) -> Result<crate::provider_install::Resolved> {
+    let path = req
+        .env
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+    crate::provider_install::resolve::resolve_with_path(provider, path.as_deref(), req.working_dir)
+}
+
 fn build_claude_config(
     req: &PromptRun<'_>,
     model_ref: Option<&str>,
     subagent_model: Option<&str>,
-) -> ClaudeRunnerConfig {
+) -> Result<ClaudeRunnerConfig> {
+    build_claude_config_with(req, model_ref, subagent_model, resolve_for_request)
+}
+
+fn build_claude_config_with(
+    req: &PromptRun<'_>,
+    model_ref: Option<&str>,
+    subagent_model: Option<&str>,
+    resolver: impl FnOnce(
+        crate::provider_install::Provider,
+        &PromptRun<'_>,
+    ) -> Result<crate::provider_install::Resolved>,
+) -> Result<ClaudeRunnerConfig> {
+    let installation = resolver(crate::provider_install::Provider::Claude, req)?;
+    let mut env = req.env.clone();
+    if installation.is_managed() && std::env::var_os("DISABLE_AUTOUPDATER").is_none() {
+        env.entry("DISABLE_AUTOUPDATER".to_string())
+            .or_insert_with(|| "1".to_string());
+    }
     let (model, suffix) = split_thinking_suffix(model_ref.unwrap_or_default());
-    ClaudeRunnerConfig {
+    Ok(ClaudeRunnerConfig {
         model: (!model.is_empty()).then(|| model.to_string()),
         subagent_model: subagent_model.map(str::to_owned),
         effort: suffix.and_then(effort_from_suffix),
         cwd: req.working_dir.map(Path::to_path_buf),
         resume_session_id: resume_for(req, Sdk::Claude),
         tools: req.tools.clone(),
-        env: req.env.clone(),
+        env,
         mcp_servers: req.mcp_servers.clone(),
         cancel: req.cancel_token.cloned(),
-        cli_path: None,
+        cli_path: installation.explicit_path(),
         permission: req.permission,
         tool_policy: req.tool_policy.clone(),
-    }
+    })
 }
 
 /// How one attempt of [`run_sdk_with_fallback`] failed. Keeps the failure text
@@ -953,34 +983,45 @@ async fn run_sdk(req: PromptRun<'_>, sdk: Sdk) -> Result<PromptOutcome> {
                     req.prompt.to_string(),
                 )),
                 Sdk::Claude => Ok(stream_claude_agent(
-                    build_claude_config(&req, model_ref, subagent_model),
+                    build_claude_config(&req, model_ref, subagent_model)?,
                     req.prompt.to_string(),
                 )),
-                Sdk::OpenCode => Ok(stream_agent(
-                    OpenCodeRunnerConfig {
-                        model_ref: model_ref.map(str::to_string),
-                        cwd: req.working_dir.map(Path::to_path_buf),
-                        resume_session_id: resume_for(&req, Sdk::OpenCode),
-                        tools: req.tools.clone(),
-                        env: req.env.clone(),
-                        mcp_servers: req.mcp_servers.clone(),
-                        permission: req.permission,
-                        cancel: req.cancel_token.cloned(),
-                        keep_session_home: req.resume.is_some()
-                            || req.on_session_id.is_some()
-                            || req.tools.iter().any(|tool| {
-                                matches!(
-                                    tool.name.as_str(),
-                                    crate::sdk_tools::SUBMIT_PLAN_TOOL
-                                        | crate::sdk_tools::UPDATE_PLAN_TOOL
-                                )
-                            }),
-                        cli_path: None,
-                        computer_use: req.computer_use,
-                        tool_policy: req.tool_policy.clone(),
-                    },
-                    req.prompt.to_string(),
-                )),
+                Sdk::OpenCode => {
+                    let resolved =
+                        resolve_for_request(crate::provider_install::Provider::OpenCode, &req)?;
+                    let mut env = req.env.clone();
+                    if resolved.is_managed()
+                        && std::env::var_os("OPENCODE_DISABLE_AUTOUPDATE").is_none()
+                    {
+                        env.entry("OPENCODE_DISABLE_AUTOUPDATE".to_string())
+                            .or_insert_with(|| "1".to_string());
+                    }
+                    Ok(stream_agent(
+                        OpenCodeRunnerConfig {
+                            model_ref: model_ref.map(str::to_string),
+                            cwd: req.working_dir.map(Path::to_path_buf),
+                            resume_session_id: resume_for(&req, Sdk::OpenCode),
+                            tools: req.tools.clone(),
+                            env,
+                            mcp_servers: req.mcp_servers.clone(),
+                            permission: req.permission,
+                            cancel: req.cancel_token.cloned(),
+                            keep_session_home: req.resume.is_some()
+                                || req.on_session_id.is_some()
+                                || req.tools.iter().any(|tool| {
+                                    matches!(
+                                        tool.name.as_str(),
+                                        crate::sdk_tools::SUBMIT_PLAN_TOOL
+                                            | crate::sdk_tools::UPDATE_PLAN_TOOL
+                                    )
+                                }),
+                            cli_path: resolved.explicit_path(),
+                            computer_use: req.computer_use,
+                            tool_policy: req.tool_policy.clone(),
+                        },
+                        req.prompt.to_string(),
+                    ))
+                }
             }
         },
     )
@@ -991,6 +1032,18 @@ fn build_jcode_config(
     req: &PromptRun<'_>,
     model_ref: Option<&str>,
     subagent_model: Option<&str>,
+) -> Result<JcodeRunnerConfig> {
+    build_jcode_config_with(req, model_ref, subagent_model, resolve_for_request)
+}
+
+fn build_jcode_config_with(
+    req: &PromptRun<'_>,
+    model_ref: Option<&str>,
+    subagent_model: Option<&str>,
+    resolver: impl FnOnce(
+        crate::provider_install::Provider,
+        &PromptRun<'_>,
+    ) -> Result<crate::provider_install::Resolved>,
 ) -> Result<JcodeRunnerConfig> {
     let (provider, model, effort) = jcode::parse_model_ref(model_ref)?;
     if model.is_none() {
@@ -1010,6 +1063,7 @@ fn build_jcode_config(
         ));
     }
     Ok(JcodeRunnerConfig {
+        binary: resolver(crate::provider_install::Provider::Jcode, req)?.explicit_path(),
         model,
         provider,
         effort,
@@ -1038,6 +1092,35 @@ fn build_jcode_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_resolver(
+        provider: crate::provider_install::Provider,
+    ) -> crate::provider_install::Resolved {
+        crate::provider_install::Resolved {
+            program: provider.binary_name().into(),
+            source: crate::provider_install::Source::Path,
+        }
+    }
+
+    fn build_claude_config(
+        req: &PromptRun<'_>,
+        model: Option<&str>,
+        subagent: Option<&str>,
+    ) -> Result<ClaudeRunnerConfig> {
+        super::build_claude_config_with(req, model, subagent, |provider, _| {
+            Ok(fixture_resolver(provider))
+        })
+    }
+
+    fn build_jcode_config(
+        req: &PromptRun<'_>,
+        model: Option<&str>,
+        subagent: Option<&str>,
+    ) -> Result<JcodeRunnerConfig> {
+        super::build_jcode_config_with(req, model, subagent, |provider, _| {
+            Ok(fixture_resolver(provider))
+        })
+    }
     use std::sync::{LazyLock, Mutex};
 
     use crate::backend::effort::EffortLevel;
@@ -1694,10 +1777,92 @@ mod tests {
     }
 
     #[test]
+    fn provider_resolution_uses_child_path_and_working_directory() {
+        let _lock = lock_process();
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let process_bin = temp.path().join("process");
+        let child_bin = temp.path().join("child/bin");
+        std::fs::create_dir_all(&process_bin).unwrap_or_else(|error| panic!("{error}"));
+        std::fs::create_dir_all(&child_bin).unwrap_or_else(|error| panic!("{error}"));
+        let _path = prepend_to_path(&process_bin);
+        let _data = EnvGuard::set("XDG_DATA_HOME", temp.path().join("data"));
+        let _jcode = EnvGuard::remove("CRUISE_JCODE_CLI_PATH");
+        let _claude = EnvGuard::remove("CRUISE_CLAUDE_CLI_PATH");
+        let _opencode = EnvGuard::remove("CRUISE_OPENCODE_CLI_PATH");
+        let env = HashMap::from([("PATH".to_string(), "bin".to_string())]);
+        let mut req = base_req(&env);
+        let cwd = temp.path().join("child");
+        req.working_dir = Some(&cwd);
+        for provider in [
+            crate::provider_install::Provider::Jcode,
+            crate::provider_install::Provider::Claude,
+            crate::provider_install::Provider::OpenCode,
+        ] {
+            let binary = child_bin.join(provider.binary_name());
+            std::fs::write(&binary, b"fixture").unwrap_or_else(|error| panic!("{error}"));
+            let resolved =
+                resolve_for_request(provider, &req).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(resolved.source, crate::provider_install::Source::Path);
+            assert_eq!(resolved.program, binary);
+        }
+    }
+
+    #[test]
+    fn claude_managed_and_path_environment_wiring() {
+        let _lock = lock_process();
+        let _guard = EnvGuard::remove("DISABLE_AUTOUPDATER");
+        let env = HashMap::new();
+        let req = base_req(&env);
+        let managed = super::build_claude_config_with(&req, None, None, |_, _| {
+            Ok(crate::provider_install::Resolved {
+                program: "/fixture/claude".into(),
+                source: crate::provider_install::Source::Managed,
+            })
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            managed.env.get("DISABLE_AUTOUPDATER").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            managed.cli_path.as_deref(),
+            Some(Path::new("/fixture/claude"))
+        );
+        let path = build_claude_config(&req, None, None).unwrap_or_else(|error| panic!("{error}"));
+        assert!(!path.env.contains_key("DISABLE_AUTOUPDATER"));
+        assert!(path.cli_path.is_none());
+    }
+
+    #[test]
+    fn jcode_resolved_source_wires_binary() {
+        use crate::provider_install::{Provider, Resolved, Source};
+        let env = HashMap::new();
+        let req = base_req(&env);
+        for source in [Source::Override, Source::Managed, Source::Path] {
+            let config =
+                super::build_jcode_config_with(&req, Some("openai/model"), None, |provider, _| {
+                    assert_eq!(provider, Provider::Jcode);
+                    Ok(Resolved {
+                        program: "/fixture/jcode".into(),
+                        source,
+                    })
+                })
+                .unwrap_or_else(|error| panic!("{error}"));
+            let expected = if source == Source::Path {
+                None
+            } else {
+                Some(Path::new("/fixture/jcode"))
+            };
+            assert_eq!(config.binary.as_deref(), expected);
+        }
+    }
+
+    #[test]
     fn subagent_model_builders_forward_backend_settings() {
         let env = HashMap::new();
         let req = base_req(&env);
-        let claude = build_claude_config(&req, Some("sonnet"), Some("haiku"));
+        let claude = build_claude_config(&req, Some("sonnet"), Some("haiku"))
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(claude.subagent_model.as_deref(), Some("haiku"));
         let jcode = build_jcode_config(&req, Some("openai/main"), Some("openai/worker"))
             .unwrap_or_else(|error| panic!("{error}"));
@@ -1774,7 +1939,8 @@ mod tests {
             false,
             crate::config::PermissionMode::Full,
         );
-        let claude = build_claude_config(&req, None, None);
+        let claude =
+            build_claude_config(&req, None, None).unwrap_or_else(|error| panic!("{error}"));
         let jcode = build_jcode_config(&req, Some("test-provider/test-model"), None)
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(claude.tool_policy, req.tool_policy);
@@ -1788,7 +1954,8 @@ mod tests {
         let env = HashMap::new();
         let mut req = base_req(&env);
         req.model = fixture_model(Some("claude-sonnet-4-6:xhigh"));
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None);
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None)
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(config.effort, Some(EffortLevel::XHigh));
     }
@@ -1797,7 +1964,8 @@ mod tests {
     fn build_claude_config_leaves_model_unset_so_the_cli_picks_its_default() {
         let env = HashMap::new();
         let req = base_req(&env);
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None);
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None)
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(config.model, None);
         assert_eq!(config.effort, None);
     }
@@ -1843,7 +2011,8 @@ mod tests {
             permission: crate::config::PermissionMode::Full,
             tool_policy: crate::tool_policy::ToolPolicy::default(),
         };
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None);
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None)
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(config.cwd, Some(dir));
         assert_eq!(config.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(config.resume_session_id.as_deref(), Some("sess-1"));

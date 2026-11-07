@@ -50,6 +50,7 @@ mod formal_verify;
 mod github_review;
 mod graph;
 mod herdr;
+mod http_download;
 mod install_identity;
 mod instant_exec;
 mod instruction_inbox;
@@ -74,6 +75,7 @@ mod platform;
 mod pr_merge;
 mod pr_review_fix;
 mod pr_template;
+pub mod provider_install;
 mod quality_gate;
 mod repo_clone;
 mod resolver;
@@ -187,6 +189,9 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::Webui(args)) => webui::run(args).await,
         Some(cli::Commands::Update(args)) => update_cmd::run(&args),
+        Some(cli::Commands::Install(args)) => {
+            provider_install::run(args.provider, args.status, args.force)
+        }
         Some(cli::Commands::Workflow(command)) => run_workflow(command).await,
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::SyncBase { pr_number, url },
