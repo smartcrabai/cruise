@@ -303,7 +303,6 @@ pub(crate) async fn run_gate_command<S: std::hash::BuildHasher>(
     timeout: Option<Duration>,
     cancel: Option<&crate::cancellation::CancellationToken>,
 ) -> Result<GateCommandOutput> {
-    let started = Instant::now();
     let mut child = spawn_command(cmd, env, cwd, true)?;
     let stdout = child
         .inner()
@@ -344,29 +343,31 @@ pub(crate) async fn run_gate_command<S: std::hash::BuildHasher>(
             None
         }
     };
-    let deadline = match (status.is_some(), timeout) {
-        (true, Some(duration)) => started + duration,
-        _ => Instant::now() + Duration::from_secs(5),
-    };
     let mut stdout = stdout;
     let mut stderr = stderr;
-    let ((stdout, stdout_timed_out), (stderr, stderr_timed_out)) = tokio::select! {
-        output = async {
-            tokio::join!(
-                async {
-                    match stdout.as_mut() {
-                        Some(task) => collect_output(task, deadline).await,
-                        None => (String::new(), false),
-                    }
-                },
-                collect_output(&mut stderr, deadline),
-            )
-        } => output,
-        () = cancel_wait(cancel) => {
-            let _ = child.start_kill();
-            abort_output_task(stdout);
-            abort_output_task(Some(stderr));
-            return Err(CruiseError::Interrupted);
+    let ((stdout, stdout_timed_out), (stderr, stderr_timed_out)) = if status.is_some() {
+        let (stdout, stderr) = collect_gate_output(stdout, stderr, &mut child, cancel).await?;
+        ((stdout, false), (stderr, false))
+    } else {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        tokio::select! {
+            output = async {
+                tokio::join!(
+                    async {
+                        match stdout.as_mut() {
+                            Some(task) => collect_output(task, deadline).await,
+                            None => (String::new(), false),
+                        }
+                    },
+                    collect_output(&mut stderr, deadline),
+                )
+            } => output,
+            () = cancel_wait(cancel) => {
+                let _ = child.start_kill();
+                abort_output_task(stdout);
+                abort_output_task(Some(stderr));
+                return Err(CruiseError::Interrupted);
+            }
         }
     };
     let output_timed_out = stdout_timed_out || stderr_timed_out;
@@ -398,6 +399,117 @@ pub(crate) async fn run_gate_command<S: std::hash::BuildHasher>(
         stdout,
         stderr,
     })
+}
+const GATE_OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(5);
+const GATE_OUTPUT_FINISH_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn collect_gate_output(
+    mut stdout: Option<tokio::task::JoinHandle<String>>,
+    mut stderr: tokio::task::JoinHandle<String>,
+    child: &mut AsyncGroupChild,
+    cancel: Option<&crate::cancellation::CancellationToken>,
+) -> Result<(String, String)> {
+    enum Drain {
+        Complete((String, String)),
+        GraceExpired,
+        Cancelled,
+    }
+
+    enum Finish {
+        Complete((String, String)),
+        TimedOut,
+        Cancelled,
+    }
+
+    let mut stdout_result = None;
+    let mut stderr_result = None;
+    let wait = {
+        let output = join_gate_output(
+            &mut stdout,
+            &mut stderr,
+            &mut stdout_result,
+            &mut stderr_result,
+        );
+        tokio::pin!(output);
+        tokio::select! {
+            output = &mut output => Drain::Complete(output),
+            () = tokio::time::sleep(GATE_OUTPUT_DRAIN_GRACE) => Drain::GraceExpired,
+            () = cancel_wait(cancel) => Drain::Cancelled,
+        }
+    };
+    match wait {
+        Drain::Complete(output) => Ok(output),
+        Drain::Cancelled => {
+            let _ = child.start_kill();
+            abort_output_task(stdout);
+            abort_output_task(Some(stderr));
+            Err(CruiseError::Interrupted)
+        }
+        Drain::GraceExpired => {
+            // Large sanitized lines can outlast the pipe-drain grace; kill any
+            // remaining group writers, then give their bounded sanitizers time to finish.
+            let _ = child.start_kill();
+            let finished = {
+                let output = join_gate_output(
+                    &mut stdout,
+                    &mut stderr,
+                    &mut stdout_result,
+                    &mut stderr_result,
+                );
+                tokio::pin!(output);
+                tokio::select! {
+                    output = &mut output => Finish::Complete(output),
+                    () = tokio::time::sleep(GATE_OUTPUT_FINISH_TIMEOUT) => Finish::TimedOut,
+                    () = cancel_wait(cancel) => Finish::Cancelled,
+                }
+            };
+            match finished {
+                Finish::Complete(output) => Ok(output),
+                Finish::TimedOut => {
+                    abort_output_task(stdout);
+                    abort_output_task(Some(stderr));
+                    Ok((
+                        stdout_result.take().unwrap_or_default(),
+                        stderr_result.take().unwrap_or_default(),
+                    ))
+                }
+                Finish::Cancelled => {
+                    abort_output_task(stdout);
+                    abort_output_task(Some(stderr));
+                    Err(CruiseError::Interrupted)
+                }
+            }
+        }
+    }
+}
+
+async fn join_gate_output(
+    stdout: &mut Option<tokio::task::JoinHandle<String>>,
+    stderr: &mut tokio::task::JoinHandle<String>,
+    stdout_result: &mut Option<String>,
+    stderr_result: &mut Option<String>,
+) -> (String, String) {
+    tokio::join!(
+        collect_gate_task(stdout.as_mut(), stdout_result),
+        collect_gate_task(Some(stderr), stderr_result),
+    );
+    (
+        stdout_result.take().unwrap_or_default(),
+        stderr_result.take().unwrap_or_default(),
+    )
+}
+
+async fn collect_gate_task(
+    task: Option<&mut tokio::task::JoinHandle<String>>,
+    result: &mut Option<String>,
+) {
+    if result.is_some() {
+        return;
+    }
+    *result = Some(match task {
+        Some(task) => task.await.unwrap_or_default(),
+        None => String::new(),
+    });
 }
 
 const MAX_CAPTURED_OUTPUT: usize = 4 * 1024 * 1024;
