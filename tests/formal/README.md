@@ -1,5 +1,19 @@
 # Checkpoint contract verification
 
+For local squash merge lifecycle safety, run `bash scripts/check_local_merge_specs.sh`.
+The dedicated `local-merge-specs` CI job runs the pinned Quint tests, simulation
+and bounded verification, all Alloy assertions and witnesses with receipt
+validation, and the local merge Gherkin target. Fresh evidence is retained under
+`target/formal-reports/local-merge.*`.
+The models cover refusal and rollback, at-most-one commit, marker-before-cleanup,
+session deletion after cleanup, and safe commit guards, including a cleanup-failure
+retry witness. Quint explores eight steps; Alloy uses eight ordered states.
+Exact commands, pins, local results and receipt details are recorded in
+`LOCAL_MERGE_VERIFICATION.md`.
+These are bounded abstractions, not a proof of the Rust implementation. In
+particular, failure or crash between the base commit and marker persistence is
+not modeled, and the modeled cleanup failure leaves both resources intact.
+
 For bounded batch auto-requeue safety, see `AUTO_REQUEUE.md` and run
 `bash scripts/check_auto_requeue_specs.sh`. The dedicated `auto-requeue-specs`
 CI job retains verification receipts and traces.

@@ -62,6 +62,8 @@ fn actions() -> SessionActionsVm {
         show_cancel: true,
         show_generate_plan: true,
         show_merge_pr: true,
+        show_stage_local_merge: true,
+        show_merge_locally: true,
         status: "idle".to_string(),
     }
 }

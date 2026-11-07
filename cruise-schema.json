@@ -127,7 +127,7 @@
     "create_pr": {
       "type": "boolean",
       "default": true,
-      "description": "When true, successful worktree runs commit changes, push the branch, create a pull request, and run after-pr steps. When false, PR processing is skipped and the worktree and artifacts are retained."
+      "description": "When true, successful worktree runs commit changes, push the branch, create a pull request, and run after-pr steps. When false, PR processing is skipped and the worktree and artifacts are retained. Eligible local worktree sessions without a PR may later be staged or explicitly squash-merged and cleaned up locally."
     },
     "cleanup_after_pr": {
       "type": "boolean",

@@ -27,6 +27,7 @@ pub mod graph;
 pub(crate) mod issue_images;
 pub(crate) mod issue_input;
 pub mod issue_publish;
+pub mod local_merge;
 pub mod metadata;
 pub mod model_schedule;
 pub mod model_selection;

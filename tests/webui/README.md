@@ -1,5 +1,11 @@
 # Responsive WebUI executable specifications
 
+## Local merge browser contract
+
+After installing the pinned dependencies and Chromium as described below, build the runtime with `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, then run `node tests/webui/local-merge.mjs` from the repository root. Set `WEBUI_BDD_BIN` to use a different prebuilt runtime. This runs the production server and real Chromium against disposable Git repositories and isolated HOME/XDG directories. It covers confirmation cancellation, staging committed and uncommitted work, dirty-base rejection, and squash merge with cleanup, checking browser feedback and Git/session state. It never modifies the checkout running the test.
+
+The test saves stage success, dirty-base error, and merge success screenshots under `target/formal-reports/local-merge-browser/` (override with `WEBUI_LOCAL_MERGE_REPORT_DIR`). The existing WebUI CI workflow runs this contract and uploads the report directory.
+
 ## Auto-requeue browser coverage
 
 With Node 26.12.1 and Rust 1.99.1, from the repository root run:

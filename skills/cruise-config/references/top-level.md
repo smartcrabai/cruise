@@ -317,6 +317,7 @@ cleanup_after_pr: true   # remove worktree + branch once the PR is open
 `create_pr` is a workflow-only boolean that defaults to `true`. Setting it to
 `false` skips Cruise's automatic commit, push, PR creation, `after-pr`, and
 PR-based cleanup, while retaining the normal session, artifacts, and worktree.
+Eligible local worktree sessions without a PR may later be staged or explicitly squash-merged and cleaned up locally.
 It is useful for persistent no-PR workflows such as research; a local
 worktree does not need `gh`/`glab` when PR creation is disabled, but `--repo`
 still needs the appropriate forge CLI to access and clone the repository.

@@ -60,6 +60,7 @@ mod issue_images;
 mod issue_input;
 mod issue_publish;
 mod list_cmd;
+mod local_merge;
 mod metadata;
 mod model_schedule;
 mod model_selection;

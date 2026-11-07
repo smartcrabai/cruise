@@ -798,7 +798,7 @@ async fn attempt_pr_creation_with_ref(
     }
 }
 
-fn commit_message_with_coauthor(message: &str) -> String {
+pub(crate) fn commit_message_with_coauthor(message: &str) -> String {
     let Some(coauthor) = commit_coauthor_from_env() else {
         return message.to_string();
     };
