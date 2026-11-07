@@ -26,6 +26,21 @@ const session = {
   title: 'responsive-'.repeat(24), current_step: null, created_at: '2026-10-25T00:00:00Z',
   completed_at: null, worktree_path: null, worktree_branch: 'feature/'.repeat(30),
 };
+if (contract === 'layout') {
+  const repo = join(root, 'repo');
+  const worktree = join(root, 'diff-worktree');
+  for (const args of [
+    ['init', '-b', 'main'],
+    ['-c', 'user.name=Responsive BDD', '-c', 'user.email=responsive-bdd@example.invalid', 'commit', '--allow-empty', '-m', 'diff base'],
+    ['worktree', 'add', '-b', 'diff-fixture', worktree],
+  ]) {
+    const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8',
+      env: { ...process.env, HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
+    assert.equal(result.status, 0, `temporary diff repository: ${result.stderr}`);
+  }
+  await writeFile(join(worktree, 'diff-fixture.txt'), 'initial diff fixture line\n');
+  Object.assign(session, { base_dir: repo, worktree_path: worktree, worktree_branch: 'diff-fixture' });
+}
 await writeFile(join(sessionDir, 'state.json'), JSON.stringify(session));
 await writeFile(join(sessionDir, 'config.yaml'), 'steps:\n  harmless:\n    command: "true"\n');
 await writeFile(join(sessionDir, 'plan.md'), '# Responsive plan\n\n' + 'longword'.repeat(150) + '\n\n| Wide | Table |\n| --- | --- |\n| ' + 'column'.repeat(120) + ' | second |\n\n```text\n' + 'code'.repeat(200) + '\n```\n\n' + 'Paragraph for scrolling.\n\n'.repeat(50));
@@ -336,6 +351,14 @@ try {
     assert(await page.locator('.prose table').evaluate(el => el.scrollWidth > el.clientWidth), 'R9 wide table scrolls locally');
     await page.locator('.prose table').evaluate(el => { el.scrollLeft = el.scrollWidth; });
     assert(await page.locator('.prose table').evaluate(el => el.scrollLeft > 0));
+    await page.getByRole('tab', { name: 'Diff', exact: true }).click();
+    const diff = page.locator(`#tab-diff-${id}`);
+    await diff.waitFor();
+    assert.match(await diff.innerText(), /initial diff fixture line/);
+    await writeFile(join(root, 'diff-worktree', 'diff-fixture.txt'), 'refreshed diff fixture line\n');
+    await diff.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await page.getByText('refreshed diff fixture line', { exact: false }).waitFor();
+    assert.doesNotMatch(await page.locator(`#tab-diff-${id}`).innerText(), /initial diff fixture line/);
     await page.getByRole('tab', { name: 'Log', exact: true }).click();
     await page.locator(`#tab-log-${id}`).waitFor();
     assert(await page.locator(`#tab-log-${id}`).evaluate(el => el.clientHeight <= innerHeight * .7 + 1 && el.scrollHeight > el.clientHeight), 'R5 log capped with internal scrolling');

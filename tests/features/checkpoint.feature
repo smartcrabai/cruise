@@ -45,3 +45,18 @@ Feature: Authoritative checkpoint workflow contracts
   Scenario: Retry policy does not unfold topology and completed resume has no effects
     When I compile the two-effect shell workflow
     Then topology stays stable and completed resume runs no effects
+
+  @quality_gate @safe_resume
+  Scenario: Gate feedback and retry budget survive a checkpoint and resume
+    When I compile a quality gate retry workflow
+    Then the failed gate is checkpointed and its feedback reaches the resumed prompt
+
+  @quality_gate @exhaustion
+  Scenario: Exhaustion follows the configured failure transition without applying success
+    When I compile a quality gate exhaustion workflow
+    Then exhaustion takes the failure path without running later gates
+
+  @quality_gate @exhaustion
+  Scenario: Exhaustion without a failure transition returns a quality gate error
+    When I compile a quality gate error workflow
+    Then exhaustion stops with a quality gate error

@@ -46,6 +46,7 @@ export default function TabInfo(props) {
         <dt class="text-xs uppercase tracking-wide">Error</dt>
         <dd class="break-words text-red-600 dark:text-red-400 mt-0.5 font-mono text-xs">{props.phaseError}</dd>
       </div>}
+      {props.autoRequeueCount > 0 && <div><dt class="text-xs uppercase tracking-wide">Auto-requeued</dt><dd class="text-gray-700 dark:text-gray-300 mt-0.5">{props.autoRequeueCount}</dd></div>}
       {props.planError && props.planError !== props.phaseError && <div>
         <dt class="text-xs uppercase tracking-wide">Planning Error</dt>
         <dd class="break-words text-red-600 dark:text-red-400 mt-0.5 font-mono text-xs">{props.planError}</dd>

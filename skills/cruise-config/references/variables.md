@@ -27,6 +27,19 @@ shell quoting. See [steps.md](steps.md#workflow-call-inputs) for complete exampl
 
 ## Variable list
 
+### Commit and PR template variables
+
+These templates use a separate allowlist, not the runtime variables below:
+
+| Template | Allowed variables |
+|----------|-------------------|
+| `commit_message_template` | `{title}`, `{issue}`, `{session_id}`, `{branch}` |
+| `pr_body_template` | `{title}`, `{body}`, `{issue}`, `{session_id}`, `{branch}` |
+
+`{title}` is the trimmed generated PR title, or the first non-empty trimmed line of the session input or title when it is empty. `{body}` is the trimmed generated PR body, or empty on generation failure. `{issue}` currently always expands to an empty string; `{session_id}` is the session ID and `{branch}` is the worktree branch name. `{plan}` is not allowed here and retains its normal meaning as a session plan file path. Unknown variables and malformed syntax are rejected at workflow load/compile time. Escape literal braces with `{{` and `}}`; substituted values are not rescanned. See [top-level.md](top-level.md#commit_message_template-and-pr_body_template).
+
+### Runtime variables
+
 | Variable | Description |
 |----------|-------------|
 | `{input}` | Initial input from the CLI argument or stdin; when empty, the first prompt step with an `instruction:` asks the user interactively and stores the entry here; for `--skip-planning` / input-as-plan sessions (`input_as_plan: true`) it resolves to the current `plan.md` content |
