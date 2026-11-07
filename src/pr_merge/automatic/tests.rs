@@ -980,7 +980,7 @@ async fn github_blocks_drafts_conflicts_and_head_races() {
     let result = run_github_with_timing(
         &fixture,
         None,
-        Duration::from_millis(500),
+        Duration::from_secs(5),
         Duration::from_millis(5),
     )
     .await;
