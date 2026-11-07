@@ -265,6 +265,7 @@ steps:
 | `command` | string \| array | Shell command(s) |
 | `parallel` | object | Named prompt/command children run concurrently and join as one step |
 | `next` | string | Explicit next step name |
+| `return` | string | Declared callee return label on a top-level step or option item, mutually exclusive with its `next` |
 | `skip` | bool \| string | Skip condition (see [flow-control.md](flow-control.md)) |
 | `flag` | string \| non-empty string array | Declared flag name, or a non-empty list using ANY/OR semantics (the step is enabled when any listed flag is on). String form remains compatible. Allowed on steps, group and `workflow_call` call sites, and parallel parents; call-site gates apply to expanded steps. Not allowed on parallel children, steps inside a group definition, or a callee's own steps (see [flow-control.md](flow-control.md) and [top-level.md](top-level.md#flags)) |
 | `squash-merge` | bool | Native synchronous squash merge; `true` is valid only as the final direct step in `after-pr` and must be gated exactly by `flag: merge`. See [after-pr.md](after-pr.md#opt-in-native-synchronous-squash-merge) |
@@ -275,6 +276,7 @@ steps:
 | `env` | object | Per-step environment variables |
 | `group` | string | Group invocation (see [groups.md](groups.md)) |
 | `workflow_call` | string | Workflow file or supported GitHub URL to inline |
+| `on_return` | string-valued object \| null | Map each declared callee return label to a parent step, only on `workflow_call` |
 | `with` | string-valued object \| null | Required callee input arguments, only on `workflow_call`. Empty strings are valid; other value types are rejected. Omission/null passes no arguments; even `{}` is invalid on a non-call step. |
 | `fail-if-no-file-changes` | — | Rejected as an unknown field; use `if.no-file-changes: failed` instead (see [flow-control.md](flow-control.md)) |
 
@@ -312,3 +314,42 @@ Callees cannot declare groups or gate their own steps with flags. Calls inside
 groups remain forbidden. Call-site `flag` gates every expanded step, `skip` and
 `when` apply to the first, and `next` applies to the last unless it has its own.
 See [variables.md](variables.md#load-time-workflow-inputs) for binding and escapes.
+
+### Workflow call return labels
+
+Called workflow `shared/gate.yaml`:
+
+```yaml
+returns: [approved, needs_fix]
+steps:
+  decide:
+    option:
+      - {selector: Approve, return: approved}
+      - {selector: Fix, return: needs_fix}
+```
+
+Caller:
+
+```yaml
+steps:
+  gate:
+    workflow_call: ./shared/gate.yaml
+    on_return: {approved: publish, needs_fix: fix}
+  fix: {command: "true"}
+  publish: {command: "true"}
+```
+
+Labels must be unique, match `[A-Za-z_][A-Za-z0-9_-]*`, be returned at least
+once, and be mapped exactly by the caller. Destinations must exist in the same
+parent step map and cannot be workflow call sites. Null `on_return` means
+omission. A callee top-level step can use `return` instead of `next`; an option
+step must put it on individual options. A return-bearing step cannot use
+`if.file-changed`, and returns are invalid on group or parallel children, call
+sites, and after-PR steps. Roots cannot use return routes or nonempty `returns`.
+
+Routes become explicit `next` edges at load time. Normal fallthrough uses the
+call-site `next` or the following parent step. Skipping a return-bearing step
+does not return and instead continues in declaration order. A call-site `next`
+is invalid if the callee's last step has a step-level return, but option returns
+do not preclude it. Nested calls map labels at each scope, and loops remain
+subject to existing graph validation.

@@ -84,7 +84,8 @@ pub(crate) fn missing_jcode_model_error() -> CruiseError {
 }
 
 /// Top-level keys that only make sense in a workflow.
-const WORKFLOW_ONLY_KEYS: [&str; 6] = [
+const WORKFLOW_ONLY_KEYS: [&str; 7] = [
+    "returns",
     "description",
     "steps",
     "groups",
@@ -843,6 +844,23 @@ mod tests {
             let message = parse_error(&env);
             assert!(message.contains(key), "{key}: {message}");
             assert!(message.contains("default.yaml"), "{key}: {message}");
+        }
+    }
+
+    #[test]
+    fn returns_are_rejected_in_user_and_project_defaults() {
+        for project in [false, true] {
+            let env = env();
+            let path = if project {
+                &env.project_file
+            } else {
+                &env.user_file
+            };
+            write(path, "returns: [approved]\n");
+            let message = parse_error(&env);
+            assert!(message.contains("returns"), "{path:?}: {message}");
+            assert!(message.contains("default.yaml"), "{path:?}: {message}");
+            assert!(message.contains("workflow-only"), "{path:?}: {message}");
         }
     }
 
