@@ -242,9 +242,9 @@ path = "tests/webui_responsive_bdd.rs"
 test = false
 
 [[test]]
+harness = false
 name = "webui_daemon_bdd"
 path = "tests/webui_daemon_bdd.rs"
-harness = false
 
 [[test]]
 harness = false
