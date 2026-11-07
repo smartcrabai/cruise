@@ -251,6 +251,13 @@ pub(crate) async fn editor(
             return Ok(html(state.templates.render("publish-dialog", &vm)?));
         }
         let (field, label, placeholder, submit_label, required) = match kind.as_str() {
+            "tell" => (
+                "instruction",
+                "Tell the running session",
+                "Enter an instruction...",
+                "Send",
+                true,
+            ),
             "fix" => (
                 "feedback",
                 "Fix the plan",
@@ -750,6 +757,23 @@ pub(crate) async fn fix(
         let spawn_id = id.clone();
         super::ops::spawn(async move { application.fix(&spawn_id, feedback, sink).await });
         let mut body = partials::header_and_row(&state, &id, Some(OperationKind::Fix))?;
+        body.push_str(&partials::clear(&format!("editor-{id}")));
+        Ok(html(body))
+    })
+}
+
+pub(crate) async fn tell(
+    State(state): State<WebState>,
+    Path(id): Path<String>,
+    axum::extract::Form(pairs): Form,
+) -> Response {
+    let fields = Fields::from(pairs);
+    run(&state, "Tell", || {
+        let instruction = fields.text("instruction");
+        state
+            .application
+            .tell(&id, instruction, crate::instruction_inbox::Origin::WebUi)?;
+        let mut body = partials::header_and_row(&state, &id, None)?;
         body.push_str(&partials::clear(&format!("editor-{id}")));
         Ok(html(body))
     })

@@ -178,6 +178,13 @@ path = "tests/checkpoint_bdd.rs"
 
 [[test]]
 harness = false
+name = "instruction_inbox_bdd"
+path = "tests/instruction_inbox_bdd.rs"
+# Requires Unix subprocess fixtures, run explicitly.
+test = false
+
+[[test]]
+harness = false
 name = "opencode_bdd"
 path = "tests/opencode_bdd.rs"
 # POSIX fixture: required explicitly by check_opencode_specs.sh on Linux CI.

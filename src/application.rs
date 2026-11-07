@@ -1305,6 +1305,7 @@ pub enum SessionAction {
     Generate,
     Answer,
     Cancel,
+    Tell,
     Delete,
     Approve,
     Publish,
@@ -2801,6 +2802,31 @@ impl CruiseApplication {
         use_input_as_plan_inner(&self.manager, &self.runtime, id, &claim, state, sink)
     }
 
+    /// Submit an instruction without acquiring the run's application claim.
+    pub fn tell(
+        &self,
+        id: &str,
+        content: String,
+        origin: crate::instruction_inbox::Origin,
+    ) -> Result<crate::instruction_inbox::Receipt> {
+        self.manager.load(id)?;
+        crate::instruction_inbox::accept(
+            &self.manager.sessions_dir(),
+            id,
+            crate::instruction_inbox::AcceptRequest {
+                content,
+                origin,
+                dedupe_key: None,
+            },
+        )
+    }
+
+    /// Read the instruction ledger summary for a session.
+    pub fn pending_summary(&self, id: &str) -> Result<crate::instruction_inbox::InboxSummary> {
+        self.manager.load(id)?;
+        crate::instruction_inbox::summary(&self.manager.sessions_dir(), id)
+    }
+
     /// Reset a session to its planned state.
     ///
     /// # Errors
@@ -2821,6 +2847,11 @@ impl CruiseApplication {
                 state.phase.label()
             )));
         }
+        crate::instruction_inbox::expire_pending(
+            &self.manager.sessions_dir(),
+            id,
+            "reset to planned",
+        )?;
         state.reset_to_planned();
         self.manager.save(&state)?;
         Ok(state)
@@ -2929,6 +2960,9 @@ impl CruiseApplication {
             SessionPhase::Running => {
                 if self.runtime.active_identity(&state.id).is_some() {
                     actions.push(SessionAction::Cancel);
+                }
+                if self.runtime.active_identity(&state.id).is_some() || state.is_runner_alive() {
+                    actions.push(SessionAction::Tell);
                 }
             }
             SessionPhase::Failed(_) => actions.extend([
@@ -3488,6 +3522,7 @@ impl CruiseApplication {
             return result;
         }
         let mut inputs = inputs_result?;
+        let instructions = crate::instruction_inbox::open_run_inbox(&self.manager, id);
         let started = emit_run_started(&self.manager, id, &*sink, &mut setup, batch_started);
         prepare.finish_result(&started);
         started?;
@@ -3500,6 +3535,7 @@ impl CruiseApplication {
             sink.clone(),
             log_sink,
             batch_started,
+            instructions.as_ref(),
         )
         .await;
         *unresolved_failed_steps = execution_result.as_ref().is_ok_and(|failed| *failed);
@@ -3518,6 +3554,11 @@ impl CruiseApplication {
         }
         .with_context(finalize.context())
         .await;
+        crate::instruction_inbox::close_run_inbox(
+            instructions,
+            &setup.state.phase,
+            &crate::session::SessionLogger::new(self.manager.run_log_path(id)),
+        );
         finalize.finish_result(&result);
         result
     }
@@ -3798,6 +3839,7 @@ async fn run_engine_steps(
 }
 
 struct WorktreeRun<'a> {
+    instructions: Option<&'a crate::instruction_inbox::RunInbox>,
     manager: &'a SessionManager,
     sink: &'a Arc<dyn ApplicationEventSink>,
     worktree: &'a crate::worktree::WorktreeContext,
@@ -3862,6 +3904,7 @@ impl WorktreeRun<'_> {
                 Some(on_log),
                 Some(&on_pr_processing),
                 Some(&persist_pr),
+                self.instructions,
             ),
         )
         .await
@@ -3876,6 +3919,7 @@ async fn execute_run(
     sink: Arc<dyn ApplicationEventSink>,
     log_sink: Option<Arc<dyn LogSink>>,
     batch_started: bool,
+    instructions: Option<&crate::instruction_inbox::RunInbox>,
 ) -> Result<bool> {
     let id = claim.session_id();
     let option = RuntimeOptionHandler {
@@ -3914,6 +3958,7 @@ async fn execute_run(
             flags: &inputs.flags,
             on_step_log: Some(&on_log),
             on_step_start: &on_start,
+            instructions,
         };
         run_engine_steps(
             &ctx,
@@ -3945,6 +3990,7 @@ async fn execute_run(
                 crate::workspace::ExecutionWorkspace::Worktree { ctx, .. } => ctx.clone(),
             };
             WorktreeRun {
+                instructions,
                 manager,
                 sink: &sink,
                 worktree: &worktree,

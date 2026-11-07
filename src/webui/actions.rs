@@ -13,6 +13,7 @@ pub(crate) struct SessionActionsVm {
     pub show_publish_issue: bool,
     pub show_fix: bool,
     pub show_ask: bool,
+    pub show_tell: bool,
     pub show_create_worktree: bool,
     pub show_run: bool,
     pub run_label: String,
@@ -104,6 +105,7 @@ pub(crate) fn session_actions(
         show_publish_issue,
         show_fix,
         show_ask,
+        show_tell: is_phase_running && (is_locally_running || session.runner_alive),
         show_create_worktree,
         show_run,
         run_label: run_label.to_string(),
@@ -147,6 +149,8 @@ mod tests {
             exec: false,
             plan_available: false,
             fix_in_progress: false,
+            runner_alive: false,
+            pending_instructions: 0,
             skipped_steps: vec![],
         }
     }

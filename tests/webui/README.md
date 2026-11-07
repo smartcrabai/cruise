@@ -1,5 +1,19 @@
 # Responsive WebUI executable specifications
 
+## Tell browser regression
+
+From the repository root, install the pinned dependencies and browser, build the production runtime, and run the Tell contract:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+tests/webui/node_modules/.bin/playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/tell-dialog.mjs
+node tests/webui/tell-negative.mjs
+```
+
+On Linux, Chromium's system libraries must also be installed (the existing CI setup uses `playwright install --with-deps chromium`). The test uses an isolated temporary HOME, XDG data directory and Git repository. It exercises the actual WebUI and a real running workflow, without an external agent or credentials. Screenshots of the planned boundary, rejected blank instruction, editor, accepted submission and Info audit are saved under `target/formal-reports/tell-browser/`. The negative control removes the Tell button from a temporary asset copy and requires the same browser contract to fail on that missing button. The WebUI CI workflow runs both and uploads `target/formal-reports/`.
+
 ## Graph flag browser regression
 
 After installing the pinned browser dependencies, run `cargo +1.99.1 build --locked --all-features --bin cruise-runtime` followed by `node tests/webui/graph-flags.mjs` from the repository root. The existing WebUI CI job runs this test and uploads `target/formal-reports/graph-browser/`. `WEBUI_BDD_BIN` can select another runtime and `WEBUI_GRAPH_REPORT_DIR` changes the screenshot directory. The test uses a temporary HOME/XDG tree and changes persisted flags externally, exercising real Graph tab HTMX requests for off, on, off again, and an all-disabled graph. It asserts the server's Mermaid source and projected edges, not that the externally loaded Mermaid CDN successfully rendered SVG. Screenshots capture the browser state at the swap and may show Mermaid source if the CDN has not loaded.

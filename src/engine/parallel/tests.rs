@@ -46,6 +46,7 @@ impl Fixture {
         let start = start.unwrap_or_else(|| self.dag.start.clone());
         let mut tracker = FileTracker::with_root(self.root.path().to_path_buf());
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &self.compiled,
             max_retries: 3,
             rate_limit_retries: 0,

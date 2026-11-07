@@ -51,6 +51,7 @@ fn actions() -> SessionActionsVm {
         show_publish_issue: true,
         show_fix: true,
         show_ask: true,
+        show_tell: false,
         show_create_worktree: true,
         show_run: true,
         run_label: "Retry".to_string(),
@@ -256,6 +257,7 @@ fn tab_fixtures() -> Vec<(&'static str, Value)> {
             "tab-info",
             value(&TabInfoVm {
                 id: "s1".to_string(),
+                pending_instructions: 0,
                 config_source: "builtin".to_string(),
                 flags: vec![FlagRowVm {
                     name: "e2e".to_string(),

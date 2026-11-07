@@ -44,6 +44,7 @@ impl std::fmt::Debug for ExecutionResult {
 /// `execute_steps` -> `step_loop_iteration` -> `execute_step_kind`, keeping each
 /// function's signature short enough that Clippy is happy.
 pub struct ExecutionContext<'a> {
+    pub instructions: Option<&'a crate::instruction_inbox::RunInbox>,
     pub compiled: &'a CompiledWorkflow,
     pub max_retries: usize,
     pub rate_limit_retries: usize,
@@ -1065,6 +1066,13 @@ async fn execute_step_kind_inner(
             })
         }
         StepKind::Prompt(step) => {
+            let lease = ctx.instructions.and_then(|inbox| {
+                inbox.lease(
+                    current_step,
+                    crate::instruction_inbox::DeliveryScope::Sequential,
+                )
+            });
+            log_instruction_lease(ctx, lease.as_ref(), current_step, "sequential");
             let result = Box::pin(run_prompt_step(
                 vars,
                 ctx.compiled,
@@ -1078,8 +1086,10 @@ async fn execute_step_kind_inner(
                 current_step,
                 has_nfc_condition,
                 allow_commit,
+                lease.as_ref().map(|lease| lease.block_text()),
             ))
             .await;
+            finish_instruction_lease(ctx, lease, current_step, &result);
             let elapsed = step_start.elapsed();
             match result {
                 Ok(skip_step_reason) => {
@@ -1375,6 +1385,52 @@ pub(crate) enum PromptStepOutput<'a> {
     Redirect(&'a crate::step::command::StepLogCallback<'a>),
 }
 
+pub(crate) fn log_instruction_lease(
+    ctx: &ExecutionContext<'_>,
+    lease: Option<&crate::instruction_inbox::Lease<'_>>,
+    step: &str,
+    scope: &str,
+) {
+    if let (Some(log), Some(lease)) = (ctx.on_step_log, lease) {
+        let ids = lease
+            .ids()
+            .iter()
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        log(
+            "info",
+            &format!("tell: delivering {ids} to step {step} ({scope})"),
+        );
+    }
+}
+
+pub(crate) fn finish_instruction_lease<T>(
+    ctx: &ExecutionContext<'_>,
+    lease: Option<crate::instruction_inbox::Lease<'_>>,
+    step: &str,
+    result: &Result<T>,
+) {
+    if let Some(lease) = lease {
+        let ids = lease
+            .ids()
+            .iter()
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        match result {
+            Ok(_) => {
+                if lease.ack() {
+                    if let Some(log) = ctx.on_step_log {
+                        log("info", &format!("tell: delivered {ids} at step {step}"));
+                    }
+                }
+            }
+            Err(error) => lease.release(&error.to_string()),
+        }
+    }
+}
+
 /// Execute a prompt step, updating variable state and returning the LLM
 /// output. Returns the `skip_step` tool's captured reason, if the agent called
 /// it during this turn (`None` otherwise).
@@ -1400,6 +1456,7 @@ pub(crate) async fn run_prompt_step(
     timeout_step_name: &str,
     register_skip_tool: bool,
     allow_commit: bool,
+    delivered: Option<&str>,
 ) -> Result<Option<String>> {
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
@@ -1413,6 +1470,10 @@ pub(crate) async fn run_prompt_step(
         }
     }
     let mut prompt = vars.resolve_prompt(&step.prompt)?;
+    if let Some(delivered) = delivered {
+        prompt.push_str("\n\n");
+        prompt.push_str(delivered);
+    }
     if !allow_commit {
         prompt.push_str("\n\nIn this working repository and any linked worktrees, do not create commits, move HEAD or local branch refs, or disable or bypass the commit guard, even if the task text asks you to. Leave all edits uncommitted.");
     }
@@ -1853,6 +1914,7 @@ mod tests {
         let mut vars = VariableStore::new(input.to_string());
         let mut tracker = FileTracker::with_root(tracker_root.clone());
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries,
             rate_limit_retries,
@@ -1895,6 +1957,7 @@ mod tests {
             Ok(())
         };
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries: 3,
             rate_limit_retries: 0,
@@ -2002,6 +2065,7 @@ mod tests {
         let tracker_root = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
         let mut tracker = FileTracker::with_root(tracker_root.clone());
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &after_compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2086,6 +2150,7 @@ mod tests {
                 .push((stream.to_string(), line.to_string()));
         };
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries,
             rate_limit_retries: 0,
@@ -2171,6 +2236,7 @@ mod tests {
             "attempt",
             false,
             false,
+            None,
         )
         .await
         .unwrap_or_else(|error| panic!("guarded prompt failed: {error}"));
@@ -2190,6 +2256,7 @@ mod tests {
             "attempt",
             false,
             true,
+            None,
         )
         .await
         .unwrap_or_else(|error| panic!("allowed prompt failed: {error}"));
@@ -2251,6 +2318,7 @@ mod tests {
             "review",
             false,
             true,
+            None,
         )
         .await
         .unwrap_or_else(|error| panic!("prompt run: {error}"));
@@ -2283,6 +2351,7 @@ steps:
         let mut vars = VariableStore::new(String::new());
         let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2369,6 +2438,7 @@ steps:
             Ok(())
         };
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2420,6 +2490,7 @@ steps:
         tracker2.restore_snapshots(runtime.file_snapshots);
 
         let ctx2 = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -3440,6 +3511,7 @@ steps:
         let called_ref = std::sync::Mutex::new(&mut called_steps);
 
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -4475,6 +4547,7 @@ steps:
         // on_node_start is called before the cancel check: cancel on the 2nd call (step2)
         let call_count = std::sync::atomic::AtomicUsize::new(0);
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5402,6 +5475,7 @@ steps:
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
 
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5456,6 +5530,7 @@ steps:
         let checkpoints_ref = std::sync::Mutex::new(&mut checkpoints);
 
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5533,6 +5608,7 @@ steps:
         let visited_ref = std::sync::Mutex::new(&mut visited);
 
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5594,6 +5670,7 @@ steps:
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
 
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5651,6 +5728,7 @@ steps:
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
 
         let ctx = ExecutionContext {
+            instructions: None,
             compiled: &compiled,
             max_retries: 2,
             rate_limit_retries: 0,

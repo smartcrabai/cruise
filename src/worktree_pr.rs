@@ -165,6 +165,7 @@ pub async fn handle_worktree_pr_with_persistence(
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
     on_pr_processing: Option<&PrProcessingCallback<'_>>,
     on_pr_created: Option<&PrCreatedCallback<'_>>,
+    instructions: Option<&crate::instruction_inbox::RunInbox>,
 ) -> Result<()> {
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
@@ -230,6 +231,7 @@ pub async fn handle_worktree_pr_with_persistence(
                     cancel_token,
                     option_handler,
                     on_step_log,
+                    instructions,
                 )
                 .await?;
                 Ok(())
@@ -506,6 +508,7 @@ async fn run_after_pr_steps(
     cancel_token: Option<&CancellationToken>,
     option_handler: &dyn OptionHandler,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
+    instructions: Option<&crate::instruction_inbox::RunInbox>,
 ) -> Result<()> {
     if compiled.after_pr.is_empty() {
         return Ok(());
@@ -521,6 +524,7 @@ async fn run_after_pr_steps(
         "after-pr",
     )?;
     let ctx = ExecutionContext {
+        instructions,
         compiled: &after_compiled,
         max_retries,
         rate_limit_retries,
@@ -567,6 +571,7 @@ pub(crate) async fn run_after_pr_steps_for_test(
         &crate::flags::NO_FLAGS,
         None,
         option_handler,
+        None,
         None,
     )
     .await
@@ -1924,6 +1929,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             Some(&on_step_log),
             Some(&on_pr_processing),
             None,
+            None,
         )
         .await;
 
@@ -1985,6 +1991,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             None,
             &crate::option_handler::NoOpOptionHandler,
             None,
+            None,
         )
         .await;
         assert!(
@@ -2006,6 +2013,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             &merge_enabled,
             None,
             &crate::option_handler::NoOpOptionHandler,
+            None,
             None,
         )
         .await;
@@ -2043,6 +2051,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             None,
             &crate::option_handler::NoOpOptionHandler,
             None,
+            None,
         )
         .await;
 
@@ -2070,6 +2079,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             &merge_enabled,
             None,
             &crate::option_handler::NoOpOptionHandler,
+            None,
             None,
         )
         .await;
@@ -2128,6 +2138,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             &crate::flags::NO_FLAGS,
             None,
             &crate::option_handler::NoOpOptionHandler,
+            None,
             None,
         )
         .await;
@@ -2240,6 +2251,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             None,
             None,
             Some(&on_pr_created),
+            None,
         )
         .await;
 

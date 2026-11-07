@@ -50,6 +50,8 @@ pub struct SessionDto {
     pub exec: bool,
     pub plan_available: bool,
     pub fix_in_progress: bool,
+    pub runner_alive: bool,
+    pub pending_instructions: usize,
     pub skipped_steps: Vec<String>,
 }
 
@@ -88,6 +90,10 @@ pub(crate) fn session_dto(
         application.runtime().active_operation(&state.id),
         Some(OperationKind::Fix)
     );
+    let runner_alive = state.is_runner_alive();
+    let pending_instructions = application
+        .pending_summary(&state.id)
+        .map_or(0, |summary| summary.pending.len());
     SessionDto {
         id: state.id,
         phase,
@@ -111,6 +117,8 @@ pub(crate) fn session_dto(
         exec: state.exec,
         plan_available,
         fix_in_progress,
+        runner_alive,
+        pending_instructions,
         skipped_steps: state.skipped_steps,
     }
 }
@@ -620,6 +628,8 @@ mod tests {
             exec: false,
             plan_available: true,
             fix_in_progress: false,
+            runner_alive: false,
+            pending_instructions: 0,
             skipped_steps: vec![],
         };
         let Ok(value) = serde_json::to_value(dto) else {

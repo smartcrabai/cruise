@@ -52,6 +52,7 @@ mod graph;
 mod herdr;
 mod install_identity;
 mod issue_publish;
+mod instruction_inbox;
 mod list_cmd;
 mod metadata;
 mod model_schedule;
@@ -83,6 +84,7 @@ mod test_binary_support;
 #[cfg(test)]
 mod test_support;
 mod timeout;
+mod tell_cmd;
 mod tool_policy;
 mod tui;
 mod update_cmd;
@@ -156,6 +158,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Plan(args)) => Box::pin(plan_cmd::run(args)).await,
         Some(cli::Commands::Draft(args)) => draft_cmd::run(args),
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
+        Some(cli::Commands::Tell(args)) => tell_cmd::run(args),
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),

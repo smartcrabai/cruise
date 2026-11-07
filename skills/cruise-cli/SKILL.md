@@ -219,7 +219,7 @@ The interactive menu changes with the session's phase:
 | **Awaiting Input** | Generate Plan, Delete, Back |
 | **Awaiting Approval** | Approve, Publish as Issue, Edit Settings, Delete, Back |
 | **Planned** | Run, Publish as Issue, Edit Settings, Replan, Delete, Back |
-| **Running** | Resume, Reset to Planned, Delete, Back |
+| **Running** | Resume, Tell (live runner only), Reset to Planned, Delete, Back |
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
 | **Completed** | Open PR*, Merge PR*, Reset to Planned, Delete, Back |
@@ -228,6 +228,7 @@ The interactive menu changes with the session's phase:
 \* Open PR and Merge PR show only when the session has a PR URL.
 
 - **Merge PR** previews the PR (state, mergeability, review decision, checks), asks for a method (`Squash` default, `Merge`, `Rebase`), confirms, then runs `gh pr merge <url> <method flag>` (never `--auto`/`--admin`/`--delete-branch`). If the PR is then Closed/Merged, that session and its worktree are removed; if it is still Open (merge queue), the session is kept and `cruise clean` re-checks later. Closed/Merged PRs are not merged again: use `cruise clean`.
+- **Tell** sends text to a live running session: `cruise tell <id> "instruction"`, or pipe text to `cruise tell <id> -`. Inspect history with `cruise tell <id> --log`; TUI and WebUI also offer Tell. Accepted text reaches the next agent prompt, not the current step or command/option steps, and does not change permissions or transitions. Completed runs expire pending text; failed or suspended runs retain it, reset expires it, and crash recovery can redeliver. Limits are 8,192 bytes per instruction, 20 pending, and 65,536 pending bytes.
 - **Reset to Planned** clears the current step so the session re-runs from the start — the go-to recovery for a wedged `Running`/`Failed` session.
 - **Replan** regenerates the plan from feedback while staying `Planned`.
 - **Publish as Issue** publishes `plan.md` verbatim as a GitHub issue (or GitLab issue) in the resolved repo, then deletes the local session. Optionally posts a follow-up `@cruise run` comment to trigger the Actions workflow (default off for `AwaitingApproval`, on for `Planned`, since publishing a `Planned` session replaces running it locally). If the comment fails to post, the issue stays but the local session is kept for a retry, which reuses that issue instead of creating a duplicate (the `@cruise run` comment prompt is skipped on GitLab).

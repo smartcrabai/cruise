@@ -23,6 +23,7 @@ pub(crate) mod forge;
 pub mod github_review;
 pub mod graph;
 pub mod issue_publish;
+pub mod instruction_inbox;
 pub mod metadata;
 pub mod model_schedule;
 pub mod model_selection;

@@ -313,6 +313,7 @@ fn flag_summary(app: &TuiApp, session: &crate::session::SessionState) -> String 
 }
 
 fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Vec<Line<'a>> {
+    let instructions = app.application.pending_summary(&session.id).ok();
     let mut lines = vec![
         labeled_line(app, "ID       ", Span::raw(session.id.as_str())),
         labeled_line(
@@ -329,6 +330,14 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
         ),
         labeled_line(app, "Source   ", Span::raw(session.config.display_label())),
         labeled_line(app, "Flags    ", Span::raw(flag_summary(app, session))),
+        labeled_line(
+            app,
+            "Pending  ",
+            Span::raw(instructions.as_ref().map_or_else(
+                || "—".to_string(),
+                |summary| summary.pending.len().to_string(),
+            )),
+        ),
         labeled_line(
             app,
             "Directory",
@@ -363,6 +372,12 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
             Span::raw(session.published_issue_url.as_deref().unwrap_or("—")),
         ),
     ];
+    if let Some(summary) = instructions {
+        for item in summary.history.iter().rev().take(5) {
+            let preview = item.content.lines().next().unwrap_or("");
+            lines.push(labeled_line(app, "Tell     ", Span::raw(format!("#{} {} {}", item.id, item.status, preview))));
+        }
+    }
     if !session.input.trim().is_empty() {
         lines.push(labeled_line(
             app,

@@ -219,6 +219,7 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
                 .is_some_and(|url| url.starts_with("http://") || url.starts_with("https://"));
             let vm = TabInfoVm {
                 id: id.to_string(),
+                pending_instructions: session.pending_instructions,
                 config_source: session.config_source.clone(),
                 flags,
                 flags_note,

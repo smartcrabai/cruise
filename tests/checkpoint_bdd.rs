@@ -79,6 +79,7 @@ mod contracts {
             skipped_steps: &[],
             flags: &cruise::flags::NO_FLAGS,
             on_step_log: None,
+            instructions: None,
         }
     }
 
