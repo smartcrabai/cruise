@@ -450,17 +450,18 @@ mod tests {
     }
 
     #[test]
-    fn verify_action_follows_usable_approval_and_is_suppressed_when_busy() {
-        let show_verify = |phase, available, operation, pending| {
-            let value = serde_json::to_value(actions(phase, available, operation, pending))
-                .expect("actions serialize");
-            value
-                .get("showVerify")
-                .and_then(|value| value.as_bool())
-                .expect("showVerify must be serialized as a boolean")
-        };
-        assert!(show_verify("Awaiting Approval", true, None, false));
-        assert!(!show_verify("Awaiting Approval", false, None, false));
+    fn verify_action_follows_usable_approval_and_is_suppressed_when_busy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let show_verify =
+            |phase, available, operation, pending| -> Result<bool, Box<dyn std::error::Error>> {
+                let value = serde_json::to_value(actions(phase, available, operation, pending))?;
+                value
+                    .get("showVerify")
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| "showVerify must be serialized as a boolean".into())
+            };
+        assert!(show_verify("Awaiting Approval", true, None, false)?);
+        assert!(!show_verify("Awaiting Approval", false, None, false)?);
         for phase in [
             "Draft",
             "Awaiting Input",
@@ -470,25 +471,25 @@ mod tests {
             "Failed",
             "Completed",
         ] {
-            assert!(!show_verify(phase, true, None, false), "{phase}");
+            assert!(!show_verify(phase, true, None, false)?, "{phase}");
         }
         assert!(!show_verify(
             "Awaiting Approval",
             true,
             Some(OperationKind::Ask),
             false
-        ));
-        assert!(!show_verify("Awaiting Approval", true, None, true));
+        )?);
+        assert!(!show_verify("Awaiting Approval", true, None, true)?);
 
         let mut session = make_session("Awaiting Approval");
         session.plan_available = true;
         session.plan_error = Some("provider unavailable".to_string());
-        let value =
-            serde_json::to_value(session_actions(&session, None, false)).expect("serialize");
+        let value = serde_json::to_value(session_actions(&session, None, false))?;
         assert_eq!(
             value.get("showVerify"),
             Some(&serde_json::Value::Bool(false))
         );
+        Ok(())
     }
 
     #[test]

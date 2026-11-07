@@ -918,6 +918,7 @@ impl WorkflowConfig {
     }
 
     /// Effective timeout for each model-checking command.
+    #[must_use]
     pub fn formal_verify_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(
             self.formal_verify

@@ -3110,20 +3110,7 @@ impl CruiseApplication {
                 actions.push(SessionAction::Delete);
             }
             SessionPhase::AwaitingApproval => {
-                if usable_plan {
-                    actions.push(SessionAction::Approve);
-                    if state.pr_target.is_none() {
-                        actions.push(SessionAction::Publish);
-                    }
-                    actions.extend([
-                        SessionAction::Fix,
-                        SessionAction::Ask,
-                        SessionAction::Verify,
-                    ]);
-                } else {
-                    actions.extend([SessionAction::Fix, SessionAction::Generate]);
-                }
-                actions.push(SessionAction::Discard);
+                Self::add_approval_actions(state, usable_plan, &mut actions);
             }
             SessionPhase::Planned => {
                 if usable_plan {
@@ -3195,6 +3182,27 @@ impl CruiseApplication {
             actions.push(SessionAction::Cancel);
         }
         actions
+    }
+
+    fn add_approval_actions(
+        state: &SessionState,
+        usable_plan: bool,
+        actions: &mut Vec<SessionAction>,
+    ) {
+        if usable_plan {
+            actions.push(SessionAction::Approve);
+            if state.pr_target.is_none() {
+                actions.push(SessionAction::Publish);
+            }
+            actions.extend([
+                SessionAction::Fix,
+                SessionAction::Ask,
+                SessionAction::Verify,
+            ]);
+        } else {
+            actions.extend([SessionAction::Fix, SessionAction::Generate]);
+        }
+        actions.push(SessionAction::Discard);
     }
 
     fn add_local_merge_actions(state: &SessionState, actions: &mut Vec<SessionAction>) {
@@ -3316,6 +3324,10 @@ impl CruiseApplication {
     }
 
     /// Verify formal specifications derived from the saved plan without changing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when verification, session persistence, or event delivery fails.
     pub async fn verify(
         &self,
         id: &str,

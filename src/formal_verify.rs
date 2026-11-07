@@ -42,7 +42,32 @@ pub struct ExtractedBlocks {
     pub over_limit: Vec<Language>,
 }
 // CommonMark's parser accepts unclosed fences. Check the source range for an explicit closing fence.
+#[must_use]
 pub fn extract_blocks(input: &str) -> ExtractedBlocks {
+    // pulldown-cmark does not treat a lone CR as a line ending. Normalize it
+    // without changing byte offsets, while leaving CRLF pairs intact.
+    let normalized;
+    let input = if input
+        .as_bytes()
+        .iter()
+        .enumerate()
+        .any(|(i, &byte)| byte == b'\r' && input.as_bytes().get(i + 1) != Some(&b'\n'))
+    {
+        let mut chars = input.chars().peekable();
+        normalized = std::iter::from_fn(|| {
+            chars.next().map(|ch| {
+                if ch == '\r' && chars.peek() != Some(&'\n') {
+                    '\n'
+                } else {
+                    ch
+                }
+            })
+        })
+        .collect::<String>();
+        normalized.as_str()
+    } else {
+        input
+    };
     let mut result = ExtractedBlocks::default();
     // The parser's block range starts at the opening fence, even in containers.
     // Track the end of emitted text separately because an implicit end at a
@@ -97,7 +122,7 @@ pub fn extract_blocks(input: &str) -> ExtractedBlocks {
                         .count()
                         >= n;
                     if closed {
-                        let idx = if language == Language::Quint { 0 } else { 1 };
+                        let idx = usize::from(language != Language::Quint);
                         counts[idx] += 1;
                         if counts[idx] <= 4 {
                             result.blocks.push(SpecBlock {
@@ -135,6 +160,7 @@ impl std::fmt::Display for Verdict {
         )
     }
 }
+#[must_use]
 pub fn aggregate(verdicts: &[Verdict]) -> Verdict {
     if verdicts.contains(&Verdict::Failed) {
         Verdict::Failed
@@ -160,6 +186,7 @@ pub struct BlockReport {
     pub artifact: PathBuf,
 }
 impl BlockReport {
+    #[must_use]
     pub fn verdict(&self) -> Verdict {
         aggregate(&self.stages.iter().map(|s| s.verdict).collect::<Vec<_>>())
     }
@@ -180,6 +207,7 @@ pub struct VerifyReport {
     pub warnings: Vec<String>,
 }
 impl VerifyReport {
+    #[must_use]
     pub fn verdict(&self) -> Verdict {
         aggregate(
             &self
@@ -189,6 +217,7 @@ impl VerifyReport {
                 .collect::<Vec<_>>(),
         )
     }
+    #[must_use]
     pub fn render_markdown(&self) -> String {
         let mut s = format!(
             "## Formal verification: {}\n\nArtifacts: `{}`\n",
@@ -224,6 +253,10 @@ impl VerifyReport {
         s
     }
 }
+/// Verify extracted specifications and save their report in the session directory.
+///
+/// # Errors
+/// Returns an error if artifact creation fails or verification is interrupted.
 pub fn verify_blocks(
     blocks: ExtractedBlocks,
     session_dir: &Path,
@@ -257,7 +290,7 @@ pub fn verify_blocks(
     }
     let mut excess_counts = [4usize; 2];
     for language in blocks.over_limit {
-        let index = if language == Language::Quint { 0 } else { 1 };
+        let index = usize::from(language != Language::Quint);
         excess_counts[index] += 1;
         let mut b = BlockReport {
             language,

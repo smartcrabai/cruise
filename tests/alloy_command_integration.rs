@@ -1,13 +1,16 @@
 //! Production-connected Alloy CLI integration, using an explicitly supplied pinned JAR.
 use cruise::formal_verify::{Language, SpecBlock, Verdict, alloy};
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 #[test]
 #[ignore = "requires Alloy 6.2.0 JAR and Java"]
-fn alloy_discovers_and_executes_every_command() {
+fn alloy_discovers_and_executes_every_command() -> Result<(), Box<dyn std::error::Error>> {
     // This integration requires the pinned distribution and a compatible Java on PATH.
-    std::env::var_os("CRUISE_ALLOY_JAR").expect("set CRUISE_ALLOY_JAR to Alloy 6.2.0");
-    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        std::env::var_os("CRUISE_ALLOY_JAR").is_some(),
+        "set CRUISE_ALLOY_JAR to Alloy 6.2.0"
+    );
+    let dir = tempfile::tempdir()?;
     let block = SpecBlock {
         language: Language::Alloy,
         number: 1,
@@ -28,9 +31,10 @@ fn alloy_discovers_and_executes_every_command() {
     );
     for index in 0..4 {
         assert!(
-            PathBuf::from(dir.path())
+            dir.path()
                 .join(format!("command-{index}/receipt.json"))
                 .exists()
         );
     }
+    Ok(())
 }

@@ -7,6 +7,10 @@ pub struct MainModule {
     pub invariants: Vec<String>,
     pub temporals: Vec<String>,
 }
+/// Finds the main module and its verification targets in a Quint AST.
+///
+/// # Errors
+/// Returns an error for invalid JSON, malformed modules, or multiple main modules.
 pub fn main_module(ast: &str) -> Result<Option<MainModule>, String> {
     let value: serde_json::Value = serde_json::from_str(ast).map_err(|e| e.to_string())?;
     let modules = value
@@ -53,6 +57,7 @@ pub fn main_module(ast: &str) -> Result<Option<MainModule>, String> {
         Ok(found.pop())
     }
 }
+#[must_use]
 pub fn quint_verdict(exit: Option<i32>, output: &str, timed_out: bool) -> Verdict {
     if timed_out {
         Verdict::Error
@@ -158,6 +163,16 @@ pub fn verify(
     if !ok {
         return report;
     }
+    verify_targets(report, &module, dir, timeout, &run)
+}
+
+fn verify_targets(
+    mut report: BlockReport,
+    module: &MainModule,
+    dir: &Path,
+    timeout: Duration,
+    run: &impl Fn(Vec<String>, &str, Duration) -> StageReport,
+) -> BlockReport {
     let common = || {
         vec![
             "--main".into(),

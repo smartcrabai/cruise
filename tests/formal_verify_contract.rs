@@ -5,6 +5,7 @@ use cruise::formal_verify::{
     quint::{main_module, quint_verdict},
     verify_blocks,
 };
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 #[test]
@@ -25,7 +26,7 @@ fn extracts_only_closed_exact_language_fences() {
             (Language::Quint, 3, "inner ```\n")
         ]
     );
-    assert!(found.over_limit.is_empty());
+    assert_eq!(found.over_limit, []);
 }
 
 #[test]
@@ -43,7 +44,7 @@ fn extracts_container_fences_and_rejects_implicit_ends() {
             (Language::Alloy, 1, "listed\n")
         ]
     );
-    assert!(found.over_limit.is_empty());
+    assert_eq!(found.over_limit, []);
 }
 
 #[test]
@@ -70,13 +71,23 @@ fn empty_closed_fences_and_unclosed_openers_are_distinguished() {
 }
 
 #[test]
-fn extraction_limits_are_per_language_and_keep_encounter_order() {
-    let input = (0..6)
-        .map(|i| format!("```quint\nq{i}\n```\n```alloy\na{i}\n```\n"))
-        .collect::<String>();
+fn extracts_fences_with_mixed_line_endings() {
+    let input = "é\r> ~~~quint\r> α\r\n> β\r> ~~~\r\n\r```alloy\runclosed\r";
+    let found = extract_blocks(input);
+    assert_eq!(found.blocks.len(), 1);
+    assert_eq!(found.blocks[0].language, Language::Quint);
+    assert_eq!(found.blocks[0].source, "α\nβ\n");
+}
+
+#[test]
+fn extraction_limits_are_per_language_and_keep_encounter_order() -> Result<(), std::fmt::Error> {
+    let mut input = String::new();
+    for i in 0..6 {
+        writeln!(input, "```quint\nq{i}\n```\n```alloy\na{i}\n```")?;
+    }
     let found = extract_blocks(&input);
     assert_eq!(found.blocks.len(), 8);
-    for (i, pair) in found.blocks.chunks_exact(2).enumerate() {
+    for (i, pair) in found.blocks.as_chunks::<2>().0.iter().enumerate() {
         assert_eq!((pair[0].language, pair[0].number), (Language::Quint, i + 1));
         assert_eq!((pair[1].language, pair[1].number), (Language::Alloy, i + 1));
     }
@@ -89,21 +100,21 @@ fn extraction_limits_are_per_language_and_keep_encounter_order() {
             Language::Alloy
         ]
     );
+    Ok(())
 }
 
 #[test]
-fn verify_flow_reports_nothing_for_unclosed_fences() {
-    let dir = tempfile::tempdir().unwrap();
+fn verify_flow_reports_nothing_for_unclosed_fences() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
     let blocks = extract_blocks("> ~~~quint\n> unclosed\n\noutside\n\n```alloy\nunclosed\n");
-    let report =
-        verify_blocks(blocks, dir.path(), std::time::Duration::from_secs(1), None).unwrap();
+    let report = verify_blocks(blocks, dir.path(), std::time::Duration::from_secs(1), None)?;
     assert!(report.blocks.is_empty());
     assert_eq!(report.verdict(), Verdict::Error);
     assert!(
-        std::fs::read_to_string(report.artifact.join("report.md"))
-            .unwrap()
+        std::fs::read_to_string(report.artifact.join("report.md"))?
             .contains("nothing was verified")
     );
+    Ok(())
 }
 
 #[test]
@@ -160,23 +171,25 @@ fn quint_exit_timeout_and_violation_precedence() {
 }
 
 #[test]
-fn quint_ast_selects_main_and_qualified_targets() {
+fn quint_ast_selects_main_and_qualified_targets() -> Result<(), Box<dyn std::error::Error>> {
     let ast = r#"{"modules":[{"name":"helper","declarations":[]},{"name":"Main","declarations":[{"kind":"def","qualifier":"action","name":"init"},{"kind":"def","qualifier":"action","name":"step"},{"kind":"def","qualifier":"val","name":"invSafe"},{"kind":"def","qualifier":"temporal","name":"propLive"},{"kind":"def","qualifier":"action","name":"invWrong"},{"kind":"def","qualifier":"val","name":"propWrong"},{"kind":"other","qualifier":"val","name":"invOther"}]}]}"#;
-    let m = main_module(ast).unwrap().unwrap();
+    let m = main_module(ast)?.ok_or("expected main module")?;
     assert_eq!(m.name, "Main");
     assert_eq!(m.invariants, ["invSafe"]);
     assert_eq!(m.temporals, ["propLive"]);
-    assert!(main_module(r#"{"modules":[]}"#).unwrap().is_none());
+    assert!(main_module(r#"{"modules":[]}"#)?.is_none());
     assert!(main_module("not json").is_err());
     assert!(main_module(r#"{"modules":{}}"#).is_err());
     let duplicate = r#"{"modules":[{"name":"A","declarations":[{"kind":"def","qualifier":"action","name":"init"},{"kind":"def","qualifier":"action","name":"step"}]},{"name":"B","declarations":[{"kind":"def","qualifier":"action","name":"init"},{"kind":"def","qualifier":"action","name":"step"}]}]}"#;
-    assert!(main_module(duplicate).unwrap_err().contains("ambiguous"));
+    assert!(matches!(main_module(duplicate), Err(error) if error.contains("ambiguous")));
+    Ok(())
 }
 
 #[test]
-fn alloy_command_listing_requires_ordered_valid_entries() {
+fn alloy_command_listing_requires_ordered_valid_entries() -> Result<(), Box<dyn std::error::Error>>
+{
     let listing = "0 . Run Witness for 3\n1 . Check Safety for 4\n2 . Run run$3 for 3\n3 . Run labeled for 3\n";
-    let commands = alloy_commands(listing).unwrap();
+    let commands = alloy_commands(listing)?;
     assert_eq!(
         commands
             .iter()
@@ -192,6 +205,7 @@ fn alloy_command_listing_requires_ordered_valid_entries() {
     assert!(alloy_commands("1 . Run Missing\n").is_err());
     assert!(alloy_commands("").is_err());
     assert!(alloy_commands("0 . Unknown thing\n").is_err());
+    Ok(())
 }
 
 #[test]

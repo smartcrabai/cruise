@@ -8,7 +8,10 @@ pub struct AlloyCommand {
     pub name: String,
 }
 
-// Parse the pinned Alloy CLI's `commands` output, not the model source.
+/// Parse the pinned Alloy CLI's `commands` output, not the model source.
+///
+/// # Errors
+/// Returns an error if the listing is empty or contains an invalid command.
 pub fn alloy_commands(listing: &str) -> Result<Vec<AlloyCommand>, String> {
     let mut commands = Vec::new();
     for line in listing.lines() {
@@ -37,6 +40,7 @@ pub fn alloy_commands(listing: &str) -> Result<Vec<AlloyCommand>, String> {
     }
 }
 
+#[must_use]
 pub fn receipt_verdict(kind: &str, name: &str, json: &str) -> Verdict {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
         return Verdict::Error;
@@ -57,7 +61,7 @@ pub fn receipt_verdict(kind: &str, name: &str, json: &str) -> Verdict {
                 || a.iter().any(|x| {
                     x.get("instances")
                         .and_then(|v| v.as_array())
-                        .is_none_or(|v| v.is_empty())
+                        .is_none_or(Vec::is_empty)
                 })
             {
                 return Verdict::Error;
@@ -145,9 +149,9 @@ pub fn verify(
         let verdict = if outcome.timed_out || outcome.cancelled || outcome.exit != Some(0) {
             Verdict::Error
         } else {
-            std::fs::read_to_string(output_dir.join("receipt.json"))
-                .map(|s| receipt_verdict(&item.kind, &item.name, &s))
-                .unwrap_or(Verdict::Error)
+            std::fs::read_to_string(output_dir.join("receipt.json")).map_or(Verdict::Error, |s| {
+                receipt_verdict(&item.kind, &item.name, &s)
+            })
         };
         let log = outcome.output();
         report.stages.push(StageReport {

@@ -2,6 +2,7 @@ use super::process::run_bounded;
 use crate::cancellation::CancellationToken;
 use sha2::{Digest, Sha256};
 use std::{
+    fmt::Write as _,
     fs,
     io::{Read, Write},
     path::PathBuf,
@@ -79,7 +80,7 @@ pub fn check_java(dir: &std::path::Path, cancel: Option<&CancellationToken>) -> 
 fn digest(path: &std::path::Path) -> Result<String, String> {
     let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut hash = Sha256::new();
-    let mut buf = [0u8; 65536];
+    let mut buf = vec![0u8; 65536];
     loop {
         let n = f.read(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
@@ -87,11 +88,11 @@ fn digest(path: &std::path::Path) -> Result<String, String> {
         }
         hash.update(&buf[..n]);
     }
-    Ok(hash
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    let mut encoded = String::with_capacity(64);
+    for byte in hash.finalize() {
+        write!(&mut encoded, "{byte:02x}").map_err(|e| e.to_string())?;
+    }
+    Ok(encoded)
 }
 pub fn alloy_jar(timeout: Duration, cancel: Option<&CancellationToken>) -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("CRUISE_ALLOY_JAR") {
@@ -160,7 +161,7 @@ fn download(
             Ok(Ok(bytes)) if bytes.is_empty() => return Ok(()),
             Ok(Ok(bytes)) => file.write_all(&bytes).map_err(|e| e.to_string())?,
             Ok(Err(error)) => return Err(error),
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err("Alloy download worker stopped".into());
             }
@@ -173,7 +174,7 @@ fn alloy_jar_in(
     expected_hash: &str,
     fetch: impl FnOnce(&mut fs::File) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let jar = dir.join("alloy-6.2.0.jar");
     if digest(&jar).is_ok_and(|d| d == expected_hash) {
         return Ok(jar);
@@ -201,26 +202,39 @@ mod tests {
 
     fn stalled_download(cancel_download: bool) {
         use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/alloy", listener.local_addr().unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let url = format!(
+            "http://{}/alloy",
+            listener
+                .local_addr()
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))
+        );
         let (ready_tx, ready_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let (mut stream, _) = listener
+                .accept()
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
             let mut request = [0; 1024];
-            let _ = stream.read(&mut request).unwrap();
+            let _ = stream
+                .read(&mut request)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\npartial")
-                .unwrap();
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
             let _ = ready_tx.send(());
             let _ = release_rx.recv_timeout(Duration::from_secs(5));
         });
-        let dir = tempfile::tempdir().unwrap();
+        let dir =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let token = CancellationToken::new();
         let canceller = if cancel_download {
             let token = token.clone();
             Some(std::thread::spawn(move || {
-                ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                ready_rx
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
                 std::thread::sleep(Duration::from_millis(100));
                 token.cancel();
             }))
@@ -236,7 +250,8 @@ mod tests {
         let error = alloy_jar_in(dir.path(), HASH, |file| {
             download(&url, file, timeout, Some(&token))
         })
-        .unwrap_err();
+        .err()
+        .unwrap_or_else(|| panic!("test operation unexpectedly succeeded"));
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "download did not stop promptly"
@@ -250,11 +265,20 @@ mod tests {
                 "{error}"
             );
         }
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(
+            fs::read_dir(dir.path())
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))
+                .count(),
+            0
+        );
         let _ = release_tx.send(());
-        server.join().unwrap();
+        server
+            .join()
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         if let Some(canceller) = canceller {
-            canceller.join().unwrap();
+            canceller
+                .join()
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         }
     }
 
@@ -270,28 +294,47 @@ mod tests {
 
     #[test]
     fn alloy_download_validates_before_rename_and_removes_mismatched_part() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let jar = dir.path().join("alloy-6.2.0.jar");
         let correct = b"valid Alloy bytes";
         let expected = "8c85ac41c7c94f3d79a12b53dafca4968820d1cef033aacdb5579dba78e20e1b";
-        fs::write(&jar, b"existing invalid bytes").unwrap();
+        fs::write(&jar, b"existing invalid bytes")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
 
         let error = alloy_jar_in(dir.path(), expected, |file| {
             file.write_all(b"incorrect download")
                 .map_err(|e| e.to_string())
         })
-        .unwrap_err();
+        .err()
+        .unwrap_or_else(|| panic!("test operation unexpectedly succeeded"));
         assert_eq!(error, "Alloy JAR SHA-256 mismatch");
-        assert_eq!(fs::read(&jar).unwrap(), b"existing invalid bytes");
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(&jar).unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            b"existing invalid bytes"
+        );
+        assert_eq!(
+            fs::read_dir(dir.path())
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))
+                .count(),
+            1
+        );
 
         let result = alloy_jar_in(dir.path(), expected, |file| {
             file.write_all(correct).map_err(|e| e.to_string())
         })
-        .unwrap();
+        .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         assert_eq!(result, jar);
-        assert_eq!(fs::read(&jar).unwrap(), correct);
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(&jar).unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+            correct
+        );
+        assert_eq!(
+            fs::read_dir(dir.path())
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -314,20 +357,27 @@ mod tests {
         const CHILD: &str = "CRUISE_TEST_ALLOY_OVERRIDE_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let expected = std::env::current_dir()
-                .unwrap()
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))
                 .join("relative-test-alloy.jar");
-            assert_eq!(alloy_jar(Duration::from_secs(1), None).unwrap(), expected);
+            assert_eq!(
+                alloy_jar(Duration::from_secs(1), None)
+                    .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+                expected
+            );
             return;
         }
-        let status = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "formal_verify::tools::tests::alloy_override_is_resolved_in_child_environment",
-            ])
-            .env(CHILD, "1")
-            .env("CRUISE_ALLOY_JAR", "relative-test-alloy.jar")
-            .status()
-            .unwrap();
+        let status = Command::new(
+            std::env::current_exe()
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+        )
+        .args([
+            "--exact",
+            "formal_verify::tools::tests::alloy_override_is_resolved_in_child_environment",
+        ])
+        .env(CHILD, "1")
+        .env("CRUISE_ALLOY_JAR", "relative-test-alloy.jar")
+        .status()
+        .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         assert!(status.success());
     }
 
@@ -337,25 +387,34 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         const CHILD: &str = "CRUISE_TEST_QUINT_VERSION_CHILD";
         if std::env::var_os(CHILD).is_some() {
-            let dir = tempfile::tempdir().unwrap();
-            let warning = check_quint(dir.path(), None).unwrap().unwrap();
+            let dir = tempfile::tempdir()
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+            let warning = check_quint(dir.path(), None)
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}"))
+                .unwrap_or_else(|| panic!("expected a version warning"));
             assert!(warning.contains("0.33.0"));
             assert!(warning.contains("0.34.0"));
             return;
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let quint = dir.path().join("quint");
-        fs::write(&quint, "#!/bin/sh\necho 'quint 0.34.0'\n").unwrap();
-        fs::set_permissions(&quint, fs::Permissions::from_mode(0o755)).unwrap();
-        let status = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "formal_verify::tools::tests::quint_version_warning_in_child_environment",
-            ])
-            .env(CHILD, "1")
-            .env("PATH", dir.path())
-            .status()
-            .unwrap();
+        fs::write(&quint, "#!/bin/sh\necho 'quint 0.34.0'\n")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        fs::set_permissions(&quint, fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let status = Command::new(
+            std::env::current_exe()
+                .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+        )
+        .args([
+            "--exact",
+            "formal_verify::tools::tests::quint_version_warning_in_child_environment",
+        ])
+        .env(CHILD, "1")
+        .env("PATH", dir.path())
+        .status()
+        .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         assert!(status.success());
     }
 }

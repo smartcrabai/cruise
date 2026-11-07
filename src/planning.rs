@@ -268,10 +268,6 @@ impl AskHandler for PlanningAskHandler {
 /// registered (`sdk:` planning with `register_plan_tools`) — the agent ended
 /// its turn without a successful `submit_plan` / `update_plan` call (the
 /// captured output is not a plan and is refused as a fallback).
-#[expect(
-    clippy::too_many_lines,
-    reason = "single prompt pipeline keeps the plan-tool and usage wiring in one place"
-)]
 pub async fn run_plan_prompt_template(
     ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,
@@ -294,6 +290,17 @@ pub async fn run_plan_prompt_template(
     .await
 }
 
+fn prepare_plan_prompt_vars(ctx: &PlanPromptCtx<'_>, vars: &mut VariableStore) {
+    // The context owns the authoritative plan path, including for direct callers.
+    vars.set_named_file(crate::session::PLAN_VAR, ctx.plan_path.to_path_buf());
+    vars.set_named_value(PLAN_LANGUAGE_VAR, ctx.config.effective_plan_language());
+    // Refresh guidance each turn to reflect whether ask_user is available.
+    vars.set_named_value(
+        PLAN_CLARIFICATION_VAR,
+        clarification_guidance(ctx.interactive).to_string(),
+    );
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "verification retains the SDK conversation across its two read-only turns"
@@ -308,18 +315,7 @@ async fn run_plan_prompt_template_with_conversation(
     register_plan_tools: bool,
     retain_turn_conversation: bool,
 ) -> Result<PromptResult> {
-    // The context owns the authoritative plan path. Normal callers already
-    // register the same path through `setup_plan_vars`; setting it here also
-    // keeps this executor safe for direct template callers.
-    vars.set_named_file(crate::session::PLAN_VAR, ctx.plan_path.to_path_buf());
-    vars.set_named_value(PLAN_LANGUAGE_VAR, ctx.config.effective_plan_language());
-    // The ambiguity guidance depends on whether a user can answer `ask_user`
-    // this run; refresh it every turn so plan/fix templates never instruct the
-    // agent to call a tool that is not registered.
-    vars.set_named_value(
-        PLAN_CLARIFICATION_VAR,
-        clarification_guidance(ctx.interactive).to_string(),
-    );
+    prepare_plan_prompt_vars(ctx, vars);
     let prompt = vars.resolve(template)?;
     let executor = ctx.executor();
     ensure_agents_authenticated(ctx.config, AuthScope::Planning, ctx.working_dir)?;
@@ -397,16 +393,8 @@ async fn run_plan_prompt_template_with_conversation(
             working_dir: ctx.working_dir,
             stream: stream_callbacks,
             tools,
-            on_session_id: if conversation_enabled {
-                ctx.on_session_id
-            } else {
-                None
-            },
-            resume: if conversation_enabled {
-                resume.clone()
-            } else {
-                None
-            },
+            on_session_id: conversation_enabled.then_some(ctx.on_session_id).flatten(),
+            resume: conversation_enabled.then(|| resume.clone()).flatten(),
             computer_use: ctx.config.computer_use(),
             permission: crate::config::PermissionMode::Full,
             tool_policy: crate::tool_policy::ToolPolicy::default(),
@@ -427,6 +415,11 @@ async fn run_plan_prompt_template_with_conversation(
 }
 
 /// Generate specifications, verify them off the async runtime, and interpret the report.
+///
+/// # Errors
+///
+/// Returns an error if prompt execution, verification, or report delivery fails,
+/// if the plan path has no session directory, or if the verification task fails.
 pub async fn run_verify_flow(
     ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,

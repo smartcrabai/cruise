@@ -99,7 +99,8 @@ mod tests {
 
     #[test]
     fn timeout_kills_process_group() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("temporary directory: {error}"));
         let marker = dir.path().join("descendant-finished");
         let mut command = Command::new("sh");
         command
@@ -124,7 +125,8 @@ mod tests {
 
     #[test]
     fn cancellation_kills_process_group() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("temporary directory: {error}"));
         let marker = dir.path().join("descendant-finished");
         let mut command = Command::new("sh");
         command
@@ -145,7 +147,9 @@ mod tests {
             dir.path(),
             "cancel",
         );
-        thread.join().unwrap();
+        thread
+            .join()
+            .unwrap_or_else(|error| panic!("cancellation thread failed: {error:?}"));
         assert!(outcome.cancelled, "{}", outcome.message);
         assert!(!outcome.timed_out);
         std::thread::sleep(Duration::from_millis(1200));
@@ -154,7 +158,8 @@ mod tests {
 
     #[test]
     fn stdin_is_null_even_when_command_requests_pipe() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("temporary directory: {error}"));
         let mut command = Command::new("sh");
         command
             .arg("-c")
