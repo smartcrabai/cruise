@@ -36,10 +36,18 @@ pub fn validate_execution_graph(
             .get(&node.step_name)
             .ok_or_else(|| CruiseError::StepNotFound(node.step_name.clone()))?;
         let always_skip = skipped.contains(node.step_name.as_str())
-            || matches!(step.skip, Some(SkipCondition::Static(true)));
+            || matches!(step.skip, Some(SkipCondition::Static(true)))
+            || step
+                .call_guards
+                .iter()
+                .any(|guard| matches!(guard.skip, Some(SkipCondition::Static(true))));
         let may_skip = always_skip
             || matches!(step.skip, Some(SkipCondition::Variable(_)))
-            || step.when.is_some();
+            || step.when.is_some()
+            || step
+                .call_guards
+                .iter()
+                .any(|guard| guard.skip.is_some() || guard.when.is_some());
         let group_meta = compiled
             .step_to_invocation
             .get(&node.step_name)

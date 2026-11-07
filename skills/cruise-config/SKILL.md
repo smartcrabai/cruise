@@ -10,6 +10,7 @@ callee `inputs` with string-valued caller `with` mappings. See
 [steps.md](references/steps.md#workflow-call-inputs) for complete caller/callee
 examples and [variables.md](references/variables.md#load-time-workflow-inputs)
 for lexical scope, explicit forwarding, and preserved runtime escapes.
+For named callee exits and caller routing, see [return labels](references/steps.md#workflow-call-return-labels).
 
 ## When to use
 
