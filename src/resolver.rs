@@ -529,7 +529,7 @@ fn resolve_config_in_dir_with_interactive(
             config.show_others_category,
             &config.others_category_name,
         );
-        prompt_select_among_candidates(nodes, candidates)?
+        prompt_select_among_candidates(&nodes, &candidates)?
     };
 
     // 4. Read the chosen candidate and return.
@@ -565,8 +565,8 @@ fn read_config_file(path: &std::path::Path) -> Result<String> {
 
 /// Present an `inquire::Select` of candidates and return the chosen one.
 fn prompt_select_among_candidates(
-    nodes: Vec<crate::workflow_categories::PickerNode>,
-    candidates: Vec<ConfigCandidate>,
+    nodes: &[crate::workflow_categories::PickerNode],
+    candidates: &[ConfigCandidate],
 ) -> Result<ConfigCandidate> {
     use crate::workflow_categories::PickerNode;
     struct MenuItem {
@@ -580,10 +580,10 @@ fn prompt_select_among_candidates(
     }
     let mut path = Vec::<usize>::new();
     loop {
-        let mut current = &nodes;
+        let mut current = nodes;
         for &index in &path {
             if let PickerNode::Category { nodes, .. } = &current[index] {
-                current = nodes;
+                current = nodes.as_slice();
             }
         }
         let mut options: Vec<MenuItem> = current

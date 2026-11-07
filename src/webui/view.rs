@@ -264,14 +264,8 @@ pub(crate) struct ConfigSelectVm {
 pub(crate) const AUTO_CONFIG_VALUE: &str = "";
 
 impl ConfigSelectVm {
-    pub(crate) fn new(
-        nodes: &[crate::workflow_categories::PickerNode],
-        candidates: &[crate::workflow_categories::PickerCandidate],
-        selected: Option<&str>,
-        base_dir: &str,
-    ) -> Self {
-        let selected = selected.unwrap_or(AUTO_CONFIG_VALUE);
-        let sentinels = vec![
+    fn sentinels(selected: &str) -> Vec<ConfigOptionVm> {
+        vec![
             ConfigOptionVm {
                 value: AUTO_CONFIG_VALUE.to_string(),
                 label: "Auto (base dir / user workflows / builtin)".to_string(),
@@ -288,71 +282,82 @@ impl ConfigSelectVm {
                 ),
                 selected: selected == super::dto::BUILTIN_CONFIG_PATH,
             },
-        ];
-        let mut groups = Vec::new();
-        let mut already_selected = sentinels.iter().any(|option| option.selected);
-        fn append(
-            nodes: &[crate::workflow_categories::PickerNode],
-            candidates: &[crate::workflow_categories::PickerCandidate],
-            path: &str,
-            base_dir: &str,
-            selected: &str,
-            already_selected: &mut bool,
-            groups: &mut Vec<ConfigGroupVm>,
-        ) {
-            use crate::workflow_categories::PickerNode;
-            let mut options = Vec::new();
-            for node in nodes {
-                if let PickerNode::Workflow {
-                    candidate,
-                    description,
-                } = node
-                {
-                    let item = &candidates[*candidate];
-                    let chosen = !*already_selected && selected == item.value;
-                    *already_selected |= chosen;
-                    let desc = description.as_ref().or(item.description.as_ref());
-                    options.push(ConfigOptionVm {
-                        value: item.value.clone(),
-                        label: desc.map_or_else(
-                            || item.label.clone(),
-                            |d| format!("{} \u{2014} {d}", item.label),
-                        ),
-                        selected: chosen,
-                    });
-                }
-            }
-            if !options.is_empty() {
-                let label = if path.is_empty() {
-                    format!(
-                        "Base dir ({})",
-                        if base_dir.is_empty() { "." } else { base_dir }
-                    )
-                } else {
-                    path.to_string()
-                };
-                groups.push(ConfigGroupVm { label, options });
-            }
-            for node in nodes {
-                if let PickerNode::Category { name, nodes } = node {
-                    let child = if path.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{path} › {name}")
-                    };
-                    append(
-                        nodes,
-                        candidates,
-                        &child,
-                        base_dir,
-                        selected,
-                        already_selected,
-                        groups,
-                    );
-                }
+        ]
+    }
+
+    fn append(
+        nodes: &[crate::workflow_categories::PickerNode],
+        candidates: &[crate::workflow_categories::PickerCandidate],
+        path: &str,
+        base_dir: &str,
+        selected: &str,
+        already_selected: &mut bool,
+        groups: &mut Vec<ConfigGroupVm>,
+    ) {
+        use crate::workflow_categories::PickerNode;
+        let mut options = Vec::new();
+        for node in nodes {
+            if let PickerNode::Workflow {
+                candidate,
+                description,
+            } = node
+            {
+                let item = &candidates[*candidate];
+                let chosen = !*already_selected && selected == item.value;
+                *already_selected |= chosen;
+                let desc = description.as_ref().or(item.description.as_ref());
+                options.push(ConfigOptionVm {
+                    value: item.value.clone(),
+                    label: desc.map_or_else(
+                        || item.label.clone(),
+                        |d| format!("{} \u{2014} {d}", item.label),
+                    ),
+                    selected: chosen,
+                });
             }
         }
-        append(
+        if !options.is_empty() {
+            let label = if path.is_empty() {
+                format!(
+                    "Base dir ({})",
+                    if base_dir.is_empty() { "." } else { base_dir }
+                )
+            } else {
+                path.to_string()
+            };
+            groups.push(ConfigGroupVm { label, options });
+        }
+        for node in nodes {
+            if let PickerNode::Category { name, nodes } = node {
+                let child = if path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{path} › {name}")
+                };
+                Self::append(
+                    nodes,
+                    candidates,
+                    &child,
+                    base_dir,
+                    selected,
+                    already_selected,
+                    groups,
+                );
+            }
+        }
+    }
+
+    pub(crate) fn new(
+        nodes: &[crate::workflow_categories::PickerNode],
+        candidates: &[crate::workflow_categories::PickerCandidate],
+        selected: Option<&str>,
+        base_dir: &str,
+    ) -> Self {
+        let selected = selected.unwrap_or(AUTO_CONFIG_VALUE);
+        let sentinels = Self::sentinels(selected);
+        let mut groups = Vec::new();
+        let mut already_selected = sentinels.iter().any(|option| option.selected);
+        Self::append(
             nodes,
             candidates,
             "",
@@ -362,11 +367,17 @@ impl ConfigSelectVm {
             &mut groups,
         );
         if !already_selected && !selected.is_empty() {
-            let label = candidates.iter().find(|item| item.value == selected)
+            let label = candidates
+                .iter()
+                .find(|item| item.value == selected)
                 .map_or_else(|| selected.to_string(), |item| item.label.clone());
             groups.push(ConfigGroupVm {
                 label: "Current workflow".to_string(),
-                options: vec![ConfigOptionVm { value: selected.to_string(), label, selected: true }],
+                options: vec![ConfigOptionVm {
+                    value: selected.to_string(),
+                    label,
+                    selected: true,
+                }],
             });
         }
         Self { sentinels, groups }
@@ -823,7 +834,7 @@ mod tests {
         let package = candidates
             .iter()
             .position(|candidate| candidate.value == "/work/package.yaml")
-            .unwrap();
+            .unwrap_or_else(|| panic!("missing package candidate"));
         let leaf = || PickerNode::Workflow {
             candidate: package,
             description: None,
@@ -859,7 +870,7 @@ mod tests {
         let candidates = crate::webui::dto::picker_candidates(&entries, "");
         let nodes = crate::workflow_categories::build_picker_tree(
             &candidates,
-            &Default::default(),
+            &indexmap::IndexMap::default(),
             true,
             "Others",
         );

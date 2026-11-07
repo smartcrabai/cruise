@@ -96,13 +96,13 @@ mod webui;
 mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]
 mod workflow_call;
+mod workflow_categories;
 mod workflow_cmd;
 mod workflow_defaults;
 mod workflow_doctor;
 mod workflow_doctor_targets;
 mod workflow_generate;
 mod workflow_packages;
-mod workflow_categories;
 mod workspace;
 pub mod worktree;
 mod worktree_pr;

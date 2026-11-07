@@ -70,7 +70,9 @@ struct RuntimeConfig {
     plan_model: Option<crate::config::ModelSpec>,
 }
 
-fn default_parallelism() -> usize { 1 }
+fn default_parallelism() -> usize {
+    1
+}
 
 fn deserialize_workflow_categories<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -122,19 +124,46 @@ impl Default for AppConfig {
 
 impl AppConfig {
     /// Load runtime defaults while ignoring picker-only fields.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime configuration cannot be read or parsed.
     pub fn load_runtime() -> Result<Self> {
         let path = Self::config_path()?;
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(error) => return Err(CruiseError::Other(format!("failed to read config {}: {error}", path.display()))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(CruiseError::Other(format!(
+                    "failed to read config {}: {error}",
+                    path.display()
+                )));
+            }
         };
         let runtime: RuntimeConfig = if is_yaml_config_path(&path) {
-            serde_yaml::from_str(&content).map_err(|error| CruiseError::Other(format!("invalid config YAML in {}: {error}", path.display())))?
+            serde_yaml::from_str(&content).map_err(|error| {
+                CruiseError::Other(format!(
+                    "invalid config YAML in {}: {error}",
+                    path.display()
+                ))
+            })?
         } else {
-            serde_json::from_str(&content).map_err(|error| CruiseError::Other(format!("invalid config JSON in {}: {error}", path.display())))?
+            serde_json::from_str(&content).map_err(|error| {
+                CruiseError::Other(format!(
+                    "invalid config JSON in {}: {error}",
+                    path.display()
+                ))
+            })?
         };
-        let config = Self { run_all_parallelism: runtime.run_all_parallelism, run_all_auto_requeue_max_attempts: runtime.run_all_auto_requeue_max_attempts, prevent_sleep: runtime.prevent_sleep, model: runtime.model, plan_model: runtime.plan_model, ..Self::default() };
+        let config = Self {
+            run_all_parallelism: runtime.run_all_parallelism,
+            run_all_auto_requeue_max_attempts: runtime.run_all_auto_requeue_max_attempts,
+            prevent_sleep: runtime.prevent_sleep,
+            model: runtime.model,
+            plan_model: runtime.plan_model,
+            ..Self::default()
+        };
         config.validate()?;
         Ok(config)
     }
@@ -570,7 +599,7 @@ mod tests {
 
     #[test]
     fn invalid_category_shape_fails_load_with_path_in_message() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
         for (name, content) in [
             ("config.yaml", "workflow_categories:\n  Development: [x]\n"),
             (
@@ -579,8 +608,11 @@ mod tests {
             ),
         ] {
             let path = dir.path().join(name);
-            std::fs::write(&path, content).unwrap();
-            let error = AppConfig::load_from(&path).unwrap_err().to_string();
+            std::fs::write(&path, content).unwrap_or_else(|e| panic!("{e}"));
+            let error = AppConfig::load_from(&path)
+                .err()
+                .unwrap_or_else(|| panic!("invalid category should fail"))
+                .to_string();
             assert!(
                 error.contains("workflow_categories") && error.contains("Development"),
                 "{error}"

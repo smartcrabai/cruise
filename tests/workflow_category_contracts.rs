@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 type Categories = IndexMap<String, WorkflowCategoryNode>;
 
 fn categories(yaml: &str) -> Categories {
-    serde_yaml::from_str(yaml).unwrap()
+    serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn candidate(key: &str, builtin: bool, local: bool, package: bool) -> PickerCandidate {
@@ -77,7 +77,8 @@ fn parses_nested_categories_with_plain_and_described_entries() {
 #[test]
 fn rejects_malformed_categories_and_entries() {
     let error = serde_yaml::from_str::<Categories>("Development: [tdd]")
-        .unwrap_err()
+        .err()
+        .unwrap_or_else(|| panic!("invalid category should fail"))
         .to_string();
     assert!(error.contains("Development"), "{error}");
     for yaml in ["Dev: {workflows: [{a: x, b: y}]}", "Dev: {workflows: [3]}"] {
@@ -114,11 +115,11 @@ fn validation_rejects_blank_names_descriptions_and_conflicts() {
 fn round_trips_yaml_and_json_preserving_order() {
     let original =
         categories("Zed: {workflows: [tdd, {refactor: R}]}\nAlpha: {Child: {workflows: [api]}}\n");
-    let yaml = serde_yaml::to_string(&original).unwrap();
-    let json = serde_json::to_string(&original).unwrap();
+    let yaml = serde_yaml::to_string(&original).unwrap_or_else(|e| panic!("{e}"));
+    let json = serde_json::to_string(&original).unwrap_or_else(|e| panic!("{e}"));
     for decoded in [
-        serde_yaml::from_str::<Categories>(&yaml).unwrap(),
-        serde_json::from_str::<Categories>(&json).unwrap(),
+        serde_yaml::from_str::<Categories>(&yaml).unwrap_or_else(|e| panic!("{e}")),
+        serde_json::from_str::<Categories>(&json).unwrap_or_else(|e| panic!("{e}")),
     ] {
         assert_eq!(decoded, original);
         assert_eq!(
@@ -143,7 +144,7 @@ fn default_categories_and_user_replacement() {
         .iter()
         .filter_map(|n| match n {
             PickerNode::Category { name, .. } => Some(name.as_str()),
-            _ => None,
+            PickerNode::Workflow { .. } => None,
         })
         .collect();
     assert_eq!(names, ["Development", "Quality", "Research", "Security"]);

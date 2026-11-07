@@ -13,7 +13,7 @@ pub const DEFAULT_BUILTIN_NAME: &str = "tdd";
 
 /// Default picker categories, in display order.
 pub const DEFAULT_WORKFLOW_CATEGORIES: &[(&str, &[&str])] = &[
-    ("Development", &["tdd", "refactor"]),
+    ("Development", &["tdd", "refactor", "pr-review-fix"]),
     ("Quality", &["add-tests", "add-formal-specs"]),
     ("Research", &["research"]),
     ("Security", &["security"]),

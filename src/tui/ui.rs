@@ -2539,7 +2539,7 @@ mod tests {
     #[test]
     fn config_rows_render_headers_then_indented_choices() {
         let view = rendered_hermetic_config_view_with(120, |app| {
-            let base = TempDir::new().unwrap();
+            let base = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
             app.form.step = Step::Config;
             app.form
                 .working_dir
@@ -2564,13 +2564,13 @@ mod tests {
     #[test]
     fn duplicate_membership_has_one_selection_marker() {
         let _lock = lock_process();
-        let fake_home = TempDir::new().unwrap();
+        let fake_home = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
         let _home_guards = crate::test_support::set_fake_home(fake_home.path());
         let config_dir = fake_home.path().join(".config/cruise");
-        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap_or_else(|e| panic!("{e}"));
         std::fs::write(config_dir.join("config.json"),
-            r#"{"workflow_categories":{"First":{"workflows":["tdd"]},"Second":{"workflows":["tdd"]}},"show_others_category":false}"#).unwrap();
-        let base = TempDir::new().unwrap();
+            r#"{"workflow_categories":{"First":{"workflows":["tdd"]},"Second":{"workflows":["tdd"]}},"show_others_category":false}"#).unwrap_or_else(|e| panic!("{e}"));
+        let base = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
         let view = rendered_lines_with_lock(120, 24, true, View::NewSession, None, None, |app| {
             app.form.step = Step::Config;
             app.form

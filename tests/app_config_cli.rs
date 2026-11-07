@@ -229,7 +229,7 @@ fn parallelism_update_preserves_workflow_categories_in_yaml_and_json() {
             "others_category_name": "Misc"
         });
         let contents = if extension == "yaml" {
-            serde_yaml::to_string(&input).unwrap()
+            serde_yaml::to_string(&input).unwrap_or_else(|e| panic!("{e}"))
         } else {
             input.to_string()
         };
@@ -240,11 +240,11 @@ fn parallelism_update_preserves_workflow_categories_in_yaml_and_json() {
             "{extension}: {}",
             output_text(&updated)
         );
-        let saved = std::fs::read_to_string(path).unwrap();
+        let saved = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{e}"));
         let actual: serde_json::Value = if extension == "yaml" {
-            serde_yaml::from_str(&saved).unwrap()
+            serde_yaml::from_str(&saved).unwrap_or_else(|e| panic!("{e}"))
         } else {
-            serde_json::from_str(&saved).unwrap()
+            serde_json::from_str(&saved).unwrap_or_else(|e| panic!("{e}"))
         };
         // Existing app config serializes using camelCase; the accepted aliases
         // must survive a read-modify-write regardless of spelling.

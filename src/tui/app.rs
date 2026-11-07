@@ -3918,7 +3918,7 @@ mod tests {
         let mut fixture = configured_app_with_content(
             r#"{"workflow_categories":{"First":{"workflows":["research"]},"Second":{"workflows":["refactor","tdd"]}},"show_others_category":false}"#,
         );
-        let base = TempDir::new().unwrap();
+        let base = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
         let app = &mut fixture.app;
         assert!(app.refresh_config_sources(base.path()));
         app.view = View::NewSession;
@@ -3934,7 +3934,7 @@ mod tests {
     fn invalid_workflow_categories_sets_error_on_refresh() {
         let mut fixture =
             configured_app_with_content(r#"{"workflow_categories":{"Development":["tdd"]}}"#);
-        let base = TempDir::new().unwrap();
+        let base = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
         assert!(!fixture.app.refresh_config_sources(base.path()));
         assert!(fixture.app.config_sources.is_empty());
         assert!(

@@ -2410,6 +2410,9 @@ impl CruiseApplication {
         entries
     }
     /// Build the interactive workflow picker, including installed packages.
+    ///
+    /// # Errors
+    /// Returns an error if application configuration cannot be loaded.
     pub fn workflow_picker_tree(
         &self,
         candidates: &[crate::workflow_categories::PickerCandidate],
@@ -2450,6 +2453,10 @@ impl CruiseApplication {
     pub fn app_config(&self) -> Result<crate::app_config::AppConfig> {
         crate::app_config::AppConfig::load()
     }
+    /// Load runtime configuration without picker-only fields.
+    ///
+    /// # Errors
+    /// Returns an error if runtime configuration cannot be loaded.
     pub fn runtime_config(&self) -> Result<crate::app_config::AppConfig> {
         crate::app_config::AppConfig::load_runtime()
     }

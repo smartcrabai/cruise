@@ -46,16 +46,18 @@ impl<'de> Deserialize<'de> for WorkflowEntry {
                 name,
                 description: None,
             }),
-            Entry::Described(map) if map.len() == 1 => {
-                let (name, description) = map.into_iter().next().unwrap();
-                Ok(Self {
-                    name,
-                    description: Some(description),
-                })
+            Entry::Described(map) => {
+                let mut entries = map.into_iter();
+                match (entries.next(), entries.next()) {
+                    (Some((name, description)), None) => Ok(Self {
+                        name,
+                        description: Some(description),
+                    }),
+                    _ => Err(serde::de::Error::custom(
+                        "workflow entry must have exactly one description",
+                    )),
+                }
             }
-            _ => Err(serde::de::Error::custom(
-                "workflow entry must have exactly one description",
-            )),
         }
     }
 }
@@ -102,6 +104,10 @@ impl<'de> Deserialize<'de> for WorkflowCategoryNode {
         deserializer.deserialize_map(NodeVisitor)
     }
 }
+/// Validates category names, workflow names, and descriptions.
+///
+/// # Errors
+/// Returns an error when a name or description is invalid or descriptions conflict.
 pub fn validate_workflow_categories(
     categories: &IndexMap<String, WorkflowCategoryNode>,
 ) -> Result<()> {
@@ -131,16 +137,22 @@ pub fn validate_workflow_categories(
                     if desc.trim().is_empty() {
                         return Err(CruiseError::Other(format!("blank description at {path}")));
                     }
-                    let key = entry.name.strip_prefix("builtin:").filter(|name| {
-                        crate::builtin_workflows::BUILTIN_WORKFLOWS.iter().any(|workflow| workflow.name == *name)
-                    }).unwrap_or(&entry.name);
-                    if let Some(old) = descriptions.insert(key.to_string(), desc.clone()) {
-                        if old != *desc {
-                            return Err(CruiseError::Other(format!(
-                                "conflicting descriptions for {} at {path}",
-                                entry.name
-                            )));
-                        }
+                    let key = entry
+                        .name
+                        .strip_prefix("builtin:")
+                        .filter(|name| {
+                            crate::builtin_workflows::BUILTIN_WORKFLOWS
+                                .iter()
+                                .any(|workflow| workflow.name == *name)
+                        })
+                        .unwrap_or(&entry.name);
+                    if let Some(old) = descriptions.insert(key.to_string(), desc.clone())
+                        && old != *desc
+                    {
+                        return Err(CruiseError::Other(format!(
+                            "conflicting descriptions for {} at {path}",
+                            entry.name
+                        )));
                     }
                 }
             }
@@ -171,12 +183,50 @@ pub enum PickerNode {
         description: Option<String>,
     },
 }
+#[must_use]
 pub fn build_picker_tree(
     candidates: &[PickerCandidate],
     categories: &IndexMap<String, WorkflowCategoryNode>,
     show_others: bool,
     others_name: &str,
 ) -> Vec<PickerNode> {
+    fn build(
+        categories: &IndexMap<String, WorkflowCategoryNode>,
+        candidates: &[PickerCandidate],
+        matched: &mut [bool],
+    ) -> Vec<PickerNode> {
+        let mut result = Vec::new();
+        for (name, node) in categories {
+            let mut nodes = Vec::new();
+            for entry in &node.workflows {
+                for (i, candidate) in candidates.iter().enumerate() {
+                    let is_match = if let Some(key) = entry.name.strip_prefix("builtin:") {
+                        candidate.is_builtin && candidate.key == key
+                    } else {
+                        candidate.key == entry.name
+                    };
+                    if is_match {
+                        matched[i] = true;
+                        nodes.push(PickerNode::Workflow {
+                            candidate: i,
+                            description: entry
+                                .description
+                                .clone()
+                                .or_else(|| candidate.description.clone()),
+                        });
+                    }
+                }
+            }
+            nodes.extend(build(&node.children, candidates, matched));
+            if !nodes.is_empty() {
+                result.push(PickerNode::Category {
+                    name: name.clone(),
+                    nodes,
+                });
+            }
+        }
+        result
+    }
     let defaults;
     let categories = if categories.is_empty() {
         defaults = crate::builtin_workflows::DEFAULT_WORKFLOW_CATEGORIES
@@ -201,43 +251,6 @@ pub fn build_picker_tree(
     } else {
         categories
     };
-    fn build(
-        categories: &IndexMap<String, WorkflowCategoryNode>,
-        candidates: &[PickerCandidate],
-        matched: &mut [bool],
-    ) -> Vec<PickerNode> {
-        let mut result = Vec::new();
-        for (name, node) in categories {
-            let mut nodes = Vec::new();
-            for entry in &node.workflows {
-                for (i, candidate) in candidates.iter().enumerate() {
-                    let matches = if let Some(key) = entry.name.strip_prefix("builtin:") {
-                        candidate.is_builtin && candidate.key == key
-                    } else {
-                        candidate.key == entry.name
-                    };
-                    if matches {
-                        matched[i] = true;
-                        nodes.push(PickerNode::Workflow {
-                            candidate: i,
-                            description: entry
-                                .description
-                                .clone()
-                                .or_else(|| candidate.description.clone()),
-                        });
-                    }
-                }
-            }
-            nodes.extend(build(&node.children, candidates, matched));
-            if !nodes.is_empty() {
-                result.push(PickerNode::Category {
-                    name: name.clone(),
-                    nodes,
-                });
-            }
-        }
-        result
-    }
     let mut matched = vec![false; candidates.len()];
     let declared = build(categories, candidates, &mut matched);
     let mut root = Vec::new();
