@@ -218,11 +218,13 @@ mod tests {
             .local_addr()
             .unwrap_or_else(|error| panic!("get webhook test listener address: {error}"));
         drop(listener);
+        // Windows may take longer than two seconds to report a refused connection.
+        // Keep the transport classification assertion while allowing its TCP retry window.
         assert_eq!(
             post(
                 &format!("http://{addr}/services/SECRET123"),
                 &body,
-                Duration::from_secs(2)
+                Duration::from_secs(30)
             ),
             Err(WebhookError::Transport)
         );
