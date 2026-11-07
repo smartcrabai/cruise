@@ -28,6 +28,45 @@ use crate::backend::effort::EffortLevel;
 use crate::backend::stream::{LimitError, StreamChunk};
 use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
+use crate::usage::{UsageCounts, UsageRound};
+
+fn usage_rounds_from_result(result: &claude_agent_sdk::types::ResultMessage) -> Vec<UsageRound> {
+    if let Some(models) = &result.model_usage {
+        let rounds: Vec<_> = models
+            .iter()
+            .map(|(model, usage)| UsageRound {
+                model: Some(model.clone()),
+                counts: UsageCounts {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                    cost_usd: usage.cost_usd,
+                    ..Default::default()
+                },
+            })
+            .filter(|round| !round.counts.is_empty())
+            .collect();
+        if !rounds.is_empty() {
+            return rounds;
+        }
+    }
+    if result.usage.is_none() && result.total_cost_usd.is_none() {
+        return Vec::new();
+    }
+    let usage = result.usage.as_ref().unwrap_or(&serde_json::Value::Null);
+    vec![UsageRound {
+        model: None,
+        counts: UsageCounts {
+            input_tokens: usage["input_tokens"].as_u64(),
+            output_tokens: usage["output_tokens"].as_u64(),
+            cache_read_input_tokens: usage["cache_read_input_tokens"].as_u64(),
+            cache_creation_input_tokens: usage["cache_creation_input_tokens"].as_u64(),
+            cost_usd: result.total_cost_usd,
+            ..Default::default()
+        },
+    }]
+}
 
 /// MCP server name for cruise's in-process toolbox. The CLI exposes its tools
 /// to the model as `mcp__cruise__<tool>`.
@@ -327,6 +366,13 @@ async fn run_async(config: ClaudeRunnerConfig, prompt: String, tx: &Sender<Strea
                 }
             }
             Ok(Message::Result(r)) => {
+                if usage_rounds_from_result(&r)
+                    .into_iter()
+                    .any(|round| tx.send(StreamChunk::Usage(round)).is_err())
+                {
+                    terminal = None;
+                    break;
+                }
                 if report_session(tx, &mut session_reported, r.session_id) {
                     terminal = Some(if r.is_error {
                         Terminal::ResultError(r.result.unwrap_or_else(|| r.subtype.clone()))
@@ -540,6 +586,84 @@ fn cruise_tool_to_agent_tool(tool: &CruiseTool) -> AgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn usage_result() -> claude_agent_sdk::types::ResultMessage {
+        claude_agent_sdk::types::ResultMessage {
+            subtype: "success".into(),
+            session_id: None,
+            duration_ms: None,
+            duration_api_ms: None,
+            is_error: false,
+            num_turns: None,
+            total_cost_usd: None,
+            usage: None,
+            model_usage: None,
+            result: None,
+            terminal_reason: None,
+            raw: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn claude_result_prefers_model_usage_camel_case() {
+        let mut result = usage_result();
+        result.usage = Some(serde_json::json!({"input_tokens": 999}));
+        result.total_cost_usd = Some(0.02);
+        result.model_usage = Some(
+            serde_json::from_value(serde_json::json!({
+                "claude-sonnet-4-6": {"inputTokens":100,"outputTokens":20,
+                    "cacheReadInputTokens":5,"cacheCreationInputTokens":0,"costUSD":0.01}
+            }))
+            .unwrap_or_else(|error| panic!("invalid model usage fixture: {error}")),
+        );
+        let rounds = usage_rounds_from_result(&result);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(rounds[0].counts.input_tokens, Some(100));
+        assert_eq!(rounds[0].counts.output_tokens, Some(20));
+        assert_eq!(rounds[0].counts.cache_read_input_tokens, Some(5));
+        assert_eq!(rounds[0].counts.cache_creation_input_tokens, Some(0));
+        assert_eq!(rounds[0].counts.cost_usd, Some(0.01));
+    }
+
+    #[test]
+    fn claude_result_without_model_usage_uses_snake_case_usage() {
+        let mut result = usage_result();
+        result.usage = Some(serde_json::json!({"input_tokens":7,"output_tokens":3}));
+        result.total_cost_usd = Some(0.5);
+        let rounds = usage_rounds_from_result(&result);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].model, None);
+        assert_eq!(rounds[0].counts.input_tokens, Some(7));
+        assert_eq!(rounds[0].counts.output_tokens, Some(3));
+        assert_eq!(rounds[0].counts.cache_read_input_tokens, None);
+        assert_eq!(rounds[0].counts.cost_usd, Some(0.5));
+    }
+
+    #[test]
+    fn claude_result_without_any_usage_yields_no_rounds() {
+        assert_eq!(usage_rounds_from_result(&usage_result()), []);
+    }
+
+    #[test]
+    fn claude_empty_model_usage_falls_back_to_aggregate() {
+        let mut result = usage_result();
+        result.model_usage = Some(HashMap::default());
+        result.usage = Some(serde_json::json!({"input_tokens": 7}));
+        let rounds = usage_rounds_from_result(&result);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].counts.input_tokens, Some(7));
+    }
+
+    #[test]
+    fn claude_cost_only_result_is_reported() {
+        let mut result = usage_result();
+        result.total_cost_usd = Some(0.5);
+        let rounds = usage_rounds_from_result(&result);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].counts.cost_usd, Some(0.5));
+        assert_eq!(rounds[0].counts.input_tokens, None);
+    }
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;

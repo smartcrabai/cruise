@@ -192,6 +192,7 @@ pub async fn handle_worktree_pr_with_persistence(
         ensure_review_fix_committed_and_push(ctx, &target.head_branch, cancel_token).await?;
         return run_after_pr_steps(
             compiled,
+            Some(&session.id),
             vars,
             tracker,
             max_retries,
@@ -226,6 +227,7 @@ pub async fn handle_worktree_pr_with_persistence(
         }
         run_after_pr_steps(
             compiled,
+            Some(&session.id),
             vars,
             tracker,
             max_retries,
@@ -462,6 +464,7 @@ async fn create_pr_attempt(
 ) -> Result<PrAttemptOutcome> {
     let (pr_title, pr_body) = generate_pr_description(
         &ctx.path,
+        Some(&session.id),
         compiled,
         vars,
         rate_limit_retries,
@@ -503,6 +506,7 @@ async fn create_pr_attempt(
 /// Generate a PR title and body, propagating prompt and execution failures.
 async fn generate_pr_description(
     worktree_path: &Path,
+    usage_session_id: Option<&str>,
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
     rate_limit_retries: usize,
@@ -518,6 +522,7 @@ async fn generate_pr_description(
     if executor.is_sdk() {
         let result = generate_pr_via_sdk_tool(
             &executor,
+            usage_session_id,
             worktree_path,
             &pr_prompt,
             model,
@@ -542,6 +547,11 @@ async fn generate_pr_description(
         };
         executor
             .run(crate::executor::PromptRun {
+                usage: Some(crate::usage::UsageScope {
+                    session_id: usage_session_id,
+                    step: None,
+                    purpose: crate::usage::UsagePurpose::PrMetadata,
+                }),
                 prompt: &pr_prompt,
                 model,
                 subagent_model: None,
@@ -582,6 +592,7 @@ async fn generate_pr_description(
 )]
 async fn generate_pr_via_sdk_tool(
     executor: &crate::executor::Executor,
+    usage_session_id: Option<&str>,
     worktree_path: &Path,
     pr_prompt: &str,
     model: Option<&crate::config::ModelSpec>,
@@ -608,6 +619,11 @@ async fn generate_pr_via_sdk_tool(
     };
     match executor
         .run(crate::executor::PromptRun {
+            usage: Some(crate::usage::UsageScope {
+                session_id: usage_session_id,
+                step: None,
+                purpose: crate::usage::UsagePurpose::PrMetadata,
+            }),
             prompt: &prompt,
             model,
             subagent_model: None,
@@ -647,6 +663,7 @@ async fn generate_pr_via_sdk_tool(
 #[expect(clippy::too_many_arguments, reason = "mirrors the PR flow parameters")]
 pub(crate) async fn run_after_pr_steps(
     compiled: &CompiledWorkflow,
+    usage_session_id: Option<&str>,
     vars: &mut VariableStore,
     tracker: &mut FileTracker,
     max_retries: usize,
@@ -674,6 +691,7 @@ pub(crate) async fn run_after_pr_steps(
     )?;
     let ctx = ExecutionContext {
         instructions,
+        usage_session_id,
         compiled: &after_compiled,
         max_retries,
         rate_limit_retries,
@@ -711,6 +729,7 @@ pub(crate) async fn run_after_pr_steps_for_test(
 ) -> Result<()> {
     run_after_pr_steps(
         compiled,
+        None,
         vars,
         tracker,
         10,
@@ -1988,6 +2007,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             std::time::Duration::from_secs(10),
             generate_pr_description(
                 tmp.path(),
+                None,
                 &control_compiled,
                 &mut control_vars,
                 0,
@@ -2015,7 +2035,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         vars.set_named_file(crate::session::PLAN_VAR, plan_path);
         let metadata = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            generate_pr_description(tmp.path(), &compiled, &mut vars, 0, None, None),
+            generate_pr_description(tmp.path(), None, &compiled, &mut vars, 0, None, None),
         )
         .await??;
         assert_eq!(
@@ -2480,7 +2500,15 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         // When
         let timed = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            generate_pr_description(tmp.path(), &compiled, &mut vars, 0, Some(&token), None),
+            generate_pr_description(
+                tmp.path(),
+                None,
+                &compiled,
+                &mut vars,
+                0,
+                Some(&token),
+                None,
+            ),
         )
         .await;
 
@@ -2512,7 +2540,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         vars.set_named_file(crate::session::PLAN_VAR, plan_path);
 
         // cat echoes the prompt; the function should complete without panicking.
-        let _ = generate_pr_description(tmp.path(), &compiled, &mut vars, 0, None, None).await;
+        let _ =
+            generate_pr_description(tmp.path(), None, &compiled, &mut vars, 0, None, None).await;
         // No assertion on values — only that the function accepts None and returns without hanging.
     }
 
@@ -2537,7 +2566,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         let mut vars = VariableStore::new("implement feature X".to_string());
         vars.set_named_file(crate::session::PLAN_VAR, plan_path);
 
-        let _ = generate_pr_description(tmp.path(), &compiled, &mut vars, 0, None, None).await;
+        let _ =
+            generate_pr_description(tmp.path(), None, &compiled, &mut vars, 0, None, None).await;
 
         let expected = std::fs::canonicalize(tmp.path()).unwrap_or_else(|e| panic!("{e:?}"));
         let actual_path = std::fs::read_to_string(&cwd_path)
@@ -2571,6 +2601,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
 
         let _ = generate_pr_via_sdk_tool(
             &executor,
+            None,
             tmp.path(),
             "test prompt",
             None,
@@ -2727,6 +2758,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         let no_merge = crate::flags::FlagValues::new();
         let warned = run_after_pr_steps(
             &compiled,
+            None,
             &mut vars,
             &mut tracker,
             10,
@@ -2750,6 +2782,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
         let fatal = run_after_pr_steps(
             &compiled,
+            None,
             &mut vars,
             &mut tracker,
             10,
@@ -2787,6 +2820,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
 
         let result = run_after_pr_steps(
             &compiled,
+            None,
             &mut vars,
             &mut tracker,
             10,
@@ -2816,6 +2850,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
         let result = run_after_pr_steps(
             &compiled,
+            None,
             &mut vars,
             &mut tracker,
             10,
@@ -2875,6 +2910,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
 
         let result = run_after_pr_steps(
             &compiled,
+            None,
             &mut vars,
             &mut tracker,
             10,

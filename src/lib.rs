@@ -56,6 +56,8 @@ pub mod timeout;
     reason = "pre-tool gate entry point is used only by the runtime binary"
 )]
 pub mod tool_policy;
+pub mod usage;
+pub mod usage_cmd;
 pub mod variable;
 pub mod workflow;
 pub mod workflow_call;

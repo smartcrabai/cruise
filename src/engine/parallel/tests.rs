@@ -47,6 +47,7 @@ impl Fixture {
         let mut tracker = FileTracker::with_root(self.root.path().to_path_buf());
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &self.compiled,
             max_retries: 3,
             rate_limit_retries: 0,

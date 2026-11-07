@@ -46,6 +46,7 @@ impl std::fmt::Debug for ExecutionResult {
 pub struct ExecutionContext<'a> {
     pub instructions: Option<&'a crate::instruction_inbox::RunInbox>,
     pub compiled: &'a CompiledWorkflow,
+    pub usage_session_id: Option<&'a str>,
     pub max_retries: usize,
     pub rate_limit_retries: usize,
     pub on_step_start: &'a (dyn Fn(&str) -> Result<()> + Send + Sync),
@@ -1186,6 +1187,7 @@ async fn execute_step_kind_inner(
                 PromptStepOutput::Console(ctx.on_step_log),
                 timeout,
                 current_step,
+                ctx.usage_session_id,
                 has_nfc_condition,
                 allow_commit,
                 lease
@@ -1558,6 +1560,7 @@ pub(crate) async fn run_prompt_step(
     output: PromptStepOutput<'_>,
     timeout: Option<Duration>,
     timeout_step_name: &str,
+    usage_session_id: Option<&str>,
     register_skip_tool: bool,
     allow_commit: bool,
     delivered: Option<&str>,
@@ -1662,6 +1665,11 @@ pub(crate) async fn run_prompt_step(
             }
         };
         let run_future = executor.run(crate::executor::PromptRun {
+            usage: Some(crate::usage::UsageScope {
+                session_id: usage_session_id,
+                step: Some(timeout_step_name),
+                purpose: crate::usage::UsagePurpose::WorkflowStep,
+            }),
             prompt: &prompt,
             model: model_or_mode.as_ref(),
             subagent_model: step
@@ -2023,6 +2031,7 @@ mod tests {
         let mut tracker = FileTracker::with_root(tracker_root.clone());
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries,
             rate_limit_retries,
@@ -2066,6 +2075,7 @@ mod tests {
         };
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 3,
             rate_limit_retries: 0,
@@ -2174,6 +2184,7 @@ mod tests {
         let mut tracker = FileTracker::with_root(tracker_root.clone());
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &after_compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2259,6 +2270,7 @@ mod tests {
         };
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries,
             rate_limit_retries: 0,
@@ -2342,6 +2354,7 @@ mod tests {
             PromptStepOutput::Console(None),
             Some(Duration::from_secs(5)),
             "attempt",
+            None,
             false,
             false,
             None,
@@ -2362,6 +2375,7 @@ mod tests {
             PromptStepOutput::Console(None),
             Some(Duration::from_secs(5)),
             "attempt",
+            None,
             false,
             true,
             None,
@@ -2424,6 +2438,7 @@ mod tests {
             PromptStepOutput::Console(None),
             Some(Duration::from_secs(5)),
             "review",
+            None,
             false,
             true,
             None,
@@ -2460,6 +2475,7 @@ steps:
         let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2547,6 +2563,7 @@ steps:
         };
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2599,6 +2616,7 @@ steps:
 
         let ctx2 = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -3670,6 +3688,7 @@ steps:
 
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -4706,6 +4725,7 @@ steps:
         let call_count = std::sync::atomic::AtomicUsize::new(0);
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5634,6 +5654,7 @@ steps:
 
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5689,6 +5710,7 @@ steps:
 
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5767,6 +5789,7 @@ steps:
 
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5829,6 +5852,7 @@ steps:
 
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5887,6 +5911,7 @@ steps:
 
         let ctx = ExecutionContext {
             instructions: None,
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 2,
             rate_limit_retries: 0,

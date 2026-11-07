@@ -80,6 +80,7 @@ impl Fixture {
                 // An empty command is intentional: this must select the SDK, not a
                 // fake fallback command that could make missing support look correct.
                 Executor::new(Some("opencode"), &[]).run(PromptRun {
+                    usage: None,
                     prompt: "Do not contact a model: startup contract only",
                     model: Some(&cruise::config::ModelSpec::Single(
                         "contract/model".to_owned(),
