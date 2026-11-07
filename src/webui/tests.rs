@@ -1314,6 +1314,74 @@ mod event_partials {
             .collect()
     }
 
+    fn write_notification_config(harness: &super::Harness, json: &str) {
+        let dir = harness.dir.path().join("xdg-config/cruise");
+        std::fs::create_dir_all(&dir).unwrap_or_else(|error| panic!("config dir: {error}"));
+        std::fs::write(dir.join("config.json"), json)
+            .unwrap_or_else(|error| panic!("config: {error}"));
+    }
+
+    #[test]
+    fn desktop_disabled_suppresses_browser_notification_but_keeps_ask_panel() {
+        let harness = harness();
+        let session = create_session(&harness);
+        write_notification_config(&harness, r#"{"notifications":{"desktop":false}}"#);
+        let messages = for_event(
+            &harness.state,
+            &ApplicationEvent::AskUserRequired {
+                session_id: session.id.clone(),
+                request_id: "r1".to_string(),
+                question: "Which database?".to_string(),
+            },
+        );
+        let html = html_of(&messages);
+        assert!(
+            html.contains(&format!("id=\"ask-panel-{}\"", session.id)),
+            "{html}"
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, SseMessage::Notify { .. }))
+        );
+    }
+
+    #[test]
+    fn failed_desktop_override_does_not_suppress_plan_ready() {
+        let harness = harness();
+        let session = create_session(&harness);
+        write_notification_config(
+            &harness,
+            r#"{"notifications":{"events":{"failed":{"desktop":false}}}}"#,
+        );
+        let failed = for_event(
+            &harness.state,
+            &ApplicationEvent::PlanFailed {
+                session_id: session.id.clone(),
+                error: "planning failed".to_string(),
+            },
+        );
+        assert!(!messages_have_notify(&failed));
+        assert!(html_of(&failed).contains("planning failed"));
+        let ready = for_event(
+            &harness.state,
+            &ApplicationEvent::PlanFinished {
+                session_id: session.id.clone(),
+                phase: "Awaiting Approval".to_string(),
+            },
+        );
+        assert!(ready.iter().any(|message| matches!(
+            message,
+            SseMessage::Notify { body, .. } if body.contains("Plan ready")
+        )));
+    }
+
+    fn messages_have_notify(messages: &[SseMessage]) -> bool {
+        messages
+            .iter()
+            .any(|message| matches!(message, SseMessage::Notify { .. }))
+    }
+
     #[test]
     fn log_chunk_targets_the_run_all_log_and_escapes_markup() {
         let harness = harness();
