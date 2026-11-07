@@ -50,6 +50,15 @@ pub fn run(args: &ConfigArgs) -> Result<()> {
         if let Some(model) = config.plan_model.as_ref() {
             println!("plan_model = {}", serde_json::to_string(model)?);
         }
+        if !config.notifications.is_default() {
+            println!(
+                "notifications = {}",
+                serde_json::to_string(&config.notifications)?
+            );
+        }
+        if let Some((timestamp, error)) = crate::notification_webhook::last_error() {
+            println!("notification_webhook_error = {error} at {timestamp}");
+        }
     }
     Ok(())
 }
