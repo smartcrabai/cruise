@@ -4,6 +4,11 @@
 //!
 //! GitHub is faked by a `gh` executable at the front of `PATH`; no network is used.
 
+#[path = "support/workflow_packages.rs"]
+mod workflow_packages_fixture;
+
+use sha2::{Digest as _, Sha256};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -22,23 +27,6 @@ steps:
     workflow_call: ./shared.yaml
 ";
 
-const GH_STUB: &str = r#"#!/bin/sh
-D="$(dirname "$0")"
-args="$*"
-case "$args" in
-  *contents/*)
-    path="${args#*contents/}"; path="${path%%\?*}"
-    ref="${args##*ref=}"; ref="${ref%% *}"
-    sha="$(cat "$D/sha")"
-    [ "$ref" = "$sha" ] || { echo "contents requested with unpinned ref $ref" >&2; exit 1; }
-    f="$D/files/$sha/$path"
-    [ -f "$f" ] || { echo "not found" >&2; exit 1; }
-    base64 < "$f" | tr -d '\n'; echo ;;
-  *commits/*) cat "$D/sha" ;;
-  *) case "$args" in *default_branch*) echo main ;; *) echo "unexpected: $args" >&2; exit 1 ;; esac ;;
-esac
-"#;
-
 struct Fixture {
     root: TempDir,
 }
@@ -49,13 +37,7 @@ impl Fixture {
         for d in ["bin", "home", "config", "cwd"] {
             std::fs::create_dir_all(root.path().join(d)).unwrap_or_else(|e| panic!("{e}"));
         }
-        let gh = root.path().join("bin/gh");
-        std::fs::write(&gh, GH_STUB).unwrap_or_else(|e| panic!("{e}"));
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
-                .unwrap_or_else(|e| panic!("{e}"));
-        }
+        workflow_packages_fixture::install_gh(root.path());
         let fx = Self { root };
         fx.publish(SHA_1, ROOT_YAML, "PROMPT BODY ONE\n");
         fx
@@ -73,6 +55,25 @@ impl Fixture {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         std::fs::write(self.root.path().join("bin/sha"), sha).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    fn publish_bundle(&self, sha: &str, manifest: &str, prompt: &str) {
+        self.publish(sha, ROOT_YAML, prompt);
+        let base = self.root.path().join("bin/files").join(sha);
+        std::fs::create_dir_all(base.join("workflows"))
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+        std::fs::write(base.join("cruise-package.yaml"), manifest)
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+        std::fs::write(
+            base.join("workflows/review.yaml"),
+            "steps:\n  review:\n    prompt_file: ../prompts/p.md\n",
+        )
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+        std::fs::write(
+            base.join("workflows/implement.yaml"),
+            "steps:\n  implement:\n    workflow_call: ../shared.yaml\n",
+        )
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
     }
 
     fn cruise(&self, args: &[&str]) -> Output {
@@ -96,6 +97,7 @@ impl Fixture {
             .env("PATH", path)
             .env("HOME", self.root.path().join("home"))
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
+            .env("XDG_STATE_HOME", self.root.path().join("state"))
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
             .env("NO_COLOR", "1")
             .stdin(Stdio::null())
@@ -417,4 +419,232 @@ fn remove_refuses_unmanaged_yaml_and_unknown_names() {
     );
     assert!(fx.yaml("manual").exists());
     assert!(!fx.cruise(&["workflow", "remove", "ghost"]).status.success());
+}
+
+const BUNDLE_MANIFEST: &str = "description: Example bundle\nworkflows:\n  - name: review\n    path: workflows/review.yaml\n  - name: implement\n    path: workflows/implement.yaml\n";
+
+#[test]
+fn bundle_preview_keeps_commands_after_warning_line() {
+    let fx = Fixture::new();
+    fx.publish_bundle(SHA_1, BUNDLE_MANIFEST, "prompt\n");
+    std::fs::write(
+        fx.root.path().join(format!("bin/files/{SHA_1}/workflows/review.yaml")),
+        "steps:\n  first:\n    command: |\n      echo first\n      WARNING: embedded line\n  second:\n    command: echo after-warning-marker\n",
+    ).unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+    let out = fx.cruise(&["workflow", "add", "org/repo@main", "--name", "pkg"]);
+    let preview = text(&out);
+    assert!(!out.status.success());
+    assert!(preview.contains("WARNING: embedded line"), "{preview}");
+    assert!(preview.contains("after-warning-marker"), "{preview}");
+    assert!(!fx.workflows().join("pkg").exists());
+}
+
+#[test]
+fn single_package_update_and_remove_preserve_same_named_directory() {
+    let fx = Fixture::new();
+    fx.install("pkg");
+    let unrelated = fx.workflows().join("pkg");
+    std::fs::create_dir(&unrelated)
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+    std::fs::write(unrelated.join("keep"), "untouched")
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+    fx.publish(SHA_2, ROOT_YAML, "UPDATED PROMPT\n");
+    let update = fx.cruise(&["workflow", "update", "pkg", "--yes"]);
+    assert!(update.status.success(), "{}", text(&update));
+    assert!(read(&fx.yaml("pkg")).contains("UPDATED PROMPT"));
+    let remove = fx.cruise(&["workflow", "remove", "pkg"]);
+    assert!(remove.status.success(), "{}", text(&remove));
+    assert_eq!(read(&unrelated.join("keep")), "untouched");
+}
+
+#[test]
+fn bundle_install_preview_lock_and_self_contained_workflows() {
+    let fx = Fixture::new();
+    fx.publish_bundle(SHA_1, BUNDLE_MANIFEST, "BUNDLE PROMPT\n");
+    let declined = fx.cruise(&["workflow", "add", "org/repo@main", "--name", "pkg"]);
+    assert!(!declined.status.success(), "{}", text(&declined));
+    assert!(!fx.workflows().join("pkg").exists());
+    let out = fx.cruise(&["workflow", "add", "org/repo@main", "--name", "pkg", "--yes"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let preview = text(&out);
+    for expected in ["review", "implement", "WARNING", SHA_1] {
+        assert!(preview.contains(expected), "missing {expected}: {preview}");
+    }
+    for name in ["review", "implement"] {
+        assert!(
+            preview.contains(&format!("WARNING: workflow {name} is untrusted")),
+            "{preview}"
+        );
+    }
+    let dir = fx.workflows().join("pkg");
+    let review = read(&dir.join("review.yaml"));
+    assert!(review.contains("BUNDLE PROMPT"));
+    let implement = read(&dir.join("implement.yaml"));
+    assert!(implement.contains("inner prompt body"));
+    for yaml in [&review, &implement] {
+        for forbidden in [
+            "prompt_file",
+            "workflow_call",
+            "github.com",
+            "githubusercontent",
+        ] {
+            assert!(!yaml.contains(forbidden), "artifact retains {forbidden}");
+        }
+    }
+    assert!(!dir.join("shared.yaml").exists());
+    let lock: serde_json::Value =
+        serde_json::from_str(&read(&dir.join(".cruise-package-lock.json")))
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+    assert_eq!(lock["resolved_commit"], SHA_1);
+    assert_eq!(
+        lock["workflows"]["review"]["source_path"],
+        "workflows/review.yaml"
+    );
+    for name in ["review", "implement"] {
+        let bytes = std::fs::read(dir.join(format!("{name}.yaml")))
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+        let digest = Sha256::digest(&bytes)
+            .iter()
+            .fold(String::new(), |mut out, b| {
+                write!(out, "{b:02x}").unwrap_or_else(|e| panic!("digest formatting failed: {e}"));
+                out
+            });
+        assert_eq!(lock["workflows"][name]["sha256"], digest);
+    }
+    assert!(text(&fx.cruise(&["workflow", "list"])).contains("pkg"));
+}
+
+#[test]
+fn bundle_invalid_manifests_leave_no_install() {
+    for manifest in [
+        "workflows: []\n",
+        "workflows:\n  - name: review\n    path: ../outside.yaml\n",
+        "workflows:\n  - name: review\n    path: workflows/review.yaml\n  - name: REVIEW\n    path: workflows/implement.yaml\n",
+        "workflows:\n  - name: review\n    path: workflows/review.yaml\n  - name: other\n    path: workflows/review.yaml\n",
+        "path: workflows\nworkflows:\n  - name: review\n    path: workflows/review.yaml\n",
+    ] {
+        let fx = Fixture::new();
+        fx.publish_bundle(SHA_1, manifest, "prompt\n");
+        let out = fx.cruise(&["workflow", "add", "org/repo@main", "--name", "pkg", "--yes"]);
+        assert!(!out.status.success(), "accepted {manifest}: {}", text(&out));
+        assert!(!fx.workflows().join("pkg").exists());
+    }
+}
+
+#[test]
+fn bundle_update_replaces_dropped_and_new_members() {
+    let fx = Fixture::new();
+    fx.publish_bundle(SHA_1, BUNDLE_MANIFEST, "old prompt\n");
+    fx.install("pkg");
+    let dir = fx.workflows().join("pkg");
+    let manifest = "workflows:\n  - name: review\n    path: workflows/review.yaml\n  - name: deploy\n    path: workflows/deploy.yaml\n";
+    fx.publish_bundle(SHA_2, manifest, "new prompt\n");
+    std::fs::write(
+        fx.root
+            .path()
+            .join(format!("bin/files/{SHA_2}/workflows/deploy.yaml")),
+        "steps:\n  deploy:\n    prompt: new deployment\n",
+    )
+    .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+    let out = fx.cruise(&["workflow", "update", "pkg", "--yes"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!dir.join("implement.yaml").exists());
+    assert!(read(&dir.join("review.yaml")).contains("new prompt"));
+    assert!(read(&dir.join("deploy.yaml")).contains("new deployment"));
+    let lock: serde_json::Value =
+        serde_json::from_str(&read(&dir.join(".cruise-package-lock.json")))
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+    assert_eq!(lock["resolved_commit"], SHA_2);
+    let members = lock["workflows"]
+        .as_object()
+        .unwrap_or_else(|| panic!("missing workflows object"));
+    assert_eq!(members.len(), 2);
+    assert!(members.contains_key("review"));
+    assert!(members.contains_key("deploy"));
+    assert!(!members.contains_key("implement"));
+}
+
+#[test]
+fn bundle_missing_or_nonregular_listed_file_preserves_install_and_update() {
+    for mode in [None, Some("blob 120000"), Some("tree 040000")] {
+        let fx = Fixture::new();
+        fx.publish_bundle(SHA_1, BUNDLE_MANIFEST, "old prompt\n");
+        let upstream = fx
+            .root
+            .path()
+            .join(format!("bin/files/{SHA_1}/workflows/implement.yaml"));
+        if let Some(mode) = mode {
+            let mode_path = fx
+                .root
+                .path()
+                .join(format!("bin/modes/{SHA_1}/workflows/implement.yaml"));
+            std::fs::create_dir_all(
+                mode_path
+                    .parent()
+                    .unwrap_or_else(|| panic!("missing mode directory")),
+            )
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+            std::fs::write(mode_path, mode)
+                .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+        } else {
+            std::fs::remove_file(&upstream)
+                .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+        }
+        let out = fx.cruise(&["workflow", "add", "org/repo", "--name", "pkg", "--yes"]);
+        assert!(!out.status.success(), "mode {mode:?}: {}", text(&out));
+        assert!(!fx.workflows().join("pkg").exists());
+
+        fx.publish_bundle(SHA_2, BUNDLE_MANIFEST, "installed prompt\n");
+        fx.install("pkg");
+        let dir = fx.workflows().join("pkg");
+        let files = ["review.yaml", "implement.yaml", ".cruise-package-lock.json"];
+        let before: Vec<_> = files
+            .iter()
+            .map(|name| {
+                std::fs::read(dir.join(name))
+                    .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"))
+            })
+            .collect();
+        std::fs::write(fx.root.path().join("bin/sha"), SHA_1)
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+        let out = fx.cruise(&["workflow", "update", "pkg", "--yes"]);
+        assert!(!out.status.success(), "mode {mode:?}: {}", text(&out));
+        let after: Vec<_> = files
+            .iter()
+            .map(|name| {
+                std::fs::read(dir.join(name))
+                    .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"))
+            })
+            .collect();
+        assert_eq!(before, after);
+    }
+}
+
+#[test]
+fn bundle_update_is_atomic_and_remove_protects_unmanaged_files() {
+    let fx = Fixture::new();
+    fx.publish_bundle(SHA_1, BUNDLE_MANIFEST, "OLD PROMPT\n");
+    fx.install("pkg");
+    let dir = fx.workflows().join("pkg");
+    let review = dir.join("review.yaml");
+    let lock = dir.join(".cruise-package-lock.json");
+    let before = (read(&review), read(&lock));
+    fx.publish_bundle(SHA_2, "workflows: []\n", "NEW PROMPT\n");
+    let out = fx.cruise(&["workflow", "update", "pkg", "--yes"]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert_eq!(before, (read(&review), read(&lock)));
+    fx.publish_bundle(SHA_2, BUNDLE_MANIFEST, "NEW PROMPT\n");
+    let out = fx.cruise(&["workflow", "update", "pkg", "--yes"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(read(&review).contains("NEW PROMPT"));
+    assert!(read(&lock).contains(SHA_2));
+    std::fs::write(dir.join("notes.txt"), "keep")
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+    assert!(!fx.cruise(&["workflow", "remove", "pkg"]).status.success());
+    assert!(dir.join("notes.txt").exists());
+    std::fs::remove_file(dir.join("notes.txt"))
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+    let out = fx.cruise(&["workflow", "remove", "pkg"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!dir.exists());
 }

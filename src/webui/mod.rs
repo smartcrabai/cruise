@@ -328,8 +328,17 @@ pub(crate) fn router(state: WebState) -> Router {
         .route("/webui/sessions/{id}/fix", post(handlers::fix))
         .route("/webui/sessions/{id}/ask", post(handlers::ask))
         .route("/webui/sessions/{id}/run", post(handlers::run_session))
+        .route("/webui/sessions/{id}/create-pr", post(handlers::create_pr))
         .route("/webui/sessions/{id}/cancel", post(handlers::cancel))
         .route("/webui/sessions/{id}/reset", post(handlers::reset))
+        .route(
+            "/webui/sessions/{id}/stage-local",
+            post(handlers::stage_local),
+        )
+        .route(
+            "/webui/sessions/{id}/merge-local",
+            post(handlers::merge_locally),
+        )
         .route(
             "/webui/sessions/{id}/ask-answer",
             post(handlers::ask_answer),

@@ -281,6 +281,7 @@ async fn direct_opencode_executor_rejects_computer_use_without_starting_backend(
     let mcp_servers = cruise::config::McpServers::default();
     let result = Executor::new(Some("opencode"), &[])
         .run(PromptRun {
+            usage: None,
             prompt: "must not execute",
             model: None,
             subagent_model: None,

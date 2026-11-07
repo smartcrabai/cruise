@@ -89,6 +89,33 @@ pub fn copy_images_into_session(session_dir: &Path, sources: &[PathBuf]) -> Resu
     Ok(stored)
 }
 
+pub(crate) fn store_downloaded_images(
+    session_dir: &Path,
+    images: &[crate::issue_images::DownloadedImage],
+) -> Result<Vec<PathBuf>> {
+    if images.is_empty() {
+        return Ok(vec![]);
+    }
+    let dest_dir = attachments_dir(session_dir);
+    std::fs::create_dir_all(&dest_dir).map_err(|e| {
+        CruiseError::Other(format!(
+            "failed to create attachments dir {}: {}",
+            dest_dir.display(),
+            e
+        ))
+    })?;
+    let mut stored = Vec::with_capacity(images.len());
+    for (index, image) in images.iter().enumerate() {
+        let name = format!("image-{}.{}", index + 1, image.extension);
+        let dest = unique_dest_path(&dest_dir, Path::new(&name))?;
+        std::fs::write(&dest, &image.bytes).map_err(|e| {
+            CruiseError::Other(format!("failed to write {}: {}", dest.display(), e))
+        })?;
+        stored.push(dest);
+    }
+    Ok(stored)
+}
+
 /// Choose a non-colliding destination path inside `dest_dir` based on `src`'s
 /// filename. Adds `-2`, `-3`, … before the extension when needed. Errors out
 /// if the namespace `image[-2..999].ext` is exhausted instead of silently

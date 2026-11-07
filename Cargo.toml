@@ -174,8 +174,25 @@ test = false
 
 [[test]]
 harness = false
+name = "workflow_packages_bdd"
+path = "tests/workflow_packages_bdd.rs"
+# Unix subprocess fixture, run explicitly by check_workflow_packages_specs.sh.
+test = false
+
+[[test]]
+harness = false
 name = "checkpoint_bdd"
 path = "tests/checkpoint_bdd.rs"
+
+[[test]]
+harness = false
+name = "local_merge_bdd"
+path = "tests/local_merge_bdd.rs"
+
+[[test]]
+harness = false
+name = "auto_requeue_bdd"
+path = "tests/auto_requeue_bdd.rs"
 
 [[test]]
 harness = false
@@ -228,6 +245,11 @@ test = false
 name = "webui_daemon_bdd"
 path = "tests/webui_daemon_bdd.rs"
 harness = false
+
+[[test]]
+harness = false
+name = "pr_failed_bdd"
+path = "tests/pr_failed_bdd.rs"
 
 [profile.release]
 codegen-units = 1

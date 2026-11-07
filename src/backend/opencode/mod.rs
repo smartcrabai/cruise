@@ -502,6 +502,7 @@ async fn execute(
                     Ok(None) => {}
                     Err(error) => return Err(error.to_string()),
                 }
+                forward_usage(&mut turn, tx)?;
             }
         } else {
             reconcile(client, id, inbox, &mut turn, tx).await?;
@@ -586,12 +587,24 @@ async fn reconcile(
                     tx.send(StreamChunk::Delta(delta))
                         .map_err(|_| "OpenCode receiver closed")?;
                 }
+                forward_usage(turn, tx)?;
             }
         }
         Err("OpenCode durable log ended before synchronization".into())
     })
     .await
     .map_err(|_| "OpenCode durable reconciliation timed out".to_owned())?
+}
+
+fn forward_usage(
+    turn: &mut events::Turn,
+    tx: &SyncSender<StreamChunk>,
+) -> std::result::Result<(), String> {
+    for round in std::mem::take(&mut turn.usage_rounds) {
+        tx.send(StreamChunk::Usage(round))
+            .map_err(|_| "OpenCode receiver closed")?;
+    }
+    Ok(())
 }
 
 async fn settle_interrupted(
