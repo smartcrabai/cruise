@@ -1,9 +1,9 @@
 //! End-to-end lifecycle checks against the real CLI, with an isolated state directory.
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use cruise::session::{SessionManager, SessionPhase, SessionState};
 use cruise::session_config::SessionConfigRef;
@@ -48,7 +48,26 @@ impl Harness {
     }
 
     fn run(&self, args: &[&str]) -> std::io::Result<Output> {
-        self.command().args(args).output()
+        let mut stdout = tempfile::tempfile()?;
+        let mut stderr = tempfile::tempfile()?;
+        let mut child = self
+            .command()
+            .args(args)
+            .stdout(Stdio::from(stdout.try_clone()?))
+            .stderr(Stdio::from(stderr.try_clone()?))
+            .spawn()?;
+        let status = wait_for_child(&mut child, &format!("cruise {args:?}"))?;
+        stdout.seek(SeekFrom::Start(0))?;
+        stderr.seek(SeekFrom::Start(0))?;
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        stdout.read_to_end(&mut stdout_bytes)?;
+        stderr.read_to_end(&mut stderr_bytes)?;
+        Ok(Output {
+            status,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        })
     }
 
     fn success(&self, args: &[&str]) -> TestResult<Output> {
@@ -78,6 +97,44 @@ impl Harness {
     fn status(&self) -> TestResult<Value> {
         let output = self.success(&["webui", "status", "--json"])?;
         Ok(serde_json::from_slice(&output.stdout)?)
+    }
+}
+
+fn wait_for_child(
+    child: &mut Child,
+    description: &str,
+) -> std::io::Result<std::process::ExitStatus> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let timeout = std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("{description} did not exit within 30 seconds"),
+            );
+            if let Err(kill_error) = child.kill()
+                && child.try_wait()?.is_none()
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{timeout}; failed to kill child: {kill_error}"),
+                ));
+            }
+            let kill_deadline = Instant::now() + Duration::from_secs(5);
+            while child.try_wait()?.is_none() {
+                if Instant::now() >= kill_deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("{timeout}; child did not exit after being killed"),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return Err(timeout);
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -134,6 +191,38 @@ fn windows_detached_daemon_survives_start_command_exit() -> TestResult {
     assert_eq!(status["pid"], started["pid"]);
     let port = u16::try_from(started["port"].as_u64().ok_or("missing port")?)?;
     assert!(response(port)?.starts_with("HTTP/1.1 200"));
+    h.success(&["webui", "stop"])?;
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_start_closes_captured_output_while_daemon_remains_running() -> TestResult {
+    let h = Harness::new()?;
+    let mut command = h.command();
+    command.args(["webui", "start", "--port", "0"]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(command.output());
+    });
+    let output = match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(output) => output?,
+        Err(_) => {
+            let _ = h.run(&["webui", "stop", "--force"]);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "webui start did not close captured output within 30 seconds",
+            )
+            .into());
+        }
+    };
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("started in background"));
+    assert_eq!(h.status()?["running"], true);
     h.success(&["webui", "stop"])?;
     Ok(())
 }
@@ -274,7 +363,7 @@ fn stale_record_is_replaced_by_start() -> TestResult {
         .stdout(Stdio::null())
         .spawn()?;
     let dead_pid = exited.id();
-    exited.wait()?;
+    wait_for_child(&mut exited, "cruise --version")?;
     let dir = h
         .record_path()
         .parent()

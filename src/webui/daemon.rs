@@ -168,8 +168,29 @@ fn spawn_daemon(
     }
     #[cfg(windows)]
     {
+        use std::os::windows::io::AsRawHandle as _;
         use std::os::windows::process::CommandExt as _;
+        use windows_sys::Win32::Foundation::{
+            HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+        };
         use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+        // CreateProcess inherits every inheritable handle, not just the stdio
+        // handles configured above. In particular, the CLI's captured output
+        // pipes would otherwise remain open for the lifetime of the daemon.
+        // Command duplicates its configured log handles as inheritable itself.
+        for handle in [
+            std::io::stdin().as_raw_handle(),
+            std::io::stdout().as_raw_handle(),
+            std::io::stderr().as_raw_handle(),
+        ] {
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                // SAFETY: these are borrowed standard handles, and changing the
+                // inheritance flag does not close or invalidate them.
+                if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+            }
+        }
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     cmd.spawn()
@@ -478,6 +499,45 @@ pub(crate) fn restart_hint() {
 mod tests {
     use super::*;
 
+    #[cfg(any(target_os = "linux", windows))]
+    fn wait_for_test_child(
+        child: &mut Child,
+        description: &str,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                let timeout = std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{description} did not exit within 30 seconds"),
+                );
+                if let Err(kill_error) = child.kill()
+                    && child.try_wait()?.is_none()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("{timeout}; failed to kill child: {kill_error}"),
+                    ));
+                }
+                let kill_deadline = Instant::now() + Duration::from_secs(5);
+                while child.try_wait()?.is_none() {
+                    if Instant::now() >= kill_deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("{timeout}; child did not exit after being killed"),
+                        ));
+                    }
+                    thread::sleep(POLL);
+                }
+                return Err(timeout);
+            }
+            thread::sleep(POLL);
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn pidfd_signal_after_process_exit_does_not_target_replacement() -> Result<()> {
@@ -494,7 +554,7 @@ mod tests {
         target.process_identity = super::super::instance::precise_identity(target.pid);
         assert!(target.verify_identity()?);
         child.kill()?;
-        child.wait()?;
+        wait_for_test_child(&mut child, "pidfd test child")?;
         signal_handle(handle.as_raw_fd(), libc::SIGKILL)?;
         Ok(())
     }
@@ -597,7 +657,7 @@ mod tests {
         impl Drop for ChildGuard {
             fn drop(&mut self) {
                 let _ = self.0.kill();
-                let _ = self.0.wait();
+                let _ = wait_for_test_child(&mut self.0, "Windows test child cleanup");
             }
         }
         let mut child = ChildGuard(
@@ -621,7 +681,8 @@ mod tests {
         assert!(force_kill(&unverifiable).is_err());
         assert!(child.0.try_wait()?.is_none());
         force_kill(&target)?;
-        assert!(!child.0.wait()?.success());
+        let status = wait_for_test_child(&mut child.0, "Windows force-termination test child")?;
+        assert!(!status.success());
         Ok(())
     }
 
