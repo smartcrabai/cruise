@@ -1,5 +1,9 @@
 # Checkpoint contract verification
 
+For the planned workflow environment override precedence and snapshot model,
+see `CONFIG_ENV_OVERRIDE.md` and run `bash scripts/check_config_env_specs.sh`.
+This standalone Quint model is not a production conformance test.
+
 For local squash merge lifecycle safety, run `bash scripts/check_local_merge_specs.sh`.
 The dedicated `local-merge-specs` CI job runs the pinned Quint tests, simulation
 and bounded verification, all Alloy assertions and witnesses with receipt

@@ -2868,7 +2868,14 @@ impl TuiApp {
         if !self.sync_batch_parallelism(true) {
             return;
         }
-        let mut editor = Editor::new(&self.batch_parallelism.to_string());
+        let raw = match self.application.app_config() {
+            Ok(config) => config.run_all_parallelism,
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                return;
+            }
+        };
+        let mut editor = Editor::new(&raw.to_string());
         editor.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         self.modal = Some(Modal::RunAllParallelism {
             editor: Box::new(editor),
@@ -2914,10 +2921,11 @@ impl TuiApp {
             return;
         }
 
-        self.batch_parallelism = value;
-        self.batch_parallelism_error = None;
         self.last_error = None;
         self.modal = None;
+        if !self.sync_batch_parallelism(true) {
+            return;
+        }
         self.status = Some(format!(
             "Saved shared WebUI/TUI Run All parallelism: {value}; applies from the next scheduling point"
         ));
@@ -7964,6 +7972,25 @@ mod tests {
         assert_eq!(configured_parallelism(&fixture), 4);
         assert_eq!(fixture.app.batch_parallelism, 4);
         assert!(fixture.app.modal.is_none());
+    }
+
+    #[test]
+    fn parallelism_editor_saves_raw_and_displays_effective_override() {
+        let mut fixture = configured_app(2);
+        let _parallelism = EnvGuard::set("CRUISE_RUN_ALL_PARALLELISM", "4");
+        open_parallelism_editor(&mut fixture.app);
+        assert!(
+            matches!(&fixture.app.modal, Some(Modal::RunAllParallelism { editor, .. }) if editor.text() == "2")
+        );
+        assert_eq!(fixture.app.batch_parallelism, 4);
+        fixture.app.handle_key(key(KeyCode::Enter));
+        assert_eq!(configured_parallelism(&fixture), 2);
+        assert_eq!(fixture.app.batch_parallelism, 4);
+        open_parallelism_editor(&mut fixture.app);
+        replace_parallelism_input(&mut fixture.app, "3");
+        fixture.app.handle_key(key(KeyCode::Enter));
+        assert_eq!(configured_parallelism(&fixture), 3);
+        assert_eq!(fixture.app.batch_parallelism, 4);
     }
 
     #[test]

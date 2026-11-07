@@ -467,6 +467,7 @@ fn run_all_fixtures() -> Vec<(&'static str, Value)> {
             "settings-modal",
             value(&SettingsVm {
                 run_all_parallelism: 4,
+                effective_run_all_parallelism: 4,
                 run_all_auto_requeue_max_attempts: 2,
                 error: Some("Must be at least 1".to_string()),
             }),

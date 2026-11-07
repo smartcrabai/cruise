@@ -35,12 +35,11 @@ For `sdk: jcode`, `JCODE_OPENAI_SERVICE_TIER` controls the OpenAI service tier. 
 
 ## Process-level config overrides
 
-The CLI and WebUI apply these environment variables when loading a
-workflow config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`,
-`CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`,
-`CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are
-trimmed and blank values are ignored. Boolean values must be `true`, `false`,
-`1`, or `0`; any other value is an error naming the offending variable.
+Process-level configuration overrides apply after workflow and defaults layers. See the [CLI skill's full table](../../cruise-cli/SKILL.md#process-environment-overrides) for all supported variables and their keys. Names normally derive from `CRUISE_` plus the uppercase key path with dots and hyphens replaced by underscores; the language child names below are exceptions, not aliases.
+
+Values are trimmed and blanks ignored. Booleans accept only `true`, `false`, `1`, or `0`; integers use unsigned decimal digits. Models are literal single models unless they begin with `[` or `{`, in which case they are JSON in the field's normal shape. Model arrays enable fallback as in YAML. Composite fields require JSON, not YAML flow syntax; `null` clears an optional field and `[]` clears a list where supported. Parent `CRUISE_RETRY` and `CRUISE_LANGUAGES` apply before their child overrides. `CRUISE_SDK` clears `command`, `CRUISE_COMMAND` clears `sdk`, and setting both nonblank is an error. Invalid values identify the variable and undergo normal validation.
+
+CLI flags and saved session cleanup overrides win where applicable. `CRUISE_RUN_ALL_PARALLELISM` changes the effective app setting for TUI/WebUI run-all without persisting it, not CLI `run --all` (`--parallelism`). File-backed sessions reapply overrides when reloaded; snapshot sessions retain their creation-time configuration. Named or secret-bearing `env`, `mcp_servers`, and `pre_steps`, workflow structure (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), `create_pr`, and deprecated `pr_language` / `plan_language` are excluded. Process runtime switches are separate from configuration overrides.
 
 `CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding
 `languages.pr` and `languages.plan` settings. When these variables are unset,

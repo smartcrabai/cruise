@@ -388,10 +388,12 @@ pub(crate) async fn repos(State(state): State<WebState>) -> Response {
 pub(crate) async fn settings_modal(State(state): State<WebState>) -> Response {
     fragment(&state, "Settings", || {
         let config = state.application.app_config()?;
+        let effective = state.application.effective_app_config()?;
         state.templates.render(
             "settings-modal",
             &SettingsVm {
                 run_all_parallelism: config.run_all_parallelism,
+                effective_run_all_parallelism: effective.run_all_parallelism,
                 run_all_auto_requeue_max_attempts: config.run_all_auto_requeue_max_attempts,
                 error: None,
             },
@@ -1237,7 +1239,12 @@ pub(crate) async fn start_run_all(
         let config_application = application.clone();
         let provider = move || -> Result<usize> {
             requested.map_or_else(
-                || Ok(config_application.runtime_config()?.run_all_parallelism),
+                || {
+                    Ok(config_application
+                        .runtime_config()?
+                        .with_env_overrides()?
+                        .run_all_parallelism)
+                },
                 Ok,
             )
         };
@@ -1316,6 +1323,107 @@ pub(crate) async fn save_settings(
 #[cfg(test)]
 mod tests {
     use super::{Fields, encode_query};
+
+    #[tokio::test]
+    async fn settings_reads_effective_parallelism_but_saves_raw_configuration() {
+        use crate::app_config::AppConfig;
+        use crate::application::CruiseApplication;
+        use crate::session::SessionManager;
+        use crate::test_support::{EnvGuard, lock_process};
+        use crate::webui::{WebState, assets::Assets};
+        use axum::extract::{Form, State};
+
+        // Follow the WebUI router harness: isolate XDG configuration and hold the
+        // process-wide environment lock for the lifetime of the guards.
+        let _lock = lock_process();
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path().as_os_str());
+        let config_path =
+            AppConfig::config_path().unwrap_or_else(|error| panic!("config path: {error}"));
+        std::fs::create_dir_all(
+            config_path
+                .parent()
+                .unwrap_or_else(|| panic!("config parent")),
+        )
+        .unwrap_or_else(|error| panic!("config dir: {error}"));
+        std::fs::write(
+            &config_path,
+            r#"{"runAllParallelism":2,"model":"stored-model"}"#,
+        )
+        .unwrap_or_else(|error| panic!("write config: {error}"));
+        let _parallelism = EnvGuard::set("CRUISE_RUN_ALL_PARALLELISM", "4");
+        let _model = EnvGuard::set("CRUISE_MODEL", "environment-model");
+        let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/webui"));
+        let assets = Assets {
+            templates_dir: root.join("templates"),
+            static_dir: root.join("static"),
+            dev_mode: true,
+        };
+        let application = CruiseApplication::new(SessionManager::new(dir.path().to_path_buf()));
+        let state = WebState::new(application, &assets)
+            .unwrap_or_else(|error| panic!("web state: {error}"));
+
+        let response = super::settings_modal(State(state.clone())).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_else(|error| panic!("body: {error}"));
+        let body =
+            String::from_utf8(body.to_vec()).unwrap_or_else(|error| panic!("UTF-8: {error}"));
+        assert!(body.contains("value=\"2\""), "{body}");
+        assert!(body.contains("Effective Run All parallelism: 4"), "{body}");
+
+        let response = super::save_settings(
+            State(state.clone()),
+            Form(vec![
+                ("runAllParallelism".into(), "2".into()),
+                ("runAllAutoRequeueMaxAttempts".into(), "0".into()),
+            ]),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            state
+                .application
+                .app_config()
+                .unwrap_or_else(|error| panic!("{error}"))
+                .run_all_parallelism,
+            2
+        );
+        assert_eq!(
+            state
+                .application
+                .effective_app_config()
+                .unwrap_or_else(|error| panic!("{error}"))
+                .run_all_parallelism,
+            4
+        );
+
+        let response = super::save_settings(
+            State(state.clone()),
+            Form(vec![
+                ("runAllParallelism".into(), "3".into()),
+                ("runAllAutoRequeueMaxAttempts".into(), "0".into()),
+            ]),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let raw: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&config_path).unwrap_or_else(|error| panic!("read config: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("parse config: {error}"));
+        assert_eq!(raw["runAllParallelism"], 3);
+        assert_eq!(raw["model"], "stored-model");
+
+        let response = super::settings_modal(State(state)).await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_else(|error| panic!("body: {error}"));
+        let body =
+            String::from_utf8(body.to_vec()).unwrap_or_else(|error| panic!("UTF-8: {error}"));
+        assert!(body.contains("value=\"3\""), "{body}");
+        assert!(body.contains("Effective Run All parallelism: 4"), "{body}");
+    }
 
     #[test]
     fn new_session_request_maps_pr_number() {
