@@ -803,6 +803,7 @@ async fn run_single_loaded(
     let exec_result: Result<_> = async {
         let exec_result = {
             let ctx = crate::engine::ExecutionContext {
+                usage_session_id: Some(&session_id),
                 compiled: &compiled,
                 max_retries: effective_max_retries,
                 rate_limit_retries: args.rate_limit_retries,

@@ -35,6 +35,7 @@ use crate::workflow::{SkippableStepNode, list_skippable_after_pr_steps, list_ski
 )]
 fn cli_plan_ctx<'a>(
     config: &'a WorkflowConfig,
+    usage_session_id: Option<&'a str>,
     plan_path: &'a Path,
     working_dir: Option<&'a Path>,
     interactive: bool,
@@ -53,6 +54,7 @@ fn cli_plan_ctx<'a>(
         Arc::new(NoninteractiveAskHandler)
     };
     PlanPromptCtx {
+        usage_session_id,
         config,
         ask,
         plan_path,
@@ -467,6 +469,7 @@ async fn generate_created_plan(
         let on_session_id = cli_plan_session_callback(manager, session, config, &work_dir);
         let ctx = cli_plan_ctx(
             config,
+            Some(&session.id),
             &plan_path,
             Some(&work_dir),
             interactive,
@@ -821,6 +824,7 @@ async fn approve_with_title(
             plan_content,
             cancel_token,
             Some(&on_notice),
+            Some(&session.id),
         )
         .await
         {
@@ -846,6 +850,7 @@ async fn generate_title_via_sdk(
     plan_content: &str,
     cancel_token: Option<&CancellationToken>,
     on_notice: Option<&(dyn Fn(&str) + Send + Sync)>,
+    usage_session_id: Option<&str>,
 ) -> Result<String> {
     let title_store = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let tool = crate::sdk_tools::generate_title_tool(std::sync::Arc::clone(&title_store));
@@ -861,6 +866,11 @@ async fn generate_title_via_sdk(
     let env = std::collections::HashMap::new();
     executor
         .run(crate::executor::PromptRun {
+            usage: Some(crate::usage::UsageScope {
+                session_id: usage_session_id,
+                step: None,
+                purpose: crate::usage::UsagePurpose::PlanTitle,
+            }),
             prompt: &prompt,
             model,
             subagent_model: None,
@@ -1207,6 +1217,7 @@ async fn generate_plan_for_session(
     let on_session_id = cli_plan_session_callback(manager, session, &config, working_dir);
     let ctx = cli_plan_ctx(
         &config,
+        Some(&session.id),
         &plan_path,
         Some(working_dir),
         false,
@@ -1424,8 +1435,10 @@ async fn run_approve_loop(
     let cancel_token = CancellationToken::new();
     let on_notice = cli_notice_callback(manager, &session.id);
     let on_session_id = cli_plan_session_callback(manager, session, config, &working_dir);
+    let usage_session_id = session.id.clone();
     let ctx = cli_plan_ctx(
         config,
+        Some(&usage_session_id),
         plan_path,
         Some(working_dir.as_path()),
         !noninteractive,
@@ -1725,6 +1738,7 @@ pub async fn replan_session(
         // Fix-plan reuses the standard template regardless of grill.
         let ctx = cli_plan_ctx(
             &config,
+            Some(&session.id),
             &plan_path,
             Some(working_dir.as_path()),
             std::io::stdin().is_terminal(),
@@ -1904,6 +1918,7 @@ pub async fn regenerate_plan_for_session(
         let on_session_id = cli_plan_session_callback(manager, session, &config, &work_dir);
         let ctx = cli_plan_ctx(
             &config,
+            Some(&session.id),
             &plan_path,
             Some(&work_dir),
             std::io::stdin().is_terminal(),
@@ -2005,7 +2020,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         )?;
         let control_title = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            generate_title_via_sdk(&control, "task", "# Plan", None, None),
+            generate_title_via_sdk(&control, "task", "# Plan", None, None, None),
         )
         .await??;
         assert_eq!(control_title, "Mixed SDK title");
@@ -2014,7 +2029,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         )?;
         let title = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            generate_title_via_sdk(&config, "task", "# Plan", None, None),
+            generate_title_via_sdk(&config, "task", "# Plan", None, None, None),
         )
         .await??;
         assert_eq!(title, "Mixed SDK title");
@@ -2026,7 +2041,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             "sdk: jcode\nplan_model: []\nmodel:\n  - sdk: claude\n    model: mixed-title-model\n  - unused/planning\nsteps:\n  build:\n    command: echo hi\n",
         )?;
         assert_eq!(
-            generate_title_via_sdk(&empty_plan, "task", "# Plan", None, None).await?,
+            generate_title_via_sdk(&empty_plan, "task", "# Plan", None, None, None).await?,
             "Mixed SDK title"
         );
         let mut session = make_session("20261023000005", tmp.path());
@@ -2941,7 +2956,14 @@ after-pr:
         // When
         let timed = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            generate_title_via_sdk(&config, "my task", "# Plan\n- step", Some(&token), None),
+            generate_title_via_sdk(
+                &config,
+                "my task",
+                "# Plan\n- step",
+                Some(&token),
+                None,
+                None,
+            ),
         )
         .await;
 
@@ -2975,7 +2997,7 @@ after-pr:
 
         // cat echoes the prompt; the generate_title tool is never called.
         // With no token, the function should complete (with an Err: None from the store).
-        let result = generate_title_via_sdk(&config, "task", "# Plan", None, None).await;
+        let result = generate_title_via_sdk(&config, "task", "# Plan", None, None, None).await;
 
         // The title store remains empty because cat doesn't call the tool,
         // so the function returns Err with "title store returned None".

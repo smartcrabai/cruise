@@ -167,6 +167,8 @@ pub enum PlanProgress {
 /// `update_plan`), and execution settings. Built once per planning session and
 /// reused across the plan / fix / ask turns.
 pub struct PlanPromptCtx<'a> {
+    /// Cruise session associated with this planning prompt.
+    pub usage_session_id: Option<&'a str>,
     /// Workflow configuration (selects command vs SDK backend, model refs).
     pub config: &'a WorkflowConfig,
     /// UI handler backing the SDK `ask_user` tool (CLI or `WebUI`).
@@ -344,6 +346,11 @@ pub async fn run_plan_prompt_template(
     };
     let outcome = executor
         .run(PromptRun {
+            usage: Some(crate::usage::UsageScope {
+                session_id: ctx.usage_session_id,
+                step: None,
+                purpose: crate::usage::UsagePurpose::Planning,
+            }),
             prompt: &prompt,
             model,
             subagent_model: ctx.config.subagent_model.as_ref(),
@@ -789,6 +796,7 @@ mod tests {
 
     fn make_ctx_no_token<'a>(config: &'a WorkflowConfig, plan_path: &'a Path) -> PlanPromptCtx<'a> {
         PlanPromptCtx {
+            usage_session_id: None,
             config,
             ask: Arc::new(NoninteractiveAskHandler),
             plan_path,
@@ -828,6 +836,7 @@ mod tests {
         let token = CancellationToken::new();
 
         let ctx = PlanPromptCtx {
+            usage_session_id: None,
             config: &config,
             ask: Arc::new(NoninteractiveAskHandler),
             plan_path: &plan_path,
@@ -920,6 +929,7 @@ mod tests {
         token.cancel();
 
         let ctx = PlanPromptCtx {
+            usage_session_id: None,
             config: &config,
             ask: Arc::new(NoninteractiveAskHandler),
             plan_path: &plan_path,

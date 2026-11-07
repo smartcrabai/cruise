@@ -31,6 +31,8 @@ impl std::error::Error for LimitError {}
 /// One event from a running prompt.
 #[derive(Debug)]
 pub enum StreamChunk {
+    /// Provider-reported usage for one model round.
+    Usage(crate::usage::UsageRound),
     /// Streaming text delta from the assistant.
     Delta(String),
     /// Final completion with the full assistant text (may be empty if all text
@@ -130,6 +132,7 @@ pub(crate) struct Folded {
 /// Incrementally folds [`StreamChunk`]s into a [`ChunkOutcome`], surfacing text
 /// deltas through an `on_delta` sink as they arrive.
 pub(crate) struct ChunkReducer {
+    pub(crate) usage: crate::usage::UsageAccumulator,
     buf: String,
     session: Option<String>,
     retry_barrier: bool,
@@ -138,6 +141,7 @@ pub(crate) struct ChunkReducer {
 impl ChunkReducer {
     pub(crate) fn new() -> Self {
         Self {
+            usage: crate::usage::UsageAccumulator::default(),
             buf: String::new(),
             session: None,
             retry_barrier: false,
@@ -156,6 +160,10 @@ impl ChunkReducer {
         on_delta: &mut F,
     ) -> Option<ChunkOutcome> {
         match chunk {
+            StreamChunk::Usage(round) => {
+                self.usage.add(round);
+                None
+            }
             StreamChunk::RetryBarrier => {
                 self.retry_barrier = true;
                 None
@@ -209,6 +217,57 @@ impl ChunkReducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reducer_usage_chunk_is_not_terminal() {
+        let mut reducer = ChunkReducer::new();
+        let round = crate::usage::UsageRound {
+            model: None,
+            counts: crate::usage::UsageCounts {
+                input_tokens: Some(1),
+                ..Default::default()
+            },
+        };
+        assert!(
+            reducer
+                .step(StreamChunk::Usage(round), &mut |_| {})
+                .is_none()
+        );
+        assert_eq!(
+            reducer.step(StreamChunk::Done("x".into()), &mut |_| {}),
+            Some(ChunkOutcome::Done {
+                output: "x".into(),
+                session: None
+            })
+        );
+    }
+
+    #[test]
+    fn reducer_accumulates_usage_rounds_across_chunks() {
+        let mut reducer = ChunkReducer::new();
+        for (input, cache) in [(10, None), (5, Some(3))] {
+            let round = crate::usage::UsageRound {
+                model: None,
+                counts: crate::usage::UsageCounts {
+                    input_tokens: Some(input),
+                    cache_read_input_tokens: cache,
+                    ..Default::default()
+                },
+            };
+            assert!(
+                reducer
+                    .step(StreamChunk::Usage(round), &mut |_| {})
+                    .is_none()
+            );
+        }
+        match reducer.usage.into_field("not_reported") {
+            crate::usage::UsageField::Reported { totals, .. } => {
+                assert_eq!(totals.input_tokens, Some(15));
+                assert_eq!(totals.cache_read_input_tokens, None);
+            }
+            _ => panic!("expected reported usage"),
+        }
+    }
 
     // -- ChunkReducer ---------------------------------------------------------
 

@@ -45,6 +45,7 @@ impl std::fmt::Debug for ExecutionResult {
 /// function's signature short enough that Clippy is happy.
 pub struct ExecutionContext<'a> {
     pub compiled: &'a CompiledWorkflow,
+    pub usage_session_id: Option<&'a str>,
     pub max_retries: usize,
     pub rate_limit_retries: usize,
     pub on_step_start: &'a (dyn Fn(&str) -> Result<()> + Send + Sync),
@@ -1076,6 +1077,7 @@ async fn execute_step_kind_inner(
                 PromptStepOutput::Console(ctx.on_step_log),
                 timeout,
                 current_step,
+                ctx.usage_session_id,
                 has_nfc_condition,
                 allow_commit,
             ))
@@ -1398,6 +1400,7 @@ pub(crate) async fn run_prompt_step(
     output: PromptStepOutput<'_>,
     timeout: Option<Duration>,
     timeout_step_name: &str,
+    usage_session_id: Option<&str>,
     register_skip_tool: bool,
     allow_commit: bool,
 ) -> Result<Option<String>> {
@@ -1493,6 +1496,11 @@ pub(crate) async fn run_prompt_step(
             }
         };
         let run_future = executor.run(crate::executor::PromptRun {
+            usage: Some(crate::usage::UsageScope {
+                session_id: usage_session_id,
+                step: Some(timeout_step_name),
+                purpose: crate::usage::UsagePurpose::WorkflowStep,
+            }),
             prompt: &prompt,
             model: model_or_mode.as_ref(),
             subagent_model: step
@@ -1853,6 +1861,7 @@ mod tests {
         let mut vars = VariableStore::new(input.to_string());
         let mut tracker = FileTracker::with_root(tracker_root.clone());
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries,
             rate_limit_retries,
@@ -1895,6 +1904,7 @@ mod tests {
             Ok(())
         };
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 3,
             rate_limit_retries: 0,
@@ -2002,6 +2012,7 @@ mod tests {
         let tracker_root = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
         let mut tracker = FileTracker::with_root(tracker_root.clone());
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &after_compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2086,6 +2097,7 @@ mod tests {
                 .push((stream.to_string(), line.to_string()));
         };
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries,
             rate_limit_retries: 0,
@@ -2169,6 +2181,7 @@ mod tests {
             PromptStepOutput::Console(None),
             Some(Duration::from_secs(5)),
             "attempt",
+            None,
             false,
             false,
         )
@@ -2188,6 +2201,7 @@ mod tests {
             PromptStepOutput::Console(None),
             Some(Duration::from_secs(5)),
             "attempt",
+            None,
             false,
             true,
         )
@@ -2249,6 +2263,7 @@ mod tests {
             PromptStepOutput::Console(None),
             Some(Duration::from_secs(5)),
             "review",
+            None,
             false,
             true,
         )
@@ -2283,6 +2298,7 @@ steps:
         let mut vars = VariableStore::new(String::new());
         let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2369,6 +2385,7 @@ steps:
             Ok(())
         };
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2420,6 +2437,7 @@ steps:
         tracker2.restore_snapshots(runtime.file_snapshots);
 
         let ctx2 = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -3440,6 +3458,7 @@ steps:
         let called_ref = std::sync::Mutex::new(&mut called_steps);
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -4475,6 +4494,7 @@ steps:
         // on_node_start is called before the cancel check: cancel on the 2nd call (step2)
         let call_count = std::sync::atomic::AtomicUsize::new(0);
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5402,6 +5422,7 @@ steps:
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5456,6 +5477,7 @@ steps:
         let checkpoints_ref = std::sync::Mutex::new(&mut checkpoints);
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5533,6 +5555,7 @@ steps:
         let visited_ref = std::sync::Mutex::new(&mut visited);
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5594,6 +5617,7 @@ steps:
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5651,6 +5675,7 @@ steps:
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 2,
             rate_limit_retries: 0,

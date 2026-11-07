@@ -42,6 +42,7 @@ use crate::error::{CruiseError, Result};
 use crate::model_selection::{Sdk, SdkSessionId, resolve_candidates, resolve_entry};
 use crate::retry::{self, Failure, FallbackEngine, RetryAction, RetryPolicy, Unavailable};
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt_with_attempt_model};
+use crate::usage::{UsageAccumulator, UsageField, UsageScope, record_attempt};
 
 /// Callback invoked when an SDK backend reports its session identifier.
 pub type SessionIdCallback<'a> = dyn Fn(&SdkSessionId) -> Result<()> + Send + Sync + 'a;
@@ -55,6 +56,8 @@ type StreamSessionIdCallback<'a> = dyn Fn(&str) -> Result<()> + Send + Sync + 'a
 /// `tools` and `resume` are honored by the SDK backends and ignored in command
 /// mode.
 pub struct PromptRun<'a> {
+    /// Optional context for recording provider usage for each attempt.
+    pub usage: Option<UsageScope<'a>>,
     /// The fully-resolved prompt text to send.
     pub prompt: &'a str,
     /// Model name (command mode) or model reference (`sdk: jcode`,
@@ -396,7 +399,25 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
         req.working_dir,
         req.stream,
     )
-    .await?;
+    .await;
+    if let Some(scope) = req.usage {
+        let outcome = match &result {
+            Ok(_) => "success",
+            Err(CruiseError::Interrupted) => "interrupted",
+            Err(_) => "error",
+        };
+        record_attempt(
+            scope,
+            "command",
+            model,
+            1,
+            outcome,
+            UsageField::Unavailable {
+                reason: "command_backend",
+            },
+        );
+    }
+    let result = result?;
     Ok(PromptOutcome {
         result,
         session_id: None,
@@ -415,6 +436,7 @@ async fn stream_to_outcome(
     on_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
     on_session_id: Option<&StreamSessionIdCallback<'_>>,
     cancel_token: Option<&CancellationToken>,
+    usage: &mut UsageAccumulator,
 ) -> Result<Folded> {
     // Bridge the blocking std channel to an async one so we can stream deltas
     // through the borrowed `on_delta` callback without moving it onto the
@@ -441,17 +463,29 @@ async fn stream_to_outcome(
                 // The backend receives the same token. Keep the receiver alive
                 // until its worker finishes cleanup; dropping it or returning
                 // here would let detached CLI processes outlive this request.
-                while rx.recv().await.is_some() {}
+                while let Some(chunk) = rx.recv().await {
+                    if let StreamChunk::Usage(round) = chunk {
+                        usage.add(round);
+                    }
+                }
                 return Err(CruiseError::Interrupted);
             },
             maybe = rx.recv() => match maybe {
                 Some(chunk) => {
+                    if let StreamChunk::Usage(round) = chunk {
+                        usage.add(round);
+                        continue;
+                    }
                     if let StreamChunk::SessionReady { id, ready } = &chunk
                         && let Some(callback) = on_session_id
                         && let Err(error) = callback(id)
                     {
                         let _ = ready.send(false);
-                        while rx.recv().await.is_some() {}
+                        while let Some(chunk) = rx.recv().await {
+                            if let StreamChunk::Usage(round) = chunk {
+                                usage.add(round);
+                            }
+                        }
                         return Err(error);
                     }
                     if let StreamChunk::Session(id) = &chunk
@@ -470,6 +504,9 @@ async fn stream_to_outcome(
                     if let Some(out) = reducer.step(chunk, &mut sink) {
                         break out;
                     }
+                }
+                None if cancel_token.is_some_and(CancellationToken::is_cancelled) => {
+                    return Err(CruiseError::Interrupted);
                 }
                 None => break reducer.finish(),
             }
@@ -682,6 +719,7 @@ async fn run_sdk_with_fallback(
             };
             crate::telemetry::record_retry("fallback", reason, 1, Some(&from), Some(&to));
         }
+        let mut usage = UsageAccumulator::default();
         let completion = async {
             let rx_std = match start(sdk, model.as_deref()) {
                 Ok(rx_std) => rx_std,
@@ -704,9 +742,14 @@ async fn run_sdk_with_fallback(
                     })
                 })
             };
-            let folded =
-                stream_to_outcome(rx_std, on_delta, Some(&session_callback), req.cancel_token)
-                    .await?;
+            let folded = stream_to_outcome(
+                rx_std,
+                on_delta,
+                Some(&session_callback),
+                req.cancel_token,
+                &mut usage,
+            )
+            .await?;
             let streamed = folded.streamed;
             let retry_barrier = folded.retry_barrier;
             match folded.outcome {
@@ -742,6 +785,28 @@ async fn run_sdk_with_fallback(
         }
         .with_context(attempt.context())
         .await;
+
+        let outcome = match &completion {
+            Ok(AttemptCompletion::Done(_)) => Some("success"),
+            Ok(AttemptCompletion::Retry(AttemptFailure::Unusable { .. })) => None,
+            Ok(
+                AttemptCompletion::Retry(AttemptFailure::Limited { .. })
+                | AttemptCompletion::Barrier(AttemptFailure::Limited { .. }),
+            ) => Some("limited"),
+            Ok(_) => Some("error"),
+            Err(CruiseError::Interrupted) => Some("interrupted"),
+            Err(_) => Some("error"),
+        };
+        if let (Some(scope), Some(outcome)) = (req.usage, outcome) {
+            record_attempt(
+                scope,
+                label,
+                model.as_deref(),
+                u64::try_from(attempt_number).unwrap_or(u64::MAX),
+                outcome,
+                usage.into_field("not_reported"),
+            );
+        }
 
         let failed = match completion {
             Err(error) => {
@@ -1257,6 +1322,7 @@ mod tests {
         let env = std::collections::HashMap::new();
         let result = e
             .run(PromptRun {
+                usage: None,
                 prompt: "hi",
                 model: None,
                 subagent_model: None,
@@ -1341,8 +1407,222 @@ mod tests {
         assert_eq!(Executor::plan_model(None, None), None);
     }
 
+    #[cfg(unix)]
+    mod usage_recording_tests {
+        use super::*;
+        use crate::usage::{UsageCounts, UsagePurpose, UsageRound, UsageScope};
+
+        // A subprocess gives every case a private XDG state directory without
+        // changing process-global environment variables in parallel tests.
+        fn isolated(name: &str, run: impl FnOnce()) {
+            if std::env::var_os("CRUISE_EXECUTOR_USAGE_TEST_CHILD").is_some() {
+                run();
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+            let output = std::process::Command::new(
+                std::env::current_exe().unwrap_or_else(|error| panic!("{error}")),
+            )
+            .arg("--exact")
+            .arg(format!("executor::tests::usage_recording_tests::{name}"))
+            .arg("--nocapture")
+            .env("CRUISE_EXECUTOR_USAGE_TEST_CHILD", "1")
+            .env("CRUISE_USAGE_RECORDING", "1")
+            .env("XDG_STATE_HOME", dir.path())
+            .output()
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert!(
+                output.status.success(),
+                "child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "isolated test was not selected"
+            );
+        }
+
+        fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap_or_else(|error| panic!("{error}"))
+        }
+
+        fn scope() -> UsageScope<'static> {
+            UsageScope {
+                session_id: Some("test-session"),
+                step: Some("test-step"),
+                purpose: UsagePurpose::WorkflowStep,
+            }
+        }
+
+        fn usage() -> StreamChunk {
+            StreamChunk::Usage(UsageRound {
+                model: None,
+                counts: UsageCounts {
+                    input_tokens: Some(12),
+                    output_tokens: Some(3),
+                    ..Default::default()
+                },
+            })
+        }
+
+        fn records() -> Vec<serde_json::Value> {
+            let path = crate::usage::usage_path().unwrap_or_else(|error| panic!("{error}"));
+            match std::fs::read_to_string(path) {
+                Ok(text) => text
+                    .lines()
+                    .map(|line| {
+                        serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}"))
+                    })
+                    .collect(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => panic!("reading usage records: {error}"),
+            }
+        }
+
+        #[test]
+        fn sdk_attempts_record_one_line_per_provider_attempt() {
+            isolated("sdk_attempts_record_one_line_per_provider_attempt", || {
+                runtime().block_on(async {
+                    let env = HashMap::new();
+                    let mut req = base_req(&env);
+                    req.usage = Some(scope());
+                    req.max_retries = 1;
+                    let mut starts = 0;
+                    let result = run_with_fallback(&req, "claude", None, |_| {
+                        starts += 1;
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        tx.send(usage()).unwrap_or_else(|error| panic!("{error}"));
+                        if starts == 1 {
+                            tx.send(StreamChunk::Limit(crate::backend::stream::LimitError {
+                                provider: "test".into(),
+                                detail: String::new(),
+                            }))
+                            .unwrap_or_else(|error| panic!("{error}"));
+                        } else {
+                            tx.send(StreamChunk::Done("ok".into()))
+                                .unwrap_or_else(|error| panic!("{error}"));
+                        }
+                        Ok(rx)
+                    })
+                    .await;
+                    assert!(result.is_ok());
+                    let rows = records();
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0]["attempt"], 1);
+                    assert_eq!(rows[0]["outcome"], "limited");
+                    assert_eq!(rows[1]["attempt"], 2);
+                    assert_eq!(rows[1]["outcome"], "success");
+                    assert_eq!(rows[0]["usage"]["input_tokens"], 12);
+                    assert_eq!(rows[1]["usage"]["input_tokens"], 12);
+                })
+            });
+        }
+
+        #[test]
+        fn start_failure_writes_no_record() {
+            isolated("start_failure_writes_no_record", || {
+                runtime().block_on(async {
+                    let env = HashMap::new();
+                    let mut req = base_req(&env);
+                    req.usage = Some(scope());
+                    let result = run_with_fallback(&req, "claude", None, |_| {
+                        Err(CruiseError::Other("startup failed".into()))
+                    })
+                    .await;
+                    assert!(result.is_err());
+                    assert!(records().is_empty());
+                })
+            });
+        }
+
+        #[test]
+        fn interrupted_attempt_keeps_usage_collected_before_cancel() {
+            isolated(
+                "interrupted_attempt_keeps_usage_collected_before_cancel",
+                || {
+                    runtime().block_on(async {
+                        let env = HashMap::new();
+                        let cancel = CancellationToken::new();
+                        let mut req = base_req(&env);
+                        req.usage = Some(scope());
+                        req.cancel_token = Some(&cancel);
+                        let result = run_with_fallback(&req, "claude", None, |_| {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let cancel = cancel.clone();
+                            std::thread::spawn(move || {
+                                tx.send(usage()).unwrap_or_else(|error| panic!("{error}"));
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                cancel.cancel();
+                            });
+                            Ok(rx)
+                        })
+                        .await;
+                        assert!(matches!(result, Err(CruiseError::Interrupted)));
+                        let rows = records();
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0]["outcome"], "interrupted");
+                        assert_eq!(rows[0]["usage"]["status"], "reported");
+                        assert_eq!(rows[0]["usage"]["input_tokens"], 12);
+                    })
+                },
+            );
+        }
+
+        #[test]
+        fn usage_scope_none_writes_nothing() {
+            isolated("usage_scope_none_writes_nothing", || {
+                runtime().block_on(async {
+                    let env = HashMap::new();
+                    let req = base_req(&env);
+                    let result = run_with_fallback(&req, "claude", None, |_| {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        tx.send(usage()).unwrap_or_else(|error| panic!("{error}"));
+                        tx.send(StreamChunk::Done("ok".into()))
+                            .unwrap_or_else(|error| panic!("{error}"));
+                        Ok(rx)
+                    })
+                    .await;
+                    assert!(result.is_ok());
+                    assert!(records().is_empty());
+                })
+            });
+        }
+
+        #[test]
+        fn command_backend_writes_unavailable_record() {
+            isolated("command_backend_writes_unavailable_record", || {
+                runtime().block_on(async {
+                    let env = HashMap::new();
+                    for (script, expected) in [
+                        ("cat >/dev/null; printf ok", "success"),
+                        ("cat >/dev/null; exit 3", "error"),
+                    ] {
+                        let mut req = base_req(&env);
+                        req.usage = Some(scope());
+                        let result = sh_executor(script).run(req).await;
+                        assert_eq!(result.is_ok(), expected == "success");
+                    }
+                    let rows = records();
+                    assert_eq!(rows.len(), 2);
+                    for (row, expected) in rows.iter().zip(["success", "error"]) {
+                        assert_eq!(row["backend"], "command");
+                        assert_eq!(row["outcome"], expected);
+                        assert_eq!(row["usage"]["status"], "unavailable");
+                        assert_eq!(row["usage"]["reason"], "command_backend");
+                        assert!(row["usage"].get("input_tokens").is_none());
+                    }
+                })
+            });
+        }
+    }
+
     fn base_req(env: &HashMap<String, String>) -> PromptRun<'_> {
         PromptRun {
+            usage: None,
             prompt: "hi",
             model: None,
             subagent_model: None,
@@ -1543,6 +1823,7 @@ mod tests {
         );
         let dir = std::path::PathBuf::from("/tmp/cruise-claude-test");
         let req = PromptRun {
+            usage: None,
             prompt: "hi",
             model: fixture_model(Some("claude-opus-4-6")),
             subagent_model: None,
@@ -1862,9 +2143,15 @@ mod tests {
             assert!(checkpointed.load(std::sync::atomic::Ordering::Acquire));
             let _ = tx.send(StreamChunk::Done("answer".to_string()));
         });
-        let result = stream_to_outcome(rx, None, Some(&callback), None)
-            .await
-            .unwrap_or_else(|error| panic!("{error}"));
+        let result = stream_to_outcome(
+            rx,
+            None,
+            Some(&callback),
+            None,
+            &mut UsageAccumulator::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
         assert!(matches!(result.outcome, ChunkOutcome::Done { .. }));
         worker.join().unwrap_or_else(|_| panic!("worker panicked"));
     }
@@ -1884,7 +2171,14 @@ mod tests {
             assert_eq!(ack.recv_timeout(Duration::from_secs(2)), Ok(false));
             done.store(true, std::sync::atomic::Ordering::Release);
         });
-        let result = stream_to_outcome(rx, None, Some(&callback), None).await;
+        let result = stream_to_outcome(
+            rx,
+            None,
+            Some(&callback),
+            None,
+            &mut UsageAccumulator::default(),
+        )
+        .await;
         assert!(result.is_err());
         assert!(cleaned.load(std::sync::atomic::Ordering::Acquire));
         worker.join().unwrap_or_else(|_| panic!("worker panicked"));
@@ -2013,6 +2307,7 @@ mod tests {
             };
             let outcome = executor
                 .run(PromptRun {
+                    usage: None,
                     prompt: "assistant output",
                     model: fixture_model(model),
                     subagent_model: None,
@@ -3086,6 +3381,7 @@ mod tests {
         let env = HashMap::new();
         executor
             .run(PromptRun {
+                usage: None,
                 prompt: "go",
                 model: None,
                 subagent_model: None,

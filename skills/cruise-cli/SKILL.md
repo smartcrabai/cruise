@@ -68,6 +68,7 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | Dump session state for scripts | `cruise list --json` |
 | Automate, emit JSON, or run in CI | Existing CLI commands, especially `cruise list --json` and `cruise run` |
 | Delete sessions whose PR is merged/closed or that are terminal no-PR exec/current-branch remnants | `cruise clean` |
+| Summarize locally recorded token usage | `cruise usage [--by step,backend,model] [--session ID] [--format text\|json\|csv]` |
 | Run cruise on another machine | `cruise ssh <host> [--cwd <remote-path>] [-- <cruise-args>]` |
 | Serve the local browser UI (add `-o`/`--open` to launch the browser) | `cruise webui` |
 | Update Cruise itself | `cruise update` |
@@ -342,6 +343,8 @@ These process environment variables are read directly at runtime and are not wor
 
 `CRUISE_SKIP_AGENT_AUTH_CHECK=1` bypasses the file-only OAuth expiration preflight before session planning/execution (`cruise plan`, `cruise run`, `cruise exec`, and TUI/WebUI equivalents). Only the exact process-environment value `1` opts out, not `true` or whitespace-padded values. The check covers applicable Claude SDK and explicit jcode Claude/OpenAI OAuth candidates, including effective fallbacks and step overrides, not every installed provider. It stops only for expired access tokens with no refresh token or a known expired refresh token. Refreshable expired access tokens pass without warning. Command backends, dry-runs, OpenCode, API-key/unsupported providers, bare jcode models, and unreadable or indeterminate credential files are skipped. This does not validate server-side revocation or Keychain credentials; step-level `env` API keys are not considered. See [SDK authentication details](../cruise-config/references/sdk.md#startup-oauth-expiration-checks) for credential paths, Claude environment bypasses, and limitations.
 
+`CRUISE_USAGE_RECORDING=0` or `false` disables local usage recording. Unset, `1`, or `true` enables it; values are trimmed and case-insensitive. Unknown values enable recording with a warning. This is a runtime switch, not a workflow override.
+
 ## Runtime file layout (XDG)
 
 | Kind | Path (default) |
@@ -350,6 +353,7 @@ These process environment variables are read directly at runtime and are not wor
 | App settings (`config.json`) | `$XDG_CONFIG_HOME/cruise/` → `~/.config/cruise/` |
 | Sessions + worktrees + `--repo` clones | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` (sessions with no filesystem config path, including `-c __builtin__`, keep a `sessions/<id>/config.yaml` snapshot; the execution graph is persisted as `sessions/<id>/dag.json`) |
 | State (`history.json`, `new_session_draft.json`, per-installation `installations/<installation-id>/update-transaction.json`) | `$XDG_STATE_HOME/cruise/` → `~/.local/state/cruise/` |
+| Usage records | `$XDG_STATE_HOME/cruise/usage.ndjson` → `~/.local/state/cruise/usage.ndjson` |
 
 On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cruise` (config), `%LOCALAPPDATA%\cruise\data` (data) and `%LOCALAPPDATA%\cruise\state` (state); missing variables fall back to the `~/` defaults, and `~\` is expanded like `~/`.
 

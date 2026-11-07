@@ -708,6 +708,7 @@ async fn run_loop(
             PromptStepOutput::Console(ctx.on_step_log),
             Some(remaining),
             step_name,
+            ctx.usage_session_id,
             false,
             allow_commit,
         ))

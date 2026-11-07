@@ -35,6 +35,11 @@ pub(crate) async fn generate_yaml(
     loop {
         let outcome = executor
             .run(PromptRun {
+                usage: Some(crate::usage::UsageScope {
+                    session_id: None,
+                    step: None,
+                    purpose: crate::usage::UsagePurpose::WorkflowGenerate,
+                }),
                 prompt: &prompt,
                 model: model.as_ref(),
                 subagent_model: None,

@@ -61,6 +61,8 @@ pub enum Commands {
     List(ListArgs),
     /// Remove sessions with closed/merged PRs.
     Clean(CleanArgs),
+    /// Summarize locally recorded provider usage.
+    Usage(crate::usage_cmd::UsageArgs),
     /// Show or update application config (`~/.config/cruise/config.json` or `~/.config/cruise/config.yaml`).
     Config(ConfigArgs),
     /// Execute the workflow config directly in the current directory (no plan, no worktree, no PR).

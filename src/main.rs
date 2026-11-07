@@ -86,6 +86,8 @@ mod timeout;
 mod tool_policy;
 mod tui;
 mod update_cmd;
+mod usage;
+mod usage_cmd;
 mod variable;
 mod webui;
 mod workflow;
@@ -158,6 +160,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
+        Some(cli::Commands::Usage(args)) => usage_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),

@@ -68,6 +68,7 @@ mod contracts {
         max: usize,
     ) -> ExecutionContext<'a> {
         ExecutionContext {
+            usage_session_id: None,
             compiled,
             max_retries: max,
             rate_limit_retries: 0,
