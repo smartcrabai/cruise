@@ -75,6 +75,7 @@ mod platform;
 mod pr_merge;
 mod pr_review_fix;
 mod pr_template;
+mod prompt_render;
 pub mod provider_install;
 mod quality_gate;
 mod repo_clone;
@@ -102,7 +103,7 @@ mod tui;
 mod update_cmd;
 mod usage;
 mod usage_cmd;
-mod variable;
+pub mod variable;
 mod webui;
 mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]

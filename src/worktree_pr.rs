@@ -22,7 +22,6 @@ use crate::worktree;
 
 const PR_NUMBER_VAR: &str = "pr.number";
 pub(crate) const PR_URL_VAR: &str = "pr.url";
-const PR_LANGUAGE_VAR: &str = "pr.language";
 const COMMIT_COAUTHOR_NAME_ENV: &str = "CRUISE_COMMIT_COAUTHOR_NAME";
 const COMMIT_COAUTHOR_EMAIL_ENV: &str = "CRUISE_COMMIT_COAUTHOR_EMAIL";
 const CREATE_PR_PROMPT_TEMPLATE: &str = include_str!("../prompts/create-pr.md");
@@ -749,8 +748,7 @@ pub(crate) fn build_pr_prompt(
     vars: &mut VariableStore,
     compiled: &CompiledWorkflow,
 ) -> Result<String> {
-    vars.set_named_value(PR_LANGUAGE_VAR, compiled.pr_language.clone());
-    vars.resolve(CREATE_PR_PROMPT_TEMPLATE)
+    crate::prompt_render::render_pr_template(CREATE_PR_PROMPT_TEMPLATE, vars, &compiled.pr_language)
 }
 
 #[cfg(test)]
@@ -1320,7 +1318,8 @@ fn try_parse_heading_format(content: &str) -> Option<(String, String)> {
     None
 }
 
-pub(crate) fn parse_pr_metadata(output: &str) -> (String, String) {
+#[must_use]
+pub fn parse_pr_metadata(output: &str) -> (String, String) {
     let content = strip_code_block(output);
 
     // 1. Try parsing the whole content as frontmatter

@@ -47,6 +47,7 @@ pub mod planning;
 pub mod pr_merge;
 pub mod pr_review_fix;
 mod pr_template;
+pub mod prompt_render;
 pub mod provider_install;
 pub mod quality_gate;
 pub mod repo_clone;
@@ -68,6 +69,10 @@ pub mod usage;
 pub mod usage_cmd;
 pub mod variable;
 pub mod workflow;
+mod workflow_validate;
+pub mod workflow_generate {
+    pub use crate::workflow_validate::validate_generated_yaml;
+}
 pub mod workflow_call;
 pub mod workflow_categories;
 pub mod workflow_cmd;

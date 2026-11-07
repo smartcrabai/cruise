@@ -106,9 +106,8 @@ pub(crate) async fn generate_yaml(
     description: &str,
     destination_parent: &Path,
 ) -> Result<String> {
-    let base_prompt = PROMPT_TEMPLATE
-        .replace("{schema}", SCHEMA)
-        .replace("{description}", description);
+    let base_prompt =
+        crate::prompt_render::render_generate_prompt(PROMPT_TEMPLATE, SCHEMA, description);
 
     run_with_repairs(
         base_prompt.clone(),
@@ -141,14 +140,7 @@ pub(crate) async fn generate_yaml(
     })
 }
 
-/// Run doctor static checks with flags off and isolated defaults on candidate YAML.
-///
-/// # Errors
-///
-/// Returns the first parse, reference, validation, compile or graph error.
-pub(crate) fn validate_generated_yaml(yaml: &str, base_dir: &Path) -> Result<()> {
-    crate::workflow_doctor::check_generated_yaml(yaml, base_dir)
-}
+pub(crate) use crate::workflow_doctor::check_generated_yaml as validate_generated_yaml;
 
 /// Check that `name` is a plain file stem (ASCII alphanumerics, `-`, `_`).
 ///

@@ -1,0 +1,26 @@
+# Runtime references and workflow-call inputs are distinct namespaces.
+runtime:
+  - input
+  - plan
+  - plan.clarification
+  - plan.language
+  - pr.language
+  - pr.number
+  - pr.url
+  - prev.input
+  - prev.output
+  - prev.stderr
+  - prev.success
+generate:
+  - description
+  - schema
+workflow_make:
+  - schema
+  - reference
+  - transcript
+  - draft
+  - request
+  - repair
+workflow_inputs:
+  - inputs.fix_ci_error_prompt
+  - inputs.resolve_conflict_prompt

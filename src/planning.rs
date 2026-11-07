@@ -35,13 +35,13 @@ pub const VERIFY_RESULT_PROMPT_TEMPLATE: &str = include_str!("../prompts/verify-
 /// plan. SDK-only — it relies on the interactive `ask_user` tool.
 pub const PLAN_GRILL_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/plan-grill-sdk.md");
 
-const PLAN_LANGUAGE_VAR: &str = "plan.language";
+pub(crate) const PLAN_LANGUAGE_VAR: &str = "plan.language";
 
 /// Template variable holding the ambiguity-handling guidance for the current
 /// planning turn. Resolved from [`PlanPromptCtx::interactive`] on every
 /// plan-related turn so interactive and headless (CI) runs get different
 /// instructions.
-const PLAN_CLARIFICATION_VAR: &str = "plan.clarification";
+pub(crate) const PLAN_CLARIFICATION_VAR: &str = "plan.clarification";
 
 /// Guidance for interactive runs: the user can be reached via the `ask_user`
 /// tool, so ambiguous requirements should be clarified rather than guessed.
@@ -59,7 +59,7 @@ interpretation, state the assumption explicitly in the plan, and continue.**";
 
 /// Ambiguity-handling guidance for the current run's interactivity.
 #[must_use]
-fn clarification_guidance(interactive: bool) -> &'static str {
+pub(crate) fn clarification_guidance(interactive: bool) -> &'static str {
     if interactive {
         PLAN_CLARIFICATION_INTERACTIVE
     } else {
@@ -290,17 +290,6 @@ pub async fn run_plan_prompt_template(
     .await
 }
 
-fn prepare_plan_prompt_vars(ctx: &PlanPromptCtx<'_>, vars: &mut VariableStore) {
-    // The context owns the authoritative plan path, including for direct callers.
-    vars.set_named_file(crate::session::PLAN_VAR, ctx.plan_path.to_path_buf());
-    vars.set_named_value(PLAN_LANGUAGE_VAR, ctx.config.effective_plan_language());
-    // Refresh guidance each turn to reflect whether ask_user is available.
-    vars.set_named_value(
-        PLAN_CLARIFICATION_VAR,
-        clarification_guidance(ctx.interactive).to_string(),
-    );
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "verification retains the SDK conversation across its two read-only turns"
@@ -315,8 +304,13 @@ async fn run_plan_prompt_template_with_conversation(
     register_plan_tools: bool,
     retain_turn_conversation: bool,
 ) -> Result<PromptResult> {
-    prepare_plan_prompt_vars(ctx, vars);
-    let prompt = vars.resolve(template)?;
+    let prompt = crate::prompt_render::render_plan_template(
+        template,
+        vars,
+        ctx.config,
+        ctx.plan_path,
+        ctx.interactive,
+    )?;
     let executor = ctx.executor();
     ensure_agents_authenticated(ctx.config, AuthScope::Planning, ctx.working_dir)?;
     let model = crate::model_selection::planning_spec(
