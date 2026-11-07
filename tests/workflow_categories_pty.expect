@@ -1,0 +1,53 @@
+# Drive the actual CLI on a pseudo-terminal. Each expect consumes fresh output,
+# so seeing Dev a second time proves that Back returned to the root menu.
+set timeout 10
+cd $env(EXPECT_PROJECT)
+spawn -noecho $env(EXPECT_RUNTIME) draft {PTY test task}
+expect {
+    -re {Dev/} {}
+    timeout { puts stderr "root category did not appear"; exit 1 }
+    eof { puts stderr "CLI exited before root category"; exit 1 }
+}
+send -- "\r"
+expect {
+    -re {Backend/} {}
+    timeout { puts stderr "nested category did not appear"; exit 1 }
+    eof { puts stderr "CLI exited before nested category"; exit 1 }
+}
+send -- "\r"
+expect {
+    -re {refactor} {}
+    timeout { puts stderr "nested workflow did not appear"; exit 1 }
+    eof { puts stderr "CLI exited before workflow"; exit 1 }
+}
+expect {
+    -re {Back} {}
+    timeout { puts stderr "Back entry did not appear"; exit 1 }
+    eof { puts stderr "CLI exited before Back entry"; exit 1 }
+}
+# The sole workflow precedes Back in this leaf menu.
+send -- "\033\[B\r"
+expect {
+    -re {Backend/} {}
+    timeout { puts stderr "Back did not return to parent"; exit 1 }
+    eof { puts stderr "CLI exited while navigating Back"; exit 1 }
+}
+# Parent has one child category followed by Back.
+send -- "\033\[B\r"
+expect {
+    -re {Dev/} {}
+    timeout { puts stderr "Back did not return to root"; exit 1 }
+    eof { puts stderr "CLI exited before returning to root"; exit 1 }
+}
+send -- "\033"
+expect {
+    -re {config selection cancelled} {}
+    timeout { puts stderr "Escape did not cancel selection"; exit 1 }
+    eof { puts stderr "CLI exited without cancellation message"; exit 1 }
+}
+expect eof
+set result [wait]
+if {[lindex $result 3] == 0} {
+    puts stderr "cancelled CLI unexpectedly succeeded"
+    exit 1
+}

@@ -14,10 +14,28 @@ There is no state-expansion algorithm or node-budget fallback.
 | 4.1–4.2, 9.3: state, snapshots, atomic checkpoints and save failure | `graph::persistence`, `engine::execute_steps_with_graph`, CLI and application checkpoint callbacks | `graph_state::repeated_resume_never_replenishes_accepted_retry_budget`, `failed_checkpoint_prevents_the_next_side_effect`, existing prev-variable and parallel-result checkpoint tests |
 | 4.3: reload, resume and explicit restart | `ExecutionGraph::restore`, `prepare_resume`, engine reload, `SessionState::reset_to_planned`, session settings, session save archival | repeated-resume test includes a model reload and lowered/raised ceilings, group snapshot resume test, `explicit_restart_archives_even_a_corrupt_checkpoint` |
 | 4.4: legacy and invalid files | separate `LegacyGraph` decoder, version checks, non-destructive `application::session_dag` | `checkpoint_outvotes_stale_session_position_and_preserves_invalid_files`, CLI missing-checkpoint rejection |
-| 5, 9.4: conservative normal-exit analysis | iterative reachability and Kosaraju in `graph::validation` | static/dynamic/user skips, actual entry, unreachable cycles, disabled file-change branches, optional dangerous branches, large SCC tests |
+| 5, 9.4: conservative normal-exit analysis | shared live-edge filtering and `analyze_workflow` in `graph::validation` | static/dynamic/user skips, actual entry, unreachable steps and cycles, disabled file-change branches, optional dangerous branches, main and after-pr analysis, large SCC tests |
 | 5.3, 6.2: real entry points | pre-workspace validation in run, exec, shared application setup, reload and after-pr | public CLI normal/dry-run tests, after-pr rejection before main side effects, existing application and after-pr tests |
 | 6.1, 6.3: display and phase boundaries | WebUI DTO, Graph panel, TUI, browser fixture, separate after-pr graph | DTO serialization test, WebUI regression tests, headless real-Mermaid rendering of a back edge, self-loop, terminal edge and traversal labels |
 | 7, 9.2: retained contracts | existing config/group budget resolution, workflow expansion, parallel parent execution, backend APIs | existing config, engine, parallel, CLI and shared-application regression suites |
+
+## Doctor static analysis
+
+`cruise workflow doctor` analyzes the compiled main and after-pr graphs without
+executing steps. `analyze_workflow` shares the runtime validation live-edge
+filter, including skip and group rules and exclusion of the
+`IfNoFileChangesFail` edge. A step is unreachable when it cannot be reached
+from the phase entry through those live edges under the selected flags. Flags
+are off by default; `-f` selects a different set. Because flag gates can make
+unreachable steps intentional, `unreachable_step` is a doctor-only warning.
+
+The existing normal-exit semantics remain in force: a reachable cycle with no
+normal exit produces `no_normal_exit` when the entry cannot reach a normal exit.
+When the entry can exit but another reachable cycle cannot, doctor reports
+`cycle_may_not_exit` as a warning. Runtime validation keeps its existing error
+and warning behavior and does not print unreachable-step diagnostics. Doctor
+also reports reference, configuration, routing and package diagnostics, and
+`--strict` makes warnings fail the command.
 
 ## Test corrections and their higher-authority grounds
 

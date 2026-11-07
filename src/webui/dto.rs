@@ -31,6 +31,7 @@ pub struct SessionDto {
     pub id: String,
     pub phase: String,
     pub phase_error: Option<String>,
+    pub auto_requeue_count: u32,
     pub config_source: String,
     pub config_path: Option<String>,
     pub base_dir: String,
@@ -43,6 +44,9 @@ pub struct SessionDto {
     pub worktree_branch: Option<String>,
     pub workspace_mode: WorkspaceMode,
     pub pr_url: Option<String>,
+    pub can_merge_locally: bool,
+    pub can_stage_locally: bool,
+    pub pr_target: Option<crate::pr_review_fix::PrTarget>,
     pub updated_at: Option<String>,
     pub awaiting_input: bool,
     pub pending_ask_question: Option<String>,
@@ -67,8 +71,11 @@ pub(crate) fn session_dto(
     resolve_current_step: bool,
 ) -> SessionDto {
     let plan_available = session_plan_available(&state);
+    let can_merge_locally = crate::local_merge::can_merge_locally(&state);
+    let can_stage_locally = crate::local_merge::can_stage_locally(&state);
     let (phase, phase_error) = match &state.phase {
         SessionPhase::Failed(message) => ("Failed".to_string(), Some(message.clone())),
+        SessionPhase::PrFailed(message) => ("PR Failed".to_string(), Some(message.clone())),
         phase => (phase.label().to_string(), None),
     };
     let config_path = state.config.selection_value();
@@ -92,6 +99,7 @@ pub(crate) fn session_dto(
         id: state.id,
         phase,
         phase_error,
+        auto_requeue_count: state.auto_requeue_count,
         config_source,
         config_path,
         base_dir: state.base_dir.to_string_lossy().into_owned(),
@@ -104,6 +112,9 @@ pub(crate) fn session_dto(
         worktree_branch: state.worktree_branch,
         workspace_mode: state.workspace_mode,
         pr_url: state.pr_url,
+        can_merge_locally,
+        can_stage_locally,
+        pr_target: state.pr_target,
         updated_at: state.updated_at,
         awaiting_input: state.awaiting_input,
         pending_ask_question: state.pending_ask_question,
@@ -155,6 +166,7 @@ pub(crate) fn transition_reason(
         TransitionReason::IfNoFileChangesFail => ("ifNoFileChangesFail".to_string(), None),
         TransitionReason::IfFailGoto { target } => ("ifFail".to_string(), Some(target.clone())),
         TransitionReason::IfFailRetry => ("ifFailRetry".to_string(), None),
+        TransitionReason::QualityGateRetry => ("qualityGateRetry".to_string(), None),
         TransitionReason::OptionChoice { selector } => {
             ("optionChoice".to_string(), Some(selector.clone()))
         }
@@ -338,6 +350,73 @@ pub struct ConfigEntryDto {
     pub name: String,
     pub description: Option<String>,
     pub source: Option<ConfigEntrySource>,
+}
+
+pub(crate) fn picker_candidate(
+    entry: &ConfigEntryDto,
+    base_dir: &str,
+) -> crate::workflow_categories::PickerCandidate {
+    let is_builtin =
+        entry.source == Some(ConfigEntrySource::Builtin) || entry.path == BUILTIN_CONFIG_PATH;
+    let key = if entry.path == BUILTIN_CONFIG_PATH {
+        crate::builtin_workflows::DEFAULT_BUILTIN_NAME.to_string()
+    } else if is_builtin {
+        entry
+            .path
+            .strip_prefix(crate::resolver::BUILTIN_SELECTOR_PREFIX)
+            .unwrap_or(&entry.name)
+            .to_string()
+    } else {
+        Path::new(&entry.path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&entry.name)
+            .to_string()
+    };
+    let prefix = format!("{}/", base_dir.trim_end_matches('/'));
+    let label = entry
+        .path
+        .strip_prefix(&prefix)
+        .unwrap_or(&entry.name)
+        .to_string();
+    crate::workflow_categories::PickerCandidate {
+        value: entry.path.clone(),
+        label,
+        key,
+        is_builtin,
+        is_local: entry.source != Some(ConfigEntrySource::User) && !is_builtin,
+        is_installed_package: false,
+        description: entry.description.clone(),
+    }
+}
+
+pub(crate) fn picker_candidates(
+    entries: &[ConfigEntryDto],
+    base_dir: &str,
+) -> Vec<crate::workflow_categories::PickerCandidate> {
+    let default_description = crate::builtin_workflows::BUILTIN_WORKFLOWS
+        .iter()
+        .find(|workflow| workflow.name == crate::builtin_workflows::DEFAULT_BUILTIN_NAME)
+        .map(|workflow| workflow.description.to_string());
+    let default = picker_candidate(
+        &ConfigEntryDto {
+            path: BUILTIN_CONFIG_PATH.to_string(),
+            name: crate::builtin_workflows::DEFAULT_BUILTIN_NAME.to_string(),
+            description: default_description,
+            source: Some(ConfigEntrySource::Builtin),
+        },
+        base_dir,
+    );
+    let mut candidates: Vec<_> = entries
+        .iter()
+        .map(|entry| picker_candidate(entry, base_dir))
+        .collect();
+    let builtin_start = candidates
+        .iter()
+        .position(|candidate| candidate.is_builtin)
+        .unwrap_or(candidates.len());
+    candidates.insert(builtin_start, default);
+    candidates
 }
 
 pub(crate) fn config_entries(
@@ -601,6 +680,7 @@ mod tests {
             id: "session-1".to_string(),
             phase: "Planned".to_string(),
             phase_error: None,
+            auto_requeue_count: 0,
             config_source: crate::resolver::ConfigSource::Builtin.display_string(),
             config_path: Some(BUILTIN_CONFIG_PATH.to_string()),
             base_dir: "/tmp/project".to_string(),
@@ -613,6 +693,9 @@ mod tests {
             worktree_branch: None,
             workspace_mode: WorkspaceMode::Worktree,
             pr_url: None,
+            can_merge_locally: false,
+            can_stage_locally: false,
+            pr_target: None,
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,
