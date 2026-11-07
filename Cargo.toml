@@ -149,6 +149,7 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
 ] }
 
 [dev-dependencies]
@@ -222,6 +223,11 @@ name = "webui_responsive_bdd"
 path = "tests/webui_responsive_bdd.rs"
 # Requires the pinned browser package and Chromium, see tests/webui/README.md.
 test = false
+
+[[test]]
+name = "webui_daemon_bdd"
+path = "tests/webui_daemon_bdd.rs"
+harness = false
 
 [profile.release]
 codegen-units = 1

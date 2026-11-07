@@ -69,8 +69,18 @@ impl ShutdownSignals {
 
 /// Production signal future: the first signal starts graceful shutdown and
 /// arms a hard-deadline watchdog. A second signal quits immediately.
-pub(crate) async fn production_signal(mut signals: ShutdownSignals) {
-    signals.recv().await;
+pub(crate) async fn production_signal(
+    mut signals: ShutdownSignals,
+    control: tokio::sync::oneshot::Receiver<()>,
+) {
+    tokio::select! {
+        _ = signals.recv() => {},
+        result = control => {
+            if result.is_err() {
+                signals.recv().await;
+            }
+        }
+    }
     std::thread::spawn(|| {
         std::thread::sleep(SHUTDOWN_GRACE_PERIOD);
         eprintln!(
