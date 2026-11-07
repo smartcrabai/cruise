@@ -408,11 +408,16 @@ async fn run_async(config: ClaudeRunnerConfig, prompt: String, tx: &Sender<Strea
     await_stderr_drain(drain_handle).await;
     let tail = snapshot_stderr_tail(&stderr_tail);
 
+    report_terminal(tx, terminal, &tail);
+}
+
+/// Report the terminal verdict after collecting the child's stderr tail.
+fn report_terminal(tx: &Sender<StreamChunk>, terminal: Terminal, tail: &[String]) {
     match terminal {
         Terminal::ResultError(msg) | Terminal::StreamError(msg) => {
-            send_error_with_stderr(tx, &msg, &tail);
+            send_error_with_stderr(tx, &msg, tail);
         }
-        Terminal::NoResult => send_error_with_stderr(tx, NO_RESULT_MESSAGE, &tail),
+        Terminal::NoResult => send_error_with_stderr(tx, NO_RESULT_MESSAGE, tail),
         // A completed turn is never re-classified from stderr: the CLI logs
         // there while retrying internally, and demoting a finished turn to a
         // limit would discard its output and re-run the whole step.
