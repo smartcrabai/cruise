@@ -72,11 +72,11 @@ fn empty_closed_fences_and_unclosed_openers_are_distinguished() {
 
 #[test]
 fn extracts_fences_with_mixed_line_endings() {
-    let input = "é\r> ~~~quint\r> α\r\n> β\r> ~~~\r\n\r```alloy\runclosed\r";
+    let input = "\u{e9}\r> ~~~quint\r> \u{3b1}\r\n> \u{3b2}\r> ~~~\r\n\r```alloy\runclosed\r";
     let found = extract_blocks(input);
     assert_eq!(found.blocks.len(), 1);
     assert_eq!(found.blocks[0].language, Language::Quint);
-    assert_eq!(found.blocks[0].source, "α\nβ\n");
+    assert_eq!(found.blocks[0].source, "\u{3b1}\n\u{3b2}\n");
 }
 
 #[test]
