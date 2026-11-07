@@ -73,6 +73,8 @@ When no files change, the workflow proceeds to the next step normally (or follow
 
 > Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 
+Use `cruise workflow doctor <path>` to inspect routing and graph diagnostics without running the workflow. `unreachable_step` is a warning relative to the selected flags, all off by default; use `-f NAME` to check a different selection. `no_normal_exit` is an error when the start cannot reach a normal exit and reaches a cycle. `cycle_may_not_exit` warns when normal exit is possible but a reachable cycle cannot exit. `--strict` makes warnings cause a nonzero exit. Runtime preflight does not emit doctor-only unreachable-step warnings.
+
 ## `if.no-file-changes` — detect no-change
 
 Specifies behavior when a step completes without modifying any workspace files. The value is either `retry` or `failed`.

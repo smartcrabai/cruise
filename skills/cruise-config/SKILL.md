@@ -126,6 +126,8 @@ After writing or editing a config, verify each of the following:
 12. **Retry loops**: Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 13. **`quality_gates`**: if present, is the list non-empty with nonblank commands and valid optional timeouts? Use it only on prompt steps outside parallel and `after-pr`, not on call sites. Check the shared retry budget and exhaustion behavior in [references/flow-control.md](references/flow-control.md#quality_gates--prompt-step-verification).
 
+Run `cruise workflow doctor <path>` to check references, routing and graph diagnostics without executing the workflow. Its unreachable-step warning is relative to the selected flags, which default to off; use `-f NAME` to inspect another flag selection. A reachable exitless cycle is an error if the start cannot reach a normal exit, or a warning if another path can exit. `--strict` makes warnings fail the check. These static checks do not establish command safety or resolve all runtime-dependent variables.
+
 ## Generated configs
 
-`cruise workflow generate` drafts a workflow with an LLM and saves it only after the `exec` preflight passes. Preflight does not catch unknown top-level keys (silently ignored) and does not prove command safety. Review any generated YAML against the authoring checklist above before running it.
+`cruise workflow generate` drafts a workflow with an LLM and saves it only after doctor static checks pass with flags off and isolated defaults. These checks do not catch unknown top-level keys (silently ignored) and do not prove command safety. Review any generated YAML against the authoring checklist above before running it.

@@ -298,6 +298,8 @@ The CLI remains the canonical client for automation, JSON (`cruise list --json`)
 
 `add` and `update` always print the source, commit SHA, and every command the workflow can run, warn that it may run arbitrary commands, and ask `[y/N]`. Without a TTY, pass `--yes` (the preview is still printed). Installing never runs the workflow. `update <name>` re-resolves the recorded ref, `remove <name>` deletes the YAML and manifest, and `list` shows the built-in workflows followed by installed packages. `update` and `remove` refuse packages whose YAML was edited by hand. Installed YAMLs appear in the normal config selector.
 
+Use `cruise workflow doctor <name>` to check an installed package, including whether its YAML has been modified.
+
 ### CLI Reference
 
 ```
@@ -314,7 +316,7 @@ Commands:
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve the browser UI from this machine (pass `--open` to launch the default browser)
   update       Update a managed native installation; `--status` lists recorded transactions read-only
-  workflow     Manage workflows: list/eject built-ins, generate YAML, install GitHub packages (`add`, `remove`, `update`)
+  workflow     Manage workflows: list/eject built-ins, generate or check YAML (`doctor`), install GitHub packages (`add`, `remove`, `update`)
 
 Arguments:
   [INPUT]  Initial input (legacy: positional input without a subcommand uses `plan`)
@@ -336,10 +338,29 @@ cruise workflow generate <DESCRIPTION> --name <NAME> [--user] [--config <PATH>]
 
 Drafts a new workflow YAML from a description. The backend is chosen by the normal config resolution (`--config`, `CRUISE_CONFIG`, local files, user workflows, or the built-in `tdd` workflow). The file is saved to `./.cruise/<NAME>.yaml`, or to the user workflow directory (`~/.config/cruise/workflows/`) with `--user`. `NAME` may contain only letters, digits, `-` and `_`.
 
-- The reply must be raw YAML (no Markdown fence). Each candidate is parsed and run through the same preflight as `cruise exec` (reference resolution relative to the destination directory, config validation, retry budget, compile, graph checks). On failure the diagnostic and previous candidate are sent back for up to 3 repairs (4 backend turns in total). If it is still invalid, nothing is written.
+- The reply must be raw YAML (no Markdown fence). Each candidate receives doctor static checks with flags off and isolated defaults (reference resolution relative to the destination directory, config validation, retry budget, compile, graph checks). On failure the diagnostic and previous candidate are sent back for up to 3 repairs (4 backend turns in total). If it is still invalid, nothing is written.
 - The validated YAML is saved exactly as returned. An existing file with the same name is never overwritten, and the backend is not called in that case.
 - The generated workflow is not run and no session is created.
 - Validation does not prove that the commands are safe or that the workflow succeeds. The selected agent backend keeps its normal permissions, so it may modify the repository during generation. Review the YAML before running it.
+
+#### `cruise workflow doctor`
+
+```sh
+cruise workflow doctor [--json] [--strict] [-f NAME[=on|off]]... [TARGET]...
+cruise workflow doctor --all [--json] [--strict]
+```
+
+Doctor statically checks workflow YAML without executing it or creating a session, worktree, or project configuration. With no targets it checks `cruise.yaml`, `cruise.yml`, `.cruise.yaml`, `.cruise.yml`, and YAML files in `.cruise/`, excluding `.cruise/default.yaml`. `--all` additionally checks user workflows and all built-ins, and cannot be combined with targets or `-f`.
+
+Targets can be paths, `builtin:<name>`, `__builtin__` (the default built-in), or bare user workflow or built-in names. A bare name matching both a user workflow and a built-in is ambiguous: use an explicit path or `builtin:<name>`. Repeat targets to check several workflows. Repeat `-f` or use comma-separated assignments to select flags for every target, for example `-f review,merge=off`. A flag not declared by a target is an error for that target. Without `-f`, flags are off.
+
+Checks include local prompt and workflow references, configuration, routing targets, retry budgets, flag names, and graph reachability. Resolution uses the same defaults and environment overrides as execution. GitHub workflow references are resolved normally and may require network access. Doctor does not test backend, model, authentication, provider connectivity, command safety, or runtime-dependent template variables.
+
+An unreachable step is a warning under the selected flags, not necessarily a defect: flag-gated paths can legitimately be unreachable. A reachable cycle that cannot reach a normal exit is an error when no normal exit is reachable from the start. If normal exit is possible but another reachable cycle cannot exit, doctor warns. Modified installed packages and deprecated language settings also produce warnings.
+
+Human-readable reports go to stdout. `--json` emits a single object with `schema_version: 1`, `ok`, `exit_code`, `summary` (`checked`, `passed`, `failed`, `errors`, `warnings`) and ordered `targets`. Each target includes its target, kind (`project`, `user`, `builtin`, or `file`), package status, path, status (`ok`, `warning`, `error`, or `unresolved`), step counts, retry limit, declared flags, and ordered diagnostics. Diagnostics contain `level`, `code`, `stage`, nullable `step`, and `message`. Automations should use `code` and `step`, not message wording.
+
+Exit status is `0` when checks pass (warnings are allowed), `1` for errors or warnings with `--strict`, and `2` for unresolved targets or no targets. Status `2` takes precedence over `1`; argument usage errors also exit `2`.
 
 #### `cruise ssh`
 
