@@ -6,10 +6,12 @@ use std::process::{Command, Output, Stdio};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
-fn write_executable_script(path: &Path, script: &str) {
-    std::fs::write(path, script).expect("write agent");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-        .expect("make agent executable");
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn write_executable_script(path: &Path, script: &str) -> TestResult {
+    std::fs::write(path, script)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
 }
 
 struct Fixture {
@@ -19,11 +21,11 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
-        let root = TempDir::new().expect("tempdir");
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let root = TempDir::new()?;
         let repo = root.path().join("repo");
-        std::fs::create_dir(&repo).expect("create repo");
-        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir(&repo)?;
+        git(&repo, &["init", "-q", "-b", "main"])?;
         git(
             &repo,
             &[
@@ -41,7 +43,7 @@ impl Fixture {
                 "-m",
                 "fixture",
             ],
-        );
+        )?;
         let agent = root.path().join("agent.sh");
         write_executable_script(
             &agent,
@@ -55,16 +57,16 @@ else
   echo implement >> "$AGENT_LOG"
 fi
 "#,
-        );
+        )?;
         let config = root.path().join("config/cruise");
-        std::fs::create_dir_all(&config).expect("create config dir");
+        std::fs::create_dir_all(&config)?;
         let yaml = format!(
             "command: [{}]\n",
-            serde_json::to_string(agent.to_str().unwrap()).unwrap()
+            serde_json::to_string(agent.to_str().ok_or("agent path is not UTF-8")?)?
         );
-        std::fs::write(config.join("default.yaml"), yaml).expect("write defaults");
+        std::fs::write(config.join("default.yaml"), yaml)?;
         let log = root.path().join("agent.log");
-        Self { root, repo, log }
+        Ok(Self { root, repo, log })
     }
 
     fn command(&self) -> Command {
@@ -99,26 +101,24 @@ fi
             .collect()
     }
 
-    fn assert_no_sessions(&self) {
+    fn assert_no_sessions(&self) -> TestResult {
         let sessions = self.root.path().join("data/cruise/sessions");
         assert!(
-            !sessions.exists() || std::fs::read_dir(sessions).unwrap().next().is_none(),
+            !sessions.exists() || std::fs::read_dir(sessions)?.next().is_none(),
             "exec session was retained"
         );
+        Ok(())
     }
 }
 
-fn git(dir: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git");
+fn git(dir: &Path, args: &[&str]) -> TestResult {
+    let output = Command::new("git").args(args).current_dir(dir).output()?;
     assert!(
         output.status.success(),
         "git {args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
 }
 
 fn terminal(output: &Output) -> String {
@@ -130,64 +130,61 @@ fn terminal(output: &Output) -> String {
 }
 
 #[test]
-fn instant_preserves_task_whitespace_and_rejects_blank() {
-    let f = Fixture::new();
+fn instant_preserves_task_whitespace_and_rejects_blank() -> TestResult {
+    let f = Fixture::new()?;
     let output = f
         .command()
         .args(["--instant", "  task with spaces  "])
-        .output()
-        .unwrap();
+        .output()?;
     assert!(output.status.success(), "{}", terminal(&output));
-    let prompt = std::fs::read_to_string(f.log.with_extension("log.prompt")).unwrap();
+    let prompt = std::fs::read_to_string(f.log.with_extension("log.prompt"))?;
     assert!(prompt.contains("\n  task with spaces  \n"), "{prompt:?}");
-    let output = f.command().args(["--instant", "   "]).output().unwrap();
+    let output = f.command().args(["--instant", "   "]).output()?;
     assert!(!output.status.success(), "{}", terminal(&output));
     assert!(terminal(&output).contains("non-empty task"));
     assert_eq!(f.calls(), ["implement"]);
+    Ok(())
 }
 
 #[test]
-fn instant_exec_runs_once_and_removes_session() {
-    let f = Fixture::new();
-    let output = f
-        .command()
-        .args(["--instant", "add greeting"])
-        .output()
-        .unwrap();
+fn instant_exec_runs_once_and_removes_session() -> TestResult {
+    let f = Fixture::new()?;
+    let output = f.command().args(["--instant", "add greeting"]).output()?;
     assert!(output.status.success(), "{}", terminal(&output));
     assert_eq!(f.calls(), ["implement"]);
-    f.assert_no_sessions();
+    f.assert_no_sessions()?;
+    Ok(())
 }
 
 #[test]
-fn dry_run_does_not_spawn_or_create_session() {
-    let f = Fixture::new();
+fn dry_run_does_not_spawn_or_create_session() -> TestResult {
+    let f = Fixture::new()?;
     let output = f
         .command()
         .args(["--instant", "--dry-run", "task"])
-        .output()
-        .unwrap();
+        .output()?;
     assert!(output.status.success(), "{}", terminal(&output));
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("implement"),
         "{}",
         terminal(&output)
     );
-    assert!(f.calls().is_empty());
-    f.assert_no_sessions();
+    assert_eq!(f.calls(), Vec::<String>::new());
+    f.assert_no_sessions()?;
+    Ok(())
 }
 
 #[test]
-fn review_stops_on_no_changes_or_at_round_limit() {
+fn review_stops_on_no_changes_or_at_round_limit() -> TestResult {
     for (change, rounds, expected) in [("1", None, 2), ("0", None, 1), ("1", Some("1"), 1)] {
-        let f = Fixture::new();
+        let f = Fixture::new()?;
         let mut cmd = f.command();
         cmd.args(["--instant", "--review"])
             .env("CHANGE_REVIEW", change);
         if let Some(rounds) = rounds {
             cmd.args(["--review-rounds", rounds]);
         }
-        let output = cmd.arg("task").output().unwrap();
+        let output = cmd.arg("task").output()?;
         assert!(output.status.success(), "{}", terminal(&output));
         let calls = f.calls();
         assert_eq!(calls.first().map(String::as_str), Some("implement"));
@@ -198,32 +195,32 @@ fn review_stops_on_no_changes_or_at_round_limit() {
             terminal(&output)
         );
     }
+    Ok(())
 }
 
 #[test]
-fn review_detects_tracked_file_in_target() {
-    let f = Fixture::new();
-    std::fs::create_dir(f.repo.join("target")).unwrap();
-    std::fs::write(f.repo.join("target/tracked.txt"), "original").unwrap();
-    git(&f.repo, &["add", "-f", "target/tracked.txt"]);
+fn review_detects_tracked_file_in_target() -> TestResult {
+    let f = Fixture::new()?;
+    std::fs::create_dir(f.repo.join("target"))?;
+    std::fs::write(f.repo.join("target/tracked.txt"), "original")?;
+    git(&f.repo, &["add", "-f", "target/tracked.txt"])?;
     let output = f
         .command()
         .env("CHANGE_TRACKED", "1")
         .args(["--instant", "--review", "task"])
-        .output()
-        .unwrap();
+        .output()?;
     assert!(output.status.success(), "{}", terminal(&output));
     assert_eq!(f.calls(), ["implement", "review", "review"]);
+    Ok(())
 }
 
 #[test]
-fn failed_verification_fails_the_run() {
-    let f = Fixture::new();
+fn failed_verification_fails_the_run() -> TestResult {
+    let f = Fixture::new()?;
     let output = f
         .command()
         .args(["--instant", "--verify", "false", "task"])
-        .output()
-        .unwrap();
+        .output()?;
     assert!(!output.status.success(), "{}", terminal(&output));
     assert!(
         terminal(&output).contains("verify-1"),
@@ -231,75 +228,77 @@ fn failed_verification_fails_the_run() {
         terminal(&output)
     );
     assert_eq!(f.calls(), ["implement"]);
+    Ok(())
 }
 
 #[test]
-fn verify_commands_preserve_shell_text_and_run_in_order() {
-    let f = Fixture::new();
+fn verify_commands_preserve_shell_text_and_run_in_order() -> TestResult {
+    let f = Fixture::new()?;
     let output = f.command().args([
         "--instant",
         "--verify", "printf '%s\\n' \"a: b\" > verify-output.txt",
         "--verify", "test \"$(cat verify-output.txt)\" = 'a: b' && printf '%s\\n' second >> verify-output.txt",
         "task",
-    ]).output().unwrap();
+    ]).output()?;
     assert!(output.status.success(), "{}", terminal(&output));
     assert_eq!(
-        std::fs::read_to_string(f.repo.join("verify-output.txt")).unwrap(),
+        std::fs::read_to_string(f.repo.join("verify-output.txt"))?,
         "a: b\nsecond\n"
     );
+    Ok(())
 }
 
 #[test]
-fn instant_ignores_config_search_but_normal_exec_does_not() {
-    let f = Fixture::new();
+fn instant_ignores_config_search_but_normal_exec_does_not() -> TestResult {
+    let f = Fixture::new()?;
     let missing = f.root.path().join("missing.yaml");
     let output = f
         .command()
         .env("CRUISE_CONFIG", &missing)
         .args(["--instant", "task"])
-        .output()
-        .unwrap();
+        .output()?;
     assert!(output.status.success(), "{}", terminal(&output));
     let output = f
         .command()
         .env("CRUISE_CONFIG", &missing)
         .arg("task")
-        .output()
-        .unwrap();
+        .output()?;
     assert!(!output.status.success(), "{}", terminal(&output));
     assert_eq!(f.calls(), ["implement"]);
+    Ok(())
 }
 
 #[test]
-fn non_git_directory_fails_before_agent() {
-    let f = Fixture::new();
+fn non_git_directory_fails_before_agent() -> TestResult {
+    let f = Fixture::new()?;
     let dir = f.root.path().join("not-a-repo");
-    std::fs::create_dir(&dir).unwrap();
+    std::fs::create_dir(&dir)?;
     let output = f
         .command()
         .current_dir(dir)
         .args(["--instant", "task"])
-        .output()
-        .unwrap();
+        .output()?;
     assert!(!output.status.success(), "{}", terminal(&output));
-    assert!(f.calls().is_empty());
+    assert_eq!(f.calls(), Vec::<String>::new());
+    Ok(())
 }
 
 #[test]
-fn instant_rejects_config_and_flags() {
-    let f = Fixture::new();
+fn instant_rejects_config_and_flags() -> TestResult {
+    let f = Fixture::new()?;
     for args in [
         ["--instant", "-c", "x.yaml", "task"],
         ["--instant", "-f", "after_pr", "task"],
     ] {
-        let output = f.command().args(args).output().unwrap();
+        let output = f.command().args(args).output()?;
         assert_eq!(output.status.code(), Some(2), "{}", terminal(&output));
     }
+    Ok(())
 }
 
 #[test]
-fn review_budget_cannot_exceed_cli_max_retries() {
-    let f = Fixture::new();
+fn review_budget_cannot_exceed_cli_max_retries() -> TestResult {
+    let f = Fixture::new()?;
     let output = f
         .command()
         .args([
@@ -311,8 +310,8 @@ fn review_budget_cannot_exceed_cli_max_retries() {
             "3",
             "task",
         ])
-        .output()
-        .unwrap();
+        .output()?;
     assert!(!output.status.success(), "{}", terminal(&output));
-    assert!(f.calls().is_empty());
+    assert_eq!(f.calls(), Vec::<String>::new());
+    Ok(())
 }

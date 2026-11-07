@@ -3,7 +3,9 @@
 use std::process::{Command, Output, Stdio};
 use tempfile::TempDir;
 
-fn dry_run(root: &TempDir, args: &[&str], overrides: &[(&str, &str)]) -> Output {
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn dry_run(root: &TempDir, args: &[&str], overrides: &[(&str, &str)]) -> std::io::Result<Output> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("CRUISE_") {
@@ -23,7 +25,6 @@ fn dry_run(root: &TempDir, args: &[&str], overrides: &[(&str, &str)]) -> Output 
         .envs(overrides.iter().copied())
         .stdin(Stdio::null())
         .output()
-        .expect("start cruise")
 }
 
 fn text(output: &Output) -> String {
@@ -35,28 +36,32 @@ fn text(output: &Output) -> String {
 }
 
 #[test]
-fn defaults_prepend_command_step_to_instant() {
-    let root = TempDir::new().unwrap();
+fn defaults_prepend_command_step_to_instant() -> TestResult {
+    let root = TempDir::new()?;
     let dir = root.path().join("config/cruise");
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir)?;
     std::fs::write(
         dir.join("default.yaml"),
         "pre_steps:\n  setup:\n    command: echo setup\n",
-    )
-    .unwrap();
-    let result = dry_run(&root, &["task"], &[]);
+    )?;
+    let result = dry_run(&root, &["task"], &[])?;
     let output = text(&result);
     assert!(result.status.success(), "{output}");
-    let steps = output.split("steps:").last().unwrap();
+    let steps = output
+        .rsplit("steps:")
+        .next()
+        .ok_or("missing steps section")?;
     assert!(
-        steps.find("setup").unwrap() < steps.find("implement").unwrap(),
+        steps.find("setup").ok_or("missing setup")?
+            < steps.find("implement").ok_or("missing implement")?,
         "{output}"
     );
+    Ok(())
 }
 
 #[test]
-fn review_and_verify_steps_follow_declared_order() {
-    let root = TempDir::new().unwrap();
+fn review_and_verify_steps_follow_declared_order() -> TestResult {
+    let root = TempDir::new()?;
     let result = dry_run(
         &root,
         &[
@@ -68,10 +73,13 @@ fn review_and_verify_steps_follow_declared_order() {
             "task",
         ],
         &[],
-    );
+    )?;
     let output = text(&result);
     assert!(result.status.success(), "{output}");
-    let steps = output.split("steps:").last().expect("steps section");
+    let steps = output
+        .rsplit("steps:")
+        .next()
+        .ok_or("missing steps section")?;
     let positions: Vec<_> = ["implement", "review-pass", "verify-1", "verify-2"]
         .iter()
         .map(|name| {
@@ -89,36 +97,40 @@ fn review_and_verify_steps_follow_declared_order() {
         "{output}"
     );
     assert!(output.contains("max_retries: 2"), "{output}");
+    Ok(())
 }
 
 #[test]
-fn review_rounds_above_default_budget_are_valid() {
-    let root = TempDir::new().unwrap();
-    let result = dry_run(&root, &["--review", "--review-rounds", "5", "task"], &[]);
+fn review_rounds_above_default_budget_are_valid() -> TestResult {
+    let root = TempDir::new()?;
+    let result = dry_run(&root, &["--review", "--review-rounds", "5", "task"], &[])?;
     let output = text(&result);
     assert!(result.status.success(), "{output}");
     assert!(output.contains("max_retries: 5"), "{output}");
+    Ok(())
 }
 
 #[test]
-fn environment_model_overrides_instant_model() {
-    let root = TempDir::new().unwrap();
+fn environment_model_overrides_instant_model() -> TestResult {
+    let root = TempDir::new()?;
     let result = dry_run(
         &root,
         &["--model", "requested/model", "task"],
         &[("CRUISE_MODEL", "environment/model")],
-    );
+    )?;
     let output = text(&result);
     assert!(result.status.success(), "{output}");
     assert!(output.contains("environment/model"), "{output}");
     assert!(!output.contains("requested/model"), "{output}");
+    Ok(())
 }
 
 #[test]
-fn task_with_variable_like_text_is_not_interpreted_as_workflow_yaml() {
-    let root = TempDir::new().unwrap();
-    let result = dry_run(&root, &["fix {weird} a: b"], &[]);
+fn task_with_variable_like_text_is_not_interpreted_as_workflow_yaml() -> TestResult {
+    let root = TempDir::new()?;
+    let result = dry_run(&root, &["fix {weird} a: b"], &[])?;
     let output = text(&result);
     assert!(result.status.success(), "{output}");
     assert!(output.contains("implement"), "{output}");
+    Ok(())
 }

@@ -139,7 +139,7 @@ mod tests {
     use crate::resolver::{ConfigSource, load_config_from_source};
 
     #[test]
-    fn generated_inline_workflow_contract() {
+    fn generated_inline_workflow_contract() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut args = ExecArgs {
             input: Some("task".into()),
             instant: true,
@@ -154,12 +154,12 @@ mod tests {
             dry_run: false,
             flags: vec![],
         };
-        let yaml = build_yaml(&args).unwrap();
-        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = build_yaml(&args)?;
+        let value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
         for key in ["sdk", "model", "max_retries", "groups"] {
             assert!(value.get(key).is_none(), "{yaml}");
         }
-        let config = load_config_from_source(&yaml, &ConfigSource::Inline).unwrap();
+        let config = load_config_from_source(&yaml, &ConfigSource::Inline)?;
         assert_eq!(
             config.steps.keys().map(String::as_str).collect::<Vec<_>>(),
             ["implement"]
@@ -176,15 +176,15 @@ mod tests {
         args.review = true;
         args.review_rounds = Some(5);
         args.verify = vec!["echo one".into(), "echo two".into()];
-        let yaml = build_yaml(&args).unwrap();
-        let config = load_config_from_source(&yaml, &ConfigSource::Inline).unwrap();
+        let yaml = build_yaml(&args)?;
+        let config = load_config_from_source(&yaml, &ConfigSource::Inline)?;
         assert_eq!(
             config.steps.keys().map(String::as_str).collect::<Vec<_>>(),
             ["implement", "review-pass", "verify-1", "verify-2"]
         );
         assert_eq!(config.max_retries, Some(5));
         assert_eq!(config.groups["review-loop"].max_retries, Some(5));
-        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
         assert_eq!(
             value["steps"]["verify-1"]["command"].as_str(),
             Some("echo one")
@@ -193,5 +193,6 @@ mod tests {
             value["steps"]["verify-2"]["command"].as_str(),
             Some("echo two")
         );
+        Ok(())
     }
 }

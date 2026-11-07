@@ -144,27 +144,26 @@ fn take_current_snapshot(root: impl AsRef<Path>) -> Result<Snapshot> {
         .arg(root.as_ref())
         .args(["ls-files", "--cached", "-z", "--", "."])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            for name in output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|name| !name.is_empty())
-            {
-                #[cfg(unix)]
-                let name = {
-                    use std::os::unix::ffi::OsStrExt;
-                    std::ffi::OsStr::from_bytes(name).to_os_string()
-                };
-                #[cfg(not(unix))]
-                let name = std::ffi::OsString::from(String::from_utf8_lossy(name).into_owned());
-                let path = root.as_ref().join(name);
-                if path.components().any(|c| c.as_os_str() == ".git") {
-                    continue;
-                }
-                if path.is_file() && !snapshot.contains_key(&path) {
-                    snapshot.insert(path.clone(), hash_file(&path)?);
-                }
+        for name in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+        {
+            #[cfg(unix)]
+            let name = {
+                use std::os::unix::ffi::OsStrExt;
+                std::ffi::OsStr::from_bytes(name).to_os_string()
+            };
+            #[cfg(not(unix))]
+            let name = std::ffi::OsString::from(String::from_utf8_lossy(name).into_owned());
+            let path = root.as_ref().join(name);
+            if path.components().any(|c| c.as_os_str() == ".git") {
+                continue;
+            }
+            if path.is_file() && !snapshot.contains_key(&path) {
+                snapshot.insert(path.clone(), hash_file(&path)?);
             }
         }
     }

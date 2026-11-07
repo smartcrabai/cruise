@@ -2,15 +2,17 @@ use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
 
-fn run(args: &[&str]) -> Output {
-    let home = TempDir::new().expect("temporary home");
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn run(args: &[&str]) -> Result<Output, Box<dyn std::error::Error>> {
+    let home = TempDir::new()?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("CRUISE_") {
             command.env_remove(name);
         }
     }
-    command
+    Ok(command
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join("config"))
         .env("XDG_DATA_HOME", home.path().join("data"))
@@ -22,8 +24,7 @@ fn run(args: &[&str]) -> Output {
         .current_dir(home.path())
         .stdin(Stdio::null())
         .args(args)
-        .output()
-        .expect("run cruise")
+        .output()?)
 }
 
 fn text(output: &Output) -> String {
@@ -35,7 +36,7 @@ fn text(output: &Output) -> String {
 }
 
 #[test]
-fn instant_options_require_their_dependencies() {
+fn instant_options_require_their_dependencies() -> TestResult {
     for option in [
         vec!["--sdk", "jcode"],
         vec!["--model", "model"],
@@ -45,7 +46,7 @@ fn instant_options_require_their_dependencies() {
         let mut args = vec!["exec"];
         args.extend(option.iter().copied());
         args.push("task");
-        let output = run(&args);
+        let output = run(&args)?;
         assert_eq!(output.status.code(), Some(2), "{args:?}: {}", text(&output));
         assert!(
             text(&output).contains("--instant"),
@@ -53,13 +54,14 @@ fn instant_options_require_their_dependencies() {
             text(&output)
         );
     }
-    let output = run(&["exec", "--instant", "--review-rounds", "3", "task"]);
+    let output = run(&["exec", "--instant", "--review-rounds", "3", "task"])?;
     assert_eq!(output.status.code(), Some(2), "{}", text(&output));
     assert!(text(&output).contains("--review"), "{}", text(&output));
+    Ok(())
 }
 
 #[test]
-fn instant_conflicts_with_config_and_flags() {
+fn instant_conflicts_with_config_and_flags() -> TestResult {
     for option in [
         vec!["-c", "workflow.yaml"],
         vec!["-f", "after_pr"],
@@ -69,7 +71,7 @@ fn instant_conflicts_with_config_and_flags() {
         let mut args = vec!["exec", "--instant"];
         args.extend(option.iter().copied());
         args.push("task");
-        let output = run(&args);
+        let output = run(&args)?;
         assert_eq!(output.status.code(), Some(2), "{args:?}: {}", text(&output));
         assert!(
             text(&output).contains("--instant") && text(&output).contains("cannot be used with"),
@@ -77,10 +79,11 @@ fn instant_conflicts_with_config_and_flags() {
             text(&output)
         );
     }
+    Ok(())
 }
 
 #[test]
-fn rejects_invalid_instant_inputs() {
+fn rejects_invalid_instant_inputs() -> TestResult {
     for args in [
         vec!["exec", "--instant", "--dry-run"],
         vec!["exec", "--instant", "--dry-run", "   "],
@@ -103,7 +106,7 @@ fn rejects_invalid_instant_inputs() {
             "task",
         ],
     ] {
-        let output = run(&args);
+        let output = run(&args)?;
         assert!(!output.status.success(), "{args:?}: {}", text(&output));
         assert_ne!(
             output.status.code(),
@@ -112,16 +115,17 @@ fn rejects_invalid_instant_inputs() {
             text(&output)
         );
     }
+    Ok(())
 }
 
 #[test]
-fn sdk_validation_preserves_unknown_and_removed_diagnostics() {
+fn sdk_validation_preserves_unknown_and_removed_diagnostics() -> TestResult {
     for (sdk, expected) in [
         ("claude-cli", "unknown"),
         ("seher", "no longer supported"),
         ("pi", "no longer supported"),
     ] {
-        let output = run(&["exec", "--instant", "--dry-run", "--sdk", sdk, "task"]);
+        let output = run(&["exec", "--instant", "--dry-run", "--sdk", sdk, "task"])?;
         let diagnostic = text(&output);
         assert!(!output.status.success(), "{sdk}: {diagnostic}");
         assert!(
@@ -135,10 +139,11 @@ fn sdk_validation_preserves_unknown_and_removed_diagnostics() {
             );
         }
     }
+    Ok(())
 }
 
 #[test]
-fn review_retry_budget_respects_boundaries_and_cli_override() {
+fn review_retry_budget_respects_boundaries_and_cli_override() -> TestResult {
     for rounds in ["1", "3", "4", "5"] {
         let output = run(&[
             "exec",
@@ -148,7 +153,7 @@ fn review_retry_budget_respects_boundaries_and_cli_override() {
             "--review-rounds",
             rounds,
             "task",
-        ]);
+        ])?;
         assert!(
             output.status.success(),
             "rounds {rounds}: {}",
@@ -166,11 +171,12 @@ fn review_retry_budget_respects_boundaries_and_cli_override() {
         "--max-retries",
         "3",
         "task",
-    ]);
+    ])?;
     let diagnostic = text(&output);
     assert!(!output.status.success(), "{diagnostic}");
     assert!(
         diagnostic.contains("review-loop") && diagnostic.contains("max_retries"),
         "{diagnostic}"
     );
+    Ok(())
 }

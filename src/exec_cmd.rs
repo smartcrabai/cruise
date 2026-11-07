@@ -347,16 +347,17 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn instant_inline_session_persists_snapshot_and_empty_plan() {
-        let tmp = TempDir::new().unwrap();
+    fn instant_inline_session_persists_snapshot_and_empty_plan()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
         let process = ProcessStateGuard::new(tmp.path());
         let repo = create_repo_with_origin(&tmp);
         process.set_current_dir(&repo);
-        let manager = SessionManager::new(crate::paths::data_dir().unwrap());
+        let manager = SessionManager::new(crate::paths::data_dir()?);
         let mut args = exec_args_no_op(&tmp.path().join("unused"));
         args.instant = true;
         args.config = None;
-        let yaml = crate::instant_exec::build_yaml(&args).unwrap();
+        let yaml = crate::instant_exec::build_yaml(&args)?;
         let id = SessionManager::new_session_id();
         let session = setup_exec_session(
             &manager,
@@ -364,22 +365,21 @@ mod tests {
             &yaml,
             "instant task".into(),
             &id,
-        )
-        .unwrap();
-        let saved = manager.load(&id).unwrap();
+        )?;
+        let saved = manager.load(&id)?;
         assert_eq!(saved.config, SessionConfigRef::InlineSnapshot);
         assert_eq!(saved.input, "instant task");
         assert!(saved.exec && saved.allow_dirty_working_tree);
         assert_eq!(saved.workspace_mode, WorkspaceMode::CurrentBranch);
         assert!(matches!(saved.phase, SessionPhase::Planned));
         assert_eq!(
-            fs::read_to_string(session.plan_path(&manager.sessions_dir())).unwrap(),
+            fs::read_to_string(session.plan_path(&manager.sessions_dir()))?,
             ""
         );
-        let snapshot =
-            fs::read_to_string(manager.sessions_dir().join(id).join("config.yaml")).unwrap();
-        let config = load_config_from_source(&snapshot, &ConfigSource::Inline).unwrap();
+        let snapshot = fs::read_to_string(manager.sessions_dir().join(id).join("config.yaml"))?;
+        let config = load_config_from_source(&snapshot, &ConfigSource::Inline)?;
         assert!(config.steps.contains_key("implement"));
+        Ok(())
     }
 
     #[test]
