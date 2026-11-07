@@ -1026,9 +1026,11 @@ async fn execute_step_kind_inner(
                 cancel_token: ctx.cancel_token,
             };
             let merge_result = if let Some(timeout) = timeout {
-                if let Ok(result) =
-                    tokio::time::timeout(timeout, crate::pr_merge::automatic::squash_merge(request))
-                        .await
+                if let Ok(result) = tokio::time::timeout(
+                    timeout,
+                    Box::pin(crate::pr_merge::automatic::squash_merge(request)),
+                )
+                .await
                 {
                     result
                 } else {
@@ -1044,7 +1046,7 @@ async fn execute_step_kind_inner(
                     )));
                 }
             } else {
-                crate::pr_merge::automatic::squash_merge(request).await
+                Box::pin(crate::pr_merge::automatic::squash_merge(request)).await
             };
             if ctx
                 .cancel_token

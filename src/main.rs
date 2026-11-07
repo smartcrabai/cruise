@@ -4,10 +4,12 @@ pub mod application;
 mod artifacts;
 mod ask_handler;
 mod attachments;
+mod auto_requeue;
 mod backend;
 mod batch_dashboard;
 #[cfg_attr(not(test), expect(dead_code))]
 mod batch_run;
+mod branch_diff;
 mod builtin_workflows;
 mod cancellation;
 mod clean_cmd;
@@ -24,6 +26,9 @@ mod console_mode;
 )]
 mod dag;
 mod desktop_notifications;
+mod diff_cmd;
+#[cfg(test)]
+mod diff_cmd_contract_tests;
 mod display;
 mod draft_cmd;
 #[cfg_attr(
@@ -51,8 +56,11 @@ mod github_review;
 mod graph;
 mod herdr;
 mod install_identity;
+mod issue_images;
+mod issue_input;
 mod issue_publish;
 mod list_cmd;
+mod local_merge;
 mod metadata;
 mod model_schedule;
 mod model_selection;
@@ -65,6 +73,8 @@ mod plan_cmd;
 mod planning;
 mod platform;
 mod pr_merge;
+mod pr_review_fix;
+mod pr_template;
 mod repo_clone;
 mod resolver;
 mod retry;
@@ -74,6 +84,7 @@ mod sdk_tools;
 mod session;
 mod session_config;
 mod session_edit;
+mod sleep_guard;
 mod spinner;
 mod ssh_cmd;
 mod step;
@@ -96,7 +107,7 @@ mod workflow_defaults;
 mod workflow_generate;
 mod workflow_packages;
 mod workspace;
-mod worktree;
+pub mod worktree;
 mod worktree_pr;
 mod yaml_metadata;
 
@@ -157,6 +168,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Draft(args)) => draft_cmd::run(args),
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
+        Some(cli::Commands::Diff(args)) => diff_cmd::run(&args),
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
@@ -218,6 +230,8 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             // Backward compat: positional input and planning options use `plan`.
             let plan_args = cli::PlanArgs {
                 input,
+                pr: None,
+                issue: None,
                 config: None,
                 dry_run: false,
                 no_force_exec,

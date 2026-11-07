@@ -225,15 +225,29 @@ async fn run_force_exec(
     .await
 }
 
-pub async fn run(mut args: PlanArgs) -> Result<()> {
-    // Resolve config first so the path is visible before prompting for input.
-    // For repo sessions the config lives in the temporary clone, which doesn't
-    // exist yet; resolution is deferred until after cloning.
-    let target = resolve_plan_target(args.repo.as_deref(), args.config.as_deref())?;
+struct PreparedPlan {
+    pr_target: Option<crate::pr_review_fix::PrTarget>,
+    noninteractive: bool,
+    input: String,
+    images: Vec<PathBuf>,
+    has_issue: bool,
+    target: PlanTarget,
+}
 
+fn prepare_plan(args: &mut PlanArgs) -> Result<PreparedPlan> {
+    let pr_target = if let Some(number) = args.pr {
+        let target = crate::pr_review_fix::resolve_pr_target(number, args.repo.as_deref())?;
+        args.config
+            .get_or_insert_with(|| crate::pr_review_fix::BUILTIN_SELECTOR.to_string());
+        args.skip_planning = true;
+        args.no_force_exec = true;
+        Some(target)
+    } else {
+        None
+    };
     // noninteractive is true whenever stdin is not a terminal (pipe, redirect,
     // or backward-compat path where cli.rs already consumed stdin and placed
-    // the content in args.input).  This prevents inquire from attempting to
+    // the content in args.input). This prevents inquire from attempting to
     // read interactive input from a non-TTY file descriptor.
     let noninteractive = !std::io::stdin().is_terminal();
 
@@ -247,7 +261,29 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
         ));
     }
 
-    let (raw_input, from_interactive) = read_plan_input(args.input.take(), noninteractive)?;
+    let (raw_input, from_interactive) = if let Some(pr) = &pr_target {
+        let extra = match args.input.take() {
+            Some(input) if input != "stdin" => input,
+            Some(_) if !noninteractive => {
+                return Err(CruiseError::Other("stdin requires piped input".into()));
+            }
+            _ if noninteractive => {
+                let mut input = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut input)
+                    .map_err(|error| {
+                        CruiseError::Other(format!("failed to read stdin: {error}"))
+                    })?;
+                input
+            }
+            _ => String::new(),
+        };
+        (crate::pr_review_fix::plan_text(pr, &extra), false)
+    } else if args.issue.is_some() && args.input.is_none() {
+        (String::new(), false)
+    } else {
+        read_plan_input(args.input.take(), noninteractive)?
+    };
     // Auto-detect image paths only from the interactive prompt (Claude-Code-like
     // drag-and-drop). For arg/stdin input, treat the text as opaque so prose
     // mentioning a path like "what changed in /tmp/x.png" stays intact.
@@ -256,45 +292,109 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
     } else {
         (raw_input, vec![])
     };
-    for p in &args.images {
-        images.push(PathBuf::from(p));
+    for path in &args.images {
+        images.push(PathBuf::from(path));
+    }
+    let binding = crate::issue_input::parse_binding(&input)?;
+    if args.issue.is_some() && binding.is_some() {
+        return Err(CruiseError::Other(
+            "pass either #N or --issue, not both".to_string(),
+        ));
+    }
+    let has_issue = args.issue.is_some() || binding.is_some();
+    let target = resolve_plan_target(args.repo.as_deref(), args.config.as_deref(), has_issue)?;
+    if pr_target.is_some()
+        && let PlanTarget::Local { config, .. } = &target
+    {
+        validate_config(config)?;
+        crate::pr_review_fix::validate_workflow(config)?;
+        crate::flags::validate_names(config, &crate::flags::from_cli(&args.flags)?)?;
     }
 
+    Ok(PreparedPlan {
+        pr_target,
+        noninteractive,
+        input,
+        images,
+        has_issue,
+        target,
+    })
+}
+
+fn print_plan_dry_run(args: &PlanArgs, input: &str, images: &[PathBuf]) {
+    if let Some(number) = args.issue {
+        eprintln!("{}", style(format!("  issue: #{number}")).dim());
+    }
+    eprintln!(
+        "{}",
+        style(format!("Would plan: \"{}\"", input.trim())).dim()
+    );
+    for image in images {
+        eprintln!(
+            "{}",
+            style(format!("  attached image: {}", image.display())).dim()
+        );
+    }
+}
+
+async fn run_force_exec_or_continue(
+    target: PlanTarget,
+    args: &PlanArgs,
+    input: &str,
+    images: &[PathBuf],
+    has_issue: bool,
+) -> Result<Option<PlanTarget>> {
     if let PlanTarget::Local { config, .. } = &target
         && config.force_exec()
     {
-        match force_exec_opt_out(args.no_force_exec, args.grill, !images.is_empty()) {
-            Some(reason) => eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim()),
-            None => {
-                return Box::pin(run_force_exec(
-                    target,
-                    input.trim().to_string(),
-                    args.rate_limit_retries,
-                    args.dry_run,
-                    false,
-                    args.flags.clone(),
-                ))
-                .await;
-            }
+        if let Some(reason) = force_exec_opt_out(args.no_force_exec, args.grill, !images.is_empty())
+            .or(if has_issue { Some("issue input") } else { None })
+        {
+            eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim());
+        } else {
+            Box::pin(run_force_exec(
+                target,
+                input.trim().to_string(),
+                args.rate_limit_retries,
+                args.dry_run,
+                false,
+                args.flags.clone(),
+            ))
+            .await?;
+            return Ok(None);
         }
     }
+    Ok(Some(target))
+}
+
+pub async fn run(mut args: PlanArgs) -> Result<()> {
+    let PreparedPlan {
+        pr_target,
+        noninteractive,
+        input,
+        images,
+        has_issue,
+        target,
+    } = prepare_plan(&mut args)?;
+
+    let Some(target) =
+        run_force_exec_or_continue(target, &args, &input, &images, has_issue).await?
+    else {
+        return Ok(());
+    };
 
     if args.dry_run {
-        eprintln!(
-            "{}",
-            style(format!("Would plan: \"{}\"", input.trim())).dim()
-        );
-        if !images.is_empty() {
-            for img in &images {
-                eprintln!(
-                    "{}",
-                    style(format!("  attached image: {}", img.display())).dim()
-                );
-            }
-        }
+        print_plan_dry_run(&args, &input, &images);
         return Ok(());
     }
 
+    let task_input = crate::issue_input::resolve_task_input(
+        &input,
+        args.issue,
+        args.repo.as_deref(),
+        &std::env::current_dir()?,
+        &crate::issue_input::GhGithub,
+    )?;
     let _herdr = crate::herdr::start();
     let manager = SessionManager::new(crate::paths::data_dir()?);
 
@@ -304,15 +404,33 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
         &manager,
         target,
         args.config.as_deref(),
-        input.trim(),
+        &task_input.text,
         &session_id,
     );
     let plan_result = match created {
-        Ok((config, session)) => {
+        Ok((config, mut session)) => {
+            if let Some(pr) = pr_target {
+                if let Err(error) = crate::pr_review_fix::validate_workflow(&config) {
+                    cleanup_discarded_session_workspace(&manager, &session);
+                    let _ = manager.delete(&session.id);
+                    return Err(error);
+                }
+                session.pr_url = Some(pr.url.clone());
+                session.pr_target = Some(pr);
+                manager.save(&session)?;
+            }
             operation.set_workflow(&session.config);
-            run_created_plan(&args, &manager, config, session, noninteractive, images)
-                .with_context(operation.context())
-                .await
+            run_created_plan(
+                &args,
+                &manager,
+                config,
+                session,
+                noninteractive,
+                images,
+                task_input,
+            )
+            .with_context(operation.context())
+            .await
         }
         Err(error) => Err(error),
     };
@@ -331,6 +449,7 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
             session: Some(session_id),
             all: false,
             parallelism: None,
+            auto_requeue_max_attempts: None,
             max_retries: None,
             rate_limit_retries: args.rate_limit_retries,
             dry_run: false,
@@ -357,12 +476,13 @@ async fn run_created_plan(
     mut session: SessionState,
     noninteractive: bool,
     images: Vec<PathBuf>,
+    task_input: crate::issue_input::ResolvedTaskInput,
 ) -> Result<PlanDisposition> {
     let prepare_operation = crate::telemetry::Operation::phase("prepare");
     let prepared: Result<()> = (|| {
         apply_cli_flags_or_discard(manager, &config, &mut session, &args.flags)?;
 
-        if let Err(e) = attach_images_or_discard(manager, &mut session, &images) {
+        if let Err(e) = attach_task_inputs_or_discard(manager, &mut session, &task_input, &images) {
             eprintln!(
                 "\n{} Failed to attach images. Session {} discarded.",
                 style("✗").red().bold(),
@@ -522,21 +642,20 @@ pub async fn launch_background_plan(
     no_force_exec: bool,
     flags: &[(String, bool)],
 ) -> Result<()> {
-    let target = resolve_plan_target(repo, None)?;
-
     // Background planning input never comes from the interactive prompt, so
     // skip text-based path extraction (which would shadow legitimate prose
     // mentions of file paths) and accept image attachments only via `--image`.
     let input = read_background_plan_input(plan_input)?;
-    let mut detected_images: Vec<PathBuf> = Vec::with_capacity(images.len());
-    for p in images {
-        detected_images.push(PathBuf::from(p));
-    }
+    let has_issue = crate::issue_input::parse_binding(&input)?.is_some();
+    let target = resolve_plan_target(repo, None, has_issue)?;
+    let detected_images = images.iter().map(PathBuf::from).collect::<Vec<_>>();
 
     if let PlanTarget::Local { config, .. } = &target
         && config.force_exec()
     {
-        match force_exec_opt_out(no_force_exec, false, !detected_images.is_empty()) {
+        match force_exec_opt_out(no_force_exec, false, !detected_images.is_empty())
+            .or(if has_issue { Some("issue input") } else { None })
+        {
             Some(reason) => {
                 eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim());
             }
@@ -554,18 +673,30 @@ pub async fn launch_background_plan(
         }
     }
 
+    let task_input = crate::issue_input::resolve_task_input(
+        &input,
+        None,
+        repo,
+        &std::env::current_dir()?,
+        &crate::issue_input::GhGithub,
+    )?;
     let manager = SessionManager::new(crate::paths::data_dir()?);
     let session_id = SessionManager::new_session_id();
     let operation = crate::telemetry::Operation::execution("plan", &session_id, None);
     let result: Result<()> =
-        match create_session_for_target(&manager, target, None, &input, &session_id) {
+        match create_session_for_target(&manager, target, None, &task_input.text, &session_id) {
             Ok((config, mut session)) => {
                 operation.set_workflow(&session.config);
                 async {
                     let prepare_operation = crate::telemetry::Operation::phase("prepare");
                     let prepared: Result<()> = (|| {
                         apply_cli_flags_or_discard(&manager, &config, &mut session, flags)?;
-                        attach_images_or_discard(&manager, &mut session, &detected_images)
+                        attach_task_inputs_or_discard(
+                            &manager,
+                            &mut session,
+                            &task_input,
+                            &detected_images,
+                        )
                     })();
                     prepare_operation.finish_result(&prepared);
                     prepared?;
@@ -800,7 +931,9 @@ async fn approve_with_title(
 ) -> Result<()> {
     // The `generate_title` tool needs an SDK backend, which includes the default
     // `jcode` one a config gets by naming neither `sdk:` nor `command:`.
-    if crate::executor::Executor::new(config.sdk.as_deref(), &config.command).is_sdk() {
+    if session.pr_target.is_some() {
+        crate::metadata::refresh_session_title_from_plan(session, plan_content);
+    } else if crate::executor::Executor::new(config.sdk.as_deref(), &config.command).is_sdk() {
         // Title dispatch forwards neither workflow env nor a working directory.
         // Keep this gate outside the optional title-error warning handler.
         let mut auth_config = config.clone();
@@ -836,7 +969,9 @@ async fn approve_with_title(
         crate::metadata::refresh_session_title_from_plan(session, plan_content);
     }
     session.approve();
-    crate::repo_clone::cleanup_after_approval(manager, session, config.create_pr);
+    if session.pr_target.is_none() {
+        crate::repo_clone::cleanup_after_approval(manager, session, config.create_pr);
+    }
     manager.save(session)
 }
 
@@ -905,14 +1040,19 @@ fn plan_working_dir(session: &SessionState) -> &Path {
 /// the session keeps `worktree_path = None` (plan runs in `base_dir`).
 fn setup_planning_worktree(manager: &SessionManager, session: &mut SessionState) -> Result<()> {
     let worktrees_dir = manager.worktrees_dir();
-    match crate::worktree::setup_session_worktree(
-        &session.base_dir,
-        &session.id,
-        session.input_or_title(),
-        &worktrees_dir,
-        session.worktree_branch.as_deref(),
-    ) {
-        Ok((ctx, _reused)) => {
+    let result = if let Some(pr) = &session.pr_target {
+        crate::pr_review_fix::validate_origin(pr, &session.base_dir)?;
+        crate::worktree::setup_pr_worktree(
+            &session.base_dir,
+            &session.id,
+            &worktrees_dir,
+            &pr.head_branch,
+        )
+    } else {
+        crate::workspace::setup_session_worktree(manager, session)
+    };
+    match result {
+        Ok((ctx, reused)) => {
             eprintln!(
                 "{} worktree: {} (planning)",
                 style("->").cyan(),
@@ -920,6 +1060,9 @@ fn setup_planning_worktree(manager: &SessionManager, session: &mut SessionState)
             );
             session.worktree_path = Some(ctx.path.clone());
             session.worktree_branch = Some(ctx.branch.clone());
+            if !reused && session.forked_from_branch.is_none() {
+                session.forked_from_branch = crate::worktree::attached_branch(&session.base_dir);
+            }
             manager.save(session)?;
         }
         Err(CruiseError::NotGitRepository) => {
@@ -997,11 +1140,20 @@ enum PlanTarget {
 /// For local sessions the config is resolved (and displayed) immediately; for
 /// repo sessions only the spec is validated -- the config lives in the
 /// temporary clone, which is created later.
-fn resolve_plan_target(repo: Option<&str>, explicit_config: Option<&str>) -> Result<PlanTarget> {
+fn resolve_plan_target(
+    repo: Option<&str>,
+    explicit_config: Option<&str>,
+    has_issue: bool,
+) -> Result<PlanTarget> {
     match repo.map(str::trim) {
         Some(spec) if !spec.is_empty() => {
             crate::repo_clone::validate_repo_spec(spec)?;
             let ctx = crate::forge::resolve_repo_locator_env(spec)?;
+            if has_issue && ctx.kind != crate::forge::ForgeKind::GitHub {
+                return Err(CruiseError::Other(
+                    "issue input is supported for GitHub repositories only".into(),
+                ));
+            }
             crate::forge::ensure_forge_available(ctx.kind)?;
             Ok(PlanTarget::Repo(spec.to_string()))
         }
@@ -1138,20 +1290,29 @@ fn build_repo_planning_session(
 /// session (and, for repo-backed sessions, its temporary clone) is removed
 /// before propagating the error so nothing leaks behind a half-attached
 /// session. No-op when `images` is empty.
-fn attach_images_or_discard(
+fn attach_task_inputs_or_discard(
     manager: &SessionManager,
     session: &mut SessionState,
+    task_input: &crate::issue_input::ResolvedTaskInput,
     images: &[PathBuf],
 ) -> Result<()> {
-    if images.is_empty() {
+    if images.is_empty() && task_input.images.is_empty() && task_input.issue_number.is_none() {
         return Ok(());
     }
     let session_dir = manager.sessions_dir().join(&session.id);
-    match crate::attachments::copy_images_into_session(&session_dir, images) {
-        Ok(stored) => {
-            session.attachments = stored;
-            manager.save(session)
-        }
+    let stored = (|| {
+        let mut stored =
+            crate::attachments::store_downloaded_images(&session_dir, &task_input.images)?;
+        stored.extend(crate::attachments::copy_images_into_session(
+            &session_dir,
+            images,
+        )?);
+        session.attachments = stored;
+        session.issue_number = task_input.issue_number;
+        manager.save(session)
+    })();
+    match stored {
+        Ok(()) => Ok(()),
         Err(e) => {
             cleanup_discarded_session_workspace(manager, session);
             if let Err(del_err) = manager.delete(&session.id) {
@@ -1477,7 +1638,10 @@ async fn run_approve_loop(
 
         let review = crate::herdr::blocked("Plan ready: approve, fix, or ask");
 
-        let options = vec!["Approve", "Fix", "Ask", "Execute now", "Publish as Issue"];
+        let mut options = vec!["Approve", "Fix", "Ask", "Execute now"];
+        if session.pr_target.is_none() {
+            options.push("Publish as Issue");
+        }
         crate::platform::reclaim_terminal_foreground();
         let selected = match inquire::Select::new("Action:", options).prompt() {
             Ok(s) => s,
@@ -2185,7 +2349,9 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
 
     fn plan_args(config_path: &Path, no_force_exec: bool, skip_planning: bool) -> PlanArgs {
         PlanArgs {
+            issue: None,
             input: Some("implement force exec".to_string()),
+            pr: None,
             config: Some(
                 config_path
                     .to_str()
@@ -2707,6 +2873,36 @@ steps:
             .worktree_context()
             .unwrap_or_else(|| panic!("expected worktree context"));
         crate::worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn test_planning_worktree_reuse_ignores_invalid_base_settings()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = lock_process();
+        let tmp = TempDir::new()?;
+        let _config =
+            crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("config"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join(".cruise"))?;
+        init_git_repo(&repo);
+        fs::write(repo.join(".cruise/default.yaml"), "base_branch: main\n")?;
+        let manager = SessionManager::new(tmp.path().join("data"));
+        let mut session = make_session("20260522080002", &repo);
+        manager.create(&session)?;
+        setup_planning_worktree(&manager, &mut session)?;
+        let path = session.worktree_path.clone();
+        let branch = session.worktree_branch.clone();
+        fs::write(repo.join(".cruise/default.yaml"), "base_branch: '-x'\n")?;
+
+        setup_planning_worktree(&manager, &mut session)?;
+        assert_eq!(session.worktree_path, path);
+        assert_eq!(session.worktree_branch, branch);
+        assert_eq!(session.worktree_base_branch.as_deref(), Some("main"));
+
+        let mut fresh = make_session("20260522080003", &repo);
+        assert!(setup_planning_worktree(&manager, &mut fresh).is_err());
+        assert!(!manager.worktrees_dir().join(&fresh.id).exists());
+        Ok(())
     }
 
     #[test]

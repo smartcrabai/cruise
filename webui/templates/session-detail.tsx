@@ -62,6 +62,18 @@ export default function SessionDetail(props) {
         >
           Log
         </button>
+        <button
+          type="button"
+          role="tab"
+          hx-get={props.tabHrefs.diff}
+          hx-target={`#tab-panel-${props.id}`}
+          hx-swap="innerHTML"
+          hx-push-url={props.pushHrefs.diff}
+          aria-selected={props.activeTab === "diff" ? "true" : "false"}
+          class="cruise-tab px-4 py-2 text-xs font-medium transition-colors"
+        >
+          Diff
+        </button>
       </nav>
       <div id={`tab-panel-${props.id}`} class="md:flex-1 md:min-h-0 md:overflow-auto">
         {props.tabPanel}
