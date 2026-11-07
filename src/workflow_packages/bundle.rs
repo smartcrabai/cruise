@@ -83,10 +83,7 @@ pub(crate) fn read_lock(dir: &Path, name: &str) -> Result<BundleLock, WorkflowPa
 }
 fn read_lock_at(base: &Path, name: &str) -> Result<BundleLock, WorkflowPackageError> {
     let path = base.join(BUNDLE_LOCK_FILE);
-    if !std::fs::symlink_metadata(&path)
-        .map(|metadata| metadata.file_type().is_file())
-        .unwrap_or(false)
-    {
+    if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file()) {
         return Err(WorkflowPackageError::NotInstalled(name.into()));
     }
     let text = std::fs::read_to_string(path)
@@ -113,15 +110,12 @@ pub(crate) fn load_unmodified_at(
     base: &Path,
     name: &str,
 ) -> Result<BundleLock, WorkflowPackageError> {
-    if !std::fs::symlink_metadata(base)
-        .map(|m| m.file_type().is_dir())
-        .unwrap_or(false)
-    {
+    if !std::fs::symlink_metadata(base).is_ok_and(|m| m.file_type().is_dir()) {
         return Err(WorkflowPackageError::Modified(name.into()));
     }
     let lock = read_lock_at(base, name)?;
     let entries =
-        std::fs::read_dir(&base).map_err(|_| WorkflowPackageError::Modified(name.into()))?;
+        std::fs::read_dir(base).map_err(|_| WorkflowPackageError::Modified(name.into()))?;
     for entry in entries {
         let entry = entry.map_err(|_| WorkflowPackageError::Modified(name.into()))?;
         let file_name = entry.file_name();
@@ -140,12 +134,8 @@ pub(crate) fn load_unmodified_at(
     }
     for (n, workflow) in &lock.workflows {
         let path = base.join(format!("{n}.yaml"));
-        if !std::fs::symlink_metadata(&path)
-            .map(|m| m.file_type().is_file())
-            .unwrap_or(false)
-            || std::fs::read(path)
-                .map(|b| sha256_hex(&b) != workflow.sha256)
-                .unwrap_or(true)
+        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file())
+            || std::fs::read(path).map_or(true, |b| sha256_hex(&b) != workflow.sha256)
         {
             return Err(WorkflowPackageError::Modified(name.into()));
         }
@@ -290,10 +280,10 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_recovery_preserves_all_entries() {
-        let dir = tempfile::tempdir().unwrap();
+    fn ambiguous_recovery_preserves_all_entries() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
         for name in [".pkg.previous-a", ".pkg.previous-b", ".pkg.staging-a"] {
-            std::fs::create_dir(dir.path().join(name)).unwrap();
+            std::fs::create_dir(dir.path().join(name))?;
         }
         assert!(matches!(
             recover_bundle(dir.path(), "pkg"),
@@ -302,23 +292,24 @@ mod tests {
         for name in [".pkg.previous-a", ".pkg.previous-b", ".pkg.staging-a"] {
             assert!(dir.path().join(name).is_dir());
         }
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn symlinked_lock_is_not_discoverable() {
+    fn symlinked_lock_is_not_discoverable() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("pkg")).unwrap();
-        std::fs::write(dir.path().join("lock"), "{}").unwrap();
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join("pkg"))?;
+        std::fs::write(dir.path().join("lock"), "{}")?;
         symlink(
             dir.path().join("lock"),
             dir.path().join("pkg").join(BUNDLE_LOCK_FILE),
-        )
-        .unwrap();
+        )?;
         assert!(matches!(
             read_lock(dir.path(), "pkg"),
             Err(WorkflowPackageError::NotInstalled(_))
         ));
+        Ok(())
     }
 }

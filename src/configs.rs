@@ -23,8 +23,10 @@ pub fn list_user_configs() -> Vec<ConfigEntry> {
             name: p
                 .strip_prefix(&workflows_dir)
                 .unwrap_or(&p)
-                .to_string_lossy()
-                .into_owned(),
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
             description: std::fs::read_to_string(&p)
                 .ok()
                 .and_then(|yaml| extract_file_description(&yaml)),
@@ -385,13 +387,14 @@ mod tests {
     // --- list_user_configs ---
 
     #[test]
-    fn user_configs_discover_only_complete_locked_bundles() {
+    fn user_configs_discover_only_complete_locked_bundles() -> Result<(), Box<dyn std::error::Error>>
+    {
         let _lock = crate::test_support::lock_process();
         let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
         let dir = tmp.path().join(".config/cruise/workflows");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("a.yaml"), "steps: {}\n").unwrap();
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("a.yaml"), "steps: {}\n")?;
         let lock = |name: &str| {
             format!(
                 r#"{{"name":"{name}","owner":"org","repo":"repo","requested_ref":"main","resolved_commit":"1111111111111111111111111111111111111111","workflows":{{"implement":{{"source_path":"implement.yaml","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}},"review":{{"source_path":"review.yaml","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}}}}}"#
@@ -406,10 +409,10 @@ mod tests {
             "unlocked",
         ] {
             let bundle = dir.join(name);
-            fs::create_dir(&bundle).unwrap();
-            fs::write(bundle.join("implement.yaml"), "steps: {}\n").unwrap();
+            fs::create_dir(&bundle)?;
+            fs::write(bundle.join("implement.yaml"), "steps: {}\n")?;
             if name != "missing" {
-                fs::write(bundle.join("review.yaml"), "steps: {}\n").unwrap();
+                fs::write(bundle.join("review.yaml"), "steps: {}\n")?;
             }
             if name != "unlocked" {
                 let contents = if name == "broken" {
@@ -419,10 +422,10 @@ mod tests {
                 } else {
                     lock(name)
                 };
-                fs::write(bundle.join(".cruise-package-lock.json"), contents).unwrap();
+                fs::write(bundle.join(".cruise-package-lock.json"), contents)?;
             }
         }
-        fs::write(dir.join("pkg/unlisted.yaml"), "steps: {}\n").unwrap();
+        fs::write(dir.join("pkg/unlisted.yaml"), "steps: {}\n")?;
         let entries = list_user_configs();
         let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, ["a.yaml", "pkg/implement.yaml", "pkg/review.yaml"]);
@@ -431,6 +434,7 @@ mod tests {
                 .iter()
                 .all(|entry| std::path::Path::new(&entry.path).is_absolute())
         );
+        Ok(())
     }
 
     #[test]

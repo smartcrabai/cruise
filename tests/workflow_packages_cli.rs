@@ -7,6 +7,8 @@
 #[path = "support/workflow_packages.rs"]
 mod workflow_packages_fixture;
 
+use sha2::{Digest as _, Sha256};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -58,18 +60,20 @@ impl Fixture {
     fn publish_bundle(&self, sha: &str, manifest: &str, prompt: &str) {
         self.publish(sha, ROOT_YAML, prompt);
         let base = self.root.path().join("bin/files").join(sha);
-        std::fs::create_dir_all(base.join("workflows")).unwrap();
-        std::fs::write(base.join("cruise-package.yaml"), manifest).unwrap();
+        std::fs::create_dir_all(base.join("workflows"))
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+        std::fs::write(base.join("cruise-package.yaml"), manifest)
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
         std::fs::write(
             base.join("workflows/review.yaml"),
             "steps:\n  review:\n    prompt_file: ../prompts/p.md\n",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
         std::fs::write(
             base.join("workflows/implement.yaml"),
             "steps:\n  implement:\n    workflow_call: ../shared.yaml\n",
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
     }
 
     fn cruise(&self, args: &[&str]) -> Output {
@@ -426,7 +430,7 @@ fn bundle_preview_keeps_commands_after_warning_line() {
     std::fs::write(
         fx.root.path().join(format!("bin/files/{SHA_1}/workflows/review.yaml")),
         "steps:\n  first:\n    command: |\n      echo first\n      WARNING: embedded line\n  second:\n    command: echo after-warning-marker\n",
-    ).unwrap();
+    ).unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
     let out = fx.cruise(&["workflow", "add", "org/repo@main", "--name", "pkg"]);
     let preview = text(&out);
     assert!(!out.status.success());
@@ -440,8 +444,10 @@ fn single_package_update_and_remove_preserve_same_named_directory() {
     let fx = Fixture::new();
     fx.install("pkg");
     let unrelated = fx.workflows().join("pkg");
-    std::fs::create_dir(&unrelated).unwrap();
-    std::fs::write(unrelated.join("keep"), "untouched").unwrap();
+    std::fs::create_dir(&unrelated)
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+    std::fs::write(unrelated.join("keep"), "untouched")
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
     fx.publish(SHA_2, ROOT_YAML, "UPDATED PROMPT\n");
     let update = fx.cruise(&["workflow", "update", "pkg", "--yes"]);
     assert!(update.status.success(), "{}", text(&update));
@@ -465,7 +471,10 @@ fn bundle_install_preview_lock_and_self_contained_workflows() {
         assert!(preview.contains(expected), "missing {expected}: {preview}");
     }
     for name in ["review", "implement"] {
-        assert!(preview.contains(&format!("WARNING: workflow {name} is untrusted")), "{preview}");
+        assert!(
+            preview.contains(&format!("WARNING: workflow {name} is untrusted")),
+            "{preview}"
+        );
     }
     let dir = fx.workflows().join("pkg");
     let review = read(&dir.join("review.yaml"));
@@ -484,19 +493,22 @@ fn bundle_install_preview_lock_and_self_contained_workflows() {
     }
     assert!(!dir.join("shared.yaml").exists());
     let lock: serde_json::Value =
-        serde_json::from_str(&read(&dir.join(".cruise-package-lock.json"))).unwrap();
+        serde_json::from_str(&read(&dir.join(".cruise-package-lock.json")))
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
     assert_eq!(lock["resolved_commit"], SHA_1);
     assert_eq!(
         lock["workflows"]["review"]["source_path"],
         "workflows/review.yaml"
     );
-    use sha2::{Digest as _, Sha256};
     for name in ["review", "implement"] {
-        let bytes = std::fs::read(dir.join(format!("{name}.yaml"))).unwrap();
-        let digest: String = Sha256::digest(&bytes)
+        let bytes = std::fs::read(dir.join(format!("{name}.yaml")))
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+        let digest = Sha256::digest(&bytes)
             .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+            .fold(String::new(), |mut out, b| {
+                write!(out, "{b:02x}").unwrap_or_else(|e| panic!("digest formatting failed: {e}"));
+                out
+            });
         assert_eq!(lock["workflows"][name]["sha256"], digest);
     }
     assert!(text(&fx.cruise(&["workflow", "list"])).contains("pkg"));
@@ -528,17 +540,24 @@ fn bundle_update_replaces_dropped_and_new_members() {
     let manifest = "workflows:\n  - name: review\n    path: workflows/review.yaml\n  - name: deploy\n    path: workflows/deploy.yaml\n";
     fx.publish_bundle(SHA_2, manifest, "new prompt\n");
     std::fs::write(
-        fx.root.path().join(format!("bin/files/{SHA_2}/workflows/deploy.yaml")),
+        fx.root
+            .path()
+            .join(format!("bin/files/{SHA_2}/workflows/deploy.yaml")),
         "steps:\n  deploy:\n    prompt: new deployment\n",
-    ).unwrap();
+    )
+    .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
     let out = fx.cruise(&["workflow", "update", "pkg", "--yes"]);
     assert!(out.status.success(), "{}", text(&out));
     assert!(!dir.join("implement.yaml").exists());
     assert!(read(&dir.join("review.yaml")).contains("new prompt"));
     assert!(read(&dir.join("deploy.yaml")).contains("new deployment"));
-    let lock: serde_json::Value = serde_json::from_str(&read(&dir.join(".cruise-package-lock.json"))).unwrap();
+    let lock: serde_json::Value =
+        serde_json::from_str(&read(&dir.join(".cruise-package-lock.json")))
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
     assert_eq!(lock["resolved_commit"], SHA_2);
-    let members = lock["workflows"].as_object().unwrap();
+    let members = lock["workflows"]
+        .as_object()
+        .unwrap_or_else(|| panic!("missing workflows object"));
     assert_eq!(members.len(), 2);
     assert!(members.contains_key("review"));
     assert!(members.contains_key("deploy"));
@@ -550,13 +569,26 @@ fn bundle_missing_or_nonregular_listed_file_preserves_install_and_update() {
     for mode in [None, Some("blob 120000"), Some("tree 040000")] {
         let fx = Fixture::new();
         fx.publish_bundle(SHA_1, BUNDLE_MANIFEST, "old prompt\n");
-        let upstream = fx.root.path().join(format!("bin/files/{SHA_1}/workflows/implement.yaml"));
+        let upstream = fx
+            .root
+            .path()
+            .join(format!("bin/files/{SHA_1}/workflows/implement.yaml"));
         if let Some(mode) = mode {
-            let mode_path = fx.root.path().join(format!("bin/modes/{SHA_1}/workflows/implement.yaml"));
-            std::fs::create_dir_all(mode_path.parent().unwrap()).unwrap();
-            std::fs::write(mode_path, mode).unwrap();
+            let mode_path = fx
+                .root
+                .path()
+                .join(format!("bin/modes/{SHA_1}/workflows/implement.yaml"));
+            std::fs::create_dir_all(
+                mode_path
+                    .parent()
+                    .unwrap_or_else(|| panic!("missing mode directory")),
+            )
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
+            std::fs::write(mode_path, mode)
+                .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
         } else {
-            std::fs::remove_file(&upstream).unwrap();
+            std::fs::remove_file(&upstream)
+                .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
         }
         let out = fx.cruise(&["workflow", "add", "org/repo", "--name", "pkg", "--yes"]);
         assert!(!out.status.success(), "mode {mode:?}: {}", text(&out));
@@ -566,11 +598,24 @@ fn bundle_missing_or_nonregular_listed_file_preserves_install_and_update() {
         fx.install("pkg");
         let dir = fx.workflows().join("pkg");
         let files = ["review.yaml", "implement.yaml", ".cruise-package-lock.json"];
-        let before: Vec<_> = files.iter().map(|name| std::fs::read(dir.join(name)).unwrap()).collect();
-        std::fs::write(fx.root.path().join("bin/sha"), SHA_1).unwrap();
+        let before: Vec<_> = files
+            .iter()
+            .map(|name| {
+                std::fs::read(dir.join(name))
+                    .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"))
+            })
+            .collect();
+        std::fs::write(fx.root.path().join("bin/sha"), SHA_1)
+            .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
         let out = fx.cruise(&["workflow", "update", "pkg", "--yes"]);
         assert!(!out.status.success(), "mode {mode:?}: {}", text(&out));
-        let after: Vec<_> = files.iter().map(|name| std::fs::read(dir.join(name)).unwrap()).collect();
+        let after: Vec<_> = files
+            .iter()
+            .map(|name| {
+                std::fs::read(dir.join(name))
+                    .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"))
+            })
+            .collect();
         assert_eq!(before, after);
     }
 }
@@ -593,10 +638,12 @@ fn bundle_update_is_atomic_and_remove_protects_unmanaged_files() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(read(&review).contains("NEW PROMPT"));
     assert!(read(&lock).contains(SHA_2));
-    std::fs::write(dir.join("notes.txt"), "keep").unwrap();
+    std::fs::write(dir.join("notes.txt"), "keep")
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
     assert!(!fx.cruise(&["workflow", "remove", "pkg"]).status.success());
     assert!(dir.join("notes.txt").exists());
-    std::fs::remove_file(dir.join("notes.txt")).unwrap();
+    std::fs::remove_file(dir.join("notes.txt"))
+        .unwrap_or_else(|e| panic!("test fixture operation failed: {e}"));
     let out = fx.cruise(&["workflow", "remove", "pkg"]);
     assert!(out.status.success(), "{}", text(&out));
     assert!(!dir.exists());

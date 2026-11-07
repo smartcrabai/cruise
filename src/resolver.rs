@@ -1511,18 +1511,22 @@ mod tests {
     }
 
     #[test]
-    fn bundle_candidates_match_user_config_discovery() {
-        let repo = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
+    fn bundle_candidates_match_user_config_discovery()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let repo = tempfile::tempdir()?;
+        let home = tempfile::tempdir()?;
         let _guard = DirGuard::new();
         let _home = crate::test_support::set_fake_home(home.path());
         let dir = user_workflows_dir(home.path());
-        std::fs::create_dir_all(dir.join("pkg")).unwrap();
-        std::fs::write(dir.join("flat.yaml"), "steps: {}\n").unwrap();
-        std::fs::write(dir.join("pkg/review.yaml"), "steps: {}\n").unwrap();
-        std::fs::write(dir.join("pkg/extra.yaml"), "steps: {}\n").unwrap();
-        std::fs::write(dir.join("pkg/.cruise-package-lock.json"), r#"{"name":"pkg","owner":"org","repo":"repo","requested_ref":"main","resolved_commit":"1111111111111111111111111111111111111111","workflows":{"review":{"source_path":"review.yaml","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}}"#).unwrap();
-        let candidates = collect_candidates(repo.path(), None).unwrap();
+        std::fs::create_dir_all(dir.join("pkg"))?;
+        std::fs::write(dir.join("flat.yaml"), "steps: {}\n")?;
+        std::fs::write(dir.join("pkg/review.yaml"), "steps: {}\n")?;
+        std::fs::write(dir.join("pkg/extra.yaml"), "steps: {}\n")?;
+        std::fs::write(
+            dir.join("pkg/.cruise-package-lock.json"),
+            r#"{"name":"pkg","owner":"org","repo":"repo","requested_ref":"main","resolved_commit":"1111111111111111111111111111111111111111","workflows":{"review":{"source_path":"review.yaml","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}}"#,
+        )?;
+        let candidates = collect_candidates(repo.path(), None)?;
         let paths: Vec<_> = candidates
             .iter()
             .filter_map(|candidate| match &candidate.source {
@@ -1544,6 +1548,7 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.label.ends_with("workflows/pkg/review.yaml"))
         );
+        Ok(())
     }
 
     #[test]

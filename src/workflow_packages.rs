@@ -52,7 +52,7 @@ pub struct PackageSpec {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-struct Manifest {
+pub(crate) struct Manifest {
     name: String,
     owner: String,
     repo: String,
@@ -441,7 +441,10 @@ fn build_bundle(
         for command in commands {
             let _ = writeln!(preview, "  {n}: {command}");
         }
-        let _ = writeln!(preview, "WARNING: workflow {n} is untrusted and may run arbitrary commands with side effects when you run it.");
+        let _ = writeln!(
+            preview,
+            "WARNING: workflow {n} is untrusted and may run arbitrary commands with side effects when you run it."
+        );
     }
     Ok(PreparedPackage {
         kind: PreparedKind::Bundle { lock, files },
@@ -471,7 +474,7 @@ fn check_no_collision(dir: &Path, name: &str) -> Result<(), WorkflowPackageError
     Ok(())
 }
 
-fn workflows_dir() -> Result<PathBuf, WorkflowPackageError> {
+pub(crate) fn workflows_dir() -> Result<PathBuf, WorkflowPackageError> {
     crate::paths::workflows_dir().map_err(|e| WorkflowPackageError::GitHub(e.to_string()))
 }
 
@@ -567,7 +570,7 @@ pub fn commit_install(prepared: PreparedPackage) -> Result<InstalledPackage, Wor
 }
 
 /// Load a managed package's manifest and verify its YAML is unmodified.
-fn load_unmodified(dir: &Path, name: &str) -> Result<Manifest, WorkflowPackageError> {
+pub(crate) fn load_unmodified(dir: &Path, name: &str) -> Result<Manifest, WorkflowPackageError> {
     validate_name(name)?;
     let manifest_text = std::fs::read_to_string(manifest_path(dir, name))
         .map_err(|_| WorkflowPackageError::NotInstalled(name.to_string()))?;
@@ -578,11 +581,6 @@ fn load_unmodified(dir: &Path, name: &str) -> Result<Manifest, WorkflowPackageEr
         return Err(WorkflowPackageError::Modified(name.to_string()));
     }
     Ok(manifest)
-}
-
-/// Verify that an installed package still matches its manifest.
-pub fn verify_unmodified(name: &str) -> Result<(), WorkflowPackageError> {
-    load_unmodified(&workflows_dir()?, name).map(|_| ())
 }
 
 pub fn prepare_update(name: &str) -> Result<PreparedPackage, WorkflowPackageError> {
@@ -691,14 +689,13 @@ pub fn list_installed() -> Result<Vec<InstalledPackage>, WorkflowPackageError> {
         let entry = entry?;
         let file_name = entry.file_name().to_string_lossy().into_owned();
         if !file_name.starts_with('.') && entry.file_type()?.is_dir() {
-            if let Ok(lock) = bundle::read_lock(&dir, &file_name) {
-                if lock
+            if let Ok(lock) = bundle::read_lock(&dir, &file_name)
+                && lock
                     .workflows
                     .keys()
                     .all(|n| dir.join(&file_name).join(format!("{n}.yaml")).is_file())
-                {
-                    packages.push(installed_bundle(&dir, lock));
-                }
+            {
+                packages.push(installed_bundle(&dir, lock));
             }
             continue;
         }

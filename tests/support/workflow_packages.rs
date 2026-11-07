@@ -34,8 +34,9 @@ esac
 pub fn install_gh(root: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
     let bin = root.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("fixture setup failed: {e}"));
     let gh = bin.join("gh");
-    std::fs::write(&gh, GH).unwrap();
-    std::fs::set_permissions(gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(&gh, GH).unwrap_or_else(|e| panic!("fixture setup failed: {e}"));
+    std::fs::set_permissions(gh, std::fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("fixture setup failed: {e}"));
 }
