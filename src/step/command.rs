@@ -430,7 +430,9 @@ async fn read_output_bounded<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) ->
                 let count = read.min(HEAD.saturating_sub(head.len()));
                 head.extend_from_slice(&buffer[..count]);
                 for &byte in &buffer[count..read] {
-                    if tail.len() == TAIL { tail.pop_front(); }
+                    if tail.len() == TAIL {
+                        tail.pop_front();
+                    }
                     tail.push_back(byte);
                 }
             }

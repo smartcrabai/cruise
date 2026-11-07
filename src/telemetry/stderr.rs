@@ -30,7 +30,11 @@ pub(crate) struct StreamSanitizer {
 
 impl StreamSanitizer {
     pub(crate) fn new(limit: usize) -> Self {
-        Self { pending: Vec::new(), state: ScanState::default(), output: BoundedOutput::new(limit) }
+        Self {
+            pending: Vec::new(),
+            state: ScanState::default(),
+            output: BoundedOutput::new(limit),
+        }
     }
 
     pub(crate) fn push(&mut self, bytes: &[u8]) {
@@ -43,17 +47,23 @@ impl StreamSanitizer {
     }
 
     fn line(&mut self, newline: bool) {
-        if newline { self.pending.pop(); }
+        if newline {
+            self.pending.pop();
+        }
         let line = String::from_utf8_lossy(&self.pending);
         if !is_machine_diagnostic_line(&line) {
             sanitize_line(&line, &mut self.state, &mut self.output);
         }
-        if newline { self.output.push('\n'); }
+        if newline {
+            self.output.push('\n');
+        }
         self.pending.clear();
     }
 
     pub(crate) fn finish(mut self) -> String {
-        if !self.pending.is_empty() { self.line(false); }
+        if !self.pending.is_empty() {
+            self.line(false);
+        }
         let (body, _, meaningful) = self.output.finish();
         if meaningful { body } else { String::new() }
     }

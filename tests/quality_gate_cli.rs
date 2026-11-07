@@ -200,11 +200,18 @@ fn feedback_masks_secrets() {
 
 #[test]
 fn large_output_preserves_both_ends_in_feedback_and_artifact() {
-    let f = Fixture::new("if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; echo BEGIN_MARKER; echo 'password=hunter2'; head -c 5000000 /dev/zero | tr '\\0' x; echo; echo END_MARKER; exit 1; fi\n", 1, "");
+    let f = Fixture::new(
+        "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; echo BEGIN_MARKER; echo 'password=hunter2'; head -c 5000000 /dev/zero | tr '\\0' x; echo; echo END_MARKER; exit 1; fi\n",
+        1,
+        "",
+    );
     let out = f.exec();
     assert!(out.status.success(), "{}", text(&out));
     let retry = f.prompt(2);
-    let path = retry.lines().find_map(|line| line.strip_prefix("- Sanitized log (may be truncated): ")).unwrap();
+    let path = retry
+        .lines()
+        .find_map(|line| line.strip_prefix("- Sanitized log (may be truncated): "))
+        .unwrap();
     let path = Path::new(path);
     assert!(!path.starts_with(&f.repo));
     let log = std::fs::read_to_string(f.home.join("gate-log-2")).unwrap();
@@ -214,12 +221,26 @@ fn large_output_preserves_both_ends_in_feedback_and_artifact() {
         assert!(output.contains("omitted"));
         assert!(!output.contains("hunter2"));
     }
-    assert!(String::from_utf8_lossy(&Command::new("git").args(["status", "--porcelain"]).current_dir(&f.repo).output().unwrap().stdout).is_empty());
+    assert!(
+        String::from_utf8_lossy(
+            &Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&f.repo)
+                .output()
+                .unwrap()
+                .stdout
+        )
+        .is_empty()
+    );
 }
 
 #[test]
 fn omitted_private_key_context_is_redacted_in_feedback_and_artifact() {
-    let f = Fixture::new("if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; head -c 2500000 /dev/zero | tr '\\0' x; echo; echo '-----BEGIN PRIVATE KEY-----'; head -c 2500000 /dev/zero | tr '\\0' y; echo KEY_BODY_MUST_NOT_ESCAPE; echo '-----END PRIVATE KEY-----'; echo FINAL_SAFE_DIAGNOSTIC; exit 1; fi\n", 1, "");
+    let f = Fixture::new(
+        "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; head -c 2500000 /dev/zero | tr '\\0' x; echo; echo '-----BEGIN PRIVATE KEY-----'; head -c 2500000 /dev/zero | tr '\\0' y; echo KEY_BODY_MUST_NOT_ESCAPE; echo '-----END PRIVATE KEY-----'; echo FINAL_SAFE_DIAGNOSTIC; exit 1; fi\n",
+        1,
+        "",
+    );
     let out = f.exec();
     assert!(out.status.success(), "{}", text(&out));
     let retry = f.prompt(2);
@@ -232,8 +253,15 @@ fn omitted_private_key_context_is_redacted_in_feedback_and_artifact() {
 
 #[test]
 fn seconds_timeout_kills_gate_and_reports_feedback() {
-    let f = Fixture::new("if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; sleep 5; touch \"$HOME/leaked\"; else exit 0; fi\n", 1, "");
-    let yaml = std::fs::read_to_string(&f.config).unwrap().replace("      - command: 'sh \"$HOME/gate.sh\"'", "      - command: 'sh \"$HOME/gate.sh\"'\n        timeout: '1s'");
+    let f = Fixture::new(
+        "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; sleep 5; touch \"$HOME/leaked\"; else exit 0; fi\n",
+        1,
+        "",
+    );
+    let yaml = std::fs::read_to_string(&f.config).unwrap().replace(
+        "      - command: 'sh \"$HOME/gate.sh\"'",
+        "      - command: 'sh \"$HOME/gate.sh\"'\n        timeout: '1s'",
+    );
     std::fs::write(&f.config, yaml).unwrap();
     let start = std::time::Instant::now();
     let out = f.exec();
@@ -246,17 +274,31 @@ fn seconds_timeout_kills_gate_and_reports_feedback() {
 
 #[test]
 fn no_changes_retries_before_running_gate() {
-    let f = Fixture::new("echo gate >> \"$HOME/gates\"\n", 2, "    if:\n      no-file-changes: retry\n");
+    let f = Fixture::new(
+        "echo gate >> \"$HOME/gates\"\n",
+        2,
+        "    if:\n      no-file-changes: retry\n",
+    );
     std::fs::write(f.home.join("agent.sh"), "echo attempt >> \"$HOME/attempts\"\nn=$(wc -l < \"$HOME/attempts\" | tr -d ' ')\ncat > \"$HOME/prompt-$n\"\nif [ \"$n\" -gt 1 ]; then touch changed; fi\necho done\n").unwrap();
     let out = f.exec();
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(f.attempts(), 2);
-    assert_eq!(std::fs::read_to_string(f.home.join("gates")).unwrap().lines().count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(f.home.join("gates"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
 }
 
 #[test]
 fn failed_gate_suppresses_file_changed_route() {
-    let f = Fixture::new("if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; exit 1; fi\n", 1, "    if:\n      file-changed: other\n  other:\n    command: 'touch routed'\n");
+    let f = Fixture::new(
+        "if [ ! -f \"$HOME/gate-ran\" ]; then touch \"$HOME/gate-ran\"; exit 1; fi\n",
+        1,
+        "    if:\n      file-changed: other\n  other:\n    command: 'touch routed'\n",
+    );
     std::fs::write(f.home.join("agent.sh"), "echo attempt >> \"$HOME/attempts\"\nn=$(wc -l < \"$HOME/attempts\" | tr -d ' ')\ncat > \"$HOME/prompt-$n\"\necho \"$n\" >> changed\necho done\n").unwrap();
     let out = f.exec();
     assert!(out.status.success(), "{}", text(&out));
@@ -267,10 +309,20 @@ fn failed_gate_suppresses_file_changed_route() {
 
 #[test]
 fn cancellation_cleans_up_gate_process_group() {
-    let f = Fixture::new("echo $$ > \"$HOME/gate-pid\"; sleep 5; touch \"$HOME/leaked\"\n", 1, "");
-    let mut child = f.command().stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let f = Fixture::new(
+        "echo $$ > \"$HOME/gate-pid\"; sleep 5; touch \"$HOME/leaked\"\n",
+        1,
+        "",
+    );
+    let mut child = f
+        .command()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
     let start = std::time::Instant::now();
-    while !f.home.join("gate-pid").exists() && start.elapsed() < std::time::Duration::from_secs(10) {
+    while !f.home.join("gate-pid").exists() && start.elapsed() < std::time::Duration::from_secs(10)
+    {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(f.home.join("gate-pid").exists());

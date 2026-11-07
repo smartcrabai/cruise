@@ -25,7 +25,11 @@ pub(crate) async fn run_quality_gates(
 ) -> Result<Option<QualityGateFailure>> {
     for gate in gates {
         let output = match crate::step::command::run_gate_command(
-            &gate.command, env, cwd, gate.timeout, cancel,
+            &gate.command,
+            env,
+            cwd,
+            gate.timeout,
+            cancel,
         )
         .await
         {
@@ -106,9 +110,14 @@ mod tests {
     async fn spawn_failure_is_feedback_with_unavailable_artifact() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing");
-        let gates = [ResolvedGate { command: "true".into(), timeout: None }];
+        let gates = [ResolvedGate {
+            command: "true".into(),
+            timeout: None,
+        }];
         let failure = run_quality_gates(&gates, &HashMap::new(), Some(&missing), None)
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         let feedback = format_feedback(&failure, "step", 1, 2, None);
         assert!(feedback.contains("Sanitized log (may be truncated): unavailable"));
         assert!(!feedback.contains("exit code"));
