@@ -80,6 +80,7 @@ impl Default for NotificationSettings {
 }
 
 impl NotificationSettings {
+    #[must_use]
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }

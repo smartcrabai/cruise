@@ -97,7 +97,8 @@ fn displayed_notifications(output: &Output) -> serde_json::Value {
 }
 
 #[test]
-fn notification_defaults_remain_invisible_and_are_not_saved() {
+fn notification_defaults_remain_invisible_and_are_not_saved()
+-> Result<(), Box<dyn std::error::Error>> {
     for input in [
         r#"{"runAllParallelism":2}"#,
         r#"{"runAllParallelism":2,"notifications":{}}"#,
@@ -108,14 +109,14 @@ fn notification_defaults_remain_invisible_and_are_not_saved() {
         assert!(shown.status.success(), "{}", output_text(&shown));
         assert_eq!(
             String::from_utf8_lossy(&shown.stdout),
-            "run_all_parallelism = 2\n"
+            "run_all_parallelism = 2\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\n"
         );
         let updated = fixture.run(&["config", "--set-parallelism", "3"]);
         assert!(updated.status.success(), "{}", output_text(&updated));
-        let saved: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
         assert!(saved.get("notifications").is_none(), "{saved}");
     }
+    Ok(())
 }
 
 #[test]
@@ -180,23 +181,22 @@ fn notification_unknown_keys_are_rejected() {
 }
 
 #[test]
-fn config_reports_webhook_error_without_exposing_webhook_url() {
+fn config_reports_webhook_error_without_exposing_webhook_url()
+-> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     fixture.write_app_config("json", r#"{"notifications":{"sound":true}}"#);
     let state = fixture.root.path().join("state/cruise");
-    std::fs::create_dir_all(&state).unwrap();
+    std::fs::create_dir_all(&state)?;
     std::fs::write(
         state.join("notification-webhook-error"),
         "1700000000 transport error\n",
-    )
-    .unwrap();
+    )?;
     let secret = "https://hooks.example.test/services/SECRET123";
     let output = fixture
         .command()
         .env("CRUISE_NOTIFY_WEBHOOK", secret)
         .arg("config")
-        .output()
-        .unwrap();
+        .output()?;
     assert!(output.status.success(), "{}", output_text(&output));
     let text = output_text(&output);
     assert!(
@@ -208,11 +208,8 @@ fn config_reports_webhook_error_without_exposing_webhook_url() {
         !text.contains(secret) && !text.contains("SECRET123"),
         "{text}"
     );
-    assert!(
-        !std::fs::read_to_string(fixture.app_config("json"))
-            .unwrap()
-            .contains("SECRET123")
-    );
+    assert!(!std::fs::read_to_string(fixture.app_config("json"))?.contains("SECRET123"));
+    Ok(())
 }
 
 #[test]

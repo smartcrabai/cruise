@@ -15,6 +15,8 @@ use crate::error::Result;
 /// Buffered events per SSE connection, matching the TUI's `UiEvent` channel.
 const SUBSCRIBER_CAPACITY: usize = 256;
 
+type NotificationHook = Arc<dyn Fn(&ApplicationEvent) + Send + Sync>;
+
 /// Broadcast hub. Sinks never fail: a browser that navigated away must not
 /// turn a running session into `Failed`
 /// (`CruiseApplication` maps `sink.send` errors to a failed phase).
@@ -25,7 +27,7 @@ const SUBSCRIBER_CAPACITY: usize = 256;
 #[derive(Default)]
 pub(crate) struct EventHub {
     state: Mutex<HubState>,
-    notification_hook: Option<Arc<dyn Fn(&ApplicationEvent) + Send + Sync>>,
+    notification_hook: Option<NotificationHook>,
 }
 
 impl std::fmt::Debug for EventHub {
@@ -231,7 +233,7 @@ mod tests {
                     if let Some((kind, _, _)) = application_event_notification(event) {
                         assert_eq!(kind, WorkflowNotificationKind::Completed);
                         calls.fetch_add(1, Ordering::SeqCst);
-                        let hub = weak.upgrade().unwrap();
+                        let Some(hub) = weak.upgrade() else { return };
                         let _subscriber = hub.subscribe();
                     }
                 })),

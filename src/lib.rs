@@ -81,6 +81,10 @@ mod spinner;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_support;
 
+#[expect(
+    dead_code,
+    reason = "the library registers the binary-facing notification helper module"
+)]
 mod desktop_notifications;
 mod notification_sound;
 mod notification_webhook;

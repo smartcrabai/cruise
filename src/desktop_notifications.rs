@@ -1,10 +1,5 @@
 //! Best-effort desktop notifications shared by the CLI and TUI.
 
-#![expect(
-    dead_code,
-    reason = "the library registers the binary-facing notification helper module"
-)]
-
 const NOTIFICATION_TITLE: &str = "Cruise";
 const MAX_DETAIL_CHARS: usize = 60;
 const DISABLE_NOTIFICATIONS_ENV: &str = "CRUISE_DISABLE_NOTIFICATIONS";
@@ -365,7 +360,7 @@ mod tests {
                 self.0.borrow_mut().push(format!("{url} {text}"));
             }
         }
-        let recorder = Recorder(Default::default());
+        let recorder = Recorder(std::cell::RefCell::default());
         let payload = build_payload(WorkflowNotificationKind::Failed, None, Some("a<b>"), "s");
         deliver(
             &payload,
