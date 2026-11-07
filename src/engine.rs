@@ -651,8 +651,8 @@ async fn step_loop_iteration(
                 break;
             }
         }
-        when_skip = when_skip
-            || should_skip_due_to_when(step_config.when.as_ref(), vars, ctx.working_dir)?;
+        when_skip =
+            when_skip || should_skip_due_to_when(step_config.when.as_ref(), vars, ctx.working_dir)?;
     }
 
     if static_skip || when_skip {
@@ -2727,26 +2727,39 @@ steps:
             (false, false, "missing", "present", true),
             (false, false, "present", "missing", true),
         ] {
-            let dir = TempDir::new().unwrap();
-            std::fs::write(dir.path().join("present"), "yes").unwrap();
+            let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+            std::fs::write(dir.path().join("present"), "yes")
+                .unwrap_or_else(|e| panic!("write present failed: {e}"));
             let (declaration, return_field, routing) = if return_first {
-                ("returns: [done]\n", ", return: done", "    on_return: {done: wrong}\n")
+                (
+                    "returns: [done]\n",
+                    ", return: done",
+                    "    on_return: {done: wrong}\n",
+                )
             } else {
                 ("", "", "")
             };
             let callee = format!(
                 "{declaration}steps:\n  first: {{command: 'exit 1', skip: {child_skip}, when: {{exists: {child_when}}}{return_field}}}\n  second: {{command: 'true'}}\n"
             );
-            std::fs::write(dir.path().join("callee.yaml"), callee).unwrap();
+            std::fs::write(dir.path().join("callee.yaml"), callee)
+                .unwrap_or_else(|e| panic!("write callee failed: {e}"));
             let root = format!(
                 "command: [echo]\nsteps:\n  call:\n    workflow_call: ./callee.yaml\n    skip: {caller_skip}\n    when: {{exists: {caller_when}}}\n    next: end\n{routing}  wrong: {{command: 'exit 1'}}\n  end: {{command: 'true'}}\n"
             );
-            let config = WorkflowConfig::from_yaml(&root).unwrap();
+            let config =
+                WorkflowConfig::from_yaml(&root).unwrap_or_else(|e| panic!("parse failed: {e}"));
             let resolved = crate::workflow_call::resolve_workflow_calls_with_defaults(
-                config, dir.path(), &crate::workflow_defaults::WorkflowDefaults::default(),
-            ).unwrap();
-            let yaml = serde_yaml::to_string(&resolved).unwrap();
-            let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf()).await.unwrap();
+                config,
+                dir.path(),
+                &crate::workflow_defaults::WorkflowDefaults::default(),
+            )
+            .unwrap_or_else(|e| panic!("resolution failed: {e}"));
+            let yaml = serde_yaml::to_string(&resolved)
+                .unwrap_or_else(|e| panic!("serialization failed: {e}"));
+            let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf())
+                .await
+                .unwrap_or_else(|e| panic!("workflow failed: {e}"));
             assert_eq!(result.skipped, 1);
             assert_eq!(result.run, 2);
         }

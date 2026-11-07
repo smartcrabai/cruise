@@ -9,7 +9,7 @@ use tempfile::TempDir;
 
 fn write(dir: &Path, name: &str, contents: &str) -> PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, contents).unwrap();
+    std::fs::write(&path, contents).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
     path
 }
 
@@ -21,7 +21,7 @@ fn load(path: &Path) -> cruise::error::Result<WorkflowConfig> {
 }
 
 fn fixture(callee: &str, call_fields: &str) -> (TempDir, PathBuf) {
-    let dir = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
     write(dir.path(), "callee.yaml", callee);
     let root = write(
         dir.path(),
@@ -53,22 +53,24 @@ fn option_routes_are_parent_scoped_and_metadata_is_removed() {
         "returns: [approved, needs_fix]\nsteps:\n  review:\n    command: 'true'\n  decide:\n    option:\n      - {selector: Approve, return: approved}\n      - {selector: Fix, return: needs_fix}\n",
         "    on_return: {approved: publish, needs_fix: fix}\n",
     );
-    let config = load(&root).unwrap();
+    let config = load(&root).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
     assert_eq!(
         config.steps.keys().map(String::as_str).collect::<Vec<_>>(),
         ["gate/review", "gate/decide", "fix", "publish"]
     );
-    let json = serde_json::to_value(&config).unwrap();
+    let json = serde_json::to_value(&config).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
     assert!(json.get("returns").is_none());
     assert!(config.steps["gate/review"].next.is_none());
-    let options = json["steps"]["gate/decide"]["option"].as_array().unwrap();
+    let options = json["steps"]["gate/decide"]["option"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected options array"));
     assert_eq!(options[0]["next"], "publish");
     assert_eq!(options[1]["next"], "fix");
     assert!(options.iter().all(|o| o.get("return").is_none()));
     assert!(
         json["steps"]
             .as_object()
-            .unwrap()
+            .unwrap_or_else(|| panic!("expected steps object"))
             .values()
             .all(|s| s.get("return").is_none() && s.get("on_return").is_none())
     );
@@ -81,14 +83,18 @@ fn step_return_and_normal_fallthrough_preserve_distinct_routes() {
         "    on_return: {ok: publish}\n",
     );
     assert_eq!(
-        load(&root).unwrap().steps["gate/finish"].next.as_deref(),
+        load(&root)
+            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"))
+            .steps["gate/finish"]
+            .next
+            .as_deref(),
         Some("publish")
     );
     let (_dir, root) = fixture(
         "returns: [ok]\nsteps:\n  early: {command: 'true', return: ok}\n  last: {command: 'true'}\n",
         "    on_return: {ok: fix}\n    next: publish\n",
     );
-    let config = load(&root).unwrap();
+    let config = load(&root).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
     assert_eq!(config.steps["gate/early"].next.as_deref(), Some("fix"));
     assert_eq!(config.steps["gate/last"].next.as_deref(), Some("publish"));
 }
@@ -104,7 +110,7 @@ fn nested_returns_are_mapped_at_each_scope() {
         "leaf.yaml",
         "returns: [ok]\nsteps:\n  finish: {command: 'true', return: ok}\n",
     );
-    let config = load(&root).unwrap();
+    let config = load(&root).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
     assert_eq!(
         config.steps["gate/inner/finish"].next.as_deref(),
         Some("gate/finish")
@@ -193,7 +199,7 @@ fn conflicting_and_misplaced_returns_are_rejected() {
         let (_dir, root) = fixture(callee, fields);
         invalid(&root, &[message]);
     }
-    let dir = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
     for (name, yaml) in [
         (
             "returns.yaml",
@@ -218,14 +224,20 @@ fn loops_with_and_without_normal_exit_route_independently() {
         "returns: [ok]\nsteps:\n  decide:\n    option:\n      - {selector: Retry, next: decide}\n      - {selector: Done, return: ok}\n  normal: {command: 'true'}\n",
         "    on_return: {ok: fix}\n    next: publish\n",
     );
-    let config = load(&root).unwrap();
-    let json = serde_json::to_value(&config).unwrap();
-    assert_eq!(json["steps"]["gate/decide"]["option"][0]["next"], "gate/decide");
+    let config = load(&root).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+    let json = serde_json::to_value(&config).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+    assert_eq!(
+        json["steps"]["gate/decide"]["option"][0]["next"],
+        "gate/decide"
+    );
     assert_eq!(json["steps"]["gate/decide"]["option"][1]["next"], "fix");
     assert_eq!(config.steps["gate/normal"].next.as_deref(), Some("publish"));
-    let compiled = cruise::workflow::compile(config).unwrap();
-    let graph = cruise::graph::build_graph(&compiled, 3).unwrap();
-    cruise::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &[]).unwrap();
+    let compiled =
+        cruise::workflow::compile(config).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+    let graph = cruise::graph::build_graph(&compiled, 3)
+        .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+    cruise::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &[])
+        .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
 
     let (_dir, root) = fixture(
         "returns: [ok]\nsteps:\n  loop: {command: 'true', next: loop}\n  finish: {command: 'true', return: ok}\n",
@@ -237,19 +249,45 @@ fn loops_with_and_without_normal_exit_route_independently() {
         "returns: [ok]\nsteps:\n  loop: {command: 'true', next: loop}\n  finish: {command: 'true', return: ok}\n",
         "    on_return: {ok: fix}\n",
     );
-    let compiled = cruise::workflow::compile(load(&root).unwrap()).unwrap();
-    let graph = cruise::graph::build_graph(&compiled, 3).unwrap();
-    assert!(cruise::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &[]).is_err());
+    let compiled = cruise::workflow::compile(
+        load(&root).unwrap_or_else(|e| panic!("unexpected error: {e:?}")),
+    )
+    .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+    let graph = cruise::graph::build_graph(&compiled, 3)
+        .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+    assert!(
+        cruise::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &[]).is_err()
+    );
 }
 
 #[test]
 fn additional_return_placement_and_conflicts_are_rejected() {
     for (callee, fields, message) in [
-        ("returns: [ok]\nsteps:\n  decide:\n    option:\n      - {selector: Done, next: decide, return: ok}\n", "    on_return: {ok: fix}\n", "both next and return"),
-        ("returns: [ok]\nsteps:\n  finish:\n    command: 'true'\n    return: ok\n    if: {file-changed: '*.rs'}\n", "    on_return: {ok: fix}\n", "return-bearing step cannot declare if.file-changed"),
-        ("returns: [ok]\ngroups:\n  g:\n    steps:\n      finish: {command: 'true', return: ok}\nsteps:\n  run: {command: 'true'}\n", "    on_return: {ok: fix}\n", "return is only valid on top-level callee steps"),
-        ("returns: [ok]\nsteps:\n  run: {command: 'true'}\nafter-pr:\n  finish: {command: 'true', return: ok}\n", "    on_return: {ok: fix}\n", "return is only valid on top-level callee steps"),
-        ("steps:\n  finish: {command: 'true'}\n", "    on_return: {ok: fix}\n", "undeclared return label"),
+        (
+            "returns: [ok]\nsteps:\n  decide:\n    option:\n      - {selector: Done, next: decide, return: ok}\n",
+            "    on_return: {ok: fix}\n",
+            "both next and return",
+        ),
+        (
+            "returns: [ok]\nsteps:\n  finish:\n    command: 'true'\n    return: ok\n    if: {file-changed: '*.rs'}\n",
+            "    on_return: {ok: fix}\n",
+            "return-bearing step cannot declare if.file-changed",
+        ),
+        (
+            "returns: [ok]\ngroups:\n  g:\n    steps:\n      finish: {command: 'true', return: ok}\nsteps:\n  run: {command: 'true'}\n",
+            "    on_return: {ok: fix}\n",
+            "return is only valid on top-level callee steps",
+        ),
+        (
+            "returns: [ok]\nsteps:\n  run: {command: 'true'}\nafter-pr:\n  finish: {command: 'true', return: ok}\n",
+            "    on_return: {ok: fix}\n",
+            "return is only valid on top-level callee steps",
+        ),
+        (
+            "steps:\n  finish: {command: 'true'}\n",
+            "    on_return: {ok: fix}\n",
+            "undeclared return label",
+        ),
     ] {
         let (_dir, root) = fixture(callee, fields);
         invalid(&root, &[message]);
@@ -259,7 +297,7 @@ fn additional_return_placement_and_conflicts_are_rejected() {
 #[cfg(unix)]
 #[tokio::test]
 async fn return_and_skips_follow_the_executed_path() {
-    use cruise::engine::{execute_steps_with_graph, ExecutionContext};
+    use cruise::engine::{ExecutionContext, execute_steps_with_graph};
     use cruise::file_tracker::FileTracker;
     use cruise::graph::build_graph;
     use cruise::option_handler::OptionHandler;
@@ -282,15 +320,23 @@ async fn return_and_skips_follow_the_executed_path() {
         (true, false, "normal\nfix\npublish\n"),
         (false, true, "normal\nfix\npublish\n"),
     ] {
-        let callee = format!("returns: [ok]\nsteps:\n  finish: {{command: 'echo return >> visits', return: ok, skip: {step_skip}}}\n  normal: {{command: 'echo normal >> visits'}}\n");
+        let callee = format!(
+            "returns: [ok]\nsteps:\n  finish: {{command: 'echo return >> visits', return: ok, skip: {step_skip}}}\n  normal: {{command: 'echo normal >> visits'}}\n"
+        );
         let fields = format!("    on_return: {{ok: publish}}\n    skip: {call_skip}\n");
         let (dir, root) = fixture(&callee, &fields);
-        let root_text = std::fs::read_to_string(&root).unwrap()
+        let root_text = std::fs::read_to_string(&root)
+            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"))
             .replace("command: 'true'", "command: 'echo fix >> visits'")
-            .replace("  publish:\n    command: 'echo fix >> visits'", "  publish:\n    command: 'echo publish >> visits'");
-        std::fs::write(&root, root_text).unwrap();
-        let compiled = compile(load(&root).unwrap()).unwrap();
-        let mut graph = build_graph(&compiled, 3).unwrap();
+            .replace(
+                "  publish:\n    command: 'echo fix >> visits'",
+                "  publish:\n    command: 'echo publish >> visits'",
+            );
+        std::fs::write(&root, root_text).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let compiled = compile(load(&root).unwrap_or_else(|e| panic!("unexpected error: {e:?}")))
+            .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let mut graph =
+            build_graph(&compiled, 3).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
         let ctx = ExecutionContext {
             compiled: &compiled,
             max_retries: 3,
@@ -310,16 +356,42 @@ async fn return_and_skips_follow_the_executed_path() {
             &mut FileTracker::with_root(dir.path().into()),
             &mut graph,
             &|_, _| Ok(()),
-        ).await.unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("visits")).unwrap(), expected);
+        )
+        .await
+        .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("visits"))
+                .unwrap_or_else(|e| panic!("unexpected error: {e:?}")),
+            expected
+        );
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn option_return_follows_the_executed_path() {
+    use cruise::engine::{ExecutionContext, execute_steps_with_graph};
+    use cruise::file_tracker::FileTracker;
+    use cruise::graph::build_graph;
+    use cruise::option_handler::OptionHandler;
+    use cruise::variable::VariableStore;
+    use cruise::workflow::compile;
 
     struct ChooseFirst;
     impl OptionHandler for ChooseFirst {
-        fn select_option(&self, choices: &[cruise::step::OptionChoice], _: Option<&str>) -> cruise::error::Result<cruise::step::option::OptionResult> {
+        fn select_option(
+            &self,
+            choices: &[cruise::step::OptionChoice],
+            _: Option<&str>,
+        ) -> cruise::error::Result<cruise::step::option::OptionResult> {
             match &choices[0] {
-                cruise::step::OptionChoice::Selector { next, .. } => Ok(cruise::step::option::OptionResult { next_step: next.clone(), text_input: None }),
-                _ => panic!("expected selector"),
+                cruise::step::OptionChoice::Selector { next, .. } => {
+                    Ok(cruise::step::option::OptionResult {
+                        next_step: next.clone(),
+                        text_input: None,
+                    })
+                }
+                cruise::step::OptionChoice::TextInput { .. } => panic!("expected selector"),
             }
         }
     }
@@ -327,19 +399,42 @@ async fn return_and_skips_follow_the_executed_path() {
         "returns: [ok]\nsteps:\n  decide:\n    option:\n      - {selector: Done, return: ok}\n",
         "    on_return: {ok: publish}\n",
     );
-    let root_text = std::fs::read_to_string(&root).unwrap()
+    let root_text = std::fs::read_to_string(&root)
+        .unwrap_or_else(|e| panic!("unexpected error: {e:?}"))
         .replace("command: 'true'", "command: 'echo fix >> visits'")
-        .replace("  publish:\n    command: 'echo fix >> visits'", "  publish:\n    command: 'echo publish >> visits'");
-    std::fs::write(&root, root_text).unwrap();
-    let compiled = compile(load(&root).unwrap()).unwrap();
-    let mut graph = build_graph(&compiled, 3).unwrap();
+        .replace(
+            "  publish:\n    command: 'echo fix >> visits'",
+            "  publish:\n    command: 'echo publish >> visits'",
+        );
+    std::fs::write(&root, root_text).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+    let compiled = compile(load(&root).unwrap_or_else(|e| panic!("unexpected error: {e:?}")))
+        .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+    let mut graph = build_graph(&compiled, 3).unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
     let ctx = ExecutionContext {
-        compiled: &compiled, max_retries: 3, rate_limit_retries: 0,
-        on_step_start: &|_| Ok(()), cancel_token: None, option_handler: &ChooseFirst,
-        config_reloader: None, working_dir: Some(dir.path()), skipped_steps: &[],
-        flags: &cruise::flags::NO_FLAGS, on_step_log: None,
+        compiled: &compiled,
+        max_retries: 3,
+        rate_limit_retries: 0,
+        on_step_start: &|_| Ok(()),
+        cancel_token: None,
+        option_handler: &ChooseFirst,
+        config_reloader: None,
+        working_dir: Some(dir.path()),
+        skipped_steps: &[],
+        flags: &cruise::flags::NO_FLAGS,
+        on_step_log: None,
     };
-    execute_steps_with_graph(&ctx, &mut VariableStore::new(String::new()),
-        &mut FileTracker::with_root(dir.path().into()), &mut graph, &|_, _| Ok(())).await.unwrap();
-    assert_eq!(std::fs::read_to_string(dir.path().join("visits")).unwrap(), "publish\n");
+    execute_steps_with_graph(
+        &ctx,
+        &mut VariableStore::new(String::new()),
+        &mut FileTracker::with_root(dir.path().into()),
+        &mut graph,
+        &|_, _| Ok(()),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("visits"))
+            .unwrap_or_else(|e| panic!("unexpected error: {e:?}")),
+        "publish\n"
+    );
 }

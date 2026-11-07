@@ -657,7 +657,6 @@ fn validate_root_returns_before_expansion(config: &WorkflowConfig) -> Result<()>
 }
 
 pub(crate) fn validate_no_return_routes(config: &WorkflowConfig) -> Result<()> {
-    validate_root_returns_before_expansion(config)?;
     fn has_on_return(step: &StepConfig) -> bool {
         step.on_return.is_some()
             || step
@@ -665,6 +664,7 @@ pub(crate) fn validate_no_return_routes(config: &WorkflowConfig) -> Result<()> {
                 .as_ref()
                 .is_some_and(|children| children.values().any(has_on_return))
     }
+    validate_root_returns_before_expansion(config)?;
     if config
         .steps
         .values()
@@ -1652,7 +1652,8 @@ steps:
                 path: path.into(),
             };
             let error = resolve_github_workflow_for_install(&reference)
-                .expect_err("root return routes must be rejected on install");
+                .err()
+                .unwrap_or_else(|| panic!("root return routes must be rejected on install"));
             assert!(
                 matches!(&error, CruiseError::InvalidStepConfig(message)
                     if message.contains("return routes are only valid in a workflow_call target")),
@@ -1904,19 +1905,50 @@ steps:
 
     #[test]
     fn nested_workflow_call_preserves_all_first_step_guards() {
-        let dir = TempDir::new().unwrap();
-        write_file(&dir, "leaf.yaml", "steps:\n  first: {command: 'true', skip: leaf.skip, when: {exists: leaf}}\n");
-        write_file(&dir, "middle.yaml", "steps:\n  inner:\n    workflow_call: ./leaf.yaml\n    skip: inner.skip\n    when: {exists: inner}\n");
-        let root = WorkflowConfig::from_yaml("command: [echo]\nsteps:\n  outer:\n    workflow_call: ./middle.yaml\n    skip: outer.skip\n    when: {exists: outer}\n").unwrap();
-        let resolved = resolve_workflow_calls_with_defaults(root, dir.path(), &WorkflowDefaults::default()).unwrap();
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        write_file(
+            &dir,
+            "leaf.yaml",
+            "steps:\n  first: {command: 'true', skip: leaf.skip, when: {exists: leaf}}\n",
+        );
+        write_file(
+            &dir,
+            "middle.yaml",
+            "steps:\n  inner:\n    workflow_call: ./leaf.yaml\n    skip: inner.skip\n    when: {exists: inner}\n",
+        );
+        let root = WorkflowConfig::from_yaml("command: [echo]\nsteps:\n  outer:\n    workflow_call: ./middle.yaml\n    skip: outer.skip\n    when: {exists: outer}\n").unwrap_or_else(|e| panic!("parse failed: {e}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(root, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|e| panic!("resolution failed: {e}"));
         let step = &resolved.steps["outer/inner/first"];
         assert_eq!(step.call_guards.len(), 2);
-        assert_eq!(step.call_guards[0].when.as_ref().unwrap().exists.as_deref(), Some("outer"));
-        assert_eq!(step.call_guards[1].when.as_ref().unwrap().exists.as_deref(), Some("inner"));
-        assert_eq!(step.when.as_ref().unwrap().exists.as_deref(), Some("leaf"));
-        assert!(matches!(&step.call_guards[0].skip, Some(crate::config::SkipCondition::Variable(v)) if v == "outer.skip"));
-        assert!(matches!(&step.call_guards[1].skip, Some(crate::config::SkipCondition::Variable(v)) if v == "inner.skip"));
-        assert!(matches!(&step.skip, Some(crate::config::SkipCondition::Variable(v)) if v == "leaf.skip"));
+        assert_eq!(
+            step.call_guards[0]
+                .when
+                .as_ref()
+                .and_then(|when| when.exists.as_deref()),
+            Some("outer")
+        );
+        assert_eq!(
+            step.call_guards[1]
+                .when
+                .as_ref()
+                .and_then(|when| when.exists.as_deref()),
+            Some("inner")
+        );
+        assert_eq!(
+            step.when.as_ref().and_then(|when| when.exists.as_deref()),
+            Some("leaf")
+        );
+        assert!(
+            matches!(&step.call_guards[0].skip, Some(crate::config::SkipCondition::Variable(v)) if v == "outer.skip")
+        );
+        assert!(
+            matches!(&step.call_guards[1].skip, Some(crate::config::SkipCondition::Variable(v)) if v == "inner.skip")
+        );
+        assert!(
+            matches!(&step.skip, Some(crate::config::SkipCondition::Variable(v)) if v == "leaf.skip")
+        );
     }
 
     #[test]
