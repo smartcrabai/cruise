@@ -125,6 +125,8 @@ After writing or editing a config, verify each of the following:
 11. **YAML order**: steps execute in declaration order, except children within a `parallel` block run concurrently and join before the next step — does that match the intended flow?
 12. **Retry loops**: Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 
+Run `cruise workflow doctor <path>` to check references, routing and graph diagnostics without executing the workflow. Its unreachable-step warning is relative to the selected flags, which default to off; use `-f NAME` to inspect another flag selection. A reachable exitless cycle is an error if the start cannot reach a normal exit, or a warning if another path can exit. `--strict` makes warnings fail the check. These static checks do not establish command safety or resolve all runtime-dependent variables.
+
 ## Generated configs
 
-`cruise workflow generate` drafts a workflow with an LLM and saves it only after the `exec` preflight passes. Preflight does not catch unknown top-level keys (silently ignored) and does not prove command safety. Review any generated YAML against the authoring checklist above before running it.
+`cruise workflow generate` drafts a workflow with an LLM and saves it only after doctor static checks pass with flags off and isolated defaults. These checks do not catch unknown top-level keys (silently ignored) and do not prove command safety. Review any generated YAML against the authoring checklist above before running it.

@@ -10,10 +10,6 @@ use std::collections::HashSet;
 ///
 /// # Errors
 /// Rejects a reachable cycle only when no normal exit is reachable from `entry`.
-#[expect(
-    clippy::too_many_lines,
-    reason = "iterative reachability and SCC analysis share indexed topology"
-)]
 pub fn validate_execution_graph(
     graph: &ExecutionGraph,
     compiled: &CompiledWorkflow,
@@ -21,6 +17,35 @@ pub fn validate_execution_graph(
     skipped_steps: &[String],
     phase: &str,
 ) -> Result<()> {
+    let analysis = analyze_phase(graph, compiled, entry, skipped_steps, phase)?;
+    if let Some(message) = analysis.cycle_without_exit {
+        crate::status_eprintln!("warning: {message}");
+    }
+    Ok(())
+}
+
+/// Static analysis of one execution phase.
+#[derive(Debug)]
+pub struct PhaseAnalysis {
+    pub phase: String,
+    pub unreachable_steps: Vec<String>,
+    pub cycle_without_exit: Option<String>,
+}
+
+struct LiveEdges {
+    start: usize,
+    edges: Vec<Vec<usize>>,
+    reverse: Vec<Vec<usize>>,
+    exits: Vec<usize>,
+    reachable: Vec<bool>,
+}
+
+fn live_edges(
+    graph: &ExecutionGraph,
+    compiled: &CompiledWorkflow,
+    entry: &str,
+    skipped_steps: &[String],
+) -> Result<LiveEdges> {
     let start = graph
         .nodes
         .get_index_of(entry)
@@ -93,6 +118,42 @@ pub fn validate_execution_graph(
         }
     }
     let reachable = reachable_from(&edges, [start]);
+    Ok(LiveEdges {
+        start,
+        edges,
+        reverse,
+        exits,
+        reachable,
+    })
+}
+
+pub(crate) fn analyze_phase(
+    graph: &ExecutionGraph,
+    compiled: &CompiledWorkflow,
+    entry: &str,
+    skipped_steps: &[String],
+    phase: &str,
+) -> Result<PhaseAnalysis> {
+    let LiveEdges {
+        start,
+        edges,
+        reverse,
+        exits,
+        reachable,
+    } = live_edges(graph, compiled, entry, skipped_steps)?;
+    let n = graph.nodes.len();
+    let unreachable_steps = graph
+        .nodes
+        .values()
+        .enumerate()
+        .filter(|(i, _)| !reachable[*i])
+        .map(|(_, node)| node.step_name.clone())
+        .collect();
+    let mut analysis = PhaseAnalysis {
+        phase: phase.into(),
+        unreachable_steps,
+        cycle_without_exit: None,
+    };
     let can_exit = reachable_from(&reverse, exits);
     // Iterative Kosaraju: no recursion or all-pairs reachability matrix.
     let mut visited = vec![false; n];
@@ -139,7 +200,7 @@ pub fn validate_execution_graph(
         }
     }
     if dangerous.is_empty() {
-        return Ok(());
+        return Ok(analysis);
     }
     let names = dangerous
         .iter()
@@ -161,10 +222,10 @@ pub fn validate_execution_graph(
             "{phase} execution from '{entry}' has no normal exit and reaches a cycle: {names}"
         )));
     }
-    crate::status_eprintln!(
-        "warning: {phase} execution may enter a cycle with no normal exit: {names}; runtime loop protection remains enabled"
-    );
-    Ok(())
+    analysis.cycle_without_exit = Some(format!(
+        "{phase} execution may enter a cycle with no normal exit: {names}; runtime loop protection remains enabled"
+    ));
+    Ok(analysis)
 }
 
 fn reachable_from(edges: &[Vec<usize>], seeds: impl IntoIterator<Item = usize>) -> Vec<bool> {
@@ -187,6 +248,31 @@ fn reachable_from(edges: &[Vec<usize>], seeds: impl IntoIterator<Item = usize>) 
     seen
 }
 
+/// Analyze main and after-pr phases without emitting warnings.
+///
+/// # Errors
+/// Propagates graph construction errors and definite nontermination diagnostics.
+pub fn analyze_workflow(
+    compiled: &CompiledWorkflow,
+    graph: &ExecutionGraph,
+    entry: &str,
+    skipped: &[String],
+) -> Result<Vec<PhaseAnalysis>> {
+    let mut phases = vec![analyze_phase(graph, compiled, entry, skipped, "main")?];
+    if !compiled.after_pr.is_empty() {
+        let after = compiled.to_after_pr_compiled();
+        let after_graph = build_graph(&after, graph.max_retries)?;
+        phases.push(analyze_phase(
+            &after_graph,
+            &after,
+            &after_graph.start,
+            skipped,
+            "after-pr",
+        )?);
+    }
+    Ok(phases)
+}
+
 /// Validate main and after-pr before creating workspaces or executing commands.
 ///
 /// # Errors
@@ -204,4 +290,50 @@ pub fn validate_workflow(
         validate_execution_graph(&graph, &after, &graph.start, skipped, "after-pr")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WorkflowConfig;
+
+    fn analyze(yaml: &str, skipped: &[String]) -> Result<Vec<PhaseAnalysis>> {
+        let config = WorkflowConfig::from_yaml(yaml)
+            .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
+        let compiled = crate::workflow::compile(config)?;
+        let graph = build_graph(&compiled, 3)?;
+        analyze_workflow(&compiled, &graph, &graph.start, skipped)
+    }
+
+    #[test]
+    fn unreachable_respects_skipped_steps() -> Result<()> {
+        let yaml = "command: [echo]\nsteps:\n  a:\n    command: echo a\n    next: c\n  b:\n    command: echo b\n  c:\n    command: echo c\n";
+        let normal = analyze(yaml, &[])?;
+        assert_eq!(normal[0].phase, "main");
+        assert_eq!(normal[0].unreachable_steps, ["b"]);
+        let skipped = analyze(yaml, &["a".into()])?;
+        assert_eq!(skipped[0].unreachable_steps, [] as [String; 0]);
+        Ok(())
+    }
+
+    #[test]
+    fn reports_definite_nontermination() {
+        let yaml = "command: [echo]\nsteps:\n  a:\n    command: echo a\n    next: b\n  b:\n    command: echo b\n    next: a\n";
+        let error = analyze(yaml, &[]).err();
+        assert!(error.is_some_and(|error| {
+            error
+                .to_string()
+                .contains("has no normal exit and reaches a cycle")
+        }));
+    }
+
+    #[test]
+    fn analyzes_after_pr_independently() -> Result<()> {
+        let yaml = "command: [echo]\nsteps:\n  a:\n    command: echo a\nafter-pr:\n  x:\n    command: echo x\n    next: z\n  y:\n    command: echo y\n  z:\n    command: echo z\n";
+        let phases = analyze(yaml, &[])?;
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[1].phase, "after-pr");
+        assert_eq!(phases[1].unreachable_steps, ["y"]);
+        Ok(())
+    }
 }

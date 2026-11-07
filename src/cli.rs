@@ -159,12 +159,33 @@ pub enum WorkflowCommand {
     Eject(WorkflowEjectArgs),
     /// Generate a new workflow YAML file from a description using the configured backend.
     Generate(WorkflowGenerateArgs),
+    /// Validate workflow YAML without running it (static checks).
+    Doctor(WorkflowDoctorArgs),
     /// Install a workflow from GitHub: `owner/repo[/path][@ref]`.
     Add(WorkflowAddArgs),
     /// Remove an installed workflow package.
     Remove(WorkflowNameArgs),
     /// Update an installed workflow package to its requested ref's latest commit.
     Update(WorkflowUpdateArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct WorkflowDoctorArgs {
+    /// Workflow names or paths to inspect.
+    #[arg(conflicts_with = "all")]
+    pub targets: Vec<String>,
+    /// Inspect local, user, and built-in workflows.
+    #[arg(long)]
+    pub all: bool,
+    /// Emit a JSON report.
+    #[arg(long)]
+    pub json: bool,
+    /// Treat warnings as a failing exit status.
+    #[arg(long)]
+    pub strict: bool,
+    /// Set workflow flags for each target.
+    #[arg(long = "flag", short = 'f', value_name = "NAME[=on|off]", value_delimiter = ',', value_parser = crate::flags::parse_assignment, conflicts_with = "all")]
+    pub flags: Vec<(String, bool)>,
 }
 
 #[derive(Parser, Debug)]

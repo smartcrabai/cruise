@@ -43,13 +43,6 @@ mod error;
 mod exec_cmd;
 mod executor;
 mod file_tracker;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "NO_FLAGS is part of the public library flags API but unused by the CLI binary"
-    )
-)]
 mod flags;
 mod forge;
 mod github_review;
@@ -104,6 +97,8 @@ mod workflow;
 mod workflow_call;
 mod workflow_cmd;
 mod workflow_defaults;
+mod workflow_doctor;
+mod workflow_doctor_targets;
 mod workflow_generate;
 mod workflow_packages;
 mod workspace;
@@ -114,6 +109,9 @@ mod yaml_metadata;
 // Hooks run once per tool call, without constructing a runtime or telemetry.
 fn main() {
     let cli = cli::parse_cli();
+    if let Some(cli::Commands::Workflow(cli::WorkflowCommand::Doctor(args))) = &cli.command {
+        std::process::exit(workflow_doctor::run(args));
+    }
     if matches!(
         &cli.command,
         Some(cli::Commands::Internal(cli::InternalArgs {
@@ -181,6 +179,9 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         }
         Some(cli::Commands::Workflow(cli::WorkflowCommand::Generate(args))) => {
             workflow_generate::run(args).await
+        }
+        Some(cli::Commands::Workflow(cli::WorkflowCommand::Doctor(_))) => {
+            unreachable!("workflow doctor exits before runtime initialization")
         }
         Some(cli::Commands::Workflow(cli::WorkflowCommand::Add(args))) => {
             workflow_cmd::add(&args.spec, args.name, args.yes)
