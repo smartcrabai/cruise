@@ -125,7 +125,8 @@ pub fn load_config_from_source(
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml`.
 /// 4. `./.cruise/*.yaml` / `*.yml` (sorted by filename).
-/// 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` -- interactive selector includes a trailing
+/// 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` and members of valid locked bundle
+///    directories -- interactive selector includes a trailing
 ///    "Built-in default" entry so the built-in default can be chosen explicitly.
 ///
 /// # Errors
@@ -153,7 +154,7 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `cruise.yaml` / `cruise.yml` / `.cruise.yaml` / `.cruise.yml` under `cwd`.
 /// 4. `.cruise/*.yaml` / `*.yml` under `cwd` (sorted by filename).
-/// 5. `~/.config/cruise/workflows/*.yaml` / `*.yml`.
+/// 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` and members of valid locked bundle directories.
 ///
 /// # Errors
 ///
@@ -380,13 +381,13 @@ fn collect_candidates(
     // warn once per process so the user knows to migrate them.
     crate::configs::warn_legacy_user_configs();
     if let Ok(workflows_dir) = crate::paths::workflows_dir() {
-        push_yaml_dir_candidates(
-            &mut candidates,
-            &workflows_dir,
-            &cwd,
-            home.as_deref(),
-            CandidateKind::UserDir,
-        );
+        for file in crate::configs::user_workflow_yaml_paths(&workflows_dir) {
+            let file = to_absolute(file);
+            candidates.push(ConfigCandidate {
+                label: shorten_display_path(&file, &cwd, home.as_deref()),
+                source: CandidateKind::UserDir(file),
+            });
+        }
     }
 
     // 4. Built-in workflows — always last, default first.
@@ -1634,6 +1635,47 @@ mod tests {
             team_idx < user_idx,
             ".cruise/team.yaml (idx {team_idx}) must precede user-dir (idx {user_idx})"
         );
+    }
+
+    #[test]
+    fn bundle_candidates_match_user_config_discovery()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let repo = tempfile::tempdir()?;
+        let home = tempfile::tempdir()?;
+        let _guard = DirGuard::new();
+        let _home = crate::test_support::set_fake_home(home.path());
+        let dir = user_workflows_dir(home.path());
+        std::fs::create_dir_all(dir.join("pkg"))?;
+        std::fs::write(dir.join("flat.yaml"), "steps: {}\n")?;
+        std::fs::write(dir.join("pkg/review.yaml"), "steps: {}\n")?;
+        std::fs::write(dir.join("pkg/extra.yaml"), "steps: {}\n")?;
+        std::fs::write(
+            dir.join("pkg/.cruise-package-lock.json"),
+            r#"{"name":"pkg","owner":"org","repo":"repo","requested_ref":"main","resolved_commit":"1111111111111111111111111111111111111111","workflows":{"review":{"source_path":"review.yaml","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}}"#,
+        )?;
+        let candidates = collect_candidates(repo.path(), None)?;
+        let paths: Vec<_> = candidates
+            .iter()
+            .filter_map(|candidate| match &candidate.source {
+                CandidateKind::UserDir(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let entries: Vec<_> = crate::configs::list_user_configs()
+            .into_iter()
+            .map(|entry| PathBuf::from(entry.path))
+            .collect();
+        assert_eq!(paths, entries);
+        assert_eq!(
+            paths,
+            vec![dir.join("flat.yaml"), dir.join("pkg/review.yaml")]
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.label.ends_with("workflows/pkg/review.yaml"))
+        );
+        Ok(())
     }
 
     #[test]

@@ -399,7 +399,8 @@ fn check_target(
         }
     }
     if let Some(name) = target.package_name
-        && let Err(e) = crate::workflow_packages::verify_unmodified(&name)
+        && let Err(e) = crate::workflow_packages::workflows_dir()
+            .and_then(|dir| crate::workflow_packages::load_unmodified(&dir, &name))
     {
         let (level, code) = if matches!(
             e,

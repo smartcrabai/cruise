@@ -295,12 +295,25 @@ jobs:
       - name: Execution and skip-selection Quint, Alloy receipts and production Gherkin
         run: bash scripts/check_workflow_flags_specs.sh
 
+      - name: Workflow package Quint, Alloy receipts and production tests
+        if: ${{ !cancelled() }}
+        run: bash scripts/check_workflow_packages_specs.sh
+
       - name: Upload workflow flag specification evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: workflow-flags-spec-reports
           path: target/formal-reports/workflow-flags.*/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload workflow package specification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: workflow-packages-spec-reports
+          path: target/formal-reports/workflow-packages.*/
           if-no-files-found: error
           retention-days: 14
 
