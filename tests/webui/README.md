@@ -1,5 +1,25 @@
 # Responsive WebUI executable specifications
 
+## Verify browser tests
+
+The secret-free boundary suite runs `node tests/webui/verify-boundary.mjs` after the runtime is built and Chromium is installed. It uses real production rendering with isolated HOME/XDG and persisted sessions. It checks that Verify is offered for an approval session with a plan, and hidden for a missing plan, Draft, and Planned, plus the mobile approval view. With a restricted system-only executable PATH and no credentials it clicks Verify, asserts the production POST and the missing Claude CLI error in the UI, and checks the saved plan is preserved. Screenshots, including the error, go under `target/formal-reports/verify-boundary-browser/` (override with `WEBUI_VERIFY_BOUNDARY_REPORT_DIR`). Responsive WebUI CI runs it and uploads the screenshots. No provider is mocked or executed and no specification is verified by this boundary test.
+
+The separate paid real-provider test can be run locally:
+
+From the repository root, install the pinned Node and Rust versions and browser prerequisites above, install Claude Code 2.1.250, then run:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+npm ci --prefix tests/formal --ignore-scripts
+npx --prefix tests/webui playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+ANTHROPIC_API_KEY=... node tests/webui/verify-real.mjs
+```
+
+This invokes the real Claude provider and can incur charges. It creates isolated HOME/XDG and session data, runs the production runtime, and uses real Quint from `tests/formal`; Alloy and Java must also be installed and configured if Alloy checking is desired. It asserts a Draft boundary, the Verify POST, a real formal report and checker stage, and preservation of the saved plan. Screenshots go to `target/formal-reports/verify-browser/` or `WEBUI_VERIFY_REPORT_DIR`. `WEBUI_BDD_BIN` selects a runtime and `WEBUI_VERIFY_MODEL` selects a Claude model. The stochastic provider may generate invalid specs or fail, and the test does not claim a passing formal verdict or complete correctness of the generated model. Screenshots may contain provider output and should be handled accordingly.
+
+The paid test is not run in CI. The separate pre-existing `verify.mjs` uses a fake provider and is not evidence of real-provider success.
+
 ## Graph flag browser regression
 
 After installing the pinned browser dependencies, run `cargo +1.99.1 build --locked --all-features --bin cruise-runtime` followed by `node tests/webui/graph-flags.mjs` from the repository root. The existing WebUI CI job runs this test and uploads `target/formal-reports/graph-browser/`. `WEBUI_BDD_BIN` can select another runtime and `WEBUI_GRAPH_REPORT_DIR` changes the screenshot directory. The test uses a temporary HOME/XDG tree and changes persisted flags externally, exercising real Graph tab HTMX requests for off, on, off again, and an all-disabled graph. It asserts the server's Mermaid source and projected edges, not that the externally loaded Mermaid CDN successfully rendered SVG. Screenshots capture the browser state at the swap and may show Mermaid source if the CDN has not loaded.

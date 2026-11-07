@@ -13,6 +13,7 @@ pub(crate) struct SessionActionsVm {
     pub show_publish_issue: bool,
     pub show_fix: bool,
     pub show_ask: bool,
+    pub show_verify: bool,
     pub show_create_worktree: bool,
     pub show_run: bool,
     pub run_label: String,
@@ -40,6 +41,7 @@ pub(crate) fn session_actions(
         Some(
             OperationKind::Fix
                 | OperationKind::Ask
+                | OperationKind::Verify
                 | OperationKind::Replan
                 | OperationKind::Generate
         )
@@ -70,6 +72,7 @@ pub(crate) fn session_actions(
         && !is_active_run;
     let show_fix = awaiting_approval_with_plan;
     let show_ask = awaiting_approval_with_plan && !has_plan_error;
+    let show_verify = show_ask && !has_pending_prompt;
     let show_create_worktree = !is_active_run && session.phase == "Planned" && usable_plan;
     let show_run = !is_active_run
         && !is_awaiting_refresh
@@ -104,6 +107,7 @@ pub(crate) fn session_actions(
         show_publish_issue,
         show_fix,
         show_ask,
+        show_verify,
         show_create_worktree,
         show_run,
         run_label: run_label.to_string(),
@@ -410,6 +414,48 @@ mod tests {
         session.pr_url = Some("https://github.com/owner/repo/pull/3".to_string());
         let value = session_actions(&session, Some(OperationKind::Mutate), false);
         assert!(!value.show_merge_pr);
+    }
+
+    #[test]
+    fn verify_action_follows_usable_approval_and_is_suppressed_when_busy() {
+        let show_verify = |phase, available, operation, pending| {
+            let value = serde_json::to_value(actions(phase, available, operation, pending))
+                .expect("actions serialize");
+            value
+                .get("showVerify")
+                .and_then(|value| value.as_bool())
+                .expect("showVerify must be serialized as a boolean")
+        };
+        assert!(show_verify("Awaiting Approval", true, None, false));
+        assert!(!show_verify("Awaiting Approval", false, None, false));
+        for phase in [
+            "Draft",
+            "Awaiting Input",
+            "Planned",
+            "Running",
+            "Suspended",
+            "Failed",
+            "Completed",
+        ] {
+            assert!(!show_verify(phase, true, None, false), "{phase}");
+        }
+        assert!(!show_verify(
+            "Awaiting Approval",
+            true,
+            Some(OperationKind::Ask),
+            false
+        ));
+        assert!(!show_verify("Awaiting Approval", true, None, true));
+
+        let mut session = make_session("Awaiting Approval");
+        session.plan_available = true;
+        session.plan_error = Some("provider unavailable".to_string());
+        let value =
+            serde_json::to_value(session_actions(&session, None, false)).expect("serialize");
+        assert_eq!(
+            value.get("showVerify"),
+            Some(&serde_json::Value::Bool(false))
+        );
     }
 
     #[test]

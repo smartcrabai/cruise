@@ -41,6 +41,13 @@ pub enum OperationKind {
     BatchQueued,
     BatchRun,
     Mutate,
+    Verify,
+}
+
+impl OperationKind {
+    fn keeps_saved_plan(self) -> bool {
+        matches!(self, Self::Ask | Self::Verify)
+    }
 }
 
 fn execution_kind(operation: OperationKind) -> &'static str {
@@ -52,6 +59,7 @@ fn execution_kind(operation: OperationKind) -> &'static str {
         OperationKind::Run | OperationKind::BatchRun => "run",
         OperationKind::BatchQueued => "batch_queued",
         OperationKind::Mutate => "mutate",
+        OperationKind::Verify => "verify",
     }
 }
 
@@ -1321,6 +1329,7 @@ pub enum SessionAction {
     Resume,
     OpenPr,
     MergePr,
+    Verify,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1573,7 +1582,7 @@ struct PlanContext {
 
 fn planning_operation_allowed(state: &SessionState, operation: OperationKind) -> bool {
     match operation {
-        OperationKind::Fix | OperationKind::Ask => matches!(
+        OperationKind::Fix | OperationKind::Ask | OperationKind::Verify => matches!(
             state.phase,
             SessionPhase::AwaitingApproval | SessionPhase::Planned
         ),
@@ -1702,7 +1711,7 @@ fn fail_plan(
     context.state = context.before_state.clone();
     context.state.base_dir = base_dir;
     preserve_plan_checkpoint(manager, &mut context.state)?;
-    if operation != OperationKind::Ask {
+    if !operation.keeps_saved_plan() {
         context.state.plan_error = Some(message.clone());
     }
     manager.save(&context.state)?;
@@ -1874,6 +1883,13 @@ async fn run_plan_prompt(
     });
     let planning_interactive =
         request.interactive.is_enabled() && crate::planning::sdk_plan_tools_enabled(config);
+    if operation == OperationKind::Verify {
+        let saved = context
+            .old_plan
+            .as_deref()
+            .ok_or_else(|| CruiseError::Other("cannot verify without a saved plan".into()))?;
+        crate::planning::write_plan_atomically(&context.staged_plan_path, saved)?;
+    }
     let mut vars = crate::planning::setup_plan_vars(
         context.state.template_input(&manager.sessions_dir()),
         context.staged_plan_path.clone(),
@@ -1930,15 +1946,44 @@ async fn run_plan_prompt(
         on_notice: Some(&on_notice),
         cancel_token: Some(&token),
     };
+    if operation == OperationKind::Verify {
+        let on_report = |text: &str| {
+            sink.send(ApplicationEvent::PlanChunk {
+                session_id: context.state.id.clone(),
+                stream: EventStream::Stdout,
+                text: format!("\n{text}\n"),
+            })
+        };
+        let result = crate::planning::run_verify_flow(
+            &ctx,
+            &mut vars,
+            &mut context.resume,
+            Some(&streams),
+            &on_report,
+        )
+        .await;
+        if let Some(error) = stream_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            return Err(CruiseError::Other(format!(
+                "planning event delivery failed: {error}"
+            )));
+        }
+        return result;
+    }
     let template = match operation {
         OperationKind::Fix => crate::planning::fix_plan_template(config),
         OperationKind::Ask => crate::planning::ask_plan_template(config),
+        OperationKind::Verify => crate::planning::VERIFY_PLAN_PROMPT_TEMPLATE,
         OperationKind::Replan => crate::planning::plan_template(config),
         _ => crate::planning::initial_plan_template(config, request.grill),
     };
     let label = match operation {
         OperationKind::Fix => "[plan] fixing plan...",
         OperationKind::Ask => "[plan] answering question...",
+        OperationKind::Verify => "[plan] generating formal specifications...",
         OperationKind::Replan => "[plan] replanning...",
         _ => "[plan] creating plan...",
     };
@@ -1949,7 +1994,7 @@ async fn run_plan_prompt(
         label,
         Some(&streams),
         &mut context.resume,
-        operation != OperationKind::Ask,
+        !operation.keeps_saved_plan(),
     )
     .await?;
     if let Some(error) = stream_failure
@@ -1961,7 +2006,7 @@ async fn run_plan_prompt(
             "planning event delivery failed: {error}"
         )));
     }
-    if operation == OperationKind::Ask {
+    if operation.keeps_saved_plan() {
         return Ok(());
     }
     let plan_content = crate::planning::resolve_generated_plan_content(
@@ -1981,7 +2026,7 @@ fn commit_generated_plan(
     staged_plan_path: &std::path::Path,
     old_plan: Option<&[u8]>,
 ) -> Result<()> {
-    if operation != OperationKind::Ask {
+    if !operation.keeps_saved_plan() {
         std::fs::rename(staged_plan_path, plan_path).map_err(|error| {
             CruiseError::Other(format!("failed to commit generated plan: {error}"))
         })?;
@@ -2122,7 +2167,7 @@ fn finish_plan(
     } else {
         context.state.phase = if matches!(
             operation,
-            OperationKind::Fix | OperationKind::Ask | OperationKind::Replan
+            OperationKind::Fix | OperationKind::Ask | OperationKind::Replan | OperationKind::Verify
         ) || matches!(
             context.before_state.phase,
             SessionPhase::Planned | SessionPhase::AwaitingApproval
@@ -2186,7 +2231,7 @@ fn finish_plan(
         context.state.clear_pending_input();
     }
     context.state.plan_error = None;
-    if operation != OperationKind::Ask
+    if !operation.keeps_saved_plan()
         && let Ok(content) = std::fs::read_to_string(&context.staged_plan_path)
     {
         crate::metadata::refresh_session_title_from_plan(&mut context.state, &content);
@@ -2906,6 +2951,7 @@ impl CruiseApplication {
                         SessionAction::Publish,
                         SessionAction::Fix,
                         SessionAction::Ask,
+                        SessionAction::Verify,
                     ]);
                 } else {
                     actions.extend([SessionAction::Fix, SessionAction::Generate]);
@@ -2959,6 +3005,7 @@ impl CruiseApplication {
                 OperationKind::Generate
                     | OperationKind::Fix
                     | OperationKind::Ask
+                    | OperationKind::Verify
                     | OperationKind::Replan
                     | OperationKind::Run
             )
@@ -3075,6 +3122,16 @@ impl CruiseApplication {
             ..PlanRequest::default()
         };
         self.plan_with_operation(id, request, sink, OperationKind::Ask)
+            .await
+    }
+
+    /// Verify formal specifications derived from the saved plan without changing it.
+    pub async fn verify(
+        &self,
+        id: &str,
+        sink: Arc<dyn ApplicationEventSink>,
+    ) -> Result<SessionState> {
+        self.plan_with_operation(id, PlanRequest::default(), sink, OperationKind::Verify)
             .await
     }
 
@@ -4517,6 +4574,155 @@ mod tests {
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    fn verify_test_session(
+        app: &CruiseApplication,
+        manager: &SessionManager,
+        dir: &std::path::Path,
+        phase: SessionPhase,
+    ) -> SessionState {
+        let script = dir.join("verify-backend.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'call\\n' >> '{}'\nprintf 'No specifications produced.\\n'\n",
+                dir.join("verify-calls").display()
+            ),
+        )
+        .unwrap_or_else(|e| panic!("write backend: {e}"));
+        let mut state = app
+            .create_session(NewSessionRequest {
+                input: "verify test".to_string(),
+                base_dir: dir.to_path_buf(),
+                config_path: None,
+                config_yaml: Some(format!(
+                    "command: [sh, '{}']\nsteps:\n  s1:\n    prompt: test\n",
+                    script.display()
+                )),
+                repo: None,
+                workspace_mode: WorkspaceMode::Worktree,
+                allow_dirty_working_tree: false,
+                attachments: vec![],
+                skipped_steps: vec![],
+                flags: BTreeMap::default(),
+            })
+            .unwrap_or_else(|e| panic!("create session: {e}"));
+        state.phase = phase;
+        manager
+            .save(&state)
+            .unwrap_or_else(|e| panic!("save session: {e}"));
+        std::fs::write(
+            state.plan_path(&manager.sessions_dir()),
+            b"# Original plan\n\nKeep this.\n",
+        )
+        .unwrap_or_else(|e| panic!("write plan: {e}"));
+        state
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verify_no_blocks_preserves_plan_and_phase_without_second_turn() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _config = isolate_application_config(temp.path());
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        for phase in [SessionPhase::AwaitingApproval, SessionPhase::Planned] {
+            let dir = temp.path().join(phase.label().replace(' ', "-"));
+            std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{e}"));
+            let state = verify_test_session(&app, &manager, &dir, phase.clone());
+            let plan = state.plan_path(&manager.sessions_dir());
+            let before = std::fs::read(&plan).unwrap_or_else(|e| panic!("{e}"));
+            let events = Arc::new(Mutex::new(Vec::<ApplicationEvent>::new()));
+            let captured = Arc::clone(&events);
+            let sink: Arc<dyn ApplicationEventSink> = Arc::new(move |event| {
+                captured
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(event);
+                Ok(())
+            });
+            let result = app
+                .verify(&state.id, sink)
+                .await
+                .unwrap_or_else(|e| panic!("verify: {e}"));
+            assert_eq!(result.phase, phase);
+            let saved = manager.load(&state.id).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(saved.phase, phase);
+            assert!(saved.plan_error.is_none());
+            assert_eq!(
+                std::fs::read(plan).unwrap_or_else(|e| panic!("{e}")),
+                before
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.join("verify-calls")).unwrap_or_else(|e| panic!("{e}")),
+                "call\n"
+            );
+            assert!(events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|event| matches!(event, ApplicationEvent::PlanChunk { text, .. } if text.contains("nothing was verified"))));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verify_no_blocks_report_error_preserves_plan_without_setting_plan_error() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _config = isolate_application_config(temp.path());
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let state = verify_test_session(&app, &manager, temp.path(), SessionPhase::Planned);
+        let plan = state.plan_path(&manager.sessions_dir());
+        let before = std::fs::read(&plan).unwrap_or_else(|e| panic!("{e}"));
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|event| {
+            if matches!(event, ApplicationEvent::PlanChunk { text, .. } if text.contains("nothing was verified"))
+            {
+                Err(CruiseError::Other("report sink failed".to_string()))
+            } else {
+                Ok(())
+            }
+        });
+        let error = app
+            .verify(&state.id, sink)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("expected error"));
+        assert!(error.to_string().contains("report sink failed"), "{error}");
+        let saved = manager.load(&state.id).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(saved.phase, SessionPhase::Planned);
+        assert!(saved.plan_error.is_none());
+        assert_eq!(
+            std::fs::read(plan).unwrap_or_else(|e| panic!("{e}")),
+            before
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("verify-calls"))
+                .unwrap_or_else(|e| panic!("{e}")),
+            "call\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verify_excludes_draft_even_with_saved_plan() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _config = isolate_application_config(temp.path());
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let state = verify_test_session(&app, &manager, temp.path(), SessionPhase::Draft);
+        assert!(!app.capabilities(&state).contains(&SessionAction::Verify));
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_| Ok(()));
+        assert!(app.verify(&state.id, sink).await.is_err());
+        assert!(!temp.path().join("verify-calls").exists());
+        assert_eq!(
+            manager
+                .load(&state.id)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .phase,
+            SessionPhase::Draft
+        );
+    }
 
     #[test]
     fn session_display_dag_hides_disabled_steps_without_changing_raw_graph() {

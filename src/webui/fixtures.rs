@@ -51,6 +51,7 @@ fn actions() -> SessionActionsVm {
         show_publish_issue: true,
         show_fix: true,
         show_ask: true,
+        show_verify: true,
         show_create_worktree: true,
         show_run: true,
         run_label: "Retry".to_string(),

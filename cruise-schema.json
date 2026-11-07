@@ -153,6 +153,10 @@
       "additionalProperties": { "$ref": "#/$defs/FlagConfig" },
       "description": "Declared workflow flags. Steps reference them with `flag:`; all flags are off when absent. Enable selected flags with `--flag NAME`, a comma-separated name list, or explicit `NAME=on|off|true|false` assignments."
     },
+    "formal_verify": {
+      "$ref": "#/$defs/FormalVerifyConfig",
+      "description": "Settings for planning-time formal verification."
+    },
     "retry": {
       "$ref": "#/$defs/RetryConfig",
       "description": "Retryable-failure policy for the SDK backends. Optional: without it, only provider rate limits are retried on the same model, unless a workflow-level model array with fallback entries supplies an implicit policy."
@@ -738,6 +742,19 @@
             "$ref": "#/$defs/StepConfig"
           },
           "description": "Named steps belonging to this group"
+        }
+      }
+    },
+    "FormalVerifyConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model_check_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400,
+          "default": 900,
+          "description": "Timeout in seconds for each Quint model-checking or Alloy command."
         }
       }
     },

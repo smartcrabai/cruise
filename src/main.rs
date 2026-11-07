@@ -35,6 +35,7 @@ mod draft_cmd;
 )]
 mod engine;
 mod error;
+mod formal_verify;
 mod exec_cmd;
 mod executor;
 mod file_tracker;

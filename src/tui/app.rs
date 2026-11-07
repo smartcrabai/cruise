@@ -145,7 +145,12 @@ fn classify_sidebar_status(
         Some(OperationKind::Generate | OperationKind::Fix | OperationKind::Replan) => {
             return SidebarStatus::Planning;
         }
-        Some(OperationKind::Run | OperationKind::BatchRun | OperationKind::Ask) => {
+        Some(
+            OperationKind::Run
+            | OperationKind::BatchRun
+            | OperationKind::Ask
+            | OperationKind::Verify,
+        ) => {
             return SidebarStatus::Running;
         }
         Some(OperationKind::BatchQueued | OperationKind::Mutate) | None => {}
@@ -1191,7 +1196,11 @@ impl TuiApp {
                 ) {
                     self.active_planning.insert(session_id.clone());
                     self.plan_ready_eligible.insert(session_id.clone());
-                } else if operation == crate::application::OperationKind::Ask {
+                } else if matches!(
+                    operation,
+                    crate::application::OperationKind::Ask
+                        | crate::application::OperationKind::Verify
+                ) {
                     self.active_planning.insert(session_id.clone());
                     self.plan_ready_eligible.remove(&session_id);
                 }
@@ -2801,6 +2810,7 @@ impl TuiApp {
                 PendingCommand::Session(SessionAction::Replan),
             ),
             SessionAction::Generate
+            | SessionAction::Verify
             | SessionAction::Answer
             | SessionAction::Cancel
             | SessionAction::Approve
@@ -2991,6 +3001,16 @@ impl TuiApp {
             return;
         };
         match action {
+            SessionAction::Verify => {
+                if self
+                    .registry
+                    .verify(self.application.clone(), id, self.events.clone())
+                {
+                    self.status = Some("Verifying plan".to_string());
+                } else {
+                    self.set_error("An operation is already active for this session".to_string());
+                }
+            }
             SessionAction::Generate => {
                 let request = PlanRequest {
                     interactive: Interactive::new(true),
@@ -3463,6 +3483,7 @@ fn operation_label(operation: crate::application::OperationKind) -> &'static str
         crate::application::OperationKind::Generate => "Generate",
         crate::application::OperationKind::Fix => "Fix",
         crate::application::OperationKind::Ask => "Ask",
+        crate::application::OperationKind::Verify => "Verify",
         crate::application::OperationKind::Replan => "Replan",
         crate::application::OperationKind::Run => "Run",
         crate::application::OperationKind::BatchQueued => "Batch queued",
@@ -3482,6 +3503,7 @@ pub fn action_label(action: SessionAction) -> &'static str {
         SessionAction::Publish => "Publish Issue",
         SessionAction::Fix => "Fix Plan",
         SessionAction::Ask => "Ask About Plan",
+        SessionAction::Verify => "Verify Spec",
         SessionAction::Discard => "Discard",
         SessionAction::RunWorktree => "Run in Worktree",
         SessionAction::RunCurrentBranch => "Run on Current Branch",
@@ -3993,6 +4015,29 @@ mod tests {
             assert_eq!(app.sidebar_status(&state), SidebarStatus::Completed);
             drop(claim);
         }
+    }
+
+    #[test]
+    fn verify_action_and_operation_labels_are_visible() {
+        assert_eq!(action_label(SessionAction::Verify), "Verify Spec");
+        assert_eq!(
+            operation_label(crate::application::OperationKind::Verify),
+            "Verify"
+        );
+    }
+
+    #[test]
+    fn verify_operation_is_running_in_the_sidebar() {
+        let app = app_without_lock();
+        let id = "verify-session";
+        let state = sidebar_session(id, SessionPhase::AwaitingApproval);
+        let claim = app
+            .application
+            .runtime()
+            .try_begin(id, crate::application::OperationKind::Verify)
+            .unwrap_or_else(|error| panic!("failed to claim verify session: {error}"));
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::Running);
+        drop(claim);
     }
 
     #[test]

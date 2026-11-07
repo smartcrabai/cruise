@@ -231,7 +231,7 @@ The TUI requires an interactive TTY on macOS, Linux, or Windows. It is an intera
 
 The TUI has three views:
 
-- **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, or **Log** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The Info tab shows declared workflow flags and their on/off values. The Graph tab shows its node list plus the selected node's dependency and edge details, hiding flag-disabled steps except in legacy unversioned graph checkpoints, which are displayed without filtering; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
+- **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, or **Log** detail tab. The [`cruise list` Actions](#cruise-list-actions) matrix describes the list menu, not the full TUI action set. The Info tab shows declared workflow flags and their on/off values. The Graph tab shows its node list plus the selected node's dependency and edge details, hiding flag-disabled steps except in legacy unversioned graph checkpoints, which are displayed without filtering; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
 - **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above and the remaining questions below. The order is Source (local Directory or GitHub repository), working directory or repository, workflow config, task, images, workflow flags (shown only when the config declares flags), skipped steps (flag-disabled steps are hidden), workspace mode, dirty-tree allowance (current-branch runs only), and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question shows the same prioritized file candidates as the CLI, plus Auto-detect and all built-in workflows with `tdd` first. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
 - **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Press `p` to edit the shared WebUI/TUI parallelism setting. Changes are saved to the app configuration and can be made while a batch is active; a new limit applies at the next scheduling point, without cancelling workers that are already running. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
@@ -625,8 +625,11 @@ On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cru
    - **Approve** -- Mark the session as ready to run.
    - **Fix** -- Provide feedback; the plan step reruns with your input.
    - **Ask** -- Ask a question; the answer is captured but not displayed; the menu reappears.
+   - **Verify** -- Generate Quint and Alloy specifications, run their checks, and display the report and its interpretation without changing the saved plan. Use **Fix** to revise the plan.
    - **Execute now** -- Skip approval and run immediately.
    - **Publish as Issue** -- Publish `plan.md` as a GitHub issue (or GitLab issue) and delete the local session.
+
+   **Verify Spec** in the TUI and **Verify** in the WebUI are also available for a usable plan awaiting approval. It is a menu action, not an `/verify` command in Ask. It requires `quint` on PATH (0.33.0 recommended) and Java 17 or later for Alloy. Alloy uses `CRUISE_ALLOY_JAR` if supplied; otherwise Cruise downloads and checksum-verifies Alloy 6.2.0 into its data directory. Reports and logs are retained under the session's `formal/<run-id>/` directory until the session is deleted, not in the repository. Each Quint parse, typecheck and simulation has a 60-second limit. Model checks use `formal_verify.model_check_timeout_seconds` (default 900 seconds). Alloy commands run sequentially, so N commands can take up to N times that limit, plus setup and other checks. A passed bounded check is not a proof beyond its modeled scope.
 
    After choosing **Approve** or **Execute now**, declared workflow flags are selected first when no `-f/--flag` was supplied. Then a **step skip selector** lists only steps enabled by those values (grouped steps appear as a parent with children); no selector is shown when there are no candidates. Toggle any steps you want to skip for this run. Only selections from the visible candidates are persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected for the next session using the same config. Cancelling either selector returns to the approve-plan menu without saving partial flag changes, approving, or executing the session. Execute now forwards the approval-time flag values as explicit assignments, suppressing another flag prompt at execution start. After Approve, a later `cruise run` still offers the fresh-execution flag selector and does not ask for skips again (see [Workflow flags](#cruise-run)).
 
@@ -699,6 +702,8 @@ The interactive session list shows a menu of actions depending on the session's 
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
 | **Completed** | Open PR*, Merge PR*, Reset to Planned, Delete, Back |
+
+`cruise list` does not offer Verify, matching its existing omission of Ask.
 
 \* Open PR and Merge PR are shown only when the session has a PR URL.
 
@@ -803,7 +808,7 @@ fresh snapshot session to use updated settings.
 
 - `env` and `mcp_servers` merge per key (higher layer wins).
 - `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
-- Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
+- Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`, `formal_verify`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
 - `description`, `steps`, `groups`, and `after-pr` are workflow-only and are a load error in `default.yaml`. Unknown keys are errors too.
 - If defaults name a backend (`command` / `sdk`) of a different kind than the workflow's own, validation fails when they would fill an unset backend-specific `model`, `plan_model`, `subagent_model`, or `retry`, add a missing `mcp_servers` entry, or fill an unset `computer_use`, `permission`, or `disallowed_tools` field, regardless of its value. Set the field in the workflow or remove it from `default.yaml`. The check runs before `CRUISE_SDK` overrides, which are not considered.
 
@@ -825,6 +830,13 @@ In GitHub Actions, `XDG_*` is isolated, so only the project `.cruise/default.yam
 ## Config File Reference
 
 ### Basic Structure
+
+`formal_verify.model_check_timeout_seconds` sets the per-command Quint model-check and Alloy timeout in seconds. It accepts an integer from 1 through 86400 and defaults to 900. It may be set in workflow YAML or layered `default.yaml`:
+
+```yaml
+formal_verify:
+  model_check_timeout_seconds: 900
+```
 
 ```yaml
 command:                   # LLM invocation command (mutually exclusive with `sdk`)

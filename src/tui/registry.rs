@@ -305,6 +305,18 @@ impl OperationRegistry {
         })
     }
 
+    pub fn verify(
+        &mut self,
+        app: CruiseApplication,
+        id: String,
+        tx: UnboundedSender<UiEvent>,
+    ) -> bool {
+        let sink = Arc::new(ControlSink::new(tx.clone()));
+        self.spawn_operation(id.clone(), "verify", tx, async move {
+            app.verify(&id, sink).await
+        })
+    }
+
     pub fn run(
         &mut self,
         app: CruiseApplication,

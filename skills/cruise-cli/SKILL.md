@@ -51,6 +51,7 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 | I already wrote the plan myself — skip the LLM planning | `cruise plan --skip-planning "<plan text>"` (or `cruise --plan "…" --skip-planning`) |
 | Interview me one question at a time, then write the plan | `cruise plan --grill "task"` (SDK backend (the default) + TTY) |
 | Add executable Quint, Alloy, and Gherkin specifications with CI | `cruise exec -c builtin:add-formal-specs "task"` |
+| Verify a plan without changing it | Choose **Verify** in the interactive plan approval menu or WebUI, or **Verify Spec** in the TUI, for a usable plan awaiting approval; `cruise list` and Ask text do not provide this action |
 | Run `refactor`, `add-tests`, `add-formal-specs`, or `security` locally by default (`force_exec: true`) | For example, `cruise plan -c builtin:refactor "task"` runs directly without an outer plan/session, worktree, or automatic PR; add `--no-force-exec` for the normal plan/session path |
 | Research with a durable, read-only report | `cruise plan --skip-planning -c builtin:research "question"`; approve if prompted, then `cruise run <session-id>` |
 | Audit and safely repair confirmed security defects in a durable session | `cruise plan --no-force-exec -c builtin:security "audit request"`; approve if prompted, then `cruise run <session-id>` |

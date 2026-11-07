@@ -8,8 +8,8 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::config::{
-    LanguagesConfig, McpServers, ModelEntry, ModelSpec, PermissionMode, RetryConfig, SkipCondition,
-    StepConfig, StringOrVec, WhenCondition, WorkflowConfig,
+    FormalVerifyConfig, LanguagesConfig, McpServers, ModelEntry, ModelSpec, PermissionMode,
+    RetryConfig, SkipCondition, StepConfig, StringOrVec, WhenCondition, WorkflowConfig,
 };
 use crate::error::{CruiseError, Result};
 
@@ -151,6 +151,7 @@ struct DefaultsFile {
     #[serde(default)]
     env: HashMap<String, String>,
     retry: Option<RetryConfig>,
+    formal_verify: Option<FormalVerifyConfig>,
     #[serde(default)]
     mcp_servers: McpServers,
     #[serde(default)]
@@ -192,6 +193,7 @@ pub struct WorkflowDefaults {
     disallowed_tools: Option<Sourced<Vec<crate::tool_policy::ToolRestriction>>>,
     env: HashMap<String, String>,
     retry: Option<Sourced<RetryConfig>>,
+    formal_verify: Option<Sourced<FormalVerifyConfig>>,
     mcp_servers: IndexMap<String, Sourced<crate::config::McpServerConfig>>,
     pre_steps: IndexMap<String, StepConfig>,
 }
@@ -340,6 +342,7 @@ impl WorkflowDefaults {
         self.disallowed_tools =
             sourced(file.disallowed_tools, path).or(self.disallowed_tools.take());
         self.retry = sourced(file.retry, path).or(self.retry.take());
+        self.formal_verify = sourced(file.formal_verify, path).or(self.formal_verify.take());
         self.env.extend(file.env);
         for (name, server) in file.mcp_servers {
             self.mcp_servers.insert(
@@ -526,6 +529,9 @@ impl WorkflowDefaults {
         }
         if config.retry.is_none() {
             config.retry = self.retry.as_ref().map(|s| s.value.clone());
+        }
+        if config.formal_verify.is_none() {
+            config.formal_verify = self.formal_verify.as_ref().map(|s| s.value.clone());
         }
         for (key, value) in &self.env {
             config

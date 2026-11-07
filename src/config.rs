@@ -237,6 +237,9 @@ pub struct WorkflowConfig {
     /// provider rate limits only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
+    /// Time limits for planning-time formal verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formal_verify: Option<FormalVerifyConfig>,
 
     /// MCP servers made available to every SDK prompt run (`sdk: jcode`, the
     /// default backend, `sdk: claude`, and `sdk: opencode`). Rejected with a
@@ -674,6 +677,15 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Settings for planning-time formal verification.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormalVerifyConfig {
+    /// Per-command model checking timeout in seconds, from 1 through 86400.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_check_timeout_seconds: Option<u64>,
+}
+
 /// Default `retry.base_delay_ms`.
 fn default_base_delay_ms() -> u64 {
     500
@@ -807,6 +819,16 @@ impl WorkflowConfig {
     #[must_use]
     pub fn interactive_planning(&self) -> bool {
         self.interactive_planning
+    }
+
+    /// Effective timeout for each model-checking command.
+    pub fn formal_verify_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.formal_verify
+                .as_ref()
+                .and_then(|c| c.model_check_timeout_seconds)
+                .unwrap_or(900),
+        )
     }
 
     /// Effective `cleanup_after_pr`.
@@ -1152,6 +1174,16 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
 ///
 /// Returns an error if any validation check fails.
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
+    if let Some(seconds) = config
+        .formal_verify
+        .as_ref()
+        .and_then(|c| c.model_check_timeout_seconds)
+        && !(1..=86400).contains(&seconds)
+    {
+        return Err(crate::error::CruiseError::InvalidStepConfig(
+            "`formal_verify.model_check_timeout_seconds` must be between 1 and 86400".to_string(),
+        ));
+    }
     if let Some(input) = config.inputs.first() {
         return Err(crate::error::CruiseError::InvalidStepConfig(format!(
             "root workflow missing input '{input}'"
