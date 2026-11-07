@@ -89,9 +89,10 @@ impl WebState {
         } else {
             Some(css::generate(&assets.templates_dir, &assets.static_dir)?)
         };
+        let hub = Arc::new(EventHub::with_notifications(application.clone()));
         Ok(Self {
             application,
-            hub: Arc::new(EventHub::default()),
+            hub,
             templates: Arc::new(Templates::new(assets.templates_dir.clone())),
             run_all: Arc::new(RunAllState::default()),
             templates_dir: assets.templates_dir.clone(),

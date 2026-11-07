@@ -61,6 +61,8 @@ mod model_selection;
 mod multiline_input;
 pub mod new_session_draft;
 mod new_session_history;
+mod notification_sound;
+mod notification_webhook;
 mod option_handler;
 mod paths;
 mod plan_cmd;

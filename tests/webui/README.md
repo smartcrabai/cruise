@@ -1,5 +1,9 @@
 # Responsive WebUI executable specifications
 
+## Per-event notifications browser regression
+
+Run `cargo +1.99.1 build --locked --all-features --bin cruise-runtime` and `node tests/webui/notifications.mjs` from the repository root after installing the pinned Playwright dependencies and Chromium. The existing responsive WebUI CI job runs this test and uploads screenshots under `target/formal-reports/notification-browser/`. `WEBUI_BDD_BIN` selects a different runtime. Seven real workflows run through the browser in an isolated temporary Git repository, including option dialogs and deterministic no-file-changes failures. A browser EventSource observes production SSE and a local HTTP server receives real webhook POSTs. The test checks completed, action-required, and failed event opt-out and opt-in, plus a disabled master with completed-event opt-in, alongside the corresponding visible toasts. The option scenarios also answer the real dialog and complete their workflows. Negative SSE assertions observe a bounded 500 ms window after the toast. This does not exercise OS desktop notification display, sound, or plan-ready events.
+
 ## Workflow category browser regression
 
 From the repository root, install the locked dependencies and browser, build the production runtime, and run the isolated browser test:
