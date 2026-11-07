@@ -630,12 +630,30 @@ async fn step_loop_iteration(
 
     // Flags are evaluated first so a disabled chunk never touches `skip` variables or `when` globs.
     let flag_skip = crate::flags::is_disabled(step_config.flag.as_ref(), ctx.flags);
-    let static_skip = flag_skip
+    let mut static_skip = flag_skip;
+    if !static_skip {
+        for guard in &step_config.call_guards {
+            if should_skip(guard.skip.as_ref(), vars)? {
+                static_skip = true;
+                break;
+            }
+        }
+    }
+    static_skip = static_skip
         || should_skip(step_config.skip.as_ref(), vars)?
         || ctx.skipped_steps.iter().any(|s| s == current_step);
     // Only evaluate glob I/O when the step is not already unconditionally skipped.
-    let when_skip =
-        !static_skip && should_skip_due_to_when(step_config.when.as_ref(), vars, ctx.working_dir)?;
+    let mut when_skip = false;
+    if !static_skip {
+        for guard in &step_config.call_guards {
+            if should_skip_due_to_when(guard.when.as_ref(), vars, ctx.working_dir)? {
+                when_skip = true;
+                break;
+            }
+        }
+        when_skip =
+            when_skip || should_skip_due_to_when(step_config.when.as_ref(), vars, ctx.working_dir)?;
+    }
 
     if static_skip || when_skip {
         state.counters.skipped += 1;
@@ -1008,9 +1026,11 @@ async fn execute_step_kind_inner(
                 cancel_token: ctx.cancel_token,
             };
             let merge_result = if let Some(timeout) = timeout {
-                if let Ok(result) =
-                    tokio::time::timeout(timeout, crate::pr_merge::automatic::squash_merge(request))
-                        .await
+                if let Ok(result) = tokio::time::timeout(
+                    timeout,
+                    Box::pin(crate::pr_merge::automatic::squash_merge(request)),
+                )
+                .await
                 {
                     result
                 } else {
@@ -1026,7 +1046,7 @@ async fn execute_step_kind_inner(
                     )));
                 }
             } else {
-                crate::pr_merge::automatic::squash_merge(request).await
+                Box::pin(crate::pr_merge::automatic::squash_merge(request)).await
             };
             if ctx
                 .cancel_token
@@ -2693,6 +2713,56 @@ steps:
         let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
         assert_eq!(result.skipped, 1, "one step should be counted as skipped");
         assert_eq!(result.run, 1, "one step should be counted as run");
+    }
+
+    #[tokio::test]
+    async fn workflow_call_first_step_preserves_both_guards_and_skip_fallback() {
+        for (caller_skip, child_skip, caller_when, child_when, return_first) in [
+            (true, false, "present", "present", false),
+            (false, true, "present", "present", false),
+            (false, false, "missing", "present", false),
+            (false, false, "present", "missing", false),
+            (true, false, "present", "present", true),
+            (false, true, "present", "present", true),
+            (false, false, "missing", "present", true),
+            (false, false, "present", "missing", true),
+        ] {
+            let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+            std::fs::write(dir.path().join("present"), "yes")
+                .unwrap_or_else(|e| panic!("write present failed: {e}"));
+            let (declaration, return_field, routing) = if return_first {
+                (
+                    "returns: [done]\n",
+                    ", return: done",
+                    "    on_return: {done: wrong}\n",
+                )
+            } else {
+                ("", "", "")
+            };
+            let callee = format!(
+                "{declaration}steps:\n  first: {{command: 'exit 1', skip: {child_skip}, when: {{exists: {child_when}}}{return_field}}}\n  second: {{command: 'true'}}\n"
+            );
+            std::fs::write(dir.path().join("callee.yaml"), callee)
+                .unwrap_or_else(|e| panic!("write callee failed: {e}"));
+            let root = format!(
+                "command: [echo]\nsteps:\n  call:\n    workflow_call: ./callee.yaml\n    skip: {caller_skip}\n    when: {{exists: {caller_when}}}\n    next: end\n{routing}  wrong: {{command: 'exit 1'}}\n  end: {{command: 'true'}}\n"
+            );
+            let config =
+                WorkflowConfig::from_yaml(&root).unwrap_or_else(|e| panic!("parse failed: {e}"));
+            let resolved = crate::workflow_call::resolve_workflow_calls_with_defaults(
+                config,
+                dir.path(),
+                &crate::workflow_defaults::WorkflowDefaults::default(),
+            )
+            .unwrap_or_else(|e| panic!("resolution failed: {e}"));
+            let yaml = serde_yaml::to_string(&resolved)
+                .unwrap_or_else(|e| panic!("serialization failed: {e}"));
+            let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf())
+                .await
+                .unwrap_or_else(|e| panic!("workflow failed: {e}"));
+            assert_eq!(result.skipped, 1);
+            assert_eq!(result.run, 2);
+        }
     }
 
     #[tokio::test]

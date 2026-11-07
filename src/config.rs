@@ -18,6 +18,19 @@ where
         .collect()
 }
 
+fn deserialize_return_labels<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<serde_yaml::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| match value {
+            serde_yaml::Value::String(label) => Ok(label),
+            _ => Err(serde::de::Error::custom("return labels must be strings")),
+        })
+        .collect()
+}
+
 fn deserialize_call_arguments<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<IndexMap<String, String>>, D::Error>
@@ -93,6 +106,13 @@ pub struct WorkflowConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub inputs: Vec<String>,
+    /// Return labels declared by a called workflow.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_return_labels",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub returns: Vec<String>,
     /// LLM invocation command (e.g. `["claude", "--model", "{model}", "-p"]`).
     ///
     /// Mutually exclusive with `sdk` (validated by [`validate_sdk`]). Defaults
@@ -177,6 +197,13 @@ pub struct WorkflowConfig {
     /// New-style nested language configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub languages: Option<LanguagesConfig>,
+
+    /// Optional template for the generated commit subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_message_template: Option<String>,
+    /// Optional template for the generated pull request body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_body_template: Option<String>,
 
     /// Automatically commit, push, and create a pull request after a successful
     /// worktree run. When false, the session completes without PR processing;
@@ -480,8 +507,16 @@ pub struct StepConfig {
     /// Explicit next step name, overriding sequential order.
     pub next: Option<String>,
 
+    /// Label returned to the calling workflow instead of a local next step.
+    #[serde(default, rename = "return", skip_serializing_if = "Option::is_none")]
+    pub return_label: Option<String>,
+
     /// Skip condition: static bool or variable reference.
     pub skip: Option<SkipCondition>,
+
+    /// Guards inherited from enclosing workflow calls, evaluated before this step's guards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_guards: Vec<CallGuard>,
 
     /// Whether this step runs when any listed workflow flag is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -520,6 +555,14 @@ pub struct StepConfig {
     )]
     pub with: Option<IndexMap<String, String>>,
 
+    /// Mapping from called workflow return labels to parent steps.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_call_arguments",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub on_return: Option<IndexMap<String, String>>,
+
     /// Path or supported GitHub blob/raw URL whose contents become `prompt`.
     /// Absolute, `~`-prefixed, or relative to the directory of the config file
     /// that declares the step (a bare file name means "next to the config file").
@@ -553,11 +596,23 @@ pub struct StepConfig {
 }
 
 /// Configuration of the `github-review` step.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewerScope {
+    #[default]
+    Bots,
+    All,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubReviewConfig {
     /// Bot logins whose review of the current head is awaited.
+    #[serde(default)]
     pub bots: Vec<String>,
+    /// Scope of review authors to consider.
+    #[serde(default)]
+    pub reviewers: ReviewerScope,
     /// Maximum number of loop iterations (default 3).
     #[serde(
         rename = "max-iterations",
@@ -594,6 +649,10 @@ pub struct OptionItem {
     /// `None` falls back to the step's own `next`, then to the following step
     /// in declaration order; it only ends the workflow when neither exists.
     pub next: Option<String>,
+
+    /// Label returned to the calling workflow when this item is selected.
+    #[serde(default, rename = "return", skip_serializing_if = "Option::is_none")]
+    pub return_label: Option<String>,
 }
 
 /// Action to take when no workspace file changes are detected after a step.
@@ -645,6 +704,13 @@ pub struct WhenCondition {
     /// Variable references in the glob string are resolved via `VariableStore::resolve()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exists: Option<String>,
+}
+
+/// Pre-execution guards inherited from a workflow call.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct CallGuard {
+    pub skip: Option<SkipCondition>,
+    pub when: Option<WhenCondition>,
 }
 
 /// Group configuration for grouping related steps.
@@ -1165,24 +1231,55 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     {
         validate_call_argument_placement(name, step)?;
     }
-    validate_sdk(config)?;
-    validate_mcp_servers(config)?;
-    validate_flags(config)?;
-    validate_computer_use(config)?;
-    validate_permission(config)?;
-    validate_subagent_model(config)?;
-    validate_tool_restrictions(config)?;
-    validate_output_file_usage(config)?;
-    validate_squash_merge(config)?;
-    validate_github_review(config)?;
-
-    validate_parallel_steps(config)?;
-    validate_groups(config)?;
-    validate_if_conditions(config)?;
-    validate_timeouts(config)?;
-    validate_when(config)?;
-    validate_retry(config)?;
+    for check in CONFIG_CHECKS {
+        check(config)?;
+    }
     Ok(())
+}
+
+const CONFIG_CHECKS: &[fn(&WorkflowConfig) -> crate::error::Result<()>] = &[
+    validate_sdk,
+    validate_mcp_servers,
+    validate_flags,
+    validate_computer_use,
+    validate_permission,
+    validate_subagent_model,
+    validate_tool_restrictions,
+    validate_output_file_usage,
+    validate_squash_merge,
+    validate_github_review,
+    validate_parallel_steps,
+    validate_groups,
+    validate_if_conditions,
+    validate_timeouts,
+    validate_when,
+    validate_retry,
+];
+
+/// Run independent configuration checks in runtime order and collect their errors.
+pub fn validate_config_all(config: &WorkflowConfig) -> Vec<crate::error::CruiseError> {
+    let mut errors = Vec::new();
+    if let Some(input) = config.inputs.first() {
+        errors.push(crate::error::CruiseError::InvalidStepConfig(format!(
+            "root workflow missing input '{input}'"
+        )));
+    }
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        if let Err(error) = validate_call_argument_placement(name, step) {
+            errors.push(error);
+        }
+    }
+    for check in CONFIG_CHECKS {
+        if let Err(error) = check(config) {
+            errors.push(error);
+        }
+    }
+    errors
 }
 
 fn validate_call_argument_placement(name: &str, step: &StepConfig) -> crate::error::Result<()> {
@@ -1456,7 +1553,10 @@ pub(crate) fn validate_github_review(config: &WorkflowConfig) -> crate::error::R
         if review.max_iterations == 0 {
             return Err(invalid("github-review max-iterations must be positive"));
         }
-        if review.bots.is_empty() {
+        if review.reviewers == ReviewerScope::All && !review.bots.is_empty() {
+            return Err(invalid("github-review reviewers: all cannot specify bots"));
+        }
+        if review.reviewers == ReviewerScope::Bots && review.bots.is_empty() {
             return Err(invalid("github-review bots must not be empty"));
         }
         let mut seen = std::collections::HashSet::new();
@@ -2736,6 +2836,50 @@ steps:
         let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
         validate_config(&config)?;
         crate::workflow::compile(config).map(|_| ())
+    }
+
+    #[test]
+    fn validate_config_all_collects_independent_errors_in_runtime_order() {
+        let config = WorkflowConfig::from_yaml(
+            "command: [echo]\nflags:\n  bad name: {}\nsteps:\n  a:\n    command: echo a\n    with:\n      value: test\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let errors = validate_config_all(&config);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors[0]
+                .to_string()
+                .contains("uses with without workflow_call")
+        );
+        assert!(errors[1].to_string().contains("bad name"));
+        assert_eq!(
+            validate_config(&config)
+                .err()
+                .map(|error| error.to_string()),
+            Some(errors[0].to_string())
+        );
+    }
+
+    #[test]
+    fn validate_config_all_matches_wrapper_for_valid_and_invalid_configs() {
+        for yaml in [
+            "command: [echo]\nsteps:\n  a:\n    command: echo a\n",
+            "inputs: [required]\ncommand: [echo]\nsteps:\n  a:\n    command: echo a\n",
+            "command: [echo]\nflags:\n  bad name: {}\nsteps:\n  a:\n    command: echo a\n",
+            "sdk: invalid\nsteps:\n  a:\n    prompt: hello\n",
+        ] {
+            let config =
+                WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{yaml}: {e:?}"));
+            let errors = validate_config_all(&config);
+            match validate_config(&config) {
+                Ok(()) => assert!(errors.is_empty(), "{yaml}: {errors:?}"),
+                Err(error) => assert_eq!(
+                    Some(error.to_string()),
+                    errors.first().map(ToString::to_string),
+                    "{yaml}"
+                ),
+            }
+        }
     }
 
     fn github_review_after_pr(body: &str) -> String {
@@ -4856,11 +5000,14 @@ steps:
                 "pr_language",
                 "plan_language",
                 "languages",
+                "commit_message_template",
+                "pr_body_template",
                 "env",
                 "force_exec",
                 "disallowed_tools",
                 "computer_use",
                 "groups",
+                "returns",
                 "steps",
                 "after-pr",
                 "mcp_servers",
@@ -5029,6 +5176,8 @@ steps:
                 "env",
                 "group",
                 "workflow_call",
+                "on_return",
+                "return",
                 "timeout",
                 "prompt_file",
                 "output_file",
@@ -5348,7 +5497,7 @@ steps:
         let option_item_props = def_properties(schema, "OptionItem");
         assert_has_fields(
             option_item_props,
-            &["selector", "text-input", "next"],
+            &["selector", "text-input", "next", "return"],
             "OptionItem",
         );
     }

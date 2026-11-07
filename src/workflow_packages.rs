@@ -580,6 +580,11 @@ fn load_unmodified(dir: &Path, name: &str) -> Result<Manifest, WorkflowPackageEr
     Ok(manifest)
 }
 
+/// Verify that an installed package still matches its manifest.
+pub fn verify_unmodified(name: &str) -> Result<(), WorkflowPackageError> {
+    load_unmodified(&workflows_dir()?, name).map(|_| ())
+}
+
 pub fn prepare_update(name: &str) -> Result<PreparedPackage, WorkflowPackageError> {
     validate_name(name)?;
     let dir = workflows_dir()?;

@@ -185,6 +185,16 @@ path = "tests/checkpoint_bdd.rs"
 
 [[test]]
 harness = false
+name = "local_merge_bdd"
+path = "tests/local_merge_bdd.rs"
+
+[[test]]
+harness = false
+name = "auto_requeue_bdd"
+path = "tests/auto_requeue_bdd.rs"
+
+[[test]]
+harness = false
 name = "opencode_bdd"
 path = "tests/opencode_bdd.rs"
 # POSIX fixture: required explicitly by check_opencode_specs.sh on Linux CI.
@@ -229,6 +239,11 @@ name = "webui_responsive_bdd"
 path = "tests/webui_responsive_bdd.rs"
 # Requires the pinned browser package and Chromium, see tests/webui/README.md.
 test = false
+
+[[test]]
+harness = false
+name = "pr_failed_bdd"
+path = "tests/pr_failed_bdd.rs"
 
 [profile.release]
 codegen-units = 1

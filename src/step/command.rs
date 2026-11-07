@@ -371,9 +371,20 @@ pub(crate) async fn run_process_output_cancelled(
     cwd: Option<&std::path::Path>,
     cancel_token: Option<&crate::cancellation::CancellationToken>,
 ) -> Result<std::process::Output> {
+    run_process_output_cancelled_with_env(program, args, cwd, cancel_token, &[]).await
+}
+
+pub(crate) async fn run_process_output_cancelled_with_env(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    cancel_token: Option<&crate::cancellation::CancellationToken>,
+    env: &[(&str, &str)],
+) -> Result<std::process::Output> {
     let mut builder = Command::new(program);
     builder
         .args(args)
+        .envs(env.iter().copied())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -427,7 +438,9 @@ pub(crate) async fn run_process_output_cancelled(
 pub fn is_rate_limited(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("rate limit")
-        || lower.contains("429")
+        || lower
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|word| word == "429")
         || lower.contains("too many requests")
         || lower.contains("ratelimit")
 }
@@ -479,6 +492,9 @@ mod tests {
         assert!(!is_rate_limited("Normal error message"));
         assert!(!is_rate_limited(""));
         assert!(!is_rate_limited("compilation error"));
+        assert!(!is_rate_limited(
+            "GitHub CI failed for expected HEAD 0123456789abcdef429abcdef0123456789abcd"
+        ));
     }
 
     #[tokio::test]

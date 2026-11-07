@@ -47,6 +47,67 @@ pub struct Cli {
     pub input: Option<String>,
 }
 
+#[cfg(test)]
+mod issue_entrypoint_tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn plan_issue_accepts_optional_additional_instructions() {
+        for input in [None, Some("focus on tests")] {
+            let mut args = vec!["cruise", "plan", "--issue", "12"];
+            if let Some(input) = input {
+                args.push(input);
+            }
+            let cli =
+                Cli::try_parse_from(args).unwrap_or_else(|error| panic!("plan --issue: {error}"));
+            let Some(Commands::Plan(plan)) = cli.command else {
+                panic!("expected plan command");
+            };
+            assert_eq!(plan.input.as_deref(), input);
+        }
+    }
+
+    #[test]
+    fn draft_issue_accepts_optional_additional_instructions() {
+        for input in [None, Some("focus on tests")] {
+            let mut args = vec!["cruise", "draft", "--issue", "12"];
+            if let Some(input) = input {
+                args.push(input);
+            }
+            let cli =
+                Cli::try_parse_from(args).unwrap_or_else(|error| panic!("draft --issue: {error}"));
+            let Some(Commands::Draft(draft)) = cli.command else {
+                panic!("expected draft command");
+            };
+            assert_eq!(draft.input.as_deref(), input);
+        }
+    }
+
+    #[test]
+    fn issue_flag_rejects_zero_and_non_numbers() {
+        for command in ["plan", "draft"] {
+            for number in ["0", "-1", "abc", "18446744073709551616"] {
+                assert!(
+                    Cli::try_parse_from(["cruise", command, "--issue", number]).is_err(),
+                    "{command} accepted invalid issue number {number}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn root_issue_inputs_are_forwarded_verbatim_and_exec_does_not_accept_issue_flag() {
+        let positional = Cli::try_parse_from(["cruise", "#12\nextra"])
+            .unwrap_or_else(|error| panic!("parse root issue input: {error}"));
+        assert_eq!(positional.input.as_deref(), Some("#12\nextra"));
+        let background = Cli::try_parse_from(["cruise", "--plan", "#12\nextra"])
+            .unwrap_or_else(|error| panic!("parse background issue input: {error}"));
+        assert_eq!(background.plan.as_deref(), Some("#12\nextra"));
+        assert!(Cli::try_parse_from(["cruise", "exec", "--issue", "12"]).is_err());
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Create an implementation plan for a task.
@@ -59,6 +120,8 @@ pub enum Commands {
     Run(RunArgs),
     /// List and manage sessions interactively.
     List(ListArgs),
+    /// Show the changes in a session branch and worktree.
+    Diff(DiffArgs),
     /// Remove sessions with closed/merged PRs.
     Clean(CleanArgs),
     /// Show or update application config (`~/.config/cruise/config.json` or `~/.config/cruise/config.yaml`).
@@ -96,12 +159,33 @@ pub enum WorkflowCommand {
     Eject(WorkflowEjectArgs),
     /// Generate a new workflow YAML file from a description using the configured backend.
     Generate(WorkflowGenerateArgs),
+    /// Validate workflow YAML without running it (static checks).
+    Doctor(WorkflowDoctorArgs),
     /// Install a workflow or manifest bundle from GitHub: `owner/repo[/path][@ref]`.
     Add(WorkflowAddArgs),
     /// Remove an installed workflow package.
     Remove(WorkflowNameArgs),
     /// Update an installed workflow package to its requested ref's latest commit.
     Update(WorkflowUpdateArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct WorkflowDoctorArgs {
+    /// Workflow names or paths to inspect.
+    #[arg(conflicts_with = "all")]
+    pub targets: Vec<String>,
+    /// Inspect local, user, and built-in workflows.
+    #[arg(long)]
+    pub all: bool,
+    /// Emit a JSON report.
+    #[arg(long)]
+    pub json: bool,
+    /// Treat warnings as a failing exit status.
+    #[arg(long)]
+    pub strict: bool,
+    /// Set workflow flags for each target.
+    #[arg(long = "flag", short = 'f', value_name = "NAME[=on|off]", value_delimiter = ',', value_parser = crate::flags::parse_assignment, conflicts_with = "all")]
+    pub flags: Vec<(String, bool)>,
 }
 
 #[derive(Parser, Debug)]
@@ -222,6 +306,14 @@ pub struct PlanArgs {
     /// Task description.
     pub input: Option<String>,
 
+    /// Fix review threads on an existing GitHub pull request.
+    #[arg(long, value_name = "NUMBER", conflicts_with_all = ["grill", "images", "issue"])]
+    pub pr: Option<u64>,
+
+    /// Use a GitHub issue as the task.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub issue: Option<u64>,
+
     /// Path to the workflow config file. The special value `__builtin__`
     /// selects the built-in default workflow;
     /// `builtin:<name>` selects a named built-in workflow.
@@ -281,6 +373,10 @@ pub struct DraftArgs {
     /// Task description.
     pub input: Option<String>,
 
+    /// Use a GitHub issue as the task.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub issue: Option<u64>,
+
     /// Path to the workflow config file. The special value `__builtin__`
     /// selects the built-in default workflow, and `builtin:<name>` selects a
     /// named built-in workflow.
@@ -319,6 +415,9 @@ pub struct RunArgs {
     /// together with `--all`; must be at least 1.
     #[arg(long, value_name = "N")]
     pub parallelism: Option<usize>,
+    /// Maximum automatic retries per session in a batch.
+    #[arg(long, value_name = "N", requires = "all", allow_hyphen_values = true)]
+    pub auto_requeue_max_attempts: Option<u32>,
 
     /// Maximum number of times a budgeted graph transition may be traversed.
     ///
@@ -376,12 +475,24 @@ pub struct ListArgs {
 }
 
 #[derive(Parser, Debug)]
+pub struct DiffArgs {
+    /// Session ID.
+    pub session: String,
+    /// Show a summary instead of the patch.
+    #[arg(long)]
+    pub stat: bool,
+}
+
+#[derive(Parser, Debug)]
 pub struct ConfigArgs {
     /// Set the maximum number of sessions the `WebUI` and TUI run concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
     #[arg(long, value_name = "N")]
     pub set_parallelism: Option<usize>,
+    /// Set the maximum automatic retries per session in a batch.
+    #[arg(long, value_name = "N")]
+    pub set_auto_requeue_max_attempts: Option<u32>,
 }
 
 #[derive(Parser, Debug)]
@@ -480,6 +591,29 @@ pub fn parse_cli() -> Cli {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn diff_contract_parses_session_and_optional_stat() {
+        for (args, expected_stat) in [
+            (vec!["cruise", "diff", "20260101000000000"], false),
+            (vec!["cruise", "diff", "20260101000000000", "--stat"], true),
+        ] {
+            let cli = Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("diff arguments should parse: {error}"));
+            match cli.command {
+                Some(Commands::Diff(args)) => {
+                    assert_eq!(args.session, "20260101000000000");
+                    assert_eq!(args.stat, expected_stat);
+                }
+                other => panic!("unexpected parse result: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn diff_contract_requires_session() {
+        assert!(Cli::try_parse_from(["cruise", "diff"]).is_err());
+    }
 
     #[test]
     fn test_cli_verify() {
