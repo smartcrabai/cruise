@@ -4,10 +4,12 @@ pub mod application;
 mod artifacts;
 mod ask_handler;
 mod attachments;
+mod auto_requeue;
 mod backend;
 mod batch_dashboard;
 #[cfg_attr(not(test), expect(dead_code))]
 mod batch_run;
+mod branch_diff;
 mod builtin_workflows;
 mod cancellation;
 mod clean_cmd;
@@ -26,6 +28,9 @@ mod dag;
 mod desktop_notifications;
 mod notification_sound;
 mod notification_webhook;
+mod diff_cmd;
+#[cfg(test)]
+mod diff_cmd_contract_tests;
 mod display;
 mod draft_cmd;
 #[cfg_attr(
@@ -40,21 +45,18 @@ mod error;
 mod exec_cmd;
 mod executor;
 mod file_tracker;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "NO_FLAGS is part of the public library flags API but unused by the CLI binary"
-    )
-)]
 mod flags;
 mod forge;
 mod github_review;
 mod graph;
 mod herdr;
 mod install_identity;
+mod instant_exec;
+mod issue_images;
+mod issue_input;
 mod issue_publish;
 mod list_cmd;
+mod local_merge;
 mod metadata;
 mod model_schedule;
 mod model_selection;
@@ -67,6 +69,9 @@ mod plan_cmd;
 mod planning;
 mod platform;
 mod pr_merge;
+mod pr_review_fix;
+mod pr_template;
+mod quality_gate;
 mod repo_clone;
 mod resolver;
 mod retry;
@@ -76,6 +81,7 @@ mod sdk_tools;
 mod session;
 mod session_config;
 mod session_edit;
+mod sleep_guard;
 mod spinner;
 mod ssh_cmd;
 mod step;
@@ -93,18 +99,25 @@ mod webui;
 mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]
 mod workflow_call;
+mod workflow_categories;
 mod workflow_cmd;
 mod workflow_defaults;
+mod workflow_doctor;
+mod workflow_doctor_targets;
 mod workflow_generate;
+mod workflow_make;
 mod workflow_packages;
 mod workspace;
-mod worktree;
+pub mod worktree;
 mod worktree_pr;
 mod yaml_metadata;
 
 // Hooks run once per tool call, without constructing a runtime or telemetry.
 fn main() {
     let cli = cli::parse_cli();
+    if let Some(cli::Commands::Workflow(cli::WorkflowCommand::Doctor(args))) = &cli.command {
+        std::process::exit(workflow_doctor::run(args));
+    }
     if matches!(
         &cli.command,
         Some(cli::Commands::Internal(cli::InternalArgs {
@@ -159,28 +172,14 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Draft(args)) => draft_cmd::run(args),
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
+        Some(cli::Commands::Diff(args)) => diff_cmd::run(&args),
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
         Some(cli::Commands::Webui(args)) => webui::run(args).await,
         Some(cli::Commands::Update(args)) => update_cmd::run(&args),
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::List)) => workflow_cmd::list(),
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Eject(args))) => {
-            workflow_cmd::eject(&args.name, args.to == cli::EjectDestination::Project)
-        }
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Generate(args))) => {
-            workflow_generate::run(args).await
-        }
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Add(args))) => {
-            workflow_cmd::add(&args.spec, args.name, args.yes)
-        }
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Update(args))) => {
-            workflow_cmd::update(&args.name, args.yes)
-        }
-        Some(cli::Commands::Workflow(cli::WorkflowCommand::Remove(args))) => {
-            workflow_cmd::remove(&args.name)
-        }
+        Some(cli::Commands::Workflow(command)) => run_workflow(command).await,
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::SyncBase { pr_number, url },
         })) => match worktree_pr::sync_base(&pr_number, url.as_deref()) {
@@ -220,6 +219,8 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             // Backward compat: positional input and planning options use `plan`.
             let plan_args = cli::PlanArgs {
                 input,
+                pr: None,
+                issue: None,
                 config: None,
                 dry_run: false,
                 no_force_exec,
@@ -233,5 +234,22 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             };
             Box::pin(plan_cmd::run(plan_args)).await
         }
+    }
+}
+
+async fn run_workflow(command: cli::WorkflowCommand) -> error::Result<()> {
+    match command {
+        cli::WorkflowCommand::List => workflow_cmd::list(),
+        cli::WorkflowCommand::Eject(args) => {
+            workflow_cmd::eject(&args.name, args.to == cli::EjectDestination::Project)
+        }
+        cli::WorkflowCommand::Generate(args) => workflow_generate::run(args).await,
+        cli::WorkflowCommand::Make(args) => workflow_make::run(args).await,
+        cli::WorkflowCommand::Doctor(_) => {
+            unreachable!("workflow doctor exits before runtime initialization")
+        }
+        cli::WorkflowCommand::Add(args) => workflow_cmd::add(&args.spec, args.name, args.yes),
+        cli::WorkflowCommand::Update(args) => workflow_cmd::update(&args.name, args.yes),
+        cli::WorkflowCommand::Remove(args) => workflow_cmd::remove(&args.name),
     }
 }

@@ -16,9 +16,9 @@ use crate::error::Result;
 use super::WebState;
 use super::templates::escape_html;
 use super::view::{
-    AskPanelVm, ChoiceVm, OptionDialogVm, PhaseBadgeVm, RunAllControlVm, SessionHeaderVm,
-    SessionSyncVm, SidebarVm, TabLogVm, TabPlanVm, ToastKind, ToastVm, is_planning, runnable_count,
-    session_row, sort_sessions, truncate,
+    AskPanelVm, ChoiceVm, DiffLineVm, OptionDialogVm, PhaseBadgeVm, RunAllControlVm,
+    SessionHeaderVm, SessionSyncVm, SidebarVm, TabDiffVm, TabLogVm, TabPlanVm, ToastKind, ToastVm,
+    is_planning, runnable_count, session_row, sort_sessions, truncate,
 };
 
 /// One message pushed over the SSE connection.
@@ -93,6 +93,7 @@ pub(crate) fn header_vm(
         badge,
         current_step: session.current_step.clone(),
         phase_error: session.phase_error.clone(),
+        auto_requeue_count: session.auto_requeue_count,
         plan_error: session.plan_error.clone(),
         pr_url: session.pr_url.clone(),
         pr_is_link,
@@ -291,6 +292,59 @@ pub(crate) fn plan_tab_html(state: &WebState, session_id: &str) -> Result<String
         html: super::templates::RawHtml::new(super::markdown::render_markdown(&markdown)),
     };
     state.templates.render("tab-plan", &vm)
+}
+
+pub(crate) fn diff_tab_html(state: &WebState, session_id: &str) -> Result<String> {
+    let session = state.application.read_session(session_id)?;
+    let (lines, message, truncated) = if session.worktree_branch.is_none() {
+        (
+            Vec::new(),
+            Some("No session branch available for diff".to_owned()),
+            false,
+        )
+    } else {
+        match state.application.session_branch_diff(session_id) {
+            Ok(diff) if diff.patch.is_empty() => (
+                Vec::new(),
+                Some(format!("No changes on {}", diff.branch)),
+                diff.truncated,
+            ),
+            Ok(diff) => (
+                diff.patch
+                    .lines()
+                    .map(|line| DiffLineVm {
+                        text: line.to_owned(),
+                        class: if line.starts_with("diff --git")
+                            || line.starts_with("+++")
+                            || line.starts_with("---")
+                        {
+                            "header"
+                        } else if line.starts_with('+') {
+                            "add"
+                        } else if line.starts_with('-') {
+                            "remove"
+                        } else if line.starts_with("@@") {
+                            "hunk"
+                        } else {
+                            ""
+                        },
+                    })
+                    .collect(),
+                None,
+                diff.truncated,
+            ),
+            Err(error) => (Vec::new(), Some(error.to_string()), false),
+        }
+    };
+    state.templates.render(
+        "tab-diff",
+        &TabDiffVm {
+            id: session_id.to_string(),
+            lines,
+            message,
+            truncated,
+        },
+    )
 }
 
 pub(crate) fn ask_panel_html(state: &WebState, session_id: &str) -> Result<String> {
@@ -576,6 +630,15 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
         | ApplicationEvent::BatchTotalChanged { .. }
         | ApplicationEvent::BatchSessionStarted { .. } => {
             out.push(SseMessage::Html(run_all_partials(state)?));
+        }
+        ApplicationEvent::AutoRequeued { session_id, .. } => {
+            let mut html = run_all_partials(state)?;
+            html.push_str(&header_and_row(state, session_id, None)?);
+            html.push_str(&replace(
+                &format!("tab-info-{session_id}"),
+                &super::pages::tab_panel_html(state, session_id, "info")?,
+            ));
+            out.push(SseMessage::Html(html));
         }
         ApplicationEvent::BatchSessionFinished { id, .. } => {
             let mut html = run_all_partials(state)?;
