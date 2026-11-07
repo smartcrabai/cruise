@@ -179,6 +179,7 @@ pub(crate) struct SessionDetailVm {
 pub(crate) struct TabInfoVm {
     pub(crate) auto_requeue_count: u32,
     pub(crate) id: String,
+    pub(crate) pending_instructions: usize,
     pub(crate) config_source: String,
     /// Declared workflow flags with this session's values; absent values are off.
     pub(crate) flags: Vec<FlagRowVm>,
@@ -607,6 +608,7 @@ impl ToastVm {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsVm {
     pub(crate) run_all_parallelism: usize,
+    pub(crate) effective_run_all_parallelism: usize,
     pub(crate) run_all_auto_requeue_max_attempts: u32,
     pub(crate) error: Option<String>,
 }

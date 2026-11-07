@@ -223,6 +223,7 @@ The `ssh` subcommand reserves the exact legacy input `ssh`; to plan a task whose
 entire text is `ssh`, use `cruise plan "ssh"`.
 The hidden `mcp-bridge` entry point likewise reserves the exact input
 `mcp-bridge`; use `cruise plan "mcp-bridge"` to plan that task.
+The `tell` subcommand is also reserved; use `cruise plan "tell"` to plan that text.
 
 The CLI and TUI support best-effort desktop, sound, and Slack webhook notifications for
 **Action required**, **Plan ready**, **Completed**, and **Failed** workflow events.
@@ -240,6 +241,7 @@ steps, `blocked` while waiting for an answer, an option selection, or plan
 review, and `idle` otherwise. Authority is released on exit. Reporting is
 best-effort and never changes workflow success, failure, or exit status. Set
 `CRUISE_DISABLE_HERDR=1` to disable it.
+From a herdr pane, use `cruise tell <session-id> "instruction"` to instruct a running session.
 
 ### TUI (Interactive Keyboard Client)
 
@@ -347,6 +349,7 @@ Commands:
   plan         Create an implementation plan for a task
   draft        Save a task description as a draft without generating a plan
   run          Execute a planned session
+  tell         Send an instruction to a running session
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs
   usage        Summarize locally recorded token usage
@@ -599,6 +602,19 @@ Adding `--skip-planning` skips the background worker entirely: the input is writ
 
 With no subcommand, no `--plan`, and no positional input, a non-TTY stdin is read to the end and its trimmed contents become the positional input, so `echo "task" | cruise` takes the legacy positional path and plans like `cruise plan "task"` (`--skip-planning`, `--no-force-exec`, `--repo`, and `--image` still apply). Blank piped input is ignored, and with an interactive stdin the argument-free invocation opens the TUI instead. Pass `--plan stdin` to read piped input explicitly on the background planning path.
 
+#### `cruise tell`
+
+```sh
+cruise tell <session-id> "Also cover the timeout case"
+printf '%s\n' 'Check the logs' | cruise tell <session-id> -
+cruise tell <session-id> --log
+cruise ssh devbox --cwd /srv/project -- tell <session-id> "Check the logs"
+```
+
+Submit to a live Running session only. Omit the instruction to read non-interactive stdin; `--log` reads instruction history without submitting. Acceptance is not delivery: the currently running agent step cannot see a new instruction. It is appended to the next agent prompt, including all prompt children of a parallel block, but not command or option steps. It cannot change permissions, commit policy, output format, or workflow transitions.
+
+Instructions are trimmed and limited to 8,192 bytes each, with at most 20 pending instructions and 65,536 pending bytes. Delivered or expired items are terminal. Completed runs expire undelivered instructions; failed or suspended runs retain them for a subsequent run, and reset to planned expires them. Delivery is at least once: a crash or failure to record acknowledgement can cause redelivery. The session's XDG data directory stores `instructions.jsonl` and its lock; `--log` shows statuses. Do not put secrets in instructions.
+
 #### `cruise list`
 
 ```
@@ -608,7 +624,7 @@ Options:
       --json   Print all sessions as a JSON array to stdout instead of opening the interactive selector
 ```
 
-With no flags, opens an interactive session browser whose menu depends on each session's phase (see [`cruise list` Actions](#cruise-list-actions)). With `--json`, prints every session as a JSON array (id, phase, input, PR URL, plan-error info, ...) and exits -- useful for scripting or feeding session state to external tooling.
+With no flags, opens an interactive session browser whose menu depends on each session's phase (see [`cruise list` Actions](#cruise-list-actions)). With `--json`, prints every session as a JSON array (id, phase, input, PR URL, plan-error info, `pending_instructions`, ...) and exits -- useful for scripting or feeding session state to external tooling.
 
 #### `cruise diff`
 
@@ -876,13 +892,14 @@ The interactive session list shows a menu of actions depending on the session's 
 | **AwaitingInput** | Generate Plan, Delete, Back |
 | **AwaitingApproval** | Approve, Publish as Issue, Edit Settings, Delete, Back |
 | **Planned** | Run, Publish as Issue, Edit Settings, Replan, Delete, Back |
-| **Running** | Resume, Reset to Planned, Delete, Back |
+| **Running** | Resume, Tell*, Reset to Planned, Delete, Back |
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
 | **PR Failed** | Create PR, Open PR*, Reset to Planned, Delete, Back |
 | **Completed** | Open PR*, Merge PR*, Stage local merge**, Merge locally & cleanup**, Reset to Planned, Delete, Back |
 
 \* Open PR and Merge PR are shown only when the session has a PR URL.
+Tell is shown only while the running session's runner is alive.
 
 \** Local merge actions require an eligible local worktree session without a PR and a recorded target branch. Stage is unavailable once a merge intent or commit has been recorded; legacy sessions without a recorded target are ineligible.
 
@@ -894,6 +911,7 @@ The interactive session list shows a menu of actions depending on the session's 
 - **Approve** -- Approve the plan and transition the session to the Planned phase.
 - **Publish as Issue** -- Publish `plan.md`, unchanged, as a GitHub issue (or GitLab issue) in the resolved repo, then delete the local session. Prompts whether to also post a follow-up `@cruise run` comment so the `@cruise` GitHub Action picks it up (default: off for `AwaitingApproval`, on for `Planned`). If the issue is created but that comment fails to post, the session is kept so you can retry (the existing issue is reused, not duplicated) or comment manually (the `@cruise run` comment prompt is skipped on GitLab).
 - **Run / Resume** -- Execute (or continue) the session.
+- **Tell** -- Submit an instruction to the running session's next agent prompt. TUI and WebUI also offer Tell for a live run.
 - **Create PR** -- Retry publication for a **PR Failed** session without rerunning the workflow. Cruise commits remaining changes, pushes, and reuses an existing PR for the branch or creates one. Check the displayed error and forge authentication first (for GitHub HTTPS credentials, `gh auth setup-git` can configure Git). Publication failure or cancellation keeps the session in **PR Failed** with its worktree and any existing PR URL. A fatal after-PR error leaves it **Failed**. Success completes the session and runs configured after-PR steps only when a PR was created or reused; a no-commits skip completes without running them. Reset to Planned instead restarts the workflow, while Delete removes the session and its workspace.
 - **View Diff** -- Review the session branch's changes and return to the menu. See [`cruise diff`](#cruise-diff) for comparison and cleanup limitations.
 - **Replan** -- Provide feedback to re-generate the plan; the session stays in the Planned phase.
@@ -980,7 +998,7 @@ Uncategorized local and `CRUISE_CONFIG` candidates remain available at the root 
 
 `$XDG_CONFIG_HOME/cruise/default.yaml` supplies user defaults. When `XDG_CONFIG_HOME` is unset, the path defaults to `~/.config/cruise/default.yaml` on macOS/Linux. On Windows, it is `%APPDATA%\cruise\default.yaml` when `APPDATA` is set; if `APPDATA` is missing, Cruise falls back to the home-directory path `~/.config/cruise/default.yaml`. `./.cruise/default.yaml` supplies project defaults. These files provide defaults for fields a workflow leaves unset. They are never selectable as workflows (`-c` and `CRUISE_CONFIG` pointing at them is an error). `default` is not a built-in workflow name, so `cruise workflow eject default` is rejected as an unknown built-in; `cruise workflow generate --name default` still refuses to write the reserved `./.cruise/default.yaml`. `<config_dir>/workflows/default.yaml` remains an ordinary workflow.
 
-Precedence, highest first: environment variables (`CRUISE_MODEL`, ...) > the workflow file > `./.cruise/default.yaml` > `~/.config/cruise/default.yaml` > application model defaults (`config.json` or `config.yaml`) > built-in defaults. Step-level model overrides still take precedence for ordinary prompts.
+Precedence, highest first, where applicable: per-invocation CLI flags (including `-c` for workflow selection) > saved session cleanup override > configuration environment overrides > the workflow file > `./.cruise/default.yaml` > `$XDG_CONFIG_HOME/cruise/default.yaml` > application model defaults (`config.json` or `config.yaml`) > built-in defaults. Step-level model overrides still take precedence for ordinary prompts.
 
 When an actual jcode prompt has no effective model, Cruise creates
 `$XDG_CONFIG_HOME/cruise/default.yaml` (or the platform's normal user config
@@ -1190,8 +1208,8 @@ steps:
   Non-prompt steps and group/workflow-call/parallel wrappers cannot set it.
 - A called workflow's top-level value is ignored in favor of the caller's
   default; the callee's per-step overrides are retained.
-- Layered `default.yaml` supports it, but application `config.json` /
-  `config.yaml` defaults and `CRUISE_SUBAGENT_MODEL` overrides are not provided.
+- Layered `default.yaml` and `CRUISE_SUBAGENT_MODEL` support it, but application
+  `config.json` / `config.yaml` defaults do not.
 
 #### `sdk: jcode` — the jcode SDK (default)
 
@@ -1451,7 +1469,47 @@ command workflows retain their existing no-model behavior.
 
 Environment variables can be set at workflow and step level. Step-level values override workflow-level values for that step only. Parallel children add a third level: workflow < parallel block < child. Values support template variable substitution; each child resolves its own values against the variables from before the block.
 
-The CLI and WebUI also apply these process-level workflow overrides when loading a session config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`, `CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are trimmed and blank values are ignored; boolean values accept `true`, `false`, `1`, or `0`. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
+Process-level configuration overrides apply after workflow and defaults resolution. Supported names and value types are:
+
+| Variable | Configuration key | Value |
+|---|---|---|
+| `CRUISE_MODEL` | `model` | model |
+| `CRUISE_PLAN_MODEL` | `plan_model` | model |
+| `CRUISE_SUBAGENT_MODEL` | `subagent_model` | model entry |
+| `CRUISE_SDK` | `sdk` | text |
+| `CRUISE_COMMAND` | `command` | JSON array |
+| `CRUISE_MAX_RETRIES` | `max_retries` | integer |
+| `CRUISE_INTERACTIVE_PLANNING` | `interactive_planning` | boolean |
+| `CRUISE_CLEANUP_AFTER_PR` | `cleanup_after_pr` | boolean |
+| `CRUISE_FORCE_EXEC` | `force_exec` | boolean |
+| `CRUISE_COMPUTER_USE` | `computer_use` | boolean |
+| `CRUISE_PERMISSION` | `permission` | text: `read-only`, `edit`, or `full` |
+| `CRUISE_DISALLOWED_TOOLS` | `disallowed_tools` | JSON array |
+| `CRUISE_COMMIT_MESSAGE_TEMPLATE` | `commit_message_template` | text |
+| `CRUISE_PR_BODY_TEMPLATE` | `pr_body_template` | text |
+| `CRUISE_RETRY` | `retry` | JSON object or `null` |
+| `CRUISE_RETRY_BASE_DELAY_MS` | `retry.base_delay_ms` | integer |
+| `CRUISE_RETRY_MAX_DELAY_MS` | `retry.max_delay_ms` | integer |
+| `CRUISE_RETRY_MODEL_FALLBACK` | `retry.model_fallback` | boolean |
+| `CRUISE_RETRY_FALLBACK_CHAINS` | `retry.fallback_chains` | JSON object |
+| `CRUISE_LANGUAGES` | `languages` | JSON object |
+| `CRUISE_LANGUAGE_PR` | `languages.pr` | text |
+| `CRUISE_LANGUAGE_PLAN` | `languages.plan` | text |
+| `CRUISE_RUN_ALL_PARALLELISM` | app `run_all_parallelism` | integer, at least 1 |
+
+Names normally use `CRUISE_` plus the uppercase key path, replacing dots and hyphens with underscores. The language child names above are the only supported spellings. Values are trimmed and whitespace-only values are ignored. Booleans accept only `true`, `false`, `1`, or `0`; integers are unsigned decimal digits without a sign. Text is literal. Model values are literal single models unless they start with `[` or `{`, in which case they are parsed as JSON and must match the field's normal model shape. In particular, `CRUISE_MODEL` and `CRUISE_PLAN_MODEL` now accept JSON arrays: values beginning with `[` or `{` were previously treated as literal model names. Arrays with fallback entries enable model fallback as in YAML. Other composite values require JSON, not YAML flow syntax. Use JSON `null` for an optional value or `[]` for an empty list where supported, not a blank value. Invalid values produce an error naming the variable and still undergo normal configuration validation.
+
+Parent objects are applied before child overrides, so `CRUISE_RETRY_MAX_DELAY_MS` overrides the corresponding field in `CRUISE_RETRY`, and `CRUISE_LANGUAGE_PR` overrides `CRUISE_LANGUAGES`. Setting `CRUISE_SDK` clears a configured command, while `CRUISE_COMMAND` clears a configured SDK. Setting both nonblank variables is an error. For example:
+
+```sh
+export CRUISE_MODEL='["provider/primary", "provider/fallback"]'
+export CRUISE_RETRY='{"base_delay_ms":1000}'
+export CRUISE_RETRY_MAX_DELAY_MS=5000
+```
+
+`CRUISE_RUN_ALL_PARALLELISM` overrides the app setting for TUI/WebUI run-all operations and effective config display, but is not saved to the config file. It does not change CLI `run --all`, which uses `--parallelism`. File-backed sessions reapply environment overrides when reloaded; snapshot sessions retain the resolved config from creation. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
+
+The keys `env`, `mcp_servers`, and `pre_steps` are excluded because they contain named entries, commands, or secrets. Workflow structure and identity (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), the `create_pr` workflow contract, and deprecated `pr_language` / `plan_language` are also excluded. Process switches such as `CRUISE_CONFIG`, `CRUISE_FORGE`, `CRUISE_RUNTIME`, `CRUISE_SKIP_AGENT_AUTH_CHECK`, `CRUISE_DISABLE_NOTIFICATIONS`, `CRUISE_DISABLE_HERDR`, `CRUISE_OBSERVABILITY_ENABLED`, and `CRUISE_COMMIT_COAUTHOR_NAME` / `CRUISE_COMMIT_COAUTHOR_EMAIL` are separate from configuration overrides.
 
 `JCODE_OPENAI_SERVICE_TIER` controls jcode SDK's OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Explicit values are respected.
 

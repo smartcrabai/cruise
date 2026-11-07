@@ -18,6 +18,7 @@ mod commit_guard;
 mod condition;
 mod config;
 mod config_cmd;
+pub mod config_env;
 mod configs;
 mod console_mode;
 #[expect(
@@ -51,6 +52,7 @@ mod herdr;
 mod http_download;
 mod install_identity;
 mod instant_exec;
+mod instruction_inbox;
 mod issue_images;
 mod issue_input;
 mod issue_publish;
@@ -88,6 +90,7 @@ mod spinner;
 mod ssh_cmd;
 mod step;
 pub mod telemetry;
+mod tell_cmd;
 #[cfg(test)]
 mod test_binary_support;
 #[cfg(test)]
@@ -175,6 +178,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Plan(args)) => Box::pin(plan_cmd::run(args)).await,
         Some(cli::Commands::Draft(args)) => draft_cmd::run(args),
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
+        Some(cli::Commands::Tell(args)) => tell_cmd::run(args),
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
         Some(cli::Commands::Diff(args)) => diff_cmd::run(&args),
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args),

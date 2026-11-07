@@ -27,8 +27,18 @@ pub fn run(args: &ConfigArgs) -> Result<()> {
             println!("run_all_auto_requeue_max_attempts = {max}");
         }
     } else {
-        let config = crate::app_config::AppConfig::load()?;
-        println!("run_all_parallelism = {}", config.run_all_parallelism);
+        let config = crate::app_config::AppConfig::load()?.with_env_overrides()?;
+        let source = if std::env::var("CRUISE_RUN_ALL_PARALLELISM")
+            .is_ok_and(|value| !value.trim().is_empty())
+        {
+            " (from CRUISE_RUN_ALL_PARALLELISM)"
+        } else {
+            ""
+        };
+        println!(
+            "run_all_parallelism = {}{source}",
+            config.run_all_parallelism
+        );
         println!(
             "run_all_auto_requeue_max_attempts = {}",
             config.run_all_auto_requeue_max_attempts

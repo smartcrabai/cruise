@@ -26,6 +26,7 @@ REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+POLL_SINCE="${POLL_SINCE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 # shellcheck source=lib/plan.sh
 source "$SCRIPT_DIR/lib/plan.sh"
 
@@ -126,7 +127,18 @@ restore_commit_coauthor_hook() {
     git -C "$WORKSPACE" config --local --unset core.hooksPath >>"$LOG_FILE" 2>&1 || true
   fi
 }
-trap restore_commit_coauthor_hook EXIT
+poller_pid=""
+stop_poller() {
+  if [ -n "$poller_pid" ]; then
+    kill "$poller_pid" 2>/dev/null || true
+    wait "$poller_pid" 2>/dev/null || true
+    poller_pid=""
+  fi
+}
+cleanup() { stop_poller; restore_commit_coauthor_hook; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 install_commit_coauthor_hook() {
   if [ -z "$commit_coauthor_name" ] || [ -z "$commit_coauthor_email" ]; then
@@ -245,8 +257,13 @@ do_run() {
     emit_and_exit "$session_id" "" "" "" 1 "cruise failed to create a session from the resolved plan (see run logs)."
   fi
 
+  : > "$CRUISE_DIR/tell-seen.txt"
+  CRUISE_DIR="$CRUISE_DIR" bash "$SCRIPT_DIR/tell-poller.sh" watch "$session_id" "$ENTITY_NUMBER" "$POLL_SINCE" >>"$LOG_FILE" 2>&1 &
+  poller_pid=$!
   cruise run "$session_id" ${flag_args[@]+"${flag_args[@]}"} 2>&1 | tee -a "$LOG_FILE"
   local run_exit=$?
+  stop_poller
+  CRUISE_DIR="$CRUISE_DIR" bash "$SCRIPT_DIR/tell-poller.sh" sweep "$session_id" "$ENTITY_NUMBER" "$POLL_SINCE" >>"$LOG_FILE" 2>&1 || echo "::warning::cruise: final instruction sweep failed"
 
   local session_json pr_url session_phase pr_skipped_reason
   session_json="$(cruise list --json 2>/dev/null | jq -c --arg id "$session_id" '.[] | select(.id==$id)')"

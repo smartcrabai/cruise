@@ -14,6 +14,7 @@ pub mod cancellation;
 pub(crate) mod commit_guard;
 pub mod condition;
 pub mod config;
+pub mod config_env;
 pub mod configs;
 pub mod dag;
 pub mod engine;
@@ -29,6 +30,7 @@ pub mod graph;
     reason = "the binary-only updater also uses these shared download helpers"
 )]
 mod http_download;
+pub mod instruction_inbox;
 pub(crate) mod issue_images;
 pub(crate) mod issue_input;
 pub mod issue_publish;

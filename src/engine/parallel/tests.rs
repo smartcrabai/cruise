@@ -46,6 +46,7 @@ impl Fixture {
         let start = start.unwrap_or_else(|| self.dag.start.clone());
         let mut tracker = FileTracker::with_root(self.root.path().to_path_buf());
         let ctx = ExecutionContext {
+            instructions: None,
             usage_session_id: None,
             compiled: &self.compiled,
             max_retries: 3,
@@ -250,9 +251,8 @@ async fn missing_jcode_model_is_fatal_for_parallel_blocks_with_or_without_if_fai
         "JCODE_HOME",
         home.path().join("jcode-home"),
     ));
-    for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-        guards.push(crate::test_support::EnvGuard::remove(key));
-    }
+    guards.push(crate::test_support::EnvGuard::remove("JCODE_MODEL"));
+    guards.extend(crate::test_support::clear_config_override_envs());
 
     for parent_if_fail in ["", "    if:\n      fail: recover\n"] {
         let yaml = format!(

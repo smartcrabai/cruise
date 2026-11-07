@@ -793,7 +793,14 @@ async fn run_loop(
         let mut prompt = step.prompt.clone();
         prompt.prompt = build_prompt(&prompt.prompt, &head, &threads);
         let head_before = git_head(pr, cancel).await?;
-        match Box::pin(run_prompt_step(
+        let lease = ctx.instructions.and_then(|inbox| {
+            inbox.lease(
+                step_name,
+                crate::instruction_inbox::DeliveryScope::GitHubReview,
+            )
+        });
+        crate::engine::log_instruction_lease(ctx, lease.as_ref(), step_name, "github-review");
+        let prompt_result = Box::pin(run_prompt_step(
             vars,
             ctx.compiled,
             &prompt,
@@ -807,9 +814,13 @@ async fn run_loop(
             ctx.usage_session_id,
             false,
             allow_commit,
+            lease
+                .as_ref()
+                .map(crate::instruction_inbox::Lease::block_text),
         ))
-        .await
-        {
+        .await;
+        crate::engine::finish_instruction_lease(ctx, lease, step_name, &prompt_result);
+        match prompt_result {
             Ok(_) => {}
             Err(CruiseError::StepTimeout { .. }) => {
                 return Err(failed("timed out while running the prompt"));

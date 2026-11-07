@@ -25,6 +25,9 @@ PROVIDERS_INPUT="${PROVIDERS_INPUT:-}"
 EVENT_NAME="${GITHUB_EVENT_NAME:-}"
 EVENT_PATH="${GITHUB_EVENT_PATH:-}"
 REPO="${GITHUB_REPOSITORY:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/authz.sh"
+source "$SCRIPT_DIR/lib/command.sh"
 
 out() {
   echo "$1=$2" >> "$GITHUB_OUTPUT"
@@ -138,49 +141,30 @@ sys.exit(0 if re.search(pattern, body, re.IGNORECASE) else 1)
   deny "trigger phrase '$TRIGGER_PHRASE' not found in body"
 fi
 
-if [ -z "$actor" ] || [ "$actor" = "null" ]; then
-  deny "could not determine actor"
+if ! authorize_actor "$actor" "$actor_type" "$REPO" "$ALLOWED_BOTS"; then
+  deny "$AUTHZ_REASON"
 fi
+is_bot="$AUTHZ_IS_BOT"
 
-is_bot=false
-case "$actor" in
-  *"[bot]") is_bot=true ;;
-esac
-if [ "$actor_type" = "Bot" ]; then
-  is_bot=true
-fi
-
-if [ "$is_bot" = "true" ]; then
-  allowed=false
-  trimmed_allowed="$(printf '%s' "$ALLOWED_BOTS" | tr -d '[:space:]')"
-  if [ "$trimmed_allowed" = "*" ]; then
-    allowed=true
-  else
-    normalized_actor="$(printf '%s' "$actor" | tr '[:upper:]' '[:lower:]')"
-    normalized_actor="${normalized_actor%\[bot\]}"
-    old_ifs="$IFS"
-    IFS=','
-    for b in $ALLOWED_BOTS; do
-      nb="$(printf '%s' "$b" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
-      nb="${nb%\[bot\]}"
-      if [ -n "$nb" ] && [ "$nb" = "$normalized_actor" ]; then
-        allowed=true
-      fi
-    done
-    IFS="$old_ifs"
+command_rest_file="${RUNNER_TEMP:-/tmp}/cruise-command-rest.txt"
+mkdir -p "$(dirname "$command_rest_file")"
+command="$(printf '%s' "$body" | parse_command "$TRIGGER_PHRASE" "$command_rest_file")" || hard_fail "could not parse command"
+if [ "$command" = tell ]; then
+  [ "$EVENT_NAME" = issue_comment ] || deny "tell requires an issue comment"
+  comment_id="$(jqr '.comment.id')"
+  if [[ "$comment_id" =~ ^[0-9]+$ ]]; then
+    bash "$SCRIPT_DIR/tell-poller.sh" --unhandled-reply "$comment_id" "$number" || echo "::warning::cruise: could not check tell delivery" >&2
   fi
-  if [ "$allowed" != "true" ]; then
-    deny "bot actor '$actor' is not in allowed_bots ('$ALLOWED_BOTS')"
-  fi
-else
-  # The `permission` field only ever reports admin/write/read/none; the
-  # "maintain" and "triage" roles are mapped to write and read respectively
-  # (they appear only in `role_name`), so maintainers pass the `write` arm.
-  permission="$(gh api "repos/$REPO/collaborators/$actor/permission" --jq '.permission' 2>/dev/null || true)"
-  case "$permission" in
-    admin | write) : ;;
-    *) deny "actor '$actor' has insufficient permission: '${permission:-unknown}'" ;;
-  esac
+  out proceed false
+  out entity_number "$number"
+  out actor "$actor"
+  out actor_id "$actor_id"
+  out is_bot "$is_bot"
+  out command tell
+  out command_rest_file "$command_rest_file"
+  out gate_error ""
+  echo "cruise: tell does not start a run"
+  exit 0
 fi
 
 # A missing API key is a configuration error, not a "this event doesn't
@@ -215,35 +199,6 @@ fi
 # docs/github-actions.md's "Command grammar" section for the exact rule and
 # its false-positive/negative edge cases (e.g. a sentence that happens to
 # start with "fix").
-command_rest_file="${RUNNER_TEMP:-/tmp}/cruise-command-rest.txt"
-mkdir -p "$(dirname "$command_rest_file")"
-command="$(printf '%s' "$body" | python3 -c '
-import re, sys
-phrase, rest_file = sys.argv[1], sys.argv[2]
-body = sys.stdin.read()
-pattern = re.compile(r"(?:^|(?<=\s))" + re.escape(phrase) + r"(?=[\s.,!?;:]|$)", re.IGNORECASE)
-matches = list(pattern.finditer(body))
-m = matches[-1] if matches else None
-remainder = body[m.end():] if m else ""
-remainder = re.sub(r"^[\s.,!?;:]+", "", remainder)
-known = {"run", "exec", "plan", "fix"}
-command = "run"
-rest = remainder
-first_line, _, tail = remainder.partition("\n")
-tokens = first_line.split(None, 1)
-if tokens:
-    candidate = tokens[0]
-    bare = candidate[1:] if candidate.startswith("/") else candidate
-    bare = bare.rstrip(".,!?;:")
-    if bare.lower() in known:
-        command = bare.lower()
-        after = tokens[1] if len(tokens) > 1 else ""
-        rest = (after + "\n" + tail) if tail else after
-sys.stdout.write(command)
-with open(rest_file, "w", encoding="utf-8") as f:
-    f.write(rest.strip())
-' "$TRIGGER_PHRASE" "$command_rest_file")"
-
 out proceed true
 out entity_number "$number"
 out actor "$actor"
