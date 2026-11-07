@@ -102,30 +102,6 @@ pub(crate) fn format_feedback(
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn spawn_failure_is_feedback_with_unavailable_artifact() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing");
-        let gates = [ResolvedGate {
-            command: "true".into(),
-            timeout: None,
-        }];
-        let failure = run_quality_gates(&gates, &HashMap::new(), Some(&missing), None)
-            .await
-            .unwrap()
-            .unwrap();
-        let feedback = format_feedback(&failure, "step", 1, 2, None);
-        assert!(feedback.contains("Sanitized log (may be truncated): unavailable"));
-        assert!(!feedback.contains("exit code"));
-        assert!(!failure.output.is_empty());
-        assert!(feedback.contains(&failure.output));
-    }
-}
-
 fn write_gate_log(root: Option<&Path>, step: &str, attempt: usize, output: &str) -> Option<String> {
     let root = root?;
     let slug: String = step
@@ -144,4 +120,29 @@ fn write_gate_log(root: Option<&Path>, step: &str, attempt: usize, output: &str)
             .body;
     crate::artifacts::write(root, &name, &sanitized).ok()?;
     Some(root.join(name).display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn spawn_failure_is_feedback_with_unavailable_artifact(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let missing = dir.path().join("missing");
+        let gates = [ResolvedGate {
+            command: "true".into(),
+            timeout: None,
+        }];
+        let failure = run_quality_gates(&gates, &HashMap::new(), Some(&missing), None)
+            .await?
+            .ok_or("expected quality gate failure")?;
+        let feedback = format_feedback(&failure, "step", 1, 2, None);
+        assert!(feedback.contains("Sanitized log (may be truncated): unavailable"));
+        assert!(!feedback.contains("exit code"));
+        assert!(!failure.output.is_empty());
+        assert!(feedback.contains(&failure.output));
+        Ok(())
+    }
 }

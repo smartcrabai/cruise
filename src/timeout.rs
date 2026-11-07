@@ -48,7 +48,10 @@ mod tests {
 
     #[test]
     fn parse_timeout_seconds_suffix() {
-        assert_eq!(parse_timeout("1s").unwrap(), Duration::from_secs(1));
+        assert_eq!(
+            parse_timeout("1s").unwrap_or_else(|e| panic!("{e:?}")),
+            Duration::from_secs(1)
+        );
         assert!(parse_timeout("0s").is_err());
         assert!(parse_timeout("s").is_err());
     }
