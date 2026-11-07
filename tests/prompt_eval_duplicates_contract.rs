@@ -13,13 +13,19 @@ fn hash(bytes: &[u8]) -> String {
     result
 }
 
+// Git may check out text files with CRLF on Windows. Hash the same LF text
+// across platforms while preserving all other content changes.
+fn hash_prompt_file(content: &str) -> String {
+    hash(content.replace("\r\n", "\n").as_bytes())
+}
+
 fn check_pair(
     name: &str,
     file_hash: &str,
     step_hash: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let file = fs::read(root.join(format!("prompts/{name}.md")))?;
+    let file = fs::read_to_string(root.join(format!("prompts/{name}.md")))?;
     let yaml = fs::read_to_string(root.join("builtin/tdd.yaml"))?;
     let config = WorkflowConfig::from_yaml(&yaml)?;
     let prompt = config
@@ -30,7 +36,7 @@ fn check_pair(
         .as_ref()
         .ok_or_else(|| format!("missing prompt for step: {name}"))?;
     assert_eq!(
-        hash(&file),
+        hash_prompt_file(&file),
         file_hash,
         "{name} file changed: review the known divergence"
     );
@@ -40,6 +46,23 @@ fn check_pair(
         "{name} workflow prompt changed: review the known divergence"
     );
     Ok(())
+}
+
+#[test]
+fn prompt_file_hash_normalizes_checkout_line_endings_only() {
+    let lf = "first line\nsecond line\n";
+    assert_eq!(
+        hash_prompt_file(lf),
+        hash_prompt_file(&lf.replace('\n', "\r\n"))
+    );
+    assert_ne!(
+        hash_prompt_file(lf),
+        hash_prompt_file("first line\nchanged\n")
+    );
+    assert_ne!(
+        hash_prompt_file(lf),
+        hash_prompt_file("first line\nsecond line")
+    );
 }
 
 #[test]
