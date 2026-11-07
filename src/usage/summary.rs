@@ -272,8 +272,15 @@ impl Summary {
             .collect();
         let mut headers = self.group_by.clone();
         headers.extend([
-            "calls", "unavailable", "input", "output", "cache_read", "cache_creation",
-            "reasoning", "total", "cost_usd",
+            "calls",
+            "unavailable",
+            "input",
+            "output",
+            "cache_read",
+            "cache_creation",
+            "reasoning",
+            "total",
+            "cost_usd",
         ]);
         let mut lines = vec![headers.join("  ")];
         for row in &self.rows {

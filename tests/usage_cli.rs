@@ -103,7 +103,12 @@ fn usage_without_file_prints_empty_result_and_exits_zero() {
     let f = Fixture::new();
     let text = f.success(&[]);
     assert_eq!(text.lines().count(), 1, "{text:?}");
-    assert_eq!(text.lines().next(), Some("step  backend  model  calls  unavailable  input  output  cache_read  cache_creation  reasoning  total  cost_usd"));
+    assert_eq!(
+        text.lines().next(),
+        Some(
+            "step  backend  model  calls  unavailable  input  output  cache_read  cache_creation  reasoning  total  cost_usd"
+        )
+    );
     let value = f.json(&[]);
     assert_eq!(value["schema"], 1);
     assert_eq!(value["group_by"], json!(["step", "backend", "model"]));
@@ -239,7 +244,10 @@ fn summarize_propagates_read_errors() {
     let f = Fixture::new();
     fs::create_dir_all(f.0.path().join("state/cruise/usage.ndjson")).unwrap();
     let output = f.run(&[]);
-    assert!(!output.status.success(), "directory read unexpectedly succeeded");
+    assert!(
+        !output.status.success(),
+        "directory read unexpectedly succeeded"
+    );
     assert!(!output.stderr.is_empty(), "read error should be reported");
 }
 
@@ -281,18 +289,40 @@ fn summarize_by_model_expands_by_model_entries_and_preserves_totals() {
 fn expanded_null_model_is_default_and_record_null_stays_null() {
     let f = Fixture::new();
     f.write_records(&[
-        record("one", "expanded", "claude", Some("requested"), json!({"status":"reported", "by_model":[{"model":null, "input_tokens":5}]})),
+        record(
+            "one",
+            "expanded",
+            "claude",
+            Some("requested"),
+            json!({"status":"reported", "by_model":[{"model":null, "input_tokens":5}]}),
+        ),
         record("one", "ordinary", "command", None, unavailable()),
     ]);
     let text = f.success(&[]);
-    assert!(text.lines().any(|line| line.starts_with("expanded  claude  (default)  ")), "{text}");
-    assert!(text.lines().any(|line| line.starts_with("ordinary  command  -  ")), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("expanded  claude  (default)  ")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("ordinary  command  -  ")),
+        "{text}"
+    );
     let value = f.json(&[]);
     assert_eq!(value["rows"][0]["model"], "(default)");
     assert_eq!(value["rows"][1]["model"], Value::Null);
     let csv = f.success(&["--format", "csv"]);
-    assert!(csv.lines().any(|line| line.starts_with("expanded,claude,(default),")), "{csv}");
-    assert!(csv.lines().any(|line| line.starts_with("ordinary,command,,")), "{csv}");
+    assert!(
+        csv.lines()
+            .any(|line| line.starts_with("expanded,claude,(default),")),
+        "{csv}"
+    );
+    assert!(
+        csv.lines()
+            .any(|line| line.starts_with("ordinary,command,,")),
+        "{csv}"
+    );
 }
 
 #[test]

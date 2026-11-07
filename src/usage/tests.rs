@@ -242,11 +242,18 @@ fn warning_stderr_isolated_process() {
         return;
     }
     for (case, warning) in [
-        ("switch", "warning: invalid CRUISE_USAGE_RECORDING value, recording enabled"),
+        (
+            "switch",
+            "warning: invalid CRUISE_USAGE_RECORDING value, recording enabled",
+        ),
         ("write", "warning: usage record skipped:"),
     ] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "usage::tests::warning_stderr_isolated_process", "--nocapture"])
+            .args([
+                "--exact",
+                "usage::tests::warning_stderr_isolated_process",
+                "--nocapture",
+            ])
             .env(CHILD, case)
             .env("CRUISE_USAGE_RECORDING", "invalid")
             .output()
