@@ -1343,15 +1343,32 @@ mod tests {
 
         let response = super::save_settings(
             State(state.clone()),
-            Form(vec![("runAllParallelism".into(), "2".into()), ("runAllAutoRequeueMaxAttempts".into(), "0".into())]),
-        ).await;
+            Form(vec![
+                ("runAllParallelism".into(), "2".into()),
+                ("runAllAutoRequeueMaxAttempts".into(), "0".into()),
+            ]),
+        )
+        .await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        assert_eq!(state.application.app_config().unwrap().run_all_parallelism, 2);
-        assert_eq!(state.application.effective_app_config().unwrap().run_all_parallelism, 4);
+        assert_eq!(
+            state.application.app_config().unwrap().run_all_parallelism,
+            2
+        );
+        assert_eq!(
+            state
+                .application
+                .effective_app_config()
+                .unwrap()
+                .run_all_parallelism,
+            4
+        );
 
         let response = super::save_settings(
             State(state.clone()),
-            Form(vec![("runAllParallelism".into(), "3".into()), ("runAllAutoRequeueMaxAttempts".into(), "0".into())]),
+            Form(vec![
+                ("runAllParallelism".into(), "3".into()),
+                ("runAllAutoRequeueMaxAttempts".into(), "0".into()),
+            ]),
         )
         .await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);

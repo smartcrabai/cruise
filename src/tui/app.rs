@@ -7958,7 +7958,9 @@ mod tests {
         let mut fixture = configured_app(2);
         let _parallelism = EnvGuard::set("CRUISE_RUN_ALL_PARALLELISM", "4");
         open_parallelism_editor(&mut fixture.app);
-        assert!(matches!(&fixture.app.modal, Some(Modal::RunAllParallelism { editor, .. }) if editor.text() == "2"));
+        assert!(
+            matches!(&fixture.app.modal, Some(Modal::RunAllParallelism { editor, .. }) if editor.text() == "2")
+        );
         assert_eq!(fixture.app.batch_parallelism, 4);
         fixture.app.handle_key(key(KeyCode::Enter));
         assert_eq!(configured_parallelism(&fixture), 2);

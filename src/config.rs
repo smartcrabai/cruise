@@ -1086,9 +1086,13 @@ impl WorkflowConfig {
             }
         }
 
-        let fallback = explicit_fallback.then(|| self.retry.as_ref().map(|retry| retry.model_fallback)).flatten();
+        let fallback = explicit_fallback
+            .then(|| self.retry.as_ref().map(|retry| retry.model_fallback))
+            .flatten();
         self.resolve_model_fallbacks();
-        if let Some(fallback) = fallback && let Some(retry) = self.retry.as_mut() {
+        if let Some(fallback) = fallback
+            && let Some(retry) = self.retry.as_mut()
+        {
             retry.model_fallback = fallback;
         }
         Ok(())

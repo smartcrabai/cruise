@@ -31,9 +31,7 @@ pub fn parse_override(var: &'static str, kind: EnvKind, raw: &str) -> Result<Opt
         return Ok(None);
     }
     let invalid = |expected: &str| {
-        CruiseError::Other(format!(
-            "invalid value for {var} (expected {expected})"
-        ))
+        CruiseError::Other(format!("invalid value for {var} (expected {expected})"))
     };
     let value = match kind {
         EnvKind::Text => Value::String(raw.to_owned()),
@@ -241,8 +239,12 @@ mod tests {
         let value = parse_override("CRUISE_COMMAND", EnvKind::Json, &format!("\"{secret}\""))
             .unwrap()
             .unwrap();
-        let key = WORKFLOW_ENV_KEYS.iter().find(|key| key.var == "CRUISE_COMMAND").unwrap();
-        let mut config = WorkflowConfig::from_yaml("command: [echo]\nsteps:\n  s1:\n    prompt: hi\n").unwrap();
+        let key = WORKFLOW_ENV_KEYS
+            .iter()
+            .find(|key| key.var == "CRUISE_COMMAND")
+            .unwrap();
+        let mut config =
+            WorkflowConfig::from_yaml("command: [echo]\nsteps:\n  s1:\n    prompt: hi\n").unwrap();
         let error = (key.set)(&mut config, value).unwrap_err().to_string();
         assert!(error.contains("CRUISE_COMMAND"));
         assert!(error.contains("Vec"));
