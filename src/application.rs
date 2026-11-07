@@ -2409,6 +2409,42 @@ impl CruiseApplication {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         entries
     }
+    /// Build the interactive workflow picker, including installed packages.
+    ///
+    /// # Errors
+    /// Returns an error if application configuration cannot be loaded.
+    pub fn workflow_picker_tree(
+        &self,
+        candidates: &[crate::workflow_categories::PickerCandidate],
+    ) -> Result<Vec<crate::workflow_categories::PickerNode>> {
+        let config = self.app_config()?;
+        config.validate()?;
+        let installed: std::collections::HashSet<_> = crate::workflow_packages::list_installed()
+            .map_err(|error| CruiseError::Other(error.to_string()))?
+            .into_iter()
+            .map(|package| {
+                std::fs::canonicalize(&package.config_path).unwrap_or(package.config_path)
+            })
+            .collect();
+        let candidates: Vec<_> = candidates
+            .iter()
+            .map(|candidate| {
+                let mut candidate = candidate.clone();
+                if !candidate.is_builtin && !candidate.is_local {
+                    let path = std::path::PathBuf::from(&candidate.value);
+                    let path = std::fs::canonicalize(&path).unwrap_or(path);
+                    candidate.is_installed_package = installed.contains(&path);
+                }
+                candidate
+            })
+            .collect();
+        Ok(crate::workflow_categories::build_picker_tree(
+            &candidates,
+            &config.workflow_categories,
+            config.show_others_category,
+            &config.others_category_name,
+        ))
+    }
     /// Load application configuration.
     ///
     /// # Errors
@@ -2416,6 +2452,13 @@ impl CruiseApplication {
     /// Returns an error when the application configuration cannot be loaded.
     pub fn app_config(&self) -> Result<crate::app_config::AppConfig> {
         crate::app_config::AppConfig::load()
+    }
+    /// Load runtime configuration without picker-only fields.
+    ///
+    /// # Errors
+    /// Returns an error if runtime configuration cannot be loaded.
+    pub fn runtime_config(&self) -> Result<crate::app_config::AppConfig> {
+        crate::app_config::AppConfig::load_runtime()
     }
     /// Load the saved new-session draft.
     ///

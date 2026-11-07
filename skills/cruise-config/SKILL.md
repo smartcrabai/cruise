@@ -45,7 +45,7 @@ and file-backed sessions keep their live-reload contract.
 
 `research` provides bounded read-only research with independent review and a cited report. `security` performs scoped, parallel security audits, triages findings, repairs confirmed safe defects, and independently verifies the results. `add-tests` inventories production behavior and real user-flow coverage before implementation and reports evidence-backed coverage/gap IDs; it does not impose numeric coverage quotas.
 
-In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. In an interactive terminal, an interactive selector lists all found config files and the built-in workflows with `tdd` first; with no config files found, `tdd` is adopted without prompting.
+In a non-interactive context (stdin/stdout is not a TTY), the highest-priority candidate is adopted automatically. Interactive selectors organize candidates using application settings `workflow_categories`, `show_others_category`, and `others_category_name`; see [application settings](references/top-level.md) for their syntax and fallback groups. These display settings do not change non-interactive resolution.
 
 > `cruise workflow add owner/repo[/path.yaml][@ref]` installs pinned, self-contained GitHub workflows. A root `cruise-package.yaml` lists bundle members explicitly; without it, or with an explicit YAML path, a single workflow is installed. Singles use `workflows/<name>.yaml` plus `<name>.cruise-package.json`; bundles use `workflows/<name>/<workflow>.yaml` plus `.cruise-package-lock.json`. Bundle members are selectable as `<name>/<workflow>.yaml`. Hand-edited members and extra bundle files block `update`/`remove`.
 

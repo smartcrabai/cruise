@@ -359,7 +359,7 @@ impl OperationRegistry {
         self.batch = Some(tokio::spawn(async move {
             let parallelism_provider = move || {
                 config_app
-                    .app_config()
+                    .runtime_config()
                     .map(|config| config.run_all_parallelism)
             };
             match std::panic::AssertUnwindSafe(app.run_all_with_parallelism_provider(

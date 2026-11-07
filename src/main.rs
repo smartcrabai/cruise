@@ -96,6 +96,7 @@ mod webui;
 mod workflow;
 #[cfg_attr(not(test), expect(dead_code))]
 mod workflow_call;
+mod workflow_categories;
 mod workflow_cmd;
 mod workflow_defaults;
 mod workflow_doctor;

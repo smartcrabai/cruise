@@ -58,6 +58,7 @@ pub mod tool_policy;
 pub mod variable;
 pub mod workflow;
 pub mod workflow_call;
+pub mod workflow_categories;
 pub mod workflow_cmd;
 pub mod workflow_defaults;
 pub(crate) mod workflow_packages;
