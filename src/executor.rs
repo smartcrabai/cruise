@@ -1784,7 +1784,7 @@ mod tests {
         let child_bin = temp.path().join("child/bin");
         std::fs::create_dir_all(&process_bin).unwrap_or_else(|error| panic!("{error}"));
         std::fs::create_dir_all(&child_bin).unwrap_or_else(|error| panic!("{error}"));
-        let _path = EnvGuard::set("PATH", &process_bin);
+        let _path = prepend_to_path(&process_bin);
         let _data = EnvGuard::set("XDG_DATA_HOME", temp.path().join("data"));
         let _jcode = EnvGuard::remove("CRUISE_JCODE_CLI_PATH");
         let _claude = EnvGuard::remove("CRUISE_CLAUDE_CLI_PATH");
