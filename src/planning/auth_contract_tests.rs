@@ -171,6 +171,7 @@ impl Credentials {
         let token = CancellationToken::new();
         token.cancel();
         let ctx = PlanPromptCtx {
+            usage_session_id: None,
             config: &config,
             ask: std::sync::Arc::new(crate::ask_handler::NoninteractiveAskHandler),
             plan_path: &plan_path,

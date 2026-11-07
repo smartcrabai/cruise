@@ -598,6 +598,7 @@ async fn run(
     };
     let _token = CancellationToken::new();
     let ctx = ExecutionContext {
+        usage_session_id: None,
         compiled: &compiled,
         max_retries: 3,
         rate_limit_retries: 0,

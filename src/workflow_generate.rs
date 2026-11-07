@@ -58,10 +58,22 @@ pub(crate) async fn run_prompt(
     working_dir: Option<&Path>,
     cancel_token: Option<&crate::cancellation::CancellationToken>,
 ) -> Result<String> {
+    run_prompt_with_usage(config, prompt, permission, working_dir, cancel_token, None).await
+}
+
+async fn run_prompt_with_usage(
+    config: &WorkflowConfig,
+    prompt: &str,
+    permission: crate::config::PermissionMode,
+    working_dir: Option<&Path>,
+    cancel_token: Option<&crate::cancellation::CancellationToken>,
+    usage: Option<crate::usage::UsageScope<'_>>,
+) -> Result<String> {
     let executor = Executor::new(config.sdk.as_deref(), &config.command);
     let model = Executor::plan_model(config.plan_model.as_ref(), config.model.as_ref());
     let outcome = executor
         .run(PromptRun {
+            usage,
             prompt,
             model: model.as_ref(),
             subagent_model: None,
@@ -101,7 +113,19 @@ pub(crate) async fn generate_yaml(
     run_with_repairs(
         base_prompt.clone(),
         |prompt| async move {
-            run_prompt(config, &prompt, crate::config::PermissionMode::Full, None, None).await
+            run_prompt_with_usage(
+                config,
+                &prompt,
+                crate::config::PermissionMode::Full,
+                None,
+                None,
+                Some(crate::usage::UsageScope {
+                    session_id: None,
+                    step: None,
+                    purpose: crate::usage::UsagePurpose::WorkflowGenerate,
+                }),
+            )
+            .await
         },
         |candidate| {
             validate_generated_yaml(candidate, destination_parent)?;

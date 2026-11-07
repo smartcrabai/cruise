@@ -2022,6 +2022,7 @@ async fn run_plan_prompt(
         Arc::clone(&context.cleanup),
     );
     let ctx = crate::planning::PlanPromptCtx {
+        usage_session_id: Some(context.state.id.as_str()),
         config,
         ask,
         plan_path: &context.staged_plan_path,
@@ -3573,6 +3574,7 @@ impl CruiseApplication {
             if matches!(outcome, crate::worktree_pr::PublicationOutcome::Created) {
                 crate::worktree_pr::run_after_pr_steps(
                     &compiled,
+                    Some(id),
                     &mut vars,
                     &mut tracker,
                     max_retries,
@@ -4353,6 +4355,7 @@ async fn execute_run(
     let workflow = crate::telemetry::Operation::phase("workflow");
     let mut execution = {
         let ctx = crate::engine::ExecutionContext {
+            usage_session_id: Some(id),
             compiled: &setup.compiled,
             max_retries: setup.max_retries,
             rate_limit_retries: setup.rate_limit_retries,

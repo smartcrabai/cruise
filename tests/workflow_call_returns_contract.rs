@@ -349,6 +349,7 @@ async fn return_and_skips_follow_the_executed_path() {
             skipped_steps: &[],
             flags: &cruise::flags::NO_FLAGS,
             on_step_log: None,
+            usage_session_id: None,
         };
         execute_steps_with_graph(
             &ctx,
@@ -422,6 +423,7 @@ async fn option_return_follows_the_executed_path() {
         skipped_steps: &[],
         flags: &cruise::flags::NO_FLAGS,
         on_step_log: None,
+        usage_session_id: None,
     };
     execute_steps_with_graph(
         &ctx,

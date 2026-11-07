@@ -329,6 +329,7 @@ Commands:
   run          Execute a planned session
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs
+  usage        Summarize locally recorded token usage
   config       Show or update application-level configuration (`config.json` or `config.yaml`)
   exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
@@ -702,6 +703,10 @@ Checks each Completed session's PR status via `gh pr view` (or `glab mr view` on
 
 > **Note:** A session may lack a PR URL if `gh pr create` failed or was not reached. PR-backed sessions without a PR URL are retained; inspect the session logs or re-run PR creation manually with `gh pr create`.
 
+#### `cruise usage`
+
+`cruise usage [--by session,step,purpose,backend,model] [--session ID] [--format text|json|csv]` summarizes local attempt records. The default grouping is `step,backend,model` and the default format is text. Missing provider values are unknown, not zero; totals include input and output only. Command backends are recorded as unavailable. Costs are provider-reported, not estimates. OpenCode auxiliary title and compaction usage is excluded, so usage may be undercounted. Command backend internal retries are recorded as one call. `cruise ssh` records usage on the remote host, not locally.
+
 ## Session Management
 
 Cruise stores session data in `$XDG_DATA_HOME/cruise/sessions/` (default: `~/.local/share/cruise/sessions/`). Each `state.json` has one tagged `config` reference:
@@ -733,6 +738,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 | Application settings (`config.json` or `config.yaml`) | `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) |
 | Sessions, worktrees, and temporary `--repo` clones | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
 | State files (`history.json`, `new_session_draft.json`, per-installation `installations/<installation-id>/update-transaction.json`) | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
+| Usage records | `$XDG_STATE_HOME/cruise/usage.ndjson` (default: `~/.local/state/cruise/usage.ndjson`) |
 
 On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cruise` (config), `%LOCALAPPDATA%\cruise\data` (data), and `%LOCALAPPDATA%\cruise\state` (state). If those variables are missing, the `~/` defaults above apply, and `~\` is expanded like `~/`.
 
@@ -1406,6 +1412,8 @@ The CLI and WebUI also apply these process-level workflow overrides when loading
 `CRUISE_DISABLE_HERDR=1` disables the herdr lifecycle-state reporting described above.
 
 `CRUISE_SKIP_AGENT_AUTH_CHECK=1` bypasses the SDK startup OAuth expiration check described under SDK Mode. It is a process-only runtime switch, not a workflow-config override. Only the exact value `1` skips the check.
+
+`CRUISE_USAGE_RECORDING` is a process-only runtime switch. Set it to `0` or `false` to disable local usage recording; `1`, `true`, or an unset value enables it. Values are trimmed and case-insensitive. Other values enable recording with a warning.
 
 
 ```yaml
@@ -2475,7 +2483,7 @@ The built-in `follow-up/sync-base` command exports `cruise.sync_base.failure_rea
 
 Errors classified as `loop_protection` annotate each result-based enclosing span with `cruise.loop.from`, `cruise.loop.to`, `cruise.loop.max_retries`, `cruise.loop.traversals` (accepted budgeted traversals of that edge, before the refused transition), and `cruise.loop.skipped_step_count`. Step IDs follow the existing step-name privacy policy; full edge tables, skipped-step lists, and exception messages are not exported. The retry budget and workflow behavior are unchanged.
 
-Metrics are `cruise.operation.count` and `cruise.operation.duration` (seconds), labeled only by `cruise.operation` and `cruise.outcome`, plus `cruise.retry.count`, labeled only by `cruise.retry.action` and `cruise.retry.reason`. Session/workflow/model identifiers are trace-only, not metric labels. Token usage and cost are not exported.
+Metrics are `cruise.operation.count` and `cruise.operation.duration` (seconds), labeled only by `cruise.operation` and `cruise.outcome`, plus `cruise.retry.count`, labeled only by `cruise.retry.action` and `cruise.retry.reason`. Session/workflow/model identifiers are trace-only, not metric labels. Token usage and cost are not exported to OpenTelemetry; they are recorded locally as described under `cruise usage`.
 
 Prompt/input text, agent output, command bodies, working paths, and exception messages are not automatically attached to spans or metrics. Session IDs, workflow file names, step/model names, CI check/job names and references, and explicitly supplied resource attributes are exported; keep secrets out of those values.
 
