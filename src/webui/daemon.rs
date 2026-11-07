@@ -288,17 +288,32 @@ fn stop_locked(registry: &Registry, force: bool) -> Result<Option<InstanceRecord
 fn signal(record: &InstanceRecord, sig: i32) -> Result<()> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let pid = i32::try_from(record.pid).map_err(|_| error("invalid WebUI PID"))?;
-    if pid <= 0 { return Err(error("invalid WebUI PID")); }
+    if pid <= 0 {
+        return Err(error("invalid WebUI PID"));
+    }
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    if fd < 0 { return Err(std::io::Error::last_os_error().into()); }
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
     let handle = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    if !record.verify_identity()? { return Err(error("WebUI process identity changed before signaling")); }
+    if !record.verify_identity()? {
+        return Err(error("WebUI process identity changed before signaling"));
+    }
     signal_handle(handle.as_raw_fd(), sig)
 }
 
 #[cfg(target_os = "linux")]
 fn signal_handle(handle: std::os::fd::RawFd, sig: i32) -> Result<()> {
-    if unsafe { libc::syscall(libc::SYS_pidfd_send_signal, handle, sig, std::ptr::null::<libc::siginfo_t>(), 0) } != 0 {
+    if unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            handle,
+            sig,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    } != 0
+    {
         let e = std::io::Error::last_os_error();
         if e.raw_os_error() != Some(libc::ESRCH) {
             return Err(e.into());
@@ -308,8 +323,12 @@ fn signal_handle(handle: std::os::fd::RawFd, sig: i32) -> Result<()> {
 }
 #[cfg(all(unix, not(target_os = "linux")))]
 fn signal(record: &InstanceRecord, _sig: i32) -> Result<()> {
-    if !record.verify_identity()? { return Err(error("WebUI process identity changed before signaling")); }
-    Err(error("safe process-bound signaling is unavailable on this platform"))
+    if !record.verify_identity()? {
+        return Err(error("WebUI process identity changed before signaling"));
+    }
+    Err(error(
+        "safe process-bound signaling is unavailable on this platform",
+    ))
 }
 #[cfg(unix)]
 fn force_kill(record: &InstanceRecord) -> Result<()> {
@@ -317,12 +336,21 @@ fn force_kill(record: &InstanceRecord) -> Result<()> {
 }
 #[cfg(windows)]
 fn force_kill(record: &InstanceRecord) -> Result<()> {
-    if !record.verify_identity()? { return Err(error("WebUI process identity changed before termination")); }
+    if !record.verify_identity()? {
+        return Err(error("WebUI process identity changed before termination"));
+    }
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-    use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        TerminateProcess,
+    };
     // SAFETY: the handle returned by OpenProcess is used only for termination and closed once.
     unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, record.pid);
+        let handle = OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            record.pid,
+        );
         if handle.is_null() {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -335,7 +363,10 @@ fn force_kill(record: &InstanceRecord) -> Result<()> {
             CloseHandle(handle);
             return Err(error.into());
         }
-        let identity = format!("windows:{}:{}", creation.dwHighDateTime, creation.dwLowDateTime);
+        let identity = format!(
+            "windows:{}:{}",
+            creation.dwHighDateTime, creation.dwLowDateTime
+        );
         if record.process_identity.as_deref() != Some(identity.as_str()) {
             CloseHandle(handle);
             return Err(error("WebUI process identity changed before termination"));
@@ -523,7 +554,11 @@ mod tests {
                 let _ = self.0.wait();
             }
         }
-        let mut child = ChildGuard(Command::new("ping").args(["127.0.0.1", "-n", "30"]).spawn()?);
+        let mut child = ChildGuard(
+            Command::new("ping")
+                .args(["127.0.0.1", "-n", "30"])
+                .spawn()?,
+        );
         let mut target = record();
         target.pid = child.0.id();
         target.process_identity = super::super::instance::precise_identity(target.pid);

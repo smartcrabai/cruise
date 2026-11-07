@@ -120,7 +120,12 @@ async fn read_planned_session_then_control_stop_stays_idle() {
     let mut session = create_session(&harness);
     session.phase = crate::session::SessionPhase::Planned;
     harness.manager.save(&session).unwrap();
-    let (status, _, _) = get(&harness, &format!("/webui/sessions/{}/tab/info", session.id), &[]).await;
+    let (status, _, _) = get(
+        &harness,
+        &format!("/webui/sessions/{}/tab/info", session.id),
+        &[],
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(harness.state.application.runtime().is_idle());
     let (sender, _receiver) = tokio::sync::oneshot::channel();
@@ -128,9 +133,16 @@ async fn read_planned_session_then_control_stop_stays_idle() {
         token: "test-token".to_owned(),
         sender: std::sync::Mutex::new(Some(sender)),
     }));
-    let request = Request::builder().method("POST").uri("/webui/control/stop")
-        .header("x-cruise-webui-control", "test-token").body(Body::empty()).unwrap();
-    let response = router(harness.state.clone()).oneshot(request).await.unwrap();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/webui/control/stop")
+        .header("x-cruise-webui-control", "test-token")
+        .body(Body::empty())
+        .unwrap();
+    let response = router(harness.state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let loaded = harness.manager.load(&session.id).unwrap();
     assert_eq!(loaded.phase, crate::session::SessionPhase::Planned);
@@ -1675,26 +1687,47 @@ async fn serve_control_stop_closes_open_sse_client() {
         let _ = receiver.await;
     }));
     let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-    client.write_all(b"GET /webui/events HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+    client
+        .write_all(b"GET /webui/events HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
     let mut received = Vec::new();
     let mut buf = [0u8; 1024];
     while !received.windows(4).any(|w| w == b"\r\n\r\n") {
-        let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await.unwrap().unwrap();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
         assert_ne!(n, 0);
         received.extend_from_slice(&buf[..n]);
     }
     let head = String::from_utf8_lossy(&received).to_ascii_lowercase();
-    assert!(head.starts_with("http/1.1 200") && head.contains("text/event-stream"), "{head}");
+    assert!(
+        head.starts_with("http/1.1 200") && head.contains("text/event-stream"),
+        "{head}"
+    );
     let mut control = tokio::net::TcpStream::connect(addr).await.unwrap();
     control.write_all(b"POST /webui/control/stop HTTP/1.1\r\nHost: x\r\nX-Cruise-Webui-Control: test-token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
     let mut response = Vec::new();
-    tokio::time::timeout(std::time::Duration::from_secs(5), control.read_to_end(&mut response)).await.unwrap().unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        control.read_to_end(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 202"));
-    assert!(tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap().is_ok());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok()
+    );
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await {
             Ok(Ok(0) | Err(_)) => break,
-            Ok(Ok(_)) => {},
+            Ok(Ok(_)) => {}
             Err(error) => panic!("SSE connection stayed open: {error}"),
         }
     }

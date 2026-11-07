@@ -46,16 +46,22 @@ impl InstanceRecord {
         let actual = match precise_identity(self.pid) {
             Some(identity) => identity,
             None if process_definitely_absent(self.pid) => return Ok(false),
-            None => return Err(CruiseError::Other(format!(
-                "cannot verify WebUI process identity for PID {}; record retained", self.pid
-            ))),
+            None => {
+                return Err(CruiseError::Other(format!(
+                    "cannot verify WebUI process identity for PID {}; record retained",
+                    self.pid
+                )));
+            }
         };
-        if *expected != actual { return Ok(false); }
+        if *expected != actual {
+            return Ok(false);
+        }
         match process_start_time(self.pid) {
             Some(started_at) => Ok(self.process_started_at == started_at),
             None if process_definitely_absent(self.pid) => Ok(false),
             None => Err(CruiseError::Other(format!(
-                "cannot verify WebUI process start time for PID {}; record retained", self.pid
+                "cannot verify WebUI process start time for PID {}; record retained",
+                self.pid
             ))),
         }
     }
@@ -81,9 +87,15 @@ pub fn process_start_time(pid: u32) -> Option<u64> {
 
 #[cfg(unix)]
 fn process_definitely_absent(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else { return false; };
-    if pid <= 0 { return false; }
-    unsafe { libc::kill(pid, 0) != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    unsafe {
+        libc::kill(pid, 0) != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
 }
 
 #[cfg(windows)]
@@ -92,19 +104,30 @@ fn process_definitely_absent(pid: u32) -> bool {
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if !handle.is_null() { CloseHandle(handle); return false; }
+        if !handle.is_null() {
+            CloseHandle(handle);
+            return false;
+        }
         io::Error::last_os_error().raw_os_error() == Some(87)
     }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn process_definitely_absent(_pid: u32) -> bool { false }
+fn process_definitely_absent(_pid: u32) -> bool {
+    false
+}
 
 #[cfg(target_os = "linux")]
 pub fn precise_identity(pid: u32) -> Option<String> {
     let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let ticks: u64 = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()?;
+    let ticks: u64 = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()?;
     Some(format!("linux:{}:{ticks}", boot.trim()))
 }
 
@@ -113,31 +136,55 @@ pub fn precise_identity(pid: u32) -> Option<String> {
     let pid = i32::try_from(pid).ok()?;
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>();
-    let result = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut _, size as i32) };
-    if result != size as i32 || info.pbi_pid != pid as u32 { return None; }
-    Some(format!("macos:{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec))
+    let result = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut _,
+            size as i32,
+        )
+    };
+    if result != size as i32 || info.pbi_pid != pid as u32 {
+        return None;
+    }
+    Some(format!(
+        "macos:{}:{}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    ))
 }
 
 #[cfg(windows)]
 pub fn precise_identity(pid: u32) -> Option<String> {
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-    use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() { return None; }
+        if handle.is_null() {
+            return None;
+        }
         let mut creation: FILETIME = std::mem::zeroed();
         let mut exit: FILETIME = std::mem::zeroed();
         let mut kernel: FILETIME = std::mem::zeroed();
         let mut user: FILETIME = std::mem::zeroed();
         let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
         CloseHandle(handle);
-        if ok == 0 { return None; }
-        Some(format!("windows:{}:{}", creation.dwHighDateTime, creation.dwLowDateTime))
+        if ok == 0 {
+            return None;
+        }
+        Some(format!(
+            "windows:{}:{}",
+            creation.dwHighDateTime, creation.dwLowDateTime
+        ))
     }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-pub fn precise_identity(_pid: u32) -> Option<String> { None }
+pub fn precise_identity(_pid: u32) -> Option<String> {
+    None
+}
 
 #[must_use]
 pub fn new_control_token() -> String {
