@@ -809,6 +809,10 @@ fn github_workflow_base_url(reference: &GitHubWorkflowRef) -> String {
     }
 }
 
+pub(crate) fn fetch_github_file_for_install(reference: &GitHubWorkflowRef) -> Result<String> {
+    fetch_github_file_once(reference, "package manifest")
+}
+
 fn fetch_github_file(
     reference: &GitHubWorkflowRef,
     what: &str,

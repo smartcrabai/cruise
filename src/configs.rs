@@ -17,7 +17,74 @@ pub fn list_user_configs() -> Vec<ConfigEntry> {
     let Ok(workflows_dir) = crate::paths::workflows_dir() else {
         return vec![];
     };
-    list_configs_in(&workflows_dir)
+    user_workflow_yaml_paths(&workflows_dir)
+        .into_iter()
+        .map(|p| ConfigEntry {
+            name: p
+                .strip_prefix(&workflows_dir)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .into_owned(),
+            description: std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|yaml| extract_file_description(&yaml)),
+            path: p.to_string_lossy().into_owned(),
+        })
+        .collect()
+}
+
+/// Discover flat user workflows and complete, explicitly locked bundles.
+pub(crate) fn user_workflow_yaml_paths(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    use crate::workflow_packages::bundle::{BUNDLE_LOCK_FILE, BundleLock};
+
+    let mut paths = yaml_paths_in(dir);
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with('.') || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let bundle_dir = entry.path();
+            let lock_path = bundle_dir.join(BUNDLE_LOCK_FILE);
+            if !std::fs::symlink_metadata(&lock_path).is_ok_and(|m| m.file_type().is_file()) {
+                continue;
+            }
+            let Some(lock) = std::fs::read(lock_path)
+                .ok()
+                .and_then(|data| serde_json::from_slice::<BundleLock>(&data).ok())
+            else {
+                continue;
+            };
+            if lock.name != name || lock.workflows.is_empty() {
+                continue;
+            }
+            let mut members = Vec::new();
+            for member in lock.workflows.keys() {
+                if member.is_empty()
+                    || !member
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+                {
+                    members.clear();
+                    break;
+                }
+                let path = bundle_dir.join(format!("{member}.yaml"));
+                if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+                    members.clear();
+                    break;
+                }
+                members.push(path);
+            }
+            paths.extend(members);
+        }
+    }
+    paths.sort_by(|a, b| {
+        a.strip_prefix(dir)
+            .unwrap_or(a)
+            .cmp(b.strip_prefix(dir).unwrap_or(b))
+    });
+    paths
 }
 
 /// List config files in the given directory.
@@ -316,6 +383,55 @@ mod tests {
     }
 
     // --- list_user_configs ---
+
+    #[test]
+    fn user_configs_discover_only_complete_locked_bundles() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = tempfile::TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let dir = tmp.path().join(".config/cruise/workflows");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.yaml"), "steps: {}\n").unwrap();
+        let lock = |name: &str| {
+            format!(
+                r#"{{"name":"{name}","owner":"org","repo":"repo","requested_ref":"main","resolved_commit":"1111111111111111111111111111111111111111","workflows":{{"implement":{{"source_path":"implement.yaml","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}},"review":{{"source_path":"review.yaml","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}}}}}"#
+            )
+        };
+        for name in [
+            "pkg",
+            ".staging-x",
+            "mismatch",
+            "missing",
+            "broken",
+            "unlocked",
+        ] {
+            let bundle = dir.join(name);
+            fs::create_dir(&bundle).unwrap();
+            fs::write(bundle.join("implement.yaml"), "steps: {}\n").unwrap();
+            if name != "missing" {
+                fs::write(bundle.join("review.yaml"), "steps: {}\n").unwrap();
+            }
+            if name != "unlocked" {
+                let contents = if name == "broken" {
+                    "{".to_string()
+                } else if name == "mismatch" {
+                    lock("other")
+                } else {
+                    lock(name)
+                };
+                fs::write(bundle.join(".cruise-package-lock.json"), contents).unwrap();
+            }
+        }
+        fs::write(dir.join("pkg/unlisted.yaml"), "steps: {}\n").unwrap();
+        let entries = list_user_configs();
+        let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, ["a.yaml", "pkg/implement.yaml", "pkg/review.yaml"]);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| std::path::Path::new(&entry.path).is_absolute())
+        );
+    }
 
     #[test]
     fn test_list_user_configs_reads_from_xdg_config_home() {
