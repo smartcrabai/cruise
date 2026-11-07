@@ -66,7 +66,7 @@ impl PhaseBadgeVm {
             "Planned" => "planned",
             "Running" => "running",
             "Completed" => "completed",
-            "Failed" => "failed",
+            "Failed" | "PR Failed" => "failed",
             "Suspended" => "suspended",
             _ => "draft",
         };
@@ -139,6 +139,7 @@ pub(crate) struct SessionHeaderVm {
     pub(crate) badge: PhaseBadgeVm,
     pub(crate) current_step: Option<String>,
     pub(crate) phase_error: Option<String>,
+    pub(crate) auto_requeue_count: u32,
     pub(crate) plan_error: Option<String>,
     pub(crate) pr_url: Option<String>,
     pub(crate) pr_is_link: bool,
@@ -155,6 +156,7 @@ pub(crate) struct TabHrefs {
     pub(crate) dag: String,
     pub(crate) plan: String,
     pub(crate) log: String,
+    pub(crate) diff: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,6 +177,7 @@ pub(crate) struct SessionDetailVm {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TabInfoVm {
+    pub(crate) auto_requeue_count: u32,
     pub(crate) id: String,
     pub(crate) config_source: String,
     /// Declared workflow flags with this session's values; absent values are off.
@@ -199,6 +202,21 @@ pub(crate) struct TabPlanVm {
     pub(crate) id: String,
     pub(crate) html: RawHtml,
     pub(crate) available: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TabDiffVm {
+    pub(crate) id: String,
+    pub(crate) lines: Vec<DiffLineVm>,
+    pub(crate) message: Option<String>,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DiffLineVm {
+    pub(crate) text: String,
+    pub(crate) class: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -281,9 +299,10 @@ impl ConfigSelectVm {
                 value: super::dto::BUILTIN_CONFIG_PATH.to_string(),
                 label: format!(
                     "Built-in tdd \u{2014} {}",
-                    crate::builtin_workflows::BUILTIN_WORKFLOWS
-                        .first()
-                        .map_or("", |w| w.description)
+                    crate::builtin_workflows::find_builtin(
+                        crate::builtin_workflows::DEFAULT_BUILTIN_NAME
+                    )
+                    .map_or("", |w| w.description)
                 ),
                 selected: selected == super::dto::BUILTIN_CONFIG_PATH,
             },
@@ -569,6 +588,7 @@ impl ToastVm {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsVm {
     pub(crate) run_all_parallelism: usize,
+    pub(crate) run_all_auto_requeue_max_attempts: u32,
     pub(crate) error: Option<String>,
 }
 

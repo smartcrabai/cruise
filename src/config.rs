@@ -178,6 +178,13 @@ pub struct WorkflowConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub languages: Option<LanguagesConfig>,
 
+    /// Optional template for the generated commit subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_message_template: Option<String>,
+    /// Optional template for the generated pull request body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_body_template: Option<String>,
+
     /// Automatically commit, push, and create a pull request after a successful
     /// worktree run. When false, the session completes without PR processing;
     /// the worktree and its artifacts are retained. Defaults to `true`.
@@ -553,11 +560,23 @@ pub struct StepConfig {
 }
 
 /// Configuration of the `github-review` step.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewerScope {
+    #[default]
+    Bots,
+    All,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubReviewConfig {
     /// Bot logins whose review of the current head is awaited.
+    #[serde(default)]
     pub bots: Vec<String>,
+    /// Scope of review authors to consider.
+    #[serde(default)]
+    pub reviewers: ReviewerScope,
     /// Maximum number of loop iterations (default 3).
     #[serde(
         rename = "max-iterations",
@@ -1487,7 +1506,10 @@ pub(crate) fn validate_github_review(config: &WorkflowConfig) -> crate::error::R
         if review.max_iterations == 0 {
             return Err(invalid("github-review max-iterations must be positive"));
         }
-        if review.bots.is_empty() {
+        if review.reviewers == ReviewerScope::All && !review.bots.is_empty() {
+            return Err(invalid("github-review reviewers: all cannot specify bots"));
+        }
+        if review.reviewers == ReviewerScope::Bots && review.bots.is_empty() {
             return Err(invalid("github-review bots must not be empty"));
         }
         let mut seen = std::collections::HashSet::new();
@@ -4929,6 +4951,8 @@ steps:
                 "pr_language",
                 "plan_language",
                 "languages",
+                "commit_message_template",
+                "pr_body_template",
                 "env",
                 "force_exec",
                 "disallowed_tools",
