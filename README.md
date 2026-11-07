@@ -1416,6 +1416,8 @@ Process-level configuration overrides apply after workflow and defaults resoluti
 | `CRUISE_COMPUTER_USE` | `computer_use` | boolean |
 | `CRUISE_PERMISSION` | `permission` | text: `read-only`, `edit`, or `full` |
 | `CRUISE_DISALLOWED_TOOLS` | `disallowed_tools` | JSON array |
+| `CRUISE_COMMIT_MESSAGE_TEMPLATE` | `commit_message_template` | text |
+| `CRUISE_PR_BODY_TEMPLATE` | `pr_body_template` | text |
 | `CRUISE_RETRY` | `retry` | JSON object or `null` |
 | `CRUISE_RETRY_BASE_DELAY_MS` | `retry.base_delay_ms` | integer |
 | `CRUISE_RETRY_MAX_DELAY_MS` | `retry.max_delay_ms` | integer |
@@ -1438,7 +1440,7 @@ export CRUISE_RETRY_MAX_DELAY_MS=5000
 
 `CRUISE_RUN_ALL_PARALLELISM` overrides the app setting for TUI/WebUI run-all operations and effective config display, but is not saved to the config file. It does not change CLI `run --all`, which uses `--parallelism`. File-backed sessions reapply environment overrides when reloaded; snapshot sessions retain the resolved config from creation. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
 
-The keys `env`, `mcp_servers`, and `pre_steps` are excluded because they contain named entries, commands, or secrets. Workflow structure and identity (`steps`, `groups`, `after-pr`, `inputs`, `description`, `flags`), the `create_pr` workflow contract, and deprecated `pr_language` / `plan_language` are also excluded. Process switches such as `CRUISE_CONFIG`, `CRUISE_FORGE`, `CRUISE_RUNTIME`, `CRUISE_SKIP_AGENT_AUTH_CHECK`, `CRUISE_DISABLE_NOTIFICATIONS`, `CRUISE_DISABLE_HERDR`, `CRUISE_OBSERVABILITY_ENABLED`, and `CRUISE_COMMIT_COAUTHOR_NAME` / `CRUISE_COMMIT_COAUTHOR_EMAIL` are separate from configuration overrides.
+The keys `env`, `mcp_servers`, and `pre_steps` are excluded because they contain named entries, commands, or secrets. Workflow structure and identity (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), the `create_pr` workflow contract, and deprecated `pr_language` / `plan_language` are also excluded. Process switches such as `CRUISE_CONFIG`, `CRUISE_FORGE`, `CRUISE_RUNTIME`, `CRUISE_SKIP_AGENT_AUTH_CHECK`, `CRUISE_DISABLE_NOTIFICATIONS`, `CRUISE_DISABLE_HERDR`, `CRUISE_OBSERVABILITY_ENABLED`, and `CRUISE_COMMIT_COAUTHOR_NAME` / `CRUISE_COMMIT_COAUTHOR_EMAIL` are separate from configuration overrides.
 
 `JCODE_OPENAI_SERVICE_TIER` controls jcode SDK's OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Explicit values are respected.
 

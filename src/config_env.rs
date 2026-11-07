@@ -145,6 +145,18 @@ pub static WORKFLOW_ENV_KEYS: &[WorkflowEnvKey] = &[
     key!("CRUISE_COMPUTER_USE", "computer_use", Bool, computer_use),
     key!("CRUISE_PERMISSION", "permission", Text, permission),
     key!(
+        "CRUISE_COMMIT_MESSAGE_TEMPLATE",
+        "commit_message_template",
+        Text,
+        commit_message_template
+    ),
+    key!(
+        "CRUISE_PR_BODY_TEMPLATE",
+        "pr_body_template",
+        Text,
+        pr_body_template
+    ),
+    key!(
         "CRUISE_DISALLOWED_TOOLS",
         "disallowed_tools",
         Json,
@@ -197,6 +209,7 @@ pub static EXCLUDED_KEYS: &[(&str, &str)] = &[
     ("groups", "workflow structure"),
     ("after-pr", "workflow structure"),
     ("inputs", "workflow structure"),
+    ("returns", "workflow output contract"),
     ("description", "workflow identity"),
     ("flags", "workflow structure"),
     ("create_pr", "workflow contract"),
@@ -226,6 +239,47 @@ pub fn all_override_names() -> impl Iterator<Item = &'static str> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn template_overrides_replace_values_and_trim_whitespace() {
+        let mut config = WorkflowConfig::from_yaml(
+            "commit_message_template: original commit\npr_body_template: original body\nsteps:\n  s1:\n    prompt: hi\n",
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        for (var, path, raw) in [
+            (
+                "CRUISE_COMMIT_MESSAGE_TEMPLATE",
+                "commit_message_template",
+                "  feat: {title}  \n",
+            ),
+            (
+                "CRUISE_PR_BODY_TEMPLATE",
+                "pr_body_template",
+                "  {body}\nDetails  \n",
+            ),
+        ] {
+            let key = WORKFLOW_ENV_KEYS
+                .iter()
+                .find(|key| key.var == var)
+                .unwrap_or_else(|| panic!("missing {var}"));
+            assert_eq!(key.path, path);
+            assert_eq!(key.kind, EnvKind::Text);
+            let value = parse_override(key.var, key.kind, raw)
+                .unwrap_or_else(|error| panic!("{error:?}"))
+                .unwrap_or_else(|| panic!("expected value"));
+            (key.set)(&mut config, value).unwrap_or_else(|error| panic!("{error:?}"));
+            assert_eq!(
+                parse_override(key.var, key.kind, " \n\t ")
+                    .unwrap_or_else(|error| panic!("{error:?}")),
+                None
+            );
+        }
+        assert_eq!(
+            config.commit_message_template.as_deref(),
+            Some("feat: {title}")
+        );
+        assert_eq!(config.pr_body_template.as_deref(), Some("{body}\nDetails"));
+    }
 
     #[test]
     fn malformed_command_error_does_not_expose_value() {

@@ -371,6 +371,8 @@ When loading a workflow config, these process environment variables override the
 | `CRUISE_COMPUTER_USE` | `computer_use`, a boolean. |
 | `CRUISE_PERMISSION` | `permission`: `read-only`, `edit`, or `full`. |
 | `CRUISE_DISALLOWED_TOOLS` | `disallowed_tools`, a JSON array. |
+| `CRUISE_COMMIT_MESSAGE_TEMPLATE` | `commit_message_template`, text. |
+| `CRUISE_PR_BODY_TEMPLATE` | `pr_body_template`, text. |
 | `CRUISE_RETRY` | `retry`, a JSON object or `null`. |
 | `CRUISE_RETRY_BASE_DELAY_MS` | `retry.base_delay_ms`, a nonnegative integer. |
 | `CRUISE_RETRY_MAX_DELAY_MS` | `retry.max_delay_ms`, a nonnegative integer. |
@@ -386,7 +388,7 @@ When loading a workflow config, these process environment variables override the
 
 Values are trimmed and blank values ignored. Booleans accept only `true`, `false`, `1`, or `0`, and integers use unsigned decimal digits. Models are literal single models unless beginning with `[` or `{`, which means JSON in the field's normal shape. Model arrays enable fallback as in YAML. Other composite values require JSON, with `null` or `[]` clearing optional values or lists where supported. Parent `retry` and `languages` overrides apply before their children. `CRUISE_SDK` and `CRUISE_COMMAND` cannot both be nonblank. Invalid values are errors. Per-invocation CLI flags and saved session cleanup overrides take precedence where applicable. App parallelism is effective-only and is not saved; CLI `run --all` uses `--parallelism` instead. File-backed sessions reapply overrides on reload, while snapshots retain their creation-time config.
 
-Named maps and secret-bearing `env`, `mcp_servers`, and `pre_steps`, workflow structure (`steps`, `groups`, `after-pr`, `inputs`, `description`, `flags`), `create_pr`, and deprecated `pr_language` / `plan_language` are excluded. See the [configuration override reference](../cruise-config/references/env-and-llm.md#process-level-config-overrides) and the README environment table for details.
+Named maps and secret-bearing `env`, `mcp_servers`, and `pre_steps`, workflow structure (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), `create_pr`, and deprecated `pr_language` / `plan_language` are excluded. See the [configuration override reference](../cruise-config/references/env-and-llm.md#process-level-config-overrides) and the README environment table for details.
 
 Every actual jcode prompt needs an effective Cruise model. Ordinary prompts
 resolve step `model` then workflow/default `model`; planning uses
