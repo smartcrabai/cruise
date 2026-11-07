@@ -251,9 +251,8 @@ async fn missing_jcode_model_is_fatal_for_parallel_blocks_with_or_without_if_fai
         "JCODE_HOME",
         home.path().join("jcode-home"),
     ));
-    for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-        guards.push(crate::test_support::EnvGuard::remove(key));
-    }
+    guards.push(crate::test_support::EnvGuard::remove("JCODE_MODEL"));
+    guards.extend(crate::test_support::clear_config_override_envs());
 
     for parent_if_fail in ["", "    if:\n      fail: recover\n"] {
         let yaml = format!(

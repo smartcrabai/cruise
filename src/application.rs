@@ -2500,12 +2500,21 @@ impl CruiseApplication {
     pub fn app_config(&self) -> Result<crate::app_config::AppConfig> {
         crate::app_config::AppConfig::load()
     }
+
+    /// Load application configuration with process overrides applied.
+    ///
+    /// # Errors
+    /// Returns an error if loading or applying overrides fails.
+    pub fn effective_app_config(&self) -> Result<crate::app_config::AppConfig> {
+        self.app_config()?.with_env_overrides()
+    }
+
     /// Load runtime configuration without picker-only fields.
     ///
     /// # Errors
     /// Returns an error if runtime configuration cannot be loaded.
     pub fn runtime_config(&self) -> Result<crate::app_config::AppConfig> {
-        crate::app_config::AppConfig::load_runtime()
+        crate::app_config::AppConfig::load_runtime()?.with_env_overrides()
     }
     /// Load the saved new-session draft.
     ///
@@ -5919,10 +5928,7 @@ mod tests {
 
     fn isolate_application_config(home: &std::path::Path) -> Vec<crate::test_support::EnvGuard> {
         let mut guards = crate::test_support::set_fake_home(home);
-        guards.extend([
-            crate::test_support::EnvGuard::remove("CRUISE_MODEL"),
-            crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL"),
-        ]);
+        guards.extend(crate::test_support::clear_config_override_envs());
         guards
     }
 

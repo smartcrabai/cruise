@@ -18,6 +18,7 @@ mod commit_guard;
 mod condition;
 mod config;
 mod config_cmd;
+pub mod config_env;
 mod configs;
 mod console_mode;
 #[expect(

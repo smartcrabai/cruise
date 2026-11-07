@@ -145,6 +145,32 @@ impl Drop for EnvGuard {
     }
 }
 
+/// Clear every configuration override until the returned guards are dropped.
+/// The caller must hold the process lock for the guards' entire lifetime.
+#[must_use]
+pub fn clear_config_override_envs() -> Vec<EnvGuard> {
+    crate::config_env::all_override_names()
+        .map(EnvGuard::remove)
+        .collect()
+}
+
+#[cfg(test)]
+#[test]
+fn config_override_guards_clear_and_restore() {
+    let _lock = lock_process();
+    let key = crate::config_env::all_override_names()
+        .next()
+        .unwrap_or_else(|| panic!("there must be at least one override"));
+    let _original = EnvGuard::set(key, "test-value");
+    {
+        let _guards = clear_config_override_envs();
+        for name in crate::config_env::all_override_names() {
+            assert!(std::env::var_os(name).is_none(), "{name} was not cleared");
+        }
+    }
+    assert_eq!(std::env::var(key).as_deref(), Ok("test-value"));
+}
+
 pub struct ProcessLock {
     _guard: std::sync::MutexGuard<'static, ()>,
 }

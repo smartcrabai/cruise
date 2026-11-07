@@ -176,6 +176,34 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// Apply process overrides to an in-memory copy, without changing persisted configuration.
+    ///
+    /// # Errors
+    /// Returns an error if an override is invalid or makes the configuration invalid.
+    pub fn with_env_overrides(mut self) -> Result<Self> {
+        for spec in crate::config_env::APP_ENV_KEYS {
+            let Ok(raw) = std::env::var(spec.var) else {
+                continue;
+            };
+            let Some(value) = crate::config_env::parse_override(spec.var, spec.kind, &raw)? else {
+                continue;
+            };
+            self.run_all_parallelism = serde_json::from_value(value).map_err(|error| {
+                CruiseError::Other(format!(
+                    "invalid value for {} ({}): {error}",
+                    spec.var, spec.path
+                ))
+            })?;
+            self.validate().map_err(|error| {
+                CruiseError::Other(format!(
+                    "invalid value for {} ({}): {error}",
+                    spec.var, spec.path
+                ))
+            })?;
+        }
+        Ok(self)
+    }
+
     /// Load runtime defaults while ignoring picker-only fields.
     ///
     /// # Errors
@@ -391,6 +419,52 @@ mod tests {
     use super::*;
     use crate::test_support::{EnvGuard, lock_process};
     use tempfile::TempDir;
+
+    #[test]
+    fn env_parallelism_is_validated_and_never_implicitly_persisted() {
+        let _lock = lock_process();
+        let dir = TempDir::new().unwrap_or_else(|error| panic!("{error:?}"));
+        let path = dir.path().join("config.json");
+        AppConfig::default()
+            .save_to(&path)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let _env = EnvGuard::set("CRUISE_RUN_ALL_PARALLELISM", "4");
+        let raw = AppConfig::load_from(&path).unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(
+            raw.clone()
+                .with_env_overrides()
+                .unwrap_or_else(|error| panic!("{error:?}"))
+                .run_all_parallelism,
+            4
+        );
+        raw.save_to(&path)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(
+            AppConfig::load_from(&path)
+                .unwrap_or_else(|error| panic!("{error:?}"))
+                .run_all_parallelism,
+            1
+        );
+        for value in ["0", "abc", "-1"] {
+            let _invalid = EnvGuard::set("CRUISE_RUN_ALL_PARALLELISM", value);
+            assert!(
+                AppConfig::default()
+                    .with_env_overrides()
+                    .err()
+                    .unwrap_or_else(|| panic!("invalid override unexpectedly succeeded"))
+                    .to_string()
+                    .contains("CRUISE_RUN_ALL_PARALLELISM")
+            );
+        }
+        let _blank = EnvGuard::set("CRUISE_RUN_ALL_PARALLELISM", "  ");
+        assert_eq!(
+            AppConfig::default()
+                .with_env_overrides()
+                .unwrap_or_else(|error| panic!("{error:?}"))
+                .run_all_parallelism,
+            1
+        );
+    }
 
     // -- Helpers --------------------------------------------------------------
 

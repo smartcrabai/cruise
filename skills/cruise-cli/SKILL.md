@@ -366,14 +366,31 @@ When loading a workflow config, these process environment variables override the
 |----------|-----------|
 | `CRUISE_MODEL` | The workflow's default `model` for prompt steps. |
 | `CRUISE_PLAN_MODEL` | The workflow's `plan_model` for the built-in plan step (which otherwise falls back to `model`). |
+| `CRUISE_SUBAGENT_MODEL` | `subagent_model`, the subagent model entry. |
 | `CRUISE_SDK` | The workflow's `sdk` backend; it also clears `command` because the two backends are mutually exclusive. |
+| `CRUISE_COMMAND` | `command`, a JSON array; clears `sdk`. |
+| `CRUISE_MAX_RETRIES` | `max_retries`, a nonnegative integer. |
+| `CRUISE_COMPUTER_USE` | `computer_use`, a boolean. |
+| `CRUISE_PERMISSION` | `permission`: `read-only`, `edit`, or `full`. |
+| `CRUISE_DISALLOWED_TOOLS` | `disallowed_tools`, a JSON array. |
+| `CRUISE_COMMIT_MESSAGE_TEMPLATE` | `commit_message_template`, text. |
+| `CRUISE_PR_BODY_TEMPLATE` | `pr_body_template`, text. |
+| `CRUISE_RETRY` | `retry`, a JSON object or `null`. |
+| `CRUISE_RETRY_BASE_DELAY_MS` | `retry.base_delay_ms`, a nonnegative integer. |
+| `CRUISE_RETRY_MAX_DELAY_MS` | `retry.max_delay_ms`, a nonnegative integer. |
+| `CRUISE_RETRY_MODEL_FALLBACK` | `retry.model_fallback`, a boolean. |
+| `CRUISE_RETRY_FALLBACK_CHAINS` | `retry.fallback_chains`, a JSON object. |
+| `CRUISE_LANGUAGES` | `languages`, a JSON object. |
 | `CRUISE_LANGUAGE_PR` | `languages.pr`, the language for built-in PR title/body generation. |
 | `CRUISE_LANGUAGE_PLAN` | `languages.plan`, the language for built-in planning prompts. |
 | `CRUISE_CLEANUP_AFTER_PR` | `cleanup_after_pr`, whether to remove a worktree and branch automatically after a successful PR. |
 | `CRUISE_INTERACTIVE_PLANNING` | `interactive_planning`, whether SDK planning uses its interactive planning tools; it has no effect for a `command:` backend. |
 | `CRUISE_FORCE_EXEC` | `force_exec`, whether direct plan entry points execute in the current directory. |
+| `CRUISE_RUN_ALL_PARALLELISM` | App `run_all_parallelism`, an integer of at least 1 for TUI/WebUI run-all, not CLI `run --all`. |
 
-The boolean overrides (`CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`) accept only `true`, `false`, `1`, or `0` after trimming; any other non-empty value is an error. The string overrides above are applied only when their trimmed value is non-empty.
+Values are trimmed and blank values ignored. Booleans accept only `true`, `false`, `1`, or `0`, and integers use unsigned decimal digits. Models are literal single models unless beginning with `[` or `{`, which means JSON in the field's normal shape. Model arrays enable fallback as in YAML. Other composite values require JSON, with `null` or `[]` clearing optional values or lists where supported. Parent `retry` and `languages` overrides apply before their children. `CRUISE_SDK` and `CRUISE_COMMAND` cannot both be nonblank. Invalid values are errors. Per-invocation CLI flags and saved session cleanup overrides take precedence where applicable. App parallelism is effective-only and is not saved; CLI `run --all` uses `--parallelism` instead. File-backed sessions reapply overrides on reload, while snapshots retain their creation-time config.
+
+Named maps and secret-bearing `env`, `mcp_servers`, and `pre_steps`, workflow structure (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), `create_pr`, and deprecated `pr_language` / `plan_language` are excluded. See the [configuration override reference](../cruise-config/references/env-and-llm.md#process-level-config-overrides) and the README environment table for details.
 
 Every actual jcode prompt needs an effective Cruise model. Ordinary prompts
 resolve step `model` then workflow/default `model`; planning uses

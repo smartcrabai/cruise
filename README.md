@@ -977,7 +977,7 @@ Uncategorized local and `CRUISE_CONFIG` candidates remain available at the root 
 
 `$XDG_CONFIG_HOME/cruise/default.yaml` supplies user defaults. When `XDG_CONFIG_HOME` is unset, the path defaults to `~/.config/cruise/default.yaml` on macOS/Linux. On Windows, it is `%APPDATA%\cruise\default.yaml` when `APPDATA` is set; if `APPDATA` is missing, Cruise falls back to the home-directory path `~/.config/cruise/default.yaml`. `./.cruise/default.yaml` supplies project defaults. These files provide defaults for fields a workflow leaves unset. They are never selectable as workflows (`-c` and `CRUISE_CONFIG` pointing at them is an error). `default` is not a built-in workflow name, so `cruise workflow eject default` is rejected as an unknown built-in; `cruise workflow generate --name default` still refuses to write the reserved `./.cruise/default.yaml`. `<config_dir>/workflows/default.yaml` remains an ordinary workflow.
 
-Precedence, highest first: environment variables (`CRUISE_MODEL`, ...) > the workflow file > `./.cruise/default.yaml` > `~/.config/cruise/default.yaml` > application model defaults (`config.json` or `config.yaml`) > built-in defaults. Step-level model overrides still take precedence for ordinary prompts.
+Precedence, highest first, where applicable: per-invocation CLI flags (including `-c` for workflow selection) > saved session cleanup override > configuration environment overrides > the workflow file > `./.cruise/default.yaml` > `$XDG_CONFIG_HOME/cruise/default.yaml` > application model defaults (`config.json` or `config.yaml`) > built-in defaults. Step-level model overrides still take precedence for ordinary prompts.
 
 When an actual jcode prompt has no effective model, Cruise creates
 `$XDG_CONFIG_HOME/cruise/default.yaml` (or the platform's normal user config
@@ -1194,8 +1194,8 @@ steps:
   Non-prompt steps and group/workflow-call/parallel wrappers cannot set it.
 - A called workflow's top-level value is ignored in favor of the caller's
   default; the callee's per-step overrides are retained.
-- Layered `default.yaml` supports it, but application `config.json` /
-  `config.yaml` defaults and `CRUISE_SUBAGENT_MODEL` overrides are not provided.
+- Layered `default.yaml` and `CRUISE_SUBAGENT_MODEL` support it, but application
+  `config.json` / `config.yaml` defaults do not.
 
 #### `sdk: jcode` — the jcode SDK (default)
 
@@ -1453,7 +1453,47 @@ command workflows retain their existing no-model behavior.
 
 Environment variables can be set at workflow and step level. Step-level values override workflow-level values for that step only. Parallel children add a third level: workflow < parallel block < child. Values support template variable substitution; each child resolves its own values against the variables from before the block.
 
-The CLI and WebUI also apply these process-level workflow overrides when loading a session config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`, `CRUISE_LANGUAGE_PR`, `CRUISE_LANGUAGE_PLAN`, `CRUISE_CLEANUP_AFTER_PR`, `CRUISE_INTERACTIVE_PLANNING`, and `CRUISE_FORCE_EXEC`. String values are trimmed and blank values are ignored; boolean values accept `true`, `false`, `1`, or `0`. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
+Process-level configuration overrides apply after workflow and defaults resolution. Supported names and value types are:
+
+| Variable | Configuration key | Value |
+|---|---|---|
+| `CRUISE_MODEL` | `model` | model |
+| `CRUISE_PLAN_MODEL` | `plan_model` | model |
+| `CRUISE_SUBAGENT_MODEL` | `subagent_model` | model entry |
+| `CRUISE_SDK` | `sdk` | text |
+| `CRUISE_COMMAND` | `command` | JSON array |
+| `CRUISE_MAX_RETRIES` | `max_retries` | integer |
+| `CRUISE_INTERACTIVE_PLANNING` | `interactive_planning` | boolean |
+| `CRUISE_CLEANUP_AFTER_PR` | `cleanup_after_pr` | boolean |
+| `CRUISE_FORCE_EXEC` | `force_exec` | boolean |
+| `CRUISE_COMPUTER_USE` | `computer_use` | boolean |
+| `CRUISE_PERMISSION` | `permission` | text: `read-only`, `edit`, or `full` |
+| `CRUISE_DISALLOWED_TOOLS` | `disallowed_tools` | JSON array |
+| `CRUISE_COMMIT_MESSAGE_TEMPLATE` | `commit_message_template` | text |
+| `CRUISE_PR_BODY_TEMPLATE` | `pr_body_template` | text |
+| `CRUISE_RETRY` | `retry` | JSON object or `null` |
+| `CRUISE_RETRY_BASE_DELAY_MS` | `retry.base_delay_ms` | integer |
+| `CRUISE_RETRY_MAX_DELAY_MS` | `retry.max_delay_ms` | integer |
+| `CRUISE_RETRY_MODEL_FALLBACK` | `retry.model_fallback` | boolean |
+| `CRUISE_RETRY_FALLBACK_CHAINS` | `retry.fallback_chains` | JSON object |
+| `CRUISE_LANGUAGES` | `languages` | JSON object |
+| `CRUISE_LANGUAGE_PR` | `languages.pr` | text |
+| `CRUISE_LANGUAGE_PLAN` | `languages.plan` | text |
+| `CRUISE_RUN_ALL_PARALLELISM` | app `run_all_parallelism` | integer, at least 1 |
+
+Names normally use `CRUISE_` plus the uppercase key path, replacing dots and hyphens with underscores. The language child names above are the only supported spellings. Values are trimmed and whitespace-only values are ignored. Booleans accept only `true`, `false`, `1`, or `0`; integers are unsigned decimal digits without a sign. Text is literal. Model values are literal single models unless they start with `[` or `{`, in which case they are parsed as JSON and must match the field's normal model shape. In particular, `CRUISE_MODEL` and `CRUISE_PLAN_MODEL` now accept JSON arrays: values beginning with `[` or `{` were previously treated as literal model names. Arrays with fallback entries enable model fallback as in YAML. Other composite values require JSON, not YAML flow syntax. Use JSON `null` for an optional value or `[]` for an empty list where supported, not a blank value. Invalid values produce an error naming the variable and still undergo normal configuration validation.
+
+Parent objects are applied before child overrides, so `CRUISE_RETRY_MAX_DELAY_MS` overrides the corresponding field in `CRUISE_RETRY`, and `CRUISE_LANGUAGE_PR` overrides `CRUISE_LANGUAGES`. Setting `CRUISE_SDK` clears a configured command, while `CRUISE_COMMAND` clears a configured SDK. Setting both nonblank variables is an error. For example:
+
+```sh
+export CRUISE_MODEL='["provider/primary", "provider/fallback"]'
+export CRUISE_RETRY='{"base_delay_ms":1000}'
+export CRUISE_RETRY_MAX_DELAY_MS=5000
+```
+
+`CRUISE_RUN_ALL_PARALLELISM` overrides the app setting for TUI/WebUI run-all operations and effective config display, but is not saved to the config file. It does not change CLI `run --all`, which uses `--parallelism`. File-backed sessions reapply environment overrides when reloaded; snapshot sessions retain the resolved config from creation. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
+
+The keys `env`, `mcp_servers`, and `pre_steps` are excluded because they contain named entries, commands, or secrets. Workflow structure and identity (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), the `create_pr` workflow contract, and deprecated `pr_language` / `plan_language` are also excluded. Process switches such as `CRUISE_CONFIG`, `CRUISE_FORGE`, `CRUISE_RUNTIME`, `CRUISE_SKIP_AGENT_AUTH_CHECK`, `CRUISE_DISABLE_NOTIFICATIONS`, `CRUISE_DISABLE_HERDR`, `CRUISE_OBSERVABILITY_ENABLED`, and `CRUISE_COMMIT_COAUTHOR_NAME` / `CRUISE_COMMIT_COAUTHOR_EMAIL` are separate from configuration overrides.
 
 `JCODE_OPENAI_SERVICE_TIER` controls jcode SDK's OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Explicit values are respected.
 

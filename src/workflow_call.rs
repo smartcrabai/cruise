@@ -1336,19 +1336,9 @@ mod tests {
     }
 
     fn clear_all_override_envs() -> Vec<EnvGuard> {
-        vec![
-            EnvGuard::remove("CRUISE_MODEL"),
-            EnvGuard::remove("CRUISE_PLAN_MODEL"),
-            EnvGuard::remove("CRUISE_SDK"),
-            EnvGuard::remove("CRUISE_LANGUAGE_PR"),
-            EnvGuard::remove("CRUISE_LANGUAGE_PLAN"),
-            EnvGuard::remove("LC_ALL"),
-            EnvGuard::remove("LC_MESSAGES"),
-            EnvGuard::remove("LANG"),
-            EnvGuard::remove("LANGUAGE"),
-            EnvGuard::remove("CRUISE_CLEANUP_AFTER_PR"),
-            EnvGuard::remove("CRUISE_INTERACTIVE_PLANNING"),
-        ]
+        let mut guards = crate::test_support::clear_config_override_envs();
+        guards.extend(["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"].map(EnvGuard::remove));
+        guards
     }
 
     #[test]
