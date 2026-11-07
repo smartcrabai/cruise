@@ -250,6 +250,7 @@ impl CompiledWorkflow {
 /// membership style, contains empty groups, nested group calls, or
 /// individual `if` conditions inside group steps.
 pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
+    crate::config::validate_quality_gates(&config)?;
     crate::config::validate_squash_merge(&config)?;
     crate::pr_template::validate_config(&config)?;
     crate::config::validate_output_file_usage(&config)?;
@@ -304,6 +305,11 @@ fn expand_steps(
 
     for (step_name, step) in steps {
         if let Some(group_name) = &step.group {
+            if step.quality_gates.is_some() {
+                return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{step_name}' uses quality_gates on a group call"
+                )));
+            }
             // Old membership style: has group + prompt/prompt_file/command -> migration error
             if step.prompt.is_some() || step.prompt_file.is_some() || step.command.is_some() {
                 return Err(crate::error::CruiseError::InvalidStepConfig(format!(

@@ -63,6 +63,29 @@ pub const DEFAULT_PLAN_LANGUAGE: &str = "English";
 /// both.
 pub const DEFAULT_MAX_RETRIES: usize = 3;
 
+/// A shell command checked after a prompt succeeds.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QualityGateConfig {
+    pub command: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timeout: Option<String>,
+}
+
+// An omitted field is optional, but an explicitly present field must have its
+// declared type. This keeps YAML validation aligned with the published schema.
+fn deserialize_present<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 /// Nested language configuration (new style).
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LanguagesConfig {
@@ -463,6 +486,13 @@ pub enum SkipCondition {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct StepConfig {
+    /// Commands that must pass after a successful prompt.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub quality_gates: Option<Vec<QualityGateConfig>>,
     /// Model to use (prompt steps only).
     pub model: Option<String>,
 
@@ -1218,6 +1248,7 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
 ///
 /// Returns an error if any validation check fails.
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
+    validate_quality_gates(config)?;
     if let Some(input) = config.inputs.first() {
         return Err(crate::error::CruiseError::InvalidStepConfig(format!(
             "root workflow missing input '{input}'"
@@ -1233,6 +1264,61 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     }
     for check in CONFIG_CHECKS {
         check(config)?;
+    }
+    Ok(())
+}
+
+/// Validate quality gate placement and command settings before expansion.
+pub(crate) fn validate_quality_gates(config: &WorkflowConfig) -> crate::error::Result<()> {
+    fn check(name: &str, step: &StepConfig, allowed: bool) -> crate::error::Result<()> {
+        if let Some(gates) = &step.quality_gates {
+            let invalid = |message: &str| {
+                crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' quality_gates {message}"
+                ))
+            };
+            if !allowed
+                || (step.prompt.is_none() && step.prompt_file.is_none())
+                || step.command.is_some()
+                || step.option.is_some()
+                || step.parallel.is_some()
+                || step.group.is_some()
+                || step.workflow_call.is_some()
+                || step.squash_merge.is_some()
+                || step.github_review.is_some()
+            {
+                return Err(invalid("are only supported on ordinary prompt steps"));
+            }
+            if gates.is_empty() {
+                return Err(invalid("must contain at least one gate"));
+            }
+            for gate in gates {
+                if gate.command.trim().is_empty() {
+                    return Err(invalid("command must not be blank"));
+                }
+                if let Some(timeout) = &gate.timeout {
+                    crate::timeout::parse_timeout(timeout)
+                        .map_err(|_| invalid("has an invalid timeout"))?;
+                }
+            }
+        }
+        if let Some(children) = &step.parallel {
+            for (child, config) in children {
+                check(&format!("{name}/{child}"), config, false)?;
+            }
+        }
+        Ok(())
+    }
+    for (name, step) in &config.steps {
+        check(name, step, true)?;
+    }
+    for (name, step) in &config.after_pr {
+        check(name, step, false)?;
+    }
+    for group in config.groups.values() {
+        for (name, step) in &group.steps {
+            check(name, step, true)?;
+        }
     }
     Ok(())
 }
@@ -1259,6 +1345,9 @@ const CONFIG_CHECKS: &[fn(&WorkflowConfig) -> crate::error::Result<()>] = &[
 /// Run independent configuration checks in runtime order and collect their errors.
 pub fn validate_config_all(config: &WorkflowConfig) -> Vec<crate::error::CruiseError> {
     let mut errors = Vec::new();
+    if let Err(error) = validate_quality_gates(config) {
+        errors.push(error);
+    }
     if let Some(input) = config.inputs.first() {
         errors.push(crate::error::CruiseError::InvalidStepConfig(format!(
             "root workflow missing input '{input}'"
@@ -1700,6 +1789,12 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
     let Some(children) = &step.parallel else {
         return Ok(());
     };
+    if step.quality_gates.is_some() || children.values().any(|child| child.quality_gates.is_some())
+    {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "parallel step '{name}' and its children cannot use quality_gates"
+        )));
+    }
     if children.is_empty() {
         return Err(CruiseError::InvalidStepConfig(format!(
             "parallel step '{name}' must contain at least one child"

@@ -285,6 +285,7 @@ fn capture_runtime(vars: &VariableStore, tracker: &FileTracker) -> crate::graph:
         prev_input: vars.prev_input().map(str::to_owned),
         prev_stderr: vars.prev_stderr().map(str::to_owned),
         prev_success: vars.prev_success(),
+        quality_gate_feedback: vars.quality_gate_feedback().map(str::to_owned),
         file_snapshots: tracker.snapshots(),
         visited_at: None,
     }
@@ -361,6 +362,7 @@ async fn execute_steps_with_graph_inner(
         vars.set_prev_input(runtime.prev_input.clone());
         vars.set_prev_stderr(runtime.prev_stderr.clone());
         vars.set_prev_success(runtime.prev_success);
+        vars.set_quality_gate_feedback(runtime.quality_gate_feedback.clone());
         tracker.restore_snapshots(runtime.file_snapshots.clone());
     } else {
         graph.state.current = Some(graph.start.clone());
@@ -423,6 +425,11 @@ async fn execute_steps_with_graph_inner(
         let outcome = if let Some(pending) = graph.state.pending.clone() {
             pending
         } else {
+            let self_retry_spent = graph
+                .state
+                .edge_counts
+                .get(&(current.clone(), current.clone()))
+                .map_or(0, |count| count.budgeted_traversals);
             let result = if let Some(workflow) = &reloaded {
                 crate::retry::with_active_policy(
                     workflow.retry_policy.clone(),
@@ -432,6 +439,7 @@ async fn execute_steps_with_graph_inner(
                         tracker,
                         &current,
                         &graph.state.group_counts,
+                        self_retry_spent,
                         &mut state,
                     ),
                 )
@@ -443,6 +451,7 @@ async fn execute_steps_with_graph_inner(
                     tracker,
                     &current,
                     &graph.state.group_counts,
+                    self_retry_spent,
                     &mut state,
                 )
                 .await
@@ -605,6 +614,7 @@ async fn step_loop_iteration(
     tracker: &mut FileTracker,
     current_step: &str,
     group_retry_counts: &HashMap<String, usize>,
+    self_retry_spent: usize,
     state: &mut LoopState,
 ) -> Result<StepOutcome> {
     let step_config = ctx
@@ -625,6 +635,7 @@ async fn step_loop_iteration(
         group_retry_counts,
         &mut state.counters,
     ) {
+        vars.set_quality_gate_feedback(None);
         return Ok(outcome);
     }
 
@@ -656,6 +667,7 @@ async fn step_loop_iteration(
     }
 
     if static_skip || when_skip {
+        vars.set_quality_gate_feedback(None);
         state.counters.skipped += 1;
         let skip_label = if flag_skip {
             let flag = step_config
@@ -849,7 +861,73 @@ async fn step_loop_iteration(
             }
         }
 
-        let if_next = if if_fail_next.is_none() && !if_fail_retry {
+        let mut gate_retry = false;
+        let mut gate_feedback = None;
+        // Quality gates run only after an accepted agent attempt, before its
+        // selected transition can take effect.
+        if !step_failed
+            && !nfc_retry
+            && let Some(gates) = &step_config.quality_gates
+        {
+            // Resolve each gate only when it is reached. A failing earlier gate
+            // must not be masked by an unresolved variable in a later command.
+            let mut failure = None;
+            for gate in gates {
+                let gate = crate::quality_gate::ResolvedGate {
+                    command: vars.resolve(&gate.command)?,
+                    timeout: gate
+                        .timeout
+                        .as_deref()
+                        .map(crate::timeout::parse_timeout)
+                        .transpose()?,
+                };
+                failure = crate::quality_gate::run_quality_gates(
+                    &[gate],
+                    &merged_env,
+                    ctx.working_dir,
+                    ctx.cancel_token,
+                )
+                .await?;
+                if failure.is_some() {
+                    break;
+                }
+            }
+            if let Some(failure) = failure {
+                failed_attempt = true;
+                let attempt = self_retry_spent.saturating_add(1);
+                let feedback = crate::quality_gate::format_feedback(
+                    &failure,
+                    current_step,
+                    attempt,
+                    ctx.max_retries.saturating_add(1),
+                    vars.artifacts_root(),
+                );
+                if self_retry_spent < ctx.max_retries {
+                    gate_feedback = Some(feedback);
+                    gate_retry = true;
+                    crate::status_eprintln!(
+                        "  {} quality gate failed, will retry",
+                        style("R").cyan()
+                    );
+                } else if let Some(FailAction::Goto(name)) = if_fail {
+                    crate::status_eprintln!(
+                        "  {} quality gate failed, jumping to: {}",
+                        style("R").cyan(),
+                        name
+                    );
+                    if_fail_next = Some(name.clone());
+                } else {
+                    vars.set_quality_gate_feedback(None);
+                    return Err(CruiseError::QualityGateExhausted {
+                        step: current_step.to_string(),
+                        command: crate::telemetry::stderr::sanitize(&failure.command).body,
+                        attempts: attempt,
+                    });
+                }
+            }
+        }
+
+        let if_next = if if_fail_next.is_none() && !if_fail_retry && !gate_retry {
             resolve_if_next(
                 ctx.compiled,
                 tracker,
@@ -876,6 +954,8 @@ async fn step_loop_iteration(
             }
         } else if if_fail_retry {
             TransitionReason::IfFailRetry
+        } else if gate_retry {
+            TransitionReason::QualityGateRetry
         } else if let Some((target, group)) = &if_next {
             let target = crate::graph::resolve_target(ctx.compiled, target)?;
             if *group {
@@ -896,6 +976,7 @@ async fn step_loop_iteration(
         };
         let effective_next = if_fail_next
             .or(if_fail_retry.then(|| current_step.to_string()))
+            .or(gate_retry.then(|| current_step.to_string()))
             .or(if_next.map(|(target, _)| target))
             .or(nfc_retry.then(|| current_step.to_string()))
             .or(outcome.option_next)
@@ -904,6 +985,7 @@ async fn step_loop_iteration(
         let target = next
             .map(|target| crate::graph::resolve_target(ctx.compiled, &target))
             .transpose()?;
+        vars.set_quality_gate_feedback(gate_feedback);
         Ok(Transition {
             target,
             reason,
@@ -1435,6 +1517,10 @@ pub(crate) async fn run_prompt_step(
     let mut prompt = vars.resolve_prompt(&step.prompt)?;
     if !allow_commit {
         prompt.push_str("\n\nIn this working repository and any linked worktrees, do not create commits, move HEAD or local branch refs, or disable or bypass the commit guard, even if the task text asks you to. Leave all edits uncommitted.");
+    }
+    if let Some(feedback) = vars.quality_gate_feedback() {
+        prompt.push_str("\n\n");
+        prompt.push_str(feedback);
     }
 
     let permission = step.permission.unwrap_or(compiled.permission);
