@@ -33,6 +33,38 @@ pub(super) async fn run_parallel_step(
     has_if_fail: bool,
     parent_name: &str,
 ) -> Result<StepExecOutcome> {
+    let mut has_prompt = false;
+    for child in children.values() {
+        if matches!(StepKind::try_from(child.clone()), Ok(StepKind::Prompt(_)))
+            && matches!(should_skip(child.skip.as_ref(), vars), Ok(false))
+            && matches!(
+                should_skip_due_to_when(child.when.as_ref(), vars, ctx.working_dir),
+                Ok(false)
+            )
+        {
+            has_prompt = true;
+            break;
+        }
+    }
+    let lease = if has_prompt {
+        ctx.instructions.and_then(|inbox| {
+            inbox.lease(
+                parent_name,
+                crate::instruction_inbox::DeliveryScope::ParallelBlock {
+                    parent: parent_name.to_string(),
+                },
+            )
+        })
+    } else {
+        None
+    };
+    super::log_instruction_lease(
+        ctx,
+        lease.as_ref(),
+        parent_name,
+        &format!("parallel:{parent_name}"),
+    );
+    let delivered_text = lease.as_ref().map(|lease| lease.block_text().to_owned());
     let cancel = ctx
         .cancel_token
         .map_or_else(CancellationToken::new, CancellationToken::child_token);
@@ -47,6 +79,7 @@ pub(super) async fn run_parallel_step(
             vars.clone(),
             inherited_env,
             format!("{parent_name}/{name}"),
+            delivered_text.as_deref(),
         )
     });
     let joined = futures::future::join_all(futures);
@@ -71,12 +104,44 @@ pub(super) async fn run_parallel_step(
         (joined.await, false)
     };
 
+    let (dispatched, prompt_success) = children
+        .values()
+        .zip(results.iter())
+        .filter(|(child, _)| {
+            matches!(
+                StepKind::try_from((*child).clone()),
+                Ok(StepKind::Prompt(_))
+            )
+        })
+        .fold((false, true), |(dispatched, success), (_, result)| {
+            (
+                dispatched || matches!(result, Ok(output) if !output.skipped),
+                success && result.is_ok(),
+            )
+        });
+    let delivered = if dispatched && prompt_success {
+        Ok(())
+    } else {
+        Err(CruiseError::Interrupted)
+    };
+    super::finish_instruction_lease(ctx, lease, parent_name, &delivered);
     if ctx
         .cancel_token
         .is_some_and(CancellationToken::is_cancelled)
     {
         return Err(CruiseError::Interrupted);
     }
+    finish_parallel_step(children, results, vars, has_if_fail, parent_name, timed_out)
+}
+
+fn finish_parallel_step(
+    children: &IndexMap<String, StepConfig>,
+    results: Vec<Result<ChildResult>>,
+    vars: &mut VariableStore,
+    has_if_fail: bool,
+    parent_name: &str,
+    timed_out: bool,
+) -> Result<StepExecOutcome> {
     let mut outputs = IndexMap::new();
     let mut fatal_error = None;
     let mut stderr = Vec::new();
@@ -140,6 +205,7 @@ async fn run_child(
     vars: VariableStore,
     inherited_env: &HashMap<String, String>,
     name: String,
+    delivered: Option<&str>,
 ) -> Result<ChildResult> {
     let log = |stream: &str, line: &str| {
         if let Some(log) = ctx.on_step_log {
@@ -176,7 +242,7 @@ async fn run_child(
         ),
     ];
     let operation = crate::telemetry::Operation::start("step", &attributes);
-    let result = run_child_inner(ctx, child, vars, inherited_env, &name, &log)
+    let result = run_child_inner(ctx, child, vars, inherited_env, &name, &log, delivered)
         .with_context(operation.context())
         .await;
     match &result {
@@ -196,6 +262,7 @@ async fn run_child_inner(
     inherited_env: &HashMap<String, String>,
     name: &str,
     log: &(dyn Fn(&str, &str) + Send + Sync),
+    delivered: Option<&str>,
 ) -> Result<ChildResult> {
     let mut env = inherited_env.clone();
     for (key, value) in &child.env {
@@ -228,8 +295,10 @@ async fn run_child_inner(
                     super::PromptStepOutput::Redirect(log),
                     timeout,
                     name,
+                    ctx.usage_session_id,
                     false,
                     false,
+                    delivered,
                 )
                 .await?;
                 true

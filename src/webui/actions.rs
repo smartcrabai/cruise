@@ -13,8 +13,11 @@ pub(crate) struct SessionActionsVm {
     pub show_publish_issue: bool,
     pub show_fix: bool,
     pub show_ask: bool,
+    pub show_verify: bool,
+    pub show_tell: bool,
     pub show_create_worktree: bool,
     pub show_run: bool,
+    pub show_create_pr: bool,
     pub run_label: String,
     pub show_reset: bool,
     pub show_replan: bool,
@@ -23,6 +26,8 @@ pub(crate) struct SessionActionsVm {
     pub show_cancel: bool,
     pub show_generate_plan: bool,
     pub show_merge_pr: bool,
+    pub show_stage_local_merge: bool,
+    pub show_merge_locally: bool,
     pub status: String,
 }
 
@@ -33,13 +38,19 @@ pub(crate) fn session_actions(
 ) -> SessionActionsVm {
     let is_locally_running = matches!(
         active_operation,
-        Some(OperationKind::Run | OperationKind::BatchRun | OperationKind::BatchQueued)
+        Some(
+            OperationKind::Run
+                | OperationKind::CreatePr
+                | OperationKind::BatchRun
+                | OperationKind::BatchQueued
+        )
     );
     let is_fixing = matches!(
         active_operation,
         Some(
             OperationKind::Fix
                 | OperationKind::Ask
+                | OperationKind::Verify
                 | OperationKind::Replan
                 | OperationKind::Generate
         )
@@ -64,17 +75,21 @@ pub(crate) fn session_actions(
         && session.plan_available;
     let usable_plan = session.plan_available && !has_plan_error;
     let show_approve = awaiting_approval_with_plan && !has_plan_error;
-    let show_publish_issue = (session.phase == "Awaiting Approval" || session.phase == "Planned")
+    let show_publish_issue = session.pr_target.is_none()
+        && (session.phase == "Awaiting Approval" || session.phase == "Planned")
         && usable_plan
         && !is_locally_running
         && !is_active_run;
     let show_fix = awaiting_approval_with_plan;
     let show_ask = awaiting_approval_with_plan && !has_plan_error;
+    let show_verify = show_ask && !has_pending_prompt;
     let show_create_worktree = !is_active_run && session.phase == "Planned" && usable_plan;
     let show_run = !is_active_run
         && !is_awaiting_refresh
         && usable_plan
         && (session.phase == "Suspended" || session.phase == "Failed");
+    let show_create_pr =
+        session.phase == "PR Failed" && active_operation.is_none() && !is_active_run;
     let run_label = if session.phase == "Failed" {
         "Retry"
     } else {
@@ -84,8 +99,9 @@ pub(crate) fn session_actions(
         && !is_awaiting_refresh
         && (session.phase == "Suspended"
             || session.phase == "Failed"
+            || session.phase == "PR Failed"
             || session.phase == "Completed");
-    let show_replan = !is_active_run && session.phase == "Planned";
+    let show_replan = session.pr_target.is_none() && !is_active_run && session.phase == "Planned";
     let show_discard = !is_locally_running && session.phase == "Awaiting Approval";
     let show_delete =
         !is_locally_running && session.phase != "Running" && session.phase != "Awaiting Approval";
@@ -104,8 +120,11 @@ pub(crate) fn session_actions(
         show_publish_issue,
         show_fix,
         show_ask,
+        show_verify,
+        show_tell: is_phase_running && (is_locally_running || session.runner_alive),
         show_create_worktree,
         show_run,
+        show_create_pr,
         run_label: run_label.to_string(),
         show_reset,
         show_replan,
@@ -114,6 +133,8 @@ pub(crate) fn session_actions(
         show_cancel,
         show_generate_plan,
         show_merge_pr,
+        show_stage_local_merge: session.can_stage_locally && active_operation.is_none(),
+        show_merge_locally: session.can_merge_locally && active_operation.is_none(),
         status: status.to_string(),
     }
 }
@@ -128,6 +149,7 @@ mod tests {
             id: "session-1".to_string(),
             phase: phase.to_string(),
             phase_error: None,
+            auto_requeue_count: 0,
             config_source: "default.yaml".to_string(),
             config_path: Some("default.yaml".to_string()),
             base_dir: "/home/user/project".to_string(),
@@ -140,6 +162,9 @@ mod tests {
             worktree_branch: None,
             workspace_mode: WorkspaceMode::Worktree,
             pr_url: None,
+            can_merge_locally: false,
+            can_stage_locally: false,
+            pr_target: None,
             updated_at: None,
             awaiting_input: false,
             pending_ask_question: None,
@@ -147,6 +172,8 @@ mod tests {
             exec: false,
             plan_available: false,
             fix_in_progress: false,
+            runner_alive: false,
+            pending_instructions: 0,
             skipped_steps: vec![],
         }
     }
@@ -268,6 +295,20 @@ mod tests {
         assert!(value.show_delete);
         assert!(!value.show_create_worktree);
         assert!(!value.show_run);
+    }
+
+    #[test]
+    fn pr_failed_offers_create_pr_only_when_idle() {
+        let idle = actions("PR Failed", true, None, false);
+        assert!(idle.show_create_pr && idle.show_reset && idle.show_delete);
+        assert!(!idle.show_run);
+        let active = actions("PR Failed", true, Some(OperationKind::CreatePr), false);
+        assert!(
+            !active.show_create_pr && !active.show_run && !active.show_reset && !active.show_delete
+        );
+        assert!(active.show_cancel);
+        assert_eq!(active.status, "running");
+        assert!(!actions("Completed", true, None, false).show_create_pr);
     }
 
     #[test]
@@ -413,6 +454,67 @@ mod tests {
     }
 
     #[test]
+    fn verify_action_follows_usable_approval_and_is_suppressed_when_busy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let show_verify =
+            |phase, available, operation, pending| -> Result<bool, Box<dyn std::error::Error>> {
+                let value = serde_json::to_value(actions(phase, available, operation, pending))?;
+                value
+                    .get("showVerify")
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| "showVerify must be serialized as a boolean".into())
+            };
+        assert!(show_verify("Awaiting Approval", true, None, false)?);
+        assert!(!show_verify("Awaiting Approval", false, None, false)?);
+        for phase in [
+            "Draft",
+            "Awaiting Input",
+            "Planned",
+            "Running",
+            "Suspended",
+            "Failed",
+            "Completed",
+        ] {
+            assert!(!show_verify(phase, true, None, false)?, "{phase}");
+        }
+        assert!(!show_verify(
+            "Awaiting Approval",
+            true,
+            Some(OperationKind::Ask),
+            false
+        )?);
+        assert!(!show_verify("Awaiting Approval", true, None, true)?);
+
+        let mut session = make_session("Awaiting Approval");
+        session.plan_available = true;
+        session.plan_error = Some("provider unavailable".to_string());
+        let value = serde_json::to_value(session_actions(&session, None, false))?;
+        assert_eq!(
+            value.get("showVerify"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_merge_actions_follow_capabilities_and_busy_state() {
+        let mut session = make_session("Completed");
+        session.can_stage_locally = true;
+        session.can_merge_locally = true;
+        let actions = session_actions(&session, None, false);
+        assert!(actions.show_stage_local_merge && actions.show_merge_locally);
+        let actions = session_actions(&session, Some(OperationKind::Mutate), false);
+        assert!(!actions.show_stage_local_merge && !actions.show_merge_locally);
+        session.can_stage_locally = false;
+        let actions = session_actions(&session, None, false);
+        assert!(!actions.show_stage_local_merge && actions.show_merge_locally);
+        session.can_merge_locally = false;
+        session.pr_url = Some("https://example.com/pr".to_string());
+        let actions = session_actions(&session, None, false);
+        assert!(!actions.show_stage_local_merge && !actions.show_merge_locally);
+    }
+
+    #[test]
     fn serializes_all_fields_in_camel_case() {
         let Ok(value) = serde_json::to_value(actions("Draft", false, None, false)) else {
             panic!("actions serialize");
@@ -424,6 +526,7 @@ mod tests {
             "showAsk",
             "showCreateWorktree",
             "showRun",
+            "showCreatePr",
             "runLabel",
             "showReset",
             "showReplan",
@@ -432,6 +535,8 @@ mod tests {
             "showCancel",
             "showGeneratePlan",
             "showMergePr",
+            "showStageLocalMerge",
+            "showMergeLocally",
             "status",
         ] {
             assert!(value.get(key).is_some(), "missing {key}");

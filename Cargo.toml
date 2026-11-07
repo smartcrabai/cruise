@@ -14,14 +14,6 @@ version.workspace = true
 [package.metadata.dist]
 dist = true
 
-[[bin]]
-name = "cruise"
-path = "src/launcher.rs"
-
-[[bin]]
-name = "cruise-runtime"
-path = "src/main.rs"
-
 [workspace]
 members = ["."]
 resolver = "2"
@@ -55,6 +47,14 @@ targets = [
 # Whether to install an updater program
 install-updater = false
 
+[[bin]]
+name = "cruise"
+path = "src/launcher.rs"
+
+[[bin]]
+name = "cruise-runtime"
+path = "src/main.rs"
+
 [features]
 test-utils = []
 
@@ -65,6 +65,7 @@ command-group = { version = "5.0.1", features = ["with-tokio"] }
 console = "0.16.2"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 encre-css = "0.21"
+flate2 = "1.1.10"
 fs2 = "0.4.3"
 futures = "0.3"
 glob = "0.3"
@@ -136,12 +137,12 @@ walkdir = "2.5.0"
 xz2 = { version = "0.1", features = ["static"] }
 zip = { version = "9.0", default-features = false, features = ["deflate"] }
 
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+notify-rust = "=4.18.2"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 users = "0.11"
-
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
-notify-rust = "=4.18.2"
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = [
@@ -149,6 +150,7 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
 ] }
 
 [dev-dependencies]
@@ -168,14 +170,43 @@ vt100 = "=0.18.1"
 
 [[test]]
 harness = false
+name = "config_env_bdd"
+path = "tests/config_env_bdd.rs"
+
+[[test]]
+harness = false
 name = "workflow_flags_bdd"
 path = "tests/workflow_flags_bdd.rs"
 test = false
 
 [[test]]
 harness = false
+name = "workflow_packages_bdd"
+path = "tests/workflow_packages_bdd.rs"
+# Unix subprocess fixture, run explicitly by check_workflow_packages_specs.sh.
+test = false
+
+[[test]]
+harness = false
 name = "checkpoint_bdd"
 path = "tests/checkpoint_bdd.rs"
+
+[[test]]
+harness = false
+name = "instruction_inbox_bdd"
+path = "tests/instruction_inbox_bdd.rs"
+# Requires Unix subprocess fixtures, run explicitly.
+test = false
+
+[[test]]
+harness = false
+name = "local_merge_bdd"
+path = "tests/local_merge_bdd.rs"
+
+[[test]]
+harness = false
+name = "auto_requeue_bdd"
+path = "tests/auto_requeue_bdd.rs"
 
 [[test]]
 harness = false
@@ -190,6 +221,13 @@ harness = false
 name = "sdk_model_bdd"
 path = "tests/sdk_model_bdd.rs"
 # POSIX SDK subprocess fixtures, explicitly runnable with --test sdk_model_bdd.
+test = false
+
+[[test]]
+harness = false
+name = "provider_install_bdd"
+path = "tests/provider_install_bdd.rs"
+# Unix subprocess fixtures, explicitly runnable with --test provider_install_bdd.
 test = false
 
 [[test]]
@@ -223,6 +261,16 @@ name = "webui_responsive_bdd"
 path = "tests/webui_responsive_bdd.rs"
 # Requires the pinned browser package and Chromium, see tests/webui/README.md.
 test = false
+
+[[test]]
+harness = false
+name = "webui_daemon_bdd"
+path = "tests/webui_daemon_bdd.rs"
+
+[[test]]
+harness = false
+name = "pr_failed_bdd"
+path = "tests/pr_failed_bdd.rs"
 
 [profile.release]
 codegen-units = 1

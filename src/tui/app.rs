@@ -39,6 +39,7 @@ pub enum DetailTab {
     Dag,
     Plan,
     Log,
+    Diff,
 }
 
 impl DetailTab {
@@ -48,16 +49,18 @@ impl DetailTab {
             Self::Info => Self::Dag,
             Self::Dag => Self::Plan,
             Self::Plan => Self::Log,
-            Self::Log => Self::Info,
+            Self::Log => Self::Diff,
+            Self::Diff => Self::Info,
         }
     }
     #[must_use]
     pub fn previous(self) -> Self {
         match self {
-            Self::Info => Self::Log,
+            Self::Info => Self::Diff,
             Self::Dag => Self::Info,
             Self::Plan => Self::Dag,
             Self::Log => Self::Plan,
+            Self::Diff => Self::Log,
         }
     }
     #[must_use]
@@ -67,6 +70,7 @@ impl DetailTab {
             Self::Dag => "Graph",
             Self::Plan => "Plan",
             Self::Log => "Log",
+            Self::Diff => "Diff",
         }
     }
 }
@@ -100,6 +104,7 @@ pub(crate) enum SidebarStatus {
     Planned,
     Completed,
     Failed,
+    PrFailed,
     PlanFailed,
     Suspended,
 }
@@ -116,6 +121,7 @@ impl SidebarStatus {
             Self::Planned => "Planned",
             Self::Completed => "Completed",
             Self::Failed => "Failed",
+            Self::PrFailed => "PR Failed",
             Self::PlanFailed => "Plan Failed",
             Self::Suspended => "Suspended",
         }
@@ -145,7 +151,13 @@ fn classify_sidebar_status(
         Some(OperationKind::Generate | OperationKind::Fix | OperationKind::Replan) => {
             return SidebarStatus::Planning;
         }
-        Some(OperationKind::Run | OperationKind::BatchRun | OperationKind::Ask) => {
+        Some(
+            OperationKind::Run
+            | OperationKind::BatchRun
+            | OperationKind::Ask
+            | OperationKind::Verify
+            | OperationKind::CreatePr,
+        ) => {
             return SidebarStatus::Running;
         }
         Some(OperationKind::BatchQueued | OperationKind::Mutate) | None => {}
@@ -161,6 +173,7 @@ fn classify_sidebar_status(
     let status = match &session.phase {
         SessionPhase::Completed => SidebarStatus::Completed,
         SessionPhase::Failed(_) => SidebarStatus::Failed,
+        SessionPhase::PrFailed(_) => SidebarStatus::PrFailed,
         SessionPhase::Suspended => SidebarStatus::Suspended,
         SessionPhase::Draft
         | SessionPhase::AwaitingInput
@@ -243,6 +256,10 @@ pub enum Modal {
         editor: Box<Editor>,
         error: Option<String>,
     },
+    RunAllAutoRequeue {
+        editor: Box<Editor>,
+        error: Option<String>,
+    },
     Publish {
         trigger_cruise: bool,
     },
@@ -280,6 +297,7 @@ pub struct TuiApp {
     pub logs: HashMap<String, VecDeque<String>>,
     pub batch_logs: VecDeque<String>,
     pub plan_cache: HashMap<String, String>,
+    pub diff_cache: HashMap<String, Result<crate::branch_diff::BranchDiff, String>>,
     pub(crate) sidebar_plan_available: HashSet<String>,
     pub dag_cache: HashMap<String, crate::graph::ExecutionGraph>,
     /// Declared flags per session; None when the session config failed to load.
@@ -288,6 +306,7 @@ pub struct TuiApp {
     pub ask_responses: HashMap<String, VecDeque<String>>,
     ask_active: std::collections::HashSet<String>,
     pub plan_scroll: usize,
+    pub diff_scroll: usize,
     pub log_scroll: usize,
     pub focus: SessionsFocus,
     pub info_scroll: usize,
@@ -297,6 +316,7 @@ pub struct TuiApp {
     pub batch_total: usize,
     pub batch_finished: usize,
     pub batch_parallelism: usize,
+    pub batch_auto_requeue_max: u32,
     pub batch_parallelism_error: Option<String>,
     pub batch_rows: Vec<BatchRow>,
     pub batch_finished_ids: std::collections::HashSet<String>,
@@ -312,11 +332,58 @@ pub struct TuiApp {
     pub last_refresh: Instant,
     pub history_summary: Option<crate::application::NewSessionHistorySummary>,
     pub config_sources: Vec<crate::resolver::ConfigCandidate>,
+    pub(crate) config_rows: Vec<ConfigRow>,
     pub config_defaults: Option<crate::application::NewSessionConfigDefaults>,
     skip_defaults_context: Option<(PathBuf, String, String, bool)>,
     skip_defaults_initialized: bool,
     #[cfg(test)]
     test_process_lock: Option<crate::test_support::ProcessLock>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ConfigRow {
+    Header {
+        depth: usize,
+        label: String,
+    },
+    Choice {
+        candidate: usize,
+        depth: usize,
+        description: Option<String>,
+    },
+}
+
+fn flatten_config_rows(
+    nodes: &[crate::workflow_categories::PickerNode],
+    candidates: &[crate::resolver::ConfigCandidate],
+    depth: usize,
+    sources: &mut Vec<crate::resolver::ConfigCandidate>,
+    rows: &mut Vec<ConfigRow>,
+) {
+    use crate::workflow_categories::PickerNode;
+    for node in nodes {
+        match node {
+            PickerNode::Category { name, nodes } => {
+                rows.push(ConfigRow::Header {
+                    depth,
+                    label: name.clone(),
+                });
+                flatten_config_rows(nodes, candidates, depth + 1, sources, rows);
+            }
+            PickerNode::Workflow {
+                candidate,
+                description,
+            } => {
+                let index = sources.len();
+                sources.push(candidates[*candidate].clone());
+                rows.push(ConfigRow::Choice {
+                    candidate: index,
+                    depth,
+                    description: description.clone(),
+                });
+            }
+        }
+    }
 }
 
 impl TuiApp {
@@ -352,6 +419,7 @@ impl TuiApp {
             ask_responses: HashMap::new(),
             ask_active: std::collections::HashSet::new(),
             plan_cache: HashMap::new(),
+            diff_cache: HashMap::new(),
             sidebar_plan_available: HashSet::new(),
             dag_cache: HashMap::new(),
             flag_choices_cache: HashMap::new(),
@@ -359,6 +427,7 @@ impl TuiApp {
             focus: SessionsFocus::Sidebar,
             info_scroll: 0,
             plan_scroll: 0,
+            diff_scroll: 0,
             log_scroll: 0,
             status: None,
             last_error: None,
@@ -366,6 +435,7 @@ impl TuiApp {
             batch_total: 0,
             batch_finished: 0,
             batch_parallelism: 0,
+            batch_auto_requeue_max: 0,
             batch_parallelism_error: None,
             batch_rows: Vec::new(),
             batch_finished_ids: std::collections::HashSet::new(),
@@ -384,6 +454,7 @@ impl TuiApp {
             last_refresh: Instant::now(),
             history_summary,
             config_sources: Vec::new(),
+            config_rows: Vec::new(),
             config_defaults: None,
             skip_defaults_context: None,
             skip_defaults_initialized: false,
@@ -470,6 +541,7 @@ impl TuiApp {
             Ok(sources) => sources,
             Err(error) => {
                 self.config_sources.clear();
+                self.config_rows.clear();
                 self.config_defaults = None;
                 self.set_error(error.to_string());
                 return false;
@@ -478,7 +550,26 @@ impl TuiApp {
         if self.form.source == SourceKind::GitHub {
             sources.retain(|source| !source.is_local());
         }
-        self.config_sources = sources;
+        let installed = std::collections::HashSet::new();
+        let candidates: Vec<_> = sources
+            .iter()
+            .map(|source| source.picker_candidate(&installed))
+            .collect();
+        let tree = match self.application.workflow_picker_tree(&candidates) {
+            Ok(tree) => tree,
+            Err(error) => {
+                self.config_sources.clear();
+                self.config_rows.clear();
+                self.config_defaults = None;
+                self.set_error(error.to_string());
+                return false;
+            }
+        };
+        let mut ordered_sources = Vec::new();
+        let mut rows = Vec::new();
+        flatten_config_rows(&tree, &sources, 0, &mut ordered_sources, &mut rows);
+        self.config_sources = ordered_sources;
+        self.config_rows = rows;
         true
     }
 
@@ -561,9 +652,10 @@ impl TuiApp {
     }
 
     fn sync_batch_parallelism(&mut self, notify: bool) -> bool {
-        match self.application.app_config() {
+        match self.application.runtime_config() {
             Ok(config) => {
                 self.batch_parallelism = config.run_all_parallelism;
+                self.batch_auto_requeue_max = config.run_all_auto_requeue_max_attempts;
                 self.batch_parallelism_error = None;
                 true
             }
@@ -708,6 +800,8 @@ impl TuiApp {
 
     fn evict_inactive_caches(&mut self) {
         let selected = self.active_session().map(|session| session.id.clone());
+        self.diff_cache
+            .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
         self.plan_cache
             .retain(|id, _| selected.as_deref().is_some_and(|selected| selected == id));
         self.dag_cache
@@ -902,6 +996,7 @@ impl TuiApp {
         self.detail_session_id = Some(id);
         if session_changed {
             self.info_scroll = 0;
+            self.diff_scroll = 0;
         }
         if session_changed || enters_plan_automatically {
             self.plan_scroll = 0;
@@ -953,6 +1048,14 @@ impl TuiApp {
             return;
         };
         match self.tab {
+            DetailTab::Diff => {
+                let diff = self
+                    .application
+                    .session_branch_diff(&id)
+                    .map_err(|e| e.to_string());
+                self.diff_cache.insert(id, diff);
+                self.diff_scroll = 0;
+            }
             DetailTab::Plan => {
                 if !self.plan_cache.contains_key(&id)
                     && let Ok(plan) = self.application.session_plan(&id)
@@ -1096,7 +1199,9 @@ impl TuiApp {
                         .position(|item| item.id == state.id)
                         .unwrap_or(self.selected);
                     self.sync_selected_detail();
-                    self.start_plan(state.id, plan);
+                    if state.pr_target.is_none() {
+                        self.start_plan(state.id, plan);
+                    }
                     self.form.reset_after_creation();
                 }
                 Err(error) => self.set_error(error),
@@ -1191,7 +1296,11 @@ impl TuiApp {
                 ) {
                     self.active_planning.insert(session_id.clone());
                     self.plan_ready_eligible.insert(session_id.clone());
-                } else if operation == crate::application::OperationKind::Ask {
+                } else if matches!(
+                    operation,
+                    crate::application::OperationKind::Ask
+                        | crate::application::OperationKind::Verify
+                ) {
                     self.active_planning.insert(session_id.clone());
                     self.plan_ready_eligible.remove(&session_id);
                 }
@@ -1303,6 +1412,18 @@ impl TuiApp {
             ApplicationEvent::BatchSessionStarted { id } => self.start_batch_session(&id),
             ApplicationEvent::BatchSessionFinished { id, phase, error } => {
                 self.finish_batch_session(id, phase, error);
+            }
+            ApplicationEvent::AutoRequeued {
+                session_id,
+                attempt,
+                max_attempts,
+                ..
+            } => {
+                self.invalidate(&session_id, true, true, false);
+                self.refresh();
+                self.status = Some(format!(
+                    "Auto-requeued {session_id} ({attempt}/{max_attempts})"
+                ));
             }
             ApplicationEvent::BatchFinished { cancelled } => self.finish_batch(cancelled),
             ApplicationEvent::BatchFailed { error } => self.set_error_and_refresh(error),
@@ -1618,7 +1739,11 @@ impl TuiApp {
                     }
                     _ => {}
                 }
-            } else if let Some(Modal::RunAllParallelism { editor, error }) = self.modal.as_mut() {
+            } else if let Some(
+                Modal::RunAllParallelism { editor, error }
+                | Modal::RunAllAutoRequeue { editor, error },
+            ) = self.modal.as_mut()
+            {
                 match key.code {
                     KeyCode::Char(_)
                     | KeyCode::Backspace
@@ -1852,6 +1977,9 @@ impl TuiApp {
             }
             Action::Refresh => {
                 self.refresh();
+                if self.tab == DetailTab::Diff {
+                    self.load_tab_data();
+                }
                 false
             }
             Action::Help => {
@@ -1948,6 +2076,10 @@ impl TuiApp {
             }
             Action::Character('p') if self.view == View::RunAll => {
                 self.open_run_all_parallelism_editor();
+                false
+            }
+            Action::Character('e') if self.view == View::RunAll => {
+                self.open_run_all_auto_requeue_editor();
                 false
             }
             Action::Character(_) | Action::Backspace | Action::None => false,
@@ -2272,6 +2404,8 @@ impl TuiApp {
             self.update_log_scroll(delta);
         } else if self.view == View::Sessions && self.tab == DetailTab::Plan {
             self.update_plan_scroll(delta);
+        } else if self.view == View::Sessions && self.tab == DetailTab::Diff {
+            self.update_diff_scroll(delta);
         } else {
             self.select_move(delta);
         }
@@ -2291,6 +2425,8 @@ impl TuiApp {
             self.log_scroll = self.current_line_count();
         } else if self.tab == DetailTab::Plan {
             self.plan_scroll = 0;
+        } else if self.tab == DetailTab::Diff {
+            self.diff_scroll = 0;
         } else {
             self.select_home();
         }
@@ -2316,6 +2452,8 @@ impl TuiApp {
             self.plan_scroll = self
                 .active_plan()
                 .map_or(0, |plan| plan.lines().count().saturating_sub(1));
+        } else if self.tab == DetailTab::Diff {
+            self.diff_scroll = self.diff_line_count().saturating_sub(1);
         } else {
             self.select_end();
         }
@@ -2343,6 +2481,9 @@ impl TuiApp {
             } => self.handle_input_modal(title, command, editor, multiline, regenerate, action),
             Modal::RunAllParallelism { editor, error } => {
                 self.handle_run_all_parallelism_modal(editor, error, action)
+            }
+            Modal::RunAllAutoRequeue { editor, error } => {
+                self.handle_run_all_auto_requeue_modal(editor, error, action)
             }
             Modal::Publish { trigger_cruise } => self.handle_publish_modal(trigger_cruise, action),
             Modal::MergePr { status, method } => self.handle_merge_pr_modal(status, method, action),
@@ -2523,6 +2664,34 @@ impl TuiApp {
         false
     }
 
+    fn handle_run_all_auto_requeue_modal(
+        &mut self,
+        mut editor: Box<Editor>,
+        error: Option<String>,
+        action: Action,
+    ) -> bool {
+        match action {
+            Action::Enter => self.save_run_all_auto_requeue(editor),
+            Action::Escape => {}
+            Action::Character(c) => {
+                editor.input(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+                self.modal = Some(Modal::RunAllAutoRequeue {
+                    editor,
+                    error: None,
+                });
+            }
+            Action::Backspace => {
+                editor.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+                self.modal = Some(Modal::RunAllAutoRequeue {
+                    editor,
+                    error: None,
+                });
+            }
+            _ => self.modal = Some(Modal::RunAllAutoRequeue { editor, error }),
+        }
+        false
+    }
+
     fn handle_publish_modal(&mut self, mut trigger_cruise: bool, action: Action) -> bool {
         match action {
             Action::Up | Action::Down | Action::Character(' ') => {
@@ -2670,7 +2839,7 @@ impl TuiApp {
         let running =
             self.application.runtime().active_operation(&state.id) == Some(OperationKind::Run);
         let mut actions = if running {
-            vec![SessionAction::Cancel]
+            vec![SessionAction::Cancel, SessionAction::Tell]
         } else {
             self.application.capabilities(state)
         };
@@ -2704,7 +2873,14 @@ impl TuiApp {
         if !self.sync_batch_parallelism(true) {
             return;
         }
-        let mut editor = Editor::new(&self.batch_parallelism.to_string());
+        let raw = match self.application.app_config() {
+            Ok(config) => config.run_all_parallelism,
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                return;
+            }
+        };
+        let mut editor = Editor::new(&raw.to_string());
         editor.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         self.modal = Some(Modal::RunAllParallelism {
             editor: Box::new(editor),
@@ -2750,17 +2926,65 @@ impl TuiApp {
             return;
         }
 
-        self.batch_parallelism = value;
-        self.batch_parallelism_error = None;
         self.last_error = None;
         self.modal = None;
+        if !self.sync_batch_parallelism(true) {
+            return;
+        }
         self.status = Some(format!(
             "Saved shared WebUI/TUI Run All parallelism: {value}; applies from the next scheduling point"
         ));
     }
 
+    fn open_run_all_auto_requeue_editor(&mut self) {
+        if !self.sync_batch_parallelism(true) {
+            return;
+        }
+        let mut editor = Editor::new(&self.batch_auto_requeue_max.to_string());
+        editor.input(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        self.modal = Some(Modal::RunAllAutoRequeue {
+            editor: Box::new(editor),
+            error: None,
+        });
+    }
+
+    fn save_run_all_auto_requeue(&mut self, editor: Box<Editor>) {
+        let result = parse_run_all_auto_requeue(&editor.text()).and_then(|value| {
+            let mut config = self
+                .application
+                .app_config()
+                .map_err(|error| error.to_string())?;
+            config.run_all_auto_requeue_max_attempts = value;
+            self.application
+                .save_app_config(&config)
+                .map_err(|error| error.to_string())?;
+            Ok(value)
+        });
+        match result {
+            Ok(value) => {
+                self.batch_auto_requeue_max = value;
+                self.last_error = None;
+                self.modal = None;
+                self.status = Some(format!(
+                    "Saved Run All auto-requeue max: {value}; applies to the next batch"
+                ));
+            }
+            Err(error) => {
+                self.last_error = Some(error.clone());
+                self.modal = Some(Modal::RunAllAutoRequeue {
+                    editor,
+                    error: Some(error),
+                });
+            }
+        }
+    }
+
     fn apply_action(&mut self, action: SessionAction) {
         match action {
+            SessionAction::ViewDiff => {
+                self.set_detail_tab(DetailTab::Diff);
+                self.focus = SessionsFocus::Detail;
+            }
             SessionAction::Delete | SessionAction::Discard | SessionAction::ResetToPlanned => {
                 let message = format!(
                     "{} {}?",
@@ -2773,6 +2997,22 @@ impl TuiApp {
                     message,
                 });
             }
+            SessionAction::StageLocalMerge | SessionAction::MergeLocally => {
+                let Some(session) = self.active_session() else {
+                    return;
+                };
+                let branch = session.worktree_branch.as_deref().unwrap_or("unknown");
+                let target = crate::local_merge::merge_target_branch(session).unwrap_or("unknown");
+                let message = if action == SessionAction::StageLocalMerge {
+                    format!("Stage squash of {branch} into {target}?")
+                } else {
+                    format!("Squash {branch} into {target}, commit, and delete the worktree, branch, and session?")
+                };
+                self.modal = Some(Modal::Confirm {
+                    command: PendingCommand::Session(action),
+                    message,
+                });
+            }
             SessionAction::Publish => {
                 let trigger_cruise = self.active_session().is_some_and(|session| {
                     matches!(&session.phase, crate::session::SessionPhase::Planned)
@@ -2780,6 +3020,10 @@ impl TuiApp {
                 });
                 self.modal = Some(Modal::Publish { trigger_cruise });
             }
+            SessionAction::Tell => self.open_input(
+                "Instruction",
+                PendingCommand::Session(SessionAction::Tell),
+            ),
             SessionAction::Fix => self.open_input(
                 "Describe the plan fix",
                 PendingCommand::Session(SessionAction::Fix),
@@ -2801,6 +3045,7 @@ impl TuiApp {
                 PendingCommand::Session(SessionAction::Replan),
             ),
             SessionAction::Generate
+            | SessionAction::Verify
             | SessionAction::Answer
             | SessionAction::Cancel
             | SessionAction::Approve
@@ -2808,6 +3053,7 @@ impl TuiApp {
             | SessionAction::RunCurrentBranch
             | SessionAction::Retry
             | SessionAction::Resume
+            | SessionAction::CreatePr
             | SessionAction::OpenPr
             | SessionAction::MergePr => self.apply_command(PendingCommand::Session(action)),
         }
@@ -2841,6 +3087,21 @@ impl TuiApp {
             return;
         };
         match command {
+            PendingCommand::Session(SessionAction::Tell) => {
+                if value.trim().is_empty() {
+                    self.set_error("Instruction must not be empty".to_string());
+                    return;
+                }
+                match self
+                    .application
+                    .tell(&id, value, crate::instruction_inbox::Origin::Tui)
+                {
+                    Ok(receipt) => {
+                        self.status = Some(format!("Instruction #{} accepted", receipt.id));
+                    }
+                    Err(error) => self.set_error(error.to_string()),
+                }
+            }
             PendingCommand::Session(SessionAction::Fix) => {
                 if value.trim().is_empty() {
                     self.set_error("Fix feedback must not be empty".to_string());
@@ -2991,6 +3252,7 @@ impl TuiApp {
             return;
         };
         match action {
+            SessionAction::Verify => self.start_verify(id),
             SessionAction::Generate => {
                 let request = PlanRequest {
                     interactive: Interactive::new(true),
@@ -3039,7 +3301,9 @@ impl TuiApp {
                 }));
             }
             SessionAction::Fix
+            | SessionAction::ViewDiff
             | SessionAction::Ask
+            | SessionAction::Tell
             | SessionAction::EditSettings
             | SessionAction::EditCurrentStep
             | SessionAction::Replan => self.apply_action(action),
@@ -3056,6 +3320,7 @@ impl TuiApp {
                 self.start_run(id, Some(WorkspaceMode::CurrentBranch));
             }
             SessionAction::Retry | SessionAction::Resume => self.start_run(id, None),
+            SessionAction::CreatePr => self.start_create_pr(id),
             SessionAction::ResetToPlanned => match self.application.reset_to_planned(&id) {
                 Ok(_) => {
                     self.invalidate(&id, true, true, true);
@@ -3064,6 +3329,9 @@ impl TuiApp {
                 Err(error) => self.set_error(error.to_string()),
             },
             SessionAction::MergePr => self.open_merge_pr_preview(),
+            SessionAction::StageLocalMerge | SessionAction::MergeLocally => {
+                self.apply_local_merge(&id, action);
+            }
             SessionAction::OpenPr => match self.application.open_pr(&id) {
                 Ok(url) => match open_url(&url) {
                     Ok(()) => self.status = Some(format!("Opening {url}")),
@@ -3071,6 +3339,45 @@ impl TuiApp {
                 },
                 Err(error) => self.set_error(error.to_string()),
             },
+        }
+    }
+
+    fn start_verify(&mut self, id: String) {
+        if self
+            .registry
+            .verify(self.application.clone(), id, self.events.clone())
+        {
+            self.status = Some("Verifying plan".to_string());
+        } else {
+            self.set_error("An operation is already active for this session".to_string());
+        }
+    }
+
+    fn apply_local_merge(&mut self, id: &str, action: SessionAction) {
+        use crate::application::{LocalMergeMode, LocalMergeOutcome};
+        let mode = if action == SessionAction::StageLocalMerge {
+            LocalMergeMode::Stage
+        } else {
+            LocalMergeMode::MergeAndCleanup
+        };
+        match self.application.local_merge(id, mode) {
+            Ok(outcome) => {
+                self.invalidate(id, true, true, true);
+                self.refresh();
+                match outcome {
+                    LocalMergeOutcome::Staged => {
+                        self.status =
+                            Some("Squash staged in base checkout; session retained".to_string());
+                    }
+                    LocalMergeOutcome::Merged => {
+                        self.status = Some(format!("Merged locally and cleaned up {id}"));
+                    }
+                    LocalMergeOutcome::MergedCleanupFailed { error } => {
+                        self.set_error(format!("Merge committed but cleanup failed: {error}. Retry cleanup from this session."));
+                    }
+                }
+            }
+            Err(error) => self.set_error(error.to_string()),
         }
     }
 
@@ -3137,6 +3444,19 @@ impl TuiApp {
             self.logs_sender.clone(),
         ) {
             self.status = Some("Run started".to_string());
+        } else {
+            self.set_error("Session already has active work".to_string());
+        }
+    }
+
+    fn start_create_pr(&mut self, id: String) {
+        if self.registry.create_pr(
+            self.application.clone(),
+            id,
+            self.events.clone(),
+            self.logs_sender.clone(),
+        ) {
+            self.status = Some("Creating PR".to_string());
         } else {
             self.set_error("Session already has active work".to_string());
         }
@@ -3249,6 +3569,21 @@ impl TuiApp {
         }
         .min(max_scroll);
     }
+    fn diff_line_count(&self) -> usize {
+        self.active_session()
+            .and_then(|s| self.diff_cache.get(&s.id))
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |diff| diff.patch.lines().count())
+    }
+
+    pub fn update_diff_scroll(&mut self, delta: isize) {
+        self.diff_scroll = if delta.is_negative() {
+            self.diff_scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.diff_scroll.saturating_add(delta.cast_unsigned())
+        }
+        .min(self.diff_line_count().saturating_sub(1));
+    }
     fn current_line_count(&self) -> usize {
         if self.view == View::RunAll {
             return self.batch_logs.len();
@@ -3357,7 +3692,10 @@ impl TuiApp {
                     .set_text(&request.skipped_steps.join(", "));
             }
         }
-        if request.input.trim().is_empty() && request.attachments.is_empty() {
+        if request.input.trim().is_empty()
+            && request.attachments.is_empty()
+            && request.pr_number.is_none()
+        {
             self.set_error("Task description or an image attachment is required".to_string());
             return None;
         }
@@ -3458,13 +3796,25 @@ fn parse_run_all_parallelism(input: &str) -> Result<usize, String> {
     Ok(value)
 }
 
+fn parse_run_all_auto_requeue(input: &str) -> Result<u32, String> {
+    let input = input.trim();
+    if input.is_empty() || !input.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("Run All auto-requeue must be a non-negative integer".to_string());
+    }
+    input
+        .parse()
+        .map_err(|_| "Run All auto-requeue is too large".to_string())
+}
+
 fn operation_label(operation: crate::application::OperationKind) -> &'static str {
     match operation {
         crate::application::OperationKind::Generate => "Generate",
         crate::application::OperationKind::Fix => "Fix",
         crate::application::OperationKind::Ask => "Ask",
+        crate::application::OperationKind::Verify => "Verify",
         crate::application::OperationKind::Replan => "Replan",
         crate::application::OperationKind::Run => "Run",
+        crate::application::OperationKind::CreatePr => "Create PR",
         crate::application::OperationKind::BatchQueued => "Batch queued",
         crate::application::OperationKind::BatchRun => "Batch run",
         crate::application::OperationKind::Mutate => "Update",
@@ -3482,17 +3832,23 @@ pub fn action_label(action: SessionAction) -> &'static str {
         SessionAction::Publish => "Publish Issue",
         SessionAction::Fix => "Fix Plan",
         SessionAction::Ask => "Ask About Plan",
+        SessionAction::Verify => "Verify Spec",
+        SessionAction::Tell => "Tell",
         SessionAction::Discard => "Discard",
         SessionAction::RunWorktree => "Run in Worktree",
         SessionAction::RunCurrentBranch => "Run on Current Branch",
         SessionAction::Replan => "Replan",
         SessionAction::EditSettings => "Edit Settings",
         SessionAction::Retry => "Retry",
+        SessionAction::CreatePr => "Create PR",
         SessionAction::ResetToPlanned => "Reset to Planned",
         SessionAction::EditCurrentStep => "Edit Current Step",
         SessionAction::Resume => "Resume",
         SessionAction::OpenPr => "Open Pull Request",
         SessionAction::MergePr => "Merge PR",
+        SessionAction::StageLocalMerge => "Stage Local Merge",
+        SessionAction::MergeLocally => "Merge Locally & Cleanup",
+        SessionAction::ViewDiff => "View Diff",
     }
 }
 
@@ -3503,6 +3859,41 @@ mod tests {
     use crate::session::SessionPhase;
     use crate::test_support::{EnvGuard, lock_process};
     use tempfile::TempDir;
+
+    #[test]
+    fn local_merge_actions_confirm_with_branch_and_target_and_cancel() -> Result<(), &'static str> {
+        let mut app = app();
+        add_session(&mut app, "local", SessionPhase::Completed);
+        app.sessions[0].worktree_branch = Some("cruise/task".into());
+        app.sessions[0].forked_from_branch = Some("main".into());
+
+        for (action, label) in [
+            (SessionAction::StageLocalMerge, "Stage Local Merge"),
+            (SessionAction::MergeLocally, "Merge Locally & Cleanup"),
+        ] {
+            assert_eq!(action_label(action), label);
+            app.apply_action(action);
+            let modal = app
+                .modal
+                .take()
+                .ok_or("local merge must require confirmation")?;
+            match &modal {
+                Modal::Confirm {
+                    command: PendingCommand::Session(pending),
+                    message,
+                } => {
+                    assert_eq!(*pending, action);
+                    assert!(message.contains("cruise/task"));
+                    assert!(message.contains("main"));
+                }
+                _ => panic!("expected local merge confirmation"),
+            }
+            app.handle_modal_action(modal, Action::Escape);
+            assert!(app.modal.is_none());
+            assert_eq!(app.sessions.len(), 1);
+        }
+        Ok(())
+    }
 
     fn app_for(application: CruiseApplication) -> TuiApp {
         let (events, _) = tokio::sync::mpsc::unbounded_channel();
@@ -3569,6 +3960,36 @@ mod tests {
     fn configured_app(parallelism: usize) -> ConfiguredTestApp {
         let content = format!(r#"{{"runAllParallelism": {parallelism}}}"#);
         configured_app_with_content(&content)
+    }
+
+    #[test]
+    fn cycling_config_skips_headers_and_follows_display_order() {
+        let mut fixture = configured_app_with_content(
+            r#"{"workflow_categories":{"First":{"workflows":["research"]},"Second":{"workflows":["refactor","tdd"]}},"show_others_category":false}"#,
+        );
+        let base = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        let app = &mut fixture.app;
+        assert!(app.refresh_config_sources(base.path()));
+        app.view = View::NewSession;
+        app.form.step = Step::Config;
+        app.form.config.set_text("");
+        for expected in ["builtin:research", "builtin:refactor", "__builtin__", ""] {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            assert_eq!(app.form.config.text(), expected);
+        }
+    }
+
+    #[test]
+    fn invalid_workflow_categories_sets_error_on_refresh() {
+        let mut fixture =
+            configured_app_with_content(r#"{"workflow_categories":{"Development":["tdd"]}}"#);
+        let base = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+        assert!(!fixture.app.refresh_config_sources(base.path()));
+        assert!(fixture.app.config_sources.is_empty());
+        assert!(
+            fixture.app.last_error.is_some(),
+            "expected category configuration error"
+        );
     }
 
     fn open_parallelism_editor(app: &mut TuiApp) {
@@ -3860,6 +4281,7 @@ mod tests {
             (SidebarStatus::Planned, "Planned", "●"),
             (SidebarStatus::Completed, "Completed", "●"),
             (SidebarStatus::Failed, "Failed", "●"),
+            (SidebarStatus::PrFailed, "PR Failed", "●"),
             (SidebarStatus::PlanFailed, "Plan Failed", "●"),
             (SidebarStatus::Suspended, "Suspended", "●"),
         ];
@@ -3883,6 +4305,10 @@ mod tests {
                 SessionPhase::Failed("failure".to_string()),
                 SidebarStatus::Failed,
             ),
+            (
+                SessionPhase::PrFailed("push failed".to_string()),
+                SidebarStatus::PrFailed,
+            ),
             (SessionPhase::Suspended, SidebarStatus::Suspended),
         ];
 
@@ -3890,6 +4316,17 @@ mod tests {
             let state = sidebar_session(&format!("phase-{index}"), phase);
             assert_eq!(app.sidebar_status(&state), expected);
         }
+    }
+
+    #[test]
+    fn creating_pr_shows_running_without_changing_failure_phase() {
+        let state = sidebar_session("pr", SessionPhase::PrFailed("push failed".to_string()));
+        assert_eq!(
+            classify_sidebar_status(&state, Some(OperationKind::CreatePr), false, true, false),
+            SidebarStatus::Running
+        );
+        assert!(matches!(state.phase, SessionPhase::PrFailed(_)));
+        assert_eq!(action_label(SessionAction::CreatePr), "Create PR");
     }
 
     #[test]
@@ -3993,6 +4430,29 @@ mod tests {
             assert_eq!(app.sidebar_status(&state), SidebarStatus::Completed);
             drop(claim);
         }
+    }
+
+    #[test]
+    fn verify_action_and_operation_labels_are_visible() {
+        assert_eq!(action_label(SessionAction::Verify), "Verify Spec");
+        assert_eq!(
+            operation_label(crate::application::OperationKind::Verify),
+            "Verify"
+        );
+    }
+
+    #[test]
+    fn verify_operation_is_running_in_the_sidebar() {
+        let app = app_without_lock();
+        let id = "verify-session";
+        let state = sidebar_session(id, SessionPhase::AwaitingApproval);
+        let claim = app
+            .application
+            .runtime()
+            .try_begin(id, crate::application::OperationKind::Verify)
+            .unwrap_or_else(|error| panic!("failed to claim verify session: {error}"));
+        assert_eq!(app.sidebar_status(&state), SidebarStatus::Running);
+        drop(claim);
     }
 
     #[test]
@@ -4149,7 +4609,176 @@ mod tests {
     #[test]
     fn detail_tabs_cycle_in_both_directions() {
         assert_eq!(DetailTab::Info.next(), DetailTab::Dag);
-        assert_eq!(DetailTab::Info.previous(), DetailTab::Log);
+        assert_eq!(DetailTab::Dag.label(), "Graph");
+        assert_eq!(DetailTab::Dag.next(), DetailTab::Plan);
+        assert_eq!(DetailTab::Plan.next(), DetailTab::Log);
+        assert_eq!(DetailTab::Log.next(), DetailTab::Diff);
+        assert_eq!(DetailTab::Diff.next(), DetailTab::Info);
+        assert_eq!(DetailTab::Info.previous(), DetailTab::Diff);
+        assert_eq!(DetailTab::Diff.previous(), DetailTab::Log);
+        assert_eq!(DetailTab::Diff.label(), "Diff");
+    }
+
+    fn diff_fixture() -> PersistedTuiFixture {
+        let mut fixture = persisted_fixture(&[(1, SessionPhase::Completed)]);
+        let repo = fixture.temp.path().join("repo");
+        std::fs::create_dir_all(&repo)
+            .unwrap_or_else(|error| panic!("create test repository: {error}"));
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap_or_else(|error| panic!("run git {args:?}: {error}"));
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(repo.join("tracked.txt"), "original\n")
+            .unwrap_or_else(|error| panic!("write tracked file: {error}"));
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-qm", "initial"]);
+        git(&["branch", "session-branch"]);
+        let mut state = fixture
+            .manager
+            .load(&test_session_id(1))
+            .unwrap_or_else(|error| panic!("load session: {error}"));
+        state.base_dir = repo.clone();
+        state.worktree_branch = Some("session-branch".to_string());
+        state.worktree_path = Some(repo);
+        fixture
+            .manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("save session: {error}"));
+        fixture.app.refresh();
+        fixture
+    }
+
+    fn diff_screen(app: &mut TuiApp) -> String {
+        let backend = ratatui::backend::TestBackend::new(140, 40);
+        let mut terminal = ratatui::Terminal::new(backend)
+            .unwrap_or_else(|error| panic!("create terminal: {error}"));
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, app))
+            .unwrap_or_else(|error| panic!("draw terminal: {error}"));
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(140)
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn view_diff_action_label_and_palette() {
+        assert_eq!(action_label(SessionAction::ViewDiff), "View Diff");
+        let mut fixture = diff_fixture();
+        fixture.app.open_palette();
+        let Some(Modal::Palette { actions, .. }) = fixture.app.modal.as_ref() else {
+            panic!("palette expected");
+        };
+        assert!(actions.contains(&SessionAction::ViewDiff));
+    }
+
+    #[test]
+    fn view_diff_action_opens_detail_and_loads_cache() {
+        let mut fixture = diff_fixture();
+        fixture.app.apply_action(SessionAction::ViewDiff);
+        assert_eq!(fixture.app.tab, DetailTab::Diff);
+        assert_eq!(fixture.app.focus, SessionsFocus::Detail);
+        assert!(fixture.app.diff_cache.contains_key(&test_session_id(1)));
+    }
+
+    #[test]
+    fn diff_refresh_reloads_worktree_changes() {
+        let mut fixture = diff_fixture();
+        fixture.app.apply_action(SessionAction::ViewDiff);
+        let id = test_session_id(1);
+        assert!(
+            !fixture.app.diff_cache[&id]
+                .as_ref()
+                .unwrap_or_else(|error| panic!("load initial diff: {error}"))
+                .patch
+                .contains("fresh change")
+        );
+        std::fs::write(fixture.temp.path().join("repo/new.txt"), "fresh change\n")
+            .unwrap_or_else(|error| panic!("write fresh change: {error}"));
+        assert!(!fixture.app.handle_key(key(KeyCode::Char('r'))));
+        assert!(
+            fixture.app.diff_cache[&id]
+                .as_ref()
+                .unwrap_or_else(|error| panic!("load refreshed diff: {error}"))
+                .patch
+                .contains("+fresh change")
+        );
+    }
+
+    #[test]
+    fn diff_detail_renders_changes_empty_and_truncation() {
+        let mut fixture = diff_fixture();
+        fixture.app.apply_action(SessionAction::ViewDiff);
+        let text = diff_screen(&mut fixture.app);
+        assert!(text.contains("Diff"));
+        assert!(text.contains("No changes"), "{text}");
+        std::fs::write(fixture.temp.path().join("repo/new.txt"), "visible change\n")
+            .unwrap_or_else(|error| panic!("write visible change: {error}"));
+        fixture.app.handle_key(key(KeyCode::Char('r')));
+        let text = diff_screen(&mut fixture.app);
+        assert!(text.contains("+visible change"), "{text}");
+        fixture
+            .app
+            .diff_cache
+            .get_mut(&test_session_id(1))
+            .unwrap_or_else(|| panic!("diff cache entry missing"))
+            .as_mut()
+            .unwrap_or_else(|error| panic!("load diff: {error}"))
+            .truncated = true;
+        let text = diff_screen(&mut fixture.app);
+        assert!(text.to_lowercase().contains("truncated"), "{text}");
+    }
+
+    #[test]
+    fn diff_detail_explains_missing_branch() {
+        let mut fixture = persisted_fixture(&[(1, SessionPhase::Completed)]);
+        fixture.app.set_detail_tab(DetailTab::Diff);
+        let text = diff_screen(&mut fixture.app);
+        assert!(text.contains("No session branch"), "{text}");
+    }
+
+    #[test]
+    fn diff_detail_navigation_uses_diff_lines() {
+        let mut fixture = diff_fixture();
+        std::fs::write(
+            fixture.temp.path().join("repo/new.txt"),
+            "one\ntwo\nthree\n",
+        )
+        .unwrap_or_else(|error| panic!("write diff lines: {error}"));
+        fixture.app.apply_action(SessionAction::ViewDiff);
+        let count = fixture.app.diff_cache[&test_session_id(1)]
+            .as_ref()
+            .unwrap_or_else(|error| panic!("load diff lines: {error}"))
+            .patch
+            .lines()
+            .count();
+        assert!(count > 1);
+        fixture.app.handle_action(Action::Down);
+        assert_eq!(fixture.app.diff_scroll, 1);
+        fixture.app.handle_action(Action::End);
+        assert_eq!(fixture.app.diff_scroll, count - 1);
+        fixture.app.handle_action(Action::Home);
+        assert_eq!(fixture.app.diff_scroll, 0);
     }
 
     #[test]
@@ -4361,7 +4990,7 @@ mod tests {
         fixture.app.focus = SessionsFocus::Detail;
         fixture.app.tab = DetailTab::Info;
         assert!(!fixture.app.handle_key(key(KeyCode::Left)));
-        assert_eq!(fixture.app.tab, DetailTab::Log);
+        assert_eq!(fixture.app.tab, DetailTab::Diff);
         assert!(!fixture.app.handle_key(key(KeyCode::Right)));
         assert_eq!(fixture.app.tab, DetailTab::Info);
         assert_eq!(fixture.app.focus, SessionsFocus::Detail);
@@ -5949,6 +6578,8 @@ mod tests {
         app.modal = None;
         type_text(&mut app, "acme/cruise");
         assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::PullRequest);
+        assert!(!app.handle_key(key(KeyCode::Enter)));
         assert_eq!(app.form.step, Step::Config);
         assert_eq!(app.form.input.text(), "");
         assert!(!app.handle_key(key(KeyCode::Enter)));
@@ -6191,6 +6822,8 @@ mod tests {
         app.form.step = Step::Repository;
         assert!(!app.handle_key(key(KeyCode::Down)));
         assert_eq!(app.form.repository.text(), "acme/other");
+        assert!(!app.handle_key(key(KeyCode::Enter)));
+        assert_eq!(app.form.step, Step::PullRequest);
         assert!(!app.handle_key(key(KeyCode::Enter)));
         assert_eq!(app.form.step, Step::Config);
         assert!(
@@ -7289,7 +7922,7 @@ mod tests {
             let Some(Modal::Palette { actions, selected }) = &app.modal else {
                 panic!("palette expected for {phase:?}");
             };
-            assert_eq!(actions, &[SessionAction::Cancel]);
+            assert_eq!(actions, &[SessionAction::Cancel, SessionAction::Tell]);
             assert_eq!(*selected, 0);
             assert!(!token.is_cancelled());
             app.handle_action(Action::Enter);
@@ -7382,6 +8015,25 @@ mod tests {
         assert_eq!(configured_parallelism(&fixture), 4);
         assert_eq!(fixture.app.batch_parallelism, 4);
         assert!(fixture.app.modal.is_none());
+    }
+
+    #[test]
+    fn parallelism_editor_saves_raw_and_displays_effective_override() {
+        let mut fixture = configured_app(2);
+        let _parallelism = EnvGuard::set("CRUISE_RUN_ALL_PARALLELISM", "4");
+        open_parallelism_editor(&mut fixture.app);
+        assert!(
+            matches!(&fixture.app.modal, Some(Modal::RunAllParallelism { editor, .. }) if editor.text() == "2")
+        );
+        assert_eq!(fixture.app.batch_parallelism, 4);
+        fixture.app.handle_key(key(KeyCode::Enter));
+        assert_eq!(configured_parallelism(&fixture), 2);
+        assert_eq!(fixture.app.batch_parallelism, 4);
+        open_parallelism_editor(&mut fixture.app);
+        replace_parallelism_input(&mut fixture.app, "3");
+        fixture.app.handle_key(key(KeyCode::Enter));
+        assert_eq!(configured_parallelism(&fixture), 3);
+        assert_eq!(fixture.app.batch_parallelism, 4);
     }
 
     #[test]

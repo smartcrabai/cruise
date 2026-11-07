@@ -33,6 +33,7 @@ fn context<'a>(
     max: usize,
 ) -> ExecutionContext<'a> {
     ExecutionContext {
+        usage_session_id: None,
         compiled,
         max_retries: max,
         rate_limit_retries: 0,
@@ -44,6 +45,7 @@ fn context<'a>(
         skipped_steps: &[],
         flags: &cruise::flags::NO_FLAGS,
         on_step_log: None,
+        instructions: None,
     }
 }
 

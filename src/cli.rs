@@ -6,6 +6,7 @@ pub(crate) const PLAN_STDIN_SENTINEL: &str = "stdin";
 #[derive(Parser, Debug)]
 #[command(
     name = "cruise",
+    bin_name = "cruise",
     version,
     about = "YAML-driven coding agent workflow orchestrator",
     args_conflicts_with_subcommands = true
@@ -47,6 +48,67 @@ pub struct Cli {
     pub input: Option<String>,
 }
 
+#[cfg(test)]
+mod issue_entrypoint_tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn plan_issue_accepts_optional_additional_instructions() {
+        for input in [None, Some("focus on tests")] {
+            let mut args = vec!["cruise", "plan", "--issue", "12"];
+            if let Some(input) = input {
+                args.push(input);
+            }
+            let cli =
+                Cli::try_parse_from(args).unwrap_or_else(|error| panic!("plan --issue: {error}"));
+            let Some(Commands::Plan(plan)) = cli.command else {
+                panic!("expected plan command");
+            };
+            assert_eq!(plan.input.as_deref(), input);
+        }
+    }
+
+    #[test]
+    fn draft_issue_accepts_optional_additional_instructions() {
+        for input in [None, Some("focus on tests")] {
+            let mut args = vec!["cruise", "draft", "--issue", "12"];
+            if let Some(input) = input {
+                args.push(input);
+            }
+            let cli =
+                Cli::try_parse_from(args).unwrap_or_else(|error| panic!("draft --issue: {error}"));
+            let Some(Commands::Draft(draft)) = cli.command else {
+                panic!("expected draft command");
+            };
+            assert_eq!(draft.input.as_deref(), input);
+        }
+    }
+
+    #[test]
+    fn issue_flag_rejects_zero_and_non_numbers() {
+        for command in ["plan", "draft"] {
+            for number in ["0", "-1", "abc", "18446744073709551616"] {
+                assert!(
+                    Cli::try_parse_from(["cruise", command, "--issue", number]).is_err(),
+                    "{command} accepted invalid issue number {number}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn root_issue_inputs_are_forwarded_verbatim_and_exec_does_not_accept_issue_flag() {
+        let positional = Cli::try_parse_from(["cruise", "#12\nextra"])
+            .unwrap_or_else(|error| panic!("parse root issue input: {error}"));
+        assert_eq!(positional.input.as_deref(), Some("#12\nextra"));
+        let background = Cli::try_parse_from(["cruise", "--plan", "#12\nextra"])
+            .unwrap_or_else(|error| panic!("parse background issue input: {error}"));
+        assert_eq!(background.plan.as_deref(), Some("#12\nextra"));
+        assert!(Cli::try_parse_from(["cruise", "exec", "--issue", "12"]).is_err());
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Create an implementation plan for a task.
@@ -57,20 +119,28 @@ pub enum Commands {
     Draft(DraftArgs),
     /// Execute a planned session.
     Run(RunArgs),
+    /// Send an instruction to a running session.
+    Tell(TellArgs),
     /// List and manage sessions interactively.
     List(ListArgs),
+    /// Show the changes in a session branch and worktree.
+    Diff(DiffArgs),
     /// Remove sessions with closed/merged PRs.
     Clean(CleanArgs),
+    /// Summarize locally recorded provider usage.
+    Usage(crate::usage_cmd::UsageArgs),
     /// Show or update application config (`~/.config/cruise/config.json` or `~/.config/cruise/config.yaml`).
     Config(ConfigArgs),
     /// Execute the workflow config directly in the current directory (no plan, no worktree, no PR).
     Exec(ExecArgs),
     /// Run a cruise command on a remote host through OpenSSH.
     Ssh(SshArgs),
-    /// Serve the browser UI from this machine (pass `--open` to launch the default browser).
+    /// Serve or manage the browser UI on this machine.
     Webui(WebuiArgs),
     /// Update Cruise itself or inspect an in-progress update.
     Update(UpdateArgs),
+    /// Install a pinned provider CLI or inspect provider status.
+    Install(InstallArgs),
     /// List, eject, generate, and install workflows.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
@@ -79,6 +149,18 @@ pub enum Commands {
     /// Removed MCP bridge, kept so stale jcode registrations fail instead of planning.
     #[command(name = "mcp-bridge", hide = true, disable_help_flag = true)]
     McpBridge(LegacyMcpBridgeArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct TellArgs {
+    pub session_id: String,
+    pub instruction: Option<String>,
+    #[arg(long, conflicts_with = "instruction")]
+    pub log: bool,
+    #[arg(long, hide = true, default_value = "cli", value_parser = ["cli", "github"])]
+    pub origin: String,
+    #[arg(long, hide = true)]
+    pub dedupe_key: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -96,12 +178,35 @@ pub enum WorkflowCommand {
     Eject(WorkflowEjectArgs),
     /// Generate a new workflow YAML file from a description using the configured backend.
     Generate(WorkflowGenerateArgs),
-    /// Install a workflow from GitHub: `owner/repo[/path][@ref]`.
+    /// Start a conversation to create or revise a workflow YAML (interactive terminal only).
+    Make(WorkflowMakeArgs),
+    /// Validate workflow YAML without running it (static checks).
+    Doctor(WorkflowDoctorArgs),
+    /// Install a workflow or manifest bundle from GitHub: `owner/repo[/path][@ref]`.
     Add(WorkflowAddArgs),
     /// Remove an installed workflow package.
     Remove(WorkflowNameArgs),
     /// Update an installed workflow package to its requested ref's latest commit.
     Update(WorkflowUpdateArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct WorkflowDoctorArgs {
+    /// Workflow names or paths to inspect.
+    #[arg(conflicts_with = "all")]
+    pub targets: Vec<String>,
+    /// Inspect local, user, and built-in workflows.
+    #[arg(long)]
+    pub all: bool,
+    /// Emit a JSON report.
+    #[arg(long)]
+    pub json: bool,
+    /// Treat warnings as a failing exit status.
+    #[arg(long)]
+    pub strict: bool,
+    /// Set workflow flags for each target.
+    #[arg(long = "flag", short = 'f', value_name = "NAME[=on|off]", value_delimiter = ',', value_parser = crate::flags::parse_assignment, conflicts_with = "all")]
+    pub flags: Vec<(String, bool)>,
 }
 
 #[derive(Parser, Debug)]
@@ -133,8 +238,26 @@ pub struct WorkflowGenerateArgs {
 }
 
 #[derive(Parser, Debug)]
+pub struct WorkflowMakeArgs {
+    /// Initial description of the workflow to create.
+    pub description: Option<String>,
+    /// File stem for the new workflow (`<name>.yaml`).
+    #[arg(long, value_parser = crate::workflow_generate::validate_name)]
+    pub name: String,
+    /// Save into the user workflow directory instead of `./.cruise`.
+    #[arg(long)]
+    pub user: bool,
+    /// Backend config used for generation.
+    #[arg(long)]
+    pub config: Option<String>,
+    /// Read an existing workflow as a reference.
+    #[arg(long)]
+    pub from: Option<String>,
+}
+
+#[derive(Parser, Debug)]
 pub struct WorkflowAddArgs {
-    /// Package spec `owner/repo[/path][@ref]`.
+    /// Package spec `owner/repo[/path][@ref]`; a root manifest installs its entire bundle.
     pub spec: String,
     /// Install under this name instead of the default.
     #[arg(long)]
@@ -169,6 +292,17 @@ pub struct InternalArgs {
 pub enum InternalCommand {
     /// Enforce this prompt's jcode pre-tool shell policy.
     JcodePreTool,
+    /// Serve a detached `WebUI` instance.
+    WebuiServe {
+        #[arg(long)]
+        instance_id: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        port: u16,
+        #[arg(long)]
+        webui_dir: Option<std::path::PathBuf>,
+    },
     /// Merge the PR base branch into the current branch.
     SyncBase {
         /// Pull request number.
@@ -186,14 +320,31 @@ pub enum EjectDestination {
 }
 
 #[derive(Parser, Debug)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct WebuiArgs {
+    #[command(flatten)]
+    pub serve: ServeArgs,
+    #[command(subcommand)]
+    pub action: Option<WebuiAction>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebuiAction {
+    Start(ServeArgs),
+    Stop(StopArgs),
+    Restart(ServeArgs),
+    Status(StatusArgs),
+}
+
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct ServeArgs {
     /// Interface to bind. Non-loopback values expose an unauthenticated UI.
-    #[arg(long, default_value = "127.0.0.1")]
-    pub host: String,
+    #[arg(long)]
+    pub host: Option<String>,
 
     /// TCP port to listen on.
-    #[arg(long, default_value_t = 8484)]
-    pub port: u16,
+    #[arg(long)]
+    pub port: Option<u16>,
 
     /// Open the `WebUI` in the default browser after the server starts.
     #[arg(short = 'o', long)]
@@ -207,10 +358,39 @@ pub struct WebuiArgs {
 }
 
 #[derive(clap::Args, Debug)]
+pub struct StopArgs {
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct StatusArgs {
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args, Debug)]
 pub struct UpdateArgs {
     /// Display in-progress update transactions across installations without network access or changes.
     #[arg(long)]
     pub status: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct InstallArgs {
+    /// Provider to install.
+    #[arg(
+        value_enum,
+        required_unless_present = "status",
+        conflicts_with = "status"
+    )]
+    pub provider: Option<crate::provider_install::Provider>,
+    /// Inspect providers without making changes.
+    #[arg(long, conflicts_with = "force")]
+    pub status: bool,
+    /// Reinstall even when the pinned version is already present.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -221,6 +401,14 @@ pub struct UpdateArgs {
 pub struct PlanArgs {
     /// Task description.
     pub input: Option<String>,
+
+    /// Fix review threads on an existing GitHub pull request.
+    #[arg(long, value_name = "NUMBER", conflicts_with_all = ["grill", "images", "issue"])]
+    pub pr: Option<u64>,
+
+    /// Use a GitHub issue as the task.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub issue: Option<u64>,
 
     /// Path to the workflow config file. The special value `__builtin__`
     /// selects the built-in default workflow;
@@ -281,6 +469,10 @@ pub struct DraftArgs {
     /// Task description.
     pub input: Option<String>,
 
+    /// Use a GitHub issue as the task.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub issue: Option<u64>,
+
     /// Path to the workflow config file. The special value `__builtin__`
     /// selects the built-in default workflow, and `builtin:<name>` selects a
     /// named built-in workflow.
@@ -319,6 +511,9 @@ pub struct RunArgs {
     /// together with `--all`; must be at least 1.
     #[arg(long, value_name = "N")]
     pub parallelism: Option<usize>,
+    /// Maximum automatic retries per session in a batch.
+    #[arg(long, value_name = "N", requires = "all", allow_hyphen_values = true)]
+    pub auto_requeue_max_attempts: Option<u32>,
 
     /// Maximum number of times a budgeted graph transition may be traversed.
     ///
@@ -376,18 +571,54 @@ pub struct ListArgs {
 }
 
 #[derive(Parser, Debug)]
+pub struct DiffArgs {
+    /// Session ID.
+    pub session: String,
+    /// Show a summary instead of the patch.
+    #[arg(long)]
+    pub stat: bool,
+}
+
+#[derive(Parser, Debug)]
 pub struct ConfigArgs {
     /// Set the maximum number of sessions the `WebUI` and TUI run concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
     #[arg(long, value_name = "N")]
     pub set_parallelism: Option<usize>,
+    /// Set the maximum automatic retries per session in a batch.
+    #[arg(long, value_name = "N")]
+    pub set_auto_requeue_max_attempts: Option<u32>,
 }
 
 #[derive(Parser, Debug)]
 pub struct ExecArgs {
     /// Task description bound to {input}. Optional if your config doesn't reference {input}.
     pub input: Option<String>,
+
+    /// Run an in-memory workflow without a workflow config.
+    #[arg(long, conflicts_with_all = ["config", "flags"])]
+    pub instant: bool,
+
+    /// Agent SDK for instant execution.
+    #[arg(long, requires = "instant", value_name = "NAME")]
+    pub sdk: Option<String>,
+
+    /// Model for instant execution.
+    #[arg(long, requires = "instant")]
+    pub model: Option<String>,
+
+    /// Review and fix confirmed defects after implementation.
+    #[arg(long, requires = "instant")]
+    pub review: bool,
+
+    /// Maximum number of review passes (default: 2).
+    #[arg(long, requires = "review", value_name = "N")]
+    pub review_rounds: Option<usize>,
+
+    /// Verification command, repeatable and run in order.
+    #[arg(long, requires = "instant", value_name = "COMMAND")]
+    pub verify: Vec<String>,
 
     /// Path to the workflow config file. The special value `__builtin__`
     /// selects the built-in default workflow, and `builtin:<name>` selects a
@@ -480,6 +711,39 @@ pub fn parse_cli() -> Cli {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn explicit_plan_accepts_tell_as_input() {
+        let cli = Cli::try_parse_from(["cruise", "plan", "tell"])
+            .unwrap_or_else(|error| panic!("failed to parse plan command: {error}"));
+        match cli.command {
+            Some(Commands::Plan(args)) => assert_eq!(args.input.as_deref(), Some("tell")),
+            _ => panic!("expected plan command"),
+        }
+    }
+
+    #[test]
+    fn diff_contract_parses_session_and_optional_stat() {
+        for (args, expected_stat) in [
+            (vec!["cruise", "diff", "20260101000000000"], false),
+            (vec!["cruise", "diff", "20260101000000000", "--stat"], true),
+        ] {
+            let cli = Cli::try_parse_from(args)
+                .unwrap_or_else(|error| panic!("diff arguments should parse: {error}"));
+            match cli.command {
+                Some(Commands::Diff(args)) => {
+                    assert_eq!(args.session, "20260101000000000");
+                    assert_eq!(args.stat, expected_stat);
+                }
+                other => panic!("unexpected parse result: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn diff_contract_requires_session() {
+        assert!(Cli::try_parse_from(["cruise", "diff"]).is_err());
+    }
 
     #[test]
     fn test_cli_verify() {
@@ -828,6 +1092,111 @@ mod tests {
     #[test]
     fn test_webui_no_open_flag_is_rejected() {
         assert!(Cli::try_parse_from(["cruise", "webui", "--no-open"]).is_err());
+    }
+
+    fn webui_matches(argv: &[&str]) -> Result<clap::ArgMatches, clap::Error> {
+        use clap::CommandFactory;
+        Cli::command().try_get_matches_from(argv)
+    }
+
+    fn webui_sub(matches: &clap::ArgMatches) -> &clap::ArgMatches {
+        matches
+            .subcommand_matches("webui")
+            .unwrap_or_else(|| panic!("webui subcommand"))
+    }
+
+    #[test]
+    fn webui_start_parses_host_port_open() {
+        let m = webui_matches(&["cruise", "webui", "start", "--port", "0", "-o"])
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+        let (name, start) = webui_sub(&m)
+            .subcommand()
+            .unwrap_or_else(|| panic!("webui action"));
+        assert_eq!(name, "start");
+        assert_eq!(start.get_one::<u16>("port"), Some(&0));
+        assert_eq!(start.get_one::<bool>("open"), Some(&true));
+        assert_eq!(start.get_one::<String>("host"), None);
+    }
+
+    #[test]
+    fn webui_restart_accepts_serve_flags() {
+        let m = webui_matches(&["cruise", "webui", "restart", "--host", "0.0.0.0"])
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+        let (name, restart) = webui_sub(&m)
+            .subcommand()
+            .unwrap_or_else(|| panic!("webui action"));
+        assert_eq!(name, "restart");
+        assert_eq!(
+            restart.get_one::<String>("host").map(String::as_str),
+            Some("0.0.0.0")
+        );
+        assert_eq!(restart.get_one::<u16>("port"), None);
+    }
+
+    #[test]
+    fn webui_without_subcommand_leaves_host_and_port_unresolved() {
+        let m = webui_matches(&["cruise", "webui"]).unwrap_or_else(|e| panic!("parse: {e}"));
+        let webui = webui_sub(&m);
+        assert!(webui.subcommand().is_none());
+        assert_eq!(webui.get_one::<String>("host"), None);
+        assert_eq!(webui.get_one::<u16>("port"), None);
+    }
+
+    #[test]
+    fn webui_flags_before_subcommand_are_rejected() {
+        assert!(webui_matches(&["cruise", "webui", "--port", "1", "start"]).is_err());
+    }
+
+    #[test]
+    fn webui_stop_accepts_force_only() {
+        let m = webui_matches(&["cruise", "webui", "stop", "--force"])
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+        let (_, stop) = webui_sub(&m)
+            .subcommand()
+            .unwrap_or_else(|| panic!("webui action"));
+        assert_eq!(stop.get_one::<bool>("force"), Some(&true));
+        assert!(webui_matches(&["cruise", "webui", "stop", "--port", "1"]).is_err());
+    }
+
+    #[test]
+    fn webui_status_json_flag() {
+        let m = webui_matches(&["cruise", "webui", "status", "--json"])
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+        let (name, status) = webui_sub(&m)
+            .subcommand()
+            .unwrap_or_else(|| panic!("webui action"));
+        assert_eq!(name, "status");
+        assert_eq!(status.get_one::<bool>("json"), Some(&true));
+    }
+
+    #[test]
+    fn internal_webui_serve_requires_instance_id() {
+        assert!(
+            Cli::try_parse_from([
+                "cruise",
+                "internal",
+                "webui-serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "cruise",
+                "internal",
+                "webui-serve",
+                "--instance-id",
+                "abc",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0"
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

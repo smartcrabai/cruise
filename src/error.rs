@@ -61,6 +61,9 @@ pub enum CruiseError {
     #[error("git worktree error: {0}")]
     WorktreeError(String),
 
+    #[error("PR publication failed: {0}")]
+    PrPublicationFailed(String),
+
     #[error("session busy: {0}")]
     Busy(String),
 
@@ -75,6 +78,13 @@ pub enum CruiseError {
 
     #[error("step '{0}' made no workspace file changes (if.no-file-changes: failed)")]
     StepMadeNoFileChanges(String),
+
+    #[error("quality gate exhausted for step '{step}' after {attempts} attempts: {command}")]
+    QualityGateExhausted {
+        step: String,
+        command: String,
+        attempts: usize,
+    },
 
     #[error("step '{step}' timed out after {after_secs}s")]
     StepTimeout { step: String, after_secs: u64 },
@@ -123,11 +133,13 @@ impl CruiseError {
             Self::SerializationError(_) => "serialization_error",
             Self::NotGitRepository => "not_git_repository",
             Self::WorktreeError(_) => "worktree_error",
+            Self::PrPublicationFailed(_) => "pr_publication_failed",
             Self::Busy(_) => "session_busy",
             Self::SessionError(_) => "session_error",
             Self::SessionStateConflict(_) => "session_state_conflict",
             Self::SessionStateConflictAborted(_) => "session_state_conflict_aborted",
             Self::StepMadeNoFileChanges(_) => "step_no_file_changes",
+            Self::QualityGateExhausted { .. } => "quality_gate_exhausted",
             Self::StepTimeout { .. } => "timeout",
             Self::GitHubReviewFailed { .. } => "github_review_failed",
             Self::Interrupted => "cancelled",

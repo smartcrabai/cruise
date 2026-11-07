@@ -4,11 +4,18 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
-use crate::application::{ApplicationEvent, ApplicationEventSink, EventStream, LogEvent, LogSink};
+use crate::application::{
+    ApplicationEvent, ApplicationEventSink, CruiseApplication, EventStream, LogEvent, LogSink,
+};
+use crate::desktop_notifications::{
+    application_event_notification, build_payload, send_server_side_best_effort,
+};
 use crate::error::Result;
 
 /// Buffered events per SSE connection, matching the TUI's `UiEvent` channel.
 const SUBSCRIBER_CAPACITY: usize = 256;
+
+type NotificationHook = Arc<dyn Fn(&ApplicationEvent) + Send + Sync>;
 
 /// Broadcast hub. Sinks never fail: a browser that navigated away must not
 /// turn a running session into `Failed`
@@ -17,9 +24,16 @@ const SUBSCRIBER_CAPACITY: usize = 256;
 /// Subscriber channels are bounded: an SSE connection that stopped reading
 /// (sleeping laptop, dropped VPN, killed `curl`) drops events instead of
 /// buffering a whole run's output in memory.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct EventHub {
     state: Mutex<HubState>,
+    notification_hook: Option<NotificationHook>,
+}
+
+impl std::fmt::Debug for EventHub {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("EventHub").finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -29,6 +43,28 @@ struct HubState {
 }
 
 impl EventHub {
+    pub(crate) fn with_notifications(application: CruiseApplication) -> Self {
+        Self {
+            notification_hook: Some(Arc::new(move |event| {
+                if let Some((kind, session_id, detail)) = application_event_notification(event) {
+                    let application = application.clone();
+                    let session_id = session_id.to_owned();
+                    let detail = detail.map(str::to_owned);
+                    std::thread::spawn(move || {
+                        let subject = application.read_session(&session_id).map_or_else(
+                            |_| session_id.clone(),
+                            |session| session.input_or_title().to_owned(),
+                        );
+                        let payload =
+                            build_payload(kind, Some(&subject), detail.as_deref(), &session_id);
+                        send_server_side_best_effort(&payload);
+                    });
+                }
+            })),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn subscribe(&self) -> mpsc::Receiver<ApplicationEvent> {
         let (tx, rx) = mpsc::channel(SUBSCRIBER_CAPACITY);
         let mut state = self
@@ -59,6 +95,9 @@ impl EventHub {
                 Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
                 Err(mpsc::error::TrySendError::Closed(_)) => false,
             });
+        if let Some(hook) = &self.notification_hook {
+            hook(event);
+        }
     }
 
     #[cfg(test)]
@@ -176,6 +215,44 @@ mod tests {
         });
         assert!(a.try_recv().is_ok());
         assert!(b.try_recv().is_ok());
+    }
+
+    #[test]
+    fn notification_hook_runs_once_outside_lock_for_relevant_events() {
+        use crate::desktop_notifications::{
+            WorkflowNotificationKind, application_event_notification,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hub = Arc::new_cyclic(|weak: &std::sync::Weak<EventHub>| {
+            let weak = weak.clone();
+            let calls = Arc::clone(&calls);
+            EventHub {
+                notification_hook: Some(Arc::new(move |event| {
+                    if let Some((kind, _, _)) = application_event_notification(event) {
+                        assert_eq!(kind, WorkflowNotificationKind::Completed);
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let Some(hub) = weak.upgrade() else { return };
+                        let _subscriber = hub.subscribe();
+                    }
+                })),
+                ..EventHub::default()
+            }
+        });
+        let mut a = hub.subscribe();
+        let mut b = hub.subscribe();
+        hub.broadcast(&ApplicationEvent::RunFinished {
+            session_id: "s1".into(),
+            phase: "Completed".into(),
+        });
+        assert!(a.try_recv().is_ok());
+        assert!(b.try_recv().is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        hub.broadcast(&ApplicationEvent::RunStarted {
+            session_id: "s1".into(),
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     async fn recv_within(

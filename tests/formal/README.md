@@ -1,5 +1,48 @@
 # Checkpoint contract verification
 
+For the WebUI daemon lifecycle, see `WEBUI_DAEMON.md` and run `bash scripts/check_webui_daemon_specs.sh`.
+The `webui_daemon.qnt` model checks single ownership, start eligibility,
+identity-checked signals, session preservation and status at the observation
+point. Its two-PID, two-generation bounded abstraction does not model network
+authentication, timeouts, or prove the implementation correct. The script also
+runs the real CLI and control endpoint integration tests. Reports and command
+logs are written under `target/formal-reports/`; the dedicated CI workflow
+uploads them even on failure.
+
+For provider installation lifecycle and resolution precedence, see
+`PROVIDER_INSTALL.md` and run `bash scripts/check_provider_install_specs.sh`.
+The dedicated `provider-install-specs` CI job runs the pinned Quint checks and
+retains reports. The bounded model is not a production refinement proof.
+
+For the planned workflow environment override precedence and snapshot model,
+see `CONFIG_ENV_OVERRIDE.md` and run `bash scripts/check_config_env_specs.sh`.
+This standalone Quint model is not a production conformance test.
+
+For local squash merge lifecycle safety, run `bash scripts/check_local_merge_specs.sh`.
+The dedicated `local-merge-specs` CI job runs the pinned Quint tests, simulation
+and bounded verification, all Alloy assertions and witnesses with receipt
+validation, and the local merge Gherkin target. Fresh evidence is retained under
+`target/formal-reports/local-merge.*`.
+The models cover refusal and rollback, at-most-one commit, marker-before-cleanup,
+session deletion after cleanup, and safe commit guards, including a cleanup-failure
+retry witness. Quint explores eight steps; Alloy uses eight ordered states.
+Exact commands, pins, local results and receipt details are recorded in
+`LOCAL_MERGE_VERIFICATION.md`.
+These are bounded abstractions, not a proof of the Rust implementation. In
+particular, failure or crash between the base commit and marker persistence is
+not modeled, and the modeled cleanup failure leaves both resources intact.
+
+For bounded batch auto-requeue safety, see `AUTO_REQUEUE.md` and run
+`bash scripts/check_auto_requeue_specs.sh`. The dedicated `auto-requeue-specs`
+CI job retains verification receipts and traces.
+
+For the bounded PR publication recovery lifecycle, run `bash scripts/check_pr_failed_specs.sh` with the pinned toolchain described below. The suite checks that Create PR does not rerun the workflow, cancellation retains PR Failed, worktrees remain available, and completion has a PR or a no-commits skip. It includes Quint, Alloy assertion and witness receipts, and executable production application scenarios. These bounded abstractions are not a proof of the production implementation. Reports are retained under `target/formal-reports/pr-failed.*`, and the `agent-auth-specs` CI job runs the suite independently of the preceding authentication check.
+
+For PR review-fix permission filtering and bounded termination, see
+`PR_REVIEW_FIX.md` and run `bash scripts/check_pr_review_fix_specs.sh`.
+The `pr-review-fix-specs` CI job runs Quint, Alloy receipt checks and
+production-connected Gherkin.
+
 For task-scoped `subagent_model` selection, backend configuration and exclusions,
 see `SUBAGENT_MODEL.md` and run `bash scripts/check_subagent_model_specs.sh`.
 The dedicated `subagent-model-specs` PR job runs pinned Quint verification,
@@ -51,6 +94,28 @@ For the separate OpenCode V2 admission, retry and lifecycle specifications, see
 required by the provider-native formal CI job. OpenCode execution evidence is
 recorded in `OPENCODE_VERIFICATION.md`.
 
+## Quality-gate checkpoint abstraction (CP-09 through CP-11)
+
+`checkpoint.qnt` and `checkpoint.als` extend the existing checkpoint model with
+gate failures, shared retry accounting, checkpointed feedback, and exhausted
+goto and termination. The runner verifies CP-09 through CP-11 and checks Alloy
+receipts, including retry/resume and both exhaustion witnesses. The separate
+`quality_gate` models are supplementary, not the CP numbering authority.
+
+| ID | Bounded property | Concrete coverage |
+| --- | --- | --- |
+| CP-09 | Retry requires available shared budget; exhaustion routes to goto or termination without another source effect | `quality_gate_cli::exhaustion_stops_without_running_the_next_step`, `zero_budget_fails_without_retry` |
+| CP-10 | Feedback is saved with pending retry, survives resume, and clears on non-retry transitions | `quality_gate_graph::checkpoint_roundtrips_gate_feedback_pending_retry_and_budget`, `quality_gate_cli::failure_retries_with_feedback_and_clears_it_for_next_step` |
+| CP-11 | An accepted gate retry consumes exactly one shared budget unit without exceeding its ceiling | `quality_gate_cli::exhaustion_stops_without_running_the_next_step` |
+
+The models are abstractions, not a proof of Rust refinement. Feedback is a
+boolean, not command output or its redaction. The checkpoint model bounds counts
+and limits at two and abstracts goto as the existing forward exit. It omits
+multiple gates, timeouts, and explicit reposition. Resume models only a successfully
+saved state. There is no claim of exactly-once shell effects across a crash
+between an external effect and checkpoint persistence. Concrete contract tests
+cover additional behavior separately and are not replaced by the models.
+
 ## Scope and traceability
 
 CP-01 through CP-08 are reconstructed repository contract identifiers, not recovered labels from an unavailable historical audit. Each ID has a Quint invariant, an Alloy assertion and a production-connected Cucumber scenario in `../features/checkpoint.feature`, implemented in `../checkpoint_bdd.rs`. The fixtures compile real YAML, invoke the production engine with real POSIX shell effects, save/load real checkpoints and execute Rust assertions. No parser-only or dry-run substitute is used.
@@ -84,12 +149,12 @@ The runner captures installed CLI help and versions. Alloy 6.2.0 uses `help exec
 "$Q" typecheck tests/formal/checkpoint.qnt
 "$Q" test tests/formal/checkpoint.qnt --main checkpoint --backend typescript --seed 20261023 --out-itf "$R/test_{test}_{seq}.itf.json"
 "$Q" run tests/formal/checkpoint.qnt --main checkpoint --init init --step step --invariant safety --backend typescript --seed 20261023 --max-samples 100 --max-steps 12 --out-itf "$R/simulation_{seq}.itf.json"
-"$Q" verify tests/formal/checkpoint.qnt --main checkpoint --init init --step step --invariant safety --invariants cp01_accounting cp02_pending cp03_checkpoint_gate cp04_skip cp05_resume cp06_reject cp07_group cp08_completed --max-steps 12 --backend apalache --apalache-version 0.62.1 --server-endpoint "127.0.0.1:$PORT" --out-itf "$R/counterexample.itf.json"
+"$Q" verify tests/formal/checkpoint.qnt --main checkpoint --init init --step step --invariant safety --invariants cp01_accounting cp02_pending cp03_checkpoint_gate cp04_skip cp05_resume cp06_reject cp07_group cp08_completed cp09_gate_route cp10_feedback cp11_gate_budget --max-steps 12 --backend apalache --apalache-version 0.62.1 --server-endpoint "127.0.0.1:$PORT" --out-itf "$R/counterexample.itf.json"
 java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --type json --output "$R/alloy" tests/formal/checkpoint.als
 cargo +1.99.1 test --locked --test graph_state --test checkpoint_bdd
 ```
 
-The verification command checks all named invariants together, not by simulation. The separate seeded simulation is only supplementary. The four named Quint executable tests provide retry/resume, skip/completion, group runtime and group exhaustion witnesses. Cucumber's `fail_on_skipped()` rejects undefined/pending/skipped steps and `run_and_exit` fails on assertion errors.
+Alloy 6.2.0's `exec` help exposes no `--expect` option. Instead each model command declares `expect 0` or `expect 1`, and the runner independently compares every command and expectation to its receipt. The supplementary `quality_gate` models are also typechecked, tested, simulated, verified and checked with the same bounds and pins. The verification command checks all named invariants together, not by simulation. The separate seeded simulation is only supplementary. Quint executable tests provide retry/resume, skip/completion, group runtime, group exhaustion, shared-budget and zero-budget witnesses. Cucumber's `fail_on_skipped()` rejects undefined/pending/skipped steps and `run_and_exit` fails on assertion errors.
 
 ## Bounds and assumptions
 
@@ -103,6 +168,6 @@ There is no exactly-once guarantee across an external effect followed by a crash
 
 `.github/workflows/ci.yml` runs the provider-native `formal` job on normal relevant pull requests and pushes to `main`, using pinned Node/Rust and `scripts/check_formal.sh`. A nonzero check accumulates a nonzero aggregate status while independent checks continue. `actions/upload-artifact` runs with `if: always()`, retains `target/formal-reports/` for 14 days, and therefore includes completed logs even after a model/test failure. Cancellation or failures before any report can be created cannot manufacture reports.
 
-Each runner invocation allocates a fresh `target/formal-reports/run.*` directory. It retains exact command lines, versions, CLI help, individual stdout/stderr logs, status receipts, Quint test/simulation traces, Alloy `receipt.json` and SAT witness JSON. A counterexample ITF is retained when the verifier emits one. Its absence on successful verification is not evidence of a missing failure log. The nested verifier's exact process argv and isolated endpoint are in `quint-verify.log`. Alloy expectations are checked against all named commands: eight assertion checks require UNSAT (`expect 0`), and four witnesses require SAT (`expect 1`), with missing/duplicate/extra command results rejected.
+Each runner invocation allocates a fresh `target/formal-reports/run.*` directory. It retains exact command lines, versions, CLI help, individual stdout/stderr logs, status receipts, Quint test/simulation traces, Alloy `receipt.json` and SAT witness JSON. A counterexample ITF is retained when the verifier emits one. Its absence on successful verification is not evidence of a missing failure log. The nested verifier's exact process argv and isolated endpoint are in `quint-verify.log`. Alloy expectations are checked against all named commands: eleven checkpoint assertion checks require UNSAT (`expect 0`), and nine checkpoint witnesses require SAT (`expect 1`), with missing/duplicate/extra command results rejected. The supplementary quality-gate model adds three assertions and three witnesses.
 
-See `VERIFICATION.md` for the dated local execution evidence and any external constraints. No remote CI execution is implied by local checks.
+For the quality-gate execution results, see `QUALITY_GATE_VERIFICATION.md`. See `VERIFICATION.md` for earlier checkpoint execution evidence and external constraints. No remote CI execution is implied by local checks.

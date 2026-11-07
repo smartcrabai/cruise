@@ -281,6 +281,7 @@ async fn execute(
         permission,
         tool_policy: policy,
         computer_use: false,
+        usage: None,
     });
     let result = tokio::time::timeout(Duration::from_secs(timeout as u64), run)
         .await
@@ -897,6 +898,15 @@ fn malformed_judgment_is_retained() {
     let mut record = Trial { side: "candidate".into(), row: "test".into(), trial: 0, status: "error".into(), checks: vec![], rubric: serde_json::json!("skipped"), judge_raw: None, notices: vec![], error: None, output_path: None, output_source: None };
     assert!(record_judgment(&mut record, "not json".into(), &[]).is_err());
     assert_eq!(record.judge_raw.as_deref(), Some("not json"));
+}
+
+#[test]
+fn step_context_preserves_instruction_and_feedback_order() {
+    let vars = VariableStore::new(String::new());
+    let prompt = prompt_render::assemble_step_prompt_with_context(
+        "task", &vars, false, &ToolPolicy::default(), Some("delivered"), Some("feedback"),
+    ).unwrap();
+    assert_eq!(prompt, format!("task\n\ndelivered{}\n\nfeedback", prompt_render::COMMIT_GUARD_PROMPT_NOTICE));
 }
 
 #[test]

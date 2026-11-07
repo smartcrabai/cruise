@@ -2,6 +2,10 @@ export default function TabInfo(props) {
   return <div id={`tab-info-${props.id}`} role="tabpanel" class="p-4 md:p-6 space-y-3 text-sm text-gray-500 dark:text-gray-400">
     <dl class="space-y-3">
       <div>
+        <dt class="text-xs uppercase tracking-wide">Pending instructions</dt>
+        <dd class="text-gray-700 dark:text-gray-300 mt-0.5">{props.pendingInstructions}</dd>
+      </div>
+      <div>
         <dt class="text-xs uppercase tracking-wide">Config</dt>
         <dd class="break-all font-mono text-gray-700 dark:text-gray-300 mt-0.5">{props.configSource}</dd>
       </div>
@@ -42,6 +46,7 @@ export default function TabInfo(props) {
         <dt class="text-xs uppercase tracking-wide">Error</dt>
         <dd class="break-words text-red-600 dark:text-red-400 mt-0.5 font-mono text-xs">{props.phaseError}</dd>
       </div>}
+      {props.autoRequeueCount > 0 && <div><dt class="text-xs uppercase tracking-wide">Auto-requeued</dt><dd class="text-gray-700 dark:text-gray-300 mt-0.5">{props.autoRequeueCount}</dd></div>}
       {props.planError && props.planError !== props.phaseError && <div>
         <dt class="text-xs uppercase tracking-wide">Planning Error</dt>
         <dd class="break-words text-red-600 dark:text-red-400 mt-0.5 font-mono text-xs">{props.planError}</dd>

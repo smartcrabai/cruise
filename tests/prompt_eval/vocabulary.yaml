@@ -14,6 +14,13 @@ runtime:
 generate:
   - description
   - schema
+workflow_make:
+  - schema
+  - reference
+  - transcript
+  - draft
+  - request
+  - repair
 workflow_inputs:
   - inputs.fix_ci_error_prompt
   - inputs.resolve_conflict_prompt

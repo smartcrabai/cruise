@@ -54,15 +54,39 @@ pub fn render_generate_prompt(template: &str, schema: &str, description: &str) -
 ///
 /// # Errors
 /// Returns an error if a template or file reference cannot be resolved.
+#[allow(dead_code, reason = "public evaluation API is not used by the runtime binary")]
 pub fn assemble_step_prompt(
     template: &str,
     vars: &VariableStore,
     allow_commit: bool,
     tool_policy: &ToolPolicy,
 ) -> Result<String> {
+    assemble_step_prompt_with_context(template, vars, allow_commit, tool_policy, None, None)
+}
+
+/// Assemble a step prompt with delivered instructions and quality gate feedback.
+///
+/// # Errors
+/// Returns an error if a template or file reference cannot be resolved.
+pub fn assemble_step_prompt_with_context(
+    template: &str,
+    vars: &VariableStore,
+    allow_commit: bool,
+    tool_policy: &ToolPolicy,
+    delivered: Option<&str>,
+    feedback: Option<&str>,
+) -> Result<String> {
     let mut prompt = vars.resolve_prompt(template)?;
+    if let Some(delivered) = delivered {
+        prompt.push_str("\n\n");
+        prompt.push_str(delivered);
+    }
     if !allow_commit {
         prompt.push_str(COMMIT_GUARD_PROMPT_NOTICE);
+    }
+    if let Some(feedback) = feedback {
+        prompt.push_str("\n\n");
+        prompt.push_str(feedback);
     }
     if let Some(notice) = tool_policy.prompt_notice() {
         prompt.push_str("\n\n");

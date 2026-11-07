@@ -10,6 +10,7 @@ use std::{fs, path::Path};
 struct Vocabulary {
     runtime: Vec<String>,
     generate: Vec<String>,
+    workflow_make: Vec<String>,
     workflow_inputs: Vec<String>,
 }
 
@@ -83,6 +84,12 @@ fn all_prompt_vocabulary_is_known() {
     for entry in fs::read_dir(root.join("prompts")).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().and_then(|s| s.to_str()) == Some("md") {
+            if path.file_name().is_some_and(|name| name == "workflow-make.md") {
+                for name in referenced_names(&fs::read_to_string(&path).unwrap()) {
+                    assert!(vocabulary.workflow_make.contains(&name), "{}: unknown prompt variable {{{name}}}", path.display());
+                }
+                continue;
+            }
             let generate = path.file_name().is_some_and(|name| name == "workflow-generate.md");
             check_text(&path, &fs::read_to_string(&path).unwrap(), &vocabulary, generate, &[]);
         }
