@@ -254,8 +254,8 @@ steps:
                 valid:(($suites | type) == "object" and ($suites.totalCount | type) == "number" and ($info | type) == "object" and ($info.hasNextPage | type) == "boolean" and (if $info.hasNextPage then ($info.endCursor | type) == "string" and $info.endCursor != "" else true end)),
                 total_count:$suites.totalCount,
                 node_count:($nodes | length),
-                pending:([$runs[] | select(. == "pending" or . == "invalid")] | length) > 0,
-                failed:([$runs[] | select(. == "failed")] | length) > 0,
+                pending: (([$runs[] | select(. == "pending" or . == "invalid")] | length) > 0),
+                failed: (([$runs[] | select(. == "failed")] | length) > 0),
                 more:($info.hasNextPage == true),
                 cursor:(if ($info.endCursor | type) == "string" then $info.endCursor else "" end)
               }}
