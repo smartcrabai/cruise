@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use cruise::formal_verify::{alloy, Language, SpecBlock, Verdict};
+use cruise::formal_verify::{Language, SpecBlock, Verdict, alloy};
 use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
 #[test]
@@ -25,10 +25,21 @@ exit 1
     let jar = dir.path().join("alloy.jar");
     fs::write(&jar, "fixture").unwrap();
     unsafe {
-        std::env::set_var("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()));
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
         std::env::set_var("CRUISE_ALLOY_JAR", &jar);
     }
-    let block = SpecBlock { language: Language::Alloy, number: 1, source: "run witness".into() };
+    let block = SpecBlock {
+        language: Language::Alloy,
+        number: 1,
+        source: "run witness".into(),
+    };
     let report = alloy::verify(&block, dir.path(), Duration::from_secs(5), None);
     assert_eq!(report.stages.len(), 1);
     assert_eq!(report.stages[0].verdict, Verdict::Error);

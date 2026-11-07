@@ -1,8 +1,9 @@
 use cruise::formal_verify::{
     BlockReport, Language, StageReport, Verdict, VerifyReport, aggregate,
     alloy::{alloy_commands, receipt_verdict},
-    extract_blocks, verify_blocks,
+    extract_blocks,
     quint::{main_module, quint_verdict},
+    verify_blocks,
 };
 use std::path::PathBuf;
 
@@ -32,20 +33,38 @@ fn extracts_container_fences_and_rejects_implicit_ends() {
     let input = "> ~~~quint\n> quoted\n> ~~~~\n\n- ```alloy\n  listed\n  ```\n\n> ```quint\n> unclosed\n\noutside\n\n~~~alloy\nnot closed\n~~\n";
     let found = extract_blocks(input);
     assert_eq!(
-        found.blocks.iter().map(|b| (b.language, b.number, b.source.as_str())).collect::<Vec<_>>(),
-        vec![(Language::Quint, 1, "quoted\n"), (Language::Alloy, 1, "listed\n")]
+        found
+            .blocks
+            .iter()
+            .map(|b| (b.language, b.number, b.source.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Language::Quint, 1, "quoted\n"),
+            (Language::Alloy, 1, "listed\n")
+        ]
     );
     assert!(found.over_limit.is_empty());
 }
 
 #[test]
 fn empty_closed_fences_and_unclosed_openers_are_distinguished() {
-    for input in ["```quint\n```", "~~~quint\n~~~", "> ```quint\n> ```", "~~~quint\r~~~", "```quint\r\n```"] {
+    for input in [
+        "```quint\n```",
+        "~~~quint\n~~~",
+        "> ```quint\n> ```",
+        "~~~quint\r~~~",
+        "```quint\r\n```",
+    ] {
         let found = extract_blocks(input);
         assert_eq!(found.blocks.len(), 1, "{input:?}");
         assert_eq!(found.blocks[0].source, "");
     }
-    for input in ["```quint", "~~~quint\n", "> ```quint\n> text\n", "````quint\n```\n"] {
+    for input in [
+        "```quint",
+        "~~~quint\n",
+        "> ```quint\n> text\n",
+        "````quint\n```\n",
+    ] {
         assert!(extract_blocks(input).blocks.is_empty(), "{input:?}");
     }
 }
@@ -76,12 +95,15 @@ fn extraction_limits_are_per_language_and_keep_encounter_order() {
 fn verify_flow_reports_nothing_for_unclosed_fences() {
     let dir = tempfile::tempdir().unwrap();
     let blocks = extract_blocks("> ~~~quint\n> unclosed\n\noutside\n\n```alloy\nunclosed\n");
-    let report = verify_blocks(blocks, dir.path(), std::time::Duration::from_secs(1), None).unwrap();
+    let report =
+        verify_blocks(blocks, dir.path(), std::time::Duration::from_secs(1), None).unwrap();
     assert!(report.blocks.is_empty());
     assert_eq!(report.verdict(), Verdict::Error);
-    assert!(std::fs::read_to_string(report.artifact.join("report.md"))
-        .unwrap()
-        .contains("nothing was verified"));
+    assert!(
+        std::fs::read_to_string(report.artifact.join("report.md"))
+            .unwrap()
+            .contains("nothing was verified")
+    );
 }
 
 #[test]
@@ -156,8 +178,16 @@ fn alloy_command_listing_requires_ordered_valid_entries() {
     let listing = "0 . Run Witness for 3\n1 . Check Safety for 4\n2 . Run run$3 for 3\n3 . Run labeled for 3\n";
     let commands = alloy_commands(listing).unwrap();
     assert_eq!(
-        commands.iter().map(|c| (c.kind.as_str(), c.name.as_str())).collect::<Vec<_>>(),
-        vec![("run", "Witness"), ("check", "Safety"), ("run", "run$3"), ("run", "labeled")]
+        commands
+            .iter()
+            .map(|c| (c.kind.as_str(), c.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("run", "Witness"),
+            ("check", "Safety"),
+            ("run", "run$3"),
+            ("run", "labeled")
+        ]
     );
     assert!(alloy_commands("1 . Run Missing\n").is_err());
     assert!(alloy_commands("").is_err());

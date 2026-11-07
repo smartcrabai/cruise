@@ -4,14 +4,23 @@
 #[cfg(unix)]
 mod contracts {
     use cruise::{
-        application::{ApplicationEvent, ApplicationEventSink, CruiseApplication, NewSessionRequest},
+        application::{
+            ApplicationEvent, ApplicationEventSink, CruiseApplication, NewSessionRequest,
+        },
         cancellation::CancellationToken,
         error::CruiseError,
         formal_verify::{Verdict, VerifyReport, extract_blocks, verify_blocks},
         session::{SessionManager, SessionPhase, WorkspaceMode},
     };
     use cucumber::{World as _, given, then, when};
-    use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path, sync::{Arc, Mutex}, time::Duration};
+    use std::{
+        collections::BTreeMap,
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::Path,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     #[derive(Debug, Default, cucumber::World)]
     pub struct World {
@@ -228,22 +237,30 @@ mod contracts {
         let root = w.root();
         let backend = root.join("backend.sh");
         fs::write(root.join("response"), &w.source).unwrap();
-        script(&backend, "#!/bin/sh\necho call >> \"$FIXTURE_ROOT/backend-calls\"\ncat \"$FIXTURE_ROOT/response\"\n");
+        script(
+            &backend,
+            "#!/bin/sh\necho call >> \"$FIXTURE_ROOT/backend-calls\"\ncat \"$FIXTURE_ROOT/response\"\n",
+        );
         let manager = SessionManager::new(root.join("sessions"));
         let app = CruiseApplication::new(manager.clone());
-        let mut state = app.create_session(NewSessionRequest {
-            input: "verify test".into(),
-            base_dir: root.to_path_buf(),
-            config_path: None,
-            config_yaml: Some(format!("command: [sh, '{}']\nsteps:\n  s1:\n    prompt: test\n", backend.display())),
-            repo: None,
-            pr_number: None,
-            workspace_mode: WorkspaceMode::Worktree,
-            allow_dirty_working_tree: false,
-            attachments: vec![],
-            skipped_steps: vec![],
-            flags: BTreeMap::default(),
-        }).unwrap();
+        let mut state = app
+            .create_session(NewSessionRequest {
+                input: "verify test".into(),
+                base_dir: root.to_path_buf(),
+                config_path: None,
+                config_yaml: Some(format!(
+                    "command: [sh, '{}']\nsteps:\n  s1:\n    prompt: test\n",
+                    backend.display()
+                )),
+                repo: None,
+                pr_number: None,
+                workspace_mode: WorkspaceMode::Worktree,
+                allow_dirty_working_tree: false,
+                attachments: vec![],
+                skipped_steps: vec![],
+                flags: BTreeMap::default(),
+            })
+            .unwrap();
         state.phase = SessionPhase::Planned;
         manager.save(&state).unwrap();
         let plan = state.plan_path(&manager.sessions_dir());
@@ -261,10 +278,15 @@ mod contracts {
             && saved.phase == SessionPhase::Planned
             && saved.plan_error.is_none()
             && fs::read(plan).unwrap() == original;
-        let output = events.lock().unwrap().iter().filter_map(|event| match event {
-            ApplicationEvent::PlanChunk { text, .. } => Some(text.as_str()),
-            _ => None,
-        }).collect::<String>();
+        let output = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                ApplicationEvent::PlanChunk { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
         w.application_preserved = preserved;
         w.application_output = output;
     }
@@ -277,19 +299,30 @@ mod contracts {
 
     #[then("the application runs all Quint verification stages")]
     fn application_quint_stages(w: &mut World) {
-        assert_eq!(fs::read_to_string(w.root().join("calls")).unwrap().lines().collect::<Vec<_>>(),
-            ["--version", "parse", "typecheck", "run", "verify"]);
+        assert_eq!(
+            fs::read_to_string(w.root().join("calls"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["--version", "parse", "typecheck", "run", "verify"]
+        );
     }
 
     #[then("the application preserves the saved plan and makes one backend call")]
     fn application_preserves(w: &mut World) {
         assert!(w.application_preserved);
-        assert_eq!(fs::read_to_string(w.root().join("backend-calls")).unwrap(), "call\n");
+        assert_eq!(
+            fs::read_to_string(w.root().join("backend-calls")).unwrap(),
+            "call\n"
+        );
     }
     #[then("the application preserves the saved plan and interprets the report")]
     fn application_preserves_with_interpretation(w: &mut World) {
         assert!(w.application_preserved);
-        assert_eq!(fs::read_to_string(w.root().join("backend-calls")).unwrap(), "call\ncall\n");
+        assert_eq!(
+            fs::read_to_string(w.root().join("backend-calls")).unwrap(),
+            "call\ncall\n"
+        );
     }
     #[tokio::test(flavor = "current_thread")]
     async fn plan_verify_bdd() {

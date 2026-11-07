@@ -1,5 +1,5 @@
 //! Production-connected Alloy CLI integration, using an explicitly supplied pinned JAR.
-use cruise::formal_verify::{alloy, Language, SpecBlock, Verdict};
+use cruise::formal_verify::{Language, SpecBlock, Verdict, alloy};
 use std::{path::PathBuf, time::Duration};
 
 #[test]
@@ -15,8 +15,22 @@ fn alloy_discovers_and_executes_every_command() {
     };
     let report = alloy::verify(&block, dir.path(), Duration::from_secs(60), None);
     assert_eq!(report.stages.len(), 4, "{:?}", report.stages);
-    assert_eq!(report.stages.iter().map(|s| s.verdict).collect::<Vec<_>>(), vec![Verdict::Passed, Verdict::Failed, Verdict::Passed, Verdict::Passed], "{:?}", report.stages);
+    assert_eq!(
+        report.stages.iter().map(|s| s.verdict).collect::<Vec<_>>(),
+        vec![
+            Verdict::Passed,
+            Verdict::Failed,
+            Verdict::Passed,
+            Verdict::Passed
+        ],
+        "{:?}",
+        report.stages
+    );
     for index in 0..4 {
-        assert!(PathBuf::from(dir.path()).join(format!("command-{index}/receipt.json")).exists());
+        assert!(
+            PathBuf::from(dir.path())
+                .join(format!("command-{index}/receipt.json"))
+                .exists()
+        );
     }
 }

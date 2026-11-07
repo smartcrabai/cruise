@@ -94,7 +94,8 @@ pub fn extract_blocks(input: &str) -> ExtractedBlocks {
                         .iter()
                         .rev()
                         .take_while(|&&b| b == fence)
-                        .count() >= n;
+                        .count()
+                        >= n;
                     if closed {
                         let idx = if language == Language::Quint { 0 } else { 1 };
                         counts[idx] += 1;

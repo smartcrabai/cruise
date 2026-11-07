@@ -40,12 +40,12 @@ mod draft_cmd;
 )]
 mod engine;
 mod error;
-mod formal_verify;
 mod exec_cmd;
 mod executor;
 mod file_tracker;
 mod flags;
 mod forge;
+mod formal_verify;
 mod github_review;
 mod graph;
 mod herdr;

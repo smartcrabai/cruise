@@ -112,7 +112,12 @@ pub fn alloy_jar(timeout: Duration, cancel: Option<&CancellationToken>) -> Resul
 
 // Keep the file on the caller thread so cancellation can remove it immediately,
 // even if a socket operation is still waiting for the HTTP timeout.
-fn download(url: &str, file: &mut fs::File, timeout: Duration, cancel: Option<&CancellationToken>) -> Result<(), String> {
+fn download(
+    url: &str,
+    file: &mut fs::File,
+    timeout: Duration,
+    cancel: Option<&CancellationToken>,
+) -> Result<(), String> {
     let started = Instant::now();
     if cancel.is_some_and(CancellationToken::is_cancelled) {
         return Err("cancelled".into());
@@ -126,7 +131,8 @@ fn download(url: &str, file: &mut fs::File, timeout: Duration, cancel: Option<&C
         let result = (|| -> Result<(), String> {
             let agent: ureq::Agent = ureq::Agent::config_builder()
                 .timeout_global(Some(timeout))
-                .build().into();
+                .build()
+                .into();
             let mut response = agent.get(&url).call().map_err(|e| e.to_string())?;
             let mut reader = response.body_mut().as_reader();
             loop {
@@ -155,7 +161,9 @@ fn download(url: &str, file: &mut fs::File, timeout: Duration, cancel: Option<&C
             Ok(Ok(bytes)) => file.write_all(&bytes).map_err(|e| e.to_string())?,
             Ok(Err(error)) => return Err(error),
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Alloy download worker stopped".into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("Alloy download worker stopped".into());
+            }
         }
     }
 }
@@ -201,7 +209,9 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 1024];
             let _ = stream.read(&mut request).unwrap();
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\npartial").unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\npartial")
+                .unwrap();
             let _ = ready_tx.send(());
             let _ = release_rx.recv_timeout(Duration::from_secs(5));
         });
@@ -218,18 +228,34 @@ mod tests {
             None
         };
         let start = Instant::now();
-        let timeout = if cancel_download { Duration::from_secs(3) } else { Duration::from_millis(300) };
-        let error = alloy_jar_in(dir.path(), HASH, |file| download(&url, file, timeout, Some(&token))).unwrap_err();
-        assert!(start.elapsed() < Duration::from_secs(2), "download did not stop promptly");
+        let timeout = if cancel_download {
+            Duration::from_secs(3)
+        } else {
+            Duration::from_millis(300)
+        };
+        let error = alloy_jar_in(dir.path(), HASH, |file| {
+            download(&url, file, timeout, Some(&token))
+        })
+        .unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "download did not stop promptly"
+        );
         if cancel_download {
             assert_eq!(error, "cancelled");
         } else {
-            assert!(error.to_lowercase().contains("timed out") || error.to_lowercase().contains("timeout"), "{error}");
+            assert!(
+                error.to_lowercase().contains("timed out")
+                    || error.to_lowercase().contains("timeout"),
+                "{error}"
+            );
         }
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
         let _ = release_tx.send(());
         server.join().unwrap();
-        if let Some(canceller) = canceller { canceller.join().unwrap(); }
+        if let Some(canceller) = canceller {
+            canceller.join().unwrap();
+        }
     }
 
     #[test]

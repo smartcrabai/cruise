@@ -12,7 +12,9 @@ pub struct AlloyCommand {
 pub fn alloy_commands(listing: &str) -> Result<Vec<AlloyCommand>, String> {
     let mut commands = Vec::new();
     for line in listing.lines() {
-        let (index, description) = line.split_once('.').ok_or("Invalid Alloy command listing")?;
+        let (index, description) = line
+            .split_once('.')
+            .ok_or("Invalid Alloy command listing")?;
         if index.trim().parse::<usize>().ok() != Some(commands.len()) {
             return Err("Invalid Alloy command index".into());
         }
@@ -23,7 +25,10 @@ pub fn alloy_commands(listing: &str) -> Result<Vec<AlloyCommand>, String> {
             _ => return Err("Invalid Alloy command kind".into()),
         };
         let name = words.next().ok_or("Missing Alloy command label")?;
-        commands.push(AlloyCommand { kind: kind.into(), name: name.into() });
+        commands.push(AlloyCommand {
+            kind: kind.into(),
+            name: name.into(),
+        });
     }
     if commands.is_empty() {
         Err("No Alloy commands found".into())
@@ -96,11 +101,21 @@ pub fn verify(
         return report;
     }
     let mut discovery = Command::new("java");
-    discovery.current_dir(dir).args(["-Xmx4g", "-Xss64m", "-jar"]).arg(&jar)
+    discovery
+        .current_dir(dir)
+        .args(["-Xmx4g", "-Xss64m", "-jar"])
+        .arg(&jar)
         .args(["commands", "model.als"]);
     let outcome = run_bounded(discovery, timeout, cancel, &logs, "commands");
     if outcome.timed_out || outcome.cancelled || outcome.exit != Some(0) {
-        report.error("commands", format!("Alloy command discovery failed: {} {}", outcome.message, outcome.output()));
+        report.error(
+            "commands",
+            format!(
+                "Alloy command discovery failed: {} {}",
+                outcome.message,
+                outcome.output()
+            ),
+        );
         return report;
     }
     let commands = match std::fs::read_to_string(&outcome.stdout)
