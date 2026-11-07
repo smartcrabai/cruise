@@ -216,6 +216,7 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
     let selection = cruise::config::ModelSpec::Single("local-smoke/smoke:high".to_owned());
     let resume_selection = cruise::config::ModelSpec::Single("local-smoke/smoke:max".to_owned());
     let request = |selection, resume, cancel_token| PromptRun {
+        usage: None,
         prompt: "Run the local acceptance tools, then return LOCAL_V2_SMOKE_OK",
         model: Some(selection),
         subagent_model: None,

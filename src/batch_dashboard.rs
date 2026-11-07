@@ -34,6 +34,7 @@ pub(crate) enum RowStatus {
     WaitingInput,
     Completed { pr_url: Option<String> },
     Failed(String),
+    PrFailed(String),
     Suspended,
     Paused,
 }
@@ -46,6 +47,12 @@ pub struct BatchDashboard {
 }
 
 impl BatchDashboard {
+    /// Print a persistent notice without colliding with a dashboard repaint.
+    pub fn announce(message: &str) {
+        let _guard = prompt_lock_guard();
+        let _ = Term::stderr().write_line(&sanitize_terminal_text(message));
+    }
+
     fn lock_rows(&self) -> std::sync::MutexGuard<'_, IndexMap<String, Row>> {
         self.rows
             .lock()
@@ -122,11 +129,13 @@ impl BatchDashboard {
             Err(CruiseError::StepPaused) => RowStatus::Paused,
             Err(error) => match &state.phase {
                 SessionPhase::Failed(reason) => RowStatus::Failed(reason.clone()),
+                SessionPhase::PrFailed(reason) => RowStatus::PrFailed(reason.clone()),
                 _ => RowStatus::Failed(error.detailed_message()),
             },
             Ok(()) => match &state.phase {
                 SessionPhase::Suspended => RowStatus::Suspended,
                 SessionPhase::Failed(reason) => RowStatus::Failed(reason.clone()),
+                SessionPhase::PrFailed(reason) => RowStatus::PrFailed(reason.clone()),
                 _ => RowStatus::Completed {
                     pr_url: state.pr_url.clone(),
                 },
@@ -170,6 +179,7 @@ fn is_finished(status: &RowStatus) -> bool {
         status,
         RowStatus::Completed { .. }
             | RowStatus::Failed(_)
+            | RowStatus::PrFailed(_)
             | RowStatus::Suspended
             | RowStatus::Paused
     )
@@ -215,6 +225,10 @@ fn status_parts(status: &RowStatus) -> (console::StyledObject<&'static str>, Str
         RowStatus::Failed(reason) => (
             style("x").red().bold(),
             format!("Failed: {}", sanitize_terminal_text(reason)),
+        ),
+        RowStatus::PrFailed(reason) => (
+            style("x").red().bold(),
+            format!("PR failed: {}", sanitize_terminal_text(reason)),
         ),
         RowStatus::Suspended => (style("||").yellow().bold(), "Suspended".to_string()),
         RowStatus::Paused => (style("||").yellow().bold(), "Paused".to_string()),
@@ -313,6 +327,13 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn pr_failed_status_is_finished_and_sanitized() {
+        let status = RowStatus::PrFailed("line\u{1b}".into());
+        assert!(super::is_finished(&status));
+        assert_eq!(super::status_parts(&status).1.trim_end(), "PR failed: line");
+    }
 
     fn session(id: &str, title: Option<&str>, input: &str) -> SessionState {
         let mut state = SessionState::new(

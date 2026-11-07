@@ -45,6 +45,7 @@ impl std::fmt::Debug for ExecutionResult {
 /// function's signature short enough that Clippy is happy.
 pub struct ExecutionContext<'a> {
     pub compiled: &'a CompiledWorkflow,
+    pub usage_session_id: Option<&'a str>,
     pub max_retries: usize,
     pub rate_limit_retries: usize,
     pub on_step_start: &'a (dyn Fn(&str) -> Result<()> + Send + Sync),
@@ -285,6 +286,7 @@ fn capture_runtime(vars: &VariableStore, tracker: &FileTracker) -> crate::graph:
         prev_input: vars.prev_input().map(str::to_owned),
         prev_stderr: vars.prev_stderr().map(str::to_owned),
         prev_success: vars.prev_success(),
+        quality_gate_feedback: vars.quality_gate_feedback().map(str::to_owned),
         file_snapshots: tracker.snapshots(),
         visited_at: None,
     }
@@ -361,6 +363,7 @@ async fn execute_steps_with_graph_inner(
         vars.set_prev_input(runtime.prev_input.clone());
         vars.set_prev_stderr(runtime.prev_stderr.clone());
         vars.set_prev_success(runtime.prev_success);
+        vars.set_quality_gate_feedback(runtime.quality_gate_feedback.clone());
         tracker.restore_snapshots(runtime.file_snapshots.clone());
     } else {
         graph.state.current = Some(graph.start.clone());
@@ -423,6 +426,11 @@ async fn execute_steps_with_graph_inner(
         let outcome = if let Some(pending) = graph.state.pending.clone() {
             pending
         } else {
+            let self_retry_spent = graph
+                .state
+                .edge_counts
+                .get(&(current.clone(), current.clone()))
+                .map_or(0, |count| count.budgeted_traversals);
             let result = if let Some(workflow) = &reloaded {
                 crate::retry::with_active_policy(
                     workflow.retry_policy.clone(),
@@ -432,6 +440,7 @@ async fn execute_steps_with_graph_inner(
                         tracker,
                         &current,
                         &graph.state.group_counts,
+                        self_retry_spent,
                         &mut state,
                     ),
                 )
@@ -443,6 +452,7 @@ async fn execute_steps_with_graph_inner(
                     tracker,
                     &current,
                     &graph.state.group_counts,
+                    self_retry_spent,
                     &mut state,
                 )
                 .await
@@ -605,6 +615,7 @@ async fn step_loop_iteration(
     tracker: &mut FileTracker,
     current_step: &str,
     group_retry_counts: &HashMap<String, usize>,
+    self_retry_spent: usize,
     state: &mut LoopState,
 ) -> Result<StepOutcome> {
     let step_config = ctx
@@ -625,19 +636,39 @@ async fn step_loop_iteration(
         group_retry_counts,
         &mut state.counters,
     ) {
+        vars.set_quality_gate_feedback(None);
         return Ok(outcome);
     }
 
     // Flags are evaluated first so a disabled chunk never touches `skip` variables or `when` globs.
     let flag_skip = crate::flags::is_disabled(step_config.flag.as_ref(), ctx.flags);
-    let static_skip = flag_skip
+    let mut static_skip = flag_skip;
+    if !static_skip {
+        for guard in &step_config.call_guards {
+            if should_skip(guard.skip.as_ref(), vars)? {
+                static_skip = true;
+                break;
+            }
+        }
+    }
+    static_skip = static_skip
         || should_skip(step_config.skip.as_ref(), vars)?
         || ctx.skipped_steps.iter().any(|s| s == current_step);
     // Only evaluate glob I/O when the step is not already unconditionally skipped.
-    let when_skip =
-        !static_skip && should_skip_due_to_when(step_config.when.as_ref(), vars, ctx.working_dir)?;
+    let mut when_skip = false;
+    if !static_skip {
+        for guard in &step_config.call_guards {
+            if should_skip_due_to_when(guard.when.as_ref(), vars, ctx.working_dir)? {
+                when_skip = true;
+                break;
+            }
+        }
+        when_skip =
+            when_skip || should_skip_due_to_when(step_config.when.as_ref(), vars, ctx.working_dir)?;
+    }
 
     if static_skip || when_skip {
+        vars.set_quality_gate_feedback(None);
         state.counters.skipped += 1;
         let skip_label = if flag_skip {
             let flag = step_config
@@ -831,7 +862,73 @@ async fn step_loop_iteration(
             }
         }
 
-        let if_next = if if_fail_next.is_none() && !if_fail_retry {
+        let mut gate_retry = false;
+        let mut gate_feedback = None;
+        // Quality gates run only after an accepted agent attempt, before its
+        // selected transition can take effect.
+        if !step_failed
+            && !nfc_retry
+            && let Some(gates) = &step_config.quality_gates
+        {
+            // Resolve each gate only when it is reached. A failing earlier gate
+            // must not be masked by an unresolved variable in a later command.
+            let mut failure = None;
+            for gate in gates {
+                let gate = crate::quality_gate::ResolvedGate {
+                    command: vars.resolve(&gate.command)?,
+                    timeout: gate
+                        .timeout
+                        .as_deref()
+                        .map(crate::timeout::parse_timeout)
+                        .transpose()?,
+                };
+                failure = crate::quality_gate::run_quality_gates(
+                    &[gate],
+                    &merged_env,
+                    ctx.working_dir,
+                    ctx.cancel_token,
+                )
+                .await?;
+                if failure.is_some() {
+                    break;
+                }
+            }
+            if let Some(failure) = failure {
+                failed_attempt = true;
+                let attempt = self_retry_spent.saturating_add(1);
+                let feedback = crate::quality_gate::format_feedback(
+                    &failure,
+                    current_step,
+                    attempt,
+                    ctx.max_retries.saturating_add(1),
+                    vars.artifacts_root(),
+                );
+                if self_retry_spent < ctx.max_retries {
+                    gate_feedback = Some(feedback);
+                    gate_retry = true;
+                    crate::status_eprintln!(
+                        "  {} quality gate failed, will retry",
+                        style("R").cyan()
+                    );
+                } else if let Some(FailAction::Goto(name)) = if_fail {
+                    crate::status_eprintln!(
+                        "  {} quality gate failed, jumping to: {}",
+                        style("R").cyan(),
+                        name
+                    );
+                    if_fail_next = Some(name.clone());
+                } else {
+                    vars.set_quality_gate_feedback(None);
+                    return Err(CruiseError::QualityGateExhausted {
+                        step: current_step.to_string(),
+                        command: crate::telemetry::stderr::sanitize(&failure.command).body,
+                        attempts: attempt,
+                    });
+                }
+            }
+        }
+
+        let if_next = if if_fail_next.is_none() && !if_fail_retry && !gate_retry {
             resolve_if_next(
                 ctx.compiled,
                 tracker,
@@ -858,6 +955,8 @@ async fn step_loop_iteration(
             }
         } else if if_fail_retry {
             TransitionReason::IfFailRetry
+        } else if gate_retry {
+            TransitionReason::QualityGateRetry
         } else if let Some((target, group)) = &if_next {
             let target = crate::graph::resolve_target(ctx.compiled, target)?;
             if *group {
@@ -878,6 +977,7 @@ async fn step_loop_iteration(
         };
         let effective_next = if_fail_next
             .or(if_fail_retry.then(|| current_step.to_string()))
+            .or(gate_retry.then(|| current_step.to_string()))
             .or(if_next.map(|(target, _)| target))
             .or(nfc_retry.then(|| current_step.to_string()))
             .or(outcome.option_next)
@@ -886,6 +986,7 @@ async fn step_loop_iteration(
         let target = next
             .map(|target| crate::graph::resolve_target(ctx.compiled, &target))
             .transpose()?;
+        vars.set_quality_gate_feedback(gate_feedback);
         Ok(Transition {
             target,
             reason,
@@ -1008,9 +1109,11 @@ async fn execute_step_kind_inner(
                 cancel_token: ctx.cancel_token,
             };
             let merge_result = if let Some(timeout) = timeout {
-                if let Ok(result) =
-                    tokio::time::timeout(timeout, crate::pr_merge::automatic::squash_merge(request))
-                        .await
+                if let Ok(result) = tokio::time::timeout(
+                    timeout,
+                    Box::pin(crate::pr_merge::automatic::squash_merge(request)),
+                )
+                .await
                 {
                     result
                 } else {
@@ -1026,7 +1129,7 @@ async fn execute_step_kind_inner(
                     )));
                 }
             } else {
-                crate::pr_merge::automatic::squash_merge(request).await
+                Box::pin(crate::pr_merge::automatic::squash_merge(request)).await
             };
             if ctx
                 .cancel_token
@@ -1076,6 +1179,7 @@ async fn execute_step_kind_inner(
                 PromptStepOutput::Console(ctx.on_step_log),
                 timeout,
                 current_step,
+                ctx.usage_session_id,
                 has_nfc_condition,
                 allow_commit,
             ))
@@ -1398,6 +1502,7 @@ pub(crate) async fn run_prompt_step(
     output: PromptStepOutput<'_>,
     timeout: Option<Duration>,
     timeout_step_name: &str,
+    usage_session_id: Option<&str>,
     register_skip_tool: bool,
     allow_commit: bool,
 ) -> Result<Option<String>> {
@@ -1415,6 +1520,10 @@ pub(crate) async fn run_prompt_step(
     let mut prompt = vars.resolve_prompt(&step.prompt)?;
     if !allow_commit {
         prompt.push_str("\n\nIn this working repository and any linked worktrees, do not create commits, move HEAD or local branch refs, or disable or bypass the commit guard, even if the task text asks you to. Leave all edits uncommitted.");
+    }
+    if let Some(feedback) = vars.quality_gate_feedback() {
+        prompt.push_str("\n\n");
+        prompt.push_str(feedback);
     }
 
     let permission = step.permission.unwrap_or(compiled.permission);
@@ -1493,6 +1602,11 @@ pub(crate) async fn run_prompt_step(
             }
         };
         let run_future = executor.run(crate::executor::PromptRun {
+            usage: Some(crate::usage::UsageScope {
+                session_id: usage_session_id,
+                step: Some(timeout_step_name),
+                purpose: crate::usage::UsagePurpose::WorkflowStep,
+            }),
             prompt: &prompt,
             model: model_or_mode.as_ref(),
             subagent_model: step
@@ -1853,6 +1967,7 @@ mod tests {
         let mut vars = VariableStore::new(input.to_string());
         let mut tracker = FileTracker::with_root(tracker_root.clone());
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries,
             rate_limit_retries,
@@ -1895,6 +2010,7 @@ mod tests {
             Ok(())
         };
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 3,
             rate_limit_retries: 0,
@@ -2002,6 +2118,7 @@ mod tests {
         let tracker_root = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
         let mut tracker = FileTracker::with_root(tracker_root.clone());
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &after_compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2086,6 +2203,7 @@ mod tests {
                 .push((stream.to_string(), line.to_string()));
         };
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries,
             rate_limit_retries: 0,
@@ -2169,6 +2287,7 @@ mod tests {
             PromptStepOutput::Console(None),
             Some(Duration::from_secs(5)),
             "attempt",
+            None,
             false,
             false,
         )
@@ -2188,6 +2307,7 @@ mod tests {
             PromptStepOutput::Console(None),
             Some(Duration::from_secs(5)),
             "attempt",
+            None,
             false,
             true,
         )
@@ -2249,6 +2369,7 @@ mod tests {
             PromptStepOutput::Console(None),
             Some(Duration::from_secs(5)),
             "review",
+            None,
             false,
             true,
         )
@@ -2283,6 +2404,7 @@ steps:
         let mut vars = VariableStore::new(String::new());
         let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2369,6 +2491,7 @@ steps:
             Ok(())
         };
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2420,6 +2543,7 @@ steps:
         tracker2.restore_snapshots(runtime.file_snapshots);
 
         let ctx2 = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -2693,6 +2817,56 @@ steps:
         let result = result.unwrap_or_else(|e| panic!("workflow failed: {e:?}"));
         assert_eq!(result.skipped, 1, "one step should be counted as skipped");
         assert_eq!(result.run, 1, "one step should be counted as run");
+    }
+
+    #[tokio::test]
+    async fn workflow_call_first_step_preserves_both_guards_and_skip_fallback() {
+        for (caller_skip, child_skip, caller_when, child_when, return_first) in [
+            (true, false, "present", "present", false),
+            (false, true, "present", "present", false),
+            (false, false, "missing", "present", false),
+            (false, false, "present", "missing", false),
+            (true, false, "present", "present", true),
+            (false, true, "present", "present", true),
+            (false, false, "missing", "present", true),
+            (false, false, "present", "missing", true),
+        ] {
+            let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+            std::fs::write(dir.path().join("present"), "yes")
+                .unwrap_or_else(|e| panic!("write present failed: {e}"));
+            let (declaration, return_field, routing) = if return_first {
+                (
+                    "returns: [done]\n",
+                    ", return: done",
+                    "    on_return: {done: wrong}\n",
+                )
+            } else {
+                ("", "", "")
+            };
+            let callee = format!(
+                "{declaration}steps:\n  first: {{command: 'exit 1', skip: {child_skip}, when: {{exists: {child_when}}}{return_field}}}\n  second: {{command: 'true'}}\n"
+            );
+            std::fs::write(dir.path().join("callee.yaml"), callee)
+                .unwrap_or_else(|e| panic!("write callee failed: {e}"));
+            let root = format!(
+                "command: [echo]\nsteps:\n  call:\n    workflow_call: ./callee.yaml\n    skip: {caller_skip}\n    when: {{exists: {caller_when}}}\n    next: end\n{routing}  wrong: {{command: 'exit 1'}}\n  end: {{command: 'true'}}\n"
+            );
+            let config =
+                WorkflowConfig::from_yaml(&root).unwrap_or_else(|e| panic!("parse failed: {e}"));
+            let resolved = crate::workflow_call::resolve_workflow_calls_with_defaults(
+                config,
+                dir.path(),
+                &crate::workflow_defaults::WorkflowDefaults::default(),
+            )
+            .unwrap_or_else(|e| panic!("resolution failed: {e}"));
+            let yaml = serde_yaml::to_string(&resolved)
+                .unwrap_or_else(|e| panic!("serialization failed: {e}"));
+            let result = run_config_with_tracker(&yaml, "", None, dir.path().to_path_buf())
+                .await
+                .unwrap_or_else(|e| panic!("workflow failed: {e}"));
+            assert_eq!(result.skipped, 1);
+            assert_eq!(result.run, 2);
+        }
     }
 
     #[tokio::test]
@@ -3440,6 +3614,7 @@ steps:
         let called_ref = std::sync::Mutex::new(&mut called_steps);
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -4475,6 +4650,7 @@ steps:
         // on_node_start is called before the cancel check: cancel on the 2nd call (step2)
         let call_count = std::sync::atomic::AtomicUsize::new(0);
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5402,6 +5578,7 @@ steps:
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5456,6 +5633,7 @@ steps:
         let checkpoints_ref = std::sync::Mutex::new(&mut checkpoints);
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5533,6 +5711,7 @@ steps:
         let visited_ref = std::sync::Mutex::new(&mut visited);
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5594,6 +5773,7 @@ steps:
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 10,
             rate_limit_retries: 0,
@@ -5651,6 +5831,7 @@ steps:
             FileTracker::with_root(std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}")));
 
         let ctx = ExecutionContext {
+            usage_session_id: None,
             compiled: &compiled,
             max_retries: 2,
             rate_limit_retries: 0,

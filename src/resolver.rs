@@ -61,6 +61,16 @@ pub fn resolve_workflow_config(
     base_dir: &std::path::Path,
     project_dir: Option<&std::path::Path>,
 ) -> Result<crate::config::WorkflowConfig> {
+    resolve_workflow_config_with_mode(yaml, source, base_dir, project_dir, false)
+}
+
+pub(crate) fn resolve_workflow_config_with_mode(
+    yaml: &str,
+    source: &ConfigSource,
+    base_dir: &std::path::Path,
+    project_dir: Option<&std::path::Path>,
+    doctor: bool,
+) -> Result<crate::config::WorkflowConfig> {
     let defaults = crate::workflow_defaults::WorkflowDefaults::load(project_dir)?;
     match source {
         ConfigSource::Builtin | ConfigSource::NamedBuiltin(_) => {
@@ -68,22 +78,21 @@ pub fn resolve_workflow_config(
                 ConfigSource::NamedBuiltin(name) => name,
                 _ => crate::builtin_workflows::DEFAULT_BUILTIN_NAME,
             };
-            crate::workflow_call::resolve_embedded_workflow_with_defaults(
+            crate::workflow_call::resolve_embedded_with_mode(
                 yaml,
                 &format!("{name}.yaml"),
                 &defaults,
+                doctor,
             )
         }
         ConfigSource::Inline => {
-            crate::workflow_call::resolve_workflow_calls_from_yaml_with_defaults(
-                yaml, base_dir, &defaults,
-            )
+            crate::workflow_call::resolve_yaml_with_mode(yaml, base_dir, &defaults, doctor)
         }
         ConfigSource::Explicit(path)
         | ConfigSource::EnvVar(path)
         | ConfigSource::Local(path)
         | ConfigSource::UserDir(path) => {
-            crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(path, &defaults)
+            crate::workflow_call::resolve_path_with_mode(path, &defaults, doctor)
         }
     }
 }
@@ -116,7 +125,8 @@ pub fn load_config_from_source(
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `./cruise.yaml` -> `./cruise.yml` -> `./.cruise.yaml` -> `./.cruise.yml`.
 /// 4. `./.cruise/*.yaml` / `*.yml` (sorted by filename).
-/// 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` -- interactive selector includes a trailing
+/// 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` and members of valid locked bundle
+///    directories -- interactive selector includes a trailing
 ///    "Built-in default" entry so the built-in default can be chosen explicitly.
 ///
 /// # Errors
@@ -144,7 +154,7 @@ pub fn resolve_config(explicit: Option<&str>) -> Result<(String, ConfigSource)> 
 /// 2. `CRUISE_CONFIG` env var -- error if file does not exist.
 /// 3. `cruise.yaml` / `cruise.yml` / `.cruise.yaml` / `.cruise.yml` under `cwd`.
 /// 4. `.cruise/*.yaml` / `*.yml` under `cwd` (sorted by filename).
-/// 5. `~/.config/cruise/workflows/*.yaml` / `*.yml`.
+/// 5. `~/.config/cruise/workflows/*.yaml` / `*.yml` and members of valid locked bundle directories.
 ///
 /// # Errors
 ///
@@ -172,6 +182,48 @@ impl std::fmt::Display for ConfigCandidate {
 }
 
 impl ConfigCandidate {
+    pub(crate) fn picker_candidate(
+        &self,
+        installed: &std::collections::HashSet<PathBuf>,
+    ) -> crate::workflow_categories::PickerCandidate {
+        use crate::workflow_categories::PickerCandidate;
+        let (key, is_builtin, is_local, is_installed_package) = match &self.source {
+            CandidateKind::EnvVar(path) | CandidateKind::Local(path) => (
+                path.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                false,
+                true,
+                false,
+            ),
+            CandidateKind::UserDir(path) => (
+                path.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                false,
+                false,
+                installed.contains(&std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())),
+            ),
+            CandidateKind::Builtin => (
+                crate::builtin_workflows::DEFAULT_BUILTIN_NAME.to_string(),
+                true,
+                false,
+                false,
+            ),
+            CandidateKind::NamedBuiltin(name) => ((*name).to_string(), true, false, false),
+        };
+        PickerCandidate {
+            value: self.selection_value(),
+            label: self.label.clone(),
+            key,
+            is_builtin,
+            is_local,
+            is_installed_package,
+            description: None,
+        }
+    }
     /// The label shown by the CLI selector and the TUI config list.
     #[must_use]
     pub fn label(&self) -> &str {
@@ -254,7 +306,7 @@ fn push_yaml_dir_candidates(
 }
 
 /// Reject a path that points at a user or project workflow defaults file.
-fn reject_defaults_file(path: &std::path::Path, cwd: &std::path::Path) -> Result<()> {
+pub(crate) fn reject_defaults_file(path: &std::path::Path, cwd: &std::path::Path) -> Result<()> {
     let Ok(target) = std::fs::canonicalize(path) else {
         return Ok(());
     };
@@ -322,6 +374,43 @@ fn collect_candidates(
         }
     }
 
+    candidates.extend(collect_local_candidates(&cwd));
+
+    // 3. User workflow config files (~/.config/cruise/workflows/*.yaml / *.yml), ASCII-sorted.
+    // Legacy top-level yaml files left directly in config_dir are no longer read;
+    // warn once per process so the user knows to migrate them.
+    crate::configs::warn_legacy_user_configs();
+    if let Ok(workflows_dir) = crate::paths::workflows_dir() {
+        for file in crate::configs::user_workflow_yaml_paths(&workflows_dir) {
+            let file = to_absolute(file);
+            candidates.push(ConfigCandidate {
+                label: shorten_display_path(&file, &cwd, home.as_deref()),
+                source: CandidateKind::UserDir(file),
+            });
+        }
+    }
+
+    // 4. Built-in workflows — always last, default first.
+    for workflow in crate::builtin_workflows::BUILTIN_WORKFLOWS {
+        let source = if workflow.name == crate::builtin_workflows::DEFAULT_BUILTIN_NAME {
+            CandidateKind::Builtin
+        } else {
+            CandidateKind::NamedBuiltin(workflow.name)
+        };
+        candidates.push(ConfigCandidate {
+            label: format!("Built-in {}: {}", workflow.name, workflow.description),
+            source,
+        });
+    }
+
+    Ok(candidates)
+}
+
+/// Collect only project-local workflow candidates, without consulting the environment.
+pub(crate) fn collect_local_candidates(cwd: &std::path::Path) -> Vec<ConfigCandidate> {
+    let cwd = to_absolute(cwd.to_path_buf());
+    let home = home::home_dir();
+    let mut candidates = Vec::new();
     // 2. Local config files in priority order.
     for name in &["cruise.yaml", "cruise.yml", ".cruise.yaml", ".cruise.yml"] {
         let path = cwd.join(name);
@@ -369,34 +458,7 @@ fn collect_candidates(
         });
     }
 
-    // 3. User workflow config files (~/.config/cruise/workflows/*.yaml / *.yml), ASCII-sorted.
-    // Legacy top-level yaml files left directly in config_dir are no longer read;
-    // warn once per process so the user knows to migrate them.
-    crate::configs::warn_legacy_user_configs();
-    if let Ok(workflows_dir) = crate::paths::workflows_dir() {
-        push_yaml_dir_candidates(
-            &mut candidates,
-            &workflows_dir,
-            &cwd,
-            home.as_deref(),
-            CandidateKind::UserDir,
-        );
-    }
-
-    // 4. Built-in workflows — always last, default first.
-    for workflow in crate::builtin_workflows::BUILTIN_WORKFLOWS {
-        let source = if workflow.name == crate::builtin_workflows::DEFAULT_BUILTIN_NAME {
-            CandidateKind::Builtin
-        } else {
-            CandidateKind::NamedBuiltin(workflow.name)
-        };
-        candidates.push(ConfigCandidate {
-            label: format!("Built-in {}: {}", workflow.name, workflow.description),
-            source,
-        });
-    }
-
-    Ok(candidates)
+    candidates
 }
 
 /// Collect config candidates using the process environment for `CRUISE_CONFIG`.
@@ -450,7 +512,25 @@ fn resolve_config_in_dir_with_interactive(
         // Interactive: offer all candidates. Built-ins come last with the default
         // first, so cursor position 0 lands on the highest-priority file (or the
         // built-in default when no file exists) and every built-in stays selectable.
-        prompt_select_among_candidates(candidates)?
+        let config = crate::app_config::AppConfig::load()?;
+        let installed: std::collections::HashSet<_> = crate::workflow_packages::list_installed()
+            .map_err(|e| CruiseError::Other(e.to_string()))?
+            .into_iter()
+            .map(|package| {
+                std::fs::canonicalize(&package.config_path).unwrap_or(package.config_path)
+            })
+            .collect();
+        let picker_candidates: Vec<_> = candidates
+            .iter()
+            .map(|c| c.picker_candidate(&installed))
+            .collect();
+        let nodes = crate::workflow_categories::build_picker_tree(
+            &picker_candidates,
+            &config.workflow_categories,
+            config.show_others_category,
+            &config.others_category_name,
+        );
+        prompt_select_among_candidates(&nodes, &candidates)?
     };
 
     // 4. Read the chosen candidate and return.
@@ -485,16 +565,83 @@ fn read_config_file(path: &std::path::Path) -> Result<String> {
 }
 
 /// Present an `inquire::Select` of candidates and return the chosen one.
-fn prompt_select_among_candidates(candidates: Vec<ConfigCandidate>) -> Result<ConfigCandidate> {
-    match inquire::Select::new("Select a workflow config", candidates)
-        .with_starting_cursor(0)
-        .prompt()
-    {
-        Ok(candidate) => Ok(candidate),
-        Err(
-            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
-        ) => Err(CruiseError::Other("config selection cancelled".to_string())),
-        Err(e) => Err(CruiseError::Other(e.to_string())),
+fn prompt_select_among_candidates(
+    nodes: &[crate::workflow_categories::PickerNode],
+    candidates: &[ConfigCandidate],
+) -> Result<ConfigCandidate> {
+    use crate::workflow_categories::PickerNode;
+    struct MenuItem {
+        label: String,
+        index: Option<usize>,
+    }
+    impl std::fmt::Display for MenuItem {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.label)
+        }
+    }
+    let mut path = Vec::<usize>::new();
+    loop {
+        let mut current = nodes;
+        for &index in &path {
+            if let PickerNode::Category { nodes, .. } = &current[index] {
+                current = nodes.as_slice();
+            }
+        }
+        let mut options: Vec<MenuItem> = current
+            .iter()
+            .enumerate()
+            .map(|(index, node)| MenuItem {
+                index: Some(index),
+                label: match node {
+                    PickerNode::Category { name, .. } => format!("{name}/"),
+                    PickerNode::Workflow {
+                        candidate,
+                        description,
+                    } => match description {
+                        Some(description) => {
+                            let label = candidates[*candidate].label();
+                            let name = label.split_once(": ").map_or(label, |(name, _)| name);
+                            format!("{name}: {description}")
+                        }
+                        None => candidates[*candidate].label().to_string(),
+                    },
+                },
+            })
+            .collect();
+        if !path.is_empty() {
+            options.sort_by_key(|item| match item.index.map(|index| &current[index]) {
+                Some(PickerNode::Category { .. }) => 0,
+                _ => 1,
+            });
+            options.push(MenuItem {
+                label: "Back".into(),
+                index: None,
+            });
+        }
+        if options.is_empty() {
+            return Err(CruiseError::Other(
+                "no workflow configs available to select".into(),
+            ));
+        }
+        let selected = inquire::Select::new("Select a workflow config", options).prompt_skippable();
+        let selected = match selected {
+            Ok(Some(value)) => value,
+            Ok(None)
+            | Err(
+                inquire::InquireError::OperationCanceled
+                | inquire::InquireError::OperationInterrupted,
+            ) => return Err(CruiseError::Other("config selection cancelled".into())),
+            Err(e) => return Err(CruiseError::Other(e.to_string())),
+        };
+        match selected.index {
+            None => {
+                path.pop();
+            }
+            Some(index) => match &current[index] {
+                PickerNode::Category { .. } => path.push(index),
+                PickerNode::Workflow { candidate, .. } => return Ok(candidates[*candidate].clone()),
+            },
+        }
     }
 }
 
@@ -1491,6 +1638,47 @@ mod tests {
     }
 
     #[test]
+    fn bundle_candidates_match_user_config_discovery()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let repo = tempfile::tempdir()?;
+        let home = tempfile::tempdir()?;
+        let _guard = DirGuard::new();
+        let _home = crate::test_support::set_fake_home(home.path());
+        let dir = user_workflows_dir(home.path());
+        std::fs::create_dir_all(dir.join("pkg"))?;
+        std::fs::write(dir.join("flat.yaml"), "steps: {}\n")?;
+        std::fs::write(dir.join("pkg/review.yaml"), "steps: {}\n")?;
+        std::fs::write(dir.join("pkg/extra.yaml"), "steps: {}\n")?;
+        std::fs::write(
+            dir.join("pkg/.cruise-package-lock.json"),
+            r#"{"name":"pkg","owner":"org","repo":"repo","requested_ref":"main","resolved_commit":"1111111111111111111111111111111111111111","workflows":{"review":{"source_path":"review.yaml","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}}"#,
+        )?;
+        let candidates = collect_candidates(repo.path(), None)?;
+        let paths: Vec<_> = candidates
+            .iter()
+            .filter_map(|candidate| match &candidate.source {
+                CandidateKind::UserDir(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let entries: Vec<_> = crate::configs::list_user_configs()
+            .into_iter()
+            .map(|entry| PathBuf::from(entry.path))
+            .collect();
+        assert_eq!(paths, entries);
+        assert_eq!(
+            paths,
+            vec![dir.join("flat.yaml"), dir.join("pkg/review.yaml")]
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.label.ends_with("workflows/pkg/review.yaml"))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_collect_candidates_orders_sources_for_requested_directory() {
         // Given: every CLI candidate source exists under a directory that is not the process cwd.
         let repo_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
@@ -1518,7 +1706,7 @@ mod tests {
         let candidates = collect_candidates(repo_dir.path(), Some(env_path_string))
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: file-backed candidates precede the six built-ins.
+        // Then: file-backed candidates precede the seven built-ins.
         let labels = candidates
             .iter()
             .map(|candidate| candidate.label.as_str())
@@ -1533,8 +1721,10 @@ mod tests {
                 "~/.config/cruise/workflows/zeta.yaml",
             ]
         );
+        assert_eq!(labels.len(), 12);
         for (label, name) in labels[5..].iter().zip([
             "tdd",
+            "pr-review-fix",
             "refactor",
             "add-tests",
             "add-formal-specs",
@@ -1983,6 +2173,7 @@ mod tests {
             values,
             vec![
                 "__builtin__",
+                "builtin:pr-review-fix",
                 "builtin:refactor",
                 "builtin:add-tests",
                 "builtin:add-formal-specs",
@@ -1992,6 +2183,7 @@ mod tests {
         );
         for (candidate, name) in candidates.iter().zip([
             "tdd",
+            "pr-review-fix",
             "refactor",
             "add-tests",
             "add-formal-specs",
@@ -2027,12 +2219,13 @@ mod tests {
             .iter()
             .map(ConfigCandidate::selection_value)
             .collect();
-        assert_eq!(values.len(), 7);
+        assert_eq!(values.len(), 8);
         assert!(values[0].ends_with("cruise.yaml"));
         assert_eq!(
             &values[1..],
             [
                 "__builtin__",
+                "builtin:pr-review-fix",
                 "builtin:refactor",
                 "builtin:add-tests",
                 "builtin:add-formal-specs",

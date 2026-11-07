@@ -33,6 +33,34 @@ use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
 use crate::provider_install::pins::JCODE_MIN_VERSION;
+
+fn usage_round_from_token_usage(
+    input: u64,
+    output: u64,
+    cache_read_input: Option<u64>,
+    cache_creation_input: Option<u64>,
+) -> crate::usage::UsageRound {
+    crate::usage::UsageRound {
+        model: None,
+        counts: crate::usage::UsageCounts {
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            cache_read_input_tokens: cache_read_input,
+            cache_creation_input_tokens: cache_creation_input,
+            ..Default::default()
+        },
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn token_usage_event_maps_optional_cache_fields() {
+    let round = usage_round_from_token_usage(10, 4, Some(0), None);
+    assert_eq!(round.counts.input_tokens, Some(10));
+    assert_eq!(round.counts.output_tokens, Some(4));
+    assert_eq!(round.counts.cache_read_input_tokens, Some(0));
+    assert_eq!(round.counts.cache_creation_input_tokens, None);
+}
 const JCODE_HOME_ENV: &str = "JCODE_HOME";
 const NO_TELEMETRY_ENV: &str = "JCODE_NO_TELEMETRY";
 const JCODE_CHECK_UPDATES_ENV: &str = "JCODE_CHECK_UPDATES";
@@ -780,6 +808,32 @@ fn run_client_turn(
             continue;
         };
         match event {
+            ApiEvent::TokenUsage {
+                input,
+                output,
+                cache_read_input,
+                cache_creation_input,
+                ..
+            } => {
+                if tx
+                    .send(StreamChunk::Usage(usage_round_from_token_usage(
+                        input,
+                        output,
+                        cache_read_input,
+                        cache_creation_input,
+                    )))
+                    .is_err()
+                {
+                    record_failure(failure_recorded, "stream", "output_stream_closed");
+                    if let Err(error) = client.cancel(&session.session_id) {
+                        record_sdk_failure(failure_recorded, "cleanup", &error);
+                    }
+                    return Err(
+                        "jcode output stream was closed; the active session was cancelled"
+                            .to_string(),
+                    );
+                }
+            }
             ApiEvent::TextDelta {
                 text: delta,
                 message_id,

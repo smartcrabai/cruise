@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cruise::builtin_workflows::BUILTIN_WORKFLOWS;
-use cruise::config::{PermissionMode, SkipCondition, WorkflowConfig, validate_config};
+use cruise::config::{
+    PermissionMode, ReviewerScope, SkipCondition, WorkflowConfig, validate_config,
+};
 use cruise::error::CruiseError;
 use cruise::flags::{self, FlagValues};
 use cruise::resolver::{ConfigSource, resolve_workflow_config};
@@ -91,6 +93,27 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
     );
 }
 
+fn assert_pr_review_contract(config: WorkflowConfig) {
+    validate_config(&config).unwrap();
+    let compiled = compile(config).unwrap();
+    assert_eq!(
+        compiled
+            .after_pr
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["address-review"]
+    );
+    let step = &compiled.after_pr["address-review"];
+    let review = step.github_review.as_ref().unwrap();
+    assert_eq!(review.reviewers, ReviewerScope::All);
+    assert_eq!(review.max_iterations, 3);
+    assert_eq!(step.timeout.as_deref(), Some("60m"));
+    assert!(step.allow_commit);
+    assert_eq!(step.output_file.as_deref(), Some("review-report.json"));
+    assert!(step.squash_merge.is_none());
+}
+
 fn eject_with_host_settings(root: &Path, project: &Path, config_dir: &Path) {
     // These settings must not become part of a portable workflow artifact.
     write(&config_dir.join("config.yaml"), "model: app/host-model\n");
@@ -126,10 +149,14 @@ fn verify_local_builtin_resources(root: &Path) {
         let config =
             resolve_workflow_calls_from_path_with_defaults(path, &WorkflowDefaults::default())
                 .unwrap();
-        validate_config(&config).unwrap();
-        assert!(config.after_pr.contains_key("follow-up/local-only"));
-        assert!(!config.after_pr.contains_key("follow-up/wait-ci"));
-        assert_eq!(config.after_pr.last().unwrap().0, "squash-merge");
+        if builtin.name == "pr-review-fix" {
+            assert_pr_review_contract(config);
+        } else {
+            validate_config(&config).unwrap();
+            assert!(config.after_pr.contains_key("follow-up/local-only"));
+            assert!(!config.after_pr.contains_key("follow-up/wait-ci"));
+            assert_eq!(config.after_pr.last().unwrap().0, "squash-merge");
+        }
     }
 }
 
@@ -142,6 +169,11 @@ fn verify_builtin_repair_policy(project: &Path) {
             Some(project),
         )
         .unwrap();
+        assert_eq!(config.create_pr, builtin.name != "research");
+        if builtin.name == "pr-review-fix" {
+            assert_pr_review_contract(config);
+            continue;
+        }
         for id in ["follow-up/resolve-conflict", "follow-up/fix-ci-error"] {
             let step = config
                 .after_pr
@@ -165,7 +197,6 @@ fn verify_builtin_repair_policy(project: &Path) {
             config.after_pr["squash-merge"].timeout.as_deref(),
             Some("10m")
         );
-        assert_eq!(config.create_pr, builtin.name != "research");
     }
 }
 
@@ -241,7 +272,9 @@ fn verify_ejected_builtins(root: &Path, project: &Path, config_dir: &Path) {
             );
             assert_eq!(
                 ejected.force_exec,
-                !project_override || !matches!(builtin.name, "tdd" | "research")
+                !project_override || !matches!(builtin.name, "tdd" | "research" | "pr-review-fix"),
+                "{} force_exec changed defaults precedence",
+                builtin.name
             );
             validate_config(&embedded).unwrap();
         }
@@ -299,7 +332,11 @@ fn worker(root: &Path, phase: &str) {
                     Some(&project),
                 )
                 .unwrap();
-                assert_after_pr_contract(config);
+                if builtin.name == "pr-review-fix" {
+                    assert_pr_review_contract(config);
+                } else {
+                    assert_after_pr_contract(config);
+                }
             }
         }
         "verify" => verify_ejected_builtins(root, &project, &config_dir),
