@@ -75,7 +75,9 @@ try {
   const post = page.waitForResponse(r => r.request().method() === 'POST' && r.url() === `${base}/webui/sessions/${cases[0].id}/verify`);
   await mobileButton.click();
   assert.equal((await post).status(), 200, 'Verify reaches production HTTP route');
-  await page.getByText('command error: claude is not installed: no managed install and no claude on PATH. Run `cruise install claude` or set CRUISE_CLAUDE_CLI_PATH.', { exact: true }).waitFor({ timeout: 60000 });
+  const errorToast = page.getByTestId('toast-detail');
+  await errorToast.waitFor({ timeout: 60000 });
+  assert.equal(await errorToast.textContent(), 'claude is not installed: no managed install and no claude on PATH. Run `cruise …');
   await page.screenshot({ path: join(output, 'provider-startup-failure.png'), fullPage: true });
   assert.equal(verifyPosts, 1, 'exactly one real Verify POST');
   assert.equal(await readFile(join(root, 'data/cruise/sessions', cases[0].id, 'plan.md'), 'utf8'), plan, 'failed Verify preserves the saved plan');
