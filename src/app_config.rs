@@ -40,6 +40,67 @@ pub struct AppConfig {
     /// Prevent idle sleep during runs on macOS.
     #[serde(rename = "prevent_sleep", alias = "preventSleep")]
     pub prevent_sleep: bool,
+
+    #[serde(
+        rename = "workflow_categories",
+        alias = "workflowCategories",
+        deserialize_with = "deserialize_workflow_categories",
+        skip_serializing_if = "indexmap::IndexMap::is_empty"
+    )]
+    pub workflow_categories:
+        indexmap::IndexMap<String, crate::workflow_categories::WorkflowCategoryNode>,
+    #[serde(rename = "show_others_category", alias = "showOthersCategory")]
+    pub show_others_category: bool,
+    #[serde(rename = "others_category_name", alias = "othersCategoryName")]
+    pub others_category_name: String,
+}
+
+/// Runtime defaults do not depend on picker-only configuration.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct RuntimeConfig {
+    #[serde(alias = "run_all_parallelism", default = "default_parallelism")]
+    run_all_parallelism: usize,
+    #[serde(alias = "run_all_auto_requeue_max_attempts")]
+    run_all_auto_requeue_max_attempts: u32,
+    #[serde(rename = "prevent_sleep", alias = "preventSleep")]
+    prevent_sleep: bool,
+    model: Option<crate::config::ModelSpec>,
+    #[serde(rename = "plan_model", alias = "planModel")]
+    plan_model: Option<crate::config::ModelSpec>,
+}
+
+fn default_parallelism() -> usize {
+    1
+}
+
+fn deserialize_workflow_categories<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<
+    indexmap::IndexMap<String, crate::workflow_categories::WorkflowCategoryNode>,
+    D::Error,
+> {
+    struct CategoriesVisitor;
+    impl<'de> serde::de::Visitor<'de> for CategoriesVisitor {
+        type Value = indexmap::IndexMap<String, crate::workflow_categories::WorkflowCategoryNode>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a workflow_categories map")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut categories = indexmap::IndexMap::new();
+            while let Some(name) = map.next_key::<String>()? {
+                let node = map.next_value().map_err(|error| {
+                    serde::de::Error::custom(format!("workflow_categories > {name}: {error}"))
+                })?;
+                categories.insert(name, node);
+            }
+            Ok(categories)
+        }
+    }
+    deserializer.deserialize_map(CategoriesVisitor)
 }
 
 fn is_yaml_config_path(path: &Path) -> bool {
@@ -53,12 +114,59 @@ impl Default for AppConfig {
             run_all_auto_requeue_max_attempts: 0,
             model: None,
             plan_model: None,
+            workflow_categories: indexmap::IndexMap::new(),
+            show_others_category: true,
+            others_category_name: crate::workflow_categories::OTHERS_CATEGORY_NAME.into(),
             prevent_sleep: false,
         }
     }
 }
 
 impl AppConfig {
+    /// Load runtime defaults while ignoring picker-only fields.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime configuration cannot be read or parsed.
+    pub fn load_runtime() -> Result<Self> {
+        let path = Self::config_path()?;
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(CruiseError::Other(format!(
+                    "failed to read config {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        let runtime: RuntimeConfig = if is_yaml_config_path(&path) {
+            serde_yaml::from_str(&content).map_err(|error| {
+                CruiseError::Other(format!(
+                    "invalid config YAML in {}: {error}",
+                    path.display()
+                ))
+            })?
+        } else {
+            serde_json::from_str(&content).map_err(|error| {
+                CruiseError::Other(format!(
+                    "invalid config JSON in {}: {error}",
+                    path.display()
+                ))
+            })?
+        };
+        let config = Self {
+            run_all_parallelism: runtime.run_all_parallelism,
+            run_all_auto_requeue_max_attempts: runtime.run_all_auto_requeue_max_attempts,
+            prevent_sleep: runtime.prevent_sleep,
+            model: runtime.model,
+            plan_model: runtime.plan_model,
+            ..Self::default()
+        };
+        config.validate()?;
+        Ok(config)
+    }
     /// Return the canonical app config path under `$XDG_CONFIG_HOME/cruise`
     /// (defaulting to `$HOME/.config/cruise`).
     ///
@@ -204,6 +312,12 @@ impl AppConfig {
     ///
     /// Returns [`CruiseError::Other`] if any field is invalid.
     pub fn validate(&self) -> Result<()> {
+        crate::workflow_categories::validate_workflow_categories(&self.workflow_categories)?;
+        if self.others_category_name.trim().is_empty() {
+            return Err(CruiseError::Other(
+                "others_category_name must not be blank".into(),
+            ));
+        }
         if let Some(model) = &self.model {
             model.validate("model")?;
         }
@@ -484,6 +598,29 @@ mod tests {
     // -- AppConfig::save_to() + load_from() round-trip ------------------------
 
     #[test]
+    fn invalid_category_shape_fails_load_with_path_in_message() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        for (name, content) in [
+            ("config.yaml", "workflow_categories:\n  Development: [x]\n"),
+            (
+                "config.json",
+                r#"{"workflow_categories":{"Development":["x"]}}"#,
+            ),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).unwrap_or_else(|e| panic!("{e}"));
+            let error = AppConfig::load_from(&path)
+                .err()
+                .unwrap_or_else(|| panic!("invalid category should fail"))
+                .to_string();
+            assert!(
+                error.contains("workflow_categories") && error.contains("Development"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn test_save_to_then_load_from_round_trips_models_and_parallelism() {
         // Given: a non-default AppConfig
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
@@ -499,7 +636,8 @@ mod tests {
                 "plan-primary".into(),
                 "plan-fallback".into(),
             ])),
-            prevent_sleep: false,
+            prevent_sleep: true,
+            ..AppConfig::default()
         };
         // When: save then load
         original
@@ -540,7 +678,7 @@ mod tests {
                         "plan-primary".into(),
                         "plan-fallback".into(),
                     ])),
-                    prevent_sleep: false,
+                    ..AppConfig::default()
                 },
             ),
             (
@@ -553,7 +691,7 @@ mod tests {
                         "fallback".into(),
                     ])),
                     plan_model: Some(crate::config::ModelSpec::Single("plan-primary".to_string())),
-                    prevent_sleep: false,
+                    ..AppConfig::default()
                 },
             ),
         ];

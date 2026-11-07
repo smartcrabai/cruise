@@ -579,13 +579,26 @@ fn new_session_config_candidates_are_visible_selectable_and_persist_arbitrary_pa
 
     tui.send(b"\x1b[B");
     tui.wait_for_output("▸ ./cruise.yaml", START_TIMEOUT);
-    // Local config -> user workflow -> seven built-ins -> Auto-detect.
-    for _ in 0..7 {
+    // Category headers are not selectable, and choices are indented beneath them.
+    for expected in [
+        "Built-in tdd:",
+        "Built-in refactor:",
+        "Built-in pr-review-fix:",
+        "Built-in add-tests:",
+        "Built-in add-formal-specs:",
+        "Built-in research:",
+        "Built-in security:",
+        "user.yaml",
+    ] {
         tui.send(b"\x1b[B");
+        tui.wait_for_screen(START_TIMEOUT, |screen| {
+            screen.lines().any(|line| {
+                line.trim_start()
+                    .strip_prefix('▸')
+                    .is_some_and(|label| label.trim_start().contains(expected))
+            })
+        });
     }
-    tui.wait_for_output("▸ Built-in research:", START_TIMEOUT);
-    tui.send(b"\x1b[B");
-    tui.wait_for_output("▸ Built-in security:", START_TIMEOUT);
     tui.send(b"\x1b[B");
     tui.wait_for_output("▸ Auto-detect", START_TIMEOUT);
 
