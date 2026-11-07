@@ -575,7 +575,9 @@ pub(crate) async fn run_process_output_cancelled_with_env(
 pub fn is_rate_limited(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("rate limit")
-        || lower.contains("429")
+        || lower
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|word| word == "429")
         || lower.contains("too many requests")
         || lower.contains("ratelimit")
 }
@@ -627,6 +629,9 @@ mod tests {
         assert!(!is_rate_limited("Normal error message"));
         assert!(!is_rate_limited(""));
         assert!(!is_rate_limited("compilation error"));
+        assert!(!is_rate_limited(
+            "GitHub CI failed for expected HEAD 0123456789abcdef429abcdef0123456789abcd"
+        ));
     }
 
     #[tokio::test]
