@@ -2188,9 +2188,10 @@ During `cruise run`, the config file is checked for changes between each step. I
 
 ## Rate Limit Retry
 
-Without an SDK fallback policy, when a rate-limit error is detected (HTTP 429 or rate-limit text; SDK backends also treat `usage limit`, `session limit`, and `overloaded` as limits)
-in a prompt or command step, cruise retries the same model with exponential
-backoff:
+Without an SDK fallback policy, cruise retries the same model with exponential
+backoff when command stderr contains rate-limit wording or a standalone `429`
+token (not incidental `429` substrings). SDK backends also treat `usage limit`,
+`session limit`, and `overloaded` as limits:
 
 - Initial delay: 2 seconds
 - Maximum delay: 60 seconds
