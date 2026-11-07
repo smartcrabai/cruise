@@ -23,6 +23,7 @@ pub mod executor;
 pub mod file_tracker;
 pub mod flags;
 pub(crate) mod forge;
+pub mod formal_verify;
 pub mod github_review;
 pub mod graph;
 pub mod instruction_inbox;

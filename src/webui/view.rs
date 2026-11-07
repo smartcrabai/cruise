@@ -747,6 +747,7 @@ pub(crate) fn is_planning(operation: Option<OperationKind>) -> bool {
         Some(
             OperationKind::Fix
                 | OperationKind::Ask
+                | OperationKind::Verify
                 | OperationKind::Replan
                 | OperationKind::Generate
         )

@@ -46,6 +46,7 @@ mod executor;
 mod file_tracker;
 mod flags;
 mod forge;
+mod formal_verify;
 mod github_review;
 mod graph;
 mod herdr;

@@ -63,6 +63,7 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | I already wrote the plan myself — skip the LLM planning | `cruise plan --skip-planning "<plan text>"` (or `cruise --plan "…" --skip-planning`) |
 | Interview me one question at a time, then write the plan | `cruise plan --grill "task"` (SDK backend (the default) + TTY) |
 | Add executable Quint, Alloy, and Gherkin specifications with CI | `cruise exec -c builtin:add-formal-specs "task"` |
+| Verify a plan without changing it | Choose **Verify** in the interactive plan approval menu or WebUI, or **Verify Spec** in the TUI, for a usable plan awaiting approval; `cruise list` and Ask text do not provide this action |
 | Run `refactor`, `add-tests`, `add-formal-specs`, or `security` locally by default (`force_exec: true`) | For example, `cruise plan -c builtin:refactor "task"` runs directly without an outer plan/session, worktree, or automatic PR; add `--no-force-exec` for the normal plan/session path |
 | Research with a durable, read-only report | `cruise plan --skip-planning -c builtin:research "question"`; approve if prompted, then `cruise run <session-id>` |
 | Audit and safely repair confirmed security defects in a durable session | `cruise plan --no-force-exec -c builtin:security "audit request"`; approve if prompted, then `cruise run <session-id>` |
@@ -389,7 +390,7 @@ When loading a workflow config, these process environment variables override the
 
 Values are trimmed and blank values ignored. Booleans accept only `true`, `false`, `1`, or `0`, and integers use unsigned decimal digits. Models are literal single models unless beginning with `[` or `{`, which means JSON in the field's normal shape. Model arrays enable fallback as in YAML. Other composite values require JSON, with `null` or `[]` clearing optional values or lists where supported. Parent `retry` and `languages` overrides apply before their children. `CRUISE_SDK` and `CRUISE_COMMAND` cannot both be nonblank. Invalid values are errors. Per-invocation CLI flags and saved session cleanup overrides take precedence where applicable. App parallelism is effective-only and is not saved; CLI `run --all` uses `--parallelism` instead. File-backed sessions reapply overrides on reload, while snapshots retain their creation-time config.
 
-Named maps and secret-bearing `env`, `mcp_servers`, and `pre_steps`, workflow structure (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), `create_pr`, and deprecated `pr_language` / `plan_language` are excluded. See the [configuration override reference](../cruise-config/references/env-and-llm.md#process-level-config-overrides) and the README environment table for details.
+Named maps and secret-bearing `env`, `mcp_servers`, and `pre_steps`, workflow structure (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), `create_pr`, and deprecated `pr_language` / `plan_language` are excluded. `formal_verify` is configured through workflow YAML or defaults, not a configuration environment override. See the [configuration override reference](../cruise-config/references/env-and-llm.md#process-level-config-overrides) and the README environment table for details.
 
 Every actual jcode prompt needs an effective Cruise model. Ordinary prompts
 resolve step `model` then workflow/default `model`; planning uses

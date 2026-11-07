@@ -28,6 +28,8 @@ pub const ASK_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/ask-plan.md"
 pub const PLAN_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/plan-sdk.md");
 pub const FIX_PLAN_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/fix-plan-sdk.md");
 pub const ASK_PLAN_PROMPT_TEMPLATE_SDK: &str = include_str!("../prompts/ask-plan-sdk.md");
+pub const VERIFY_PLAN_PROMPT_TEMPLATE: &str = include_str!("../prompts/verify-plan.md");
+pub const VERIFY_RESULT_PROMPT_TEMPLATE: &str = include_str!("../prompts/verify-result.md");
 /// "Grill me" planning variant: the agent interviews the user one question at a
 /// time (via `ask_user`) until every design branch is resolved, then submits the
 /// plan. SDK-only — it relies on the interactive `ask_user` tool.
@@ -266,10 +268,6 @@ impl AskHandler for PlanningAskHandler {
 /// registered (`sdk:` planning with `register_plan_tools`) — the agent ended
 /// its turn without a successful `submit_plan` / `update_plan` call (the
 /// captured output is not a plan and is refused as a fallback).
-#[expect(
-    clippy::too_many_lines,
-    reason = "single prompt pipeline keeps the plan-tool and usage wiring in one place"
-)]
 pub async fn run_plan_prompt_template(
     ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,
@@ -279,18 +277,45 @@ pub async fn run_plan_prompt_template(
     resume: &mut Option<crate::model_selection::SdkSessionId>,
     register_plan_tools: bool,
 ) -> Result<PromptResult> {
-    // The context owns the authoritative plan path. Normal callers already
-    // register the same path through `setup_plan_vars`; setting it here also
-    // keeps this executor safe for direct template callers.
+    run_plan_prompt_template_with_conversation(
+        ctx,
+        vars,
+        template,
+        label,
+        stream_callbacks,
+        resume,
+        register_plan_tools,
+        false,
+    )
+    .await
+}
+
+fn prepare_plan_prompt_vars(ctx: &PlanPromptCtx<'_>, vars: &mut VariableStore) {
+    // The context owns the authoritative plan path, including for direct callers.
     vars.set_named_file(crate::session::PLAN_VAR, ctx.plan_path.to_path_buf());
     vars.set_named_value(PLAN_LANGUAGE_VAR, ctx.config.effective_plan_language());
-    // The ambiguity guidance depends on whether a user can answer `ask_user`
-    // this run; refresh it every turn so plan/fix templates never instruct the
-    // agent to call a tool that is not registered.
+    // Refresh guidance each turn to reflect whether ask_user is available.
     vars.set_named_value(
         PLAN_CLARIFICATION_VAR,
         clarification_guidance(ctx.interactive).to_string(),
     );
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "verification retains the SDK conversation across its two read-only turns"
+)]
+async fn run_plan_prompt_template_with_conversation(
+    ctx: &PlanPromptCtx<'_>,
+    vars: &mut VariableStore,
+    template: &str,
+    label: &str,
+    stream_callbacks: Option<&StreamCallbacks<'_>>,
+    resume: &mut Option<crate::model_selection::SdkSessionId>,
+    register_plan_tools: bool,
+    retain_turn_conversation: bool,
+) -> Result<PromptResult> {
+    prepare_plan_prompt_vars(ctx, vars);
     let prompt = vars.resolve(template)?;
     let executor = ctx.executor();
     ensure_agents_authenticated(ctx.config, AuthScope::Planning, ctx.working_dir)?;
@@ -302,6 +327,8 @@ pub async fn run_plan_prompt_template(
     // plan is written to `{plan}` directly via the file-writing templates and no
     // custom tools are registered.
     let plan_tools_enabled = sdk_plan_tools_enabled(ctx.config);
+    let conversation_enabled =
+        plan_tools_enabled || (retain_turn_conversation && executor.is_sdk());
     let env = crate::engine::resolve_env(&ctx.config.env, &HashMap::new(), vars)?;
     crate::status_eprintln!("\n{} {}", style("▶").cyan().bold(), style(label).bold());
     let spinner = if ctx.progress == PlanProgress::Console
@@ -366,16 +393,8 @@ pub async fn run_plan_prompt_template(
             working_dir: ctx.working_dir,
             stream: stream_callbacks,
             tools,
-            on_session_id: if plan_tools_enabled {
-                ctx.on_session_id
-            } else {
-                None
-            },
-            resume: if plan_tools_enabled {
-                resume.clone()
-            } else {
-                None
-            },
+            on_session_id: conversation_enabled.then_some(ctx.on_session_id).flatten(),
+            resume: conversation_enabled.then(|| resume.clone()).flatten(),
             computer_use: ctx.config.computer_use(),
             permission: crate::config::PermissionMode::Full,
             tool_policy: crate::tool_policy::ToolPolicy::default(),
@@ -387,12 +406,77 @@ pub async fn run_plan_prompt_template(
     ensure_plan_persisted(plan_persisted.as_deref())?;
     // Carry the backend session id forward only for SDK turns that return one.
     // Assigning `None` also clears any stale session id from a prior backend.
-    if plan_tools_enabled {
+    if conversation_enabled {
         *resume = outcome.session_id;
     } else if executor.is_sdk() {
         *resume = None;
     }
     Ok(outcome.result)
+}
+
+/// Generate specifications, verify them off the async runtime, and interpret the report.
+///
+/// # Errors
+///
+/// Returns an error if prompt execution, verification, or report delivery fails,
+/// if the plan path has no session directory, or if the verification task fails.
+pub async fn run_verify_flow(
+    ctx: &PlanPromptCtx<'_>,
+    vars: &mut VariableStore,
+    resume: &mut Option<crate::model_selection::SdkSessionId>,
+    streams: Option<&StreamCallbacks<'_>>,
+    on_report: &(dyn Fn(&str) -> Result<()> + Send + Sync),
+) -> Result<()> {
+    let output = run_plan_prompt_template_with_conversation(
+        ctx,
+        vars,
+        VERIFY_PLAN_PROMPT_TEMPLATE,
+        "[verify] generating specifications...",
+        streams,
+        resume,
+        false,
+        true,
+    )
+    .await?;
+    let blocks = crate::formal_verify::extract_blocks(&output.output);
+    if blocks.blocks.is_empty() && blocks.over_limit.is_empty() {
+        on_report("No quint/alloy blocks were found, so nothing was verified.\n")?;
+        return Ok(());
+    }
+    let session_dir = ctx
+        .plan_path
+        .parent()
+        .ok_or_else(|| {
+            crate::error::CruiseError::Other("plan path has no session directory".into())
+        })?
+        .to_path_buf();
+    let timeout = ctx.config.formal_verify_timeout();
+    let cancel = ctx.cancel_token.cloned();
+    let report = tokio::task::spawn_blocking(move || {
+        crate::formal_verify::verify_blocks(blocks, &session_dir, timeout, cancel.as_ref())
+    })
+    .await
+    .map_err(|error| {
+        crate::error::CruiseError::Other(format!("verification task failed: {error}"))
+    })??;
+    let report = report.render_markdown();
+    on_report(&report)?;
+    vars.set_prev_input(Some(report));
+    let interpretation = run_plan_prompt_template_with_conversation(
+        ctx,
+        vars,
+        VERIFY_RESULT_PROMPT_TEMPLATE,
+        "[verify] interpreting results...",
+        streams,
+        resume,
+        false,
+        true,
+    )
+    .await?;
+    if streams.is_none() {
+        on_report(&interpretation.output)?;
+    }
+    Ok(())
 }
 
 /// Guard against tool-based planning that ended without persisting its plan.
