@@ -1312,15 +1312,21 @@ mod tests {
         // Follow the WebUI router harness: isolate XDG configuration and hold the
         // process-wide environment lock for the lifetime of the guards.
         let _lock = lock_process();
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
         let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path().as_os_str());
-        let config_path = AppConfig::config_path().expect("config path");
-        std::fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
+        let config_path =
+            AppConfig::config_path().unwrap_or_else(|error| panic!("config path: {error}"));
+        std::fs::create_dir_all(
+            config_path
+                .parent()
+                .unwrap_or_else(|| panic!("config parent")),
+        )
+        .unwrap_or_else(|error| panic!("config dir: {error}"));
         std::fs::write(
             &config_path,
             r#"{"runAllParallelism":2,"model":"stored-model"}"#,
         )
-        .expect("write config");
+        .unwrap_or_else(|error| panic!("write config: {error}"));
         let _parallelism = EnvGuard::set("CRUISE_RUN_ALL_PARALLELISM", "4");
         let _model = EnvGuard::set("CRUISE_MODEL", "environment-model");
         let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/webui"));
@@ -1330,14 +1336,16 @@ mod tests {
             dev_mode: true,
         };
         let application = CruiseApplication::new(SessionManager::new(dir.path().to_path_buf()));
-        let state = WebState::new(application, &assets).expect("web state");
+        let state = WebState::new(application, &assets)
+            .unwrap_or_else(|error| panic!("web state: {error}"));
 
         let response = super::settings_modal(State(state.clone())).await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
-            .expect("body");
-        let body = String::from_utf8(body.to_vec()).expect("UTF-8");
+            .unwrap_or_else(|error| panic!("body: {error}"));
+        let body =
+            String::from_utf8(body.to_vec()).unwrap_or_else(|error| panic!("UTF-8: {error}"));
         assert!(body.contains("value=\"2\""), "{body}");
         assert!(body.contains("Effective Run All parallelism: 4"), "{body}");
 
@@ -1351,14 +1359,18 @@ mod tests {
         .await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         assert_eq!(
-            state.application.app_config().unwrap().run_all_parallelism,
+            state
+                .application
+                .app_config()
+                .unwrap_or_else(|error| panic!("{error}"))
+                .run_all_parallelism,
             2
         );
         assert_eq!(
             state
                 .application
                 .effective_app_config()
-                .unwrap()
+                .unwrap_or_else(|error| panic!("{error}"))
                 .run_all_parallelism,
             4
         );
@@ -1372,17 +1384,19 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let raw: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&config_path).expect("read config"))
-                .expect("parse config");
+        let raw: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&config_path).unwrap_or_else(|error| panic!("read config: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("parse config: {error}"));
         assert_eq!(raw["runAllParallelism"], 3);
         assert_eq!(raw["model"], "stored-model");
 
         let response = super::settings_modal(State(state)).await;
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
-            .expect("body");
-        let body = String::from_utf8(body.to_vec()).expect("UTF-8");
+            .unwrap_or_else(|error| panic!("body: {error}"));
+        let body =
+            String::from_utf8(body.to_vec()).unwrap_or_else(|error| panic!("UTF-8: {error}"));
         assert!(body.contains("value=\"3\""), "{body}");
         assert!(body.contains("Effective Run All parallelism: 4"), "{body}");
     }

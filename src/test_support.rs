@@ -150,7 +150,6 @@ impl Drop for EnvGuard {
 #[must_use]
 pub fn clear_config_override_envs() -> Vec<EnvGuard> {
     crate::config_env::all_override_names()
-        .into_iter()
         .map(EnvGuard::remove)
         .collect()
 }
@@ -161,7 +160,7 @@ fn config_override_guards_clear_and_restore() {
     let _lock = lock_process();
     let key = crate::config_env::all_override_names()
         .next()
-        .expect("there must be at least one override");
+        .unwrap_or_else(|| panic!("there must be at least one override"));
     let _original = EnvGuard::set(key, "test-value");
     {
         let _guards = clear_config_override_envs();

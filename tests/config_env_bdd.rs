@@ -13,7 +13,11 @@ struct ConfigEnvWorld {
 
 impl ConfigEnvWorld {
     fn run_cli(&mut self, args: &[&str]) {
-        let root = self.root.as_ref().expect("isolated project").path();
+        let root = self
+            .root
+            .as_ref()
+            .unwrap_or_else(|| panic!("isolated project"))
+            .path();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_cruise"));
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("CRUISE_") {
@@ -32,11 +36,16 @@ impl ConfigEnvWorld {
             .envs(&self.env)
             .stdin(Stdio::null())
             .args(args);
-        self.output = Some(cmd.output().expect("run production cruise CLI"));
+        self.output = Some(
+            cmd.output()
+                .unwrap_or_else(|error| panic!("run production cruise CLI: {error}")),
+        );
     }
 
     fn output(&self) -> &Output {
-        self.output.as_ref().expect("command was run")
+        self.output
+            .as_ref()
+            .unwrap_or_else(|| panic!("command was run"))
     }
 
     fn text(&self) -> String {
@@ -51,14 +60,14 @@ impl ConfigEnvWorld {
 
 #[given("an isolated Cruise project")]
 fn isolated(world: &mut ConfigEnvWorld) {
-    let root = tempfile::tempdir().expect("temporary directory");
+    let root = tempfile::tempdir().unwrap_or_else(|error| panic!("temporary directory: {error}"));
     let project = root.path().join("project");
-    std::fs::create_dir_all(&project).expect("create project");
+    std::fs::create_dir_all(&project).unwrap_or_else(|error| panic!("create project: {error}"));
     std::fs::write(
         project.join("workflow.yaml"),
         "command: [echo]\nsteps:\n  main:\n    command: echo main\n",
     )
-    .expect("write workflow");
+    .unwrap_or_else(|error| panic!("write workflow: {error}"));
     world.root = Some(root);
 }
 
@@ -68,8 +77,8 @@ fn set_env(world: &mut ConfigEnvWorld, key: String, value: String) {
 }
 
 #[when(regex = r"^I run cruise (config|exec)$")]
-fn run_command(world: &mut ConfigEnvWorld, command: String) {
-    match command.as_str() {
+fn run_command(world: &mut ConfigEnvWorld, matches: &[String]) {
+    match matches[0].as_str() {
         "config" => world.run_cli(&["config"]),
         "exec" => world.run_cli(&["exec", "--config", "workflow.yaml"]),
         _ => unreachable!(),
@@ -77,8 +86,8 @@ fn run_command(world: &mut ConfigEnvWorld, command: String) {
 }
 
 #[when(regex = r#"^I run cruise config setting parallelism to "([^"]+)"$"#)]
-fn set_parallelism(world: &mut ConfigEnvWorld, value: String) {
-    world.run_cli(&["config", "--set-parallelism", &value]);
+fn set_parallelism(world: &mut ConfigEnvWorld, matches: &[String]) {
+    world.run_cli(&["config", "--set-parallelism", &matches[0]]);
 }
 
 #[when("I clear the environment override and run cruise config")]
@@ -93,19 +102,19 @@ fn succeeds(world: &mut ConfigEnvWorld) {
 }
 
 #[then(regex = r#"^the command (succeeds|fails) and reports "([^"]+)"$"#)]
-fn status_and_text(world: &mut ConfigEnvWorld, status: String, expected: String) {
+fn status_and_text(world: &mut ConfigEnvWorld, matches: &[String]) {
     assert_eq!(
         world.output().status.success(),
-        status == "succeeds",
+        matches[0] == "succeeds",
         "{}",
         world.text()
     );
-    assert!(world.text().contains(&expected), "{}", world.text());
+    assert!(world.text().contains(&matches[1]), "{}", world.text());
 }
 
 #[then(regex = r#"^the output mentions "([^"]+)"$"#)]
-fn mentions(world: &mut ConfigEnvWorld, expected: String) {
-    assert!(world.text().contains(&expected), "{}", world.text());
+fn mentions(world: &mut ConfigEnvWorld, matches: &[String]) {
+    assert!(world.text().contains(&matches[0]), "{}", world.text());
 }
 
 #[tokio::main]

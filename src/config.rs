@@ -814,6 +814,17 @@ pub struct RetryConfig {
     pub fallback_chains: HashMap<String, Vec<String>>,
 }
 
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            base_delay_ms: default_base_delay_ms(),
+            max_delay_ms: default_max_delay_ms(),
+            model_fallback: default_true(),
+            fallback_chains: HashMap::new(),
+        }
+    }
+}
+
 /// Workflow-level MCP servers, keyed by server name. `IndexMap` keeps YAML
 /// order and gives deterministic output for backend configuration.
 pub type McpServers = IndexMap<String, McpServerConfig>;
@@ -1061,7 +1072,9 @@ impl WorkflowConfig {
         // Typed conversion can fail too, so make the entire operation atomic.
         let mut updated = self.clone();
         for (key, value) in values {
-            (key.set)(&mut updated, value)?;
+            (key.set)(&mut updated, value).map_err(|error| {
+                crate::error::CruiseError::Other(format!("override for {}: {error}", key.path))
+            })?;
         }
         if has_sdk {
             updated.command.clear();
@@ -5975,20 +5988,39 @@ steps:
     fn test_env_contract_model_overrides_filled_defaults() {
         let _lock = lock_process();
         let _guards = clear_all_override_envs();
-        let root = tempfile::tempdir().unwrap();
-        let _home = EnvGuard::set("HOME", root.path().to_str().unwrap());
-        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", root.path().to_str().unwrap());
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("{error:?}"));
+        let _home = EnvGuard::set(
+            "HOME",
+            root.path()
+                .to_str()
+                .unwrap_or_else(|| panic!("temporary path is not UTF-8")),
+        );
+        let _xdg = EnvGuard::set(
+            "XDG_CONFIG_HOME",
+            root.path()
+                .to_str()
+                .unwrap_or_else(|| panic!("temporary path is not UTF-8")),
+        );
         let project = root.path().join("project");
-        std::fs::create_dir_all(project.join(".cruise")).unwrap();
-        std::fs::write(project.join(".cruise/default.yaml"), "model: a\n").unwrap();
-        let defaults = crate::workflow_defaults::WorkflowDefaults::load(Some(&project)).unwrap();
+        std::fs::create_dir_all(project.join(".cruise"))
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        std::fs::write(project.join(".cruise/default.yaml"), "model: a\n")
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let defaults = crate::workflow_defaults::WorkflowDefaults::load(Some(&project))
+            .unwrap_or_else(|error| panic!("{error:?}"));
         let mut resolution =
-            crate::workflow_defaults::WorkflowConfigResolution::from_yaml(MINIMAL_YAML).unwrap();
-        defaults.apply_to(&mut resolution).unwrap();
+            crate::workflow_defaults::WorkflowConfigResolution::from_yaml(MINIMAL_YAML)
+                .unwrap_or_else(|error| panic!("{error:?}"));
+        defaults
+            .apply_to(&mut resolution)
+            .unwrap_or_else(|error| panic!("{error:?}"));
         assert_eq!(resolution.config.model, Some(ModelSpec::Single("a".into())));
 
         let _model = EnvGuard::set("CRUISE_MODEL", "b");
-        resolution.config.apply_env_overrides().unwrap();
+        resolution
+            .config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
         assert_eq!(resolution.config.model, Some(ModelSpec::Single("b".into())));
     }
 
@@ -6008,8 +6040,10 @@ steps:
         let mut config = WorkflowConfig::from_yaml(
             "sdk: claude\nmax_retries: 5\ndisallowed_tools: [web]\nsteps:\n  s1:\n    prompt: hi\n",
         )
-        .unwrap();
-        config.apply_env_overrides().unwrap();
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
         assert_eq!(config.max_retries, Some(7));
         assert!(config.computer_use);
         assert_eq!(config.permission, PermissionMode::ReadOnly);
@@ -6029,16 +6063,17 @@ steps:
             let _command = EnvGuard::set("CRUISE_COMMAND", command);
             let _sdk = sdk.map(|value| EnvGuard::set("CRUISE_SDK", value));
             let mut config =
-                WorkflowConfig::from_yaml("sdk: jcode\nsteps:\n  s1:\n    prompt: hi\n").unwrap();
+                WorkflowConfig::from_yaml("sdk: jcode\nsteps:\n  s1:\n    prompt: hi\n")
+                    .unwrap_or_else(|error| panic!("{error:?}"));
             let result = config.apply_env_overrides();
             if is_error {
                 assert!(err_string(result).contains("mutually exclusive"));
             } else {
-                result.unwrap();
+                result.unwrap_or_else(|error| panic!("{error:?}"));
                 assert_eq!(config.command, expected_command);
                 assert_eq!(config.sdk.as_deref(), expected_sdk);
                 if command == "[]" {
-                    validate_config(&config).unwrap();
+                    validate_config(&config).unwrap_or_else(|error| panic!("{error:?}"));
                 }
             }
         }
@@ -6049,9 +6084,14 @@ steps:
         let _lock = lock_process();
         let _guards = clear_all_override_envs();
         let _base = EnvGuard::set("CRUISE_RETRY_BASE_DELAY_MS", "100");
-        let mut config = WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap();
-        config.apply_env_overrides().unwrap();
-        let retry = config.retry.unwrap();
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|error| panic!("{error:?}"));
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let retry = config
+            .retry
+            .unwrap_or_else(|| panic!("retry configuration missing"));
         assert_eq!(retry.base_delay_ms, 100);
         assert_eq!(retry.max_delay_ms, default_max_delay_ms());
         assert!(retry.model_fallback);
@@ -6065,10 +6105,18 @@ steps:
             let _guards = clear_all_override_envs();
             let _parent = EnvGuard::set("CRUISE_RETRY", "null");
             let _child = child.map(|v| EnvGuard::set("CRUISE_RETRY_MAX_DELAY_MS", v));
-            let mut config = WorkflowConfig::from_yaml("command: [claude, -p]\nretry: {model_fallback: false}\nsteps:\n  s1:\n    command: echo hi\n").unwrap();
-            config.apply_env_overrides().unwrap();
+            let mut config = WorkflowConfig::from_yaml("command: [claude, -p]\nretry: {model_fallback: false}\nsteps:\n  s1:\n    command: echo hi\n").unwrap_or_else(|error| panic!("{error:?}"));
+            config
+                .apply_env_overrides()
+                .unwrap_or_else(|error| panic!("{error:?}"));
             if child.is_some() {
-                assert_eq!(config.retry.unwrap().max_delay_ms, 900);
+                assert_eq!(
+                    config
+                        .retry
+                        .unwrap_or_else(|| panic!("retry configuration missing"))
+                        .max_delay_ms,
+                    900
+                );
             } else {
                 assert!(config.retry.is_none());
             }
@@ -6080,9 +6128,16 @@ steps:
         let _lock = lock_process();
         let _guards = clear_all_override_envs();
         let _env = EnvGuard::set("CRUISE_RETRY_MODEL_FALLBACK", "true");
-        let mut config = WorkflowConfig::from_yaml("command: [claude, -p]\nretry: {model_fallback: false}\nsteps:\n  s1:\n    command: echo hi\n").unwrap();
-        config.apply_env_overrides().unwrap();
-        assert!(config.retry.unwrap().model_fallback);
+        let mut config = WorkflowConfig::from_yaml("command: [claude, -p]\nretry: {model_fallback: false}\nsteps:\n  s1:\n    command: echo hi\n").unwrap_or_else(|error| panic!("{error:?}"));
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(
+            config
+                .retry
+                .unwrap_or_else(|| panic!("retry configuration missing"))
+                .model_fallback
+        );
     }
 
     #[test]
@@ -6090,10 +6145,18 @@ steps:
         let _lock = lock_process();
         let _guards = clear_all_override_envs();
         let _env = EnvGuard::set("CRUISE_MODEL", "[\"a\",\"b\"]");
-        let mut config = WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap();
-        config.apply_env_overrides().unwrap();
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|error| panic!("{error:?}"));
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
         assert!(matches!(config.model, Some(ModelSpec::Multiple(ref values)) if values.len() == 2));
-        assert!(config.retry.unwrap().model_fallback);
+        assert!(
+            config
+                .retry
+                .unwrap_or_else(|| panic!("retry configuration missing"))
+                .model_fallback
+        );
     }
 
     #[test]
@@ -6111,9 +6174,18 @@ steps:
                 let _model = EnvGuard::set(model_key, "[\"a\",\"b\"]");
                 let _parent = parent.map(|v| EnvGuard::set("CRUISE_RETRY", v));
                 let _child = child.map(|v| EnvGuard::set("CRUISE_RETRY_MODEL_FALLBACK", v));
-                let mut config = WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap();
-                config.apply_env_overrides().unwrap();
-                assert_eq!(config.retry.unwrap().model_fallback, expected);
+                let mut config = WorkflowConfig::from_yaml(MINIMAL_YAML)
+                    .unwrap_or_else(|error| panic!("{error:?}"));
+                config
+                    .apply_env_overrides()
+                    .unwrap_or_else(|error| panic!("{error:?}"));
+                assert_eq!(
+                    config
+                        .retry
+                        .unwrap_or_else(|| panic!("retry configuration missing"))
+                        .model_fallback,
+                    expected
+                );
             }
         }
     }
@@ -6128,8 +6200,11 @@ steps:
                 "{\"pr\":\"French\",\"plan\":\"German\"}",
             );
             let _child = EnvGuard::set("CRUISE_LANGUAGE_PR", child);
-            let mut config = WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap();
-            config.apply_env_overrides().unwrap();
+            let mut config =
+                WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|error| panic!("{error:?}"));
+            config
+                .apply_env_overrides()
+                .unwrap_or_else(|error| panic!("{error:?}"));
             assert_eq!(config.effective_pr_language(), expected);
             assert_eq!(config.effective_plan_language(), "German");
         }
@@ -6140,17 +6215,23 @@ steps:
         let _lock = lock_process();
         let _guards = clear_all_override_envs();
         let _excluded = EnvGuard::set("CRUISE_CREATE_PR", "false");
-        let mut config = WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap();
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|error| panic!("{error:?}"));
         let original_create_pr = config.create_pr;
-        config.apply_env_overrides().unwrap();
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
         assert_eq!(config.create_pr, original_create_pr);
 
         let _valid = EnvGuard::set("CRUISE_MAX_RETRIES", "3");
         let _invalid = EnvGuard::set("CRUISE_PERMISSION", "bogus");
-        let before = serde_json::to_value(&config).unwrap();
+        let before = serde_json::to_value(&config).unwrap_or_else(|error| panic!("{error:?}"));
         let error = err_string(config.apply_env_overrides());
         assert!(error.contains("CRUISE_PERMISSION"));
-        assert_eq!(serde_json::to_value(&config).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(&config).unwrap_or_else(|error| panic!("{error:?}")),
+            before
+        );
     }
 
     #[test]

@@ -10,14 +10,14 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = TempDir::new().expect("create fixture");
+        let root = TempDir::new().unwrap_or_else(|error| panic!("create fixture: {error}"));
         let project = root.path().join("project");
-        std::fs::create_dir_all(&project).expect("create project");
+        std::fs::create_dir_all(&project).unwrap_or_else(|error| panic!("create project: {error}"));
         std::fs::write(
             project.join("workflow.yaml"),
             "command: [echo]\nsteps:\n  main:\n    command: echo main\n",
         )
-        .expect("write workflow");
+        .unwrap_or_else(|error| panic!("write workflow: {error}"));
         Self { root, project }
     }
 
@@ -68,7 +68,7 @@ impl Fixture {
                 .env("GIT_CONFIG_COUNT", "0")
                 .args(&args)
                 .output()
-                .expect("run git");
+                .unwrap_or_else(|error| panic!("run git: {error}"));
             assert!(output.status.success(), "{}", text(&output));
         }
     }
@@ -90,7 +90,7 @@ fn config_displays_environment_parallelism_without_persisting_it() {
         .env("CRUISE_RUN_ALL_PARALLELISM", "4")
         .arg("config")
         .output()
-        .expect("show config");
+        .unwrap_or_else(|error| panic!("show config: {error}"));
     assert!(show.status.success(), "{}", text(&show));
     let stdout = String::from_utf8_lossy(&show.stdout);
     assert!(stdout.contains("run_all_parallelism = 4"), "{stdout}");
@@ -104,13 +104,13 @@ fn config_displays_environment_parallelism_without_persisting_it() {
         .env("CRUISE_RUN_ALL_PARALLELISM", "4")
         .args(["config", "--set-parallelism", "2"])
         .output()
-        .expect("set config");
+        .unwrap_or_else(|error| panic!("set config: {error}"));
     assert!(set.status.success(), "{}", text(&set));
     let show_raw = fixture
         .command()
         .arg("config")
         .output()
-        .expect("show persisted config");
+        .unwrap_or_else(|error| panic!("show persisted config: {error}"));
     assert!(show_raw.status.success(), "{}", text(&show_raw));
     assert!(
         String::from_utf8_lossy(&show_raw.stdout).contains("run_all_parallelism = 2"),
@@ -118,8 +118,9 @@ fn config_displays_environment_parallelism_without_persisting_it() {
         text(&show_raw)
     );
     let saved = std::fs::read_to_string(fixture.root.path().join("config/cruise/config.json"))
-        .expect("read saved config");
-    let saved: serde_json::Value = serde_json::from_str(&saved).expect("parse saved config");
+        .unwrap_or_else(|error| panic!("read saved config: {error}"));
+    let saved: serde_json::Value =
+        serde_json::from_str(&saved).unwrap_or_else(|error| panic!("parse saved config: {error}"));
     assert_eq!(saved["runAllParallelism"], 2);
 }
 
@@ -132,7 +133,7 @@ fn invalid_environment_parallelism_is_rejected() {
             .env("CRUISE_RUN_ALL_PARALLELISM", value)
             .arg("config")
             .output()
-            .expect("show config");
+            .unwrap_or_else(|error| panic!("show config: {error}"));
         assert!(!output.status.success(), "value {value}: {}", text(&output));
         assert!(
             text(&output).contains("CRUISE_RUN_ALL_PARALLELISM"),
@@ -158,7 +159,7 @@ fn invalid_boolean_override_fails_in_real_plan_command() {
             "test plan",
         ])
         .output()
-        .expect("run plan");
+        .unwrap_or_else(|error| panic!("run plan: {error}"));
     assert!(!output.status.success(), "{}", text(&output));
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("CRUISE_CLEANUP_AFTER_PR"),
@@ -176,7 +177,7 @@ fn conflicting_sdk_and_command_env_fail_before_execution() {
         .env("CRUISE_COMMAND", "[\"echo\"]")
         .args(["exec", "--dry-run", "--config", "workflow.yaml"])
         .output()
-        .expect("run exec");
+        .unwrap_or_else(|error| panic!("run exec: {error}"));
     let message = text(&output);
     assert!(!output.status.success(), "{message}");
     assert!(
@@ -195,7 +196,7 @@ fn invalid_count_override_fails_with_variable_name() {
         .env("CRUISE_MAX_RETRIES", "-1")
         .args(["exec", "--dry-run", "--config", "workflow.yaml"])
         .output()
-        .expect("run exec");
+        .unwrap_or_else(|error| panic!("run exec: {error}"));
     let message = text(&output);
     assert!(!output.status.success(), "{message}");
     assert!(message.contains("CRUISE_MAX_RETRIES"), "{message}");
@@ -211,7 +212,7 @@ fn no_force_exec_flag_overrides_environment_for_plan() {
         fixture.project.join("workflow.yaml"),
         "command: [echo]\nsteps:\n  main:\n    command: touch executed-marker\n",
     )
-    .expect("write workflow");
+    .unwrap_or_else(|error| panic!("write workflow: {error}"));
     let output = fixture
         .command()
         .env("CRUISE_FORCE_EXEC", "true")
@@ -224,12 +225,15 @@ fn no_force_exec_flag_overrides_environment_for_plan() {
             "test plan",
         ])
         .output()
-        .expect("run plan");
+        .unwrap_or_else(|error| panic!("run plan: {error}"));
     assert!(output.status.success(), "{}", text(&output));
     assert!(!marker.exists(), "the workflow must not execute directly");
     let manager = cruise::session::SessionManager::new(fixture.root.path().join("data/cruise"));
     assert_eq!(
-        manager.list().expect("list sessions").len(),
+        manager
+            .list()
+            .unwrap_or_else(|error| panic!("list sessions: {error}"))
+            .len(),
         1,
         "{}",
         text(&output)

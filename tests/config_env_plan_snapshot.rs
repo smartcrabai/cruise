@@ -1,10 +1,11 @@
 use std::process::Command;
 
 #[test]
-fn plan_builtin_snapshot_captures_environment_retry_override() {
-    let root = tempfile::tempdir().unwrap();
+fn plan_builtin_snapshot_captures_environment_retry_override()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
     let project = root.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&project)?;
     for args in [
         vec!["init", "-q", "-b", "main"],
         vec![
@@ -27,8 +28,7 @@ fn plan_builtin_snapshot_captures_environment_retry_override() {
             .current_dir(&project)
             .env("GIT_CONFIG_COUNT", "0")
             .args(args)
-            .output()
-            .unwrap();
+            .output()?;
         assert!(
             result.status.success(),
             "{}",
@@ -63,8 +63,7 @@ fn plan_builtin_snapshot_captures_environment_retry_override() {
             "__builtin__",
             "test plan",
         ])
-        .output()
-        .unwrap();
+        .output()?;
     assert!(
         output.status.success(),
         "stdout: {}\nstderr: {}",
@@ -72,13 +71,13 @@ fn plan_builtin_snapshot_captures_environment_retry_override() {
         String::from_utf8_lossy(&output.stderr)
     );
     let manager = cruise::session::SessionManager::new(root.path().join("data/cruise"));
-    let sessions = manager.list().unwrap();
+    let sessions = manager.list()?;
     assert_eq!(sessions.len(), 1);
     let path = manager
         .sessions_dir()
         .join(&sessions[0].id)
         .join("config.yaml");
-    let snapshot: serde_yaml::Value =
-        serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let snapshot: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(path)?)?;
     assert_eq!(snapshot["max_retries"].as_u64(), Some(7));
+    Ok(())
 }

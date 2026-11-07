@@ -25,6 +25,9 @@ pub struct AppEnvKey {
 }
 
 /// Parse an override, treating whitespace-only values as absent.
+///
+/// # Errors
+/// Returns an error when the value does not match the expected grammar.
 pub fn parse_override(var: &'static str, kind: EnvKind, raw: &str) -> Result<Option<Value>> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -38,7 +41,11 @@ pub fn parse_override(var: &'static str, kind: EnvKind, raw: &str) -> Result<Opt
         EnvKind::Bool => match raw {
             "true" | "1" => Value::Bool(true),
             "false" | "0" => Value::Bool(false),
-            _ => return Err(invalid("true/false/1/0")),
+            _ => {
+                return Err(CruiseError::Other(format!(
+                    "invalid value for {var}: '{raw}' (expected true/false/1/0)"
+                )));
+            }
         },
         EnvKind::Count => {
             if !raw.bytes().all(|b| b.is_ascii_digit()) {
@@ -68,9 +75,7 @@ fn decode<T: serde::de::DeserializeOwned>(var: &str, value: Value) -> Result<T> 
     })
 }
 fn retry(config: &mut WorkflowConfig) -> &mut RetryConfig {
-    config.retry.get_or_insert_with(|| {
-        serde_json::from_value(serde_json::json!({})).expect("retry defaults are valid")
-    })
+    config.retry.get_or_insert_with(RetryConfig::default)
 }
 macro_rules! key {
     ($var:literal, $path:literal, $kind:ident, $field:ident) => {
@@ -226,7 +231,8 @@ mod tests {
     fn malformed_command_error_does_not_expose_value() {
         let secret = "recognizable-secret-123";
         let error = parse_override("CRUISE_COMMAND", EnvKind::Json, &format!("[\"{secret}\""))
-            .unwrap_err()
+            .err()
+            .unwrap_or_else(|| panic!("expected error"))
             .to_string();
         assert!(error.contains("CRUISE_COMMAND"));
         assert!(error.contains("valid JSON"));
@@ -237,15 +243,19 @@ mod tests {
     fn wrong_type_command_error_does_not_expose_value() {
         let secret = "recognizable-secret-456";
         let value = parse_override("CRUISE_COMMAND", EnvKind::Json, &format!("\"{secret}\""))
-            .unwrap()
-            .unwrap();
+            .unwrap_or_else(|error| panic!("{error:?}"))
+            .unwrap_or_else(|| panic!("expected value"));
         let key = WORKFLOW_ENV_KEYS
             .iter()
             .find(|key| key.var == "CRUISE_COMMAND")
-            .unwrap();
+            .unwrap_or_else(|| panic!("expected command key"));
         let mut config =
-            WorkflowConfig::from_yaml("command: [echo]\nsteps:\n  s1:\n    prompt: hi\n").unwrap();
-        let error = (key.set)(&mut config, value).unwrap_err().to_string();
+            WorkflowConfig::from_yaml("command: [echo]\nsteps:\n  s1:\n    prompt: hi\n")
+                .unwrap_or_else(|error| panic!("{error:?}"));
+        let error = (key.set)(&mut config, value)
+            .err()
+            .unwrap_or_else(|| panic!("expected error"))
+            .to_string();
         assert!(error.contains("CRUISE_COMMAND"));
         assert!(error.contains("Vec"));
         assert!(!error.contains(secret));
@@ -260,14 +270,16 @@ mod tests {
             ("0", false),
         ] {
             assert_eq!(
-                parse_override("CRUISE_TEST", EnvKind::Bool, raw).unwrap(),
+                parse_override("CRUISE_TEST", EnvKind::Bool, raw)
+                    .unwrap_or_else(|error| panic!("{error:?}")),
                 Some(Value::Bool(expected))
             );
         }
         for raw in ["True", "yes", "2"] {
             assert!(
                 parse_override("CRUISE_TEST", EnvKind::Bool, raw)
-                    .unwrap_err()
+                    .err()
+                    .unwrap_or_else(|| panic!("expected error"))
                     .to_string()
                     .contains("CRUISE_TEST")
             );
@@ -276,21 +288,24 @@ mod tests {
             assert!(parse_override("CRUISE_TEST", EnvKind::Count, raw).is_err());
         }
         assert_eq!(
-            parse_override("CRUISE_TEST", EnvKind::Count, "0").unwrap(),
+            parse_override("CRUISE_TEST", EnvKind::Count, "0")
+                .unwrap_or_else(|error| panic!("{error:?}")),
             Some(Value::from(0))
         );
         assert_eq!(
-            parse_override("CRUISE_TEST", EnvKind::Text, "  Japanese ").unwrap(),
+            parse_override("CRUISE_TEST", EnvKind::Text, "  Japanese ")
+                .unwrap_or_else(|error| panic!("{error:?}")),
             Some(Value::from("Japanese"))
         );
         assert_eq!(
-            parse_override("CRUISE_TEST", EnvKind::Text, "  ").unwrap(),
+            parse_override("CRUISE_TEST", EnvKind::Text, "  ")
+                .unwrap_or_else(|error| panic!("{error:?}")),
             None
         );
         assert!(
             parse_override("CRUISE_TEST", EnvKind::Model, "[\"a\",\"b\"]")
-                .unwrap()
-                .unwrap()
+                .unwrap_or_else(|error| panic!("{error:?}"))
+                .unwrap_or_else(|| panic!("expected value"))
                 .is_array()
         );
         assert!(
@@ -299,13 +314,14 @@ mod tests {
                 EnvKind::Model,
                 "{\"sdk\":\"claude\",\"model\":\"x\"}"
             )
-            .unwrap()
-            .unwrap()
+            .unwrap_or_else(|error| panic!("{error:?}"))
+            .unwrap_or_else(|| panic!("expected value"))
             .is_object()
         );
         assert!(parse_override("CRUISE_TEST", EnvKind::Model, "[\"a\"").is_err());
         assert_eq!(
-            parse_override("CRUISE_TEST", EnvKind::Json, "null").unwrap(),
+            parse_override("CRUISE_TEST", EnvKind::Json, "null")
+                .unwrap_or_else(|error| panic!("{error:?}")),
             Some(Value::Null)
         );
         assert!(parse_override("CRUISE_TEST", EnvKind::Json, "{").is_err());

@@ -2455,6 +2455,10 @@ impl CruiseApplication {
         crate::app_config::AppConfig::load()
     }
 
+    /// Load application configuration with process overrides applied.
+    ///
+    /// # Errors
+    /// Returns an error if loading or applying overrides fails.
     pub fn effective_app_config(&self) -> Result<crate::app_config::AppConfig> {
         self.app_config()?.with_env_overrides()
     }

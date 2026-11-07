@@ -19,13 +19,20 @@ fn all_registered_overrides_are_documented() {
 
 #[test]
 fn schema_properties_are_classified_and_override_paths_exist() {
-    let schema: serde_json::Value =
-        serde_json::from_str(include_str!("../cruise-schema.json")).unwrap();
-    let properties = schema["properties"].as_object().unwrap();
+    let schema: serde_json::Value = serde_json::from_str(include_str!("../cruise-schema.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let properties = schema["properties"]
+        .as_object()
+        .unwrap_or_else(|| panic!("schema properties are missing"));
     let excluded: BTreeSet<_> = EXCLUDED_KEYS.iter().map(|(key, _)| *key).collect();
     let roots: BTreeSet<_> = WORKFLOW_ENV_KEYS
         .iter()
-        .map(|key| key.path.split('.').next().unwrap())
+        .map(|key| {
+            key.path
+                .split('.')
+                .next()
+                .unwrap_or_else(|| panic!("empty override path"))
+        })
         .collect();
     for key in properties.keys().filter(|key| key.as_str() != "$schema") {
         assert!(
@@ -38,18 +45,26 @@ fn schema_properties_are_classified_and_override_paths_exist() {
         for part in key.path.split('.') {
             if let Some(reference) = current.get("$ref").and_then(|v| v.as_str()) {
                 current = schema
-                    .pointer(reference.strip_prefix('#').unwrap())
-                    .unwrap();
+                    .pointer(
+                        reference
+                            .strip_prefix('#')
+                            .unwrap_or_else(|| panic!("non-local reference: {reference}")),
+                    )
+                    .unwrap_or_else(|| panic!("missing reference: {reference}"));
             }
             current = &current["properties"][part];
             assert!(!current.is_null(), "missing schema path: {}", key.path);
         }
     }
-    let app = serde_json::to_value(cruise::app_config::AppConfig::default()).unwrap();
+    let app = serde_json::to_value(cruise::app_config::AppConfig::default())
+        .unwrap_or_else(|error| panic!("{error}"));
     for key in APP_ENV_KEYS {
         // AppConfig uses camelCase in its persisted JSON representation.
         let mut parts = key.path.split('_');
-        let mut json_key = parts.next().unwrap().to_owned();
+        let mut json_key = parts
+            .next()
+            .unwrap_or_else(|| panic!("empty app override path"))
+            .to_owned();
         for part in parts {
             let mut chars = part.chars();
             if let Some(first) = chars.next() {
