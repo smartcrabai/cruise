@@ -1476,7 +1476,10 @@ async fn github_timeout_diagnostic_uses_latest_observation() {
     assert!(reason.contains("mergeable=UNKNOWN"), "{reason}");
     assert!(reason.contains("mergeStateStatus=CLEAN"), "{reason}");
     assert!(reason.contains("CI state=SUCCESS"), "{reason}");
-    assert!(reason.contains(&format!("CI head={}", fixture.head)), "{reason}");
+    assert!(
+        reason.contains(&format!("CI head={}", fixture.head)),
+        "{reason}"
+    );
     assert_eq!(fixture.effect_lines(), Vec::<String>::new());
 }
 
