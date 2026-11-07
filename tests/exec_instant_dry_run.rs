@@ -39,12 +39,19 @@ fn defaults_prepend_command_step_to_instant() {
     let root = TempDir::new().unwrap();
     let dir = root.path().join("config/cruise");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("default.yaml"), "pre_steps:\n  setup:\n    command: echo setup\n").unwrap();
+    std::fs::write(
+        dir.join("default.yaml"),
+        "pre_steps:\n  setup:\n    command: echo setup\n",
+    )
+    .unwrap();
     let result = dry_run(&root, &["task"], &[]);
     let output = text(&result);
     assert!(result.status.success(), "{output}");
     let steps = output.split("steps:").last().unwrap();
-    assert!(steps.find("setup").unwrap() < steps.find("implement").unwrap(), "{output}");
+    assert!(
+        steps.find("setup").unwrap() < steps.find("implement").unwrap(),
+        "{output}"
+    );
 }
 
 #[test]

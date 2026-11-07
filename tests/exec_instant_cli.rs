@@ -132,7 +132,11 @@ fn terminal(output: &Output) -> String {
 #[test]
 fn instant_preserves_task_whitespace_and_rejects_blank() {
     let f = Fixture::new();
-    let output = f.command().args(["--instant", "  task with spaces  "]).output().unwrap();
+    let output = f
+        .command()
+        .args(["--instant", "  task with spaces  "])
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{}", terminal(&output));
     let prompt = std::fs::read_to_string(f.log.with_extension("log.prompt")).unwrap();
     assert!(prompt.contains("\n  task with spaces  \n"), "{prompt:?}");
@@ -202,7 +206,12 @@ fn review_detects_tracked_file_in_target() {
     std::fs::create_dir(f.repo.join("target")).unwrap();
     std::fs::write(f.repo.join("target/tracked.txt"), "original").unwrap();
     git(&f.repo, &["add", "-f", "target/tracked.txt"]);
-    let output = f.command().env("CHANGE_TRACKED", "1").args(["--instant", "--review", "task"]).output().unwrap();
+    let output = f
+        .command()
+        .env("CHANGE_TRACKED", "1")
+        .args(["--instant", "--review", "task"])
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{}", terminal(&output));
     assert_eq!(f.calls(), ["implement", "review", "review"]);
 }

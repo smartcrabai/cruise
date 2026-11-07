@@ -136,19 +136,38 @@ pub(crate) fn build_yaml(args: &ExecArgs) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver::{load_config_from_source, ConfigSource};
+    use crate::resolver::{ConfigSource, load_config_from_source};
 
     #[test]
     fn generated_inline_workflow_contract() {
-        let mut args = ExecArgs { input: Some("task".into()), instant: true, sdk: None, model: None,
-            review: false, review_rounds: None, verify: vec![], config: None,
-            max_retries: None, rate_limit_retries: 0, dry_run: false, flags: vec![] };
+        let mut args = ExecArgs {
+            input: Some("task".into()),
+            instant: true,
+            sdk: None,
+            model: None,
+            review: false,
+            review_rounds: None,
+            verify: vec![],
+            config: None,
+            max_retries: None,
+            rate_limit_retries: 0,
+            dry_run: false,
+            flags: vec![],
+        };
         let yaml = build_yaml(&args).unwrap();
         let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        for key in ["sdk", "model", "max_retries", "groups"] { assert!(value.get(key).is_none(), "{yaml}"); }
+        for key in ["sdk", "model", "max_retries", "groups"] {
+            assert!(value.get(key).is_none(), "{yaml}");
+        }
         let config = load_config_from_source(&yaml, &ConfigSource::Inline).unwrap();
-        assert_eq!(config.steps.keys().map(String::as_str).collect::<Vec<_>>(), ["implement"]);
-        assert_eq!(config.steps["implement"].prompt.as_deref(), Some(IMPLEMENT_PROMPT));
+        assert_eq!(
+            config.steps.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["implement"]
+        );
+        assert_eq!(
+            config.steps["implement"].prompt.as_deref(),
+            Some(IMPLEMENT_PROMPT)
+        );
         for prompt in [IMPLEMENT_PROMPT, REVIEW_PROMPT] {
             assert_eq!(prompt.matches("{input}").count(), 1);
             assert_eq!(prompt.matches('{').count(), 1);
@@ -159,11 +178,20 @@ mod tests {
         args.verify = vec!["echo one".into(), "echo two".into()];
         let yaml = build_yaml(&args).unwrap();
         let config = load_config_from_source(&yaml, &ConfigSource::Inline).unwrap();
-        assert_eq!(config.steps.keys().map(String::as_str).collect::<Vec<_>>(), ["implement", "review-pass", "verify-1", "verify-2"]);
+        assert_eq!(
+            config.steps.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["implement", "review-pass", "verify-1", "verify-2"]
+        );
         assert_eq!(config.max_retries, Some(5));
         assert_eq!(config.groups["review-loop"].max_retries, Some(5));
         let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(value["steps"]["verify-1"]["command"].as_str(), Some("echo one"));
-        assert_eq!(value["steps"]["verify-2"]["command"].as_str(), Some("echo two"));
+        assert_eq!(
+            value["steps"]["verify-1"]["command"].as_str(),
+            Some("echo one")
+        );
+        assert_eq!(
+            value["steps"]["verify-2"]["command"].as_str(),
+            Some("echo two")
+        );
     }
 }

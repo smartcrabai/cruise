@@ -358,15 +358,26 @@ mod tests {
         args.config = None;
         let yaml = crate::instant_exec::build_yaml(&args).unwrap();
         let id = SessionManager::new_session_id();
-        let session = setup_exec_session(&manager, &ConfigSource::Inline, &yaml, "instant task".into(), &id).unwrap();
+        let session = setup_exec_session(
+            &manager,
+            &ConfigSource::Inline,
+            &yaml,
+            "instant task".into(),
+            &id,
+        )
+        .unwrap();
         let saved = manager.load(&id).unwrap();
         assert_eq!(saved.config, SessionConfigRef::InlineSnapshot);
         assert_eq!(saved.input, "instant task");
         assert!(saved.exec && saved.allow_dirty_working_tree);
         assert_eq!(saved.workspace_mode, WorkspaceMode::CurrentBranch);
         assert!(matches!(saved.phase, SessionPhase::Planned));
-        assert_eq!(fs::read_to_string(session.plan_path(&manager.sessions_dir())).unwrap(), "");
-        let snapshot = fs::read_to_string(manager.sessions_dir().join(id).join("config.yaml")).unwrap();
+        assert_eq!(
+            fs::read_to_string(session.plan_path(&manager.sessions_dir())).unwrap(),
+            ""
+        );
+        let snapshot =
+            fs::read_to_string(manager.sessions_dir().join(id).join("config.yaml")).unwrap();
         let config = load_config_from_source(&snapshot, &ConfigSource::Inline).unwrap();
         assert!(config.steps.contains_key("implement"));
     }
