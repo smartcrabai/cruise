@@ -1,4 +1,4 @@
-//! Persistent, private registry for the single local WebUI instance.
+//! Persistent, private registry for the single local `WebUI` instance.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -133,19 +133,19 @@ pub fn precise_identity(pid: u32) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 pub fn precise_identity(pid: u32) -> Option<String> {
-    let pid = i32::try_from(pid).ok()?;
+    let native_pid = i32::try_from(pid).ok()?;
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
     let result = unsafe {
         libc::proc_pidinfo(
-            pid,
+            native_pid,
             libc::PROC_PIDTBSDINFO,
             0,
-            &mut info as *mut _ as *mut _,
-            size as i32,
+            (&raw mut info).cast(),
+            size,
         )
     };
-    if result != size as i32 || info.pbi_pid != pid as u32 {
+    if result != size || info.pbi_pid != pid {
         return None;
     }
     Some(format!(
@@ -363,14 +363,16 @@ fn private_open(path: &Path, create_new: bool) -> io::Result<File> {
 mod tests {
     use super::*;
 
-    fn record() -> InstanceRecord {
+    fn record() -> Result<InstanceRecord> {
         let pid = std::process::id();
-        InstanceRecord {
+        Ok(InstanceRecord {
             schema_version: 1,
             instance_id: "test-id".into(),
             mode: "foreground".into(),
             pid,
-            process_started_at: process_start_time(pid).expect("current process start time"),
+            process_started_at: process_start_time(pid).ok_or_else(|| {
+                CruiseError::Other("current process start time unavailable".into())
+            })?,
             process_identity: precise_identity(pid),
             host: "127.0.0.1".into(),
             port: 1234,
@@ -381,57 +383,73 @@ mod tests {
             working_dir: ".".into(),
             log_path: None,
             started_at: 1,
-        }
+        })
     }
 
     #[test]
-    fn round_trip_identity_and_owned_cleanup() {
-        let temp = tempfile::tempdir().unwrap();
+    fn round_trip_identity_and_owned_cleanup() -> Result<()> {
+        let temp = tempfile::tempdir()?;
         let registry = Registry::at(temp.path().join("webui"));
-        let _guard = registry.lock().unwrap();
-        let record = record();
+        let _guard = registry.lock()?;
+        let record = record()?;
         assert!(record.is_live());
         let mut reused = record.clone();
         reused.process_identity = Some("different-process-in-same-second".to_owned());
         assert_eq!(reused.pid, record.pid);
         assert_eq!(reused.process_started_at, record.process_started_at);
-        assert!(!reused.verify_identity().unwrap());
+        assert!(!reused.verify_identity()?);
         let mut wrong_start = record.clone();
         wrong_start.process_started_at += 1;
-        assert!(!wrong_start.verify_identity().unwrap());
-        registry.write(&record).unwrap();
-        assert_eq!(registry.read().unwrap().unwrap().instance_id, "test-id");
-        assert!(!registry.remove_if_owned("someone-else").unwrap());
-        assert!(registry.remove_if_owned("test-id").unwrap());
-        assert!(registry.read().unwrap().is_none());
+        assert!(!wrong_start.verify_identity()?);
+        registry.write(&record)?;
+        assert_eq!(
+            registry
+                .read()?
+                .ok_or_else(|| CruiseError::Other("missing record".into()))?
+                .instance_id,
+            "test-id"
+        );
+        assert!(!registry.remove_if_owned("someone-else")?);
+        assert!(registry.remove_if_owned("test-id")?);
+        assert!(registry.read()?.is_none());
+        Ok(())
     }
 
     #[test]
-    fn registry_lock_blocks_another_handle_until_drop() {
-        let temp = tempfile::tempdir().unwrap();
+    fn registry_lock_blocks_another_handle_until_drop() -> Result<()> {
+        let temp = tempfile::tempdir()?;
         let registry = Registry::at(temp.path().join("webui"));
-        let guard = registry.lock().unwrap();
-        let other = private_open(&registry.dir().join("instance.lock"), false).unwrap();
-        let err = fs2::FileExt::try_lock_exclusive(&other).unwrap_err();
+        let guard = registry.lock()?;
+        let other = private_open(&registry.dir().join("instance.lock"), false)?;
+        let Err(err) = fs2::FileExt::try_lock_exclusive(&other) else {
+            return Err(CruiseError::Other(
+                "second lock unexpectedly succeeded".into(),
+            ));
+        };
         assert_eq!(err.kind(), fs2::lock_contended_error().kind());
         drop(guard);
-        fs2::FileExt::try_lock_exclusive(&other).unwrap();
-        fs2::FileExt::unlock(&other).unwrap();
+        fs2::FileExt::try_lock_exclusive(&other)?;
+        fs2::FileExt::unlock(&other)?;
+        Ok(())
     }
 
     #[test]
-    fn rejects_unknown_fields_and_versions() {
-        let temp = tempfile::tempdir().unwrap();
+    fn rejects_unknown_fields_and_versions() -> Result<()> {
+        let temp = tempfile::tempdir()?;
         let registry = Registry::at(temp.path().join("webui"));
-        let mut value = serde_json::to_value(record()).unwrap();
-        registry.prepare().unwrap();
+        let mut value = serde_json::to_value(record()?)?;
+        registry.prepare()?;
         value["unknown"] = true.into();
-        fs::write(registry.record_path(), value.to_string()).unwrap();
+        fs::write(registry.record_path(), value.to_string())?;
         assert!(registry.read().is_err());
-        value.as_object_mut().unwrap().remove("unknown");
+        value
+            .as_object_mut()
+            .ok_or_else(|| CruiseError::Other("record is not an object".into()))?
+            .remove("unknown");
         value["schema_version"] = 2.into();
-        fs::write(registry.record_path(), value.to_string()).unwrap();
+        fs::write(registry.record_path(), value.to_string())?;
         assert!(registry.read().is_err());
+        Ok(())
     }
 
     #[test]
@@ -446,23 +464,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn registry_permissions_are_private() {
+    fn registry_permissions_are_private() -> Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir()?;
         let registry = Registry::at(temp.path().join("webui"));
-        let _guard = registry.lock().unwrap();
-        registry.write(&record()).unwrap();
+        let _guard = registry.lock()?;
+        registry.write(&record()?)?;
         assert_eq!(
-            fs::metadata(registry.dir()).unwrap().permissions().mode() & 0o777,
+            fs::metadata(registry.dir())?.permissions().mode() & 0o777,
             0o700
         );
         assert_eq!(
-            fs::metadata(registry.record_path())
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            fs::metadata(registry.record_path())?.permissions().mode() & 0o777,
             0o600
         );
+        Ok(())
     }
 }

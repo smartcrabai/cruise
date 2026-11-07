@@ -1,4 +1,4 @@
-//! Detached WebUI lifecycle management.
+//! Detached `WebUI` lifecycle management.
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::Path;
@@ -17,41 +17,41 @@ fn error(message: impl Into<String>) -> CruiseError {
     CruiseError::Other(message.into())
 }
 
-pub(crate) fn start(args: ServeArgs) -> Result<()> {
+pub(crate) fn start(args: &ServeArgs) -> Result<()> {
     let registry = Registry::new()?;
     let _lock = registry.lock()?;
     start_locked(args)
 }
 
-fn start_locked(args: ServeArgs) -> Result<()> {
-    if let Some(record) = Registry::new()?.read_for_start()? {
-        if record.verify_identity()? {
-            if args.host.as_ref().is_some_and(|host| host != &record.host)
-                || args.port.is_some_and(|port| port != record.port)
-            {
-                return Err(error(format!(
-                    "WebUI is already running at {}; use cruise webui restart to change the address",
-                    record.origin
-                )));
-            }
-            println!(
-                "WebUI already running at {} (PID {}, {}, version {}, executable {})",
-                record.origin,
-                record.pid,
-                record.mode,
-                record.version,
-                record.executable.display()
-            );
-            if is_outdated(&record) {
-                println!("WebUI is outdated; run cruise webui restart");
-            }
-            if args.open {
-                if let Err(e) = crate::platform::open_url(&record.origin) {
-                    eprintln!("warning: could not open browser: {e}");
-                }
-            }
-            return Ok(());
+fn start_locked(args: &ServeArgs) -> Result<()> {
+    if let Some(record) = Registry::new()?.read_for_start()?
+        && record.verify_identity()?
+    {
+        if args.host.as_ref().is_some_and(|host| host != &record.host)
+            || args.port.is_some_and(|port| port != record.port)
+        {
+            return Err(error(format!(
+                "WebUI is already running at {}; use cruise webui restart to change the address",
+                record.origin
+            )));
         }
+        println!(
+            "WebUI already running at {} (PID {}, {}, version {}, executable {})",
+            record.origin,
+            record.pid,
+            record.mode,
+            record.version,
+            record.executable.display()
+        );
+        if is_outdated(&record) {
+            println!("WebUI is outdated; run cruise webui restart");
+        }
+        if args.open
+            && let Err(e) = crate::platform::open_url(&record.origin)
+        {
+            eprintln!("warning: could not open browser: {e}");
+        }
+        return Ok(());
     }
     let root = Registry::new()?.dir().to_path_buf();
     fs::create_dir_all(&root)?;
@@ -84,20 +84,22 @@ fn start_locked(args: ServeArgs) -> Result<()> {
                 log_tail(&log_path)
             )));
         }
-        if let Ok(Some(record)) = Registry::new()?.read() {
-            if record.instance_id == id && record.pid == child.id() && record.is_live() {
-                println!(
-                    "cruise webui started in background (PID {}): {}",
-                    record.pid, record.origin
-                );
-                println!("log: {}", log_path.display());
-                if args.open {
-                    if let Err(e) = crate::platform::open_url(&record.origin) {
-                        eprintln!("warning: could not open browser: {e}");
-                    }
-                }
-                return Ok(());
+        if let Ok(Some(record)) = Registry::new()?.read()
+            && record.instance_id == id
+            && record.pid == child.id()
+            && record.is_live()
+        {
+            println!(
+                "cruise webui started in background (PID {}): {}",
+                record.pid, record.origin
+            );
+            println!("log: {}", log_path.display());
+            if args.open
+                && let Err(e) = crate::platform::open_url(&record.origin)
+            {
+                eprintln!("warning: could not open browser: {e}");
             }
+            return Ok(());
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -183,7 +185,7 @@ fn log_tail(path: &Path) -> String {
     lines.join("\n")
 }
 
-pub(crate) fn stop(args: StopArgs) -> Result<()> {
+pub(crate) fn stop(args: &StopArgs) -> Result<()> {
     let registry = Registry::new()?;
     let _lock = registry.lock()?;
     stop_locked(&registry, args.force).map(|_| ())
@@ -213,7 +215,7 @@ fn stop_locked(registry: &Registry, force: bool) -> Result<Option<InstanceRecord
         url::Url::parse(&record.origin).map_err(|e| error(format!("invalid WebUI origin: {e}")))?;
     match origin.host_str() {
         Some("0.0.0.0") => origin.set_host(Some("127.0.0.1")),
-        Some("[::]") | Some("::") => origin.set_host(Some("[::1]")),
+        Some("[::]" | "::") => origin.set_host(Some("[::1]")),
         _ => Ok(()),
     }
     .map_err(|e| error(format!("invalid WebUI control address: {e}")))?;
@@ -261,7 +263,7 @@ fn stop_locked(registry: &Registry, force: bool) -> Result<Option<InstanceRecord
     }
     let deadline = Instant::now() + WAIT;
     while Instant::now() < deadline {
-        if !record.verify_identity()? {
+        if !verify_or_confirm_cleanup(registry, &record, || record.verify_identity())? {
             registry.remove_if_owned(&record.instance_id)?;
             println!("WebUI stopped (cancelled {cancelled} active operation(s))");
             return Ok(Some(record));
@@ -284,6 +286,24 @@ fn stop_locked(registry: &Registry, force: bool) -> Result<Option<InstanceRecord
     Ok(Some(record))
 }
 
+// A shutting-down daemon removes its record before exiting. On macOS it can
+// become uninspectable while still visible to kill(pid, 0), so recheck the
+// registry after an identity inspection error rather than treating that error
+// as evidence that an extant record is safe to remove.
+fn verify_or_confirm_cleanup(
+    registry: &Registry,
+    record: &InstanceRecord,
+    verify: impl FnOnce() -> Result<bool>,
+) -> Result<bool> {
+    match verify() {
+        Ok(live) => Ok(live),
+        Err(error) => match registry.read()? {
+            Some(current) if current.instance_id == record.instance_id => Err(error),
+            _ => Ok(false),
+        },
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn signal(record: &InstanceRecord, sig: i32) -> Result<()> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -295,7 +315,8 @@ fn signal(record: &InstanceRecord, sig: i32) -> Result<()> {
     if fd < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    let handle = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    let handle =
+        unsafe { OwnedFd::from_raw_fd(i32::try_from(fd).map_err(|_| error("invalid pidfd"))?) };
     if !record.verify_identity()? {
         return Err(error("WebUI process identity changed before signaling"));
     }
@@ -398,10 +419,10 @@ pub(crate) fn restart(mut args: ServeArgs) -> Result<()> {
             args.port = Some(previous.port);
         }
     }
-    start_locked(args)
+    start_locked(&args)
 }
 
-pub(crate) fn status(args: StatusArgs) -> Result<()> {
+pub(crate) fn status(args: &StatusArgs) -> Result<()> {
     let record = Registry::new()?.read()?;
     let running = match record.as_ref() {
         Some(record) => record.verify_identity()?,
@@ -442,14 +463,14 @@ pub(crate) fn status(args: StatusArgs) -> Result<()> {
 }
 
 pub(crate) fn restart_hint() {
-    if let Ok(Some(r)) = Registry::new().and_then(|registry| registry.read()) {
-        if r.is_live() {
-            let _ = writeln!(
-                std::io::stderr(),
-                "warning: the WebUI (PID {}) is still running the previous version; run cruise webui restart to load the updated runtime",
-                r.pid
-            );
-        }
+    if let Ok(Some(r)) = Registry::new().and_then(|registry| registry.read())
+        && r.is_live()
+    {
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: the WebUI (PID {}) is still running the previous version; run cruise webui restart to load the updated runtime",
+            r.pid
+        );
     }
 }
 
@@ -464,10 +485,12 @@ mod tests {
         let mut child = Command::new("sleep").arg("30").spawn()?;
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
         assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
-        let handle = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        let handle =
+            unsafe { OwnedFd::from_raw_fd(i32::try_from(fd).map_err(|_| error("invalid pidfd"))?) };
         let mut target = record();
         target.pid = child.id();
-        target.process_started_at = super::super::instance::process_start_time(target.pid).unwrap();
+        target.process_started_at = super::super::instance::process_start_time(target.pid)
+            .ok_or_else(|| error("target process must be inspectable"))?;
         target.process_identity = super::super::instance::precise_identity(target.pid);
         assert!(target.verify_identity()?);
         child.kill()?;
@@ -519,6 +542,29 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_identity_error_requires_confirmed_registry_cleanup() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let registry = Registry::at(temp.path().to_path_buf());
+        let target = record();
+        registry.write(&target)?;
+
+        assert!(
+            verify_or_confirm_cleanup(&registry, &target, || {
+                Err(error("identity unavailable"))
+            })
+            .is_err()
+        );
+        assert!(registry.read()?.is_some());
+
+        assert!(!verify_or_confirm_cleanup(&registry, &target, || {
+            registry.remove_if_owned(&target.instance_id)?;
+            Err(error("identity unavailable"))
+        })?);
+        assert!(registry.read()?.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn stop_force_does_not_signal_reused_pid() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let registry = Registry::at(temp.path().to_path_buf());
@@ -561,8 +607,11 @@ mod tests {
         );
         let mut target = record();
         target.pid = child.0.id();
+        target.process_started_at = super::super::instance::process_start_time(target.pid)
+            .ok_or_else(|| error("target process must be inspectable"))?;
         target.process_identity = super::super::instance::precise_identity(target.pid);
         assert!(target.process_identity.is_some());
+        assert!(target.verify_identity()?);
         let mut mismatched = target.clone();
         mismatched.process_identity = Some("windows:wrong".into());
         assert!(force_kill(&mismatched).is_err());

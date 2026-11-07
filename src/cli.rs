@@ -275,7 +275,7 @@ pub struct InternalArgs {
 pub enum InternalCommand {
     /// Enforce this prompt's jcode pre-tool shell policy.
     JcodePreTool,
-    /// Serve a detached WebUI instance.
+    /// Serve a detached `WebUI` instance.
     WebuiServe {
         #[arg(long)]
         instance_id: String,

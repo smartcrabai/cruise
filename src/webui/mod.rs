@@ -109,10 +109,10 @@ impl WebState {
 /// Returns an error when assets cannot be prepared or the listener cannot bind.
 pub async fn run(args: WebuiArgs) -> Result<()> {
     match args.action {
-        Some(WebuiAction::Start(args)) => daemon::start(args),
-        Some(WebuiAction::Stop(args)) => daemon::stop(args),
+        Some(WebuiAction::Start(args)) => daemon::start(&args),
+        Some(WebuiAction::Stop(args)) => daemon::stop(&args),
         Some(WebuiAction::Restart(args)) => daemon::restart(args),
-        Some(WebuiAction::Status(args)) => daemon::status(args),
+        Some(WebuiAction::Status(args)) => daemon::status(&args),
         None => run_foreground(args.serve).await,
     }
 }
@@ -120,13 +120,13 @@ pub async fn run(args: WebuiArgs) -> Result<()> {
 async fn run_foreground(args: ServeArgs) -> Result<()> {
     let registry = instance::Registry::new()?;
     let lock = registry.lock()?;
-    if let Some(record) = registry.read_for_start()? {
-        if record.verify_identity()? {
-            return Err(CruiseError::Other(format!(
-                "WebUI is already running at {} (PID {}, {}); use cruise webui status / stop",
-                record.origin, record.pid, record.mode
-            )));
-        }
+    if let Some(record) = registry.read_for_start()?
+        && record.verify_identity()?
+    {
+        return Err(CruiseError::Other(format!(
+            "WebUI is already running at {} (PID {}, {}); use cruise webui status / stop",
+            record.origin, record.pid, record.mode
+        )));
     }
     run_instance(
         args,
@@ -177,20 +177,18 @@ async fn run_instance(
     let port = args.port.unwrap_or(8484);
     let listener = tokio::net::TcpListener::bind((host.as_str(), port))
         .await
-        .map_err(|error| {
-            CruiseError::Other(format!("failed to bind {}:{}: {error}", host, port))
-        })?;
+        .map_err(|error| CruiseError::Other(format!("failed to bind {host}:{port}: {error}")))?;
     let local_addr = listener
         .local_addr()
         .map_err(|error| CruiseError::Other(error.to_string()))?;
     let url = format!("http://{local_addr}/");
-    if let Some(record) = registry.read_for_start()? {
-        if record.verify_identity()? {
-            return Err(CruiseError::Other(format!(
-                "WebUI is already running at {} (PID {})",
-                record.origin, record.pid
-            )));
-        }
+    if let Some(record) = registry.read_for_start()?
+        && record.verify_identity()?
+    {
+        return Err(CruiseError::Other(format!(
+            "WebUI is already running at {} (PID {})",
+            record.origin, record.pid
+        )));
     }
     let token = instance::new_control_token();
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -372,10 +370,10 @@ async fn control_stop(State(state): State<WebState>, headers: HeaderMap) -> Resp
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let active = state.application.runtime().begin_shutdown();
-    if let Ok(mut sender) = gate.sender.lock() {
-        if let Some(sender) = sender.take() {
-            let _ = sender.send(());
-        }
+    if let Ok(mut sender) = gate.sender.lock()
+        && let Some(sender) = sender.take()
+    {
+        let _ = sender.send(());
     }
     (
         StatusCode::ACCEPTED,

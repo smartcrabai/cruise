@@ -7,6 +7,8 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
 
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
 #[derive(Debug, Default, cucumber::World)]
 struct WebuiWorld {
     home: Option<TempDir>,
@@ -15,9 +17,13 @@ struct WebuiWorld {
 }
 
 impl WebuiWorld {
-    fn command(&self, args: &[&str]) -> Output {
-        let home = self.home.as_ref().expect("isolated environment").path();
-        Command::new(env!("CARGO_BIN_EXE_cruise"))
+    fn command(&self, args: &[&str]) -> TestResult<Output> {
+        let home = self
+            .home
+            .as_ref()
+            .ok_or("missing isolated environment")?
+            .path();
+        Ok(Command::new(env!("CARGO_BIN_EXE_cruise"))
             .current_dir(home)
             .env("HOME", home)
             .env("XDG_CONFIG_HOME", home.join("config"))
@@ -28,46 +34,40 @@ impl WebuiWorld {
             .env_remove("HERDR_ENV")
             .stdin(Stdio::null())
             .args(args)
-            .output()
-            .expect("run cruise")
+            .output()?)
     }
-    fn success(&self, args: &[&str]) -> Output {
-        let output = self.command(args);
+    fn success(&self, args: &[&str]) -> TestResult<Output> {
+        let output = self.command(args)?;
         assert!(
             output.status.success(),
             "{args:?}: stdout={} stderr={}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        output
+        Ok(output)
     }
-    fn record(&self) -> Value {
+    fn record(&self) -> TestResult<Value> {
         let path = self
             .home
             .as_ref()
-            .expect("home")
+            .ok_or("missing home")?
             .path()
             .join("state/cruise/webui/instance.json");
-        serde_json::from_slice(&std::fs::read(path).expect("instance record")).expect("JSON record")
+        Ok(serde_json::from_slice(&std::fs::read(path)?)?)
     }
-    fn status(&self) -> Value {
-        serde_json::from_slice(&self.success(&["webui", "status", "--json"]).stdout)
-            .expect("JSON status")
+    fn status(&self) -> TestResult<Value> {
+        Ok(serde_json::from_slice(
+            &self.success(&["webui", "status", "--json"])?.stdout,
+        )?)
     }
-    fn request(&self, request: &str) -> String {
-        let port = self.record()["port"].as_u64().expect("port") as u16;
-        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect WebUI");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("timeout");
-        stream
-            .write_all(request.as_bytes())
-            .expect("send HTTP request");
+    fn request(&self, request: &str) -> TestResult<String> {
+        let port = u16::try_from(self.record()?["port"].as_u64().ok_or("missing port")?)?;
+        let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.write_all(request.as_bytes())?;
         let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .expect("read HTTP response");
-        response
+        stream.read_to_string(&mut response)?;
+        Ok(response)
     }
 }
 impl Drop for WebuiWorld {
@@ -79,83 +79,95 @@ impl Drop for WebuiWorld {
 }
 
 #[given("an isolated Cruise environment")]
-fn isolated(w: &mut WebuiWorld) {
-    w.home = Some(TempDir::new().expect("temporary home"));
+fn isolated(w: &mut WebuiWorld) -> TestResult {
+    w.home = Some(TempDir::new()?);
+    Ok(())
 }
 #[when("I start the WebUI on an ephemeral port")]
-fn start(w: &mut WebuiWorld) {
-    w.success(&["webui", "start", "--port", "0"]);
-    w.original = Some(w.record());
+fn start(w: &mut WebuiWorld) -> TestResult {
+    w.success(&["webui", "start", "--port", "0"])?;
+    w.original = Some(w.record()?);
+    Ok(())
 }
 #[then("status reports the running daemon and its endpoint responds")]
-fn running(w: &mut WebuiWorld) {
-    let status = w.status();
+fn running(w: &mut WebuiWorld) -> TestResult {
+    let status = w.status()?;
     assert_eq!(status["running"], true);
     assert_eq!(status["mode"], "daemon");
-    assert_eq!(status["pid"], w.record()["pid"]);
+    assert_eq!(status["pid"], w.record()?["pid"]);
     assert!(
-        w.request("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        w.request("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?
             .starts_with("HTTP/1.1 200")
     );
+    Ok(())
 }
 #[when("I stop the WebUI")]
-fn stop(w: &mut WebuiWorld) {
-    w.success(&["webui", "stop"]);
+fn stop(w: &mut WebuiWorld) -> TestResult {
+    w.success(&["webui", "stop"])?;
+    Ok(())
 }
 #[then("status reports that the WebUI is not running")]
-fn stopped(w: &mut WebuiWorld) {
-    let output = w.command(&["webui", "status", "--json"]);
+fn stopped(w: &mut WebuiWorld) -> TestResult {
+    let output = w.command(&["webui", "status", "--json"])?;
     assert_eq!(output.status.code(), Some(1));
-    let status: Value = serde_json::from_slice(&output.stdout).expect("JSON status");
+    let status: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(status["running"], false);
+    Ok(())
 }
 #[when("I start the WebUI again without options")]
-fn start_again(w: &mut WebuiWorld) {
-    w.success(&["webui", "start"]);
+fn start_again(w: &mut WebuiWorld) -> TestResult {
+    w.success(&["webui", "start"])?;
+    Ok(())
 }
 #[then("the existing instance remains registered")]
-fn same_instance(w: &mut WebuiWorld) {
+fn same_instance(w: &mut WebuiWorld) -> TestResult {
     assert_eq!(
-        w.record()["instance_id"],
-        w.original.as_ref().expect("original")["instance_id"]
+        w.record()?["instance_id"],
+        w.original.as_ref().ok_or("missing original")?["instance_id"]
     );
+    Ok(())
 }
 #[then("a foreground WebUI cannot start concurrently")]
-fn foreground_conflict(w: &mut WebuiWorld) {
-    let output = w.command(&["webui", "--port", "0"]);
+fn foreground_conflict(w: &mut WebuiWorld) -> TestResult {
+    let output = w.command(&["webui", "--port", "0"])?;
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .to_lowercase()
             .contains("already running")
     );
+    Ok(())
 }
 #[when("I restart the WebUI")]
-fn restart(w: &mut WebuiWorld) {
-    w.success(&["webui", "restart"]);
+fn restart(w: &mut WebuiWorld) -> TestResult {
+    w.success(&["webui", "restart"])?;
+    Ok(())
 }
 #[then("a new daemon is running on the original port")]
-fn restarted(w: &mut WebuiWorld) {
-    let old = w.original.as_ref().expect("original");
-    let new = w.record();
+fn restarted(w: &mut WebuiWorld) -> TestResult {
+    let old = w.original.as_ref().ok_or("missing original")?;
+    let new = w.record()?;
     assert_ne!(new["instance_id"], old["instance_id"]);
     assert_ne!(new["pid"], old["pid"]);
     assert_eq!(new["port"], old["port"]);
-    assert_eq!(w.status()["running"], true);
+    assert_eq!(w.status()?["running"], true);
+    Ok(())
 }
 #[when("I send an unauthenticated control stop request")]
-fn unauthorized(w: &mut WebuiWorld) {
-    w.response = Some(w.request("POST /webui/control/stop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
+fn unauthorized(w: &mut WebuiWorld) -> TestResult {
+    w.response = Some(w.request("POST /webui/control/stop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?);
+    Ok(())
 }
 #[then("the control request is rejected and the daemon remains running")]
-fn rejected(w: &mut WebuiWorld) {
+fn rejected(w: &mut WebuiWorld) -> TestResult {
     assert!(
         w.response
             .as_ref()
-            .expect("response")
+            .ok_or("missing response")?
             .starts_with("HTTP/1.1 401")
     );
-    assert_eq!(w.status()["running"], true);
+    assert_eq!(w.status()?["running"], true);
+    Ok(())
 }
 
 #[tokio::main]

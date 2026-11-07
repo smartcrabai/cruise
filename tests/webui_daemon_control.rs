@@ -1,4 +1,4 @@
-//! Real CLI and HTTP coverage for the WebUI control endpoint.
+//! Real CLI and HTTP coverage for the `WebUI` control endpoint.
 
 use std::fs;
 use std::io::{Read as _, Write as _};

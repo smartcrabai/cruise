@@ -115,11 +115,12 @@ async fn control_stop_authenticates_and_signals_shutdown() {
 }
 
 #[tokio::test]
-async fn read_planned_session_then_control_stop_stays_idle() {
+async fn read_planned_session_then_control_stop_stays_idle()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut harness = harness();
     let mut session = create_session(&harness);
     session.phase = crate::session::SessionPhase::Planned;
-    harness.manager.save(&session).unwrap();
+    harness.manager.save(&session)?;
     let (status, _, _) = get(
         &harness,
         &format!("/webui/sessions/{}/tab/info", session.id),
@@ -137,18 +138,15 @@ async fn read_planned_session_then_control_stop_stays_idle() {
         .method("POST")
         .uri("/webui/control/stop")
         .header("x-cruise-webui-control", "test-token")
-        .body(Body::empty())
-        .unwrap();
-    let response = router(harness.state.clone())
-        .oneshot(request)
-        .await
-        .unwrap();
+        .body(Body::empty())?;
+    let response = router(harness.state.clone()).oneshot(request).await?;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let loaded = harness.manager.load(&session.id).unwrap();
+    let loaded = harness.manager.load(&session.id)?;
     assert_eq!(loaded.phase, crate::session::SessionPhase::Planned);
     assert_eq!(loaded.runner_pid, None);
     assert_eq!(loaded.runner_started_at, None);
     assert!(harness.state.application.runtime().is_idle());
+    Ok(())
 }
 
 fn create_session(harness: &Harness) -> SessionState {
@@ -1673,31 +1671,28 @@ async fn shutdown_begin_ends_open_sse_stream() {
 }
 
 #[tokio::test]
-async fn serve_control_stop_closes_open_sse_client() {
+async fn serve_control_stop_closes_open_sse_client() -> Result<(), Box<dyn std::error::Error>> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let mut harness = harness();
-    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let (sender, control_rx) = tokio::sync::oneshot::channel();
     harness.state.control = Some(std::sync::Arc::new(super::ControlGate {
         token: "test-token".to_owned(),
         sender: std::sync::Mutex::new(Some(sender)),
     }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
     let server = tokio::spawn(super::serve(listener, harness.state.clone(), async move {
-        let _ = receiver.await;
+        let _ = control_rx.await;
     }));
-    let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut client = tokio::net::TcpStream::connect(addr).await?;
     client
         .write_all(b"GET /webui/events HTTP/1.1\r\nHost: x\r\n\r\n")
-        .await
-        .unwrap();
+        .await?;
     let mut received = Vec::new();
     let mut buf = [0u8; 1024];
     while !received.windows(4).any(|w| w == b"\r\n\r\n") {
         let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
-            .await
-            .unwrap()
-            .unwrap();
+            .await??;
         assert_ne!(n, 0);
         received.extend_from_slice(&buf[..n]);
     }
@@ -1706,22 +1701,18 @@ async fn serve_control_stop_closes_open_sse_client() {
         head.starts_with("http/1.1 200") && head.contains("text/event-stream"),
         "{head}"
     );
-    let mut control = tokio::net::TcpStream::connect(addr).await.unwrap();
-    control.write_all(b"POST /webui/control/stop HTTP/1.1\r\nHost: x\r\nX-Cruise-Webui-Control: test-token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+    let mut control = tokio::net::TcpStream::connect(addr).await?;
+    control.write_all(b"POST /webui/control/stop HTTP/1.1\r\nHost: x\r\nX-Cruise-Webui-Control: test-token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
     let mut response = Vec::new();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         control.read_to_end(&mut response),
     )
-    .await
-    .unwrap()
-    .unwrap();
+    .await??;
     assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 202"));
     assert!(
         tokio::time::timeout(std::time::Duration::from_secs(5), server)
-            .await
-            .unwrap()
-            .unwrap()
+            .await??
             .is_ok()
     );
     loop {
@@ -1731,6 +1722,7 @@ async fn serve_control_stop_closes_open_sse_client() {
             Err(error) => panic!("SSE connection stayed open: {error}"),
         }
     }
+    Ok(())
 }
 
 #[tokio::test]

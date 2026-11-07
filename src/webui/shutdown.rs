@@ -74,7 +74,7 @@ pub(crate) async fn production_signal(
     control: tokio::sync::oneshot::Receiver<()>,
 ) {
     tokio::select! {
-        _ = signals.recv() => {},
+        () = signals.recv() => {},
         result = control => {
             if result.is_err() {
                 signals.recv().await;
