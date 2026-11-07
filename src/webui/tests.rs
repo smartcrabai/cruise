@@ -1156,6 +1156,15 @@ async fn run_all_provider_failure_reaches_connected_sse_client() {
 }
 
 #[tokio::test]
+async fn verify_action_error_is_toast_partial() {
+    let harness = harness();
+    let (status, _, body) = post(&harness, "/webui/sessions/nope/verify", "").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("hx-target=\"#toasts\""), "{body}");
+    assert!(!body.contains("id=\"session-header"), "{body}");
+}
+
+#[tokio::test]
 async fn action_error_is_toast_partial() {
     let harness = harness();
     let (status, _, body) = post(&harness, "/webui/sessions/nope/approve", "").await;

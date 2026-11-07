@@ -65,6 +65,7 @@ command-group = { version = "5.0.1", features = ["with-tokio"] }
 console = "0.16.2"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 encre-css = "0.21"
+flate2 = "1.1.10"
 fs2 = "0.4.3"
 futures = "0.3"
 glob = "0.3"
@@ -219,6 +220,13 @@ harness = false
 name = "sdk_model_bdd"
 path = "tests/sdk_model_bdd.rs"
 # POSIX SDK subprocess fixtures, explicitly runnable with --test sdk_model_bdd.
+test = false
+
+[[test]]
+harness = false
+name = "provider_install_bdd"
+path = "tests/provider_install_bdd.rs"
+# Unix subprocess fixtures, explicitly runnable with --test provider_install_bdd.
 test = false
 
 [[test]]

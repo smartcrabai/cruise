@@ -261,7 +261,7 @@ impl Runtime {
         }
         let mut child = command
             .group_spawn()
-            .map_err(|e| format!("OpenCode CLI startup failed: {e}"))?;
+            .map_err(|e| format!("OpenCode CLI startup failed: {e}. Run `cruise install opencode` if the CLI is missing."))?;
         let stdin = child.inner().stdin.take();
         let stderr = Arc::new(Mutex::new(Vec::new()));
         let mut readers = vec![];
@@ -335,7 +335,7 @@ impl Runtime {
         }));
         if read == 0 {
             return Err(format!(
-                "OpenCode CLI startup failed: {}",
+                "OpenCode CLI startup failed: {}. Run `cruise install opencode` if the CLI is missing.",
                 self.diagnostic()
             ));
         }

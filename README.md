@@ -20,6 +20,7 @@ Cruise wraps CLI coding agents such as `claude -p` and drives them through a dec
 - An OpenSSH client (`ssh`) on the local `PATH` for `cruise ssh`.
 - On Windows: [Git for Windows](https://gitforwindows.org/) (`git` on `PATH`). `command:` steps run through `cmd.exe /C`, so use cmd.exe syntax (or invoke `powershell -Command ...` / `bash -c ...` explicitly) rather than POSIX shell syntax. Desktop notifications and notification sounds are unavailable, but configured webhooks are sent. `cruise ssh` needs the Windows OpenSSH client, and herdr reporting is limited to what the herdr environment variables provide.
 - A compatible `cruise` version and its usual workflow prerequisites on the SSH destination, including any required `gh`, `jcode`, `claude`, or `opencode` CLI for the selected workflow. The remote host performs the workflow and owns its authentication, configuration, sessions, worktrees, and clones.
+- Install a managed provider on that host with, for example, `cruise ssh <host> -- install jcode`.
 
 ## Installation
 
@@ -118,6 +119,26 @@ Move-Item -LiteralPath $pointer -Destination $retired -ErrorAction Stop
 ```
 
 The first `--version` above must succeed before moving the pointer. These commands only archive and move the pointer file; never delete a runtime or sidecar. Choose unused archive/retired names if those files already exist.
+
+### Managed provider CLIs
+
+Install only the providers your workflows need:
+
+```sh
+cruise install jcode
+cruise install claude
+cruise install opencode
+cruise install --status
+cruise install jcode --force
+```
+
+This build pins jcode **0.99.1**, claude **2.1.250**, and opencode **2.1.3**. Downloads are checked against digests pinned in Cruise and the extracted binary's version is checked before publication. No vendor installer, npm CLI, or shell configuration changes are required. Managed files live under `$XDG_DATA_HOME/cruise/providers/<provider>/` (normally `~/.local/share/cruise/providers/`). Each installation uses a distinct version-prefixed directory, with the active relative path recorded in `install.json`. Previous directories are retained so concurrent readers can continue using their resolved paths. Availability depends on platform. Authentication remains the provider's responsibility.
+
+When jcode is installed only by Cruise, find its active `relative_path` in `providers/jcode/install.json` under the Cruise data directory, then invoke that binary with `login <provider>` or `auth status`. On Windows, the default data directory is `%LOCALAPPDATA%\cruise\data` when `XDG_DATA_HOME` is unset and `LOCALAPPDATA` is set. If `LOCALAPPDATA` is unavailable, the home-directory fallback applies. Quote paths containing spaces.
+
+Resolution uses a nonempty process environment override first, then a valid managed installation matching the current pin, then the existing PATH lookup. The overrides are `CRUISE_JCODE_CLI_PATH`, `CRUISE_CLAUDE_CLI_PATH`, and `CRUISE_OPENCODE_CLI_PATH`. An invalid explicit override is an error, not a fallback. These are process environment variables, not workflow `env:` settings. A missing, stale, or damaged managed installation falls back to PATH. Running workflows, planning, TUI, and WebUI never download or install providers.
+
+`--status` is read-only: it does not access the network, execute provider binaries, or create files. Reinstall with `--force` when needed. Rerun `cruise install <provider>` after a Cruise update changes its pin. `cruise update` updates Cruise itself, not providers. For managed claude and opencode, Cruise disables their auto-updaters only when the respective environment variable is not already set. PATH and override installations retain their existing behavior. The GitHub Action continues to manage its own jcode installation and version input separately.
 
 ### WebUI
 
@@ -259,7 +280,7 @@ The TUI requires an interactive TTY on macOS, Linux, or Windows. It is an intera
 
 The TUI has three views:
 
-- **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, **Log**, or **Diff** detail tab and use the full phase action matrix documented under [`cruise list` Actions](#cruise-list-actions). The Info tab shows declared workflow flags and their on/off values. The Graph tab shows its node list plus the selected node's dependency and edge details, hiding flag-disabled steps except in legacy unversioned graph checkpoints, which are displayed without filtering; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
+- **Sessions** -- Browse the global session list. Select a session to view its **Info**, **Graph**, **Plan**, **Log**, or **Diff** detail tab. The [`cruise list` Actions](#cruise-list-actions) matrix describes the list menu, not the full TUI action set. The Info tab shows declared workflow flags and their on/off values. The Graph tab shows its node list plus the selected node's dependency and edge details, hiding flag-disabled steps except in legacy unversioned graph checkpoints, which are displayed without filtering; Markdown is parsed and styled. This includes Ask and Option prompts, Clean, worktree/current-branch selection, Publish as Issue, and PR links.
 - **New Session** -- Create a session or draft through a step-by-step dialogue: one question is shown at a time with the answers so far listed above and the remaining questions below. The order is Source (local Directory or GitHub repository), working directory or repository, workflow config, task, images, workflow flags (shown only when the config declares flags), skipped steps (flag-disabled steps are hidden), workspace mode, dirty-tree allowance (current-branch runs only), and finally the launch mode (normal planning, grill planning, input-as-plan, or save as draft). Questions that earlier answers make moot are skipped. For local Directory sessions, the Workflow config question includes Auto-detect and organizes the same prioritized file candidates and built-in workflows as the CLI according to configured categories and Others visibility. GitHub sessions resolve Auto-detect in the cloned repository, so caller-local candidates are omitted, while an arbitrary path is still accepted. `Ctrl-P`, `Ctrl-G`, `Ctrl-U`, and `Ctrl-S` start or draft the session from any question with the current answers. Directory and path answers offer completion, and history is recalled with the arrow keys; draft and selection history are retained as described in [New Session Form Persistence](#new-session-form-persistence).
 - **Run All** -- Run Planned or Suspended sessions with live parallelism, in-app status, and bell feedback. Press `p` to edit the shared WebUI/TUI parallelism setting. Changes are saved to the app configuration and can be made while a batch is active; a new limit applies at the next scheduling point, without cancelling workers that are already running. Distinct sessions may run concurrently in one TUI process; duplicate work for one session is rejected.
 
@@ -356,6 +377,7 @@ Commands:
   exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve or manage the local browser UI (start, stop, restart, status)
+  install      Install a pinned provider CLI or inspect managed provider status
   update       Update a managed native installation; `--status` lists recorded transactions read-only
   workflow     Manage workflows: list/eject built-ins, generate, interactively make or check YAML (`doctor`), install GitHub packages (`add`, `remove`, `update`)
 
@@ -370,6 +392,10 @@ Options:
       --image <PATH>           Attach an image file (png/jpg/jpeg/webp/gif) to the planning input; can be repeated
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable)
 ```
+
+#### `cruise install`
+
+`cruise install <jcode|claude|opencode> [--force]` installs the build's pinned provider version. `cruise install --status` inspects managed installations without network access or side effects. See [Managed provider CLIs](#managed-provider-clis) for resolution and authentication details.
 
 #### `cruise workflow generate`
 
@@ -815,8 +841,11 @@ On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cru
    - **Approve** -- Mark the session as ready to run.
    - **Fix** -- Provide feedback; the plan step reruns with your input.
    - **Ask** -- Ask a question; the answer is captured but not displayed; the menu reappears.
+   - **Verify** -- Generate Quint and Alloy specifications, run their checks, and display the report and its interpretation without changing the saved plan. Use **Fix** to revise the plan.
    - **Execute now** -- Skip approval and run immediately.
    - **Publish as Issue** -- Publish `plan.md` as a GitHub issue (or GitLab issue) and delete the local session.
+
+   **Verify Spec** in the TUI and **Verify** in the WebUI are also available for a usable plan awaiting approval. It is a menu action, not an `/verify` command in Ask. It requires `quint` on PATH (0.33.0 recommended) and Java 17 or later for Alloy. Alloy uses `CRUISE_ALLOY_JAR` if supplied; otherwise Cruise downloads and checksum-verifies Alloy 6.2.0 into its data directory. Reports and logs are retained under the session's `formal/<run-id>/` directory until the session is deleted, not in the repository. Each Quint parse, typecheck and simulation has a 60-second limit. Model checks use `formal_verify.model_check_timeout_seconds` (default 900 seconds). Alloy commands run sequentially, so N commands can take up to N times that limit, plus setup and other checks. A passed bounded check is not a proof beyond its modeled scope.
 
    After choosing **Approve** or **Execute now**, declared workflow flags are selected first when no `-f/--flag` was supplied. Then a **step skip selector** lists only steps enabled by those values (grouped steps appear as a parent with children); no selector is shown when there are no candidates. Toggle any steps you want to skip for this run. Only selections from the visible candidates are persisted per config file in `$XDG_STATE_HOME/cruise/history.json` and pre-selected for the next session using the same config. Cancelling either selector returns to the approve-plan menu without saving partial flag changes, approving, or executing the session. Execute now forwards the approval-time flag values as explicit assignments, suppressing another flag prompt at execution start. After Approve, a later `cruise run` still offers the fresh-execution flag selector and does not ask for skips again (see [Workflow flags](#cruise-run)).
 
@@ -892,6 +921,8 @@ The interactive session list shows a menu of actions depending on the session's 
 | **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
 | **PR Failed** | Create PR, Open PR*, Reset to Planned, Delete, Back |
 | **Completed** | Open PR*, Merge PR*, Stage local merge**, Merge locally & cleanup**, Reset to Planned, Delete, Back |
+
+`cruise list` does not offer Verify, matching its existing omission of Ask.
 
 \* Open PR and Merge PR are shown only when the session has a PR URL.
 Tell is shown only while the running session's runner is alive.
@@ -1011,7 +1042,7 @@ fresh snapshot session to use updated settings.
 
 - `env` and `mcp_servers` merge per key (higher layer wins).
 - `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
-- Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
+- Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`, `formal_verify`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
 - Worktree settings `base_branch` and `auto_fetch` are defaults-only keys, with project values overriding user values. `auto_fetch: true` requires a nonempty `base_branch` after merging.
 - `description`, `steps`, `groups`, and `after-pr` are workflow-only and are a load error in `default.yaml`. Unknown keys are errors too.
 - If defaults name a backend (`command` / `sdk`) of a different kind than the workflow's own, validation fails when they would fill an unset backend-specific `model`, `plan_model`, `subagent_model`, or `retry`, add a missing `mcp_servers` entry, or fill an unset `computer_use`, `permission`, or `disallowed_tools` field, regardless of its value. Set the field in the workflow or remove it from `default.yaml`. The check runs before `CRUISE_SDK` overrides, which are not considered.
@@ -1034,6 +1065,13 @@ In GitHub Actions, `XDG_*` is isolated, so only the project `.cruise/default.yam
 ## Config File Reference
 
 ### Basic Structure
+
+`formal_verify.model_check_timeout_seconds` sets the per-command Quint model-check and Alloy timeout in seconds. It accepts an integer from 1 through 86400 and defaults to 900. It may be set in workflow YAML or layered `default.yaml`:
+
+```yaml
+formal_verify:
+  model_check_timeout_seconds: 900
+```
 
 ```yaml
 command:                   # LLM invocation command (mutually exclusive with `sdk`)
@@ -1354,7 +1392,7 @@ interactive_planning: false   # tool-less, file-based planning
 
 #### `sdk: opencode` - the OpenCode V2 client
 
-Cruise includes a Rust client for the workflow-required OpenCode V2 API, not a Python/Node SDK dependency or a provider-specific LLM client. Install and authenticate the OpenCode CLI separately. Cruise owns a short-lived loopback `opencode serve --stdio` process and stops it after each attempt. It does not connect to an external server, install the CLI, authenticate for you, or fall back to V1.
+Cruise includes a Rust client for the workflow-required OpenCode V2 API, not a Python/Node SDK dependency or a provider-specific LLM client. Install the OpenCode CLI explicitly with `cruise install opencode` or separately, and authenticate it. Cruise owns a short-lived loopback `opencode serve --stdio` process and stops it after each attempt. Workflow execution does not connect to an external server, install the CLI, authenticate for you, or fall back to V1.
 
 ```yaml
 sdk: opencode
@@ -1460,6 +1498,8 @@ command workflows retain their existing no-model behavior.
 
 ### Environment Variables
 
+`CRUISE_JCODE_CLI_PATH`, `CRUISE_CLAUDE_CLI_PATH`, and `CRUISE_OPENCODE_CLI_PATH` select provider executables from the Cruise process environment. They are not workflow configuration keys and cannot be supplied through workflow `env:`; see [Managed provider CLIs](#managed-provider-clis).
+
 Environment variables can be set at workflow and step level. Step-level values override workflow-level values for that step only. Parallel children add a third level: workflow < parallel block < child. Values support template variable substitution; each child resolves its own values against the variables from before the block.
 
 Process-level configuration overrides apply after workflow and defaults resolution. Supported names and value types are:
@@ -1502,7 +1542,7 @@ export CRUISE_RETRY_MAX_DELAY_MS=5000
 
 `CRUISE_RUN_ALL_PARALLELISM` overrides the app setting for TUI/WebUI run-all operations and effective config display, but is not saved to the config file. It does not change CLI `run --all`, which uses `--parallelism`. File-backed sessions reapply environment overrides when reloaded; snapshot sessions retain the resolved config from creation. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
 
-The keys `env`, `mcp_servers`, and `pre_steps` are excluded because they contain named entries, commands, or secrets. Workflow structure and identity (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), the `create_pr` workflow contract, and deprecated `pr_language` / `plan_language` are also excluded. Process switches such as `CRUISE_CONFIG`, `CRUISE_FORGE`, `CRUISE_RUNTIME`, `CRUISE_SKIP_AGENT_AUTH_CHECK`, `CRUISE_DISABLE_NOTIFICATIONS`, `CRUISE_DISABLE_HERDR`, `CRUISE_OBSERVABILITY_ENABLED`, and `CRUISE_COMMIT_COAUTHOR_NAME` / `CRUISE_COMMIT_COAUTHOR_EMAIL` are separate from configuration overrides.
+The keys `env`, `mcp_servers`, and `pre_steps` are excluded because they contain named entries, commands, or secrets. Workflow structure and identity (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), the `create_pr` workflow contract, and deprecated `pr_language` / `plan_language` are also excluded. `formal_verify` is configured through workflow YAML or defaults, not a configuration environment override. Process switches such as `CRUISE_CONFIG`, `CRUISE_FORGE`, `CRUISE_RUNTIME`, `CRUISE_SKIP_AGENT_AUTH_CHECK`, `CRUISE_DISABLE_NOTIFICATIONS`, `CRUISE_DISABLE_HERDR`, `CRUISE_OBSERVABILITY_ENABLED`, and `CRUISE_COMMIT_COAUTHOR_NAME` / `CRUISE_COMMIT_COAUTHOR_EMAIL` are separate from configuration overrides.
 
 `JCODE_OPENAI_SERVICE_TIER` controls jcode SDK's OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Explicit values are respected.
 

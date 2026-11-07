@@ -1651,7 +1651,7 @@ async fn run_approve_loop(
 
         let review = crate::herdr::blocked("Plan ready: approve, fix, or ask");
 
-        let mut options = vec!["Approve", "Fix", "Ask", "Execute now"];
+        let mut options = vec!["Approve", "Fix", "Ask", "Verify", "Execute now"];
         if session.pr_target.is_none() {
             options.push("Publish as Issue");
         }
@@ -1817,6 +1817,32 @@ async fn run_approve_loop(
                 *session = manager.load(&session_id)?;
             }
 
+            "Verify" => {
+                drop(review);
+                let planning_operation = crate::telemetry::Operation::phase("planning");
+                let verify_result: Result<()> = async {
+                    let verifying = run_verify_plan(&ctx, vars, resume);
+                    tokio::pin!(verifying);
+                    tokio::select! {
+                        result = &mut verifying => result,
+                        _ = tokio::signal::ctrl_c() => {
+                            cancel_token.cancel();
+                            let _ = verifying.await;
+                            Err(CruiseError::Interrupted)
+                        },
+                    }
+                }
+                .with_context(planning_operation.context())
+                .await;
+                planning_operation.finish_result(&verify_result);
+                let _ = verify_result
+                    .as_ref()
+                    .inspect_err(|_| notify_plan_result(session, &verify_result));
+                verify_result?;
+                let session_id = session.id.clone();
+                *session = manager.load(&session_id)?;
+            }
+
             "Publish as Issue" => {
                 let trigger_cruise = if crate::issue_publish::supports_trigger_cruise(session) {
                     let Some(answer) = prompt_trigger_cruise()? else {
@@ -1973,6 +1999,18 @@ async fn run_ask_plan(
         // plan-writing tools are registered.
         false,
     )
+    .await
+}
+
+async fn run_verify_plan(
+    ctx: &PlanPromptCtx<'_>,
+    vars: &mut VariableStore,
+    resume: &mut Option<crate::model_selection::SdkSessionId>,
+) -> Result<()> {
+    crate::planning::run_verify_flow(ctx, vars, resume, None, &|report| {
+        crate::display::print_bordered(report, Some("Verification report"));
+        Ok(())
+    })
     .await
 }
 

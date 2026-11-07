@@ -139,6 +139,8 @@ pub enum Commands {
     Webui(WebuiArgs),
     /// Update Cruise itself or inspect an in-progress update.
     Update(UpdateArgs),
+    /// Install a pinned provider CLI or inspect provider status.
+    Install(InstallArgs),
     /// List, eject, generate, and install workflows.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
@@ -372,6 +374,23 @@ pub struct UpdateArgs {
     /// Display in-progress update transactions across installations without network access or changes.
     #[arg(long)]
     pub status: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct InstallArgs {
+    /// Provider to install.
+    #[arg(
+        value_enum,
+        required_unless_present = "status",
+        conflicts_with = "status"
+    )]
+    pub provider: Option<crate::provider_install::Provider>,
+    /// Inspect providers without making changes.
+    #[arg(long, conflicts_with = "force")]
+    pub status: bool,
+    /// Reinstall even when the pinned version is already present.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Parser, Debug)]

@@ -820,6 +820,20 @@ pub(crate) async fn ask(
     })
 }
 
+pub(crate) async fn verify(State(state): State<WebState>, Path(id): Path<String>) -> Response {
+    run(&state, "Verify", || {
+        let application = state.application.clone();
+        let (sink, _log) = state.hub.sinks();
+        let spawn_id = id.clone();
+        super::ops::spawn(async move { application.verify(&spawn_id, sink).await });
+        Ok(html(partials::header_and_row(
+            &state,
+            &id,
+            Some(OperationKind::Verify),
+        )?))
+    })
+}
+
 pub(crate) async fn run_session(
     State(state): State<WebState>,
     Path(id): Path<String>,

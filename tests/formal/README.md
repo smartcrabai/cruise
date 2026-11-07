@@ -9,6 +9,11 @@ runs the real CLI and control endpoint integration tests. Reports and command
 logs are written under `target/formal-reports/`; the dedicated CI workflow
 uploads them even on failure.
 
+For provider installation lifecycle and resolution precedence, see
+`PROVIDER_INSTALL.md` and run `bash scripts/check_provider_install_specs.sh`.
+The dedicated `provider-install-specs` CI job runs the pinned Quint checks and
+retains reports. The bounded model is not a production refinement proof.
+
 For the planned workflow environment override precedence and snapshot model,
 see `CONFIG_ENV_OVERRIDE.md` and run `bash scripts/check_config_env_specs.sh`.
 This standalone Quint model is not a production conformance test.

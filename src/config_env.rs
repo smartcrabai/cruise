@@ -213,6 +213,10 @@ pub static EXCLUDED_KEYS: &[(&str, &str)] = &[
     ("description", "workflow identity"),
     ("flags", "workflow structure"),
     ("create_pr", "workflow contract"),
+    (
+        "formal_verify",
+        "configured through workflow or defaults only",
+    ),
     ("pr_language", "deprecated"),
     ("plan_language", "deprecated"),
 ];

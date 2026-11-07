@@ -1,5 +1,7 @@
 # Top-level structure
 
+`formal_verify.model_check_timeout_seconds` is the per-command Quint model-check and Alloy timeout, an integer from 1 to 86400 (default 900). Quint parse, typecheck, and simulation use separate 60-second limits. Alloy commands run sequentially. This strict block is accepted in workflows and layered `default.yaml`.
+
 `inputs: [task, label]` optionally declares a called workflow's required string
 inputs. Names must be unique and match `[A-Za-z_][A-Za-z0-9_]*`. There are no
 defaults, optional inputs, or CLI input flags. A root loaded directly cannot
@@ -92,7 +94,7 @@ fails the load (see [steps.md](steps.md)).
 A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`, `subagent_model`,
 `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `commit_message_template`, `pr_body_template`,
 `base_branch`, `auto_fetch`,
-`force_exec`, `computer_use`, `permission`, `disallowed_tools`, `env`, `retry`, `mcp_servers`, and
+`force_exec`, `computer_use`, `permission`, `disallowed_tools`, `env`, `retry`, `formal_verify`, `mcp_servers`, and
 `pre_steps`. Unknown keys and workflow-only keys (`description`, `steps`,
 `groups`, `after-pr`, and `create_pr`) are rejected.
 

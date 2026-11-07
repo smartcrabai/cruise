@@ -63,6 +63,7 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | I already wrote the plan myself — skip the LLM planning | `cruise plan --skip-planning "<plan text>"` (or `cruise --plan "…" --skip-planning`) |
 | Interview me one question at a time, then write the plan | `cruise plan --grill "task"` (SDK backend (the default) + TTY) |
 | Add executable Quint, Alloy, and Gherkin specifications with CI | `cruise exec -c builtin:add-formal-specs "task"` |
+| Verify a plan without changing it | Choose **Verify** in the interactive plan approval menu or WebUI, or **Verify Spec** in the TUI, for a usable plan awaiting approval; `cruise list` and Ask text do not provide this action |
 | Run `refactor`, `add-tests`, `add-formal-specs`, or `security` locally by default (`force_exec: true`) | For example, `cruise plan -c builtin:refactor "task"` runs directly without an outer plan/session, worktree, or automatic PR; add `--no-force-exec` for the normal plan/session path |
 | Research with a durable, read-only report | `cruise plan --skip-planning -c builtin:research "question"`; approve if prompted, then `cruise run <session-id>` |
 | Audit and safely repair confirmed security defects in a durable session | `cruise plan --no-force-exec -c builtin:security "audit request"`; approve if prompted, then `cruise run <session-id>` |
@@ -90,6 +91,7 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | Serve the local browser UI (add `-o`/`--open` to launch the browser) | `cruise webui` |
 | Manage the background browser UI | `cruise webui start`, `cruise webui status [--json]`, `cruise webui restart`, `cruise webui stop [--force]` |
 | Update Cruise itself | `cruise update` |
+| Install a pinned provider CLI or inspect managed provider status | `cruise install <jcode\|claude\|opencode> [--force]` / `cruise install --status` |
 | Inspect in-progress update transactions across installations (read-only; no network access or changes) | `cruise update --status` |
 | Install / update / remove / list a GitHub workflow package, including root-manifest bundles (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path.yaml][@ref]` / `update <name>` / `remove <name>` / `list` |
 | Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
@@ -98,6 +100,12 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | Show / change app-level settings (e.g. WebUI/TUI parallelism; displays `prevent_sleep`) | `cruise config` |
 | Sign the default `jcode` backend in to a provider / inspect what's configured | `jcode login <provider>` / `jcode auth status` (cruise has no login command of its own) |
 | See what *would* run without executing | add `--dry-run` to `plan` / `run` / `exec` |
+
+### Managed provider CLIs
+
+`cruise install <jcode|claude|opencode>` installs the version pinned by this Cruise build. Use `--force` to reinstall and `cruise install --status` for read-only, offline status. Provider authentication remains separate. Resolution prefers nonempty process environment overrides (`CRUISE_JCODE_CLI_PATH`, `CRUISE_CLAUDE_CLI_PATH`, `CRUISE_OPENCODE_CLI_PATH`), then a valid managed installation, then PATH. Invalid overrides fail instead of falling back. Workflow `env:` cannot set the explicit provider overrides, but its `PATH` controls PATH fallback for the child. Running workflows never installs providers. `cruise update` updates Cruise, not providers; rerun install when the build's pin changes.
+
+For managed-only jcode authentication, read `relative_path` from `providers/jcode/install.json` under the Cruise data directory, then invoke that binary with `login <provider>` or `auth status`. The data directory is `$XDG_DATA_HOME/cruise`, or `~/.local/share/cruise` on Unix when unset. On Windows without `XDG_DATA_HOME`, it is `%LOCALAPPDATA%\cruise\data` when `LOCALAPPDATA` is available, otherwise the home-directory fallback applies. Quote paths containing spaces.
 
 ### Instant execution
 
@@ -390,7 +398,7 @@ When loading a workflow config, these process environment variables override the
 
 Values are trimmed and blank values ignored. Booleans accept only `true`, `false`, `1`, or `0`, and integers use unsigned decimal digits. Models are literal single models unless beginning with `[` or `{`, which means JSON in the field's normal shape. Model arrays enable fallback as in YAML. Other composite values require JSON, with `null` or `[]` clearing optional values or lists where supported. Parent `retry` and `languages` overrides apply before their children. `CRUISE_SDK` and `CRUISE_COMMAND` cannot both be nonblank. Invalid values are errors. Per-invocation CLI flags and saved session cleanup overrides take precedence where applicable. App parallelism is effective-only and is not saved; CLI `run --all` uses `--parallelism` instead. File-backed sessions reapply overrides on reload, while snapshots retain their creation-time config.
 
-Named maps and secret-bearing `env`, `mcp_servers`, and `pre_steps`, workflow structure (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), `create_pr`, and deprecated `pr_language` / `plan_language` are excluded. See the [configuration override reference](../cruise-config/references/env-and-llm.md#process-level-config-overrides) and the README environment table for details.
+Named maps and secret-bearing `env`, `mcp_servers`, and `pre_steps`, workflow structure (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), `create_pr`, and deprecated `pr_language` / `plan_language` are excluded. `formal_verify` is configured through workflow YAML or defaults, not a configuration environment override. See the [configuration override reference](../cruise-config/references/env-and-llm.md#process-level-config-overrides) and the README environment table for details.
 
 Every actual jcode prompt needs an effective Cruise model. Ordinary prompts
 resolve step `model` then workflow/default `model`; planning uses
