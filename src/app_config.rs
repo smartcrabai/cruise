@@ -36,6 +36,9 @@ pub struct AppConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub plan_model: Option<crate::config::ModelSpec>,
+    /// Per-channel and per-event notification preferences.
+    #[serde(default, skip_serializing_if = "NotificationSettings::is_default")]
+    pub notifications: NotificationSettings,
 
     /// Prevent idle sleep during runs on macOS.
     #[serde(rename = "prevent_sleep", alias = "preventSleep")]
@@ -53,6 +56,55 @@ pub struct AppConfig {
     pub show_others_category: bool,
     #[serde(rename = "others_category_name", alias = "othersCategoryName")]
     pub others_category_name: String,
+}
+
+/// Master switches and event-specific overrides for notifications.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct NotificationSettings {
+    pub desktop: bool,
+    pub sound: bool,
+    pub webhook: bool,
+    pub events: NotificationEvents,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            desktop: true,
+            sound: false,
+            webhook: true,
+            events: NotificationEvents::default(),
+        }
+    }
+}
+
+impl NotificationSettings {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Event-specific channel overrides, with absent values inheriting the master switch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct NotificationEvents {
+    #[serde(alias = "action_required")]
+    pub action_required: EventChannels,
+    #[serde(alias = "plan_ready")]
+    pub plan_ready: EventChannels,
+    pub completed: EventChannels,
+    pub failed: EventChannels,
+}
+
+/// Optional channel overrides for one notification event.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct EventChannels {
+    pub desktop: Option<bool>,
+    pub sound: Option<bool>,
+    pub webhook: Option<bool>,
 }
 
 /// Runtime defaults do not depend on picker-only configuration.
@@ -114,6 +166,7 @@ impl Default for AppConfig {
             run_all_auto_requeue_max_attempts: 0,
             model: None,
             plan_model: None,
+            notifications: NotificationSettings::default(),
             workflow_categories: indexmap::IndexMap::new(),
             show_others_category: true,
             others_category_name: crate::workflow_categories::OTHERS_CATEGORY_NAME.into(),
