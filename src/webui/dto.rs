@@ -166,6 +166,7 @@ pub(crate) fn transition_reason(
         TransitionReason::IfNoFileChangesFail => ("ifNoFileChangesFail".to_string(), None),
         TransitionReason::IfFailGoto { target } => ("ifFail".to_string(), Some(target.clone())),
         TransitionReason::IfFailRetry => ("ifFailRetry".to_string(), None),
+        TransitionReason::QualityGateRetry => ("qualityGateRetry".to_string(), None),
         TransitionReason::OptionChoice { selector } => {
             ("optionChoice".to_string(), Some(selector.clone()))
         }

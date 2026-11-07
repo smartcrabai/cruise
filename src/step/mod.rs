@@ -86,6 +86,20 @@ impl TryFrom<StepConfig> for StepKind {
         reason = "one flat dispatch over every step kind"
     )]
     fn try_from(config: StepConfig) -> Result<Self> {
+        if config.quality_gates.is_some()
+            && (config.prompt.is_none() && config.prompt_file.is_none()
+                || config.command.is_some()
+                || config.option.is_some()
+                || config.parallel.is_some()
+                || config.group.is_some()
+                || config.workflow_call.is_some()
+                || config.squash_merge.is_some()
+                || config.github_review.is_some())
+        {
+            return Err(CruiseError::InvalidStepConfig(
+                "quality_gates are only supported on ordinary prompt steps".to_string(),
+            ));
+        }
         if config.squash_merge.is_some() {
             crate::config::validate_squash_merge_step("step", &config)?;
             return Ok(StepKind::SquashMerge);

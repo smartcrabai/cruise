@@ -108,6 +108,8 @@ pub struct VariableStore {
     /// Exit status of the previous command step.
     prev_success: Option<bool>,
 
+    quality_gate_feedback: Option<String>,
+
     /// Named variables (e.g. plan file path).
     named: HashMap<String, NamedVariable>,
 
@@ -148,6 +150,20 @@ impl VariableStore {
     /// Set the session-scoped root used by prompt artifact references.
     pub fn set_artifacts_root(&mut self, root: PathBuf) {
         self.artifacts_root = Some(root);
+    }
+
+    #[must_use]
+    pub fn artifacts_root(&self) -> Option<&std::path::Path> {
+        self.artifacts_root.as_deref()
+    }
+
+    pub fn set_quality_gate_feedback(&mut self, feedback: Option<String>) {
+        self.quality_gate_feedback = feedback;
+    }
+
+    #[must_use]
+    pub fn quality_gate_feedback(&self) -> Option<&str> {
+        self.quality_gate_feedback.as_deref()
     }
 
     /// Save a prompt artifact below the configured session root.

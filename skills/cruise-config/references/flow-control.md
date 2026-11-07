@@ -148,6 +148,33 @@ steps:
 - Without `if.fail`, a failed command step does **not** abort the workflow — it proceeds normally and the next step can branch on `{prev.success}` / `{prev.stderr}`. A `no-file-changes` failure without `if.fail` aborts the workflow.
 - Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 
+## `quality_gates` — prompt-step verification
+
+```yaml
+steps:
+  implement:
+    prompt: Implement the change.
+    quality_gates:
+      - command: cargo test
+      - command: cargo clippy
+        timeout: 10m
+    if:
+      fail: recover
+    next: done
+  recover:
+    prompt: Investigate the failed check.
+  done:
+    command: echo done
+```
+
+The non-empty list contains objects with a required nonblank `command` and an optional positive `timeout` (seconds, `m`, or `h`); unknown fields are rejected. After a successful prompt, gates run in order and stop at the first nonzero exit, timeout, or signal. The normal transition, including `if.file-changed`, is applied only after all gates pass. Gates also run for the last step, but not for skipped or failed attempts or an attempt discarded by `if.no-file-changes: retry`.
+
+Failure retries the same step using its existing self-edge budget, shared with other self-retries. The effective ceiling is `--max-retries`, then `max_retries`, then 3. With no earlier self-retries there are at most `1 + max_retries` gate attempts. At exhaustion, a named `if.fail: <step>` is taken; otherwise execution stops with `QualityGateExhausted`. `if.fail: {retry: true}` does not create a separate budget.
+
+The next prompt receives a sanitized, bounded output excerpt as untrusted data. When available, a sanitized log is stored in session `artifacts/quality-gates/` outside the repository, subject to the artifact size limit. Feedback survives checkpoint/resume, clears when no retry is pending, and does not overwrite `{prev.*}`. Gate commands execute shell commands, so workflows must be trusted.
+
+Only prompt and `prompt_file` steps may use gates, including prompt steps within groups. Parallel parents and children, `after-pr` steps, group and `workflow_call` call sites, and non-prompt steps reject them.
+
 ## `timeout:` — per-step time limit
 
 Plain digits mean seconds; `m` / `h` suffixes mean minutes / hours. Applies to prompt, command, and parallel steps. For command arrays, each command gets its own timeout. A parallel parent limits the entire block and cancels unfinished children; a child timeout affects only that child. Option steps ignore `timeout`.
@@ -168,12 +195,13 @@ steps:
 2. Execute the step (bounded by `timeout` if set).
 3. Step has a recoverable failure (non-zero exit / recoverable prompt error / timeout / `no-file-changes: failed`) and `if.fail` is set → jump to its target, or re-execute on `retry: true`. A missing-model error from a jcode prompt bypasses `if.fail` and aborts the workflow.
 4. `no-file-changes: failed`, no files changed, and no `if.fail` → stop with Failed.
-5. `if.file-changed` and files changed → jump to target (ignored when `if.no-file-changes` is also set).
-6. `no-file-changes: retry` and no files changed → re-execute the same step.
-7. An option step's selected `next:` → go to that step (`next: ~` falls through to rule 8/9).
-8. If `next:` is set → go to that step.
-9. Otherwise → go to the next step in YAML declaration order.
-10. If there is none → end the workflow.
+5. `no-file-changes: retry` and no files changed → re-execute the same step without running gates.
+6. After a successful prompt, run `quality_gates` if present. Failure retries the step while budget remains; on exhaustion, jump to a named `if.fail` target or stop with `QualityGateExhausted`.
+7. `if.file-changed` and files changed → jump to target (ignored when `if.no-file-changes` is also set).
+8. An option step's selected `next:` → go to that step (`next: ~` falls through to rule 9/10).
+9. If `next:` is set → go to that step.
+10. Otherwise → go to the next step in YAML declaration order.
+11. If there is none → end the workflow.
 
 ## Loop protection
 

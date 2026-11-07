@@ -68,6 +68,7 @@ mod platform;
 mod pr_merge;
 mod pr_review_fix;
 mod pr_template;
+mod quality_gate;
 mod repo_clone;
 mod resolver;
 mod retry;

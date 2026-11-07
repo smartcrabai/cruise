@@ -27,6 +27,7 @@ pub(crate) fn is_eligible_error(error: &CruiseError) -> bool {
         | CruiseError::InvalidTemplateSyntax(_)
         | CruiseError::ProcessSpawnError(_)
         | CruiseError::LoopProtection { .. }
+        | CruiseError::QualityGateExhausted { .. }
         | CruiseError::IoError(_)
         | CruiseError::SerializationError(_)
         | CruiseError::NotGitRepository
