@@ -3309,33 +3309,43 @@ exit 97
     );
 }
 
-#[test]
-fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
-    let collector = Collector::start();
-    let (fixture, env) = builtin_wait_ci_fixture(
-        &collector,
-        r#"#!/bin/sh
+fn failed_check_details_fake_gh_script() -> &'static str {
+    r#"#!/bin/sh
 if [ "$1" = repo ]; then
   printf 'owner/repo\n'
   exit 0
 fi
 if [ "$1" = api ] && [ "$2" = graphql ]; then
   head=$(git rev-parse HEAD) || exit 97
-  calls=$(cat .fake-gh-graphql-calls 2>/dev/null || printf '0')
-  calls=$((calls + 1))
-  printf '%s\n' "$calls" > .fake-gh-graphql-calls || exit 97
-  if [ "$calls" -eq 1 ]; then
-    printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"state":"FAILURE","contexts":{"totalCount":4}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
-    exit 0
-  fi
-  printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"contexts":{"totalCount":4,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"successful-check-not-exported","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://url-user-secret:url-pass-secret@github.com/owner/repo/actions/runs/789/job/456?token=url-query-secret#url-fragment-secret","checkSuite":{"workflowRun":{"databaseId":789}}},{"__typename":"StatusContext","context":"successful-context-not-exported","state":"SUCCESS"},{"__typename":"StatusContext","context":"deploy-prod","state":"ERROR","targetUrl":"https://status-user-secret:status-pass-secret@example.test/deploy/42?private_token=status-query-secret#status-fragment-secret"}]}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
-  printf 'Authorization: Bearer private-provider-stderr-secret\n' >&2
-  exit 0
+  query_kind=unknown
+  for argument in "$@"; do
+    case "$argument" in
+      *'contexts(first:1)'*) query_kind=summary ;;
+      *'contexts(first:100'*) query_kind=details ;;
+    esac
+  done
+  case "$query_kind" in
+    summary)
+      printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"state":"FAILURE","contexts":{"totalCount":4}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
+      exit 0 ;;
+    details)
+      printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"contexts":{"totalCount":4,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"successful-check-not-exported","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://url-user-secret:url-pass-secret@github.com/owner/repo/actions/runs/789/job/456?token=url-query-secret#url-fragment-secret","checkSuite":{"workflowRun":{"databaseId":789}}},{"__typename":"StatusContext","context":"successful-context-not-exported","state":"SUCCESS"},{"__typename":"StatusContext","context":"deploy-prod","state":"ERROR","targetUrl":"https://status-user-secret:status-pass-secret@example.test/deploy/42?private_token=status-query-secret#status-fragment-secret"}]}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
+      printf 'Authorization: Bearer private-provider-stderr-secret\n' >&2
+      exit 0 ;;
+    *)
+      printf 'unexpected fake gh GraphQL query with secret details\n' >&2
+      exit 97 ;;
+  esac
 fi
 printf 'unexpected fake gh invocation with secret details\n' >&2
 exit 97
-"#,
-    );
+"#
+}
+
+#[test]
+fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
+    let collector = Collector::start();
+    let (fixture, env) = builtin_wait_ci_fixture(&collector, failed_check_details_fake_gh_script());
     let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-prompt-secret");
     assert!(
         !output.status.success(),
@@ -3758,6 +3768,10 @@ if [ "$1" = "api" ]; then
   esac
   head=$(git rev-parse HEAD) || exit 97
   case "$*" in
+    *checkSuites*)
+      printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
+      exit 0
+      ;;
     *mergeable*)
       printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"CONFLICTING","mergeStateStatus":"BEHIND","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"SUCCESS","commit":{"oid":"%s"},"contexts":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}}\n' "$head" "$head"
       exit 0
@@ -3805,7 +3819,7 @@ if [ "$1" = "api" ]; then
       head=$(git rev-parse HEAD) || exit 97
       ready_head=$(cat "$FAKE_GH_READY_HEAD" 2>/dev/null || true)
       status_count=$(cat "$FAKE_GH_STATUS_COUNT" 2>/dev/null || printf '0')
-      if [ "$ready_head" != "$head" ] || [ "$attempts" -ne 1 ] || [ "$status_count" -lt 3 ]; then
+      if [ "$ready_head" != "$head" ] || [ "$attempts" -ne 1 ] || [ "$status_count" -lt 4 ]; then
         printf 'rejected early or duplicate merge write\n' >&2
         exit 97
       fi
@@ -3823,6 +3837,11 @@ if [ "$1" = "api" ]; then
       ;;
     *"/rules/branches/"*)
       printf '[]\n'
+      exit 0
+      ;;
+    *checkSuites*)
+      head=$(git rev-parse HEAD) || exit 97
+      printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
       exit 0
       ;;
     *statusCheckRollup*)
@@ -3873,6 +3892,10 @@ if [ "$1" = "api" ]; then
       echo 'stderr-secret-8241' >&2
       exit 1 ;;
     *"/rules/branches/"*) echo '[]'; exit 0 ;;
+    *checkSuites*)
+      head=$(git rev-parse HEAD) || exit 97
+      printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
+      exit 0 ;;
     *statusCheckRollup*)
       head=$(git rev-parse HEAD) || exit 97
       printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"SUCCESS","commit":{"oid":"%s"},"contexts":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}}}\n' "$head" "$head"
@@ -4167,16 +4190,16 @@ fn assert_expected_head_readiness(root: &std::path::Path) -> String {
         .parse::<usize>()
         .unwrap_or_else(|error| panic!("parse fake status count: {error}"));
     assert_eq!(
-        status_count, 3,
-        "native readiness should observe stale CI, current-head pending CI, then green CI"
+        status_count, 4,
+        "native readiness should observe stale CI, current-head pending CI, then two current-head green CI observations"
     );
     let status_sequence = std::fs::read_to_string(root.join("fake-gh-status-sequence"))
         .unwrap_or_else(|error| panic!("read fake status sequence: {error}"));
     let status_sequence: Vec<_> = status_sequence.lines().collect();
     assert_eq!(
         status_sequence.len(),
-        3,
-        "fake provider should observe exactly the three readiness phases: {status_sequence:?}"
+        4,
+        "fake provider should observe stale, pending, and two consecutive ready polls: {status_sequence:?}"
     );
     assert!(
         status_sequence[0].starts_with("UNKNOWN ") && status_sequence[0].ends_with(OLD_HEAD),
@@ -4196,7 +4219,12 @@ fn assert_expected_head_readiness(root: &std::path::Path) -> String {
     assert_eq!(
         status_sequence[2],
         expected_status.as_str(),
-        "native readiness should merge only after current-head green CI: {status_sequence:?}"
+        "the first current-head green poll must not merge alone: {status_sequence:?}"
+    );
+    assert_eq!(
+        status_sequence[3],
+        expected_status.as_str(),
+        "native readiness should merge after the second consecutive green poll: {status_sequence:?}"
     );
     expected_head
 }
