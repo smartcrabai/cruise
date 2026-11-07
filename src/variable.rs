@@ -91,7 +91,7 @@ pub(crate) fn resolve_template_with_lookup(
 }
 
 /// Holds all runtime variables for a workflow execution.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VariableStore {
     /// Initial input from the CLI argument or stdin.
     input: String,
@@ -108,6 +108,8 @@ pub struct VariableStore {
     /// Exit status of the previous command step.
     prev_success: Option<bool>,
 
+    quality_gate_feedback: Option<String>,
+
     /// Named variables (e.g. plan file path).
     named: HashMap<String, NamedVariable>,
 
@@ -116,7 +118,7 @@ pub struct VariableStore {
 }
 
 /// A named variable value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NamedVariable {
     /// A file path - resolves to the path string itself (not the file contents).
     FilePath(std::path::PathBuf),
@@ -148,6 +150,20 @@ impl VariableStore {
     /// Set the session-scoped root used by prompt artifact references.
     pub fn set_artifacts_root(&mut self, root: PathBuf) {
         self.artifacts_root = Some(root);
+    }
+
+    #[must_use]
+    pub fn artifacts_root(&self) -> Option<&std::path::Path> {
+        self.artifacts_root.as_deref()
+    }
+
+    pub fn set_quality_gate_feedback(&mut self, feedback: Option<String>) {
+        self.quality_gate_feedback = feedback;
+    }
+
+    #[must_use]
+    pub fn quality_gate_feedback(&self) -> Option<&str> {
+        self.quality_gate_feedback.as_deref()
     }
 
     /// Save a prompt artifact below the configured session root.

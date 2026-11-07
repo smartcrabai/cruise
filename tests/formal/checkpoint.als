@@ -15,12 +15,12 @@ open util/integer
 abstract sig Bool {}
 one sig Yes, No extends Bool {}
 abstract sig Event {}
-one sig Init, Save, CheckpointFailure, Execute, Accept, RejectBudget,
+one sig Init, Save, CheckpointFailure, Execute, GateFail, Accept, RejectBudget,
   Resume, Policy, RejectInvalid, Idle extends Event {}
 sig State {
   current, pending, total, budget, forward, forwardBudget,
     groups, effects, runtime, limit: one Int,
-  gate, saved: one Bool,
+  gate, saved, feedback, gateOutcome: one Bool,
   event: one Event
 }
 
@@ -33,6 +33,7 @@ pred samePosition[a, b: State] { b.current = a.current and b.pending = a.pending
 pred sameEffects[a, b: State] { b.effects = a.effects and b.runtime = a.runtime }
 pred sameData[a, b: State] {
   sameCounts[a,b] and samePosition[a,b] and sameEffects[a,b] and b.limit = a.limit
+  and b.feedback = a.feedback and b.gateOutcome = a.gateOutcome
 }
 pred identical[a, b: State] {
   sameData[a,b] and b.gate = a.gate and b.saved = a.saved
@@ -41,7 +42,7 @@ pred initial[a: State] {
   a.current = 0 and a.pending = 0 and a.total = 0 and a.budget = 0
   a.forward = 0 and a.forwardBudget = 0 and a.groups = 0
   a.effects = 0 and a.runtime = 0 and a.limit = 2
-  a.gate = No and a.saved = Yes and a.event = Init
+  a.gate = No and a.saved = Yes and a.feedback = No and a.gateOutcome = No and a.event = Init
 }
 pred authorize[a, b: State] {
   a.current < 2 and sameData[a,b]
@@ -61,10 +62,22 @@ pred execute[a, b: State] {
   (b.pending != 3 implies a.effects < 4)
   b.effects = (b.pending = 3 => a.effects else a.effects.add[1])
   b.runtime = b.effects and b.gate = No and b.saved = No and b.event = Execute
+  // A completed non-gate attempt consumes any feedback, including when it
+  // selects another kind of retry. The feedback was available to its prompt.
+  b.feedback = No and b.gateOutcome = No
+}
+pred gateFail[a, b: State] {
+  a.current = 0 and a.pending = 0 and a.gate = Yes and a.effects < 4 and a.groups < 2
+  b.current = a.current and sameCounts[a,b] and b.limit = a.limit
+  ((a.budget < a.limit and a.total < 2 and b.pending = 1 and b.feedback = Yes)
+    or ((a.budget >= a.limit or a.total >= 2) and b.pending in 3 + 5 and b.feedback = No))
+  b.effects = a.effects.add[1] and b.runtime = b.effects
+  b.gate = No and b.saved = Yes and b.gateOutcome = Yes and b.event = GateFail
 }
 pred accept[a, b: State] {
   a.pending > 0 and b.pending = 0 and sameEffects[a,b] and b.limit = a.limit
   b.gate = No and b.saved = Yes and b.event = Accept
+  b.gateOutcome = No and b.feedback = (a.pending <= 2 => a.feedback else No)
   (a.pending <= 2 and a.budget < a.limit and a.total < 2
     and b.current = a.current and b.total = a.total.add[1]
     and b.budget = a.budget.add[1]
@@ -85,13 +98,14 @@ pred rejectBudget[a, b: State] {
 pred resume[a, b: State] { a.saved = Yes and identical[a,b] and b.event = Resume }
 pred policy[a, b: State] {
   sameCounts[a,b] and samePosition[a,b] and sameEffects[a,b]
+  b.feedback = a.feedback and b.gateOutcome = a.gateOutcome
   b.gate = a.gate and b.saved = a.saved
   b.limit >= 0 and b.limit <= 2 and b.event = Policy
 }
 pred rejectInvalid[a, b: State] { identical[a,b] and b.event = RejectInvalid }
 pred idle[a, b: State] { identical[a,b] and b.event = Idle }
 pred step[a, b: State] {
-  authorize[a,b] or checkpointFailure[a,b] or execute[a,b] or accept[a,b]
+  authorize[a,b] or checkpointFailure[a,b] or execute[a,b] or gateFail[a,b] or accept[a,b]
   or rejectBudget[a,b] or resume[a,b] or policy[a,b] or rejectInvalid[a,b] or idle[a,b]
 }
 // This trace constraint is essential: assertions range over reachable behavior,
@@ -150,7 +164,48 @@ assert CP07Group {
     and ((b.event != Accept or a.pending != 2) implies b.groups = a.groups)
     and ((b.event = Execute and a.current = 0 and a.groups = 2) implies
       (b.pending = 3 and b.effects = a.effects))
-    and (b.event != Execute implies b.runtime = a.runtime)
+    and (b.event not in Execute + GateFail implies b.runtime = a.runtime)
+}
+assert CP09GateRoute {
+  all a: State - last | let b = next[a] |
+    (b.event = GateFail implies (a.gate = Yes and
+      ((a.budget < a.limit and a.total < 2) => b.pending = 1 else b.pending in 3 + 5)))
+    and ((b.event = Accept and a.gateOutcome = Yes) implies b.effects = a.effects)
+}
+assert CP10Feedback {
+  all a: State | (a.gateOutcome = Yes and a.pending = 1) implies (a.feedback = Yes and a.saved = Yes)
+  all a: State - last | let b = next[a] |
+    (b.event = Resume implies (b.feedback = a.feedback and b.pending = a.pending))
+    and (b.event = Execute implies b.feedback = No)
+    and ((b.event = Accept and a.pending >= 3) implies b.feedback = No)
+    and ((b.event = GateFail and b.pending != 1) implies b.feedback = No)
+}
+assert CP11GateBudget {
+  all a: State - last | let b = next[a] |
+    (b.event = Accept and a.gateOutcome = Yes and a.pending = 1) implies
+      (a.budget < a.limit and b.budget = a.budget.add[1] and b.budget <= a.limit)
+}
+pred GateRetryResumeWitness {
+  some a: State - last | a.event = GateFail and a.pending = 1 and next[a].event = Resume
+    and next[next[a]].event = Accept and next[next[a]].budget = 1 and next[next[a]].feedback = Yes
+}
+pred GateExhaustGotoWitness {
+  some a: State - last | a.event = GateFail and a.pending = 3 and prev[a].feedback = Yes and a.feedback = No
+    and next[a].event = Resume and next[next[a]].event = Accept and next[next[a]].current = 1
+}
+pred GateExhaustStopWitness {
+  some a: State - last | a.event = GateFail and a.pending = 5 and prev[a].feedback = Yes and a.feedback = No
+    and next[a].event = Accept and next[a].current = 2
+}
+// Another retry reason spends the same edge before the gate fails.
+pred SharedBudgetExhaustWitness {
+  some a: State - last | a.event = Accept and prev[a].pending = 2 and a.budget = 1
+  some a: State - last | a.event = GateFail and prev[a].budget = 1
+    and prev[a].limit = 1 and a.pending in 3 + 5
+}
+pred ZeroBudgetGateWitness {
+  some a: State - last | a.event = GateFail and prev[a].limit = 0
+    and prev[a].budget = 0 and a.pending in 3 + 5 and a.feedback = No
 }
 // CP-08 build_graph fixed identities and completed execution has no more effects.
 assert CP08Completed {
@@ -194,6 +249,14 @@ check CP05Resume for 13 State, 4 Int expect 0
 check CP06Reject for 13 State, 4 Int expect 0
 check CP07Group for 13 State, 4 Int expect 0
 check CP08Completed for 13 State, 4 Int expect 0
+check CP09GateRoute for 13 State, 4 Int expect 0
+check CP10Feedback for 13 State, 4 Int expect 0
+check CP11GateBudget for 13 State, 4 Int expect 0
+run GateRetryResumeWitness for 13 State, 4 Int expect 1
+run GateExhaustGotoWitness for 13 State, 4 Int expect 1
+run GateExhaustStopWitness for 13 State, 4 Int expect 1
+run SharedBudgetExhaustWitness for 13 State, 4 Int expect 1
+run ZeroBudgetGateWitness for 13 State, 4 Int expect 1
 run RetryResumeWitness for 13 State, 4 Int expect 1
 run SkipCompletionWitness for 13 State, 4 Int expect 1
 run GroupRuntimeWitness for 13 State, 4 Int expect 1

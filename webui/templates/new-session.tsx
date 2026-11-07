@@ -60,6 +60,8 @@ export default function NewSession(props) {
           class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-base md:text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none"
         />
         <datalist id="repo-options" hx-get="/webui/repos" hx-trigger="load" hx-swap="innerHTML"></datalist>
+        <label for="pr-number-input" class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Pull request number (GitHub, optional)</label>
+        <input id="pr-number-input" type="number" min="1" step="1" name="pr_number" class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-base md:text-sm text-gray-800 dark:text-gray-200 focus:border-blue-500 outline-none" />
       </fieldset>
 
       <div

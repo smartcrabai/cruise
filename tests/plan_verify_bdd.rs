@@ -237,6 +237,7 @@ mod contracts {
             config_path: None,
             config_yaml: Some(format!("command: [sh, '{}']\nsteps:\n  s1:\n    prompt: test\n", backend.display())),
             repo: None,
+            pr_number: None,
             workspace_mode: WorkspaceMode::Worktree,
             allow_dirty_working_tree: false,
             attachments: vec![],
