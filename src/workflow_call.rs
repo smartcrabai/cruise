@@ -45,13 +45,24 @@ pub fn resolve_workflow_calls_from_path_with_defaults(
     path: impl Into<PathBuf>,
     defaults: &WorkflowDefaults,
 ) -> Result<WorkflowConfig> {
+    resolve_path_with_mode(path, defaults, false)
+}
+
+pub(crate) fn resolve_path_with_mode(
+    path: impl Into<PathBuf>,
+    defaults: &WorkflowDefaults,
+    doctor: bool,
+) -> Result<WorkflowConfig> {
     let path = path.into();
     let yaml = std::fs::read_to_string(&path)?;
     let mut resolution = WorkflowConfigResolution::from_yaml(&yaml)
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
-    let mut stack = CallStack::default();
+    let mut stack = CallStack {
+        doctor,
+        ..CallStack::default()
+    };
     resolution.config = load_local_workflow(&path, &mut stack)?;
-    finish_resolved_config(resolution, defaults, true)
+    finish_resolved_config(resolution, defaults, true, doctor)
 }
 
 /// Resolve `workflow_call` steps and `prompt_file` fields in an already parsed
@@ -89,6 +100,7 @@ pub fn resolve_workflow_calls_with_defaults(
         WorkflowConfigResolution::from_materialized(config),
         defaults,
         true,
+        false,
     )
 }
 
@@ -117,23 +129,26 @@ pub fn resolve_workflow_calls_without_app_model_defaults(
         WorkflowConfigResolution::from_materialized(config),
         defaults,
         false,
+        false,
     )
 }
 
-/// Resolve calls from raw YAML so field presence survives until defaults are
-/// applied. This is used by internal source-based resolution.
-pub(crate) fn resolve_workflow_calls_from_yaml_with_defaults(
+pub(crate) fn resolve_yaml_with_mode(
     yaml: &str,
     base_dir: impl Into<PathBuf>,
     defaults: &WorkflowDefaults,
+    doctor: bool,
 ) -> Result<WorkflowConfig> {
     let base_dir = base_dir.into();
     let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
-    let mut stack = CallStack::default();
+    let mut stack = CallStack {
+        doctor,
+        ..CallStack::default()
+    };
     resolution.config =
         resolve_root_workflow_calls_inner(resolution.config, &base_dir, &mut stack)?;
-    finish_resolved_config(resolution, defaults, true)
+    finish_resolved_config(resolution, defaults, true, doctor)
 }
 
 /// Fetch a GitHub-hosted workflow and fully expand its `workflow_call` steps and
@@ -147,28 +162,30 @@ pub(crate) fn resolve_workflow_calls_from_yaml_with_defaults(
 pub fn resolve_github_workflow_for_install(
     reference: &GitHubWorkflowRef,
 ) -> Result<WorkflowConfig> {
-    load_github_workflow(reference, &mut CallStack::default())
+    let config = load_github_workflow(reference, &mut CallStack::default())?;
+    validate_no_return_routes(&config)?;
+    Ok(config)
 }
 
-/// Resolve a builtin resource with runtime defaults and environment overrides.
-///
-/// # Errors
-/// Returns an error for invalid resources, arguments, dependency graphs or defaults.
-pub(crate) fn resolve_embedded_workflow_with_defaults(
+pub(crate) fn resolve_embedded_with_mode(
     yaml: &str,
     resource_key: &str,
     defaults: &WorkflowDefaults,
+    doctor: bool,
 ) -> Result<WorkflowConfig> {
     let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
     resolution.config = load_embedded_workflow_yaml(
         resource_key,
         yaml,
-        &mut CallStack::default(),
+        &mut CallStack {
+            doctor,
+            ..CallStack::default()
+        },
         &IndexMap::new(),
         "root",
     )?;
-    finish_resolved_config(resolution, defaults, true)
+    finish_resolved_config(resolution, defaults, true, doctor)
 }
 
 /// Produce portable builtin YAML without applying machine defaults or overrides.
@@ -271,8 +288,10 @@ fn finish_resolved_config(
     mut resolution: WorkflowConfigResolution,
     defaults: &WorkflowDefaults,
     apply_app_model_defaults: bool,
+    doctor: bool,
 ) -> Result<WorkflowConfig> {
     let config = &mut resolution.config;
+    validate_no_return_routes(config)?;
     for warning in config.deprecated_language_warnings() {
         crate::status_eprintln!("warning: {warning}");
     }
@@ -291,8 +310,10 @@ fn finish_resolved_config(
     // `PromptRun` carries no policy field, so the retry policy reaches the
     // executor ambiently. Validated first, so an unusable policy is rejected
     // here instead of becoming the active one.
-    crate::config::validate_retry(config)?;
-    crate::retry::set_active_policy(config.retry.clone());
+    if !doctor {
+        crate::config::validate_retry(config)?;
+        crate::retry::set_active_policy(config.retry.clone());
+    }
     Ok(resolution.config)
 }
 
@@ -338,6 +359,7 @@ fn parse_github_url(url: &str, field: &str) -> Result<GitHubWorkflowRef> {
 
 #[derive(Default)]
 struct CallStack {
+    doctor: bool,
     local: Vec<PathBuf>,
     github: Vec<GitHubWorkflowRef>,
     embedded: Vec<String>,
@@ -396,7 +418,10 @@ fn resolve_root_workflow_calls_inner(
     stack: &mut CallStack,
 ) -> Result<WorkflowConfig> {
     bind_workflow_inputs(&mut config, base_dir, stack, &IndexMap::new(), "root")?;
-    resolve_workflow_calls_inner(config, base_dir, stack)
+    stack.sources.push(WorkflowSource::Local);
+    let result = resolve_workflow_calls_inner(config, base_dir, stack);
+    stack.sources.pop();
+    result
 }
 
 fn bind_workflow_inputs(
@@ -406,6 +431,11 @@ fn bind_workflow_inputs(
     inputs: &IndexMap<String, String>,
     site: &str,
 ) -> Result<()> {
+    if stack.sources.len() <= 1 {
+        validate_root_returns_before_expansion(config)?;
+    } else {
+        validate_callee_returns(site, config)?;
+    }
     let mut declared = HashSet::new();
     for name in &config.inputs {
         let mut chars = name.chars();
@@ -473,6 +503,11 @@ fn bind_step_inputs(
             "step '{name}' uses with without workflow_call"
         )));
     }
+    if step.on_return.is_some() && step.workflow_call.is_none() {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "step '{name}': on_return requires workflow_call"
+        )));
+    }
     if step.workflow_call.is_some() {
         validate_call_site(name, step)?;
     }
@@ -518,6 +553,11 @@ fn bind_step_inputs(
             }
         }
     }
+    if let Some(gates) = &mut step.quality_gates {
+        for gate in gates {
+            bind(&mut gate.command)?;
+        }
+    }
     for value in step.env.values_mut() {
         bind(value)?;
     }
@@ -559,9 +599,16 @@ fn resolve_step_map(
     group_name: Option<&str>,
 ) -> Result<IndexMap<String, StepConfig>> {
     let mut resolved = IndexMap::new();
+    let parent_plain_steps: HashSet<String> = steps
+        .iter()
+        .filter(|(_, step)| step.workflow_call.is_none())
+        .map(|(name, _)| name.clone())
+        .collect();
 
     for (step_name, step) in steps {
-        crate::config::validate_parallel_step(&step_name, &step)?;
+        if !stack.doctor {
+            crate::config::validate_parallel_step(&step_name, &step)?;
+        }
         if step.workflow_call.is_none() {
             insert_unique(&mut resolved, step_name, step)?;
             continue;
@@ -583,13 +630,235 @@ fn resolve_step_map(
             step.with.as_ref().unwrap_or(&IndexMap::new()),
             &step_name,
         )?;
-        let expanded = expand_called_workflow(&step_name, &step, callee)?;
+        let routes = validate_call_routes(&step_name, &step, &callee, &parent_plain_steps)?;
+        let expanded = expand_called_workflow(&step_name, &step, callee, &routes)?;
         for (expanded_name, expanded_step) in expanded {
             insert_unique(&mut resolved, expanded_name, expanded_step)?;
         }
     }
 
     Ok(resolved)
+}
+
+fn step_return_labels(step: &StepConfig) -> Vec<&str> {
+    step.return_label
+        .iter()
+        .map(String::as_str)
+        .chain(
+            step.option
+                .iter()
+                .flatten()
+                .filter_map(|item| item.return_label.as_deref()),
+        )
+        .collect()
+}
+
+fn has_return_recursive(step: &StepConfig) -> bool {
+    !step_return_labels(step).is_empty()
+        || step
+            .parallel
+            .as_ref()
+            .is_some_and(|children| children.values().any(has_return_recursive))
+}
+
+fn validate_root_returns_before_expansion(config: &WorkflowConfig) -> Result<()> {
+    if !config.returns.is_empty()
+        || config
+            .steps
+            .values()
+            .chain(config.after_pr.values())
+            .chain(
+                config
+                    .groups
+                    .values()
+                    .flat_map(|group| group.steps.values()),
+            )
+            .any(has_return_recursive)
+    {
+        return Err(CruiseError::InvalidStepConfig(
+            "return routes are only valid in a workflow_call target".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_no_return_routes(config: &WorkflowConfig) -> Result<()> {
+    fn has_on_return(step: &StepConfig) -> bool {
+        step.on_return.is_some()
+            || step
+                .parallel
+                .as_ref()
+                .is_some_and(|children| children.values().any(has_on_return))
+    }
+    validate_root_returns_before_expansion(config)?;
+    if config
+        .steps
+        .values()
+        .chain(config.after_pr.values())
+        .chain(
+            config
+                .groups
+                .values()
+                .flat_map(|group| group.steps.values()),
+        )
+        .any(has_on_return)
+    {
+        return Err(CruiseError::InvalidStepConfig(
+            "return routes are only valid in a workflow_call target".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_callee_returns(call_site: &str, callee: &WorkflowConfig) -> Result<()> {
+    let mut declared = HashSet::new();
+    for label in &callee.returns {
+        let mut chars = label.chars();
+        if !chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            || !declared.insert(label.as_str())
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "workflow_call '{call_site}': invalid or duplicate return label '{label}'"
+            )));
+        }
+    }
+    if callee
+        .after_pr
+        .values()
+        .chain(
+            callee
+                .groups
+                .values()
+                .flat_map(|group| group.steps.values()),
+        )
+        .any(has_return_recursive)
+    {
+        return Err(CruiseError::InvalidStepConfig(
+            "return is only valid on top-level callee steps".into(),
+        ));
+    }
+    let mut used = HashSet::new();
+    for step in callee.steps.values() {
+        if (step.parallel.is_some() && !step_return_labels(step).is_empty())
+            || step
+                .parallel
+                .as_ref()
+                .is_some_and(|children| children.values().any(has_return_recursive))
+            || (step.group.is_some() && has_return_recursive(step))
+            || (step.workflow_call.is_some() && has_return_recursive(step))
+        {
+            return Err(CruiseError::InvalidStepConfig(
+                "return is only valid on top-level callee steps".into(),
+            ));
+        }
+        if step.return_label.is_some() && step.option.is_some() {
+            return Err(CruiseError::InvalidStepConfig(
+                "return must be set on option items".into(),
+            ));
+        }
+        if step.return_label.is_some() && step.next.is_some()
+            || step
+                .option
+                .iter()
+                .flatten()
+                .any(|item| item.return_label.is_some() && item.next.is_some())
+        {
+            return Err(CruiseError::InvalidStepConfig(
+                "both next and return".into(),
+            ));
+        }
+        let labels = step_return_labels(step);
+        if !labels.is_empty()
+            && step
+                .if_condition
+                .as_ref()
+                .is_some_and(|condition| condition.file_changed.is_some())
+        {
+            return Err(CruiseError::InvalidStepConfig(
+                "return-bearing step cannot declare if.file-changed".into(),
+            ));
+        }
+        for label in labels {
+            if !declared.contains(label) {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "undeclared return label '{label}'"
+                )));
+            }
+            used.insert(label);
+        }
+    }
+    for label in &callee.returns {
+        if !used.contains(label.as_str()) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "return label '{label}' is declared but never returned"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_call_routes(
+    call_site: &str,
+    call_step: &StepConfig,
+    callee: &WorkflowConfig,
+    parent_plain_steps: &HashSet<String>,
+) -> Result<IndexMap<String, String>> {
+    let routes = call_step.on_return.clone().unwrap_or_default();
+    if call_step.on_return.is_some() && callee.returns.is_empty() {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "workflow_call '{call_site}': undeclared return label"
+        )));
+    }
+    for (label, target) in &routes {
+        if !callee.returns.contains(label) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "workflow_call '{call_site}': undeclared return label '{label}'"
+            )));
+        }
+        if !parent_plain_steps.contains(target) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "on_return target '{target}' is not a plain step"
+            )));
+        }
+    }
+    for label in &callee.returns {
+        if !routes.contains_key(label) {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "unmapped return label '{label}'"
+            )));
+        }
+    }
+    if call_step.next.is_some()
+        && callee
+            .steps
+            .last()
+            .is_some_and(|(_, step)| step.return_label.is_some())
+    {
+        return Err(CruiseError::InvalidStepConfig(
+            "call-site next is unreachable".into(),
+        ));
+    }
+    Ok(routes)
+}
+
+fn apply_return_routes(step: &mut StepConfig, routes: &IndexMap<String, String>) -> Result<()> {
+    let route = |label: String| {
+        routes.get(&label).cloned().ok_or_else(|| {
+            CruiseError::InvalidStepConfig(format!("unmapped return label '{label}'"))
+        })
+    };
+    if let Some(label) = step.return_label.take() {
+        step.next = Some(route(label)?);
+    }
+    for item in step.option.iter_mut().flatten() {
+        if let Some(label) = item.return_label.take() {
+            item.next = Some(route(label)?);
+        }
+    }
+    Ok(())
 }
 
 fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
@@ -600,8 +869,10 @@ fn validate_call_site(step_name: &str, step: &StepConfig) -> Result<()> {
         ("instruction", step.instruction.is_some()),
         ("plan", step.plan.is_some()),
         ("option", step.option.is_some()),
+        ("return", step.return_label.is_some()),
         ("command", step.command.is_some()),
         ("parallel", step.parallel.is_some()),
+        ("quality_gates", step.quality_gates.is_some()),
         ("group", step.group.is_some()),
         ("if", step.if_condition.is_some()),
         ("timeout", step.timeout.is_some()),
@@ -667,7 +938,7 @@ fn load_prompt_file(step_name: &str, prompt_file: &str, base_dir: &Path) -> Resu
     })
 }
 
-fn resolve_local_prompt_path(prompt_file: &str, base_dir: &Path) -> PathBuf {
+pub(crate) fn resolve_local_prompt_path(prompt_file: &str, base_dir: &Path) -> PathBuf {
     base_dir.join(crate::new_session_history::expand_tilde(prompt_file))
 }
 
@@ -809,6 +1080,10 @@ fn github_workflow_base_url(reference: &GitHubWorkflowRef) -> String {
     }
 }
 
+pub(crate) fn fetch_github_file_for_install(reference: &GitHubWorkflowRef) -> Result<String> {
+    fetch_github_file_once(reference, "package manifest")
+}
+
 fn fetch_github_file(
     reference: &GitHubWorkflowRef,
     what: &str,
@@ -881,6 +1156,7 @@ fn expand_called_workflow(
     call_site: &str,
     call_step: &StepConfig,
     callee: WorkflowConfig,
+    routes: &IndexMap<String, String>,
 ) -> Result<IndexMap<String, StepConfig>> {
     if !callee.groups.is_empty() {
         return Err(CruiseError::InvalidStepConfig(format!(
@@ -904,11 +1180,19 @@ fn expand_called_workflow(
         step.workflow_call = None;
         debug_assert!(step.prompt_file.is_none());
         rewrite_internal_references(&mut step, call_site, &original_ids);
+        apply_return_routes(&mut step, routes)?;
         step.flag.clone_from(&call_step.flag);
 
         if first_id.as_deref() == Some(original_id.as_str()) {
-            step.skip.clone_from(&call_step.skip);
-            step.when.clone_from(&call_step.when);
+            let mut guards = call_step.call_guards.clone();
+            if call_step.skip.is_some() || call_step.when.is_some() {
+                guards.push(crate::config::CallGuard {
+                    skip: call_step.skip.clone(),
+                    when: call_step.when.clone(),
+                });
+            }
+            guards.append(&mut step.call_guards);
+            step.call_guards = guards;
         }
         if last_id.as_deref() == Some(original_id.as_str()) && step.next.is_none() {
             step.next.clone_from(&call_step.next);
@@ -1383,6 +1667,34 @@ steps:
 
     #[cfg(unix)]
     #[test]
+    fn test_github_install_rejects_root_return_routes() {
+        let _lock = lock_process();
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        let _path = install_gh_stub(
+            &dir,
+            "#!/bin/sh\ncase \"$*\" in\n  *'contents/returns.yaml?ref=main'*) printf 'cmV0dXJuczogW2FwcHJvdmVkXQpzdGVwczoKICBkb25lOgogICAgY29tbWFuZDogInRydWUiCg==\\n' ;;\n  *'contents/option.yaml?ref=main'*) printf 'c3RlcHM6CiAgY2hvb3NlOgogICAgb3B0aW9uOgogICAgICAtIHNlbGVjdG9yOiBBcHByb3ZlCiAgICAgICAgcmV0dXJuOiBhcHByb3ZlZAo=\\n' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+
+        for path in ["returns.yaml", "option.yaml"] {
+            let reference = GitHubWorkflowRef {
+                owner: "org".into(),
+                repo: "repo".into(),
+                git_ref: "main".into(),
+                path: path.into(),
+            };
+            let error = resolve_github_workflow_for_install(&reference)
+                .err()
+                .unwrap_or_else(|| panic!("root return routes must be rejected on install"));
+            assert!(
+                matches!(&error, CruiseError::InvalidStepConfig(message)
+                    if message.contains("return routes are only valid in a workflow_call target")),
+                "{path}: {error:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_remote_prompt_file_fetches_and_decodes_content() {
         let _lock = lock_process();
         let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
@@ -1617,9 +1929,57 @@ steps:
 
         // Then: the expanded first step inherits call-site skip/when and the expanded last step jumps to parent next.
         let first = &resolved.steps["maybe-review/one"];
-        assert!(first.skip.is_some());
-        assert!(first.when.is_some());
+        assert!(first.call_guards[0].skip.is_some());
+        assert!(first.call_guards[0].when.is_some());
         assert_eq!(first.next.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn nested_workflow_call_preserves_all_first_step_guards() {
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        write_file(
+            &dir,
+            "leaf.yaml",
+            "steps:\n  first: {command: 'true', skip: leaf.skip, when: {exists: leaf}}\n",
+        );
+        write_file(
+            &dir,
+            "middle.yaml",
+            "steps:\n  inner:\n    workflow_call: ./leaf.yaml\n    skip: inner.skip\n    when: {exists: inner}\n",
+        );
+        let root = WorkflowConfig::from_yaml("command: [echo]\nsteps:\n  outer:\n    workflow_call: ./middle.yaml\n    skip: outer.skip\n    when: {exists: outer}\n").unwrap_or_else(|e| panic!("parse failed: {e}"));
+        let resolved =
+            resolve_workflow_calls_with_defaults(root, dir.path(), &WorkflowDefaults::default())
+                .unwrap_or_else(|e| panic!("resolution failed: {e}"));
+        let step = &resolved.steps["outer/inner/first"];
+        assert_eq!(step.call_guards.len(), 2);
+        assert_eq!(
+            step.call_guards[0]
+                .when
+                .as_ref()
+                .and_then(|when| when.exists.as_deref()),
+            Some("outer")
+        );
+        assert_eq!(
+            step.call_guards[1]
+                .when
+                .as_ref()
+                .and_then(|when| when.exists.as_deref()),
+            Some("inner")
+        );
+        assert_eq!(
+            step.when.as_ref().and_then(|when| when.exists.as_deref()),
+            Some("leaf")
+        );
+        assert!(
+            matches!(&step.call_guards[0].skip, Some(crate::config::SkipCondition::Variable(v)) if v == "outer.skip")
+        );
+        assert!(
+            matches!(&step.call_guards[1].skip, Some(crate::config::SkipCondition::Variable(v)) if v == "inner.skip")
+        );
+        assert!(
+            matches!(&step.skip, Some(crate::config::SkipCondition::Variable(v)) if v == "leaf.skip")
+        );
     }
 
     #[test]

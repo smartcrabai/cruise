@@ -117,26 +117,13 @@ pub(crate) async fn generate_yaml(
     })
 }
 
-/// Run the full exec preflight on a candidate YAML string.
+/// Run doctor static checks with flags off and isolated defaults on candidate YAML.
 ///
 /// # Errors
 ///
 /// Returns the first parse, reference, validation, compile or graph error.
 pub(crate) fn validate_generated_yaml(yaml: &str, base_dir: &Path) -> Result<()> {
-    let config = WorkflowConfig::from_yaml(yaml)
-        .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
-    let config = crate::workflow_call::resolve_workflow_calls_without_app_model_defaults(
-        config,
-        base_dir,
-        &crate::workflow_defaults::WorkflowDefaults::default(),
-    )?;
-    crate::config::validate_config(&config)?;
-    let max_retries = crate::config::resolve_effective_max_retries(None, &config);
-    crate::config::validate_group_retry_budget(&config, max_retries)?;
-    let compiled = crate::workflow::compile(config)?;
-    let graph = crate::graph::build_graph(&compiled, max_retries)?;
-    crate::graph::validation::validate_workflow(&compiled, &graph, &graph.start, &[])?;
-    Ok(())
+    crate::workflow_doctor::check_generated_yaml(yaml, base_dir)
 }
 
 /// Check that `name` is a plain file stem (ASCII alphanumerics, `-`, `_`).
@@ -470,6 +457,20 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
                 tmp.path()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn generated_yaml_ignores_inactive_file_changed_target() {
+        let tmp = TempDir::new().unwrap();
+        let yaml = "command: [cat]\nsteps:\n  a:\n    command: echo\n    if:\n      file-changed: missing\n";
+        assert!(validate_generated_yaml(yaml, tmp.path()).is_err());
+        assert!(
+            validate_generated_yaml(
+                &format!("{yaml}      no-file-changes: failed\n"),
+                tmp.path()
+            )
+            .is_ok()
         );
     }
 
