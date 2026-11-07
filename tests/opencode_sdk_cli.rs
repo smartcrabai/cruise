@@ -2639,10 +2639,13 @@ async fn malformed_required_event_fails_instead_of_reporting_success() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn safe_provider_failures_use_retry_and_fallback_without_corrupting_model_ids() {
     let _lock = lock_process();
-    // A failed primary is cooled down process-wide, so each status needs its
-    // own primary identity.
+    // Cooldowns are process-wide; keep these model identities unique across tests.
     for (status, primary, id) in [
-        (429, MODEL, "team/model:2026"),
+        (
+            429,
+            "fixture/team/model:2026-safe#precise",
+            "team/model:2026-safe",
+        ),
         (404, "fixture/team/model:2027#precise", "team/model:2027"),
     ] {
         let fixture = Fixture::new(Scenario::ProviderFailure {
