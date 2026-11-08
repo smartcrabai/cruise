@@ -41,6 +41,8 @@ Values are trimmed and blanks ignored. Booleans accept only `true`, `false`, `1`
 
 CLI flags and saved session cleanup overrides win where applicable. `CRUISE_RUN_ALL_PARALLELISM` changes the effective app setting for TUI/WebUI run-all without persisting it, not CLI `run --all` (`--parallelism`). File-backed sessions reapply overrides when reloaded; snapshot sessions retain their creation-time configuration. Named or secret-bearing `env`, `mcp_servers`, and `pre_steps`, workflow structure (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), `create_pr`, and deprecated `pr_language` / `plan_language` are excluded. Process runtime switches are separate from configuration overrides.
 
+`CRUISE_UI_LANGUAGE` is separate from workflow configuration and prompt language: it selects the CLI/TUI display language ahead of application `uiLanguage`, system locale, and English. It accepts `en`, `zh-CN`, `es`, `fr`, `pt-BR`, `ja`, `ko`, or `auto`; blank and `auto` defer to the next layer. Set the application default with `cruise config --set-language <tag>` or clear it with `--set-language auto`. A WebUI browser's language cookie overrides the server default without changing application config.
+
 `CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding
 `languages.pr` and `languages.plan` settings. When these variables are unset,
 nested language fields take precedence over the deprecated top-level fields,

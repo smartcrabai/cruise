@@ -37,6 +37,7 @@ fn cli_plan_entrypoint_continues_with_notification_opt_out_enabled() {
             .env("XDG_STATE_HOME", temp.path().join("state"))
             .env("JCODE_HOME", temp.path().join("jcode"))
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env_remove("HERDR_ENV");
         command
     };

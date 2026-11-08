@@ -3,3 +3,13 @@ docs/icon.png
 # Intentionally Japanese docs
 token-exchange/README.md
 skills/cruise-plan/SKILL.md
+# Intentionally CJK UI locale catalogs
+i18n/ja.toml
+i18n/ko.toml
+i18n/zh-CN.toml
+# Localization test fixtures contain intentional translated text
+src/webui/tests.rs
+tests/features/ui_locale.feature
+tests/tui_pty_smoke.rs
+tests/webui/language.mjs
+tests/webui/sse-language.mjs

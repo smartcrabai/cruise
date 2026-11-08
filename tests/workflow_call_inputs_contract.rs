@@ -655,6 +655,7 @@ fn cli_rejects_missing_inputs_before_any_command_side_effect() {
         .env("XDG_DATA_HOME", dir.path().join("data"))
         .env("XDG_STATE_HOME", dir.path().join("state"))
         .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+        .env("CRUISE_UI_LANGUAGE", "en")
         .env_remove("HERDR_ENV")
         .stdin(Stdio::null())
         .output()

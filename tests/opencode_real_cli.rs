@@ -447,6 +447,7 @@ async fn installed_v2_local_model_plugin_turn_resume_and_cancel() {
         .arg("local deterministic acceptance")
         .current_dir(&repo)
         .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+        .env("CRUISE_UI_LANGUAGE", "en")
         .env("NO_COLOR", "1")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
@@ -632,6 +633,7 @@ async fn installed_v2_explicit_shell_restriction_blocks_commit() {
         // Only this disposable fixture repository is under test, not an outer workflow guard.
         .env("GIT_CONFIG_COUNT", "0")
         .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+        .env("CRUISE_UI_LANGUAGE", "en")
         .env("NO_COLOR", "1")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);

@@ -1,5 +1,11 @@
 # Responsive WebUI executable specifications
 
+## Language browser regression
+
+From the repository root, run `npm ci --prefix tests/webui --ignore-scripts`, `tests/webui/node_modules/.bin/playwright install chromium` (on Linux use `install --with-deps chromium`), `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, then `node tests/webui/language.mjs`. The test creates and removes isolated HOME/XDG session data, starts the production runtime on an ephemeral port, and exercises desktop and mobile language selection, persistence, invalid-cookie fallback, and a graph loading failure. Screenshots are saved under `target/formal-reports/language-browser/`, overridable with `WEBUI_LANGUAGE_REPORT_DIR`. The responsive WebUI CI workflow runs the contract and uploads its reports. The graph failure deliberately blocks the external Mermaid CDN, not the application server.
+
+Run `node tests/webui/sse-language.mjs` after the same setup to exercise real run-all events with independent English and Japanese browser connections, asserting localized SSE partials, DOM updates, and notifications. It initializes a disposable Git repository and removes it afterwards. Its screenshots use the same report directory.
+
 ## Verify browser tests
 
 The secret-free boundary suite runs `node tests/webui/verify-boundary.mjs` after the runtime is built and Chromium is installed. It uses real production rendering with isolated HOME/XDG and persisted sessions. It checks that Verify is offered for an approval session with a plan, and hidden for a missing plan, Draft, and Planned, plus the mobile approval view. With a restricted system-only executable PATH and no credentials it clicks Verify, asserts the production POST and the missing Claude CLI error in the UI, and checks the saved plan is preserved. Screenshots, including the error, go under `target/formal-reports/verify-boundary-browser/` (override with `WEBUI_VERIFY_BOUNDARY_REPORT_DIR`). Responsive WebUI CI runs it and uploads the screenshots. No provider is mocked or executed and no specification is verified by this boundary test.

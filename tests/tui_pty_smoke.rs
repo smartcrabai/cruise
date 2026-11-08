@@ -96,6 +96,8 @@ impl Fixture {
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
             .env_remove("HERDR_ENV")
             .env_remove("CRUISE_CONFIG")
+            .env_remove("CRUISE_UI_LANGUAGE")
+            .env("LC_ALL", "C")
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("ANTHROPIC_AUTH_TOKEN")
             .env_remove("CLAUDE_CODE_OAUTH_TOKEN");
@@ -548,6 +550,79 @@ fn tui_available() -> bool {
         }
         Err(error) => panic!("failed to probe script: {error}"),
     }
+}
+
+fn read_app_config(path: &Path) -> serde_json::Value {
+    let contents = std::fs::read(path)
+        .unwrap_or_else(|error| panic!("failed to read app config {}: {error}", path.display()));
+    serde_json::from_slice(&contents)
+        .unwrap_or_else(|error| panic!("invalid app config {}: {error}", path.display()))
+}
+
+#[test]
+fn language_modal_selection_is_saved_and_survives_restart() {
+    if !tui_available() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let config_path = fixture.app_config_path();
+    let config_parent = config_path
+        .parent()
+        .unwrap_or_else(|| panic!("app config path has no parent: {}", config_path.display()));
+    std::fs::create_dir_all(config_parent)
+        .unwrap_or_else(|error| panic!("failed to create app config directory: {error}"));
+    std::fs::write(
+        &config_path,
+        r#"{"uiLanguage":"pt-BR","runAllParallelism":3}"#,
+    )
+    .unwrap_or_else(|error| panic!("failed to write app config: {error}"));
+
+    let mut tui = fixture.start(120, 40, true);
+    tui.send(b"L");
+    tui.wait_for_screen(START_TIMEOUT, |screen| {
+        screen.contains("Português (Brasil)") && screen.contains("日本語")
+    });
+    // Locale::ALL places Japanese immediately after Brazilian Portuguese.
+    tui.send(b"\x1b[B");
+    tui.send(b"\x1b");
+    let cancelled = read_app_config(&config_path);
+    assert_eq!(cancelled["uiLanguage"], "pt-BR", "Esc must not save");
+
+    tui.send(b"L");
+    tui.wait_for_output("日本語", START_TIMEOUT);
+    tui.send(b"\x1b[B");
+    tui.send(b"\r");
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        let config = read_app_config(&config_path);
+        if config["uiLanguage"] == "ja" {
+            assert_eq!(config["runAllParallelism"], 3);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "language was not saved: {config}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    tui.send(b"q");
+    let (status, transcript) = tui.finish();
+    assert!(status.success(), "cruise failed in PTY: {transcript}");
+
+    let mut restarted = fixture.start(120, 40, true);
+    restarted.send(b"L");
+    restarted.wait_for_output("日本語", START_TIMEOUT);
+    // Accepting the preselected value must not revert to the default.
+    restarted.send(b"\r");
+    restarted.send(b"q");
+    let (status, transcript) = restarted.finish();
+    assert!(
+        status.success(),
+        "cruise failed after restart: {transcript}"
+    );
+    let config = read_app_config(&config_path);
+    assert_eq!(config["uiLanguage"], "ja");
+    assert_eq!(config["runAllParallelism"], 3);
 }
 
 #[test]

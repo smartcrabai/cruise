@@ -24,7 +24,7 @@ export default function SessionDetail(props) {
           aria-selected={props.activeTab === "info" ? "true" : "false"}
           class="cruise-tab px-4 py-2 text-xs font-medium transition-colors"
         >
-          Info
+          {props.t.session.info}
         </button>
         <button
           type="button"
@@ -36,7 +36,7 @@ export default function SessionDetail(props) {
           aria-selected={props.activeTab === "dag" ? "true" : "false"}
           class="cruise-tab px-4 py-2 text-xs font-medium transition-colors"
         >
-          Graph
+          {props.t.session.graph}
         </button>
         <button
           type="button"
@@ -48,7 +48,7 @@ export default function SessionDetail(props) {
           aria-selected={props.activeTab === "plan" ? "true" : "false"}
           class="cruise-tab px-4 py-2 text-xs font-medium transition-colors"
         >
-          Plan
+          {props.t.session.plan}
         </button>
         <button
           type="button"
@@ -60,7 +60,7 @@ export default function SessionDetail(props) {
           aria-selected={props.activeTab === "log" ? "true" : "false"}
           class="cruise-tab px-4 py-2 text-xs font-medium transition-colors"
         >
-          Log
+          {props.t.session.log}
         </button>
         <button
           type="button"

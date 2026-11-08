@@ -146,6 +146,7 @@ users = "0.11"
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = [
+  "Win32_Globalization",
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Security_Authorization",

@@ -18,6 +18,7 @@ fn gate(tool: &str, policy: Option<&str>, input: &str) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
     command
         .env_clear()
+        .env("CRUISE_UI_LANGUAGE", "en")
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join("config"))
         .env("JCODE_HOOK_TOOL_NAME", tool)

@@ -10,10 +10,11 @@ export default function Layout(props) {
         <script src="/static/htmax.min.js"></script>
         <script src="/static/app.js" defer></script>
       </Head>
-      <div id="app" data-sidebar-open="false" class="flex flex-col md:flex-row h-dvh bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100">
+      <div id="app" data-sidebar-open="false" data-graph-error-label={props.t.graph_error} class="flex flex-col md:flex-row h-dvh bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100">
         <header class="md:hidden flex flex-shrink-0 items-center gap-2 px-3 py-2 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900">
-          <button id="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Toggle sessions" class="px-2 py-1 text-lg leading-none text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800 rounded">☰</button>
+          <button id="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label={props.t.sidebar.toggle_sessions} class="px-2 py-1 text-lg leading-none text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800 rounded">☰</button>
           <span class="text-sm font-semibold text-gray-800 dark:text-gray-200">Cruise</span>
+          <select id="ui-language-mobile" aria-label={props.t.sidebar.language} class="ml-auto bg-transparent text-sm">{props.languages.map(language => <option value={language.tag} selected={language.selected}>{language.name}</option>)}</select>
         </header>
         <div id="sidebar-backdrop" hidden class="fixed inset-0 z-30 bg-black/40 md:hidden"></div>
         <aside id="sidebar" class="flex-shrink-0 overflow-hidden border-r border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900">{props.sidebar}</aside>

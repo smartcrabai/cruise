@@ -1135,22 +1135,11 @@ impl WorkflowConfig {
     }
 }
 
-fn read_env_string(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
-const LOCALE_ENV_VARS: [&str; 4] = ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"];
-
 fn infer_language_from_locale() -> Option<String> {
     // Locale precedence follows POSIX semantics: once the first non-empty
     // variable is selected, an unsupported value must not fall through to a
     // lower-priority variable.
-    let locale = LOCALE_ENV_VARS
-        .iter()
-        .find_map(|name| read_env_string(name))?;
+    let locale = crate::i18n::resolve::posix_locale_var()?;
     locale_to_language_name(&locale)
 }
 
@@ -6008,6 +5997,7 @@ steps:
     fn clear_all_override_envs() -> Vec<EnvGuard> {
         let mut guards = crate::test_support::clear_config_override_envs();
         guards.extend([
+            EnvGuard::remove("CRUISE_UI_LANGUAGE"),
             EnvGuard::remove("LC_ALL"),
             EnvGuard::remove("LC_MESSAGES"),
             EnvGuard::remove("LANG"),

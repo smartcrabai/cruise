@@ -310,6 +310,8 @@ The New Session dialogue autosaves its answers 500 ms after a change. Other scre
 
 Keys are fixed and cannot be configured:
 
+Press `L` to choose the UI language or `auto`; the selection is saved in application configuration.
+
 | Key | Action |
 |-----|--------|
 | `1` / `2` / `3` | Switch to Sessions / New Session / Run All |
@@ -367,6 +369,10 @@ The built-in names are `tdd`, `refactor`, `add-tests`, `add-formal-specs`, `rese
 > To *write* or edit that YAML, switch to the **cruise-config** skill.
 
 ### Process environment overrides
+
+`CRUISE_UI_LANGUAGE` is a UI setting, not a workflow override. CLI and TUI resolve it before application `uiLanguage`, the system locale, and English. Set it to `en`, `zh-CN`, `es`, `fr`, `pt-BR`, `ja`, `ko`, or `auto`. Case and underscores are accepted for explicit tags. An invalid environment value produces an English warning and is ignored. System detection checks the first nonempty `LC_ALL`, `LC_MESSAGES`, `LANG`, or `LANGUAGE`, without falling through after an unsupported value. Windows also consults the user locale when environment variables do not determine one; macOS and Linux rely on environment variables, so GUI launches without them default to English.
+
+Use `cruise config --set-language ja` to persist an application language and `cruise config --set-language auto` to clear it. `cruise config` reports the effective `ui_language` and source. The WebUI language selector saves a browser cookie, not the application setting, and overrides the server process default for that browser. UI language does not alter `languages.pr` or `languages.plan`.
 
 When loading a workflow config, these process environment variables override the corresponding fields. String values are trimmed and empty values are ignored:
 

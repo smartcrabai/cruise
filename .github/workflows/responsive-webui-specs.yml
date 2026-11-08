@@ -50,6 +50,10 @@ jobs:
           cargo +1.99.1 build --locked --all-features --bin cruise-runtime
           node tests/webui/graph-flags.mjs
           node tests/webui/diff-browser.mjs
+      - name: Production locale browser test
+        run: |
+          node tests/webui/language.mjs
+          node tests/webui/sse-language.mjs
       - name: Verify WebUI browser boundaries
         run: node tests/webui/verify-boundary.mjs
       - name: Production Tell browser test

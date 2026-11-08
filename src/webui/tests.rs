@@ -942,6 +942,29 @@ fn sidebar_rows_and_direct_session_components_render_badge_contents() {
     assert!(header.contains("Add a WebUI"), "{header}");
 }
 
+#[test]
+fn japanese_session_templates_and_partials_are_localized() {
+    let harness = harness();
+    let templates = harness.state.templates.with_locale(crate::i18n::Locale::Ja);
+    let fixtures = super::fixtures::all();
+    for (name, expected) in [
+        ("session-detail", "情報"),
+        ("components/session-header", "承認待ち"),
+        ("components/session-row", "承認待ち"),
+        ("sidebar-rows", "承認待ち"),
+        ("tab-info", "フラグ"),
+    ] {
+        let (_, props) = fixtures
+            .iter()
+            .find(|(fixture, _)| *fixture == name)
+            .unwrap_or_else(|| panic!("missing template fixture for {name}"));
+        let html = templates
+            .render(name, props)
+            .unwrap_or_else(|error| panic!("rendering {name} failed: {error}"));
+        assert!(html.contains(expected), "{name}: {html}");
+    }
+}
+
 #[tokio::test]
 async fn root_page_has_shell_contract() {
     let harness = harness();

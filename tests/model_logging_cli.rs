@@ -76,6 +76,7 @@ impl Fixture {
             .env("XDG_STATE_HOME", self.root.path().join("state"))
             .env("GIT_CONFIG_COUNT", "0")
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env("NO_COLOR", "1")
             .env_remove("CRUISE_CONFIG")
             .env_remove("CRUISE_MODEL")

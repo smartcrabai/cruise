@@ -413,7 +413,28 @@ fn option_vals(request_id: &str, next_step: Option<&str>) -> String {
 
 // --- event -> partials -----------------------------------------------------
 
-fn notify(_state: &WebState, kind: ToastKind, detail: &str) -> Option<SseMessage> {
+fn toast_label(state: &WebState, kind: ToastKind) -> String {
+    let key = match kind {
+        ToastKind::InputRequired => "webui.sse.inputRequired",
+        ToastKind::Completed => "webui.sse.completed",
+        ToastKind::Failed => "webui.sse.failed",
+        ToastKind::PlanReady => "webui.sse.planReady",
+    };
+    crate::i18n::t(state.templates.locale(), key)
+}
+
+fn sse_toast(
+    state: &WebState,
+    kind: ToastKind,
+    input: impl Into<String>,
+    detail: Option<String>,
+) -> String {
+    let mut vm = ToastVm::new(kind, input, detail);
+    vm.label = toast_label(state, kind);
+    toast(state, &vm)
+}
+
+fn notify(state: &WebState, kind: ToastKind, detail: &str) -> Option<SseMessage> {
     let notification_kind = match kind {
         ToastKind::InputRequired => WorkflowNotificationKind::ActionRequired,
         ToastKind::PlanReady => WorkflowNotificationKind::PlanReady,
@@ -434,7 +455,7 @@ fn notify(_state: &WebState, kind: ToastKind, detail: &str) -> Option<SseMessage
         .collect();
     Some(SseMessage::Notify {
         title: "Cruise".to_string(),
-        body: format!("{} -- {sanitized}", kind.label()),
+        body: format!("{} -- {sanitized}", toast_label(state, kind)),
     })
 }
 
@@ -525,9 +546,11 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
             out.push(SseMessage::Html(html));
             if phase == "Awaiting Approval" {
                 let input = session_input(state, session_id);
-                out.push(SseMessage::Html(toast(
+                out.push(SseMessage::Html(sse_toast(
                     state,
-                    &ToastVm::new(ToastKind::PlanReady, truncate(&input, 80), None),
+                    ToastKind::PlanReady,
+                    truncate(&input, 80),
+                    None,
                 )));
                 out.extend(notify(state, ToastKind::PlanReady, &input));
             }
@@ -536,13 +559,11 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
         | ApplicationEvent::RunFailed { session_id, error } => {
             let input = session_input(state, session_id);
             let mut html = header_and_row(state, session_id, None)?;
-            html.push_str(&toast(
+            html.push_str(&sse_toast(
                 state,
-                &ToastVm::new(
-                    ToastKind::Failed,
-                    truncate(&input, 80),
-                    Some(truncate(error, 80)),
-                ),
+                ToastKind::Failed,
+                truncate(&input, 80),
+                Some(truncate(error, 80)),
             ));
             out.push(SseMessage::Html(html));
             out.extend(notify(state, ToastKind::Failed, error));
@@ -577,13 +598,11 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
                 &state.templates.render("ask-panel", &vm)?,
             );
             html.push_str(&header_and_row(state, session_id, None)?);
-            html.push_str(&toast(
+            html.push_str(&sse_toast(
                 state,
-                &ToastVm::new(
-                    ToastKind::InputRequired,
-                    truncate(&input, 80),
-                    Some(truncate(question, 80)),
-                ),
+                ToastKind::InputRequired,
+                truncate(&input, 80),
+                Some(truncate(question, 80)),
             ));
             out.push(SseMessage::Html(html));
             out.extend(notify(state, ToastKind::InputRequired, question));
@@ -597,13 +616,11 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
             let dialog = option_dialog_html(state, session_id, request_id, prompt, choices)?;
             let input = session_input(state, session_id);
             let mut html = targeted("#dialogs", "beforeend", &dialog);
-            html.push_str(&toast(
+            html.push_str(&sse_toast(
                 state,
-                &ToastVm::new(
-                    ToastKind::InputRequired,
-                    truncate(&input, 80),
-                    Some(truncate(prompt, 80)),
-                ),
+                ToastKind::InputRequired,
+                truncate(&input, 80),
+                Some(truncate(prompt, 80)),
             ));
             out.push(SseMessage::Html(html));
             out.extend(notify(state, ToastKind::InputRequired, prompt));
@@ -616,9 +633,11 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
             ));
             if phase == "Completed" {
                 let input = session_input(state, session_id);
-                html.push_str(&toast(
+                html.push_str(&sse_toast(
                     state,
-                    &ToastVm::new(ToastKind::Completed, truncate(&input, 80), None),
+                    ToastKind::Completed,
+                    truncate(&input, 80),
+                    None,
                 ));
                 out.push(SseMessage::Html(html));
                 out.extend(notify(state, ToastKind::Completed, &input));
@@ -655,22 +674,29 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
             } else {
                 ToastKind::Completed
             };
-            let detail = if *cancelled {
-                "Run All cancelled"
-            } else {
-                "Run All finished"
-            };
-            html.push_str(&toast(
-                state,
-                &ToastVm::new(kind, "Run All", Some(detail.to_string())),
-            ));
+            let detail = crate::i18n::t(
+                state.templates.locale(),
+                if *cancelled {
+                    "webui.sse.runAllCancelled"
+                } else {
+                    "webui.sse.runAllFinished"
+                },
+            );
+            let run_all = crate::i18n::t(state.templates.locale(), "webui.sse.runAll");
+            html.push_str(&sse_toast(state, kind, run_all, Some(detail.clone())));
             out.push(SseMessage::Html(html));
-            out.extend(notify(state, kind, detail));
+            out.extend(notify(state, kind, &detail));
         }
         ApplicationEvent::BatchFailed { error } => {
             let vm = super::pages::run_all_vm(state);
             let mut html = replace("run-all-view", &state.templates.render("run-all", &vm)?);
-            html.push_str(&toast(state, &ToastVm::failed("Run All", error.clone())));
+            let run_all = crate::i18n::t(state.templates.locale(), "webui.sse.runAll");
+            html.push_str(&sse_toast(
+                state,
+                ToastKind::Failed,
+                run_all,
+                Some(error.clone()),
+            ));
             out.push(SseMessage::Html(html));
             out.extend(notify(state, ToastKind::Failed, error));
         }

@@ -17,6 +17,9 @@ use crate::error::{CruiseError, Result};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
+    /// Optional interface language, independent of prompt languages.
+    #[serde(alias = "ui_language", skip_serializing_if = "Option::is_none")]
+    pub ui_language: Option<String>,
     /// Maximum number of sessions the `WebUI` and TUI execute concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Defaults to `1` (preserves backward-compatible sequential behaviour).
@@ -162,6 +165,7 @@ fn is_yaml_config_path(path: &Path) -> bool {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            ui_language: None,
             run_all_parallelism: 1,
             run_all_auto_requeue_max_attempts: 0,
             model: None,
@@ -393,6 +397,10 @@ impl AppConfig {
     ///
     /// Returns [`CruiseError::Other`] if any field is invalid.
     pub fn validate(&self) -> Result<()> {
+        if let Some(language) = &self.ui_language {
+            crate::i18n::resolve::validate_language(language)
+                .map_err(|error| CruiseError::Other(format!("invalid uiLanguage: {error}")))?;
+        }
         crate::workflow_categories::validate_workflow_categories(&self.workflow_categories)?;
         if self.others_category_name.trim().is_empty() {
             return Err(CruiseError::Other(
@@ -753,6 +761,7 @@ mod tests {
         let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
         let path = tmp.path().join("config.json");
         let original = AppConfig {
+            ui_language: None,
             run_all_auto_requeue_max_attempts: 0,
             run_all_parallelism: 8,
             model: Some(crate::config::ModelSpec::Multiple(vec![
@@ -798,6 +807,7 @@ mod tests {
             (
                 "runAllParallelism: 8\nmodel: primary\nplan_model:\n  - plan-primary\n  - plan-fallback\n",
                 AppConfig {
+                    ui_language: None,
                     run_all_auto_requeue_max_attempts: 0,
                     run_all_parallelism: 8,
                     model: Some(crate::config::ModelSpec::Single("primary".to_string())),
@@ -811,6 +821,7 @@ mod tests {
             (
                 "run_all_parallelism: 4\nmodel:\n  - primary\n  - fallback\nplanModel: plan-primary\n",
                 AppConfig {
+                    ui_language: None,
                     run_all_auto_requeue_max_attempts: 0,
                     run_all_parallelism: 4,
                     model: Some(crate::config::ModelSpec::Multiple(vec![

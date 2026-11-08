@@ -19,6 +19,7 @@ fn exec_dry_run_rejects_computer_use_on_the_claude_backend() {
         }
     }
     let output = command
+        .env("CRUISE_UI_LANGUAGE", "en")
         .args(["exec", "--dry-run", "--config"])
         .arg(&config)
         .output()

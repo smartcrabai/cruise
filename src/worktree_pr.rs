@@ -1666,6 +1666,8 @@ mod tests {
 
     #[tokio::test]
     async fn unset_base_compares_against_original_checkout() {
+        // Avoid process-wide PATH shims from concurrent Git tests.
+        let _lock = crate::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
         let ctx = base_ahead_fixture(&tmp);
         assert_eq!(

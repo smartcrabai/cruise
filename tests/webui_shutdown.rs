@@ -34,6 +34,7 @@ fn start(home: &std::path::Path) -> (ChildGuard, u16) {
         .env("XDG_STATE_HOME", home.join("state"))
         .env("GIT_CONFIG_COUNT", "0")
         .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+        .env("CRUISE_UI_LANGUAGE", "en")
         .env_remove("HERDR_ENV")
         .env_remove("CRUISE_CONFIG")
         .stdin(Stdio::null())

@@ -111,23 +111,6 @@ pub(crate) enum SidebarStatus {
 
 impl SidebarStatus {
     #[must_use]
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::AwaitingInput => "Awaiting Input",
-            Self::AwaitingApproval => "Awaiting Approval",
-            Self::Running => "Running",
-            Self::Planning => "Planning",
-            Self::Draft => "Draft",
-            Self::Planned => "Planned",
-            Self::Completed => "Completed",
-            Self::Failed => "Failed",
-            Self::PrFailed => "PR Failed",
-            Self::PlanFailed => "Plan Failed",
-            Self::Suspended => "Suspended",
-        }
-    }
-
-    #[must_use]
     pub(crate) fn symbol(self) -> &'static str {
         match self {
             Self::Draft => "◯",
@@ -256,6 +239,10 @@ pub enum Modal {
         editor: Box<Editor>,
         error: Option<String>,
     },
+    UiLanguage {
+        selected: usize,
+        error: Option<String>,
+    },
     RunAllAutoRequeue {
         editor: Box<Editor>,
         error: Option<String>,
@@ -280,6 +267,7 @@ pub struct BatchRow {
 
 pub struct TuiApp {
     pub application: CruiseApplication,
+    pub locale: crate::i18n::Locale,
     pub registry: OperationRegistry,
     pub events: UnboundedSender<UiEvent>,
     pub logs_sender: mpsc::Sender<UiEvent>,
@@ -400,6 +388,7 @@ impl TuiApp {
         }
         let mut app = Self {
             application,
+            locale: crate::i18n::process_locale(),
             registry: OperationRegistry::default(),
             events,
             logs_sender,
@@ -2078,6 +2067,10 @@ impl TuiApp {
                 self.open_run_all_parallelism_editor();
                 false
             }
+            Action::Character('L') => {
+                self.open_ui_language_editor();
+                false
+            }
             Action::Character('e') if self.view == View::RunAll => {
                 self.open_run_all_auto_requeue_editor();
                 false
@@ -2481,6 +2474,9 @@ impl TuiApp {
             } => self.handle_input_modal(title, command, editor, multiline, regenerate, action),
             Modal::RunAllParallelism { editor, error } => {
                 self.handle_run_all_parallelism_modal(editor, error, action)
+            }
+            Modal::UiLanguage { selected, error } => {
+                self.handle_ui_language_modal(selected, error, action)
             }
             Modal::RunAllAutoRequeue { editor, error } => {
                 self.handle_run_all_auto_requeue_modal(editor, error, action)
@@ -2886,6 +2882,72 @@ impl TuiApp {
             editor: Box::new(editor),
             error: None,
         });
+    }
+
+    fn open_ui_language_editor(&mut self) {
+        match self.application.app_config() {
+            Ok(config) => {
+                let selected = config
+                    .ui_language
+                    .as_deref()
+                    .and_then(crate::i18n::Locale::from_tag)
+                    .and_then(|value| {
+                        crate::i18n::Locale::ALL
+                            .iter()
+                            .position(|locale| *locale == value)
+                    })
+                    .map_or(0, |index| index + 1);
+                self.modal = Some(Modal::UiLanguage {
+                    selected,
+                    error: None,
+                });
+            }
+            Err(error) => self.modal = Some(Modal::Error(error.to_string())),
+        }
+    }
+
+    fn handle_ui_language_modal(
+        &mut self,
+        mut selected: usize,
+        error: Option<String>,
+        action: Action,
+    ) -> bool {
+        match action {
+            Action::Escape => return false,
+            Action::Up => {
+                selected = (selected + crate::i18n::Locale::ALL.len())
+                    % (crate::i18n::Locale::ALL.len() + 1);
+            }
+            Action::Down => selected = (selected + 1) % (crate::i18n::Locale::ALL.len() + 1),
+            Action::Enter => {
+                let result = self.application.app_config().and_then(|mut config| {
+                    config.ui_language = selected
+                        .checked_sub(1)
+                        .map(|index| crate::i18n::Locale::ALL[index].tag().to_string());
+                    self.application.save_app_config(&config)
+                });
+                match result {
+                    Ok(()) => {
+                        let configured = selected
+                            .checked_sub(1)
+                            .map(|index| crate::i18n::Locale::ALL[index].tag());
+                        self.locale = crate::i18n::resolve::resolve_current(configured).locale;
+                        self.status = Some(crate::i18n::t(self.locale, "tui.language.saved"));
+                        return false;
+                    }
+                    Err(error) => {
+                        self.modal = Some(Modal::UiLanguage {
+                            selected,
+                            error: Some(error.to_string()),
+                        });
+                        return false;
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.modal = Some(Modal::UiLanguage { selected, error });
+        false
     }
 
     fn save_run_all_parallelism(&mut self, editor: Box<Editor>) {
@@ -4271,23 +4333,22 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_status_has_stable_labels_and_symbols() {
+    fn sidebar_status_has_stable_symbols() {
         let cases = [
-            (SidebarStatus::AwaitingInput, "Awaiting Input", "●"),
-            (SidebarStatus::AwaitingApproval, "Awaiting Approval", "●"),
-            (SidebarStatus::Running, "Running", "●"),
-            (SidebarStatus::Planning, "Planning", "●"),
-            (SidebarStatus::Draft, "Draft", "◯"),
-            (SidebarStatus::Planned, "Planned", "●"),
-            (SidebarStatus::Completed, "Completed", "●"),
-            (SidebarStatus::Failed, "Failed", "●"),
-            (SidebarStatus::PrFailed, "PR Failed", "●"),
-            (SidebarStatus::PlanFailed, "Plan Failed", "●"),
-            (SidebarStatus::Suspended, "Suspended", "●"),
+            (SidebarStatus::AwaitingInput, "●"),
+            (SidebarStatus::AwaitingApproval, "●"),
+            (SidebarStatus::Running, "●"),
+            (SidebarStatus::Planning, "●"),
+            (SidebarStatus::Draft, "◯"),
+            (SidebarStatus::Planned, "●"),
+            (SidebarStatus::Completed, "●"),
+            (SidebarStatus::Failed, "●"),
+            (SidebarStatus::PrFailed, "●"),
+            (SidebarStatus::PlanFailed, "●"),
+            (SidebarStatus::Suspended, "●"),
         ];
 
-        for (status, label, symbol) in cases {
-            assert_eq!(status.label(), label);
+        for (status, symbol) in cases {
             assert_eq!(status.symbol(), symbol);
         }
     }

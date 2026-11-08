@@ -581,14 +581,21 @@ pub struct DiffArgs {
 
 #[derive(Parser, Debug)]
 pub struct ConfigArgs {
+    /// Set the interface language, or auto to clear the saved setting.
+    #[arg(
+        long = "set-language",
+        value_name = "LANG|auto",
+        value_parser = crate::i18n::resolve::validate_language
+    )]
+    pub language: Option<String>,
     /// Set the maximum number of sessions the `WebUI` and TUI run concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
-    #[arg(long, value_name = "N")]
-    pub set_parallelism: Option<usize>,
+    #[arg(long = "set-parallelism", value_name = "N")]
+    pub parallelism: Option<usize>,
     /// Set the maximum automatic retries per session in a batch.
-    #[arg(long, value_name = "N")]
-    pub set_auto_requeue_max_attempts: Option<u32>,
+    #[arg(long = "set-auto-requeue-max-attempts", value_name = "N")]
+    pub auto_requeue_max_attempts: Option<u32>,
 }
 
 #[derive(Parser, Debug)]
@@ -1362,12 +1369,12 @@ mod tests {
     fn test_config_subcommand_no_flags_shows_current_config() {
         // Given: `cruise config` with no arguments
         let cli = Cli::parse_from(["cruise", "config"]);
-        // When/Then: Config subcommand with no set_parallelism (show mode)
+        // When/Then: Config subcommand with no parallelism override (show mode)
         match cli.command {
             Some(Commands::Config(args)) => {
                 assert_eq!(
-                    args.set_parallelism, None,
-                    "no flags means show-only mode (set_parallelism is None)"
+                    args.parallelism, None,
+                    "no flags means show-only mode (parallelism is None)"
                 );
             }
             _ => panic!("expected Config subcommand"),
@@ -1378,14 +1385,10 @@ mod tests {
     fn test_config_subcommand_set_parallelism_parses_value() {
         // Given: `cruise config --set-parallelism 4`
         let cli = Cli::parse_from(["cruise", "config", "--set-parallelism", "4"]);
-        // When/Then: set_parallelism is Some(4)
+        // When/Then: parallelism is Some(4)
         match cli.command {
             Some(Commands::Config(args)) => {
-                assert_eq!(
-                    args.set_parallelism,
-                    Some(4),
-                    "expected set_parallelism = Some(4)"
-                );
+                assert_eq!(args.parallelism, Some(4), "expected parallelism = Some(4)");
             }
             _ => panic!("expected Config subcommand"),
         }
@@ -1397,7 +1400,7 @@ mod tests {
         let cli = Cli::parse_from(["cruise", "config", "--set-parallelism", "1"]);
         match cli.command {
             Some(Commands::Config(args)) => {
-                assert_eq!(args.set_parallelism, Some(1));
+                assert_eq!(args.parallelism, Some(1));
             }
             _ => panic!("expected Config subcommand"),
         }

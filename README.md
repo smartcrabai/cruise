@@ -176,6 +176,8 @@ The default URL is `http://127.0.0.1:8484/`. Use these flags to customize it:
 
 The Graph tab loads Mermaid from jsDelivr and therefore needs network access; all other WebUI tabs work offline.
 
+Choose the display language in the sidebar footer on desktop or the header on mobile. The selection reloads the page and is saved in the browser's `cruise_ui_language` cookie for approximately one year, without changing application configuration. A valid cookie takes precedence over the server's UI language; without one, the server's process default applies.
+
 TSX component imports are relative to the file containing the import. For example, `templates/components/session-row.tsx` imports its sibling badge as `./phase-badge`, not `./components/phase-badge`.
 
 ## Usage
@@ -301,6 +303,7 @@ The TUI is keyboard-only. Keys are fixed and cannot be configured:
 | `1` / `2` / `3` | Switch to Sessions / New Session / Run All |
 | `n` | Open New Session at its first question, Source; choose the location and config before typing the task |
 | `r` | Refresh |
+| `L` | Choose the UI language or `auto` and save it in application configuration |
 | `?` | Show help |
 | `q` / `Ctrl-C` | Quit; an active quit confirms and then cancels work |
 | `Ctrl-P` | Create the New Session from the current answers and start normal planning |
@@ -668,11 +671,17 @@ Options:
           Set the maximum number of sessions the WebUI and TUI run concurrently in `run --all` mode.
 
           Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
+      --set-language <LANG|auto>
+          Set the UI language, or clear the saved setting with auto.
       --set-auto-requeue-max-attempts <N>
           Set the automatic retry limit for Run All (0 disables it).
 ```
 
 Shows or updates application-level settings stored in `config.json` or `config.yaml` under `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI and TUI** execute in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
+
+`cruise config --set-language ja` saves the application setting `uiLanguage` (`ui_language` is also accepted when reading). Use `--set-language auto` to clear it and resume automatic selection. The supported explicit tags are `en`, `zh-CN`, `es`, `fr`, `pt-BR`, `ja`, and `ko`. Case and underscores in place of hyphens are accepted, but other tags such as `pt` and `en-US` are not. `cruise config` reports the effective `ui_language` and its source: `env`, `config`, `system`, or `default`.
+
+CLI and TUI UI language precedence is `CRUISE_UI_LANGUAGE` > application `uiLanguage` > system locale > `en`. A blank or `auto` environment value and an unset or `auto` config value leave that layer unspecified. Invalid environment values are warned about in English and ignored; the CLI setter and application-config validation reject invalid values. POSIX locale detection uses the first nonempty value of `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE`, without trying later variables if that value is unsupported. On Windows, the user locale is consulted if environment variables do not determine a locale. On macOS and Linux only environment variables are consulted, so a GUI launch without them defaults to English. System locale matching accepts regional forms, including mapping Portuguese locales to Brazilian Portuguese and Simplified Chinese locales to `zh-CN`.
 
 `cruise config --set-auto-requeue-max-attempts <N>` sets `run_all_auto_requeue_max_attempts` for CLI, TUI and WebUI Run All. The CLI flag `--auto-requeue-max-attempts <N>` overrides it for one batch. The limit is read once when a batch starts.
 
@@ -1446,6 +1455,8 @@ With `sdk: claude`, workflow MCP entries are written to a per-run private JSON f
 
 ### Prompt Languages
 
+UI display language is independent of prompt languages. Configure it with application `uiLanguage`, `CRUISE_UI_LANGUAGE`, or the TUI language picker; a WebUI browser can override the server default with its own language selector. These settings do not change `languages.pr` or `languages.plan`.
+
 `languages.pr` controls the language used for the auto-generated PR title and body, and `languages.plan` controls the language used by cruise's built-in planning prompts. `CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding YAML values; blank environment values are ignored. Otherwise, nested fields take precedence over deprecated `pr_language` / `plan_language`, then the first non-empty of `LC_ALL`, `LC_MESSAGES`, `LANG`, `LANGUAGE` (mapped once; an unsupported value does not fall through), then `English`. The deprecated fields remain supported as fallbacks.
 
 ```yaml
@@ -1543,6 +1554,8 @@ export CRUISE_RETRY_MAX_DELAY_MS=5000
 `CRUISE_RUN_ALL_PARALLELISM` overrides the app setting for TUI/WebUI run-all operations and effective config display, but is not saved to the config file. It does not change CLI `run --all`, which uses `--parallelism`. File-backed sessions reapply environment overrides when reloaded; snapshot sessions retain the resolved config from creation. Language settings fall back to locale inference from `LC_ALL`, `LC_MESSAGES`, `LANG`, then `LANGUAGE` when no explicit language is configured.
 
 The keys `env`, `mcp_servers`, and `pre_steps` are excluded because they contain named entries, commands, or secrets. Workflow structure and identity (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), the `create_pr` workflow contract, and deprecated `pr_language` / `plan_language` are also excluded. `formal_verify` is configured through workflow YAML or defaults, not a configuration environment override. Process switches such as `CRUISE_CONFIG`, `CRUISE_FORGE`, `CRUISE_RUNTIME`, `CRUISE_SKIP_AGENT_AUTH_CHECK`, `CRUISE_DISABLE_NOTIFICATIONS`, `CRUISE_DISABLE_HERDR`, `CRUISE_OBSERVABILITY_ENABLED`, and `CRUISE_COMMIT_COAUTHOR_NAME` / `CRUISE_COMMIT_COAUTHOR_EMAIL` are separate from configuration overrides.
+
+`CRUISE_UI_LANGUAGE` instead controls the process UI language, not a workflow field or generated prompt language. See [`cruise config`](#cruise-config) for supported tags and precedence.
 
 `JCODE_OPENAI_SERVICE_TIER` controls jcode SDK's OpenAI service tier. Cruise defaults it to `off` when neither workflow `env:` nor the process environment defines the key. Explicit values are respected.
 

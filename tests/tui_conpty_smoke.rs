@@ -40,6 +40,7 @@ fn start_tui() -> Tui {
         command.env(key, path);
     }
     command.env("CRUISE_DISABLE_NOTIFICATIONS", "1");
+    command.env("CRUISE_UI_LANGUAGE", "en");
     let child = pair
         .slave
         .spawn_command(command)

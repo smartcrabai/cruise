@@ -29,6 +29,7 @@ fn assert_removed_bridge(args: &[&str]) {
         .args(args)
         .current_dir(&project)
         .env("HOME", &home)
+        .env("CRUISE_UI_LANGUAGE", "en")
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", root.path().join("config"))
         .env("XDG_DATA_HOME", &data)

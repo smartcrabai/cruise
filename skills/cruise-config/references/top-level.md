@@ -286,6 +286,8 @@ steps:
 
 ## `languages`
 
+These are workflow prompt languages, not the UI display language. The latter uses the separate application setting `uiLanguage` and `CRUISE_UI_LANGUAGE`; a WebUI browser can override the server default with its language selector.
+
 `languages.pr` controls the language used for the auto-generated PR title and body, and `languages.plan` controls the language used for built-in planning prompts. The deprecated top-level `pr_language` and `plan_language` fields remain supported.
 
 `CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN`, when set, override the corresponding YAML values. Blank values are ignored. Without an environment override, the nested field takes precedence over its deprecated top-level counterpart, then the first non-empty variable among `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE` is mapped once; if that value is not a supported locale, no other variable is consulted and the default is `English`. Unsupported or language-neutral locales use `English`.

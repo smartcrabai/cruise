@@ -44,6 +44,7 @@ fn cruise_env<'c>(command: &'c mut Command, home: &Path) -> &'c mut Command {
         // Ignore GIT_CONFIG_* pairs inherited from an outer cruise commit guard.
         .env("GIT_CONFIG_COUNT", "0")
         .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+        .env("CRUISE_UI_LANGUAGE", "en")
         .env_remove("HERDR_ENV")
         .env_remove("CRUISE_CONFIG")
 }

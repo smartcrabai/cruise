@@ -122,6 +122,7 @@ impl Fixture {
             .env("XDG_STATE_HOME", self.path("state"))
             .env("JCODE_HOME", self.path("jcode-home"))
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env("GIT_CONFIG_COUNT", "0")
             .env("NO_COLOR", "1")
             .arg(subcommand)

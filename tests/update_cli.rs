@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 fn run_status(state_home: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_cruise"))
+        .env("CRUISE_UI_LANGUAGE", "en")
         .args(["update", "--status"])
         .env("XDG_STATE_HOME", state_home)
         .env_remove("CRUISE_UPDATE_TEST_CAPABILITIES")
@@ -117,6 +118,7 @@ fn update_command(
             command.env_remove(key);
         }
     }
+    command.env("CRUISE_UI_LANGUAGE", "en");
     command.env("CRUISE_UPDATE_TEST_BASE_URL", "http://127.0.0.1:1");
     if let Some(runtime) = runtime_override {
         command.env("CRUISE_RUNTIME", runtime);
@@ -138,6 +140,7 @@ fn assert_success(output: &std::process::Output) {
 #[test]
 fn update_help_exposes_read_only_status_option() {
     let output = Command::new(env!("CARGO_BIN_EXE_cruise"))
+        .env("CRUISE_UI_LANGUAGE", "en")
         .args(["update", "--help"])
         .output()
         .unwrap_or_else(|error| panic!("failed to run cruise update --help: {error}"));
@@ -172,6 +175,7 @@ fn update_test_capability_query_is_read_only_and_does_not_contact_release_server
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_cruise"))
+        .env("CRUISE_UI_LANGUAGE", "en")
         .args(["update", "--status"])
         .env("XDG_STATE_HOME", &state_home)
         .env("CRUISE_UPDATE_TEST_CAPABILITIES", "1")
@@ -556,6 +560,7 @@ fn update_status_is_read_only_with_runtime_override_and_existing_transaction() {
             command.env_remove(key);
         }
     }
+    command.env("CRUISE_UI_LANGUAGE", "en");
     command.env("CRUISE_UPDATE_TEST_BASE_URL", "http://127.0.0.1:1");
     command.env("CRUISE_RUNTIME", runtime_path());
     let output = command

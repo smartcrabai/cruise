@@ -96,6 +96,7 @@ impl Fixture {
             .env("JCODE_HOME", self.root.path().join("jcode"))
             .env("CRUISE_DISABLE_HERDR", "1")
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env("NO_COLOR", "1")
             .env_remove("HERDR_ENV")
             .stdin(Stdio::null());

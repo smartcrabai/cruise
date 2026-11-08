@@ -76,6 +76,7 @@ impl Fixture {
         command
             .env("PATH", path)
             .env("HOME", &self.home)
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env("XDG_CONFIG_HOME", &self.xdg_config)
             .env("XDG_DATA_HOME", &self.xdg_data)
             .env("XDG_STATE_HOME", &self.xdg_state)

@@ -9,7 +9,7 @@ export default function PublishDialog(props) {
             Post an @cruise run comment after creating the issue (GitHub only)
           </label>}
         <div class="flex gap-2 justify-end">
-          <button type="button" hx-on:click={`document.getElementById('dialog-publish-${props.id}').remove()`} class="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">Cancel</button>
+          <button type="button" hx-on:click={`document.getElementById('dialog-publish-${props.id}').remove()`} class="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">{props.t.common.cancel}</button>
           <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">Publish</button>
         </div>
       </form>

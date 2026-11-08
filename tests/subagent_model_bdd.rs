@@ -131,6 +131,7 @@ mod contracts {
             .env("XDG_STATE_HOME", w.path("state"))
             .env("JCODE_HOME", w.path("jh"))
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env("GIT_CONFIG_COUNT", "0")
             .env("NO_COLOR", "1");
         if purpose == "generate" {

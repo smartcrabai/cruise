@@ -144,6 +144,7 @@ fn gate(w: &mut PolicyWorld, tool: &str, policy: Option<String>, payload: &str) 
     command
         .args(["internal", "jcode-pre-tool"])
         .env_clear()
+        .env("CRUISE_UI_LANGUAGE", "en")
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .current_dir(root.path())

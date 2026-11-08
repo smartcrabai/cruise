@@ -894,6 +894,7 @@ fn cli_json_lists_a_new_state_and_derives_config_fields_without_reading_legacy_s
 
     let output = Command::new(env!("CARGO_BIN_EXE_cruise"))
         .args(["list", "--json"])
+        .env("CRUISE_UI_LANGUAGE", "en")
         .env("XDG_DATA_HOME", &data_home)
         .env("XDG_CONFIG_HOME", temp.path().join("xdg-config"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))

@@ -63,6 +63,7 @@ impl Fixture {
             .env("JCODE_HOME", self.root.path().join("jcode"))
             .env("GIT_CONFIG_COUNT", "0")
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env("NO_COLOR", "1")
             .env_remove("HERDR_ENV")
             .env_remove("JCODE_MODEL")
@@ -109,7 +110,7 @@ fn notification_defaults_remain_invisible_and_are_not_saved()
         assert!(shown.status.success(), "{}", output_text(&shown));
         assert_eq!(
             String::from_utf8_lossy(&shown.stdout),
-            "run_all_parallelism = 2\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\n"
+            "run_all_parallelism = 2\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\nui_language = en (source: env)\n"
         );
         let updated = fixture.run(&["config", "--set-parallelism", "3"]);
         assert!(updated.status.success(), "{}", output_text(&updated));
@@ -311,14 +312,14 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
     assert!(shown.status.success(), "{}", output_text(&shown));
     assert_eq!(
         String::from_utf8_lossy(&shown.stdout),
-        "run_all_parallelism = 3\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\n"
+        "run_all_parallelism = 3\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\nui_language = en (source: env)\n"
     );
 
     let updated = fixture.run(&["config", "--set-parallelism", "7"]);
     assert!(updated.status.success(), "{}", output_text(&updated));
     assert_eq!(
         String::from_utf8_lossy(&updated.stdout),
-        "run_all_parallelism = 7\n"
+        "run_all_parallelism = 7\nui_language = en (source: env)\n"
     );
     assert!(yaml_path.is_file(), "selected YAML config was removed");
     assert!(
@@ -334,7 +335,7 @@ fn yaml_config_show_and_set_parallelism_preserve_model_lists() {
     );
     assert_eq!(
         String::from_utf8_lossy(&shown_after_update.stdout),
-        "run_all_parallelism = 7\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\n"
+        "run_all_parallelism = 7\nrun_all_auto_requeue_max_attempts = 0\nprevent_sleep = false\nmodel = [\"app/primary\",\"app/fallback\"]\nplan_model = [\"plan/primary\",\"plan/fallback\"]\nui_language = en (source: env)\n"
     );
 }
 

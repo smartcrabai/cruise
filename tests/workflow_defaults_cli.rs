@@ -12,6 +12,7 @@ fn cruise(home: &std::path::Path, cwd: &std::path::Path) -> Command {
     }
     command
         .env("HOME", home)
+        .env("CRUISE_UI_LANGUAGE", "en")
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
         .env("XDG_STATE_HOME", home.join("state"))

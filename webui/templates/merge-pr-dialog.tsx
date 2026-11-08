@@ -23,7 +23,7 @@ export default function MergePrDialog(props) {
         </fieldset>}
         {!props.canMerge && <p class="text-sm text-gray-500 dark:text-gray-400">This pull request is not open. Run cruise clean to remove the session.</p>}
         <div class="flex gap-2 justify-end">
-          <button type="button" hx-on:click={`document.getElementById('dialog-merge-pr-${props.id}').remove()`} class="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">Cancel</button>
+          <button type="button" hx-on:click={`document.getElementById('dialog-merge-pr-${props.id}').remove()`} class="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">{props.t.common.cancel}</button>
           {props.canMerge && <button type="submit" class="px-4 py-2 bg-green-700 text-white rounded text-sm hover:bg-green-600">Confirm merge</button>}
         </div>
       </form>
