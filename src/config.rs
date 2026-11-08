@@ -1135,13 +1135,6 @@ impl WorkflowConfig {
     }
 }
 
-fn read_env_string(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
 fn infer_language_from_locale() -> Option<String> {
     // Locale precedence follows POSIX semantics: once the first non-empty
     // variable is selected, an unsupported value must not fall through to a

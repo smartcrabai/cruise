@@ -8,9 +8,11 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = TempDir::new().expect("create fixture");
-        std::fs::create_dir_all(root.path().join("home")).expect("create home");
-        std::fs::create_dir_all(root.path().join("project")).expect("create project");
+        let root = TempDir::new().unwrap_or_else(|error| panic!("create fixture: {error}"));
+        std::fs::create_dir_all(root.path().join("home"))
+            .unwrap_or_else(|error| panic!("create home: {error}"));
+        std::fs::create_dir_all(root.path().join("project"))
+            .unwrap_or_else(|error| panic!("create project: {error}"));
         Self { root }
     }
 
@@ -46,7 +48,9 @@ fn text(output: &Output) -> String {
 }
 
 fn run(command: &mut Command) -> Output {
-    command.output().expect("run cruise")
+    command
+        .output()
+        .unwrap_or_else(|error| panic!("run cruise: {error}"))
 }
 
 #[test]
@@ -87,12 +91,14 @@ fn system_locale_localizes_empty_session_list() {
     let output = run(fixture.command().arg("list").env("LANG", "ko_KR.UTF-8"));
     assert!(output.status.success(), "{}", text(&output));
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("i18n/ko.toml");
-    let contents = std::fs::read_to_string(path).expect("read Korean catalog");
-    let catalog: toml::Value = toml::from_str(&contents).expect("parse Korean catalog");
+    let contents = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read Korean catalog: {error}"));
+    let catalog: toml::Value =
+        toml::from_str(&contents).unwrap_or_else(|error| panic!("parse Korean catalog: {error}"));
     let expected = catalog["cli"]["list"]["empty"]
         .as_str()
-        .expect("Korean empty-list translation");
-    assert!(!expected.is_empty());
+        .unwrap_or_else(|| panic!("Korean empty-list translation should be a string"));
+    assert_ne!(expected, "");
     assert!(
         text(&output).contains(expected),
         "expected {expected:?}, {}",

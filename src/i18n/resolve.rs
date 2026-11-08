@@ -9,6 +9,7 @@ pub enum LocaleSource {
     Default,
 }
 impl LocaleSource {
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Env => "env",
@@ -18,7 +19,7 @@ impl LocaleSource {
         }
     }
 }
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct LocaleSettings<'a> {
     pub env: Option<&'a str>,
     pub config: Option<&'a str>,
@@ -66,6 +67,7 @@ pub fn resolve(settings: LocaleSettings<'_>) -> ResolvedLocale {
         warnings,
     }
 }
+#[must_use]
 pub fn posix_locale_var() -> Option<String> {
     ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"]
         .iter()
@@ -76,6 +78,7 @@ pub fn posix_locale_var() -> Option<String> {
                 .filter(|s| !s.is_empty())
         })
 }
+#[must_use]
 pub fn from_system_locale(value: &str) -> Option<Locale> {
     let normalized = value
         .trim()
@@ -112,6 +115,7 @@ pub fn from_system_locale(value: &str) -> Option<Locale> {
         _ => None,
     }
 }
+#[must_use]
 pub fn parse_cookie_locale(cookie: &str) -> Option<Locale> {
     cookie
         .split(';')
@@ -120,6 +124,7 @@ pub fn parse_cookie_locale(cookie: &str) -> Option<Locale> {
         .find_map(|(_, value)| Locale::from_tag(value))
 }
 #[cfg(windows)]
+#[must_use]
 pub fn system_locale_windows() -> Option<String> {
     use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
     // LOCALE_NAME_MAX_LENGTH from the Windows SDK, including the terminator.
@@ -128,6 +133,7 @@ pub fn system_locale_windows() -> Option<String> {
     (len > 1).then(|| String::from_utf16_lossy(&buf[..len as usize - 1]))
 }
 #[cfg(not(windows))]
+#[must_use]
 pub fn system_locale_windows() -> Option<String> {
     None
 }
@@ -144,6 +150,7 @@ fn select_system_locale(
         None => windows(),
     }
 }
+#[must_use]
 pub fn resolve_current(config: Option<&str>) -> ResolvedLocale {
     let env = std::env::var("CRUISE_UI_LANGUAGE").ok();
     let system = system_locale();
@@ -153,6 +160,10 @@ pub fn resolve_current(config: Option<&str>) -> ResolvedLocale {
         system: system.as_deref(),
     })
 }
+/// Validates that a locale setting is `auto` or a supported locale tag.
+///
+/// # Errors
+/// Returns an error when `value` is not `auto` or a supported locale tag.
 pub fn validate_language(value: &str) -> Result<String, String> {
     if value == value.trim()
         && (value.eq_ignore_ascii_case("auto") || Locale::from_tag(value).is_some())
@@ -255,7 +266,7 @@ mod tests {
             (result.locale, result.source),
             (Locale::En, LocaleSource::Default)
         );
-        assert!(result.warnings.is_empty());
+        assert_eq!(result.warnings, Vec::<String>::new());
     }
 
     #[test]

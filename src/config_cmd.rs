@@ -7,16 +7,16 @@ use crate::{cli::ConfigArgs, error::Result};
 /// Returns an error if configuration cannot be loaded, validated, or saved.
 pub fn run(args: &ConfigArgs) -> Result<()> {
     let mut config = crate::app_config::AppConfig::load()?;
-    let updating = args.set_parallelism.is_some()
-        || args.set_auto_requeue_max_attempts.is_some()
-        || args.set_language.is_some();
-    if let Some(parallelism) = args.set_parallelism {
+    let updating = args.parallelism.is_some()
+        || args.auto_requeue_max_attempts.is_some()
+        || args.language.is_some();
+    if let Some(parallelism) = args.parallelism {
         config.run_all_parallelism = parallelism;
     }
-    if let Some(max) = args.set_auto_requeue_max_attempts {
+    if let Some(max) = args.auto_requeue_max_attempts {
         config.run_all_auto_requeue_max_attempts = max;
     }
-    if let Some(language) = &args.set_language {
+    if let Some(language) = &args.language {
         config.ui_language = if language.eq_ignore_ascii_case("auto") {
             None
         } else {
@@ -32,10 +32,10 @@ pub fn run(args: &ConfigArgs) -> Result<()> {
     }
     if updating {
         config.save()?;
-        if let Some(parallelism) = args.set_parallelism {
+        if let Some(parallelism) = args.parallelism {
             println!("run_all_parallelism = {parallelism}");
         }
-        if let Some(max) = args.set_auto_requeue_max_attempts {
+        if let Some(max) = args.auto_requeue_max_attempts {
             println!("run_all_auto_requeue_max_attempts = {max}");
         }
     } else {

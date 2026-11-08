@@ -1,3 +1,6 @@
+[language]
+native_name = "简体中文"
+
 [tui]
 ready = "就绪"
 [tui.nav]

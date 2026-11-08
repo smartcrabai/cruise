@@ -1,3 +1,6 @@
+[language]
+native_name = "Português (Brasil)"
+
 [tui]
 ready = "Pronto"
 [tui.nav]

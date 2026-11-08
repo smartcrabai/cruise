@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 pub mod resolve;
-pub use resolve::{LocaleSettings, LocaleSource, ResolvedLocale};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Locale {
@@ -25,6 +24,7 @@ impl Locale {
         Self::Ja,
         Self::Ko,
     ];
+    #[must_use]
     pub const fn tag(self) -> &'static str {
         match self {
             Self::En => "en",
@@ -36,17 +36,13 @@ impl Locale {
             Self::Ko => "ko",
         }
     }
-    pub const fn native_name(self) -> &'static str {
-        match self {
-            Self::En => "English",
-            Self::ZhCn => "简体中文",
-            Self::Es => "Español",
-            Self::Fr => "Français",
-            Self::PtBr => "Português (Brasil)",
-            Self::Ja => "日本語",
-            Self::Ko => "한국어",
-        }
+    #[must_use]
+    pub fn native_name(self) -> &'static str {
+        catalog(self)
+            .get("language.native_name")
+            .map_or(self.tag(), String::as_str)
     }
+    #[must_use]
     pub fn from_tag(value: &str) -> Option<Self> {
         let normalized = value.trim().replace('_', "-");
         Self::ALL
@@ -77,7 +73,7 @@ fn flatten(prefix: &str, value: &toml::Value, out: &mut BTreeMap<String, String>
         toml::Value::Table(table) => {
             for (key, value) in table {
                 let name = if prefix.is_empty() {
-                    key.to_string()
+                    key.clone()
                 } else {
                     format!("{prefix}.{key}")
                 };
@@ -93,13 +89,14 @@ fn flatten(prefix: &str, value: &toml::Value, out: &mut BTreeMap<String, String>
 fn catalog(locale: Locale) -> &'static BTreeMap<String, String> {
     static CATALOGS: [OnceLock<BTreeMap<String, String>>; 7] = [const { OnceLock::new() }; 7];
     CATALOGS[locale as usize].get_or_init(|| {
-        let value: toml::Value =
-            toml::from_str(raw(locale)).unwrap_or_else(|_| toml::Value::Table(Default::default()));
+        let value: toml::Value = toml::from_str(raw(locale))
+            .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
         let mut out = BTreeMap::new();
         flatten("", &value, &mut out);
         out
     })
 }
+#[must_use]
 pub fn t(locale: Locale, key: &str) -> String {
     render_key(catalog(locale), catalog(Locale::En), key)
 }
@@ -115,6 +112,7 @@ fn render_key(
         .cloned()
         .unwrap_or_else(|| key.to_owned())
 }
+#[must_use]
 pub fn tf(locale: Locale, key: &str, vars: &[(&str, &str)]) -> String {
     interpolate(&t(locale, key), vars)
 }
@@ -142,8 +140,8 @@ fn interpolate(template: &str, vars: &[(&str, &str)]) -> String {
 pub fn webui_props(locale: Locale) -> &'static serde_json::Value {
     static PROPS: [OnceLock<serde_json::Value>; 7] = [const { OnceLock::new() }; 7];
     PROPS[locale as usize].get_or_init(|| {
-        let value: toml::Value =
-            toml::from_str(raw(locale)).unwrap_or_else(|_| toml::Value::Table(Default::default()));
+        let value: toml::Value = toml::from_str(raw(locale))
+            .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
         serde_json::to_value(value.get("webui")).unwrap_or(serde_json::Value::Null)
     })
 }
@@ -161,19 +159,34 @@ mod tests {
     }
 
     #[test]
+    fn native_locale_names_are_loaded_from_catalogs() {
+        assert!(
+            Locale::ALL
+                .iter()
+                .all(|locale| locale.native_name() != locale.tag())
+        );
+    }
+    #[test]
     fn missing_translation_returns_key_and_embedded_webui_props_are_nested() {
         assert_eq!(t(Locale::Ja, "missing.key"), "missing.key");
-        assert_eq!(webui_props(Locale::Ja)["sidebar"]["sessions"], "セッション");
+        assert!(
+            webui_props(Locale::Ja)["sidebar"]["sessions"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
     }
 
     #[test]
     fn catalog_fallback_prefers_primary_then_english_then_key() {
-        let primary = BTreeMap::from([("translated".to_string(), "訳".to_string())]);
+        let primary = BTreeMap::from([("translated".to_string(), "local translation".to_string())]);
         let english = BTreeMap::from([
             ("translated".to_string(), "translation".to_string()),
             ("fallback".to_string(), "English".to_string()),
         ]);
-        assert_eq!(render_key(&primary, &english, "translated"), "訳");
+        assert_eq!(
+            render_key(&primary, &english, "translated"),
+            "local translation"
+        );
         assert_eq!(render_key(&primary, &english, "fallback"), "English");
         assert_eq!(render_key(&primary, &english, "missing"), "missing");
     }

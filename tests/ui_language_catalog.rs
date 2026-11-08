@@ -10,7 +10,7 @@ fn catalog(tag: &str) -> BTreeMap<String, String> {
             toml::Value::Table(table) => {
                 for (key, value) in table {
                     let name = if prefix.is_empty() {
-                        key.to_string()
+                        key.clone()
                     } else {
                         format!("{prefix}.{key}")
                     };
@@ -27,7 +27,8 @@ fn catalog(tag: &str) -> BTreeMap<String, String> {
         .join("i18n")
         .join(format!("{tag}.toml"));
     let contents = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let parsed: toml::Value = toml::from_str(&contents).expect("valid TOML catalog");
+    let parsed: toml::Value = toml::from_str(&contents)
+        .unwrap_or_else(|error| panic!("invalid TOML catalog {}: {error}", path.display()));
     let mut entries = BTreeMap::new();
     flatten("", &parsed, &mut entries);
     assert!(!entries.is_empty(), "empty catalog: {tag}");

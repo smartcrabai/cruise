@@ -552,6 +552,13 @@ fn tui_available() -> bool {
     }
 }
 
+fn read_app_config(path: &Path) -> serde_json::Value {
+    let contents = std::fs::read(path)
+        .unwrap_or_else(|error| panic!("failed to read app config {}: {error}", path.display()));
+    serde_json::from_slice(&contents)
+        .unwrap_or_else(|error| panic!("invalid app config {}: {error}", path.display()))
+}
+
 #[test]
 fn language_modal_selection_is_saved_and_survives_restart() {
     if !tui_available() {
@@ -559,12 +566,16 @@ fn language_modal_selection_is_saved_and_survives_restart() {
     }
     let fixture = Fixture::new();
     let config_path = fixture.app_config_path();
-    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let config_parent = config_path
+        .parent()
+        .unwrap_or_else(|| panic!("app config path has no parent: {}", config_path.display()));
+    std::fs::create_dir_all(config_parent)
+        .unwrap_or_else(|error| panic!("failed to create app config directory: {error}"));
     std::fs::write(
         &config_path,
         r#"{"uiLanguage":"pt-BR","runAllParallelism":3}"#,
     )
-    .unwrap();
+    .unwrap_or_else(|error| panic!("failed to write app config: {error}"));
 
     let mut tui = fixture.start(120, 40, true);
     tui.send(b"L");
@@ -574,8 +585,7 @@ fn language_modal_selection_is_saved_and_survives_restart() {
     // Locale::ALL places Japanese immediately after Brazilian Portuguese.
     tui.send(b"\x1b[B");
     tui.send(b"\x1b");
-    let cancelled: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    let cancelled = read_app_config(&config_path);
     assert_eq!(cancelled["uiLanguage"], "pt-BR", "Esc must not save");
 
     tui.send(b"L");
@@ -584,8 +594,7 @@ fn language_modal_selection_is_saved_and_survives_restart() {
     tui.send(b"\r");
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        let config: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        let config = read_app_config(&config_path);
         if config["uiLanguage"] == "ja" {
             assert_eq!(config["runAllParallelism"], 3);
             break;
@@ -611,8 +620,7 @@ fn language_modal_selection_is_saved_and_survives_restart() {
         status.success(),
         "cruise failed after restart: {transcript}"
     );
-    let config: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    let config = read_app_config(&config_path);
     assert_eq!(config["uiLanguage"], "ja");
     assert_eq!(config["runAllParallelism"], 3);
 }

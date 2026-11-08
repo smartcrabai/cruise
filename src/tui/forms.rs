@@ -106,24 +106,6 @@ impl Step {
         Self::Launch,
     ];
 
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Task => "Task",
-            Self::Attachments => "Images",
-            Self::Source => "Source",
-            Self::WorkingDirectory => "Working directory",
-            Self::Repository => "Repository (GitHub or GitLab)",
-            Self::PullRequest => "Pull request number",
-            Self::Config => "Workflow config",
-            Self::SkippedSteps => "Skipped steps",
-            Self::Flags => "Workflow flags",
-            Self::Workspace => "Workspace",
-            Self::DirtyTree => "Dirty working tree",
-            Self::Launch => "Launch",
-        }
-    }
-
     /// Answered by typing into an editor.  Skipped steps are also typed when
     /// the workflow config offers no step list; the reducer decides that.
     #[must_use]

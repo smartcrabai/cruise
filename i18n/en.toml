@@ -1,3 +1,6 @@
+[language]
+native_name = "English"
+
 [tui]
 ready = "Ready"
 [tui.nav]

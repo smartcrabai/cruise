@@ -264,7 +264,7 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let items = app.sessions.iter().map(|session| {
         let status = app.sidebar_status(session);
         let prefix = format!("{} ", status.symbol());
-        let suffix = format!(" · {}", sidebar_status_label(app, status));
+        let suffix = format!(" · {}", sidebar_status_label(app.locale, status));
         let status_style = sidebar_status_style(app, status);
         let title_width = row_width
             .saturating_sub(Line::from(prefix.as_str()).width())
@@ -298,7 +298,7 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     );
 }
 
-fn sidebar_status_label(app: &TuiApp, status: SidebarStatus) -> String {
+fn sidebar_status_label(locale: crate::i18n::Locale, status: SidebarStatus) -> String {
     let key = match status {
         SidebarStatus::AwaitingInput => "tui.phase.awaiting_input",
         SidebarStatus::AwaitingApproval => "tui.phase.awaiting_approval",
@@ -312,7 +312,7 @@ fn sidebar_status_label(app: &TuiApp, status: SidebarStatus) -> String {
         SidebarStatus::PlanFailed => "tui.phase.plan_failed",
         SidebarStatus::Suspended => "tui.phase.suspended",
     };
-    crate::i18n::t(app.locale, key)
+    crate::i18n::t(locale, key)
 }
 
 fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -492,21 +492,8 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
             Span::raw(session.input.as_str()),
         ));
     }
-    if let SessionPhase::Failed(error) | SessionPhase::PrFailed(error) = &session.phase {
-        lines.push(Line::from(vec![
-            Span::styled(
-                crate::i18n::t(
-                    app.locale,
-                    if matches!(&session.phase, SessionPhase::PrFailed(_)) {
-                        "tui.phase.pr_error"
-                    } else {
-                        "tui.phase.run_error"
-                    },
-                ),
-                error_style(app),
-            ),
-            Span::raw(format!(" {error}")),
-        ]));
+    if let Some(line) = session_error_line(app, session) {
+        lines.push(line);
     }
     if session.auto_requeue_count > 0 {
         lines.push(Line::from(format!(
@@ -526,6 +513,21 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
         Span::raw(action_summary(app, session)),
     ));
     lines
+}
+
+fn session_error_line<'a>(
+    app: &TuiApp,
+    session: &'a crate::session::SessionState,
+) -> Option<Line<'a>> {
+    let (key, error) = match &session.phase {
+        SessionPhase::Failed(error) => ("tui.phase.run_error", error),
+        SessionPhase::PrFailed(error) => ("tui.phase.pr_error", error),
+        _ => return None,
+    };
+    Some(Line::from(vec![
+        Span::styled(crate::i18n::t(app.locale, key), error_style(app)),
+        Span::raw(format!(" {error}")),
+    ]))
 }
 
 fn labeled_line<'a>(app: &TuiApp, name: &'a str, value: Span<'a>) -> Line<'a> {
@@ -2432,6 +2434,7 @@ mod tests {
         plan_available: bool,
         color: Color,
     ) {
+        let locale = crate::i18n::Locale::En;
         let selected_id = format!("s{index}");
         let unselected_id = format!("u{index}");
         let mut selected = sidebar_session(&selected_id, phase.clone());
@@ -2441,6 +2444,7 @@ mod tests {
             unselected.plan_error = Some("planner failed".to_string());
         }
         let buffer = rendered_buffer_with(120, 24, false, View::Sessions, |app| {
+            app.locale = locale;
             app.sessions = vec![selected, unselected];
             app.selected = 0;
             if plan_available {
@@ -2460,7 +2464,7 @@ mod tests {
             color
         );
         for row in [selected_row, unselected_row] {
-            for cell in cells_for_text(&buffer, 120, row, status.label()) {
+            for cell in cells_for_text(&buffer, 120, row, &sidebar_status_label(locale, status)) {
                 assert_eq!(cell.fg, color, "status {status:?} label cell");
             }
         }
@@ -3712,13 +3716,19 @@ mod tests {
                 locale,
                 crate::i18n::Locale::ZhCn | crate::i18n::Locale::Ja | crate::i18n::Locale::Ko
             ) {
-                let first = title.chars().next().unwrap().to_string();
+                let first = title.chars().next().map_or_else(
+                    || panic!("empty resize title for {locale:?}"),
+                    |c| c.to_string(),
+                );
                 let row = buffer
                     .content
                     .chunks(80)
                     .find(|row| row.iter().any(|cell| cell.symbol() == first))
-                    .unwrap();
-                let index = row.iter().position(|cell| cell.symbol() == first).unwrap();
+                    .unwrap_or_else(|| panic!("missing resize title row for {locale:?}"));
+                let index = row
+                    .iter()
+                    .position(|cell| cell.symbol() == first)
+                    .unwrap_or_else(|| panic!("missing wide title character for {locale:?}"));
                 assert_eq!(
                     row[index + 1].symbol(),
                     " ",

@@ -29,10 +29,10 @@ pub(crate) struct UiLocale(pub(crate) crate::i18n::Locale);
 impl axum::extract::FromRequestParts<WebState> for UiLocale {
     type Rejection = Infallible;
 
-    async fn from_request_parts(
+    fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         state: &WebState,
-    ) -> std::result::Result<Self, Self::Rejection> {
+    ) -> impl Future<Output = std::result::Result<Self, Self::Rejection>> + Send {
         let cookie = parts
             .headers
             .get(axum::http::header::COOKIE)
@@ -40,7 +40,7 @@ impl axum::extract::FromRequestParts<WebState> for UiLocale {
         let locale = cookie
             .and_then(crate::i18n::resolve::parse_cookie_locale)
             .unwrap_or(state.process_locale);
-        Ok(Self(locale))
+        std::future::ready(Ok(Self(locale)))
     }
 }
 

@@ -957,8 +957,10 @@ fn japanese_session_templates_and_partials_are_localized() {
         let (_, props) = fixtures
             .iter()
             .find(|(fixture, _)| *fixture == name)
-            .unwrap();
-        let html = templates.render(name, props).unwrap();
+            .unwrap_or_else(|| panic!("missing template fixture for {name}"));
+        let html = templates
+            .render(name, props)
+            .unwrap_or_else(|error| panic!("rendering {name} failed: {error}"));
         assert!(html.contains(expected), "{name}: {html}");
     }
 }

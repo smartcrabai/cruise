@@ -1,4 +1,8 @@
 #![expect(clippy::unwrap_used, reason = "isolated BDD fixtures")]
+#![expect(
+    clippy::needless_pass_by_value,
+    reason = "Cucumber requires owned String captures for step parameters"
+)]
 use cucumber::{World as _, given, then, when};
 use std::process::{Command, Output, Stdio};
 
@@ -78,7 +82,8 @@ fn inspect_again(w: &mut LocaleWorld) {
 fn set_language(w: &mut LocaleWorld, value: String) {
     let out = w
         .command()
-        .args(["config", "--set-language", &value])
+        .args(["config", "--set-language"])
+        .arg(value)
         .output()
         .unwrap();
     assert!(
@@ -92,7 +97,8 @@ fn set_language(w: &mut LocaleWorld, value: String) {
 fn attempt_language(w: &mut LocaleWorld, value: String) {
     w.output = Some(
         w.command()
-            .args(["config", "--set-language", &value])
+            .args(["config", "--set-language"])
+            .arg(value)
             .output()
             .unwrap(),
     );

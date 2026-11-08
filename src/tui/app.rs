@@ -111,23 +111,6 @@ pub(crate) enum SidebarStatus {
 
 impl SidebarStatus {
     #[must_use]
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::AwaitingInput => "Awaiting Input",
-            Self::AwaitingApproval => "Awaiting Approval",
-            Self::Running => "Running",
-            Self::Planning => "Planning",
-            Self::Draft => "Draft",
-            Self::Planned => "Planned",
-            Self::Completed => "Completed",
-            Self::Failed => "Failed",
-            Self::PrFailed => "PR Failed",
-            Self::PlanFailed => "Plan Failed",
-            Self::Suspended => "Suspended",
-        }
-    }
-
-    #[must_use]
     pub(crate) fn symbol(self) -> &'static str {
         match self {
             Self::Draft => "◯",
@@ -2933,7 +2916,7 @@ impl TuiApp {
             Action::Escape => return false,
             Action::Up => {
                 selected = (selected + crate::i18n::Locale::ALL.len())
-                    % (crate::i18n::Locale::ALL.len() + 1)
+                    % (crate::i18n::Locale::ALL.len() + 1);
             }
             Action::Down => selected = (selected + 1) % (crate::i18n::Locale::ALL.len() + 1),
             Action::Enter => {
@@ -4350,23 +4333,22 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_status_has_stable_labels_and_symbols() {
+    fn sidebar_status_has_stable_symbols() {
         let cases = [
-            (SidebarStatus::AwaitingInput, "Awaiting Input", "●"),
-            (SidebarStatus::AwaitingApproval, "Awaiting Approval", "●"),
-            (SidebarStatus::Running, "Running", "●"),
-            (SidebarStatus::Planning, "Planning", "●"),
-            (SidebarStatus::Draft, "Draft", "◯"),
-            (SidebarStatus::Planned, "Planned", "●"),
-            (SidebarStatus::Completed, "Completed", "●"),
-            (SidebarStatus::Failed, "Failed", "●"),
-            (SidebarStatus::PrFailed, "PR Failed", "●"),
-            (SidebarStatus::PlanFailed, "Plan Failed", "●"),
-            (SidebarStatus::Suspended, "Suspended", "●"),
+            (SidebarStatus::AwaitingInput, "●"),
+            (SidebarStatus::AwaitingApproval, "●"),
+            (SidebarStatus::Running, "●"),
+            (SidebarStatus::Planning, "●"),
+            (SidebarStatus::Draft, "◯"),
+            (SidebarStatus::Planned, "●"),
+            (SidebarStatus::Completed, "●"),
+            (SidebarStatus::Failed, "●"),
+            (SidebarStatus::PrFailed, "●"),
+            (SidebarStatus::PlanFailed, "●"),
+            (SidebarStatus::Suspended, "●"),
         ];
 
-        for (status, label, symbol) in cases {
-            assert_eq!(status.label(), label);
+        for (status, symbol) in cases {
             assert_eq!(status.symbol(), symbol);
         }
     }

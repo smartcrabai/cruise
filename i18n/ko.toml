@@ -1,3 +1,6 @@
+[language]
+native_name = "한국어"
+
 [tui]
 ready = "준비됨"
 [tui.nav]
