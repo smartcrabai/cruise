@@ -134,7 +134,10 @@ pub fn system_locale_windows() -> Option<String> {
 pub fn system_locale() -> Option<String> {
     select_system_locale(posix_locale_var(), system_locale_windows)
 }
-fn select_system_locale(posix: Option<String>, windows: impl FnOnce() -> Option<String>) -> Option<String> {
+fn select_system_locale(
+    posix: Option<String>,
+    windows: impl FnOnce() -> Option<String>,
+) -> Option<String> {
     match posix {
         Some(value) if from_system_locale(&value).is_some() => Some(value),
         Some(value) => windows().or(Some(value)),
@@ -185,8 +188,14 @@ mod tests {
 
     #[test]
     fn system_and_cookie_parsing() {
-        assert_eq!(select_system_locale(Some("C".into()), || Some("ja-JP".into())).as_deref(), Some("ja-JP"));
-        assert_eq!(select_system_locale(Some("fr_FR".into()), || Some("ja-JP".into())).as_deref(), Some("fr_FR"));
+        assert_eq!(
+            select_system_locale(Some("C".into()), || Some("ja-JP".into())).as_deref(),
+            Some("ja-JP")
+        );
+        assert_eq!(
+            select_system_locale(Some("fr_FR".into()), || Some("ja-JP".into())).as_deref(),
+            Some("fr_FR")
+        );
         assert_eq!(from_system_locale("pt_PT.UTF-8"), Some(Locale::PtBr));
         assert_eq!(from_system_locale("zh_Hans_CN"), Some(Locale::ZhCn));
         assert_eq!(from_system_locale("zh_Hant_TW"), None);

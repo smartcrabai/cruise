@@ -112,10 +112,20 @@ fn language_setting_persists_and_auto_clears_it() {
         "{}",
         text(&output)
     );
-    let output = run(fixture.command().args(["config", "--set-language", "auto"]).env("CRUISE_UI_LANGUAGE", "ko"));
+    let output = run(fixture
+        .command()
+        .args(["config", "--set-language", "auto"])
+        .env("CRUISE_UI_LANGUAGE", "ko"));
     assert!(output.status.success(), "{}", text(&output));
-    let output = run(fixture.command().arg("config").env("CRUISE_UI_LANGUAGE", "ko"));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("ui_language = ko (source: env)"), "{}", text(&output));
+    let output = run(fixture
+        .command()
+        .arg("config")
+        .env("CRUISE_UI_LANGUAGE", "ko"));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("ui_language = ko (source: env)"),
+        "{}",
+        text(&output)
+    );
     let output = run(fixture.command().arg("config"));
     assert!(output.status.success(), "{}", text(&output));
     assert!(

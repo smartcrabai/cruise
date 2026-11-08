@@ -55,8 +55,10 @@ impl axum::extract::FromRequestParts<WebState> for UiState {
         state: &WebState,
     ) -> std::result::Result<Self, Self::Rejection> {
         let UiLocale(locale) =
-            <UiLocale as axum::extract::FromRequestParts<WebState>>::from_request_parts(parts, state)
-                .await?;
+            <UiLocale as axum::extract::FromRequestParts<WebState>>::from_request_parts(
+                parts, state,
+            )
+            .await?;
         let mut scoped = state.clone();
         scoped.templates = Arc::new(state.templates.with_locale(locale));
         Ok(Self(scoped))

@@ -922,10 +922,7 @@ pub(crate) async fn stage_local(UiState(state): UiState, Path(id): Path<String>)
     local_merge_response(&state, &id, crate::application::LocalMergeMode::Stage)
 }
 
-pub(crate) async fn merge_locally(
-    UiState(state): UiState,
-    Path(id): Path<String>,
-) -> Response {
+pub(crate) async fn merge_locally(UiState(state): UiState, Path(id): Path<String>) -> Response {
     local_merge_response(
         &state,
         &id,

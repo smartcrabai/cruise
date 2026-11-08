@@ -954,7 +954,10 @@ fn japanese_session_templates_and_partials_are_localized() {
         ("sidebar-rows", "承認待ち"),
         ("tab-info", "フラグ"),
     ] {
-        let (_, props) = fixtures.iter().find(|(fixture, _)| *fixture == name).unwrap();
+        let (_, props) = fixtures
+            .iter()
+            .find(|(fixture, _)| *fixture == name)
+            .unwrap();
         let html = templates.render(name, props).unwrap();
         assert!(html.contains(expected), "{name}: {html}");
     }
