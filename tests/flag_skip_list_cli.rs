@@ -170,6 +170,7 @@ fn spawn_list_pty(root: &TempDir) -> PtyChild {
             .env("XDG_DATA_HOME", root.path().join("data"))
             .env("XDG_STATE_HOME", root.path().join("state"))
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env_remove("HERDR_ENV")
             .env("TERM", "xterm-256color")
             .env("NO_COLOR", "1")

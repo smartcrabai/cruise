@@ -96,6 +96,7 @@ impl Fixture {
             .env("XDG_STATE_HOME", self.path("state"))
             .env("JCODE_HOME", self.path("jcode"))
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env("GIT_CONFIG_COUNT", "0")
             .env("CRUISE_TEST_RECORD", self.path("frames"))
             .env("CRUISE_TEST_FAIL", if fail { "1" } else { "0" })

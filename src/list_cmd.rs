@@ -152,19 +152,22 @@ pub async fn run(args: ListArgs) -> Result<()> {
             }
 
             // Action menu.
-            let actions = session_actions_with_plan_availability(&session, plan_available);
+            let actions = available_session_actions(&session, plan_available);
 
             // Re-shown after Generate Plan / Replan (SDK turns), which may have
             // left the terminal's foreground process group dead.
             crate::platform::reclaim_terminal_foreground();
-            let action = match inquire::Select::new("Action:", actions).prompt() {
+            let prompt = list_text("cli.list.action_prompt", "Action:");
+            let action = match inquire::Select::new(&prompt, actions).prompt() {
                 Ok(a) => a,
-                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => "Back",
+                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                    SessionAction::Back
+                }
                 Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
             };
 
             match action {
-                "Generate Plan" => {
+                SessionAction::GeneratePlan => {
                     match crate::plan_cmd::regenerate_plan_for_session(
                         &manager,
                         &mut session,
@@ -183,7 +186,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         }
                     }
                 }
-                "Approve" => {
+                SessionAction::Approve => {
                     if !plan_available || session.plan_error.is_some() {
                         eprintln!("{} plan is not ready for approval yet", style("!").yellow());
                         continue;
@@ -204,7 +207,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         style(format!("cruise run {}", session.id)).cyan()
                     );
                 }
-                "Publish as Issue" => {
+                SessionAction::PublishAsIssue => {
                     if !plan_available || session.plan_error.is_some() {
                         eprintln!("{} plan is not ready for approval yet", style("!").yellow());
                         continue;
@@ -213,11 +216,13 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     let default_trigger_cruise = matches!(session.phase, SessionPhase::Planned);
                     let trigger_cruise = if crate::issue_publish::supports_trigger_cruise(&session)
                     {
-                        match inquire::Confirm::new(
+                        let prompt = list_text(
+                            "cli.list.prompt.trigger",
                             "Post an @cruise run comment after creating the issue?",
-                        )
-                        .with_default(default_trigger_cruise)
-                        .prompt()
+                        );
+                        match inquire::Confirm::new(&prompt)
+                            .with_default(default_trigger_cruise)
+                            .prompt()
                         {
                             Ok(answer) => answer,
                             Err(
@@ -254,7 +259,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         }
                     }
                 }
-                "Run" | "Resume" => {
+                SessionAction::Run | SessionAction::Resume => {
                     let run_args = crate::cli::RunArgs {
                         session: Some(session.id.clone()),
                         all: false,
@@ -268,8 +273,10 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     };
                     return crate::run_cmd::run(run_args).await;
                 }
-                "Replan" => {
-                    let text = match prompt_multiline("Describe the changes needed:")? {
+                SessionAction::Replan => {
+                    let prompt =
+                        list_text("cli.list.prompt.replan", "Describe the changes needed:");
+                    let text = match prompt_multiline(&prompt)? {
                         InputResult::Submitted(t) => t,
                         InputResult::Cancelled => continue,
                     };
@@ -283,7 +290,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     // Re-load so subsequent session_actions(&session) uses fresh state.
                     session = manager.load(&session.id)?;
                 }
-                "Open PR" => {
+                SessionAction::OpenPr => {
                     let url = session.pr_url.as_deref().ok_or_else(|| {
                         CruiseError::Other("Open PR action requires pr_url".into())
                     })?;
@@ -296,7 +303,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         }
                     }
                 }
-                "Merge PR" => {
+                SessionAction::MergePr => {
                     if merge_pr_interactive(&manager, &session.id)? {
                         break;
                     }
@@ -304,7 +311,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         session = reloaded;
                     }
                 }
-                "Edit Settings" => {
+                SessionAction::EditSettings => {
                     match edit_session_settings_interactive(
                         &manager,
                         &mut session,
@@ -325,7 +332,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         }
                     }
                 }
-                "Reset to Planned" => {
+                SessionAction::ResetToPlanned => {
                     session.reset_to_planned();
                     manager.save(&session)?;
                     eprintln!(
@@ -334,7 +341,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         session.id
                     );
                 }
-                "Delete" => {
+                SessionAction::Delete => {
                     if session.repo.is_some() {
                         let _ = crate::repo_clone::cleanup_session_workspace(&manager, &session);
                     }
@@ -342,7 +349,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     eprintln!("{} Session {} deleted.", style("v").green(), session.id);
                     break;
                 }
-                _ => {
+                SessionAction::Back => {
                     // "Back" -- return to the session list.
                     break;
                 }
@@ -365,7 +372,10 @@ fn load_sessions_for_picker(manager: &crate::session::SessionManager) -> Result<
 fn pick_session(manager: &crate::session::SessionManager) -> Result<Option<SessionState>> {
     let sessions = load_sessions_for_picker(manager)?;
     if sessions.is_empty() {
-        eprintln!("No sessions found.");
+        eprintln!(
+            "{}",
+            crate::i18n::t(crate::i18n::process_locale(), "cli.list.empty")
+        );
         return Ok(None);
     }
     let labels: Vec<String> = sessions
@@ -379,7 +389,8 @@ fn pick_session(manager: &crate::session::SessionManager) -> Result<Option<Sessi
         .collect();
     let label_refs: Vec<&str> = labels.iter().map(std::string::String::as_str).collect();
     crate::platform::reclaim_terminal_foreground();
-    let selected = match inquire::Select::new("Select a session:", label_refs).prompt() {
+    let prompt = list_text("cli.list.select_session", "Select a session:");
+    let selected = match inquire::Select::new(&prompt, label_refs).prompt() {
         Ok(s) => s,
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
             return Ok(None);
@@ -406,54 +417,129 @@ fn session_actions(session: &SessionState) -> Vec<&'static str> {
     session_actions_with_plan_availability(session, plan_available)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionAction {
+    GeneratePlan,
+    Approve,
+    PublishAsIssue,
+    EditSettings,
+    Run,
+    Replan,
+    Resume,
+    ResetToPlanned,
+    OpenPr,
+    MergePr,
+    Delete,
+    Back,
+}
+
+impl SessionAction {
+    fn key(self) -> &'static str {
+        match self {
+            Self::GeneratePlan => "cli.list.action.generate_plan",
+            Self::Approve => "cli.list.action.approve",
+            Self::PublishAsIssue => "cli.list.action.publish_as_issue",
+            Self::EditSettings => "cli.list.action.edit_settings",
+            Self::Run => "cli.list.action.run",
+            Self::Replan => "cli.list.action.replan",
+            Self::Resume => "cli.list.action.resume",
+            Self::ResetToPlanned => "cli.list.action.reset_to_planned",
+            Self::OpenPr => "cli.list.action.open_pr",
+            Self::MergePr => "cli.list.action.merge_pr",
+            Self::Delete => "cli.list.action.delete",
+            Self::Back => "cli.list.action.back",
+        }
+    }
+
+    fn english_label(self) -> &'static str {
+        match self {
+            Self::GeneratePlan => "Generate Plan",
+            Self::Approve => "Approve",
+            Self::PublishAsIssue => "Publish as Issue",
+            Self::EditSettings => "Edit Settings",
+            Self::Run => "Run",
+            Self::Replan => "Replan",
+            Self::Resume => "Resume",
+            Self::ResetToPlanned => "Reset to Planned",
+            Self::OpenPr => "Open PR",
+            Self::MergePr => "Merge PR",
+            Self::Delete => "Delete",
+            Self::Back => "Back",
+        }
+    }
+}
+
+impl fmt::Display for SessionAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&list_text(self.key(), self.english_label()))
+    }
+}
+
+fn list_text(key: &str, fallback: &str) -> String {
+    let translated = crate::i18n::t(crate::i18n::process_locale(), key);
+    if translated == key {
+        fallback.to_owned()
+    } else {
+        translated
+    }
+}
+
+#[cfg(test)]
 fn session_actions_with_plan_availability(
     session: &SessionState,
     plan_available: bool,
 ) -> Vec<&'static str> {
+    available_session_actions(session, plan_available)
+        .into_iter()
+        .map(SessionAction::english_label)
+        .collect()
+}
+
+fn available_session_actions(session: &SessionState, plan_available: bool) -> Vec<SessionAction> {
     let mut actions = vec![];
     match &session.phase {
         SessionPhase::Draft | SessionPhase::AwaitingInput => {
-            actions.push("Generate Plan");
+            actions.push(SessionAction::GeneratePlan);
         }
         SessionPhase::AwaitingApproval => {
             if plan_available && session.plan_error.is_none() {
-                actions.push("Approve");
-                actions.push("Publish as Issue");
+                actions.push(SessionAction::Approve);
+                actions.push(SessionAction::PublishAsIssue);
             }
-            actions.push("Edit Settings");
+            actions.push(SessionAction::EditSettings);
         }
         SessionPhase::Planned => {
-            actions.push("Run");
+            actions.push(SessionAction::Run);
             if plan_available && session.plan_error.is_none() {
-                actions.push("Publish as Issue");
+                actions.push(SessionAction::PublishAsIssue);
             }
-            actions.push("Edit Settings");
-            actions.push("Replan");
+            actions.push(SessionAction::EditSettings);
+            actions.push(SessionAction::Replan);
         }
         SessionPhase::Running => {
-            actions.push("Resume");
-            actions.push("Reset to Planned");
+            actions.push(SessionAction::Resume);
+            actions.push(SessionAction::ResetToPlanned);
         }
         SessionPhase::Suspended => {
-            actions.push("Resume");
-            actions.push("Edit Settings");
-            actions.push("Reset to Planned");
+            actions.push(SessionAction::Resume);
+            actions.push(SessionAction::EditSettings);
+            actions.push(SessionAction::ResetToPlanned);
         }
         SessionPhase::Failed(_) => {
-            actions.push("Run");
-            actions.push("Edit Settings");
-            actions.push("Reset to Planned");
+            actions.push(SessionAction::Run);
+            actions.push(SessionAction::EditSettings);
+            actions.push(SessionAction::ResetToPlanned);
         }
         SessionPhase::Completed => {
             if session.pr_url.is_some() {
-                actions.push("Open PR");
-                actions.push("Merge PR");
+                actions.push(SessionAction::OpenPr);
+                actions.push(SessionAction::MergePr);
             }
-            actions.push("Reset to Planned");
+            actions.push(SessionAction::ResetToPlanned);
         }
     }
-    actions.push("Delete");
-    actions.push("Back");
+    actions.push(SessionAction::Delete);
+    actions.push(SessionAction::Back);
     actions
 }
 
@@ -562,7 +648,13 @@ async fn edit_session_settings_interactive(
         .collect();
 
     let skipped_steps = if choices.is_empty() {
-        eprintln!("(no steps available for selected flags)");
+        eprintln!(
+            "{}",
+            list_text(
+                "cli.list.prompt.no_steps",
+                "(no steps available for selected flags)"
+            )
+        );
         crate::flags::drop_disabled_skips(
             session.skipped_steps.clone(),
             main_nodes.iter().chain(&after_pr_nodes),
@@ -575,7 +667,8 @@ async fn edit_session_settings_interactive(
             .filter(|(_, choice)| session.skipped_steps.contains(&choice.expanded_id))
             .map(|(i, _)| i)
             .collect();
-        match inquire::MultiSelect::new("Steps to skip:", choices)
+        let prompt = list_text("cli.list.prompt.skip_steps", "Steps to skip:");
+        match inquire::MultiSelect::new(&prompt, choices)
             .with_default(&defaults)
             .prompt()
         {
@@ -603,7 +696,8 @@ async fn edit_session_settings_interactive(
         let clear = "From beginning (clear)".to_string();
         let mut choices = vec![keep.clone(), clear.clone()];
         choices.extend(main_ids);
-        match inquire::Select::new("Resume from step:", choices).prompt() {
+        let prompt = list_text("cli.list.prompt.resume_step", "Resume from step:");
+        match inquire::Select::new(&prompt, choices).prompt() {
             Ok(choice) if choice == keep => CurrentStepUpdate::Unchanged,
             Ok(choice) if choice == clear => CurrentStepUpdate::Clear,
             Ok(step_name) => CurrentStepUpdate::Set(step_name),
@@ -680,7 +774,8 @@ fn merge_pr_interactive(manager: &SessionManager, id: &str) -> crate::error::Res
         return Ok(false);
     }
     let methods = vec!["Squash", "Merge", "Rebase"];
-    let method_label = match inquire::Select::new("Merge method:", methods).prompt() {
+    let prompt = list_text("cli.list.prompt.merge_method", "Merge method:");
+    let method_label = match inquire::Select::new(&prompt, methods).prompt() {
         Ok(m) => m,
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
             return Ok(false);
@@ -736,22 +831,50 @@ fn format_session_label(s: &SessionState) -> String {
 
 fn format_session_label_with_plan_availability(s: &SessionState, plan_available: bool) -> String {
     let (icon, phase_str) = match &s.phase {
-        SessionPhase::Draft => (style("○").dim(), style("Draft").dim()),
-        SessionPhase::AwaitingInput => (style("?").yellow(), style("Awaiting Input").yellow()),
-        SessionPhase::AwaitingApproval if s.plan_error.is_some() => {
-            (style("✗").red(), style("Plan Failed").red())
-        }
-        SessionPhase::AwaitingApproval if !plan_available => {
-            (style("-").yellow(), style("Planning").yellow())
-        }
-        SessionPhase::AwaitingApproval => {
-            (style("o").magenta(), style("Awaiting Approval").magenta())
-        }
-        SessionPhase::Planned => (style("o").cyan(), style("Planned").cyan()),
-        SessionPhase::Running => (style(">").yellow(), style("Running").yellow()),
-        SessionPhase::Completed => (style("v").green(), style("Completed").green()),
-        SessionPhase::Failed(_) => (style("x").red(), style("Failed").red()),
-        SessionPhase::Suspended => (style("||").yellow(), style("Suspended").yellow()),
+        SessionPhase::Draft => (
+            style("○").dim(),
+            style(list_text("cli.list.phase.draft", "Draft")).dim(),
+        ),
+        SessionPhase::AwaitingInput => (
+            style("?").yellow(),
+            style(list_text("cli.list.phase.awaiting_input", "Awaiting Input")).yellow(),
+        ),
+        SessionPhase::AwaitingApproval if s.plan_error.is_some() => (
+            style("✗").red(),
+            style(list_text("cli.list.phase.plan_failed", "Plan Failed")).red(),
+        ),
+        SessionPhase::AwaitingApproval if !plan_available => (
+            style("-").yellow(),
+            style(list_text("cli.list.phase.planning", "Planning")).yellow(),
+        ),
+        SessionPhase::AwaitingApproval => (
+            style("o").magenta(),
+            style(list_text(
+                "cli.list.phase.awaiting_approval",
+                "Awaiting Approval",
+            ))
+            .magenta(),
+        ),
+        SessionPhase::Planned => (
+            style("o").cyan(),
+            style(list_text("cli.list.phase.planned", "Planned")).cyan(),
+        ),
+        SessionPhase::Running => (
+            style(">").yellow(),
+            style(list_text("cli.list.phase.running", "Running")).yellow(),
+        ),
+        SessionPhase::Completed => (
+            style("v").green(),
+            style(list_text("cli.list.phase.completed", "Completed")).green(),
+        ),
+        SessionPhase::Failed(_) => (
+            style("x").red(),
+            style(list_text("cli.list.phase.failed", "Failed")).red(),
+        ),
+        SessionPhase::Suspended => (
+            style("||").yellow(),
+            style(list_text("cli.list.phase.suspended", "Suspended")).yellow(),
+        ),
     };
     let date = format_session_date(&s.id);
     let suffix = format_suffix(s);

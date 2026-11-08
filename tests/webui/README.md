@@ -1,5 +1,11 @@
 # Responsive WebUI executable specifications
 
+## Language browser regression
+
+From the repository root, run `npm ci --prefix tests/webui --ignore-scripts`, `tests/webui/node_modules/.bin/playwright install chromium` (on Linux use `install --with-deps chromium`), `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, then `node tests/webui/language.mjs`. The test creates and removes isolated HOME/XDG session data, starts the production runtime on an ephemeral port, and exercises desktop and mobile language selection, persistence, invalid-cookie fallback, and a graph loading failure. Screenshots are saved under `target/formal-reports/language-browser/`, overridable with `WEBUI_LANGUAGE_REPORT_DIR`. The responsive WebUI CI workflow runs the contract and uploads its reports. The graph failure deliberately blocks the external Mermaid CDN, not the application server.
+
+Run `node tests/webui/sse-language.mjs` after the same setup to exercise real run-all events with independent English and Japanese browser connections, asserting localized SSE partials, DOM updates, and notifications. It initializes a disposable Git repository and removes it afterwards. Its screenshots use the same report directory.
+
 ## Graph flag browser regression
 
 After installing the pinned browser dependencies, run `cargo +1.99.1 build --locked --all-features --bin cruise-runtime` followed by `node tests/webui/graph-flags.mjs` from the repository root. The existing WebUI CI job runs this test and uploads `target/formal-reports/graph-browser/`. `WEBUI_BDD_BIN` can select another runtime and `WEBUI_GRAPH_REPORT_DIR` changes the screenshot directory. The test uses a temporary HOME/XDG tree and changes persisted flags externally, exercising real Graph tab HTMX requests for off, on, off again, and an all-disabled graph. It asserts the server's Mermaid source and projected edges, not that the externally loaded Mermaid CDN successfully rendered SVG. Screenshots capture the browser state at the swap and may show Mermaid source if the CDN has not loaded.

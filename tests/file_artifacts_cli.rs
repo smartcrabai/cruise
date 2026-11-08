@@ -85,6 +85,7 @@ impl Fixture {
             .env("XDG_DATA_HOME", self.root.path().join("data"))
             .env("XDG_STATE_HOME", self.root.path().join("state"))
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env_remove("HERDR_ENV")
             .env("NO_COLOR", "1")
             .stdin(Stdio::null())

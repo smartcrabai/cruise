@@ -62,6 +62,7 @@ mod contracts {
                 .env("JCODE_HOME", self.path("jh"))
                 .env("CLAUDE_CONFIG_DIR", self.path("claude"))
                 .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+                .env("CRUISE_UI_LANGUAGE", "en")
                 .env("CRUISE_DISABLE_HERDR", "1")
                 .env("NO_COLOR", "1")
                 .env("GIT_CONFIG_NOSYSTEM", "1")

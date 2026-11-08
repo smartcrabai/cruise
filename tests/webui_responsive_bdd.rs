@@ -26,6 +26,7 @@ fn exercise(world: &mut ResponsiveWorld, contract: String) {
         .arg(script)
         .args([contract, world.width.to_string(), world.height.to_string()])
         .env("WEBUI_BDD_BIN", env!("CARGO_BIN_EXE_cruise-runtime"))
+        .env("CRUISE_UI_LANGUAGE", "en")
         // Cargo's dylib paths are for Rust executables, not Chromium helper processes.
         .env_remove("DYLD_LIBRARY_PATH")
         .env_remove("DYLD_FALLBACK_LIBRARY_PATH")

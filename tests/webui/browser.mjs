@@ -72,7 +72,7 @@ if (contract === 'runall') {
 }
 const env = { PATH: `${bin}:${process.env.PATH}`, HOME: root, XDG_CONFIG_HOME: join(root, 'config'),
   XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'),
-  CRUISE_DISABLE_NOTIFICATIONS: '1', CRUISE_DISABLE_HERDR: '1', NO_COLOR: '1' };
+  CRUISE_DISABLE_NOTIFICATIONS: '1', CRUISE_DISABLE_HERDR: '1', CRUISE_UI_LANGUAGE: 'en', NO_COLOR: '1' };
 const server = spawn(process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime'),
   ['webui', '--port', '0', '--webui-dir', resolve(process.env.WEBUI_BDD_ASSETS || 'webui')],
   { env, cwd: join(root, 'repo'), stdio: ['ignore', 'pipe', 'pipe'] });

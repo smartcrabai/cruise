@@ -1129,6 +1129,7 @@ async fn cli_exec_resolves_workflow_and_step_common_effort() {
                 .env_remove("CRUISE_SDK")
                 .env_remove("CRUISE_MODEL")
                 .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+                .env("CRUISE_UI_LANGUAGE", "en")
                 .env("NO_COLOR", "1")
                 .stdin(Stdio::null())
                 .kill_on_drop(true)
@@ -1497,6 +1498,7 @@ async fn cli_sigint_drains_each_planning_future_before_return_or_discard() {
             .env("XDG_DATA_HOME", fixture.root.path().join("data"))
             .env("XDG_STATE_HOME", fixture.root.path().join("state"))
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env("NO_COLOR", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::from(
@@ -1662,6 +1664,7 @@ async fn exec_selects_opencode_and_completes_v2_before_reaping_cli() {
         .env("XDG_DATA_HOME", fixture.root.path().join("data"))
         .env("XDG_STATE_HOME", fixture.root.path().join("state"))
         .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+        .env("CRUISE_UI_LANGUAGE", "en")
         .env("NO_COLOR", "1")
         .env_remove("OPENCODE_CONFIG_CONTENT")
         .env_remove("OPENCODE_SERVER_PASSWORD")

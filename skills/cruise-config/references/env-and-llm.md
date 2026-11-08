@@ -42,6 +42,8 @@ workflow config: `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, `CRUISE_SDK`,
 trimmed and blank values are ignored. Boolean values must be `true`, `false`,
 `1`, or `0`; any other value is an error naming the offending variable.
 
+`CRUISE_UI_LANGUAGE` is separate from workflow configuration and prompt language: it selects the CLI/TUI display language ahead of application `uiLanguage`, system locale, and English. It accepts `en`, `zh-CN`, `es`, `fr`, `pt-BR`, `ja`, `ko`, or `auto`; blank and `auto` defer to the next layer. Set the application default with `cruise config --set-language <tag>` or clear it with `--set-language auto`. A WebUI browser's language cookie overrides the server default without changing application config.
+
 `CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding
 `languages.pr` and `languages.plan` settings. When these variables are unset,
 nested language fields take precedence over the deprecated top-level fields,

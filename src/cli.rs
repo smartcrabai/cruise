@@ -377,6 +377,9 @@ pub struct ListArgs {
 
 #[derive(Parser, Debug)]
 pub struct ConfigArgs {
+    /// Set the interface language, or auto to clear the saved setting.
+    #[arg(long, value_name = "LANG|auto", value_parser = crate::i18n::resolve::validate_language)]
+    pub set_language: Option<String>,
     /// Set the maximum number of sessions the `WebUI` and TUI run concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.

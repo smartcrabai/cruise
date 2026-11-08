@@ -17,7 +17,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let area = frame.area();
     if area.width < 80 || area.height < 24 {
         frame.render_widget(
-            Paragraph::new("Terminal too small — resize to at least 80×24")
+            Paragraph::new(crate::i18n::t(app.locale, "tui.empty.terminal_small"))
                 .style(warning(app))
                 .block(panel(app, " Cruise TUI ", true)),
             area,
@@ -46,9 +46,21 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut TuiApp) {
 fn render_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let mut spans = vec![Span::styled(" CRUISE ", selection(app)), Span::raw("  ")];
     for (view, label) in [
-        (View::Sessions, " 1 Sessions "),
-        (View::NewSession, " 2/n New Session "),
-        (View::RunAll, " 3 Run All "),
+        (
+            View::Sessions,
+            format!(" 1 {} ", crate::i18n::t(app.locale, "tui.nav.sessions")),
+        ),
+        (
+            View::NewSession,
+            format!(
+                " 2/n {} ",
+                crate::i18n::t(app.locale, "tui.nav.new_session")
+            ),
+        ),
+        (
+            View::RunAll,
+            format!(" 3 {} ", crate::i18n::t(app.locale, "tui.nav.run_all")),
+        ),
     ] {
         spans.push(Span::styled(
             label,
@@ -62,7 +74,13 @@ fn render_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     }
     if app.is_busy() {
         let spinner = ["⠋", "⠙", "⠹", "⠸"][app.spinner_frame];
-        spans.push(Span::styled(format!(" {spinner} working"), warning(app)));
+        spans.push(Span::styled(
+            format!(
+                " {spinner} {}",
+                crate::i18n::t(app.locale, "tui.footer.working")
+            ),
+            warning(app),
+        ));
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).block(
@@ -97,7 +115,10 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 }
 
 fn footer_status_spans(app: &TuiApp) -> Vec<Span<'_>> {
-    let status = app.status.as_deref().unwrap_or("Ready");
+    let status = app
+        .status
+        .clone()
+        .unwrap_or_else(|| crate::i18n::t(app.locale, "tui.ready"));
     let busy = app.is_busy();
     let mut spans = vec![
         Span::styled(
@@ -109,13 +130,27 @@ fn footer_status_spans(app: &TuiApp) -> Vec<Span<'_>> {
     let prompt_count = app.prompts.len() + app.plan_prompts.len();
     if prompt_count > 0 {
         spans.push(Span::styled(
-            format!("  {prompt_count} prompt(s)"),
+            format!(
+                "  {}",
+                crate::i18n::tf(
+                    app.locale,
+                    "tui.footer.prompts",
+                    &[("count", &prompt_count.to_string())]
+                )
+            ),
             warning(app),
         ));
     }
     if app.dropped_logs > 0 {
         spans.push(Span::styled(
-            format!("  {} logs dropped", app.dropped_logs),
+            format!(
+                "  {}",
+                crate::i18n::tf(
+                    app.locale,
+                    "tui.footer.logs_dropped",
+                    &[("count", &app.dropped_logs.to_string())]
+                )
+            ),
             error_style(app),
         ));
     }
@@ -156,6 +191,24 @@ fn footer_spans<'a>(app: &TuiApp, mut spans: Vec<Span<'a>>) -> Vec<Span<'a>> {
     };
     spans.reserve(hints.len() * 4);
     for &(shortcut, description) in hints {
+        let description = crate::i18n::t(
+            app.locale,
+            match description {
+                "new" => "tui.footer.new",
+                "clean" => "tui.footer.clean",
+                "help" => "tui.footer.help",
+                "quit" => "tui.footer.quit",
+                "actions" => "tui.footer.actions",
+                "detail" => "tui.footer.detail",
+                "sidebar" => "tui.footer.sidebar",
+                "next" => "tui.footer.next",
+                "back" => "tui.footer.back",
+                "start now" => "tui.footer.start_now",
+                "run/stop" => "tui.footer.run_stop",
+                "parallelism" => "tui.footer.parallelism",
+                _ => unreachable!("unknown footer description"),
+            },
+        );
         spans.extend([
             Span::raw("   "),
             Span::styled(shortcut, key(app)),
@@ -207,7 +260,7 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let items = app.sessions.iter().map(|session| {
         let status = app.sidebar_status(session);
         let prefix = format!("{} ", status.symbol());
-        let suffix = format!(" · {}", status.label());
+        let suffix = format!(" · {}", sidebar_status_label(app, status));
         let status_style = sidebar_status_style(app, status);
         let title_width = row_width
             .saturating_sub(Line::from(prefix.as_str()).width())
@@ -227,7 +280,11 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         List::new(items)
             .block(focus_panel(
                 app,
-                format!(" Sessions  {} ", app.sessions.len()),
+                format!(
+                    " {}  {} ",
+                    crate::i18n::t(app.locale, "tui.nav.sessions"),
+                    app.sessions.len()
+                ),
                 app.focus == SessionsFocus::Sidebar,
             ))
             .highlight_style(sidebar_selection(app))
@@ -237,13 +294,34 @@ fn render_sidebar(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     );
 }
 
+fn sidebar_status_label(app: &TuiApp, status: SidebarStatus) -> String {
+    let key = match status {
+        SidebarStatus::AwaitingInput => "tui.phase.awaiting_input",
+        SidebarStatus::AwaitingApproval => "tui.phase.awaiting_approval",
+        SidebarStatus::Running => "tui.phase.running",
+        SidebarStatus::Planning => "tui.phase.planning",
+        SidebarStatus::Draft => "tui.phase.draft",
+        SidebarStatus::Planned => "tui.phase.planned",
+        SidebarStatus::Completed => "tui.phase.completed",
+        SidebarStatus::Failed => "tui.phase.failed",
+        SidebarStatus::PlanFailed => "tui.phase.plan_failed",
+        SidebarStatus::Suspended => "tui.phase.suspended",
+    };
+    crate::i18n::t(app.locale, key)
+}
+
 fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let Some(session) = app.active_session() else {
         frame.render_widget(
-            Paragraph::new(
-                "\n  No sessions yet\n\n  Press n, choose Source, location, and config,\n  then type a task before continuing or starting.",
-            )
-            .block(panel(app, " Detail ", false)),
+            Paragraph::new(format!(
+                "\n  {}",
+                crate::i18n::t(app.locale, "tui.empty.sessions")
+            ))
+            .block(panel(
+                app,
+                format!(" {} ", crate::i18n::t(app.locale, "tui.empty.detail_title")),
+                false,
+            )),
             area,
         );
         return;
@@ -319,7 +397,7 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
             app,
             "Phase    ",
             Span::styled(
-                app.display_phase(session),
+                phase_display(app, session),
                 if app.display_phase(session) == "Planning" {
                     accent(app, false)
                 } else {
@@ -394,7 +472,47 @@ fn info_lines<'a>(app: &TuiApp, session: &'a crate::session::SessionState) -> Ve
 }
 
 fn labeled_line<'a>(app: &TuiApp, name: &'a str, value: Span<'a>) -> Line<'a> {
-    Line::from(vec![Span::styled(name, label(app)), value])
+    let key = match name.trim() {
+        "Phase" => Some("tui.info.phase"),
+        "Source" => Some("tui.info.source"),
+        "Flags" => Some("tui.info.flags"),
+        "Directory" => Some("tui.info.directory"),
+        "Workspace" => Some("tui.info.workspace"),
+        "Step" => Some("tui.info.step"),
+        "Issue" => Some("tui.info.issue"),
+        "Input" => Some("tui.info.input"),
+        "Actions" => Some("tui.info.actions"),
+        _ => None,
+    };
+    let name = key.map_or_else(
+        || name.trim().to_owned(),
+        |key| crate::i18n::t(app.locale, key),
+    );
+    let width = Line::from(name.as_str()).width();
+    let padded = format!(
+        "{}{}",
+        name,
+        " ".repeat(9_usize.saturating_sub(width).max(1))
+    );
+    Line::from(vec![Span::styled(padded, label(app)), value])
+}
+
+fn phase_display(app: &TuiApp, session: &crate::session::SessionState) -> String {
+    let key = if app.display_phase(session) == "Planning" {
+        "tui.phase.planning"
+    } else {
+        match session.phase {
+            SessionPhase::Draft => "tui.phase.draft",
+            SessionPhase::AwaitingInput => "tui.phase.awaiting_input",
+            SessionPhase::AwaitingApproval => "tui.phase.awaiting_approval",
+            SessionPhase::Planned => "tui.phase.planned",
+            SessionPhase::Running => "tui.phase.running",
+            SessionPhase::Completed => "tui.phase.completed",
+            SessionPhase::Failed(_) => "tui.phase.failed",
+            SessionPhase::Suspended => "tui.phase.suspended",
+        }
+    };
+    crate::i18n::t(app.locale, key)
 }
 
 fn error_style(app: &TuiApp) -> Style {
@@ -768,7 +886,7 @@ fn render_new_session(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                 .map(|step| {
                     Line::from(vec![
                         Span::styled("  ✓ ", success(app)),
-                        Span::styled(format!("{:<20}  ", step.label()), muted(app)),
+                        Span::styled(pad_display(&step_label(app, *step), 22), muted(app)),
                         Span::raw(truncate(&form.answer(*step), answer_width)),
                     ])
                 })
@@ -779,7 +897,7 @@ fn render_new_session(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  ▸ ", accent(app, true)),
-            Span::styled(step_question(form.step), accent(app, true)),
+            Span::styled(step_question(app, form.step), accent(app, true)),
         ])),
         rows[2],
     );
@@ -797,27 +915,55 @@ fn render_new_session(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         Paragraph::new(
             upcoming
                 .iter()
-                .map(|step| Line::from(Span::styled(format!("    {}", step.label()), muted(app))))
+                .map(|step| {
+                    Line::from(Span::styled(
+                        format!("    {}", step_label(app, *step)),
+                        muted(app),
+                    ))
+                })
                 .collect::<Vec<_>>(),
         ),
         rows[5],
     );
 }
 
-fn step_question(step: Step) -> &'static str {
-    match step {
-        Step::Task => "What should cruise do?",
-        Step::Attachments => "Any images to attach? (optional; one path per line)",
-        Step::Source => "Where is the code?",
-        Step::WorkingDirectory => "Which directory? (blank = current directory)",
-        Step::Repository => "Which repository? (owner/name, group/project, or URL)",
-        Step::Config => "Which workflow config? (blank = auto-detect)",
-        Step::SkippedSteps => "Skip any workflow steps?",
-        Step::Flags => "Which optional workflow flags should be enabled?",
-        Step::Workspace => "Where should cruise execute?",
-        Step::DirtyTree => "Run on the current branch even with uncommitted changes?",
-        Step::Launch => "How should this session start?",
-    }
+fn pad_display(text: &str, width: usize) -> String {
+    let padding = width.saturating_sub(Line::from(text).width()).max(1);
+    format!("{text}{}", " ".repeat(padding))
+}
+
+fn step_label(app: &TuiApp, step: Step) -> String {
+    let key = match step {
+        Step::Task => "tui.form.task",
+        Step::Attachments => "tui.form.attachments",
+        Step::Source => "tui.form.source",
+        Step::WorkingDirectory => "tui.form.directory",
+        Step::Repository => "tui.form.repository",
+        Step::Config => "tui.form.config",
+        Step::SkippedSteps => "tui.form.skipped",
+        Step::Flags => "tui.form.flags",
+        Step::Workspace => "tui.form.workspace",
+        Step::DirtyTree => "tui.form.dirty",
+        Step::Launch => "tui.form.launch",
+    };
+    crate::i18n::t(app.locale, key)
+}
+
+fn step_question(app: &TuiApp, step: Step) -> String {
+    let key = match step {
+        Step::Task => "tui.question.task",
+        Step::Attachments => "tui.question.attachments",
+        Step::Source => "tui.question.source",
+        Step::WorkingDirectory => "tui.question.directory",
+        Step::Repository => "tui.question.repository",
+        Step::Config => "tui.question.config",
+        Step::SkippedSteps => "tui.question.skipped",
+        Step::Flags => "tui.question.flags",
+        Step::Workspace => "tui.question.workspace",
+        Step::DirtyTree => "tui.question.dirty",
+        Step::Launch => "tui.question.launch",
+    };
+    crate::i18n::t(app.locale, key)
 }
 
 fn step_hint(app: &TuiApp) -> String {
@@ -1147,8 +1293,8 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) 
             area,
             60,
             5,
-            "Resize",
-            "Terminal too small — resize to at least 80×24",
+            &crate::i18n::t(app.locale, "tui.empty.resize"),
+            crate::i18n::t(app.locale, "tui.empty.terminal_small"),
         ),
         Modal::Confirm { message, .. } => render_text_modal(
             frame,
@@ -1178,13 +1324,59 @@ fn render_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, modal: &Modal) 
         Modal::RunAllParallelism { editor, error } => {
             render_run_all_parallelism_modal(frame, app, area, editor, error.as_deref());
         }
+        Modal::UiLanguage { selected, error } => {
+            render_ui_language_modal(frame, app, area, *selected, error.as_deref());
+        }
     }
+}
+
+fn render_ui_language_modal(
+    frame: &mut Frame<'_>,
+    app: &TuiApp,
+    area: Rect,
+    selected: usize,
+    error: Option<&str>,
+) {
+    let rect = centered(area, 48, 14);
+    frame.render_widget(Clear, rect);
+    let title = crate::i18n::t(app.locale, "tui.language.title");
+    let block = modal_block(app, &title);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let mut lines = Vec::new();
+    let auto = crate::i18n::t(app.locale, "tui.language.auto");
+    for (index, label) in std::iter::once(auto.as_str())
+        .chain(
+            crate::i18n::Locale::ALL
+                .iter()
+                .map(|locale| locale.native_name()),
+        )
+        .enumerate()
+    {
+        let marker = if index == selected { "› " } else { "  " };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{label}"),
+            if index == selected {
+                selection(app)
+            } else {
+                Style::default()
+            },
+        )));
+    }
+    if let Some(error) = error {
+        lines.push(Line::from(Span::styled(
+            format!("Error: {error}"),
+            error_style(app),
+        )));
+    }
+    lines.push(Line::from(crate::i18n::t(app.locale, "tui.language.hint")));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_help_modal(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let body = "n  new session, one question at a time     1/2/3  switch views
 Ctrl+P  planning     Ctrl+G  grill     Ctrl+U  input plan
-Ctrl+S  save draft   (each starts from any question)
+Ctrl+S  save draft   (each starts from any question)   L  language
 Tab / Shift-Tab  next / previous question, or sidebar / detail focus
 Enter  next question; newline in the task and image editors
 Ctrl+Enter  next question from a multiline editor
@@ -3245,6 +3437,28 @@ mod tests {
 
         assert!(run_all.contains("No Planned or Suspended sessions were ready."));
         assert!(!run_all.contains("Press a / Enter to start Run All."));
+    }
+
+    #[test]
+    fn resize_modal_renders_all_locales_at_minimum_size() {
+        for locale in crate::i18n::Locale::ALL {
+            let buffer = rendered_buffer_with(80, 24, false, View::Sessions, |app| {
+                app.locale = locale;
+                app.modal = Some(Modal::Resize);
+            });
+            let text = buffer.content.chunks(80)
+                .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect::<String>())
+                .collect::<Vec<_>>().join("\n");
+            let title = crate::i18n::t(locale, "tui.empty.resize");
+            assert!(text.replace(' ', "").contains(&title.replace(' ', "")), "{locale:?}: {text}");
+            assert!(text.contains("80×24"), "{locale:?}: {text}");
+            if matches!(locale, crate::i18n::Locale::ZhCn | crate::i18n::Locale::Ja | crate::i18n::Locale::Ko) {
+                let first = title.chars().next().unwrap().to_string();
+                let row = buffer.content.chunks(80).find(|row| row.iter().any(|cell| cell.symbol() == first)).unwrap();
+                let index = row.iter().position(|cell| cell.symbol() == first).unwrap();
+                assert_eq!(row[index + 1].symbol(), " ", "wide character must occupy two cells: {locale:?}");
+            }
+        }
     }
 
     #[test]

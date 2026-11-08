@@ -243,6 +243,10 @@ pub enum Modal {
         editor: Box<Editor>,
         error: Option<String>,
     },
+    UiLanguage {
+        selected: usize,
+        error: Option<String>,
+    },
     Publish {
         trigger_cruise: bool,
     },
@@ -263,6 +267,7 @@ pub struct BatchRow {
 
 pub struct TuiApp {
     pub application: CruiseApplication,
+    pub locale: crate::i18n::Locale,
     pub registry: OperationRegistry,
     pub events: UnboundedSender<UiEvent>,
     pub logs_sender: mpsc::Sender<UiEvent>,
@@ -333,6 +338,7 @@ impl TuiApp {
         }
         let mut app = Self {
             application,
+            locale: crate::i18n::process_locale(),
             registry: OperationRegistry::default(),
             events,
             logs_sender,
@@ -1950,6 +1956,10 @@ impl TuiApp {
                 self.open_run_all_parallelism_editor();
                 false
             }
+            Action::Character('L') => {
+                self.open_ui_language_editor();
+                false
+            }
             Action::Character(_) | Action::Backspace | Action::None => false,
             Action::Quit => self.request_quit(),
         }
@@ -2344,6 +2354,9 @@ impl TuiApp {
             Modal::RunAllParallelism { editor, error } => {
                 self.handle_run_all_parallelism_modal(editor, error, action)
             }
+            Modal::UiLanguage { selected, error } => {
+                self.handle_ui_language_modal(selected, error, action)
+            }
             Modal::Publish { trigger_cruise } => self.handle_publish_modal(trigger_cruise, action),
             Modal::MergePr { status, method } => self.handle_merge_pr_modal(status, method, action),
         }
@@ -2710,6 +2723,72 @@ impl TuiApp {
             editor: Box::new(editor),
             error: None,
         });
+    }
+
+    fn open_ui_language_editor(&mut self) {
+        match self.application.app_config() {
+            Ok(config) => {
+                let selected = config
+                    .ui_language
+                    .as_deref()
+                    .and_then(crate::i18n::Locale::from_tag)
+                    .and_then(|value| {
+                        crate::i18n::Locale::ALL
+                            .iter()
+                            .position(|locale| *locale == value)
+                    })
+                    .map_or(0, |index| index + 1);
+                self.modal = Some(Modal::UiLanguage {
+                    selected,
+                    error: None,
+                });
+            }
+            Err(error) => self.modal = Some(Modal::Error(error.to_string())),
+        }
+    }
+
+    fn handle_ui_language_modal(
+        &mut self,
+        mut selected: usize,
+        error: Option<String>,
+        action: Action,
+    ) -> bool {
+        match action {
+            Action::Escape => return false,
+            Action::Up => {
+                selected = (selected + crate::i18n::Locale::ALL.len())
+                    % (crate::i18n::Locale::ALL.len() + 1)
+            }
+            Action::Down => selected = (selected + 1) % (crate::i18n::Locale::ALL.len() + 1),
+            Action::Enter => {
+                let result = self.application.app_config().and_then(|mut config| {
+                    config.ui_language = selected
+                        .checked_sub(1)
+                        .map(|index| crate::i18n::Locale::ALL[index].tag().to_string());
+                    self.application.save_app_config(&config)
+                });
+                match result {
+                    Ok(()) => {
+                        let configured = selected
+                            .checked_sub(1)
+                            .map(|index| crate::i18n::Locale::ALL[index].tag());
+                        self.locale = crate::i18n::resolve::resolve_current(configured).locale;
+                        self.status = Some(crate::i18n::t(self.locale, "tui.language.saved"));
+                        return false;
+                    }
+                    Err(error) => {
+                        self.modal = Some(Modal::UiLanguage {
+                            selected,
+                            error: Some(error.to_string()),
+                        });
+                        return false;
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.modal = Some(Modal::UiLanguage { selected, error });
+        false
     }
 
     fn save_run_all_parallelism(&mut self, editor: Box<Editor>) {

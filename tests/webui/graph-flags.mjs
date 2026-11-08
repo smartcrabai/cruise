@@ -13,7 +13,7 @@ const session = join(root, 'data/cruise/sessions', id);
 const output = resolve(process.env.WEBUI_GRAPH_REPORT_DIR || 'target/formal-reports/graph-browser');
 const env = { PATH: process.env.PATH, HOME: root, XDG_CONFIG_HOME: join(root, 'config'),
   XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'),
-  CRUISE_DISABLE_NOTIFICATIONS: '1', CRUISE_DISABLE_HERDR: '1', NO_COLOR: '1',
+  CRUISE_DISABLE_NOTIFICATIONS: '1', CRUISE_DISABLE_HERDR: '1', CRUISE_UI_LANGUAGE: 'en', NO_COLOR: '1',
   GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 let server, closed, browser, logs = '';
 const watchdog = setTimeout(() => { console.error('graph browser watchdog expired', logs); server?.kill('SIGKILL'); process.exit(1); }, 90000);

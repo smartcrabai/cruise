@@ -21,6 +21,46 @@ pub(crate) mod shutdown;
 pub(crate) mod templates;
 pub(crate) mod view;
 
+/// The locale selected for an individual browser request.
+pub(crate) struct UiLocale(pub(crate) crate::i18n::Locale);
+
+impl axum::extract::FromRequestParts<WebState> for UiLocale {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &WebState,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let cookie = parts
+            .headers
+            .get(axum::http::header::COOKIE)
+            .and_then(|value| value.to_str().ok());
+        let locale = cookie
+            .and_then(crate::i18n::resolve::parse_cookie_locale)
+            .unwrap_or(state.process_locale);
+        Ok(Self(locale))
+    }
+}
+
+/// Transitional request-scoped state for rendering paths not yet parameterized.
+pub(crate) struct UiState(pub(crate) WebState);
+
+impl axum::extract::FromRequestParts<WebState> for UiState {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &WebState,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let UiLocale(locale) =
+            <UiLocale as axum::extract::FromRequestParts<WebState>>::from_request_parts(parts, state)
+                .await?;
+        let mut scoped = state.clone();
+        scoped.templates = Arc::new(state.templates.with_locale(locale));
+        Ok(Self(scoped))
+    }
+}
+
 #[cfg(test)]
 mod fixtures;
 #[cfg(test)]
@@ -65,6 +105,7 @@ pub(crate) struct WebState {
     pub(crate) templates_dir: PathBuf,
     pub(crate) static_dir: PathBuf,
     pub(crate) css: Arc<GeneratedCss>,
+    pub(crate) process_locale: crate::i18n::Locale,
 }
 
 impl std::fmt::Debug for WebState {
@@ -88,6 +129,7 @@ impl WebState {
             templates_dir: assets.templates_dir.clone(),
             static_dir: assets.static_dir.clone(),
             css: Arc::new(GeneratedCss::new(generated, assets.dev_mode)),
+            process_locale: crate::i18n::process_locale(),
         })
     }
 }
@@ -258,12 +300,14 @@ async fn app_css(State(state): State<WebState>) -> Response {
 }
 
 async fn sse(
-    State(state): State<WebState>,
+    State(mut state): State<WebState>,
+    UiLocale(locale): UiLocale,
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    state.templates = Arc::new(state.templates.with_locale(locale));
     let receiver = state.hub.subscribe();
     let stream = futures::stream::unfold(
         (state, receiver, std::collections::VecDeque::new()),
-        |(state, mut receiver, mut queue): (
+        move |(state, mut receiver, mut queue): (
             WebState,
             tokio::sync::mpsc::Receiver<crate::application::ApplicationEvent>,
             std::collections::VecDeque<Event>,

@@ -1,7 +1,7 @@
 //! Page routes: full documents for normal requests, `#main` fragments for
 //! htmx navigations.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use serde::Deserialize;
@@ -9,7 +9,6 @@ use serde::Deserialize;
 use crate::application::PendingPromptKind;
 use crate::error::Result;
 
-use super::WebState;
 use super::partials;
 use super::templates::RawHtml;
 use super::view::{
@@ -17,6 +16,7 @@ use super::view::{
     SessionDetailVm, ShellVm, StepRowVm, StepTreeVm, TabHrefs, TabInfoVm, format_local_time,
     runnable_count, truncate,
 };
+use super::{UiState, WebState};
 
 const HX_PUSH_URL: HeaderName = HeaderName::from_static("hx-push-url");
 
@@ -105,14 +105,14 @@ pub(crate) fn error_page_html(state: &WebState, message: &str) -> Result<String>
     )
 }
 
-pub(crate) async fn root(State(state): State<WebState>, headers: HeaderMap) -> Response {
+pub(crate) async fn root(UiState(state): UiState, headers: HeaderMap) -> Response {
     render(|| {
         let main = empty_state_html(&state)?;
         respond_page(&state, &headers, main, None, None, String::new())
     })
 }
 
-pub(crate) async fn not_found(State(state): State<WebState>, headers: HeaderMap) -> Response {
+pub(crate) async fn not_found(UiState(state): UiState, headers: HeaderMap) -> Response {
     let body = render(|| {
         let main = error_page_html(&state, "Page not found")?;
         respond_page(&state, &headers, main, None, None, String::new())
@@ -121,7 +121,7 @@ pub(crate) async fn not_found(State(state): State<WebState>, headers: HeaderMap)
 }
 
 pub(crate) async fn session(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     Query(query): Query<TabQuery>,
     headers: HeaderMap,
@@ -141,14 +141,14 @@ pub(crate) async fn session(
     })
 }
 
-pub(crate) async fn new_session(State(state): State<WebState>, headers: HeaderMap) -> Response {
+pub(crate) async fn new_session(UiState(state): UiState, headers: HeaderMap) -> Response {
     render(|| {
         let main = new_session_html(&state)?;
         respond_page(&state, &headers, main, None, None, String::new())
     })
 }
 
-pub(crate) async fn run_all(State(state): State<WebState>, headers: HeaderMap) -> Response {
+pub(crate) async fn run_all(UiState(state): UiState, headers: HeaderMap) -> Response {
     render(|| {
         let vm = run_all_vm(&state);
         let main = state.templates.render("run-all", &vm)?;

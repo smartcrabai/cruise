@@ -65,6 +65,7 @@ mod contracts {
                 .collect();
             values.extend([
                 ("CRUISE_DISABLE_NOTIFICATIONS".into(), "1".into()),
+                ("CRUISE_UI_LANGUAGE".into(), "en".into()),
                 ("TERM".into(), "xterm-256color".into()),
                 ("NO_COLOR".into(), "1".into()),
             ]);

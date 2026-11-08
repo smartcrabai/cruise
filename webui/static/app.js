@@ -154,7 +154,8 @@
       } catch (error) {
         const message = errorMessage(error);
         nodes.forEach((node) => {
-          node.textContent = `Failed to render Graph: ${message}`;
+          const label = document.getElementById("app")?.getAttribute("data-graph-error-label") || "Failed to render Graph";
+          node.textContent = `${label}: ${message}`;
         });
       }
     });
@@ -274,6 +275,13 @@
   }
 
   function setup() {
+    document.addEventListener("change", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLSelectElement) || !["ui-language", "ui-language-mobile"].includes(target.id)) return;
+      if (!["en", "zh-CN", "es", "fr", "pt-BR", "ja", "ko"].includes(target.value)) return;
+      document.cookie = `cruise_ui_language=${encodeURIComponent(target.value)}; Path=/; Max-Age=31536000; SameSite=Lax`;
+      window.location.reload();
+    });
     setupSidebarResize();
     setupSidebarDrawer();
     setupToasts();

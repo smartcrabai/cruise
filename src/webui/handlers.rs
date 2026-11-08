@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Multipart, Path, Query, Request, State};
+use axum::extract::{Multipart, Path, Query, Request};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use tower::ServiceExt as _;
@@ -18,7 +18,6 @@ use crate::error::{CruiseError, Result};
 use crate::session::WorkspaceMode;
 use crate::step::option::OptionResult;
 
-use super::WebState;
 use super::partials;
 use super::templates::RawHtml;
 use super::view::{
@@ -26,6 +25,7 @@ use super::view::{
     MergePrDialogVm, PublishDialogVm, RepoOptionsVm, SessionSettingsVm, SettingsVm, ToastKind,
     ToastVm,
 };
+use super::{UiState, WebState};
 
 const HX_PUSH_URL: HeaderName = HeaderName::from_static("hx-push-url");
 
@@ -119,7 +119,7 @@ where
 
 // --- fragment routes -------------------------------------------------------
 
-pub(crate) async fn sidebar(State(state): State<WebState>, headers: HeaderMap) -> Response {
+pub(crate) async fn sidebar(UiState(state): UiState, headers: HeaderMap) -> Response {
     let selected = super::pages::current_session_id(&headers);
     fragment(&state, "Sidebar", || {
         let vm = partials::sidebar_vm(&state, selected.as_deref())?;
@@ -133,7 +133,7 @@ pub(crate) async fn sidebar(State(state): State<WebState>, headers: HeaderMap) -
 }
 
 pub(crate) async fn tab(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path((id, tab)): Path<(String, String)>,
 ) -> Response {
     let tab = super::pages::normalize_tab(Some(tab.as_str()));
@@ -142,12 +142,12 @@ pub(crate) async fn tab(
     })
 }
 
-pub(crate) async fn session_log(State(state): State<WebState>, Path(id): Path<String>) -> Response {
+pub(crate) async fn session_log(UiState(state): UiState, Path(id): Path<String>) -> Response {
     fragment(&state, "Log", || partials::log_tab_html(&state, &id, None))
 }
 
 pub(crate) async fn session_sync(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     Query(params): Params,
 ) -> Response {
@@ -166,10 +166,7 @@ pub(crate) async fn session_sync(
     }
 }
 
-pub(crate) async fn session_settings(
-    State(state): State<WebState>,
-    Path(id): Path<String>,
-) -> Response {
+pub(crate) async fn session_settings(UiState(state): UiState, Path(id): Path<String>) -> Response {
     fragment(&state, "Settings", || settings_html(&state, &id, true))
 }
 
@@ -232,7 +229,7 @@ fn settings_html(state: &WebState, id: &str, open: bool) -> Result<String> {
 }
 
 pub(crate) async fn editor(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path((id, kind)): Path<(String, String)>,
 ) -> Response {
     run(&state, "Editor", || {
@@ -290,7 +287,7 @@ pub(crate) async fn editor(
     })
 }
 
-pub(crate) async fn directories(State(state): State<WebState>, Query(params): Params) -> Response {
+pub(crate) async fn directories(UiState(state): UiState, Query(params): Params) -> Response {
     let params = Fields::from(params);
     // The picker input is named `baseDir` and includes itself in the request.
     let path = params
@@ -320,7 +317,7 @@ pub(crate) async fn directories(State(state): State<WebState>, Query(params): Pa
     })
 }
 
-pub(crate) async fn configs(State(state): State<WebState>, Query(params): Params) -> Response {
+pub(crate) async fn configs(UiState(state): UiState, Query(params): Params) -> Response {
     let params = Fields::from(params);
     fragment(&state, "Configs", || {
         super::pages::config_select_html(
@@ -332,7 +329,7 @@ pub(crate) async fn configs(State(state): State<WebState>, Query(params): Params
     })
 }
 
-pub(crate) async fn new_steps(State(state): State<WebState>, Query(params): Params) -> Response {
+pub(crate) async fn new_steps(UiState(state): UiState, Query(params): Params) -> Response {
     let params = Fields::from(params);
     fragment(&state, "Steps", || {
         super::pages::step_tree_html(
@@ -347,7 +344,7 @@ pub(crate) async fn new_steps(State(state): State<WebState>, Query(params): Para
 }
 
 pub(crate) async fn new_steps_for_flags(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Query(params): Params,
 ) -> Response {
     let params = Fields::from(params);
@@ -365,7 +362,7 @@ pub(crate) async fn new_steps_for_flags(
     })
 }
 
-pub(crate) async fn repos(State(state): State<WebState>) -> Response {
+pub(crate) async fn repos(UiState(state): UiState) -> Response {
     let repos = state
         .application
         .list_repositories()
@@ -378,7 +375,7 @@ pub(crate) async fn repos(State(state): State<WebState>) -> Response {
     })
 }
 
-pub(crate) async fn settings_modal(State(state): State<WebState>) -> Response {
+pub(crate) async fn settings_modal(UiState(state): UiState) -> Response {
     fragment(&state, "Settings", || {
         let config = state.application.app_config()?;
         state.templates.render(
@@ -510,14 +507,14 @@ fn discard_uploads(request: &NewSessionRequest) {
 }
 
 pub(crate) async fn create_session(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     axum::extract::Form(pairs): Form,
 ) -> Response {
     create_session_inner(&state, &Fields::from(pairs), true)
 }
 
 pub(crate) async fn create_draft_session(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     axum::extract::Form(pairs): Form,
 ) -> Response {
     create_session_inner(&state, &Fields::from(pairs), false)
@@ -560,7 +557,7 @@ fn create_session_inner(state: &WebState, fields: &Fields, plan: bool) -> Respon
 }
 
 pub(crate) async fn save_draft(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     axum::extract::Form(pairs): Form,
 ) -> Response {
     let fields = Fields::from(pairs);
@@ -579,7 +576,7 @@ pub(crate) async fn save_draft(
 }
 
 pub(crate) async fn upload_attachments(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     mut multipart: Multipart,
 ) -> Response {
     let mut items: Vec<AttachmentVm> = Vec::new();
@@ -669,17 +666,14 @@ fn encode_query(value: &str) -> String {
     out
 }
 
-pub(crate) async fn approve(State(state): State<WebState>, Path(id): Path<String>) -> Response {
+pub(crate) async fn approve(UiState(state): UiState, Path(id): Path<String>) -> Response {
     run(&state, "Approve", || {
         state.application.approve(&id)?;
         Ok(html(partials::header_and_row(&state, &id, None)?))
     })
 }
 
-pub(crate) async fn use_input_as_plan(
-    State(state): State<WebState>,
-    Path(id): Path<String>,
-) -> Response {
+pub(crate) async fn use_input_as_plan(UiState(state): UiState, Path(id): Path<String>) -> Response {
     run(&state, "Use input as plan", || {
         let application = state.application.clone();
         let (sink, _log) = state.hub.sinks();
@@ -694,7 +688,7 @@ pub(crate) async fn use_input_as_plan(
 }
 
 pub(crate) async fn generate(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
@@ -714,7 +708,7 @@ pub(crate) async fn generate(
 }
 
 pub(crate) async fn replan(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
@@ -736,7 +730,7 @@ pub(crate) async fn replan(
 }
 
 pub(crate) async fn fix(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
@@ -756,7 +750,7 @@ pub(crate) async fn fix(
 }
 
 pub(crate) async fn ask(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
@@ -776,7 +770,7 @@ pub(crate) async fn ask(
 }
 
 pub(crate) async fn run_session(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
@@ -804,14 +798,14 @@ pub(crate) async fn run_session(
     })
 }
 
-pub(crate) async fn cancel(State(state): State<WebState>, Path(id): Path<String>) -> Response {
+pub(crate) async fn cancel(UiState(state): UiState, Path(id): Path<String>) -> Response {
     run(&state, "Cancel", || {
         let _ = state.application.cancel_session(&id);
         Ok(html(partials::header_and_row(&state, &id, None)?))
     })
 }
 
-pub(crate) async fn reset(State(state): State<WebState>, Path(id): Path<String>) -> Response {
+pub(crate) async fn reset(UiState(state): UiState, Path(id): Path<String>) -> Response {
     run(&state, "Reset", || {
         state.application.reset_to_planned(&id)?;
         let mut body = partials::header_and_row(&state, &id, None)?;
@@ -843,7 +837,7 @@ fn settings_request(fields: &Fields) -> SessionSettingsRequest {
 }
 
 pub(crate) async fn update_settings(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
@@ -859,7 +853,7 @@ pub(crate) async fn update_settings(
 }
 
 pub(crate) async fn regenerate_settings(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
@@ -890,7 +884,7 @@ pub(crate) async fn regenerate_settings(
 }
 
 pub(crate) async fn ask_answer(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
@@ -907,7 +901,7 @@ pub(crate) async fn ask_answer(
 }
 
 pub(crate) async fn option_answer(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
@@ -931,7 +925,7 @@ pub(crate) async fn option_answer(
 }
 
 pub(crate) async fn publish(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
@@ -960,10 +954,7 @@ pub(crate) async fn publish(
     })
 }
 
-pub(crate) async fn merge_pr_preview(
-    State(state): State<WebState>,
-    Path(id): Path<String>,
-) -> Response {
+pub(crate) async fn merge_pr_preview(UiState(state): UiState, Path(id): Path<String>) -> Response {
     run(&state, "Merge PR", || {
         let status = state.application.inspect_pr_for_merge(&id)?;
         let vm = MergePrDialogVm {
@@ -988,7 +979,7 @@ pub(crate) async fn merge_pr_preview(
 }
 
 pub(crate) async fn merge_pr(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     Path(id): Path<String>,
     axum::extract::Form(pairs): Form,
 ) -> Response {
@@ -1038,14 +1029,14 @@ pub(crate) async fn merge_pr(
     })
 }
 
-pub(crate) async fn discard(State(state): State<WebState>, Path(id): Path<String>) -> Response {
+pub(crate) async fn discard(UiState(state): UiState, Path(id): Path<String>) -> Response {
     run(&state, "Discard", || {
         state.application.discard_session(&id)?;
         remove_session_response(&state)
     })
 }
 
-pub(crate) async fn delete(State(state): State<WebState>, Path(id): Path<String>) -> Response {
+pub(crate) async fn delete(UiState(state): UiState, Path(id): Path<String>) -> Response {
     run(&state, "Delete", || {
         state.application.delete_session(&id)?;
         remove_session_response(&state)
@@ -1059,7 +1050,7 @@ fn remove_session_response(state: &WebState) -> Result<Response> {
 }
 
 pub(crate) async fn start_run_all(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     axum::extract::Form(pairs): Form,
 ) -> Response {
     let fields = Fields::from(pairs);
@@ -1116,7 +1107,7 @@ pub(crate) async fn start_run_all(
     })
 }
 
-pub(crate) async fn cancel_run_all(State(state): State<WebState>) -> Response {
+pub(crate) async fn cancel_run_all(UiState(state): UiState) -> Response {
     run(&state, "Cancel Run All", || {
         let _ = state.application.cancel_run_all();
         let vm = super::pages::run_all_vm(&state);
@@ -1127,7 +1118,7 @@ pub(crate) async fn cancel_run_all(State(state): State<WebState>) -> Response {
     })
 }
 
-pub(crate) async fn clean(State(state): State<WebState>) -> Response {
+pub(crate) async fn clean(UiState(state): UiState) -> Response {
     let application = state.application.clone();
     let report = tokio::task::spawn_blocking(move || application.clean()).await;
     run(&state, "Clean", || {
@@ -1147,7 +1138,7 @@ pub(crate) async fn clean(State(state): State<WebState>) -> Response {
 }
 
 pub(crate) async fn save_settings(
-    State(state): State<WebState>,
+    UiState(state): UiState,
     axum::extract::Form(pairs): Form,
 ) -> Response {
     let fields = Fields::from(pairs);

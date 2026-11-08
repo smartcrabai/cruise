@@ -16,6 +16,7 @@ mod commit_guard;
 mod condition;
 mod config;
 mod config_cmd;
+mod i18n;
 mod configs;
 mod console_mode;
 #[expect(
@@ -125,17 +126,24 @@ fn main() {
 // open menu would freeze every other concurrently running session.
 #[tokio::main]
 async fn runtime_main(cli: cli::Cli) {
+    let config = match app_config::AppConfig::load() {
+        Ok(config) => Some(config),
+        Err(error) => { eprintln!("warning: ignoring app configuration for UI language: {error}"); None }
+    };
+    let resolved = i18n::resolve::resolve_current(config.as_ref().and_then(|c| c.ui_language.as_deref()));
+    for warning in &resolved.warnings { eprintln!("{warning}"); }
+    i18n::init_process_locale(resolved.locale);
     let telemetry = match telemetry::init() {
         Ok(telemetry) => telemetry,
         Err(error) => {
-            eprintln!("Error: {error}");
+            eprintln!("{}: {error}", i18n::t(i18n::process_locale(), "webui.session.error"));
             std::process::exit(1);
         }
     };
     let result = Box::pin(run(cli)).await;
     telemetry.shutdown();
     if let Err(e) = result {
-        eprintln!("Error: {}", e.detailed_message());
+        eprintln!("{}: {}", i18n::t(i18n::process_locale(), "webui.session.error"), e.detailed_message());
         std::process::exit(1);
     }
 }

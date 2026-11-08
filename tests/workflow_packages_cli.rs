@@ -97,6 +97,7 @@ impl Fixture {
             .env("HOME", self.root.path().join("home"))
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env("NO_COLOR", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

@@ -106,6 +106,7 @@ NODE
 }
 run_check alloy-expectations alloy_expectations
 run_check checkpoint-bdd cargo +1.99.1 test --locked --test graph_state --test checkpoint_bdd
+run_check ui-locale bash scripts/check_ui_locale_specs.sh
 printf 'Aggregate exit status: %s\n' "$status" | tee -a "$RUN/results.log"
 echo "Reports: $RUN"
 exit "$status"
