@@ -47,6 +47,15 @@ fn text(output: &Output) -> String {
     )
 }
 
+fn implicit_language_line() -> String {
+    let system_locale = cruise::i18n::resolve::system_locale_windows()
+        .and_then(|value| cruise::i18n::resolve::from_system_locale(&value));
+    system_locale.map_or_else(
+        || "ui_language = en (source: default)".to_string(),
+        |locale| format!("ui_language = {} (source: system)", locale.tag()),
+    )
+}
+
 fn run(command: &mut Command) -> Output {
     command
         .output()
@@ -79,7 +88,7 @@ fn environment_language_has_priority_and_invalid_value_warns() {
         text(&output)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("ui_language = en (source: default)"),
+        String::from_utf8_lossy(&output.stdout).contains(&implicit_language_line()),
         "{}",
         text(&output)
     );
@@ -135,7 +144,7 @@ fn language_setting_persists_and_auto_clears_it() {
     let output = run(fixture.command().arg("config"));
     assert!(output.status.success(), "{}", text(&output));
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("ui_language = en (source: default)"),
+        String::from_utf8_lossy(&output.stdout).contains(&implicit_language_line()),
         "{}",
         text(&output)
     );
