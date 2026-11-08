@@ -156,6 +156,24 @@ fn effective(w: &mut LocaleWorld, language: String, source: String) {
         "{stdout}"
     );
 }
+
+#[then("the effective UI language is the platform fallback")]
+fn platform_fallback(w: &mut LocaleWorld) {
+    let out = w.output.as_ref().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let system_locale = cruise::i18n::resolve::system_locale_windows()
+        .and_then(|value| cruise::i18n::resolve::from_system_locale(&value));
+    let expected = system_locale.map_or_else(
+        || "ui_language = en (source: default)".to_string(),
+        |locale| format!("ui_language = {} (source: system)", locale.tag()),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&expected), "{stdout}");
+}
 #[tokio::test(flavor = "current_thread")]
 async fn ui_locale_bdd() {
     LocaleWorld::cucumber()
