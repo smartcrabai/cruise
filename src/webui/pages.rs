@@ -181,6 +181,7 @@ pub(crate) fn normalize_tab(tab: Option<&str>) -> &'static str {
         Some("dag") => "dag",
         Some("plan") => "plan",
         Some("log") => "log",
+        Some("diff") => "diff",
         _ => "info",
     }
 }
@@ -201,6 +202,7 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
         }
         "plan" => partials::plan_tab_html(state, id),
         "log" => partials::log_tab_html(state, id, None),
+        "diff" => partials::diff_tab_html(state, id),
         _ => {
             let session_state = state.application.reconcile_session(id)?;
             let flags = state
@@ -218,11 +220,15 @@ pub(crate) fn tab_panel_html(state: &WebState, id: &str, tab: &str) -> Result<St
                 .as_deref()
                 .is_some_and(|url| url.starts_with("http://") || url.starts_with("https://"));
             let vm = TabInfoVm {
+                auto_requeue_count: session.auto_requeue_count,
                 id: id.to_string(),
+                pending_instructions: session.pending_instructions,
                 config_source: session.config_source.clone(),
                 flags,
                 flags_note,
-                location_label: if session.repo.is_some() {
+                location_label: if let Some(target) = &session.pr_target {
+                    format!("PR #{}", target.number)
+                } else if session.repo.is_some() {
                     "Repository".to_string()
                 } else {
                     "Base dir".to_string()
@@ -266,12 +272,14 @@ pub(crate) fn session_detail_html(state: &WebState, id: &str, tab: &str) -> Resu
             dag: format!("/webui/sessions/{id}/tab/dag"),
             plan: format!("/webui/sessions/{id}/tab/plan"),
             log: format!("/webui/sessions/{id}/tab/log"),
+            diff: format!("/webui/sessions/{id}/tab/diff"),
         },
         push_hrefs: TabHrefs {
             info: format!("/sessions/{id}?tab=info"),
             dag: format!("/sessions/{id}?tab=dag"),
             plan: format!("/sessions/{id}?tab=plan"),
             log: format!("/sessions/{id}?tab=log"),
+            diff: format!("/sessions/{id}?tab=diff"),
         },
     };
     state.templates.render("session-detail", &vm)
@@ -387,7 +395,38 @@ pub(crate) fn config_select_html(
         Some(base_dir),
         repo.filter(|repo| !repo.trim().is_empty()),
     );
-    let vm = super::view::ConfigSelectVm::new(&entries, selected, base_dir);
+    let mut candidates = super::dto::picker_candidates(&entries, base_dir);
+    if repo.is_none_or(|repo| repo.trim().is_empty()) {
+        let base = crate::webui::dto::expanded_path(std::path::Path::new(if base_dir.is_empty() {
+            "."
+        } else {
+            base_dir
+        }));
+        let discovered = state.application.discover_tui_config_candidates(&base)?;
+        let installed = std::collections::HashSet::new();
+        let mut ordered = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for candidate in discovered
+            .iter()
+            .map(|item| item.picker_candidate(&installed))
+            .chain(candidates)
+        {
+            let key = if candidate.is_builtin {
+                candidate.value.clone()
+            } else {
+                std::fs::canonicalize(&candidate.value)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(&candidate.value))
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            if seen.insert(key) {
+                ordered.push(candidate);
+            }
+        }
+        candidates = ordered;
+    }
+    let nodes = state.application.workflow_picker_tree(&candidates)?;
+    let vm = super::view::ConfigSelectVm::new(&nodes, &candidates, selected, base_dir);
     state.templates.render("components/config-select", &vm)
 }
 
@@ -495,7 +534,9 @@ pub(crate) fn run_all_vm(state: &WebState) -> RunAllVm {
             title: truncate(&result.title, 80),
             phase: result.phase.clone(),
             error: result.error.clone(),
-            failed: result.phase == "Failed" || result.phase == "Busy",
+            failed: result.phase == "Failed"
+                || result.phase == "PR Failed"
+                || result.phase == "Busy",
         })
         .collect();
     let finished = results.len();

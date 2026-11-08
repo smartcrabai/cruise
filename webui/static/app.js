@@ -262,6 +262,8 @@
     const repo = document.getElementById("source-repo");
     if (directory) directory.classList.toggle("hidden", mode !== "directory");
     if (repo) repo.classList.toggle("hidden", mode === "directory");
+    const prNumber = document.getElementById("pr-number-input");
+    if (prNumber) prNumber.disabled = mode === "directory";
   }
 
   function pickDir(path) {

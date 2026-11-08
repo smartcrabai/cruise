@@ -1,4 +1,4 @@
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::io::Write;
 
 use console::style;
@@ -31,11 +31,15 @@ struct ListSessionJson {
     workspace_mode: WorkspaceMode,
     target_branch: Option<String>,
     pr_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_target: Option<crate::pr_review_fix::PrTarget>,
     pr_skipped_reason: Option<PrSkippedReason>,
     config_path: Option<String>,
     updated_at: Option<String>,
     awaiting_input: bool,
     plan_available: bool,
+    pending_instructions: usize,
+    auto_requeue_count: u32,
 }
 
 /// `Failed(msg)` is normalized to `phase = "Failed"` + `phase_error = Some(msg)`.
@@ -56,9 +60,11 @@ fn session_to_json_with_plan_availability(
         SessionPhase::Running => ("Running", None),
         SessionPhase::Completed => ("Completed", None),
         SessionPhase::Failed(msg) => ("Failed", Some(msg)),
+        SessionPhase::PrFailed(msg) => ("PrFailed", Some(msg)),
         SessionPhase::Suspended => ("Suspended", None),
     };
     ListSessionJson {
+        auto_requeue_count: session.auto_requeue_count,
         id: session.id,
         base_dir: session.base_dir.to_string_lossy().into_owned(),
         phase,
@@ -77,11 +83,13 @@ fn session_to_json_with_plan_availability(
         workspace_mode: session.workspace_mode,
         target_branch: session.target_branch,
         pr_url: session.pr_url,
+        pr_target: session.pr_target,
         pr_skipped_reason: session.pr_skipped_reason,
         config_path: session.config.selection_value(),
         updated_at: session.updated_at,
         awaiting_input: session.awaiting_input,
         plan_available,
+        pending_instructions: 0,
     }
 }
 
@@ -106,7 +114,11 @@ fn write_sessions_json_with_manager<W: Write>(
         .into_iter()
         .map(|session| {
             let plan_available = plan_available_for_session(&session, manager);
-            session_to_json_with_plan_availability(session, plan_available)
+            let pending = crate::instruction_inbox::summary(&manager.sessions_dir(), &session.id)
+                .map_or(0, |summary| summary.pending.len());
+            let mut dto = session_to_json_with_plan_availability(session, plan_available);
+            dto.pending_instructions = pending;
+            dto
         })
         .collect();
     serde_json::to_writer_pretty(&mut writer, &dtos)
@@ -167,6 +179,12 @@ pub async fn run(args: ListArgs) -> Result<()> {
             };
 
             match action {
+                SessionAction::ViewDiff => {
+                    crate::platform::reclaim_terminal_foreground();
+                    if let Err(e) = crate::diff_cmd::print_session_diff(&session, false) {
+                        eprintln!("{e}");
+                    }
+                }
                 SessionAction::GeneratePlan => {
                     match crate::plan_cmd::regenerate_plan_for_session(
                         &manager,
@@ -264,6 +282,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         session: Some(session.id.clone()),
                         all: false,
                         parallelism: None,
+                        auto_requeue_max_attempts: None,
                         max_retries: None,
                         rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
                         dry_run: false,
@@ -272,6 +291,21 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         flags: vec![],
                     };
                     return crate::run_cmd::run(run_args).await;
+                }
+                SessionAction::Tell => {
+                    let text = match prompt_multiline("Instruction:")? {
+                        InputResult::Submitted(t) => t,
+                        InputResult::Cancelled => continue,
+                    };
+                    let application = crate::application::CruiseApplication::new(manager.clone());
+                    match application.tell(
+                        &session.id,
+                        text,
+                        crate::instruction_inbox::Origin::List,
+                    ) {
+                        Ok(receipt) => eprintln!("Instruction #{} accepted", receipt.id),
+                        Err(error) => eprintln!("{error}"),
+                    }
                 }
                 SessionAction::Replan => {
                     let prompt =
@@ -290,6 +324,30 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     // Re-load so subsequent session_actions(&session) uses fresh state.
                     session = manager.load(&session.id)?;
                 }
+                SessionAction::CreatePr => {
+                    let app = crate::application::CruiseApplication::new(manager.clone());
+                    let sink = std::sync::Arc::new(|event| {
+                        match event {
+                            crate::application::ApplicationEvent::RunPhase { phase, .. } => {
+                                eprintln!("{phase}");
+                            }
+                            crate::application::ApplicationEvent::PrCreated { url, .. } => {
+                                eprintln!("PR created: {url}");
+                            }
+                            crate::application::ApplicationEvent::RunFailed { error, .. } => {
+                                eprintln!("PR creation failed: {error}");
+                            }
+                            _ => {}
+                        }
+                        Ok(())
+                    });
+                    if let Err(error) = app.create_pr(&session.id, sink, None).await {
+                        eprintln!("PR creation failed: {error}");
+                    }
+                    if let Ok(reloaded) = manager.load(&session.id) {
+                        session = reloaded;
+                    }
+                }
                 SessionAction::OpenPr => {
                     let url = session.pr_url.as_deref().ok_or_else(|| {
                         CruiseError::Other("Open PR action requires pr_url".into())
@@ -305,6 +363,19 @@ pub async fn run(args: ListArgs) -> Result<()> {
                 }
                 SessionAction::MergePr => {
                     if merge_pr_interactive(&manager, &session.id)? {
+                        break;
+                    }
+                    if let Ok(reloaded) = manager.load(&session.id) {
+                        session = reloaded;
+                    }
+                }
+                SessionAction::StageLocalMerge | SessionAction::MergeLocal => {
+                    let mode = if action == SessionAction::StageLocalMerge {
+                        crate::application::LocalMergeMode::Stage
+                    } else {
+                        crate::application::LocalMergeMode::MergeAndCleanup
+                    };
+                    if local_merge_interactive(&manager, &session, mode)? {
                         break;
                     }
                     if let Ok(reloaded) = manager.load(&session.id) {
@@ -333,6 +404,11 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     }
                 }
                 SessionAction::ResetToPlanned => {
+                    crate::instruction_inbox::expire_pending(
+                        &manager.sessions_dir(),
+                        &session.id,
+                        "reset to planned",
+                    )?;
                     session.reset_to_planned();
                     manager.save(&session)?;
                     eprintln!(
@@ -406,6 +482,7 @@ fn pick_session(manager: &crate::session::SessionManager) -> Result<Option<Sessi
 }
 
 /// Returns the action menu items available for the given session.
+/// "View Diff" appears when the session has a worktree branch; Create PR takes priority.
 /// "Run"/"Resume" appears for runnable phases; "Replan" only for Planned.
 /// "Open PR" appears for Completed sessions that have a PR URL.
 /// "Reset to Planned" appears for Running, Failed, Completed, and Suspended.
@@ -419,6 +496,11 @@ fn session_actions(session: &SessionState) -> Vec<&'static str> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionAction {
+    ViewDiff,
+    Tell,
+    CreatePr,
+    StageLocalMerge,
+    MergeLocal,
     GeneratePlan,
     Approve,
     PublishAsIssue,
@@ -436,6 +518,11 @@ enum SessionAction {
 impl SessionAction {
     fn key(self) -> &'static str {
         match self {
+            Self::ViewDiff => "cli.list.action.view_diff",
+            Self::Tell => "cli.list.action.tell",
+            Self::CreatePr => "cli.list.action.create_pr",
+            Self::StageLocalMerge => "cli.list.action.stage_local_merge",
+            Self::MergeLocal => "cli.list.action.merge_local",
             Self::GeneratePlan => "cli.list.action.generate_plan",
             Self::Approve => "cli.list.action.approve",
             Self::PublishAsIssue => "cli.list.action.publish_as_issue",
@@ -453,6 +540,11 @@ impl SessionAction {
 
     fn english_label(self) -> &'static str {
         match self {
+            Self::ViewDiff => "View Diff",
+            Self::Tell => "Tell",
+            Self::CreatePr => "Create PR",
+            Self::StageLocalMerge => "Stage local merge",
+            Self::MergeLocal => "Merge locally & cleanup",
             Self::GeneratePlan => "Generate Plan",
             Self::Approve => "Approve",
             Self::PublishAsIssue => "Publish as Issue",
@@ -497,6 +589,9 @@ fn session_actions_with_plan_availability(
 
 fn available_session_actions(session: &SessionState, plan_available: bool) -> Vec<SessionAction> {
     let mut actions = vec![];
+    if session.worktree_branch.is_some() && !matches!(session.phase, SessionPhase::PrFailed(_)) {
+        actions.push(SessionAction::ViewDiff);
+    }
     match &session.phase {
         SessionPhase::Draft | SessionPhase::AwaitingInput => {
             actions.push(SessionAction::GeneratePlan);
@@ -504,20 +599,27 @@ fn available_session_actions(session: &SessionState, plan_available: bool) -> Ve
         SessionPhase::AwaitingApproval => {
             if plan_available && session.plan_error.is_none() {
                 actions.push(SessionAction::Approve);
-                actions.push(SessionAction::PublishAsIssue);
+                if session.pr_target.is_none() {
+                    actions.push(SessionAction::PublishAsIssue);
+                }
             }
             actions.push(SessionAction::EditSettings);
         }
         SessionPhase::Planned => {
             actions.push(SessionAction::Run);
-            if plan_available && session.plan_error.is_none() {
+            if plan_available && session.plan_error.is_none() && session.pr_target.is_none() {
                 actions.push(SessionAction::PublishAsIssue);
             }
             actions.push(SessionAction::EditSettings);
-            actions.push(SessionAction::Replan);
+            if session.pr_target.is_none() {
+                actions.push(SessionAction::Replan);
+            }
         }
         SessionPhase::Running => {
             actions.push(SessionAction::Resume);
+            if session.is_runner_alive() {
+                actions.push(SessionAction::Tell);
+            }
             actions.push(SessionAction::ResetToPlanned);
         }
         SessionPhase::Suspended => {
@@ -530,10 +632,32 @@ fn available_session_actions(session: &SessionState, plan_available: bool) -> Ve
             actions.push(SessionAction::EditSettings);
             actions.push(SessionAction::ResetToPlanned);
         }
+        SessionPhase::PrFailed(_) => {
+            actions.push(SessionAction::CreatePr);
+            if session.pr_url.is_some() {
+                actions.push(SessionAction::OpenPr);
+            }
+            if session.worktree_branch.is_some() {
+                actions.push(SessionAction::ViewDiff);
+            }
+            if crate::local_merge::can_stage_locally(session) {
+                actions.push(SessionAction::StageLocalMerge);
+            }
+            if crate::local_merge::can_merge_locally(session) {
+                actions.push(SessionAction::MergeLocal);
+            }
+            actions.push(SessionAction::ResetToPlanned);
+        }
         SessionPhase::Completed => {
             if session.pr_url.is_some() {
                 actions.push(SessionAction::OpenPr);
                 actions.push(SessionAction::MergePr);
+            }
+            if crate::local_merge::can_stage_locally(session) {
+                actions.push(SessionAction::StageLocalMerge);
+            }
+            if crate::local_merge::can_merge_locally(session) {
+                actions.push(SessionAction::MergeLocal);
             }
             actions.push(SessionAction::ResetToPlanned);
         }
@@ -541,6 +665,54 @@ fn available_session_actions(session: &SessionState, plan_available: bool) -> Ve
     actions.push(SessionAction::Delete);
     actions.push(SessionAction::Back);
     actions
+}
+
+fn local_merge_interactive(
+    manager: &SessionManager,
+    session: &SessionState,
+    mode: crate::application::LocalMergeMode,
+) -> Result<bool> {
+    use crate::application::{CruiseApplication, LocalMergeMode, LocalMergeOutcome};
+
+    let branch = session.worktree_branch.as_deref().unwrap_or("unknown");
+    let target = crate::local_merge::merge_target_branch(session).unwrap_or("unknown");
+    let prompt = match mode {
+        LocalMergeMode::Stage => format!("Stage squash of {branch} into {target}?"),
+        LocalMergeMode::MergeAndCleanup => format!(
+            "Squash {branch} into {target}, commit, and delete the worktree, branch, and session?"
+        ),
+    };
+    match inquire::Confirm::new(&prompt).with_default(false).prompt() {
+        Ok(true) => {}
+        Ok(false) | Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            return Ok(false);
+        }
+        Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+    }
+    match CruiseApplication::new(manager.clone()).local_merge(&session.id, mode) {
+        Ok(LocalMergeOutcome::Staged) => {
+            eprintln!(
+                "{} Squash staged in base checkout; session retained.",
+                style("v").green()
+            );
+            Ok(false)
+        }
+        Ok(LocalMergeOutcome::Merged) => {
+            eprintln!("{} Merged locally; session cleaned up.", style("v").green());
+            Ok(true)
+        }
+        Ok(LocalMergeOutcome::MergedCleanupFailed { error }) => {
+            eprintln!(
+                "{} Merge committed but cleanup failed: {error}. Retry cleanup from this session.",
+                style("!").yellow()
+            );
+            Ok(false)
+        }
+        Err(e) => {
+            eprintln!("{} {e}", style("x").red());
+            Ok(false)
+        }
+    }
 }
 
 fn plan_available_for_session(session: &SessionState, manager: &SessionManager) -> bool {
@@ -871,6 +1043,10 @@ fn format_session_label_with_plan_availability(s: &SessionState, plan_available:
             style("x").red(),
             style(list_text("cli.list.phase.failed", "Failed")).red(),
         ),
+        SessionPhase::PrFailed(_) => (
+            style("x").red(),
+            style(list_text("cli.list.phase.pr_failed", "PR Failed")).red(),
+        ),
         SessionPhase::Suspended => (
             style("||").yellow(),
             style(list_text("cli.list.phase.suspended", "Suspended")).yellow(),
@@ -894,7 +1070,7 @@ fn format_session_date(id: &str) -> String {
 
 /// Returns " \[`step_name`\]" for Running/Suspended, or " PR#N" for Completed with PR URL.
 fn format_suffix(s: &SessionState) -> String {
-    match &s.phase {
+    let mut suffix = match &s.phase {
         SessionPhase::Running | SessionPhase::Suspended => s
             .current_step
             .as_ref()
@@ -909,7 +1085,11 @@ fn format_suffix(s: &SessionState) -> String {
             })
             .unwrap_or_default(),
         _ => String::new(),
+    };
+    if s.auto_requeue_count > 0 {
+        let _ = write!(suffix, " auto-requeued {}", s.auto_requeue_count);
     }
+    suffix
 }
 
 #[cfg(test)]
@@ -917,6 +1097,157 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn running_live_session_offers_tell_before_reset() {
+        let mut session = make_session("20260306143000", "task", SessionPhase::Running);
+        session.set_runner_to_current_process();
+        assert!(session.is_runner_alive(), "fixture requires a live runner");
+        let actions = session_actions(&session);
+        let tell = actions
+            .iter()
+            .position(|action| *action == "Tell")
+            .unwrap_or_else(|| panic!("live run must offer Tell"));
+        assert_eq!(actions.get(tell + 1), Some(&"Reset to Planned"));
+    }
+
+    #[test]
+    fn tell_is_not_offered_without_a_live_running_session() {
+        let stale = make_session("20260306143000", "task", SessionPhase::Running);
+        assert!(!session_actions(&stale).contains(&"Tell"));
+        let mut planned = make_session("20260306143001", "task", SessionPhase::Planned);
+        planned.set_runner_to_current_process();
+        assert!(!session_actions(&planned).contains(&"Tell"));
+    }
+
+    #[test]
+    fn local_merge_menu_order_and_retry_marker() {
+        let mut session = make_session("20260306143000", "task", SessionPhase::Completed);
+        session.worktree_branch = Some("cruise/task".into());
+        session.forked_from_branch = Some("main".into());
+        assert_eq!(
+            session_actions_with_plan_availability(&session, false),
+            vec![
+                "View Diff",
+                "Stage local merge",
+                "Merge locally & cleanup",
+                "Reset to Planned",
+                "Delete",
+                "Back"
+            ]
+        );
+
+        session.local_merge_commit = Some("abc123".into());
+        assert_eq!(
+            session_actions_with_plan_availability(&session, false),
+            vec![
+                "View Diff",
+                "Merge locally & cleanup",
+                "Reset to Planned",
+                "Delete",
+                "Back"
+            ]
+        );
+
+        session.pr_url = Some("https://example.com/pr/1".into());
+        assert_eq!(
+            session_actions_with_plan_availability(&session, false),
+            vec![
+                "View Diff",
+                "Open PR",
+                "Merge PR",
+                "Reset to Planned",
+                "Delete",
+                "Back"
+            ]
+        );
+    }
+
+    fn pr_failed_session() -> SessionState {
+        let phase = serde_json::from_value(serde_json::json!({"PrFailed": "push failed"}))
+            .unwrap_or_else(|error| panic!("PR failure state must be readable: {error}"));
+        make_session("20260306143000", "task", phase)
+    }
+
+    #[test]
+    fn pr_failed_list_actions_offer_publication_retry_not_workflow_run() {
+        let mut session = pr_failed_session();
+        assert_eq!(
+            session_actions(&session),
+            vec!["Create PR", "Reset to Planned", "Delete", "Back"]
+        );
+        session.pr_url = Some("https://example.com/pr/1".into());
+        assert_eq!(
+            session_actions(&session),
+            vec!["Create PR", "Open PR", "Reset to Planned", "Delete", "Back"]
+        );
+        session.worktree_branch = Some("session-branch".into());
+        assert_eq!(
+            session_actions(&session),
+            vec![
+                "Create PR",
+                "Open PR",
+                "View Diff",
+                "Reset to Planned",
+                "Delete",
+                "Back"
+            ]
+        );
+    }
+
+    #[test]
+    fn pr_failed_list_json_preserves_error() {
+        let dto = session_to_json(pr_failed_session());
+        assert_eq!(dto.phase, "PrFailed");
+        assert_eq!(dto.phase_error.as_deref(), Some("push failed"));
+    }
+
+    #[test]
+    fn pr_failed_label_identifies_publication_failure() {
+        assert!(format_session_label(&pr_failed_session()).contains("PR Failed"));
+    }
+
+    #[test]
+    fn diff_contract_list_action_order_depends_on_phase_and_requires_branch() {
+        for phase in [
+            SessionPhase::Draft,
+            SessionPhase::AwaitingInput,
+            SessionPhase::AwaitingApproval,
+            SessionPhase::Planned,
+            SessionPhase::Running,
+            SessionPhase::Completed,
+            SessionPhase::Failed("x".into()),
+            SessionPhase::PrFailed("x".into()),
+            SessionPhase::Suspended,
+        ] {
+            let mut session = make_session("20260101000000000", "task", phase.clone());
+            let actions = session_actions_with_plan_availability(&session, true);
+            assert!(!actions.contains(&"View Diff"), "{phase:?}: {actions:?}");
+            assert_eq!(actions.last(), Some(&"Back"), "{phase:?}");
+            session.worktree_branch = Some("session-branch".into());
+            let actions = session_actions_with_plan_availability(&session, true);
+            if matches!(phase, SessionPhase::PrFailed(_)) {
+                assert_eq!(&actions[..2], &["Create PR", "View Diff"], "{phase:?}");
+            } else {
+                assert_eq!(
+                    actions.first(),
+                    Some(&"View Diff"),
+                    "{phase:?}: {actions:?}"
+                );
+            }
+            assert_eq!(actions.last(), Some(&"Back"), "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn diff_contract_print_rejects_non_git_base_directory() {
+        let temp =
+            TempDir::new().unwrap_or_else(|error| panic!("temporary non-git directory: {error}"));
+        let mut session = make_session("20260101000000000", "task", SessionPhase::Completed);
+        session.base_dir = temp.path().to_path_buf();
+        session.worktree_branch = Some("session-branch".into());
+        assert!(crate::diff_cmd::print_session_diff(&session, false).is_err());
+    }
 
     // -----------------------------------------------------------------------
     // session_actions

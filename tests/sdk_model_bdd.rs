@@ -259,6 +259,7 @@ mod contracts {
         w.outcome = Some(
             Executor::Jcode
                 .run(PromptRun {
+                    usage: None,
                     prompt: "SDK_BDD_RESUME_REQUEST",
                     model: Some(&model),
                     subagent_model: None,

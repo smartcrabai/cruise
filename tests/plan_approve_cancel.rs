@@ -49,6 +49,9 @@ fn run_plan_in_pty(binary: &Path, config: &Path, home: &Path, action: ActionChoi
         command.args(["-q", "-e", "-c", &command_line, "/dev/null"]);
     }
 
+    for key in cruise::config_env::all_override_names() {
+        command.env_remove(key);
+    }
     let mut child = command
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))
@@ -60,14 +63,6 @@ fn run_plan_in_pty(binary: &Path, config: &Path, home: &Path, action: ActionChoi
         .env("CRUISE_UI_LANGUAGE", "en")
         .env_remove("HERDR_ENV")
         .env_remove("CRUISE_CONFIG")
-        .env_remove("CRUISE_MODEL")
-        .env_remove("CRUISE_PLAN_MODEL")
-        .env_remove("CRUISE_SDK")
-        .env_remove("CRUISE_LANGUAGE_PR")
-        .env_remove("CRUISE_LANGUAGE_PLAN")
-        .env_remove("CRUISE_CLEANUP_AFTER_PR")
-        .env_remove("CRUISE_INTERACTIVE_PLANNING")
-        .env_remove("CRUISE_FORCE_EXEC")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

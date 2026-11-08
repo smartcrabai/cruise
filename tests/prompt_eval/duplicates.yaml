@@ -1,0 +1,15 @@
+# Known divergent templates. Changes to either side require explicit review.
+pairs:
+  - name: write-test-first
+    prompt_file: prompts/write-test-first.md
+    prompt_sha256: ff7e29d2890fe3c6b5358076d1f1b9ee607dbee6606be65c18a7e412a012c86d
+    workflow: builtin/tdd.yaml
+    step: write-test-first
+    step_sha256: b6e4f7b1b1fb5a81176deca7a6a24fea866375322a84c23a8d31d582f31b66b5
+  - name: implement-after-tests
+    prompt_file: prompts/implement-after-tests.md
+    # Baseline updated after escaping literal example braces in the prompt file.
+    prompt_sha256: 4f4a955923d886a7e96d131edc6ca4b41a41c4276c3339394dfdf2eb9ef8e0f6
+    workflow: builtin/tdd.yaml
+    step: implement-after-tests
+    step_sha256: 3d9a3e08a0ec2303398c8fc9cbeebd8c8baed1fc13cc972dd404e4c5fddf9e40

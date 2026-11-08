@@ -55,6 +55,100 @@ fn harness() -> Harness {
     }
 }
 
+#[tokio::test]
+async fn control_stop_is_not_found_without_gate() {
+    let harness = harness();
+    let (status, _, _) = post(&harness, "/webui/control/stop", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn control_stop_authenticates_and_signals_shutdown() {
+    let mut harness = harness();
+    let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let (sender, mut receiver) = tokio::sync::oneshot::channel();
+    harness.state.control = Some(std::sync::Arc::new(super::ControlGate {
+        token: token.to_owned(),
+        sender: std::sync::Mutex::new(Some(sender)),
+    }));
+
+    for candidate in [None, Some("wrong"), Some(&token[..63])] {
+        let mut request = Request::builder().method("POST").uri("/webui/control/stop");
+        if let Some(value) = candidate {
+            request = request.header("x-cruise-webui-control", value);
+        }
+        let request = request
+            .body(Body::empty())
+            .unwrap_or_else(|e| panic!("request: {e}"));
+        let response = router(harness.state.clone())
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|e| panic!("response: {e}"));
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/webui/control/stop")
+        .header("x-cruise-webui-control", token)
+        .body(Body::empty())
+        .unwrap_or_else(|e| panic!("request: {e}"));
+    let response = router(harness.state.clone())
+        .oneshot(request)
+        .await
+        .unwrap_or_else(|e| panic!("response: {e}"));
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.headers()["connection"], "close");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap_or_else(|e| panic!("body: {e}"));
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or_else(|e| panic!("json: {e}"));
+    assert_eq!(json["active_operations"], 0);
+    assert!(receiver.try_recv().is_ok());
+}
+
+#[tokio::test]
+async fn read_planned_session_then_control_stop_stays_idle()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = harness();
+    let mut session = create_session(&harness);
+    session.phase = crate::session::SessionPhase::Planned;
+    harness.manager.save(&session)?;
+    let (status, _, _) = get(
+        &harness,
+        &format!("/webui/sessions/{}/tab/info", session.id),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(harness.state.application.runtime().is_idle());
+    let (sender, _receiver) = tokio::sync::oneshot::channel();
+    harness.state.control = Some(std::sync::Arc::new(super::ControlGate {
+        token: "test-token".to_owned(),
+        sender: std::sync::Mutex::new(Some(sender)),
+    }));
+    let request = Request::builder()
+        .method("POST")
+        .uri("/webui/control/stop")
+        .header("x-cruise-webui-control", "test-token")
+        .body(Body::empty())?;
+    let response = router(harness.state.clone()).oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let loaded = harness.manager.load(&session.id)?;
+    assert_eq!(loaded.phase, crate::session::SessionPhase::Planned);
+    assert_eq!(loaded.runner_pid, None);
+    assert_eq!(loaded.runner_started_at, None);
+    assert!(harness.state.application.runtime().is_idle());
+    Ok(())
+}
+
 fn create_session(harness: &Harness) -> SessionState {
     let base = harness.dir.path().join("work");
     let Ok(()) = std::fs::create_dir_all(&base) else {
@@ -66,6 +160,7 @@ fn create_session(harness: &Harness) -> SessionState {
         config_path: None,
         config_yaml: Some(CONFIG_YAML.to_string()),
         repo: None,
+        pr_number: None,
         workspace_mode: WorkspaceMode::Worktree,
         allow_dirty_working_tree: true,
         attachments: Vec::new(),
@@ -76,6 +171,111 @@ fn create_session(harness: &Harness) -> SessionState {
         Ok(session) => session,
         Err(error) => panic!("create_session: {error}"),
     }
+}
+
+#[tokio::test]
+async fn diff_tab_no_branch_message() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let uri = format!("/webui/sessions/{}/tab/diff", session.id);
+    let (status, _, html) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains("No session branch"), "{html}");
+}
+
+#[tokio::test]
+async fn diff_tab_renders_escaped_patch() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let uri = format!("/webui/sessions/{}/tab/diff", session.id);
+    let repo = &session.base_dir;
+    let git = |args: &[&str]| {
+        let Ok(output) = std::process::Command::new("git")
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .output()
+        else {
+            panic!("run git {args:?}");
+        };
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init"]);
+    git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "base",
+    ]);
+    git(&["checkout", "-b", "diff-fixture"]);
+    if let Err(error) = std::fs::write(repo.join("change.txt"), "<script>alert(1)</script>\n") {
+        panic!("write fixture: {error}");
+    }
+    external_edit(&harness, &session.id, |state| {
+        state.worktree_branch = Some("diff-fixture".to_string());
+        state.worktree_path = Some(repo.clone());
+    });
+    let (status, _, html) = get(&harness, &uri, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(
+        html.contains(&format!("id=\"tab-diff-{}\"", session.id)),
+        "{html}"
+    );
+    assert!(
+        html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{html}"
+    );
+    assert!(!html.contains("<script>alert(1)</script>"), "{html}");
+    let Some(added_line) = html
+        .split('\n')
+        .find(|line| line.contains("&lt;script&gt;alert(1)"))
+    else {
+        panic!("added line: {html}");
+    };
+    assert!(added_line.contains("text-green-"), "{added_line}");
+}
+
+#[tokio::test]
+async fn diff_tab_navigation_contract() {
+    let harness = harness();
+    let session = create_session(&harness);
+    assert_eq!(super::pages::normalize_tab(Some("diff")), "diff");
+    assert_eq!(super::pages::normalize_tab(Some("bogus")), "info");
+    let (status, _, html) = get(&harness, &format!("/sessions/{}?tab=diff", session.id), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert_eq!(html.matches("role=\"tab\"").count(), 5, "{html}");
+    let Some(diff_button) = html.split("<button").find(|button| {
+        button
+            .split("</button>")
+            .next()
+            .and_then(|body| body.split_once('>'))
+            .is_some_and(|(_, text)| text.trim() == "Diff")
+    }) else {
+        panic!("Diff tab: {html}");
+    };
+    assert!(
+        diff_button.contains("aria-selected=\"true\""),
+        "{diff_button}"
+    );
+}
+
+#[tokio::test]
+async fn diff_tab_is_not_in_sync_partials() {
+    let harness = harness();
+    let session = create_session(&harness);
+    let Ok(sync) = super::partials::session_sync_partials(&harness.state, &session.id, "1") else {
+        panic!("sync partials");
+    };
+    assert!(!sync.contains("tab-diff-"), "{sync}");
 }
 
 async fn get(
@@ -125,6 +325,120 @@ async fn send(harness: &Harness, request: Request<Body>) -> (StatusCode, String,
         content_type,
         String::from_utf8_lossy(&bytes).into_owned(),
     )
+}
+
+fn config_groups(html: &str) -> Vec<(&str, &str)> {
+    html.split("<optgroup label=\"")
+        .skip(1)
+        .map(|group| {
+            let (label, rest) = group
+                .split_once("\">")
+                .unwrap_or_else(|| panic!("optgroup label: {html}"));
+            let (options, _) = rest
+                .split_once("</optgroup>")
+                .unwrap_or_else(|| panic!("optgroup end: {html}"));
+            (label, options)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn webui_configs_and_session_settings_share_category_groups() {
+    let harness = harness();
+    let config_dir = harness.dir.path().join("xdg-config/cruise");
+    let workflows = config_dir.join("workflows");
+    std::fs::create_dir_all(&workflows)
+        .unwrap_or_else(|error| panic!("create workflows directory: {error}"));
+    std::fs::write(workflows.join("custom-x.yaml"), CONFIG_YAML)
+        .unwrap_or_else(|error| panic!("write workflow: {error}"));
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        "workflow_categories:\n  Dev:\n    workflows: [refactor, {custom-x: 'Custom description'}]\n    Backend:\n      workflows: [research]\n  Second:\n    workflows: [refactor]\n  Empty:\n    workflows: [missing-workflow]\nshow_others_category: true\nothers_category_name: Misc\n",
+    )
+    .unwrap_or_else(|error| panic!("write app config: {error}"));
+    let session = create_session(&harness);
+    let base = harness.dir.path().join("work");
+    let (status, _, configs) = get(
+        &harness,
+        &format!("/webui/configs?baseDir={}", base.display()),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{configs}");
+    let (status, _, settings) = get(
+        &harness,
+        &format!("/webui/sessions/{}/settings", session.id),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{settings}");
+    let groups = config_groups(&configs);
+    let labels: Vec<_> = groups.iter().map(|(label, _)| *label).collect();
+    assert_eq!(labels, ["Dev", "Dev › Backend", "Second", "Misc"]);
+    assert_eq!(
+        labels,
+        config_groups(&settings)
+            .iter()
+            .map(|(label, _)| *label)
+            .collect::<Vec<_>>()
+    );
+    assert!(groups[0].1.contains("builtin:refactor"), "{configs}");
+    assert!(groups[0].1.contains("custom-x.yaml"), "{configs}");
+    assert!(groups[0].1.contains("Custom description"), "{configs}");
+    assert!(groups[1].1.contains("builtin:research"), "{configs}");
+    assert!(groups[2].1.contains("builtin:refactor"), "{configs}");
+    assert!(groups[3].1.contains("__builtin__"), "{configs}");
+}
+
+#[tokio::test]
+async fn webui_configs_hide_others_but_keep_local_workflows() {
+    let harness = harness();
+    let config_dir = harness.dir.path().join("xdg-config/cruise");
+    std::fs::create_dir_all(&config_dir)
+        .unwrap_or_else(|error| panic!("create config directory: {error}"));
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        "workflow_categories:\n  Dev:\n    workflows: [refactor]\nshow_others_category: false\n",
+    )
+    .unwrap_or_else(|error| panic!("write app config: {error}"));
+    let base = harness.dir.path().join("work");
+    std::fs::create_dir_all(&base).unwrap_or_else(|error| panic!("create base directory: {error}"));
+    std::fs::write(base.join("cruise.yaml"), CONFIG_YAML)
+        .unwrap_or_else(|error| panic!("write local workflow: {error}"));
+    let (status, _, html) = get(
+        &harness,
+        &format!("/webui/configs?baseDir={}", base.display()),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let groups = config_groups(&html);
+    assert_eq!(groups.len(), 2, "{html}");
+    assert!(groups[0].0.starts_with("Base dir ("), "{html}");
+    assert!(groups[0].1.contains("cruise.yaml"), "{html}");
+    assert_eq!(groups[1].0, "Dev");
+    assert!(groups[1].1.contains("builtin:refactor"), "{html}");
+    assert!(!html.contains("builtin:research"), "{html}");
+}
+
+#[tokio::test]
+async fn pr_failed_header_and_create_pr_route() {
+    let harness = harness();
+    let mut session = create_session(&harness);
+    session.phase = crate::session::SessionPhase::PrFailed("push failed".to_string());
+    assert!(harness.manager.save(&session).is_ok());
+    let (status, _, body) = get(&harness, &format!("/sessions/{}", session.id), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("PR Failed") && body.contains("push failed"));
+    assert!(body.contains("Create PR") && body.contains("/create-pr"));
+    let (status, _, body) = post(
+        &harness,
+        &format!("/webui/sessions/{}/create-pr", session.id),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(&format!("session-header-{}", session.id)));
 }
 
 const FLAG_CONFIG_YAML: &str = "command: [cat]
@@ -309,6 +623,7 @@ async fn webui_flag_rerender_preserves_explicit_skips_and_flag_choices() {
             config_path: Some(config.clone()),
             config_yaml: None,
             repo: None,
+            pr_number: None,
             workspace_mode: WorkspaceMode::Worktree,
             allow_dirty_working_tree: true,
             attachments: Vec::new(),
@@ -461,6 +776,7 @@ async fn webui_dag_tab_tracks_external_flag_changes() {
             config_path: Some(config),
             config_yaml: None,
             repo: None,
+            pr_number: None,
             workspace_mode: WorkspaceMode::Worktree,
             allow_dirty_working_tree: true,
             attachments: Vec::new(),
@@ -495,6 +811,7 @@ async fn webui_settings_filter_skips_but_keep_current_step_options() {
             config_path: Some(config),
             config_yaml: None,
             repo: None,
+            pr_number: None,
             workspace_mode: WorkspaceMode::Worktree,
             allow_dirty_working_tree: true,
             attachments: Vec::new(),
@@ -744,6 +1061,7 @@ fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
             config_path: Some(std::path::PathBuf::from("__builtin__")),
             config_yaml: None,
             repo: Some(repo.to_string()),
+            pr_number: None,
             workspace_mode: crate::session::WorkspaceMode::Worktree,
             allow_dirty_working_tree: false,
             attachments: Vec::new(),
@@ -856,6 +1174,15 @@ async fn run_all_provider_failure_reaches_connected_sse_client() {
 }
 
 #[tokio::test]
+async fn verify_action_error_is_toast_partial() {
+    let harness = harness();
+    let (status, _, body) = post(&harness, "/webui/sessions/nope/verify", "").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("hx-target=\"#toasts\""), "{body}");
+    assert!(!body.contains("id=\"session-header"), "{body}");
+}
+
+#[tokio::test]
 async fn action_error_is_toast_partial() {
     let harness = harness();
     let (status, _, body) = post(&harness, "/webui/sessions/nope/approve", "").await;
@@ -903,6 +1230,50 @@ async fn preview_rejects_paths_outside_uploads_dir() {
         status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
         "{status}"
     );
+}
+
+#[tokio::test]
+async fn new_session_pr_number_input_is_scoped_to_repository_source() {
+    let harness = harness();
+    let (status, _, body) = get(&harness, "/new", &[("hx-request", "true")]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let repo_fields = body
+        .split_once("id=\"source-repo\"")
+        .unwrap_or_else(|| panic!("{body}"))
+        .1
+        .split_once("</fieldset>")
+        .unwrap_or_else(|| panic!("{body}"))
+        .0;
+    assert!(repo_fields.contains("name=\"pr_number\""), "{body}");
+    let directory_fields = body
+        .split_once("id=\"source-directory\"")
+        .unwrap_or_else(|| panic!("{body}"))
+        .1
+        .split_once("</fieldset>")
+        .unwrap_or_else(|| panic!("{body}"))
+        .0;
+    assert!(!directory_fields.contains("name=\"pr_number\""), "{body}");
+}
+
+#[tokio::test]
+async fn new_session_rejects_invalid_pr_number() {
+    let harness = harness();
+    // Prevent an unimplemented parser from invoking real git/gh or accessing the network.
+    let empty_path = harness.dir.path().join("empty-path");
+    std::fs::create_dir_all(&empty_path).unwrap_or_else(|error| panic!("{error}"));
+    let _path = crate::test_support::EnvGuard::set("PATH", empty_path.as_os_str());
+    for body in [
+        "sourceMode=repo&repo=acme%2Fcruise&pr_number=abc&input=task",
+        "sourceMode=repo&repo=acme%2Fcruise&pr_number=0&input=task",
+    ] {
+        let (status, _, response) = post(&harness, "/webui/sessions", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        let lower = response.to_lowercase();
+        assert!(
+            lower.contains("number") && (lower.contains("pr") || lower.contains("pull request")),
+            "{response}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1062,6 +1433,74 @@ mod event_partials {
                 SseMessage::Notify { .. } => None,
             })
             .collect()
+    }
+
+    fn write_notification_config(harness: &super::Harness, json: &str) {
+        let dir = harness.dir.path().join("xdg-config/cruise");
+        std::fs::create_dir_all(&dir).unwrap_or_else(|error| panic!("config dir: {error}"));
+        std::fs::write(dir.join("config.json"), json)
+            .unwrap_or_else(|error| panic!("config: {error}"));
+    }
+
+    #[test]
+    fn desktop_disabled_suppresses_browser_notification_but_keeps_ask_panel() {
+        let harness = harness();
+        let session = create_session(&harness);
+        write_notification_config(&harness, r#"{"notifications":{"desktop":false}}"#);
+        let messages = for_event(
+            &harness.state,
+            &ApplicationEvent::AskUserRequired {
+                session_id: session.id.clone(),
+                request_id: "r1".to_string(),
+                question: "Which database?".to_string(),
+            },
+        );
+        let html = html_of(&messages);
+        assert!(
+            html.contains(&format!("id=\"ask-panel-{}\"", session.id)),
+            "{html}"
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, SseMessage::Notify { .. }))
+        );
+    }
+
+    #[test]
+    fn failed_desktop_override_does_not_suppress_plan_ready() {
+        let harness = harness();
+        let session = create_session(&harness);
+        write_notification_config(
+            &harness,
+            r#"{"notifications":{"events":{"failed":{"desktop":false}}}}"#,
+        );
+        let failed = for_event(
+            &harness.state,
+            &ApplicationEvent::PlanFailed {
+                session_id: session.id.clone(),
+                error: "planning failed".to_string(),
+            },
+        );
+        assert!(!messages_have_notify(&failed));
+        assert!(html_of(&failed).contains("planning failed"));
+        let ready = for_event(
+            &harness.state,
+            &ApplicationEvent::PlanFinished {
+                session_id: session.id.clone(),
+                phase: "Awaiting Approval".to_string(),
+            },
+        );
+        assert!(ready.iter().any(|message| matches!(
+            message,
+            SseMessage::Notify { body, .. } if body.contains("Plan ready")
+        )));
+    }
+
+    fn messages_have_notify(messages: &[SseMessage]) -> bool {
+        messages
+            .iter()
+            .any(|message| matches!(message, SseMessage::Notify { .. }))
     }
 
     #[test]
@@ -1324,6 +1763,61 @@ async fn shutdown_begin_ends_open_sse_stream() {
             Err(error) => panic!("SSE stream stayed open after shutdown: {error}"),
         }
     }
+}
+
+#[tokio::test]
+async fn serve_control_stop_closes_open_sse_client() -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut harness = harness();
+    let (sender, control_rx) = tokio::sync::oneshot::channel();
+    harness.state.control = Some(std::sync::Arc::new(super::ControlGate {
+        token: "test-token".to_owned(),
+        sender: std::sync::Mutex::new(Some(sender)),
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(super::serve(listener, harness.state.clone(), async move {
+        let _ = control_rx.await;
+    }));
+    let mut client = tokio::net::TcpStream::connect(addr).await?;
+    client
+        .write_all(b"GET /webui/events HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await?;
+    let mut received = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !received.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
+            .await??;
+        assert_ne!(n, 0);
+        received.extend_from_slice(&buf[..n]);
+    }
+    let head = String::from_utf8_lossy(&received).to_ascii_lowercase();
+    assert!(
+        head.starts_with("http/1.1 200") && head.contains("text/event-stream"),
+        "{head}"
+    );
+    let mut control = tokio::net::TcpStream::connect(addr).await?;
+    control.write_all(b"POST /webui/control/stop HTTP/1.1\r\nHost: x\r\nX-Cruise-Webui-Control: test-token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        control.read_to_end(&mut response),
+    )
+    .await??;
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 202"));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await??
+            .is_ok()
+    );
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await {
+            Ok(Ok(0) | Err(_)) => break,
+            Ok(Ok(_)) => {}
+            Err(error) => panic!("SSE connection stayed open: {error}"),
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test]

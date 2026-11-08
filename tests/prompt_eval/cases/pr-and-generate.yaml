@@ -1,0 +1,34 @@
+cases:
+  - id: create-pr
+    target: {prompt_file: prompts/create-pr.md}
+    render: pr
+    output: pr_metadata
+    workspace: tests/prompt_eval/fixtures/addition-unimplemented
+    reference: 'The committed change implements checked addition in src/lib.rs. The uncommitted tests/add.rs adds tests for positive, negative, zero, and overflow operands.'
+    language: {var: pr.language, values: [English, Japanese]}
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 30}]
+    rubric: [{id: create-pr-quality, text: 'The title and description accurately summarize the available changes without inventing unrelated work.'}]
+  - id: workflow-generate
+    target: {prompt_file: prompts/workflow-generate.md}
+    render: generate
+    output: workflow_yaml
+    vars: {description: 'Create a workflow with one step that runs the test suite.'}
+    checks: [{min_chars: 20}]
+    rubric: [{id: workflow-generate-quality, text: 'The workflow defines a step that runs the test suite.'}]
+  - id: write-test-first-file
+    target: {prompt_file: prompts/write-test-first.md}
+    render: step
+    output: workspace_diff
+    workspace: tests/prompt_eval/fixtures/addition
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: write-test-first-file-quality, text: 'The changes add meaningful tests for checked addition covering normal and overflow behavior without unrelated production changes.'}]
+  - id: implement-after-tests-file
+    target: {prompt_file: prompts/implement-after-tests.md}
+    render: step
+    output: workspace_diff
+    workspace: tests/prompt_eval/fixtures/addition-unimplemented
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 20}]
+    rubric: [{id: implement-after-tests-file-quality, text: 'The diff implements checked addition so the existing tests pass without weakening them.'}]

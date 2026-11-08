@@ -20,10 +20,10 @@ Before running the build and tests, please check the following:
 
 **Required Output (include headings)**
 ## Work Summary
-- {Summary of work performed}
+- {{Summary of work performed}}
 ## Changes Made
-- {Summary of changes made}
+- {{Summary of changes made}}
 ## Build Results
-- {Build execution results}
+- {{Build execution results}}
 ## Test Results
-- {Test execution command and results}
+- {{Test execution command and results}}

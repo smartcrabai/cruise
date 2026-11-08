@@ -1,0 +1,52 @@
+cases:
+  - id: instant-implement
+    target: {prompt_file: prompts/instant-implement.md}
+    render: step
+    output: workspace_diff
+    workspace: tests/prompt_eval/fixtures/addition-unimplemented
+    vars: {input: 'Implement checked addition so the existing tests pass.'}
+    checks: [{min_chars: 20}]
+    rubric:
+      - {id: instant-implement-quality, text: 'The diff implements checked addition, preserves the existing tests and public interface, and avoids unrelated changes.'}
+  - id: instant-review
+    target: {prompt_file: prompts/instant-review.md}
+    render: step
+    output: workspace_diff
+    workspace: tests/prompt_eval/fixtures/addition-unimplemented
+    vars: {input: 'Review the working tree changes for the checked addition task.'}
+    reference: 'The fixture is committed as the baseline and has no task-related working tree changes to review.'
+    rubric:
+      - {id: instant-review-quality, text: 'With no task-related working tree changes and no confirmed task-related defect, the review makes no file changes.'}
+  - id: verify-plan
+    target: {prompt_file: prompts/verify-plan.md}
+    render: step
+    output: text
+    language: {var: plan.language, values: [English, Japanese]}
+    vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
+    checks: [{min_chars: 100}]
+    rubric:
+      - {id: verify-plan-quality, text: 'The response models only supported addition requirements using fenced Quint and Alloy specifications, finite Quint state with init, step and inv/prop definitions, and explicitly named scoped Alloy commands including a satisfiable run, without claiming verification occurred.'}
+  - id: verify-result
+    target: {prompt_file: prompts/verify-result.md}
+    render: plan
+    output: text
+    language: {var: plan.language, values: [English, Japanese]}
+    vars:
+      prev.input: 'Quint: invSum failed with counterexample a=1, b=2, result=2. propEventually was not checked because the tool timed out. Alloy: no counterexample found for check Sum for 3, and run Example for 3 found an instance.'
+    checks: [{min_chars: 100}]
+    rubric:
+      - {id: verify-result-quality, text: 'The interpretation explains the sum counterexample, distinguishes the timeout and unchecked property from failure, explains the Alloy results and bounded scope and step limits, and recommends Fix rather than modifying the plan if changes are warranted.'}
+  - id: workflow-make
+    target: {prompt_file: prompts/workflow-make.md}
+    render: plan
+    output: text
+    vars:
+      schema: 'A workflow has a required steps map. Each step supports command and next. command is a string and next names an existing step.'
+      reference: 'steps: {test: {command: cargo test}}'
+      transcript: 'User wants to run the Rust test suite.'
+      draft: 'No draft.'
+      request: 'Create a workflow with one step that runs cargo test.'
+      repair: ''
+    checks: [{min_chars: 30}]
+    rubric:
+      - {id: workflow-make-quality, text: 'The response provides at most one correctly delimited cruise-workflow block containing a complete valid workflow with a cargo test step, without claiming to execute it or modify files.'}

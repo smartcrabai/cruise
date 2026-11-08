@@ -5,13 +5,16 @@ pub mod application;
 pub mod artifacts;
 pub mod ask_handler;
 pub mod attachments;
+pub mod auto_requeue;
 pub mod backend;
 pub mod batch_run;
+pub mod branch_diff;
 pub mod builtin_workflows;
 pub mod cancellation;
 pub(crate) mod commit_guard;
 pub mod condition;
 pub mod config;
+pub mod config_env;
 pub mod configs;
 pub mod dag;
 pub mod engine;
@@ -20,10 +23,20 @@ pub mod executor;
 pub mod file_tracker;
 pub mod flags;
 pub(crate) mod forge;
+pub mod formal_verify;
 pub mod github_review;
 pub mod graph;
-pub mod issue_publish;
+#[expect(
+    dead_code,
+    reason = "the binary-only updater also uses these shared download helpers"
+)]
+mod http_download;
 pub mod i18n;
+pub mod instruction_inbox;
+pub(crate) mod issue_images;
+pub(crate) mod issue_input;
+pub mod issue_publish;
+pub mod local_merge;
 pub mod metadata;
 pub mod model_schedule;
 pub mod model_selection;
@@ -33,6 +46,11 @@ pub mod option_handler;
 pub mod paths;
 pub mod planning;
 pub mod pr_merge;
+pub mod pr_review_fix;
+mod pr_template;
+pub mod prompt_render;
+pub mod provider_install;
+pub mod quality_gate;
 pub mod repo_clone;
 pub mod resolver;
 pub mod retry;
@@ -48,9 +66,16 @@ pub mod timeout;
     reason = "pre-tool gate entry point is used only by the runtime binary"
 )]
 pub mod tool_policy;
+pub mod usage;
+pub mod usage_cmd;
 pub mod variable;
 pub mod workflow;
+mod workflow_validate;
+pub mod workflow_generate {
+    pub use crate::workflow_validate::validate_generated_yaml;
+}
 pub mod workflow_call;
+pub mod workflow_categories;
 pub mod workflow_cmd;
 pub mod workflow_defaults;
 pub(crate) mod workflow_packages;
@@ -67,9 +92,16 @@ pub mod herdr;
 pub(crate) mod multiline_input;
 pub mod platform;
 pub mod run_observer;
+pub mod sleep_guard;
 mod spinner;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_support;
 
+#[expect(
+    dead_code,
+    reason = "the library registers the binary-facing notification helper module"
+)]
 mod desktop_notifications;
+mod notification_sound;
+mod notification_webhook;

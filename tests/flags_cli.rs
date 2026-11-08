@@ -627,7 +627,7 @@ steps:
             &f,
             &["plan", "--skip-planning", "--config", &config, "test plan"],
             &[
-                ("Publish as Issue", b"\x1b[B\x1b[B\x1b[B\r"),
+                ("Publish as Issue", b"\x1b[B\x1b[B\x1b[B\x1b[B\r"),
                 ("Run E2E", b" \r"),
                 ("Steps to skip (", b"\r"),
                 ("Use current branch", b"\x1b"),
@@ -686,7 +686,7 @@ steps:
                 "test plan",
             ],
             &[
-                ("Publish as Issue", b"\x1b[B\x1b[B\x1b[B\r"),
+                ("Publish as Issue", b"\x1b[B\x1b[B\x1b[B\x1b[B\r"),
                 ("Steps to skip (", b"\r"),
                 ("Use current branch", b"\x1b"),
             ],

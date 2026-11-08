@@ -41,7 +41,7 @@ run_check quint-test "$QUINT" test "$MODEL" --main checkpoint --backend typescri
 run_check quint-simulation "$QUINT" run "$MODEL" --main checkpoint --init init --step step --invariant safety --backend typescript --seed 20261023 --max-samples 100 --max-steps 12 --out-itf "$RUN/simulation_{seq}.itf.json"
 # shellcheck disable=SC2329 # Invoked indirectly by run_check.
 verify_quint() {
-  node - "$QUINT" "$MODEL" "$RUN/counterexample.itf.json" <<'NODE'
+  node - "$QUINT" "${1:-$MODEL}" "$RUN/${2:-counterexample}.itf.json" "${3:-checkpoint}" "${4:-cp01_accounting,cp02_pending,cp03_checkpoint_gate,cp04_skip,cp05_resume,cp06_reject,cp07_group,cp08_completed,cp09_gate_route,cp10_feedback,cp11_gate_budget}" <<'NODE'
 const net = require('node:net');
 const { spawn } = require('node:child_process');
 // Ask the OS for an unused loopback port, not Quint's shared default endpoint.
@@ -54,10 +54,8 @@ reservation.listen(0, '127.0.0.1', () => {
     const endpoint = `127.0.0.1:${port}`;
     console.log(`Isolated Apalache 0.62.1 endpoint: ${endpoint}`);
     const args = [process.argv[2], 'verify', process.argv[3],
-      '--main', 'checkpoint', '--init', 'init', '--step', 'step',
-      '--invariant', 'safety', '--invariants',
-      'cp01_accounting', 'cp02_pending', 'cp03_checkpoint_gate', 'cp04_skip',
-      'cp05_resume', 'cp06_reject', 'cp07_group', 'cp08_completed',
+      '--main', process.argv[5], '--init', 'init', '--step', 'step',
+      '--invariant', 'safety', '--invariants', ...process.argv[6].split(','),
       '--max-steps', '12', '--backend', 'apalache', '--apalache-version', '0.62.1',
       '--server-endpoint', endpoint, '--out-itf', process.argv[4]];
     console.log(`Command argv: ${JSON.stringify([process.execPath, ...args])}`);
@@ -78,7 +76,7 @@ run_check quint-verify verify_quint
 run_check alloy java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --type json --output "$RUN/alloy" tests/formal/checkpoint.als
 # shellcheck disable=SC2329 # Invoked indirectly by run_check.
 alloy_expectations() {
-  node - "$ROOT/tests/formal/checkpoint.als" "$RUN/alloy/receipt.json" <<'NODE'
+  node - "${1:-$ROOT/tests/formal/checkpoint.als}" "${2:-$RUN/alloy/receipt.json}" <<'NODE'
 const fs = require('node:fs');
 const model = fs.readFileSync(process.argv[2], 'utf8')
   .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
@@ -105,8 +103,15 @@ if (Object.keys(receipt.commands).length !== seen.size) throw Error('Alloy comma
 NODE
 }
 run_check alloy-expectations alloy_expectations
+run_check quality-gate-typecheck "$QUINT" typecheck tests/formal/quality_gate.qnt
+run_check quality-gate-test "$QUINT" test tests/formal/quality_gate.qnt --main quality_gate --backend typescript --seed 20261023
+run_check quality-gate-simulation "$QUINT" run tests/formal/quality_gate.qnt --main quality_gate --init init --step step --invariant safety --backend typescript --seed 20261023 --max-samples 100 --max-steps 12
+run_check quality-gate-verify verify_quint tests/formal/quality_gate.qnt quality-gate-counterexample quality_gate gate_behavior,budget_behavior,resume_behavior
+run_check quality-gate-alloy java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --type json --output "$RUN/quality-gate-alloy" tests/formal/quality_gate.als
+run_check quality-gate-alloy-expectations alloy_expectations tests/formal/quality_gate.als "$RUN/quality-gate-alloy/receipt.json"
 run_check checkpoint-bdd cargo +1.99.1 test --locked --test graph_state --test checkpoint_bdd
 run_check ui-locale bash scripts/check_ui_locale_specs.sh
+run_check quality-gate-contracts cargo +1.99.1 test --locked --test quality_gate_graph --test quality_gate_cli --test quality_gate_config --test quality_gate_schema
 printf 'Aggregate exit status: %s\n' "$status" | tee -a "$RUN/results.log"
 echo "Reports: $RUN"
 exit "$status"

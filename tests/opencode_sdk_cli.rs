@@ -797,6 +797,7 @@ impl Fixture {
         let model = model.map(|model| cruise::config::ModelSpec::Single(model.to_owned()));
         let notice = |text: &str| locked(&self.server).notices.push(text.to_owned());
         let request = PromptRun {
+            usage: None,
             prompt: "fixture prompt",
             model: model.as_ref(),
             subagent_model: None,
@@ -1808,6 +1809,7 @@ async fn missing_resume_target_is_not_replaced_with_a_new_conversation() {
     let result = tokio::time::timeout(
         Duration::from_secs(15),
         Executor::new(Some("opencode"), &[]).run(PromptRun {
+            usage: None,
             prompt: "resume input",
             model: Some(&cruise::config::ModelSpec::Single(MODEL.to_owned())),
             subagent_model: None,
@@ -1941,6 +1943,7 @@ pub(crate) async fn resume_fixture_with_model(
     with_active_policy(
         policy_for_config(Some(config)),
         Executor::new(Some("opencode"), &[]).run(PromptRun {
+            usage: None,
             prompt: "resume fixture",
             model: Some(&cruise::config::ModelSpec::Single(model.to_owned())),
             subagent_model: None,
@@ -2092,6 +2095,7 @@ async fn executor_cancellation_awaits_admitted_handler_after_peer_disconnect() {
     let executor = Executor::new(Some("opencode"), &[]);
     let selection = cruise::config::ModelSpec::Single(MODEL.to_owned());
     let run = executor.run(PromptRun {
+        usage: None,
         prompt: "held handler",
         model: Some(&selection),
         subagent_model: None,
@@ -2190,6 +2194,7 @@ async fn configured_fixture_run(
     with_active_policy(
         policy_for_config(config.retry.clone()),
         executor.run(PromptRun {
+            usage: None,
             prompt: "configured fixture prompt",
             model: model.as_ref(),
             subagent_model: None,
@@ -2637,10 +2642,13 @@ async fn malformed_required_event_fails_instead_of_reporting_success() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn safe_provider_failures_use_retry_and_fallback_without_corrupting_model_ids() {
     let _lock = lock_process();
-    // A failed primary is cooled down process-wide, so each status needs its
-    // own primary identity.
+    // Cooldowns are process-wide; keep these model identities unique across tests.
     for (status, primary, id) in [
-        (429, MODEL, "team/model:2026"),
+        (
+            429,
+            "fixture/team/model:2026-safe#precise",
+            "team/model:2026-safe",
+        ),
         (404, "fixture/team/model:2027#precise", "team/model:2027"),
     ] {
         let fixture = Fixture::new(Scenario::ProviderFailure {

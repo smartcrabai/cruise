@@ -43,6 +43,7 @@ fn render_list(
         source: String,
         sha: String,
         path: String,
+        workflows: Vec<String>,
     }
     let rows: Vec<Row> = installed
         .iter()
@@ -54,6 +55,7 @@ fn render_list(
             )),
             sha: clean(&p.resolved_commit.chars().take(7).collect::<String>()),
             path: clean(&display_path(&p.config_path)),
+            workflows: p.workflows.iter().map(|name| clean(name)).collect(),
         })
         .collect();
 
@@ -97,6 +99,9 @@ fn render_list(
         let source = format!("{:<source_width$}", r.source);
         lines.push(format!("  {name}  {source}  {}", style(&r.sha).dim()));
         lines.push(format!("{indent}{}", style(&r.path).dim()));
+        if !r.workflows.is_empty() {
+            lines.push(format!("{indent}workflows: {}", r.workflows.join(", ")));
+        }
     }
     lines
 }
@@ -226,6 +231,7 @@ mod tests {
             requested_ref: requested_ref.to_string(),
             resolved_commit: commit.to_string(),
             config_path: PathBuf::from(format!("/cfg/{name}.yaml")),
+            workflows: vec![],
         }
     }
 
@@ -317,6 +323,33 @@ mod tests {
     }
 
     #[test]
+    fn render_list_shows_bundle_members_and_directory() {
+        let mut bundle = pkg("bundle", "main", FULL_SHA);
+        bundle.workflow_path = "cruise-package.yaml".into();
+        bundle.config_path = PathBuf::from("/cfg/bundle");
+        bundle.workflows = vec!["implement".into(), "review".into()];
+        let lines = render(&[bundle, pkg("single", "main", FULL_SHA)]);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("org/repo/cruise-package.yaml@main"))
+        );
+        assert!(lines.iter().any(|line| line.trim() == "/cfg/bundle"));
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("workflows:"))
+                .count(),
+            1
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("workflows: implement, review"))
+        );
+    }
+
+    #[test]
     fn render_list_shares_name_column_across_sections() {
         let long = "a-very-long-package-name";
         let lines = render(&[pkg(long, "main", FULL_SHA)]);
@@ -368,6 +401,16 @@ mod tests {
             .unwrap_or_else(|e| panic!("{} cannot load independently: {e:?}", workflow.name));
             crate::config::validate_config(&config).unwrap_or_else(|e| panic!("{e:?}"));
             let compiled = crate::workflow::compile(config).unwrap_or_else(|e| panic!("{e:?}"));
+            if workflow.name == "pr-review-fix" {
+                assert_eq!(compiled.after_pr.len(), 1);
+                let (id, step) = compiled
+                    .after_pr
+                    .get_index(0)
+                    .unwrap_or_else(|| panic!("pr-review-fix has no after-pr steps"));
+                assert_eq!(id, "address-review");
+                assert!(step.github_review.is_some());
+                continue;
+            }
             assert_eq!(compiled.after_pr.len(), 7);
             assert_eq!(
                 compiled

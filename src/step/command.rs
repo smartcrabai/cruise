@@ -290,22 +290,270 @@ async fn execute_command_cancel<S: std::hash::BuildHasher>(
     })
 }
 
+pub(crate) struct GateCommandOutput {
+    pub result: Option<CommandResult>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub(crate) async fn run_gate_command<S: std::hash::BuildHasher>(
+    cmd: &str,
+    env: &HashMap<String, String, S>,
+    cwd: Option<&std::path::Path>,
+    timeout: Option<Duration>,
+    cancel: Option<&crate::cancellation::CancellationToken>,
+) -> Result<GateCommandOutput> {
+    let mut child = spawn_command(cmd, env, cwd, true)?;
+    let stdout = child
+        .inner()
+        .stdout
+        .take()
+        .map(|mut pipe| tokio::spawn(async move { read_gate_output(&mut pipe).await }));
+    let stderr_pipe = child.inner().stderr.take();
+    let stderr = tokio::spawn(async move {
+        match stderr_pipe {
+            Some(mut pipe) => read_gate_output(&mut pipe).await,
+            None => String::new(),
+        }
+    });
+    let status = tokio::select! {
+        result = async {
+            match timeout {
+                Some(duration) => tokio::time::timeout(duration, child.inner().wait()).await.ok(),
+                None => Some(child.inner().wait().await),
+            }
+        } => result,
+        () = cancel_wait(cancel) => {
+            let _ = child.kill().await;
+            abort_output_task(stdout);
+            abort_output_task(Some(stderr));
+            return Err(CruiseError::Interrupted);
+        }
+    };
+    let status = match status {
+        Some(Ok(status)) => Some(status),
+        Some(Err(error)) => {
+            let _ = child.kill().await;
+            abort_output_task(stdout);
+            abort_output_task(Some(stderr));
+            return Err(CruiseError::CommandError(error.to_string()));
+        }
+        None => {
+            let _ = child.kill().await;
+            None
+        }
+    };
+    let mut stdout = stdout;
+    let mut stderr = stderr;
+    let ((stdout, stdout_timed_out), (stderr, stderr_timed_out)) = if status.is_some() {
+        let (stdout, stderr) = collect_gate_output(stdout, stderr, &mut child, cancel).await?;
+        ((stdout, false), (stderr, false))
+    } else {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        tokio::select! {
+            output = async {
+                tokio::join!(
+                    async {
+                        match stdout.as_mut() {
+                            Some(task) => collect_output(task, deadline).await,
+                            None => (String::new(), false),
+                        }
+                    },
+                    collect_output(&mut stderr, deadline),
+                )
+            } => output,
+            () = cancel_wait(cancel) => {
+                let _ = child.start_kill();
+                abort_output_task(stdout);
+                abort_output_task(Some(stderr));
+                return Err(CruiseError::Interrupted);
+            }
+        }
+    };
+    let output_timed_out = stdout_timed_out || stderr_timed_out;
+    if output_timed_out {
+        let _ = child.start_kill();
+    }
+    let status = if output_timed_out && timeout.is_some() {
+        None
+    } else {
+        status
+    };
+    let result = status.map(|status| CommandResult {
+        success: status.success(),
+        stderr: String::new(),
+        exit_code: status.code(),
+        signal: {
+            #[cfg(unix)]
+            {
+                status.signal()
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        },
+    });
+    Ok(GateCommandOutput {
+        result,
+        stdout,
+        stderr,
+    })
+}
+const GATE_OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(5);
+const GATE_OUTPUT_FINISH_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn collect_gate_output(
+    mut stdout: Option<tokio::task::JoinHandle<String>>,
+    mut stderr: tokio::task::JoinHandle<String>,
+    child: &mut AsyncGroupChild,
+    cancel: Option<&crate::cancellation::CancellationToken>,
+) -> Result<(String, String)> {
+    enum Drain {
+        Complete((String, String)),
+        GraceExpired,
+        Cancelled,
+    }
+
+    enum Finish {
+        Complete((String, String)),
+        TimedOut,
+        Cancelled,
+    }
+
+    let mut stdout_result = None;
+    let mut stderr_result = None;
+    let wait = {
+        let output = join_gate_output(
+            &mut stdout,
+            &mut stderr,
+            &mut stdout_result,
+            &mut stderr_result,
+        );
+        tokio::pin!(output);
+        tokio::select! {
+            output = &mut output => Drain::Complete(output),
+            () = tokio::time::sleep(GATE_OUTPUT_DRAIN_GRACE) => Drain::GraceExpired,
+            () = cancel_wait(cancel) => Drain::Cancelled,
+        }
+    };
+    match wait {
+        Drain::Complete(output) => Ok(output),
+        Drain::Cancelled => {
+            let _ = child.start_kill();
+            abort_output_task(stdout);
+            abort_output_task(Some(stderr));
+            Err(CruiseError::Interrupted)
+        }
+        Drain::GraceExpired => {
+            // Large-line sanitization can outlast the initial pipe-drain grace.
+            let _ = child.start_kill();
+            let finished = {
+                let output = join_gate_output(
+                    &mut stdout,
+                    &mut stderr,
+                    &mut stdout_result,
+                    &mut stderr_result,
+                );
+                tokio::pin!(output);
+                tokio::select! {
+                    output = &mut output => Finish::Complete(output),
+                    () = tokio::time::sleep(GATE_OUTPUT_FINISH_TIMEOUT) => Finish::TimedOut,
+                    () = cancel_wait(cancel) => Finish::Cancelled,
+                }
+            };
+            match finished {
+                Finish::Complete(output) => Ok(output),
+                Finish::TimedOut => {
+                    abort_output_task(stdout);
+                    abort_output_task(Some(stderr));
+                    Ok((
+                        stdout_result.take().unwrap_or_default(),
+                        stderr_result.take().unwrap_or_default(),
+                    ))
+                }
+                Finish::Cancelled => {
+                    abort_output_task(stdout);
+                    abort_output_task(Some(stderr));
+                    Err(CruiseError::Interrupted)
+                }
+            }
+        }
+    }
+}
+
+async fn join_gate_output(
+    stdout: &mut Option<tokio::task::JoinHandle<String>>,
+    stderr: &mut tokio::task::JoinHandle<String>,
+    stdout_result: &mut Option<String>,
+    stderr_result: &mut Option<String>,
+) -> (String, String) {
+    tokio::join!(
+        collect_gate_task(stdout.as_mut(), stdout_result),
+        collect_gate_task(Some(stderr), stderr_result),
+    );
+    (
+        stdout_result.take().unwrap_or_default(),
+        stderr_result.take().unwrap_or_default(),
+    )
+}
+
+async fn collect_gate_task(
+    task: Option<&mut tokio::task::JoinHandle<String>>,
+    result: &mut Option<String>,
+) {
+    if result.is_some() {
+        return;
+    }
+    *result = Some(match task {
+        Some(task) => task.await.unwrap_or_default(),
+        None => String::new(),
+    });
+}
+
 const MAX_CAPTURED_OUTPUT: usize = 4 * 1024 * 1024;
 
-async fn read_output_bounded<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> String {
-    let mut bytes = Vec::with_capacity(8192);
+async fn read_gate_output<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> String {
+    let mut sanitizer = crate::telemetry::stderr::StreamSanitizer::new(MAX_CAPTURED_OUTPUT);
     let mut buffer = [0_u8; 8192];
     loop {
         match reader.read(&mut buffer).await {
             Ok(0) | Err(_) => break,
-            Ok(read) if bytes.len() < MAX_CAPTURED_OUTPUT => {
-                let remaining = MAX_CAPTURED_OUTPUT - bytes.len();
-                bytes.extend_from_slice(&buffer[..read.min(remaining)]);
-            }
-            Ok(_) => {}
+            Ok(read) => sanitizer.push(&buffer[..read]),
         }
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    sanitizer.finish()
+}
+
+async fn read_output_bounded<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> String {
+    const MARKER: &[u8] = b"\n[... output omitted ...]\n";
+    const HEAD: usize = (MAX_CAPTURED_OUTPUT - MARKER.len()) / 2;
+    const TAIL: usize = MAX_CAPTURED_OUTPUT - MARKER.len() - HEAD;
+    let mut head = Vec::new();
+    let mut tail = std::collections::VecDeque::new();
+    let mut total = 0usize;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                total = total.saturating_add(read);
+                let count = read.min(HEAD.saturating_sub(head.len()));
+                head.extend_from_slice(&buffer[..count]);
+                for &byte in &buffer[count..read] {
+                    if tail.len() == TAIL {
+                        tail.pop_front();
+                    }
+                    tail.push_back(byte);
+                }
+            }
+        }
+    }
+    if total > HEAD + TAIL {
+        head.extend_from_slice(MARKER);
+    }
+    head.extend(tail);
+    String::from_utf8_lossy(&head).into_owned()
 }
 
 fn abort_output_task(task: Option<tokio::task::JoinHandle<String>>) {
@@ -371,9 +619,20 @@ pub(crate) async fn run_process_output_cancelled(
     cwd: Option<&std::path::Path>,
     cancel_token: Option<&crate::cancellation::CancellationToken>,
 ) -> Result<std::process::Output> {
+    run_process_output_cancelled_with_env(program, args, cwd, cancel_token, &[]).await
+}
+
+pub(crate) async fn run_process_output_cancelled_with_env(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    cancel_token: Option<&crate::cancellation::CancellationToken>,
+    env: &[(&str, &str)],
+) -> Result<std::process::Output> {
     let mut builder = Command::new(program);
     builder
         .args(args)
+        .envs(env.iter().copied())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -427,7 +686,9 @@ pub(crate) async fn run_process_output_cancelled(
 pub fn is_rate_limited(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("rate limit")
-        || lower.contains("429")
+        || lower
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|word| word == "429")
         || lower.contains("too many requests")
         || lower.contains("ratelimit")
 }
@@ -479,6 +740,9 @@ mod tests {
         assert!(!is_rate_limited("Normal error message"));
         assert!(!is_rate_limited(""));
         assert!(!is_rate_limited("compilation error"));
+        assert!(!is_rate_limited(
+            "GitHub CI failed for expected HEAD 0123456789abcdef429abcdef0123456789abcd"
+        ));
     }
 
     #[tokio::test]

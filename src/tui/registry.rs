@@ -305,6 +305,18 @@ impl OperationRegistry {
         })
     }
 
+    pub fn verify(
+        &mut self,
+        app: CruiseApplication,
+        id: String,
+        tx: UnboundedSender<UiEvent>,
+    ) -> bool {
+        let sink = Arc::new(ControlSink::new(tx.clone()));
+        self.spawn_operation(id.clone(), "verify", tx, async move {
+            app.verify(&id, sink).await
+        })
+    }
+
     pub fn run(
         &mut self,
         app: CruiseApplication,
@@ -329,6 +341,20 @@ impl OperationRegistry {
         })
     }
 
+    pub fn create_pr(
+        &mut self,
+        app: CruiseApplication,
+        id: String,
+        tx: UnboundedSender<UiEvent>,
+        logs: mpsc::Sender<UiEvent>,
+    ) -> bool {
+        let sink = Arc::new(ControlSink::new(tx.clone()));
+        let log_sink = Arc::new(BoundedLogSink::new(logs, tx.clone()));
+        self.spawn_operation(id.clone(), "create_pr", tx, async move {
+            app.create_pr(&id, sink, Some(log_sink)).await
+        })
+    }
+
     pub fn run_all(
         &mut self,
         app: CruiseApplication,
@@ -345,7 +371,7 @@ impl OperationRegistry {
         self.batch = Some(tokio::spawn(async move {
             let parallelism_provider = move || {
                 config_app
-                    .app_config()
+                    .runtime_config()
                     .map(|config| config.run_all_parallelism)
             };
             match std::panic::AssertUnwindSafe(app.run_all_with_parallelism_provider(

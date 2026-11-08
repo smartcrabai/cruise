@@ -1,11 +1,18 @@
 # Top-level structure
 
+`formal_verify.model_check_timeout_seconds` is the per-command Quint model-check and Alloy timeout, an integer from 1 to 86400 (default 900). Quint parse, typecheck, and simulation use separate 60-second limits. Alloy commands run sequentially. This strict block is accepted in workflows and layered `default.yaml`.
+
 `inputs: [task, label]` optionally declares a called workflow's required string
 inputs. Names must be unique and match `[A-Za-z_][A-Za-z0-9_]*`. There are no
 defaults, optional inputs, or CLI input flags. A root loaded directly cannot
 declare nonempty inputs because it has no caller. `inputs` is workflow-only and
 is rejected in user/project `default.yaml`. Callers supply the exact declared
 names through `workflow_call` plus `with`; see [steps.md](steps.md#workflow-call-inputs).
+
+`returns: [approved, needs_fix]` optionally declares unique called-workflow
+return labels matching `[A-Za-z_][A-Za-z0-9_-]*`. Nonempty declarations are
+invalid in directly loaded roots, and `returns` is forbidden in user/project
+`default.yaml`. See [return labels](steps.md#workflow-call-return-labels).
 
 `model` and `plan_model` accept a single string or an ordered array mixing strings and `{sdk: claude, model: claude-sonnet-5-5:medium}` objects. Strings inherit the effective workflow SDK, defaulting to jcode. Objects override only their own candidate when `sdk` is present, otherwise they inherit that workflow SDK too. This also works in application `config.json` / `config.yaml` and layered `default.yaml`; `planModel` is an application-config alias. Objects are array-only, require a nonblank `model` and at least one of `sdk` or nonempty `disabled_during`, reject unknown keys and explicit null SDKs, and cannot coexist with `command` anywhere in either list. String-only command arrays retain first-entry behavior. Environment model overrides replace the whole list. See `sdk.md` for fallback precedence, SDK-owned resume IDs, capability validation across candidates, and full window semantics.
 
@@ -85,8 +92,9 @@ fails the load (see [steps.md](steps.md)).
 ## Workflow defaults (`default.yaml`)
 
 A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`, `subagent_model`,
-`max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`,
-`force_exec`, `computer_use`, `permission`, `disallowed_tools`, `env`, `retry`, `mcp_servers`, and
+`max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `commit_message_template`, `pr_body_template`,
+`base_branch`, `auto_fetch`,
+`force_exec`, `computer_use`, `permission`, `disallowed_tools`, `env`, `retry`, `formal_verify`, `mcp_servers`, and
 `pre_steps`. Unknown keys and workflow-only keys (`description`, `steps`,
 `groups`, `after-pr`, and `create_pr`) are rejected.
 
@@ -122,6 +130,25 @@ ordered primary-plus-fallback array. JSON takes precedence when both files
 exist; otherwise an existing YAML file is used. Settings updates preserve the
 selected format; when neither file exists, they create JSON. Invalid selected
 files fail rather than falling back to the other format.
+The application-level `notifications` setting controls desktop, sound, and
+webhook channels and their per-event switches. It is not a workflow key; the
+secret Slack webhook URL is supplied only through `CRUISE_NOTIFY_WEBHOOK`.
+See the README Notifications section for defaults and examples.
+
+Application settings also control interactive workflow categories:
+
+```yaml
+workflow_categories:
+  Development:
+    workflows: [builtin:tdd, {refactor: Refactor code}]
+    Backend:
+      workflows: [api]
+show_others_category: true
+others_category_name: Others
+```
+
+Categories are ordered maps with optional `workflows` lists and nested category maps. Entries are names or single-key maps with selector-description overrides. Bare names match file stems and built-in names; `builtin:<name>` matches only built-ins. The same workflow may appear in multiple categories, but conflicting descriptions for the same name are invalid. Missing names and empty categories are omitted. A nonempty user tree replaces the defaults: Development (`tdd`, `refactor`), Quality (`add-tests`, `add-formal-specs`), Research (`research`), and Security (`security`). Unmatched local and environment candidates remain at the root, installed packages go to `Packages`, and other user and built-in workflows go to `Others` (renamed by `others_category_name`). `show_others_category` defaults to `true`; setting it to `false` hides only the latter unmatched workflows. These settings affect interactive display, not non-interactive resolution.
+
 These model defaults have lower precedence than either `default.yaml` layer
 or the workflow; environment overrides still win, and step models override
 the effective ordinary model. SDK mode derives fallback chains from these
@@ -224,9 +251,9 @@ SDK's attempts. A step value overrides this default, and the resolved SDK must
 have an applicable model candidate. Recognized `:effort` suffixes, OpenCode
 subagent models, and `command:` backends are rejected.
 
-Layered `default.yaml` supports this field; application model defaults and a
-`CRUISE_SUBAGENT_MODEL` environment override do not. Title generation, PR
-metadata, and `workflow generate` do not use it. A called workflow's top-level
+Layered `default.yaml` and the `CRUISE_SUBAGENT_MODEL` environment override
+support this field; application model defaults do not. Title generation, PR
+metadata, `workflow generate`, and `workflow make` do not use it. A called workflow's top-level
 value is ignored, but its step overrides survive. See [sdk.md](sdk.md) for
 Claude's forced model, jcode's swarm default, and fallback behavior.
 
@@ -287,6 +314,19 @@ During `cruise run`, the config file's mtime is checked between steps and the fi
 - Does not apply to sessions started from an embedded built-in workflow.
 - The current step must still exist in the new config.
 
+## `base_branch`
+
+Set this defaults-only key in user or project `default.yaml` to select the starting branch for new worktrees and the target branch for their PRs or MRs. Project defaults override user defaults. Without it, new worktrees start at the repository's HEAD and the forge CLI selects its default target. The value must be nonblank, must not start with `-`, and must pass `git check-ref-format --branch`. The local branch is preferred over `origin/<base_branch>` unless a successful `auto_fetch` supplies the remote-tracking ref. A missing branch is an error. Reused worktrees retain their saved base and are not resolved again.
+
+## `auto_fetch`
+
+This defaults-only boolean defaults to `false`. Set it to `true` alongside a `base_branch` to fetch that branch from `origin` before creating a new worktree. The requirement is checked after user and project defaults are merged. Fetch failure produces a warning and continues with local refs, preferring the local branch over the remote-tracking branch. Existing worktrees are not fetched again.
+
+```yaml
+base_branch: main
+auto_fetch: true
+```
+
 ## `cleanup_after_pr`
 
 When set to `true`, cruise deletes the local git worktree and its branch after the PR has been created successfully.
@@ -305,6 +345,7 @@ cleanup_after_pr: true   # remove worktree + branch once the PR is open
 `create_pr` is a workflow-only boolean that defaults to `true`. Setting it to
 `false` skips Cruise's automatic commit, push, PR creation, `after-pr`, and
 PR-based cleanup, while retaining the normal session, artifacts, and worktree.
+Eligible local worktree sessions without a PR may later be staged or explicitly squash-merged and cleaned up locally.
 It is useful for persistent no-PR workflows such as research; a local
 worktree does not need `gh`/`glab` when PR creation is disabled, but `--repo`
 still needs the appropriate forge CLI to access and clone the repository.
@@ -329,6 +370,23 @@ CLI option.
 
 
 See [after-pr.md](after-pr.md) for steps that run after PR creation.
+
+## `commit_message_template` and `pr_body_template`
+
+These optional top-level strings customize the host-created commit message and PR body in the worktree PR creation path. They may also be set in user `<config_dir>/default.yaml` or project `.cruise/default.yaml`; precedence is workflow > project defaults > user defaults > unset. They are not CLI options or environment overrides.
+
+```yaml
+commit_message_template: "{title} [{session_id}]"
+pr_body_template: |
+  ## Summary
+  {body}
+```
+
+The commit template permits `{title}`, `{issue}`, `{session_id}`, and `{branch}`. The PR body template additionally permits `{body}`. `{title}` is the trimmed generated PR title, falling back to the first non-empty trimmed line of the session input or title. `{body}` is the trimmed generated body, or empty if generation fails. `{issue}` currently always expands to an empty string, `{session_id}` is the session ID, and `{branch}` is the worktree branch name. See [variables.md](variables.md#commit-and-pr-template-variables) for the separate vocabulary.
+
+Unknown variables, including `{plan}`, and malformed syntax are rejected at workflow load/compile time. Use `{{` and `}}` for literal braces; expanded values are not rescanned. Rendered output is trimmed, and an empty commit message is an error. Cruise appends any configured Co-authored-by trailer separately. With a body template, the title and body are passed explicitly instead of using `--fill`.
+
+When both templates are unset, existing commit and PR creation behavior is unchanged, including the existing input fallback and `--fill` for an empty PR title. These settings do not affect current-branch runs, `create_pr: false`, agent-created commits, or squash-merge messages. They do not automatically add issue closing text.
 
 ## `force_exec`
 

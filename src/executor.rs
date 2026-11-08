@@ -42,6 +42,7 @@ use crate::error::{CruiseError, Result};
 use crate::model_selection::{Sdk, SdkSessionId, resolve_candidates, resolve_entry};
 use crate::retry::{self, Failure, FallbackEngine, RetryAction, RetryPolicy, Unavailable};
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt_with_attempt_model};
+use crate::usage::{UsageAccumulator, UsageField, UsageScope, record_attempt};
 
 /// Callback invoked when an SDK backend reports its session identifier.
 pub type SessionIdCallback<'a> = dyn Fn(&SdkSessionId) -> Result<()> + Send + Sync + 'a;
@@ -55,6 +56,8 @@ type StreamSessionIdCallback<'a> = dyn Fn(&str) -> Result<()> + Send + Sync + 'a
 /// `tools` and `resume` are honored by the SDK backends and ignored in command
 /// mode.
 pub struct PromptRun<'a> {
+    /// Optional context for recording provider usage for each attempt.
+    pub usage: Option<UsageScope<'a>>,
     /// The fully-resolved prompt text to send.
     pub prompt: &'a str,
     /// Model name (command mode) or model reference (`sdk: jcode`,
@@ -396,7 +399,25 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
         req.working_dir,
         req.stream,
     )
-    .await?;
+    .await;
+    if let Some(scope) = req.usage {
+        let outcome = match &result {
+            Ok(_) => "success",
+            Err(CruiseError::Interrupted) => "interrupted",
+            Err(_) => "error",
+        };
+        record_attempt(
+            scope,
+            "command",
+            model,
+            1,
+            outcome,
+            &UsageField::Unavailable {
+                reason: "command_backend",
+            },
+        );
+    }
+    let result = result?;
     Ok(PromptOutcome {
         result,
         session_id: None,
@@ -415,6 +436,7 @@ async fn stream_to_outcome(
     on_delta: Option<&(dyn Fn(&str) + Send + Sync)>,
     on_session_id: Option<&StreamSessionIdCallback<'_>>,
     cancel_token: Option<&CancellationToken>,
+    usage: &mut UsageAccumulator,
 ) -> Result<Folded> {
     // Bridge the blocking std channel to an async one so we can stream deltas
     // through the borrowed `on_delta` callback without moving it onto the
@@ -441,17 +463,29 @@ async fn stream_to_outcome(
                 // The backend receives the same token. Keep the receiver alive
                 // until its worker finishes cleanup; dropping it or returning
                 // here would let detached CLI processes outlive this request.
-                while rx.recv().await.is_some() {}
+                while let Some(chunk) = rx.recv().await {
+                    if let StreamChunk::Usage(round) = chunk {
+                        usage.add(round);
+                    }
+                }
                 return Err(CruiseError::Interrupted);
             },
             maybe = rx.recv() => match maybe {
                 Some(chunk) => {
+                    if let StreamChunk::Usage(round) = chunk {
+                        usage.add(round);
+                        continue;
+                    }
                     if let StreamChunk::SessionReady { id, ready } = &chunk
                         && let Some(callback) = on_session_id
                         && let Err(error) = callback(id)
                     {
                         let _ = ready.send(false);
-                        while rx.recv().await.is_some() {}
+                        while let Some(chunk) = rx.recv().await {
+                            if let StreamChunk::Usage(round) = chunk {
+                                usage.add(round);
+                            }
+                        }
                         return Err(error);
                     }
                     if let StreamChunk::Session(id) = &chunk
@@ -470,6 +504,9 @@ async fn stream_to_outcome(
                     if let Some(out) = reducer.step(chunk, &mut sink) {
                         break out;
                     }
+                }
+                None if cancel_token.is_some_and(CancellationToken::is_cancelled) => {
+                    return Err(CruiseError::Interrupted);
                 }
                 None => break reducer.finish(),
             }
@@ -495,26 +532,56 @@ async fn stream_to_outcome(
 ///
 /// Built fresh per attempt because [`crate::backend::claude::stream_agent`]
 /// consumes the config.
+fn resolve_for_request(
+    provider: crate::provider_install::Provider,
+    req: &PromptRun<'_>,
+) -> Result<crate::provider_install::Resolved> {
+    let path = req
+        .env
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+    crate::provider_install::resolve::resolve_with_path(provider, path.as_deref(), req.working_dir)
+}
+
 fn build_claude_config(
     req: &PromptRun<'_>,
     model_ref: Option<&str>,
     subagent_model: Option<&str>,
-) -> ClaudeRunnerConfig {
+) -> Result<ClaudeRunnerConfig> {
+    build_claude_config_with(req, model_ref, subagent_model, resolve_for_request)
+}
+
+fn build_claude_config_with(
+    req: &PromptRun<'_>,
+    model_ref: Option<&str>,
+    subagent_model: Option<&str>,
+    resolver: impl FnOnce(
+        crate::provider_install::Provider,
+        &PromptRun<'_>,
+    ) -> Result<crate::provider_install::Resolved>,
+) -> Result<ClaudeRunnerConfig> {
+    let installation = resolver(crate::provider_install::Provider::Claude, req)?;
+    let mut env = req.env.clone();
+    if installation.is_managed() && std::env::var_os("DISABLE_AUTOUPDATER").is_none() {
+        env.entry("DISABLE_AUTOUPDATER".to_string())
+            .or_insert_with(|| "1".to_string());
+    }
     let (model, suffix) = split_thinking_suffix(model_ref.unwrap_or_default());
-    ClaudeRunnerConfig {
+    Ok(ClaudeRunnerConfig {
         model: (!model.is_empty()).then(|| model.to_string()),
         subagent_model: subagent_model.map(str::to_owned),
         effort: suffix.and_then(effort_from_suffix),
         cwd: req.working_dir.map(Path::to_path_buf),
         resume_session_id: resume_for(req, Sdk::Claude),
         tools: req.tools.clone(),
-        env: req.env.clone(),
+        env,
         mcp_servers: req.mcp_servers.clone(),
         cancel: req.cancel_token.cloned(),
-        cli_path: None,
+        cli_path: installation.explicit_path(),
         permission: req.permission,
         tool_policy: req.tool_policy.clone(),
-    }
+    })
 }
 
 /// How one attempt of [`run_sdk_with_fallback`] failed. Keeps the failure text
@@ -682,6 +749,7 @@ async fn run_sdk_with_fallback(
             };
             crate::telemetry::record_retry("fallback", reason, 1, Some(&from), Some(&to));
         }
+        let mut usage = UsageAccumulator::default();
         let completion = async {
             let rx_std = match start(sdk, model.as_deref()) {
                 Ok(rx_std) => rx_std,
@@ -704,9 +772,14 @@ async fn run_sdk_with_fallback(
                     })
                 })
             };
-            let folded =
-                stream_to_outcome(rx_std, on_delta, Some(&session_callback), req.cancel_token)
-                    .await?;
+            let folded = stream_to_outcome(
+                rx_std,
+                on_delta,
+                Some(&session_callback),
+                req.cancel_token,
+                &mut usage,
+            )
+            .await?;
             let streamed = folded.streamed;
             let retry_barrier = folded.retry_barrier;
             match folded.outcome {
@@ -742,6 +815,27 @@ async fn run_sdk_with_fallback(
         }
         .with_context(attempt.context())
         .await;
+
+        let outcome = match &completion {
+            Ok(AttemptCompletion::Done(_)) => Some("success"),
+            Ok(AttemptCompletion::Retry(AttemptFailure::Unusable { .. })) => None,
+            Ok(
+                AttemptCompletion::Retry(AttemptFailure::Limited { .. })
+                | AttemptCompletion::Barrier(AttemptFailure::Limited { .. }),
+            ) => Some("limited"),
+            Err(CruiseError::Interrupted) => Some("interrupted"),
+            Ok(_) | Err(_) => Some("error"),
+        };
+        if let (Some(scope), Some(outcome)) = (req.usage, outcome) {
+            record_attempt(
+                scope,
+                label,
+                model.as_deref(),
+                u64::try_from(attempt_number).unwrap_or(u64::MAX),
+                outcome,
+                &usage.into_field("not_reported"),
+            );
+        }
 
         let failed = match completion {
             Err(error) => {
@@ -889,34 +983,45 @@ async fn run_sdk(req: PromptRun<'_>, sdk: Sdk) -> Result<PromptOutcome> {
                     req.prompt.to_string(),
                 )),
                 Sdk::Claude => Ok(stream_claude_agent(
-                    build_claude_config(&req, model_ref, subagent_model),
+                    build_claude_config(&req, model_ref, subagent_model)?,
                     req.prompt.to_string(),
                 )),
-                Sdk::OpenCode => Ok(stream_agent(
-                    OpenCodeRunnerConfig {
-                        model_ref: model_ref.map(str::to_string),
-                        cwd: req.working_dir.map(Path::to_path_buf),
-                        resume_session_id: resume_for(&req, Sdk::OpenCode),
-                        tools: req.tools.clone(),
-                        env: req.env.clone(),
-                        mcp_servers: req.mcp_servers.clone(),
-                        permission: req.permission,
-                        cancel: req.cancel_token.cloned(),
-                        keep_session_home: req.resume.is_some()
-                            || req.on_session_id.is_some()
-                            || req.tools.iter().any(|tool| {
-                                matches!(
-                                    tool.name.as_str(),
-                                    crate::sdk_tools::SUBMIT_PLAN_TOOL
-                                        | crate::sdk_tools::UPDATE_PLAN_TOOL
-                                )
-                            }),
-                        cli_path: None,
-                        computer_use: req.computer_use,
-                        tool_policy: req.tool_policy.clone(),
-                    },
-                    req.prompt.to_string(),
-                )),
+                Sdk::OpenCode => {
+                    let resolved =
+                        resolve_for_request(crate::provider_install::Provider::OpenCode, &req)?;
+                    let mut env = req.env.clone();
+                    if resolved.is_managed()
+                        && std::env::var_os("OPENCODE_DISABLE_AUTOUPDATE").is_none()
+                    {
+                        env.entry("OPENCODE_DISABLE_AUTOUPDATE".to_string())
+                            .or_insert_with(|| "1".to_string());
+                    }
+                    Ok(stream_agent(
+                        OpenCodeRunnerConfig {
+                            model_ref: model_ref.map(str::to_string),
+                            cwd: req.working_dir.map(Path::to_path_buf),
+                            resume_session_id: resume_for(&req, Sdk::OpenCode),
+                            tools: req.tools.clone(),
+                            env,
+                            mcp_servers: req.mcp_servers.clone(),
+                            permission: req.permission,
+                            cancel: req.cancel_token.cloned(),
+                            keep_session_home: req.resume.is_some()
+                                || req.on_session_id.is_some()
+                                || req.tools.iter().any(|tool| {
+                                    matches!(
+                                        tool.name.as_str(),
+                                        crate::sdk_tools::SUBMIT_PLAN_TOOL
+                                            | crate::sdk_tools::UPDATE_PLAN_TOOL
+                                    )
+                                }),
+                            cli_path: resolved.explicit_path(),
+                            computer_use: req.computer_use,
+                            tool_policy: req.tool_policy.clone(),
+                        },
+                        req.prompt.to_string(),
+                    ))
+                }
             }
         },
     )
@@ -927,6 +1032,18 @@ fn build_jcode_config(
     req: &PromptRun<'_>,
     model_ref: Option<&str>,
     subagent_model: Option<&str>,
+) -> Result<JcodeRunnerConfig> {
+    build_jcode_config_with(req, model_ref, subagent_model, resolve_for_request)
+}
+
+fn build_jcode_config_with(
+    req: &PromptRun<'_>,
+    model_ref: Option<&str>,
+    subagent_model: Option<&str>,
+    resolver: impl FnOnce(
+        crate::provider_install::Provider,
+        &PromptRun<'_>,
+    ) -> Result<crate::provider_install::Resolved>,
 ) -> Result<JcodeRunnerConfig> {
     let (provider, model, effort) = jcode::parse_model_ref(model_ref)?;
     if model.is_none() {
@@ -946,6 +1063,7 @@ fn build_jcode_config(
         ));
     }
     Ok(JcodeRunnerConfig {
+        binary: resolver(crate::provider_install::Provider::Jcode, req)?.explicit_path(),
         model,
         provider,
         effort,
@@ -974,6 +1092,35 @@ fn build_jcode_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_resolver(
+        provider: crate::provider_install::Provider,
+    ) -> crate::provider_install::Resolved {
+        crate::provider_install::Resolved {
+            program: provider.binary_name().into(),
+            source: crate::provider_install::Source::Path,
+        }
+    }
+
+    fn build_claude_config(
+        req: &PromptRun<'_>,
+        model: Option<&str>,
+        subagent: Option<&str>,
+    ) -> Result<ClaudeRunnerConfig> {
+        super::build_claude_config_with(req, model, subagent, |provider, _| {
+            Ok(fixture_resolver(provider))
+        })
+    }
+
+    fn build_jcode_config(
+        req: &PromptRun<'_>,
+        model: Option<&str>,
+        subagent: Option<&str>,
+    ) -> Result<JcodeRunnerConfig> {
+        super::build_jcode_config_with(req, model, subagent, |provider, _| {
+            Ok(fixture_resolver(provider))
+        })
+    }
     use std::sync::{LazyLock, Mutex};
 
     use crate::backend::effort::EffortLevel;
@@ -1257,6 +1404,7 @@ mod tests {
         let env = std::collections::HashMap::new();
         let result = e
             .run(PromptRun {
+                usage: None,
                 prompt: "hi",
                 model: None,
                 subagent_model: None,
@@ -1341,8 +1489,222 @@ mod tests {
         assert_eq!(Executor::plan_model(None, None), None);
     }
 
+    #[cfg(unix)]
+    mod usage_recording_tests {
+        use super::*;
+        use crate::usage::{UsageCounts, UsagePurpose, UsageRound, UsageScope};
+
+        // A subprocess gives every case a private XDG state directory without
+        // changing process-global environment variables in parallel tests.
+        fn isolated(name: &str, run: impl FnOnce()) {
+            if std::env::var_os("CRUISE_EXECUTOR_USAGE_TEST_CHILD").is_some() {
+                run();
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+            let output = std::process::Command::new(
+                std::env::current_exe().unwrap_or_else(|error| panic!("{error}")),
+            )
+            .arg("--exact")
+            .arg(format!("executor::tests::usage_recording_tests::{name}"))
+            .arg("--nocapture")
+            .env("CRUISE_EXECUTOR_USAGE_TEST_CHILD", "1")
+            .env("CRUISE_USAGE_RECORDING", "1")
+            .env("XDG_STATE_HOME", dir.path())
+            .output()
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert!(
+                output.status.success(),
+                "child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "isolated test was not selected"
+            );
+        }
+
+        fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap_or_else(|error| panic!("{error}"))
+        }
+
+        fn scope() -> UsageScope<'static> {
+            UsageScope {
+                session_id: Some("test-session"),
+                step: Some("test-step"),
+                purpose: UsagePurpose::WorkflowStep,
+            }
+        }
+
+        fn usage() -> StreamChunk {
+            StreamChunk::Usage(UsageRound {
+                model: None,
+                counts: UsageCounts {
+                    input_tokens: Some(12),
+                    output_tokens: Some(3),
+                    ..Default::default()
+                },
+            })
+        }
+
+        fn records() -> Vec<serde_json::Value> {
+            let path = crate::usage::usage_path().unwrap_or_else(|error| panic!("{error}"));
+            match std::fs::read_to_string(path) {
+                Ok(text) => text
+                    .lines()
+                    .map(|line| {
+                        serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}"))
+                    })
+                    .collect(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => panic!("reading usage records: {error}"),
+            }
+        }
+
+        #[test]
+        fn sdk_attempts_record_one_line_per_provider_attempt() {
+            isolated("sdk_attempts_record_one_line_per_provider_attempt", || {
+                runtime().block_on(async {
+                    let env = HashMap::new();
+                    let mut req = base_req(&env);
+                    req.usage = Some(scope());
+                    req.max_retries = 1;
+                    let mut starts = 0;
+                    let result = run_with_fallback(&req, "claude", None, |_| {
+                        starts += 1;
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        tx.send(usage()).unwrap_or_else(|error| panic!("{error}"));
+                        if starts == 1 {
+                            tx.send(StreamChunk::Limit(crate::backend::stream::LimitError {
+                                provider: "test".into(),
+                                detail: String::new(),
+                            }))
+                            .unwrap_or_else(|error| panic!("{error}"));
+                        } else {
+                            tx.send(StreamChunk::Done("ok".into()))
+                                .unwrap_or_else(|error| panic!("{error}"));
+                        }
+                        Ok(rx)
+                    })
+                    .await;
+                    assert!(result.is_ok());
+                    let rows = records();
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0]["attempt"], 1);
+                    assert_eq!(rows[0]["outcome"], "limited");
+                    assert_eq!(rows[1]["attempt"], 2);
+                    assert_eq!(rows[1]["outcome"], "success");
+                    assert_eq!(rows[0]["usage"]["input_tokens"], 12);
+                    assert_eq!(rows[1]["usage"]["input_tokens"], 12);
+                });
+            });
+        }
+
+        #[test]
+        fn start_failure_writes_no_record() {
+            isolated("start_failure_writes_no_record", || {
+                runtime().block_on(async {
+                    let env = HashMap::new();
+                    let mut req = base_req(&env);
+                    req.usage = Some(scope());
+                    let result = run_with_fallback(&req, "claude", None, |_| {
+                        Err(CruiseError::Other("startup failed".into()))
+                    })
+                    .await;
+                    assert!(result.is_err());
+                    assert_eq!(records(), Vec::<serde_json::Value>::new());
+                });
+            });
+        }
+
+        #[test]
+        fn interrupted_attempt_keeps_usage_collected_before_cancel() {
+            isolated(
+                "interrupted_attempt_keeps_usage_collected_before_cancel",
+                || {
+                    runtime().block_on(async {
+                        let env = HashMap::new();
+                        let cancel = CancellationToken::new();
+                        let mut req = base_req(&env);
+                        req.usage = Some(scope());
+                        req.cancel_token = Some(&cancel);
+                        let result = run_with_fallback(&req, "claude", None, |_| {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let cancel = cancel.clone();
+                            std::thread::spawn(move || {
+                                tx.send(usage()).unwrap_or_else(|error| panic!("{error}"));
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                cancel.cancel();
+                            });
+                            Ok(rx)
+                        })
+                        .await;
+                        assert!(matches!(result, Err(CruiseError::Interrupted)));
+                        let rows = records();
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0]["outcome"], "interrupted");
+                        assert_eq!(rows[0]["usage"]["status"], "reported");
+                        assert_eq!(rows[0]["usage"]["input_tokens"], 12);
+                    });
+                },
+            );
+        }
+
+        #[test]
+        fn usage_scope_none_writes_nothing() {
+            isolated("usage_scope_none_writes_nothing", || {
+                runtime().block_on(async {
+                    let env = HashMap::new();
+                    let req = base_req(&env);
+                    let result = run_with_fallback(&req, "claude", None, |_| {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        tx.send(usage()).unwrap_or_else(|error| panic!("{error}"));
+                        tx.send(StreamChunk::Done("ok".into()))
+                            .unwrap_or_else(|error| panic!("{error}"));
+                        Ok(rx)
+                    })
+                    .await;
+                    assert!(result.is_ok());
+                    assert_eq!(records(), Vec::<serde_json::Value>::new());
+                });
+            });
+        }
+
+        #[test]
+        fn command_backend_writes_unavailable_record() {
+            isolated("command_backend_writes_unavailable_record", || {
+                runtime().block_on(async {
+                    let env = HashMap::new();
+                    for (script, expected) in [
+                        ("cat >/dev/null; printf ok", "success"),
+                        ("cat >/dev/null; exit 3", "error"),
+                    ] {
+                        let mut req = base_req(&env);
+                        req.usage = Some(scope());
+                        let result = sh_executor(script).run(req).await;
+                        assert_eq!(result.is_ok(), expected == "success");
+                    }
+                    let rows = records();
+                    assert_eq!(rows.len(), 2);
+                    for (row, expected) in rows.iter().zip(["success", "error"]) {
+                        assert_eq!(row["backend"], "command");
+                        assert_eq!(row["outcome"], expected);
+                        assert_eq!(row["usage"]["status"], "unavailable");
+                        assert_eq!(row["usage"]["reason"], "command_backend");
+                        assert!(row["usage"].get("input_tokens").is_none());
+                    }
+                });
+            });
+        }
+    }
+
     fn base_req(env: &HashMap<String, String>) -> PromptRun<'_> {
         PromptRun {
+            usage: None,
             prompt: "hi",
             model: None,
             subagent_model: None,
@@ -1415,10 +1777,92 @@ mod tests {
     }
 
     #[test]
+    fn provider_resolution_uses_child_path_and_working_directory() {
+        let _lock = lock_process();
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let process_bin = temp.path().join("process");
+        let child_bin = temp.path().join("child/bin");
+        std::fs::create_dir_all(&process_bin).unwrap_or_else(|error| panic!("{error}"));
+        std::fs::create_dir_all(&child_bin).unwrap_or_else(|error| panic!("{error}"));
+        let _path = prepend_to_path(&process_bin);
+        let _data = EnvGuard::set("XDG_DATA_HOME", temp.path().join("data"));
+        let _jcode = EnvGuard::remove("CRUISE_JCODE_CLI_PATH");
+        let _claude = EnvGuard::remove("CRUISE_CLAUDE_CLI_PATH");
+        let _opencode = EnvGuard::remove("CRUISE_OPENCODE_CLI_PATH");
+        let env = HashMap::from([("PATH".to_string(), "bin".to_string())]);
+        let mut req = base_req(&env);
+        let cwd = temp.path().join("child");
+        req.working_dir = Some(&cwd);
+        for provider in [
+            crate::provider_install::Provider::Jcode,
+            crate::provider_install::Provider::Claude,
+            crate::provider_install::Provider::OpenCode,
+        ] {
+            let binary = child_bin.join(provider.binary_name());
+            std::fs::write(&binary, b"fixture").unwrap_or_else(|error| panic!("{error}"));
+            let resolved =
+                resolve_for_request(provider, &req).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(resolved.source, crate::provider_install::Source::Path);
+            assert_eq!(resolved.program, binary);
+        }
+    }
+
+    #[test]
+    fn claude_managed_and_path_environment_wiring() {
+        let _lock = lock_process();
+        let _guard = EnvGuard::remove("DISABLE_AUTOUPDATER");
+        let env = HashMap::new();
+        let req = base_req(&env);
+        let managed = super::build_claude_config_with(&req, None, None, |_, _| {
+            Ok(crate::provider_install::Resolved {
+                program: "/fixture/claude".into(),
+                source: crate::provider_install::Source::Managed,
+            })
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            managed.env.get("DISABLE_AUTOUPDATER").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            managed.cli_path.as_deref(),
+            Some(Path::new("/fixture/claude"))
+        );
+        let path = build_claude_config(&req, None, None).unwrap_or_else(|error| panic!("{error}"));
+        assert!(!path.env.contains_key("DISABLE_AUTOUPDATER"));
+        assert!(path.cli_path.is_none());
+    }
+
+    #[test]
+    fn jcode_resolved_source_wires_binary() {
+        use crate::provider_install::{Provider, Resolved, Source};
+        let env = HashMap::new();
+        let req = base_req(&env);
+        for source in [Source::Override, Source::Managed, Source::Path] {
+            let config =
+                super::build_jcode_config_with(&req, Some("openai/model"), None, |provider, _| {
+                    assert_eq!(provider, Provider::Jcode);
+                    Ok(Resolved {
+                        program: "/fixture/jcode".into(),
+                        source,
+                    })
+                })
+                .unwrap_or_else(|error| panic!("{error}"));
+            let expected = if source == Source::Path {
+                None
+            } else {
+                Some(Path::new("/fixture/jcode"))
+            };
+            assert_eq!(config.binary.as_deref(), expected);
+        }
+    }
+
+    #[test]
     fn subagent_model_builders_forward_backend_settings() {
         let env = HashMap::new();
         let req = base_req(&env);
-        let claude = build_claude_config(&req, Some("sonnet"), Some("haiku"));
+        let claude = build_claude_config(&req, Some("sonnet"), Some("haiku"))
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(claude.subagent_model.as_deref(), Some("haiku"));
         let jcode = build_jcode_config(&req, Some("openai/main"), Some("openai/worker"))
             .unwrap_or_else(|error| panic!("{error}"));
@@ -1495,7 +1939,8 @@ mod tests {
             false,
             crate::config::PermissionMode::Full,
         );
-        let claude = build_claude_config(&req, None, None);
+        let claude =
+            build_claude_config(&req, None, None).unwrap_or_else(|error| panic!("{error}"));
         let jcode = build_jcode_config(&req, Some("test-provider/test-model"), None)
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(claude.tool_policy, req.tool_policy);
@@ -1509,7 +1954,8 @@ mod tests {
         let env = HashMap::new();
         let mut req = base_req(&env);
         req.model = fixture_model(Some("claude-sonnet-4-6:xhigh"));
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None);
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None)
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(config.effort, Some(EffortLevel::XHigh));
     }
@@ -1518,7 +1964,8 @@ mod tests {
     fn build_claude_config_leaves_model_unset_so_the_cli_picks_its_default() {
         let env = HashMap::new();
         let req = base_req(&env);
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None);
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None)
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(config.model, None);
         assert_eq!(config.effort, None);
     }
@@ -1543,6 +1990,7 @@ mod tests {
         );
         let dir = std::path::PathBuf::from("/tmp/cruise-claude-test");
         let req = PromptRun {
+            usage: None,
             prompt: "hi",
             model: fixture_model(Some("claude-opus-4-6")),
             subagent_model: None,
@@ -1563,7 +2011,8 @@ mod tests {
             permission: crate::config::PermissionMode::Full,
             tool_policy: crate::tool_policy::ToolPolicy::default(),
         };
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None);
+        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None)
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(config.cwd, Some(dir));
         assert_eq!(config.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(config.resume_session_id.as_deref(), Some("sess-1"));
@@ -1639,9 +2088,7 @@ mod tests {
         }
         guards.push(EnvGuard::set("JCODE_HOME", home.path().join("jcode-home")));
         guards.push(EnvGuard::set("JCODE_MODEL", "backend/default-model"));
-        for key in ["CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            guards.push(EnvGuard::remove(key));
-        }
+        guards.extend(crate::test_support::clear_config_override_envs());
         let env = HashMap::new();
         let mut req = base_req(&env);
         req.resume = Some(SdkSessionId {
@@ -1675,9 +2122,8 @@ mod tests {
         let config_root = home.path().join("config");
         guards.push(EnvGuard::set("XDG_CONFIG_HOME", &config_root));
         guards.push(EnvGuard::set("JCODE_HOME", home.path().join("jcode-home")));
-        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            guards.push(EnvGuard::remove(key));
-        }
+        guards.push(EnvGuard::remove("JCODE_MODEL"));
+        guards.extend(crate::test_support::clear_config_override_envs());
         std::fs::write(&config_root, "not a directory").unwrap_or_else(|error| panic!("{error}"));
         let user_file = config_root.join("cruise/default.yaml");
         let env = HashMap::new();
@@ -1726,14 +2172,10 @@ mod tests {
         std::fs::set_permissions(&executable, permissions)
             .unwrap_or_else(|error| panic!("{error}"));
         guards.push(prepend_to_path(&bin));
-        for key in [
-            "JCODE_MODEL",
-            "JCODE_HOME",
-            "CRUISE_MODEL",
-            "CRUISE_PLAN_MODEL",
-        ] {
+        for key in ["JCODE_MODEL", "JCODE_HOME"] {
             guards.push(EnvGuard::remove(key));
         }
+        guards.extend(crate::test_support::clear_config_override_envs());
 
         let token = CancellationToken::new();
         token.cancel();
@@ -1767,9 +2209,8 @@ mod tests {
         guards.push(EnvGuard::set("JCODE_HOME", root.path().join("jcode-home")));
         let xdg = root.path().join("workspace-config");
         guards.push(EnvGuard::set("XDG_CONFIG_HOME", xdg.as_os_str()));
-        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            guards.push(EnvGuard::remove(key));
-        }
+        guards.push(EnvGuard::remove("JCODE_MODEL"));
+        guards.extend(crate::test_support::clear_config_override_envs());
         let env = HashMap::new();
         let mut req = base_req(&env);
         req.working_dir = Some(root.path());
@@ -1862,9 +2303,15 @@ mod tests {
             assert!(checkpointed.load(std::sync::atomic::Ordering::Acquire));
             let _ = tx.send(StreamChunk::Done("answer".to_string()));
         });
-        let result = stream_to_outcome(rx, None, Some(&callback), None)
-            .await
-            .unwrap_or_else(|error| panic!("{error}"));
+        let result = stream_to_outcome(
+            rx,
+            None,
+            Some(&callback),
+            None,
+            &mut UsageAccumulator::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
         assert!(matches!(result.outcome, ChunkOutcome::Done { .. }));
         worker.join().unwrap_or_else(|_| panic!("worker panicked"));
     }
@@ -1884,7 +2331,14 @@ mod tests {
             assert_eq!(ack.recv_timeout(Duration::from_secs(2)), Ok(false));
             done.store(true, std::sync::atomic::Ordering::Release);
         });
-        let result = stream_to_outcome(rx, None, Some(&callback), None).await;
+        let result = stream_to_outcome(
+            rx,
+            None,
+            Some(&callback),
+            None,
+            &mut UsageAccumulator::default(),
+        )
+        .await;
         assert!(result.is_err());
         assert!(cleaned.load(std::sync::atomic::Ordering::Acquire));
         worker.join().unwrap_or_else(|_| panic!("worker panicked"));
@@ -2013,6 +2467,7 @@ mod tests {
             };
             let outcome = executor
                 .run(PromptRun {
+                    usage: None,
                     prompt: "assistant output",
                     model: fixture_model(model),
                     subagent_model: None,
@@ -2633,9 +3088,8 @@ mod tests {
         let _process = lock_process();
         let home = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
         let mut guards = set_fake_home(home.path());
-        for key in ["JCODE_MODEL", "CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
-            guards.push(EnvGuard::remove(key));
-        }
+        guards.push(EnvGuard::remove("JCODE_MODEL"));
+        guards.extend(crate::test_support::clear_config_override_envs());
         let env = HashMap::new();
         let mut req = base_req(&env);
         req.model = fixture_model(Some("provider/"));
@@ -3086,6 +3540,7 @@ mod tests {
         let env = HashMap::new();
         executor
             .run(PromptRun {
+                usage: None,
                 prompt: "go",
                 model: None,
                 subagent_model: None,

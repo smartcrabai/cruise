@@ -6,6 +6,107 @@ From the repository root, run `npm ci --prefix tests/webui --ignore-scripts`, `t
 
 Run `node tests/webui/sse-language.mjs` after the same setup to exercise real run-all events with independent English and Japanese browser connections, asserting localized SSE partials, DOM updates, and notifications. It initializes a disposable Git repository and removes it afterwards. Its screenshots use the same report directory.
 
+## Verify browser tests
+
+The secret-free boundary suite runs `node tests/webui/verify-boundary.mjs` after the runtime is built and Chromium is installed. It uses real production rendering with isolated HOME/XDG and persisted sessions. It checks that Verify is offered for an approval session with a plan, and hidden for a missing plan, Draft, and Planned, plus the mobile approval view. With a restricted system-only executable PATH and no credentials it clicks Verify, asserts the production POST and the missing Claude CLI error in the UI, and checks the saved plan is preserved. Screenshots, including the error, go under `target/formal-reports/verify-boundary-browser/` (override with `WEBUI_VERIFY_BOUNDARY_REPORT_DIR`). Responsive WebUI CI runs it and uploads the screenshots. No provider is mocked or executed and no specification is verified by this boundary test.
+
+The separate paid real-provider test can be run locally:
+
+From the repository root, install the pinned Node and Rust versions and browser prerequisites above, install Claude Code 2.1.250, then run:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+npm ci --prefix tests/formal --ignore-scripts
+npx --prefix tests/webui playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+ANTHROPIC_API_KEY=... node tests/webui/verify-real.mjs
+```
+
+This invokes the real Claude provider and can incur charges. It creates isolated HOME/XDG and session data, runs the production runtime, and uses real Quint from `tests/formal`; Alloy and Java must also be installed and configured if Alloy checking is desired. It asserts a Draft boundary, the Verify POST, a real formal report and checker stage, and preservation of the saved plan. Screenshots go to `target/formal-reports/verify-browser/` or `WEBUI_VERIFY_REPORT_DIR`. `WEBUI_BDD_BIN` selects a runtime and `WEBUI_VERIFY_MODEL` selects a Claude model. The stochastic provider may generate invalid specs or fail, and the test does not claim a passing formal verdict or complete correctness of the generated model. Screenshots may contain provider output and should be handled accordingly.
+
+The paid test is not run in CI. The separate pre-existing `verify.mjs` uses a fake provider and is not evidence of real-provider success.
+
+## Tell browser regression
+
+From the repository root, install the pinned dependencies and browser, build the production runtime, and run the Tell contract:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+tests/webui/node_modules/.bin/playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/tell-dialog.mjs
+node tests/webui/tell-negative.mjs
+```
+
+On Linux, Chromium's system libraries must also be installed (the existing CI setup uses `playwright install --with-deps chromium`). The test uses an isolated temporary HOME, XDG data directory and Git repository. It exercises the actual WebUI and a real running workflow, without an external agent or credentials. Screenshots of the planned boundary, rejected blank instruction, editor, accepted submission and Info audit are saved under `target/formal-reports/tell-browser/`. The negative control removes the Tell button from a temporary asset copy and requires the same browser contract to fail on that missing button. The WebUI CI workflow runs both and uploads `target/formal-reports/`.
+
+## Per-event notifications browser regression
+
+Run `cargo +1.99.1 build --locked --all-features --bin cruise-runtime` and `node tests/webui/notifications.mjs` from the repository root after installing the pinned Playwright dependencies and Chromium. The existing responsive WebUI CI job runs this test and uploads screenshots under `target/formal-reports/notification-browser/`. `WEBUI_BDD_BIN` selects a different runtime. Seven real workflows run through the browser in an isolated temporary Git repository, including option dialogs and deterministic no-file-changes failures. A browser EventSource observes production SSE and a local HTTP server receives real webhook POSTs. The test checks completed, action-required, and failed event opt-out and opt-in, plus a disabled master with completed-event opt-in, alongside the corresponding visible toasts. The option scenarios also answer the real dialog and complete their workflows. Negative SSE assertions observe a bounded 500 ms window after the toast. This does not exercise OS desktop notification display, sound, or plan-ready events.
+
+## Workflow category browser regression
+
+From the repository root, install the locked dependencies and browser, build the production runtime, and run the isolated browser test:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+npx --prefix tests/webui playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/workflow-categories.mjs
+```
+
+On Linux, use `playwright install --with-deps chromium` if system libraries are missing. Screenshots are written to `target/formal-reports/workflow-categories/` and uploaded by the existing responsive WebUI CI job. The test creates and removes its own HOME, XDG directories, workflow files, and session fixtures. It uses the production server, templates, and HTMX endpoints, without external credentials.
+
+## Local merge browser contract
+
+After installing the pinned dependencies and Chromium as described below, build the runtime with `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, then run `node tests/webui/local-merge.mjs` from the repository root. Set `WEBUI_BDD_BIN` to use a different prebuilt runtime. This runs the production server and real Chromium against disposable Git repositories and isolated HOME/XDG directories. It covers confirmation cancellation, staging committed and uncommitted work, dirty-base rejection, and squash merge with cleanup, checking browser feedback and Git/session state. It never modifies the checkout running the test.
+
+The test saves stage success, dirty-base error, and merge success screenshots under `target/formal-reports/local-merge-browser/` (override with `WEBUI_LOCAL_MERGE_REPORT_DIR`). The existing WebUI CI workflow runs this contract and uploads the report directory.
+
+## Auto-requeue browser coverage
+
+With Node 26.12.1 and Rust 1.99.1, from the repository root run:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+tests/webui/node_modules/.bin/playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/auto-requeue.mjs all
+node tests/webui/auto-requeue.mjs header
+```
+
+On Linux install Chromium's system dependencies as described below. The test isolates its HOME and session data and saves screenshots to `target/formal-reports/auto-requeue-browser/`. It checks settings persistence and validation, counter display and a Run All retry. The retry uses a scripted command provider, so it does not verify a real external provider. The existing responsive WebUI CI workflow runs both scenarios and uploads the reports.
+
+## PR retry browser boundaries
+
+With Node 26.12.1, Rust 1.99.1, Git and the GitHub CLI installed, run from the repository root:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+tests/webui/node_modules/.bin/playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/pr-failed-real.mjs
+```
+
+On Linux, use `playwright install --with-deps chromium` for system dependencies. The script runs the production server and real Git against disposable local repositories and writes screenshots to `target/formal-reports/pr-failed-browser/` (override with `WEBUI_PR_REPORT_DIR`). It checks the no-commits completion boundary and a real push failure, including persisted phase and no workflow rerun. It does not create an actual forge PR or verify successful publication or existing-PR reuse, which require an appropriate real forge and credentials. CI runs these secret-free boundaries and uploads the screenshots with the other WebUI reports.
+
+## PR form browser regression
+
+Build the production runtime with `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, install the pinned Playwright browser, then run `npm --prefix tests/webui run test:pr-form`. `WEBUI_BDD_BIN` selects a runtime and `WEBUI_PR_REPORT_DIR` overrides the screenshot directory (default `target/formal-reports/pr-form-browser`). The test starts the real server with an isolated temporary HOME/XDG tree, exercises source switching, browser number validation, and real draft endpoint rejection of zero and u64 overflow. It saves screenshots and cleans up its temporary data. It does not contact a forge or use fake services. A real successful PR-backed session needs a reachable GitHub repository and authentication, so this secret-free test does not claim that coverage.
+
+## Diff browser regression
+
+From the repository root, install the pinned Playwright package and Chromium, build the production runtime, and run the dedicated test:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+tests/webui/node_modules/.bin/playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/diff-browser.mjs
+```
+
+On Linux, install Chromium system dependencies as well with `tests/webui/node_modules/.bin/playwright install --with-deps chromium`. The responsive WebUI workflow runs the test and uploads `target/formal-reports/diff-browser/`, containing changed, refresh, empty, unavailable and error screenshots. The test uses a real runtime, real HTMX requests and an isolated temporary Git repository and worktree, not the project repository. It verifies a changed file, refresh after an external edit, an empty diff, an unavailable session branch and an error for a nonexistent Git branch. `WEBUI_BDD_BIN` selects an alternative runtime and `WEBUI_DIFF_REPORT_DIR` overrides the screenshot directory.
+
 ## Graph flag browser regression
 
 After installing the pinned browser dependencies, run `cargo +1.99.1 build --locked --all-features --bin cruise-runtime` followed by `node tests/webui/graph-flags.mjs` from the repository root. The existing WebUI CI job runs this test and uploads `target/formal-reports/graph-browser/`. `WEBUI_BDD_BIN` can select another runtime and `WEBUI_GRAPH_REPORT_DIR` changes the screenshot directory. The test uses a temporary HOME/XDG tree and changes persisted flags externally, exercising real Graph tab HTMX requests for off, on, off again, and an all-disabled graph. It asserts the server's Mermaid source and projected edges, not that the externally loaded Mermaid CDN successfully rendered SVG. Screenshots capture the browser state at the swap and may show Mermaid source if the CDN has not loaded.

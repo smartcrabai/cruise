@@ -18,6 +18,19 @@ where
         .collect()
 }
 
+fn deserialize_return_labels<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<serde_yaml::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| match value {
+            serde_yaml::Value::String(label) => Ok(label),
+            _ => Err(serde::de::Error::custom("return labels must be strings")),
+        })
+        .collect()
+}
+
 fn deserialize_call_arguments<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<IndexMap<String, String>>, D::Error>
@@ -49,6 +62,29 @@ pub const DEFAULT_PLAN_LANGUAGE: &str = "English";
 /// the `WebUI`), and [`resolve_effective_max_retries`] must be callable from
 /// both.
 pub const DEFAULT_MAX_RETRIES: usize = 3;
+
+/// A shell command checked after a prompt succeeds.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QualityGateConfig {
+    pub command: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timeout: Option<String>,
+}
+
+// An omitted field is optional, but an explicitly present field must have its
+// declared type. This keeps YAML validation aligned with the published schema.
+fn deserialize_present<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
 
 /// Nested language configuration (new style).
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -93,6 +129,13 @@ pub struct WorkflowConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub inputs: Vec<String>,
+    /// Return labels declared by a called workflow.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_return_labels",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub returns: Vec<String>,
     /// LLM invocation command (e.g. `["claude", "--model", "{model}", "-p"]`).
     ///
     /// Mutually exclusive with `sdk` (validated by [`validate_sdk`]). Defaults
@@ -178,6 +221,13 @@ pub struct WorkflowConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub languages: Option<LanguagesConfig>,
 
+    /// Optional template for the generated commit subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_message_template: Option<String>,
+    /// Optional template for the generated pull request body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_body_template: Option<String>,
+
     /// Automatically commit, push, and create a pull request after a successful
     /// worktree run. When false, the session completes without PR processing;
     /// the worktree and its artifacts are retained. Defaults to `true`.
@@ -237,6 +287,9 @@ pub struct WorkflowConfig {
     /// provider rate limits only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
+    /// Time limits for planning-time formal verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formal_verify: Option<FormalVerifyConfig>,
 
     /// MCP servers made available to every SDK prompt run (`sdk: jcode`, the
     /// default backend, `sdk: claude`, and `sdk: opencode`). Rejected with a
@@ -436,6 +489,13 @@ pub enum SkipCondition {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct StepConfig {
+    /// Commands that must pass after a successful prompt.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub quality_gates: Option<Vec<QualityGateConfig>>,
     /// Model to use (prompt steps only).
     pub model: Option<String>,
 
@@ -480,8 +540,16 @@ pub struct StepConfig {
     /// Explicit next step name, overriding sequential order.
     pub next: Option<String>,
 
+    /// Label returned to the calling workflow instead of a local next step.
+    #[serde(default, rename = "return", skip_serializing_if = "Option::is_none")]
+    pub return_label: Option<String>,
+
     /// Skip condition: static bool or variable reference.
     pub skip: Option<SkipCondition>,
+
+    /// Guards inherited from enclosing workflow calls, evaluated before this step's guards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_guards: Vec<CallGuard>,
 
     /// Whether this step runs when any listed workflow flag is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -520,6 +588,14 @@ pub struct StepConfig {
     )]
     pub with: Option<IndexMap<String, String>>,
 
+    /// Mapping from called workflow return labels to parent steps.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_call_arguments",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub on_return: Option<IndexMap<String, String>>,
+
     /// Path or supported GitHub blob/raw URL whose contents become `prompt`.
     /// Absolute, `~`-prefixed, or relative to the directory of the config file
     /// that declares the step (a bare file name means "next to the config file").
@@ -553,11 +629,23 @@ pub struct StepConfig {
 }
 
 /// Configuration of the `github-review` step.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewerScope {
+    #[default]
+    Bots,
+    All,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubReviewConfig {
     /// Bot logins whose review of the current head is awaited.
+    #[serde(default)]
     pub bots: Vec<String>,
+    /// Scope of review authors to consider.
+    #[serde(default)]
+    pub reviewers: ReviewerScope,
     /// Maximum number of loop iterations (default 3).
     #[serde(
         rename = "max-iterations",
@@ -594,6 +682,10 @@ pub struct OptionItem {
     /// `None` falls back to the step's own `next`, then to the following step
     /// in declaration order; it only ends the workflow when neither exists.
     pub next: Option<String>,
+
+    /// Label returned to the calling workflow when this item is selected.
+    #[serde(default, rename = "return", skip_serializing_if = "Option::is_none")]
+    pub return_label: Option<String>,
 }
 
 /// Action to take when no workspace file changes are detected after a step.
@@ -647,6 +739,13 @@ pub struct WhenCondition {
     pub exists: Option<String>,
 }
 
+/// Pre-execution guards inherited from a workflow call.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct CallGuard {
+    pub skip: Option<SkipCondition>,
+    pub when: Option<WhenCondition>,
+}
+
 /// Group configuration for grouping related steps.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct GroupConfig {
@@ -672,6 +771,15 @@ fn default_true() -> bool {
 )]
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// Settings for planning-time formal verification.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormalVerifyConfig {
+    /// Per-command model checking timeout in seconds, from 1 through 86400.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_check_timeout_seconds: Option<u64>,
 }
 
 /// Default `retry.base_delay_ms`.
@@ -716,6 +824,17 @@ pub struct RetryConfig {
     /// keeps the failing model id and swaps only the provider.
     #[serde(default)]
     pub fallback_chains: HashMap<String, Vec<String>>,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            base_delay_ms: default_base_delay_ms(),
+            max_delay_ms: default_max_delay_ms(),
+            model_fallback: default_true(),
+            fallback_chains: HashMap::new(),
+        }
+    }
 }
 
 /// Workflow-level MCP servers, keyed by server name. `IndexMap` keeps YAML
@@ -807,6 +926,17 @@ impl WorkflowConfig {
     #[must_use]
     pub fn interactive_planning(&self) -> bool {
         self.interactive_planning
+    }
+
+    /// Effective timeout for each model-checking command.
+    #[must_use]
+    pub fn formal_verify_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.formal_verify
+                .as_ref()
+                .and_then(|c| c.model_check_timeout_seconds)
+                .unwrap_or(900),
+        )
     }
 
     /// Effective `cleanup_after_pr`.
@@ -943,26 +1073,38 @@ impl WorkflowConfig {
     /// Returns an error if a boolean env var has a value other than
     /// `true`, `false`, `1`, or `0`.
     pub fn apply_env_overrides(&mut self) -> crate::error::Result<()> {
-        if let Some(v) = read_env_string("CRUISE_MODEL") {
-            self.model = Some(ModelSpec::Single(v));
+        let mut values = Vec::new();
+        for key in crate::config_env::WORKFLOW_ENV_KEYS {
+            if let Ok(raw) = std::env::var(key.var)
+                && let Some(value) = crate::config_env::parse_override(key.var, key.kind, &raw)?
+            {
+                values.push((key, value));
+            }
         }
-        if let Some(v) = read_env_string("CRUISE_PLAN_MODEL") {
-            self.plan_model = Some(ModelSpec::Single(v));
+        let has_sdk = values.iter().any(|(key, _)| key.var == "CRUISE_SDK");
+        let has_command = values.iter().any(|(key, _)| key.var == "CRUISE_COMMAND");
+        let explicit_fallback = values.iter().any(|(key, value)| {
+            key.var == "CRUISE_RETRY_MODEL_FALLBACK"
+                || (key.var == "CRUISE_RETRY" && value.get("model_fallback").is_some())
+        });
+        if has_sdk && has_command {
+            return Err(crate::error::CruiseError::Other(
+                "CRUISE_SDK and CRUISE_COMMAND are mutually exclusive; set only one".into(),
+            ));
         }
-        if let Some(v) = read_env_string("CRUISE_SDK") {
-            self.sdk = Some(v);
-            self.command = vec![]; // sdk and command are mutually exclusive; validate_sdk enforces this
+        // Typed conversion can fail too, so make the entire operation atomic.
+        let mut updated = self.clone();
+        for (key, value) in values {
+            (key.set)(&mut updated, value).map_err(|error| {
+                crate::error::CruiseError::Other(format!("override for {}: {error}", key.path))
+            })?;
         }
-        if let Some(v) = read_env_string("CRUISE_LANGUAGE_PR") {
-            self.languages
-                .get_or_insert_with(LanguagesConfig::default)
-                .pr = Some(v);
+        if has_sdk {
+            updated.command.clear();
+        } else if has_command && !updated.command.is_empty() {
+            updated.sdk = None;
         }
-        if let Some(v) = read_env_string("CRUISE_LANGUAGE_PLAN") {
-            self.languages
-                .get_or_insert_with(LanguagesConfig::default)
-                .plan = Some(v);
-        }
+        *self = updated;
 
         // Infer languages only when neither the new nor deprecated field was
         // explicitly configured. Environment overrides above take precedence.
@@ -980,16 +1122,15 @@ impl WorkflowConfig {
             }
         }
 
-        if let Some(v) = read_env_bool("CRUISE_CLEANUP_AFTER_PR")? {
-            self.cleanup_after_pr = v;
-        }
-        if let Some(v) = read_env_bool("CRUISE_INTERACTIVE_PLANNING")? {
-            self.interactive_planning = v;
-        }
-        if let Some(v) = read_env_bool("CRUISE_FORCE_EXEC")? {
-            self.force_exec = v;
-        }
+        let fallback = explicit_fallback
+            .then(|| self.retry.as_ref().map(|retry| retry.model_fallback))
+            .flatten();
         self.resolve_model_fallbacks();
+        if let Some(fallback) = fallback
+            && let Some(retry) = self.retry.as_mut()
+        {
+            retry.model_fallback = fallback;
+        }
         Ok(())
     }
 }
@@ -1049,17 +1190,6 @@ fn locale_to_language_name(locale: &str) -> Option<String> {
         _ => return None,
     };
     Some(language_name.to_string())
-}
-
-fn read_env_bool(name: &str) -> crate::error::Result<Option<bool>> {
-    match std::env::var(name).ok().as_deref().map(str::trim) {
-        None | Some("") => Ok(None),
-        Some("true" | "1") => Ok(Some(true)),
-        Some("false" | "0") => Ok(Some(false)),
-        Some(other) => Err(crate::error::CruiseError::Other(format!(
-            "invalid value for {name}: '{other}' (expected true/false/1/0)"
-        ))),
-    }
 }
 
 /// Validate `if.no-file-changes` usage across all steps and groups.
@@ -1148,6 +1278,17 @@ pub fn validate_when(config: &WorkflowConfig) -> crate::error::Result<()> {
 ///
 /// Returns an error if any validation check fails.
 pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
+    if let Some(seconds) = config
+        .formal_verify
+        .as_ref()
+        .and_then(|c| c.model_check_timeout_seconds)
+        && !(1..=86400).contains(&seconds)
+    {
+        return Err(crate::error::CruiseError::InvalidStepConfig(
+            "`formal_verify.model_check_timeout_seconds` must be between 1 and 86400".to_string(),
+        ));
+    }
+    validate_quality_gates(config)?;
     if let Some(input) = config.inputs.first() {
         return Err(crate::error::CruiseError::InvalidStepConfig(format!(
             "root workflow missing input '{input}'"
@@ -1161,24 +1302,113 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     {
         validate_call_argument_placement(name, step)?;
     }
-    validate_sdk(config)?;
-    validate_mcp_servers(config)?;
-    validate_flags(config)?;
-    validate_computer_use(config)?;
-    validate_permission(config)?;
-    validate_subagent_model(config)?;
-    validate_tool_restrictions(config)?;
-    validate_output_file_usage(config)?;
-    validate_squash_merge(config)?;
-    validate_github_review(config)?;
-
-    validate_parallel_steps(config)?;
-    validate_groups(config)?;
-    validate_if_conditions(config)?;
-    validate_timeouts(config)?;
-    validate_when(config)?;
-    validate_retry(config)?;
+    for check in CONFIG_CHECKS {
+        check(config)?;
+    }
     Ok(())
+}
+
+/// Validate quality gate placement and command settings before expansion.
+pub(crate) fn validate_quality_gates(config: &WorkflowConfig) -> crate::error::Result<()> {
+    fn check(name: &str, step: &StepConfig, allowed: bool) -> crate::error::Result<()> {
+        if let Some(gates) = &step.quality_gates {
+            let invalid = |message: &str| {
+                crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' quality_gates {message}"
+                ))
+            };
+            if !allowed
+                || (step.prompt.is_none() && step.prompt_file.is_none())
+                || step.command.is_some()
+                || step.option.is_some()
+                || step.parallel.is_some()
+                || step.group.is_some()
+                || step.workflow_call.is_some()
+                || step.squash_merge.is_some()
+                || step.github_review.is_some()
+            {
+                return Err(invalid("are only supported on ordinary prompt steps"));
+            }
+            if gates.is_empty() {
+                return Err(invalid("must contain at least one gate"));
+            }
+            for gate in gates {
+                if gate.command.trim().is_empty() {
+                    return Err(invalid("command must not be blank"));
+                }
+                if let Some(timeout) = &gate.timeout {
+                    crate::timeout::parse_timeout(timeout)
+                        .map_err(|_| invalid("has an invalid timeout"))?;
+                }
+            }
+        }
+        if let Some(children) = &step.parallel {
+            for (child, config) in children {
+                check(&format!("{name}/{child}"), config, false)?;
+            }
+        }
+        Ok(())
+    }
+    for (name, step) in &config.steps {
+        check(name, step, true)?;
+    }
+    for (name, step) in &config.after_pr {
+        check(name, step, false)?;
+    }
+    for group in config.groups.values() {
+        for (name, step) in &group.steps {
+            check(name, step, true)?;
+        }
+    }
+    Ok(())
+}
+
+const CONFIG_CHECKS: &[fn(&WorkflowConfig) -> crate::error::Result<()>] = &[
+    validate_sdk,
+    validate_mcp_servers,
+    validate_flags,
+    validate_computer_use,
+    validate_permission,
+    validate_subagent_model,
+    validate_tool_restrictions,
+    validate_output_file_usage,
+    validate_squash_merge,
+    validate_github_review,
+    validate_parallel_steps,
+    validate_groups,
+    validate_if_conditions,
+    validate_timeouts,
+    validate_when,
+    validate_retry,
+];
+
+/// Run independent configuration checks in runtime order and collect their errors.
+pub fn validate_config_all(config: &WorkflowConfig) -> Vec<crate::error::CruiseError> {
+    let mut errors = Vec::new();
+    if let Err(error) = validate_quality_gates(config) {
+        errors.push(error);
+    }
+    if let Some(input) = config.inputs.first() {
+        errors.push(crate::error::CruiseError::InvalidStepConfig(format!(
+            "root workflow missing input '{input}'"
+        )));
+    }
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        if let Err(error) = validate_call_argument_placement(name, step) {
+            errors.push(error);
+        }
+    }
+    for check in CONFIG_CHECKS {
+        if let Err(error) = check(config) {
+            errors.push(error);
+        }
+    }
+    errors
 }
 
 fn validate_call_argument_placement(name: &str, step: &StepConfig) -> crate::error::Result<()> {
@@ -1452,7 +1682,10 @@ pub(crate) fn validate_github_review(config: &WorkflowConfig) -> crate::error::R
         if review.max_iterations == 0 {
             return Err(invalid("github-review max-iterations must be positive"));
         }
-        if review.bots.is_empty() {
+        if review.reviewers == ReviewerScope::All && !review.bots.is_empty() {
+            return Err(invalid("github-review reviewers: all cannot specify bots"));
+        }
+        if review.reviewers == ReviewerScope::Bots && review.bots.is_empty() {
             return Err(invalid("github-review bots must not be empty"));
         }
         let mut seen = std::collections::HashSet::new();
@@ -1596,6 +1829,12 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
     let Some(children) = &step.parallel else {
         return Ok(());
     };
+    if step.quality_gates.is_some() || children.values().any(|child| child.quality_gates.is_some())
+    {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "parallel step '{name}' and its children cannot use quality_gates"
+        )));
+    }
     if children.is_empty() {
         return Err(CruiseError::InvalidStepConfig(format!(
             "parallel step '{name}' must contain at least one child"
@@ -2734,6 +2973,50 @@ steps:
         crate::workflow::compile(config).map(|_| ())
     }
 
+    #[test]
+    fn validate_config_all_collects_independent_errors_in_runtime_order() {
+        let config = WorkflowConfig::from_yaml(
+            "command: [echo]\nflags:\n  bad name: {}\nsteps:\n  a:\n    command: echo a\n    with:\n      value: test\n",
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let errors = validate_config_all(&config);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors[0]
+                .to_string()
+                .contains("uses with without workflow_call")
+        );
+        assert!(errors[1].to_string().contains("bad name"));
+        assert_eq!(
+            validate_config(&config)
+                .err()
+                .map(|error| error.to_string()),
+            Some(errors[0].to_string())
+        );
+    }
+
+    #[test]
+    fn validate_config_all_matches_wrapper_for_valid_and_invalid_configs() {
+        for yaml in [
+            "command: [echo]\nsteps:\n  a:\n    command: echo a\n",
+            "inputs: [required]\ncommand: [echo]\nsteps:\n  a:\n    command: echo a\n",
+            "command: [echo]\nflags:\n  bad name: {}\nsteps:\n  a:\n    command: echo a\n",
+            "sdk: invalid\nsteps:\n  a:\n    prompt: hello\n",
+        ] {
+            let config =
+                WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{yaml}: {e:?}"));
+            let errors = validate_config_all(&config);
+            match validate_config(&config) {
+                Ok(()) => assert!(errors.is_empty(), "{yaml}: {errors:?}"),
+                Err(error) => assert_eq!(
+                    Some(error.to_string()),
+                    errors.first().map(ToString::to_string),
+                    "{yaml}"
+                ),
+            }
+        }
+    }
+
     fn github_review_after_pr(body: &str) -> String {
         format!("command: [echo]\nsteps:\n  s1:\n    prompt: hi\nafter-pr:\n  review:\n{body}")
     }
@@ -3196,8 +3479,8 @@ steps:
     #[test]
     fn test_model_env_override_removes_implicit_array_policy() {
         let _process = lock_process();
+        let _guards = crate::test_support::clear_config_override_envs();
         let _model = EnvGuard::set("CRUISE_MODEL", "anthropic/env-model");
-        let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
         let mut config = WorkflowConfig::from_yaml(
             "sdk: jcode\nmodel: [anthropic/array-model, openai/array-fallback]\nsteps:\n  s1:\n    prompt: hi\n",
         )
@@ -3224,8 +3507,8 @@ steps:
     #[test]
     fn test_model_env_override_preserves_explicit_retry_policy() {
         let _process = lock_process();
+        let _guards = crate::test_support::clear_config_override_envs();
         let _model = EnvGuard::set("CRUISE_MODEL", "anthropic/env-model");
-        let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
         let mut config = WorkflowConfig::from_yaml(
             "sdk: jcode\nmodel: [anthropic/array-model, openai/array-fallback]\nretry:\n  model_fallback: false\nsteps:\n  s1:\n    prompt: hi\n",
         )
@@ -4852,11 +5135,14 @@ steps:
                 "pr_language",
                 "plan_language",
                 "languages",
+                "commit_message_template",
+                "pr_body_template",
                 "env",
                 "force_exec",
                 "disallowed_tools",
                 "computer_use",
                 "groups",
+                "returns",
                 "steps",
                 "after-pr",
                 "mcp_servers",
@@ -5025,6 +5311,8 @@ steps:
                 "env",
                 "group",
                 "workflow_call",
+                "on_return",
+                "return",
                 "timeout",
                 "prompt_file",
                 "output_file",
@@ -5344,7 +5632,7 @@ steps:
         let option_item_props = def_properties(schema, "OptionItem");
         assert_has_fields(
             option_item_props,
-            &["selector", "text-input", "next"],
+            &["selector", "text-input", "next", "return"],
             "OptionItem",
         );
     }
@@ -5714,21 +6002,266 @@ steps:
 ";
 
     fn clear_all_override_envs() -> Vec<EnvGuard> {
-        vec![
-            EnvGuard::remove("CRUISE_MODEL"),
-            EnvGuard::remove("CRUISE_PLAN_MODEL"),
-            EnvGuard::remove("CRUISE_SDK"),
-            EnvGuard::remove("CRUISE_LANGUAGE_PR"),
-            EnvGuard::remove("CRUISE_LANGUAGE_PLAN"),
+        let mut guards = crate::test_support::clear_config_override_envs();
+        guards.extend([
             EnvGuard::remove("CRUISE_UI_LANGUAGE"),
             EnvGuard::remove("LC_ALL"),
             EnvGuard::remove("LC_MESSAGES"),
             EnvGuard::remove("LANG"),
             EnvGuard::remove("LANGUAGE"),
-            EnvGuard::remove("CRUISE_CLEANUP_AFTER_PR"),
-            EnvGuard::remove("CRUISE_INTERACTIVE_PLANNING"),
-            EnvGuard::remove("CRUISE_FORCE_EXEC"),
+            EnvGuard::remove("CRUISE_CREATE_PR"),
+        ]);
+        guards
+    }
+
+    #[test]
+    fn test_env_contract_model_overrides_filled_defaults() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let root = tempfile::tempdir().unwrap_or_else(|error| panic!("{error:?}"));
+        let _home = EnvGuard::set(
+            "HOME",
+            root.path()
+                .to_str()
+                .unwrap_or_else(|| panic!("temporary path is not UTF-8")),
+        );
+        let _xdg = EnvGuard::set(
+            "XDG_CONFIG_HOME",
+            root.path()
+                .to_str()
+                .unwrap_or_else(|| panic!("temporary path is not UTF-8")),
+        );
+        let project = root.path().join("project");
+        std::fs::create_dir_all(project.join(".cruise"))
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        std::fs::write(project.join(".cruise/default.yaml"), "model: a\n")
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let defaults = crate::workflow_defaults::WorkflowDefaults::load(Some(&project))
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let mut resolution =
+            crate::workflow_defaults::WorkflowConfigResolution::from_yaml(MINIMAL_YAML)
+                .unwrap_or_else(|error| panic!("{error:?}"));
+        defaults
+            .apply_to(&mut resolution)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(resolution.config.model, Some(ModelSpec::Single("a".into())));
+
+        let _model = EnvGuard::set("CRUISE_MODEL", "b");
+        resolution
+            .config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(resolution.config.model, Some(ModelSpec::Single("b".into())));
+    }
+
+    #[test]
+    fn test_env_contract_new_scalar_and_json_overrides() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _envs: Vec<_> = [
+            ("CRUISE_MAX_RETRIES", "7"),
+            ("CRUISE_COMPUTER_USE", "true"),
+            ("CRUISE_PERMISSION", "read-only"),
+            ("CRUISE_DISALLOWED_TOOLS", "[]"),
         ]
+        .into_iter()
+        .map(|(k, v)| EnvGuard::set(k, v))
+        .collect();
+        let mut config = WorkflowConfig::from_yaml(
+            "sdk: claude\nmax_retries: 5\ndisallowed_tools: [web]\nsteps:\n  s1:\n    prompt: hi\n",
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(config.max_retries, Some(7));
+        assert!(config.computer_use);
+        assert_eq!(config.permission, PermissionMode::ReadOnly);
+        assert_eq!(config.disallowed_tools.as_ref().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn test_env_contract_command_sdk_exclusivity() {
+        let _lock = lock_process();
+        for (command, sdk, expected_command, expected_sdk, is_error) in [
+            ("[\"x\"]", None, vec!["x"], None, false),
+            ("[]", None, vec![], Some("jcode"), false),
+            ("[\"x\"]", Some("claude"), vec![], None, true),
+            ("[]", Some("claude"), vec![], None, true),
+        ] {
+            let _guards = clear_all_override_envs();
+            let _command = EnvGuard::set("CRUISE_COMMAND", command);
+            let _sdk = sdk.map(|value| EnvGuard::set("CRUISE_SDK", value));
+            let mut config =
+                WorkflowConfig::from_yaml("sdk: jcode\nsteps:\n  s1:\n    prompt: hi\n")
+                    .unwrap_or_else(|error| panic!("{error:?}"));
+            let result = config.apply_env_overrides();
+            if is_error {
+                assert!(err_string(result).contains("mutually exclusive"));
+            } else {
+                result.unwrap_or_else(|error| panic!("{error:?}"));
+                assert_eq!(config.command, expected_command);
+                assert_eq!(config.sdk.as_deref(), expected_sdk);
+                if command == "[]" {
+                    validate_config(&config).unwrap_or_else(|error| panic!("{error:?}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_env_contract_retry_child_creates_defaults_and_overrides_parent() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _base = EnvGuard::set("CRUISE_RETRY_BASE_DELAY_MS", "100");
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|error| panic!("{error:?}"));
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let retry = config
+            .retry
+            .unwrap_or_else(|| panic!("retry configuration missing"));
+        assert_eq!(retry.base_delay_ms, 100);
+        assert_eq!(retry.max_delay_ms, default_max_delay_ms());
+        assert!(retry.model_fallback);
+        assert!(retry.fallback_chains.is_empty());
+    }
+
+    #[test]
+    fn test_env_contract_retry_null_and_parent_child_precedence() {
+        let _lock = lock_process();
+        for child in [None, Some("900")] {
+            let _guards = clear_all_override_envs();
+            let _parent = EnvGuard::set("CRUISE_RETRY", "null");
+            let _child = child.map(|v| EnvGuard::set("CRUISE_RETRY_MAX_DELAY_MS", v));
+            let mut config = WorkflowConfig::from_yaml("command: [claude, -p]\nretry: {model_fallback: false}\nsteps:\n  s1:\n    command: echo hi\n").unwrap_or_else(|error| panic!("{error:?}"));
+            config
+                .apply_env_overrides()
+                .unwrap_or_else(|error| panic!("{error:?}"));
+            if child.is_some() {
+                assert_eq!(
+                    config
+                        .retry
+                        .unwrap_or_else(|| panic!("retry configuration missing"))
+                        .max_delay_ms,
+                    900
+                );
+            } else {
+                assert!(config.retry.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn test_env_contract_retry_model_fallback_override() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _env = EnvGuard::set("CRUISE_RETRY_MODEL_FALLBACK", "true");
+        let mut config = WorkflowConfig::from_yaml("command: [claude, -p]\nretry: {model_fallback: false}\nsteps:\n  s1:\n    command: echo hi\n").unwrap_or_else(|error| panic!("{error:?}"));
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(
+            config
+                .retry
+                .unwrap_or_else(|| panic!("retry configuration missing"))
+                .model_fallback
+        );
+    }
+
+    #[test]
+    fn test_env_contract_model_array_enables_fallback() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _env = EnvGuard::set("CRUISE_MODEL", "[\"a\",\"b\"]");
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|error| panic!("{error:?}"));
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(matches!(config.model, Some(ModelSpec::Multiple(ref values)) if values.len() == 2));
+        assert!(
+            config
+                .retry
+                .unwrap_or_else(|| panic!("retry configuration missing"))
+                .model_fallback
+        );
+    }
+
+    #[test]
+    fn test_env_contract_array_respects_explicit_retry_fallback() {
+        let _lock = lock_process();
+        for model_key in ["CRUISE_MODEL", "CRUISE_PLAN_MODEL"] {
+            for (parent, child, expected) in [
+                (None, None, true),
+                (Some("{\"model_fallback\":false}"), None, false),
+                (None, Some("false"), false),
+                (Some("{\"model_fallback\":true}"), Some("false"), false),
+                (Some("{\"model_fallback\":false}"), Some("true"), true),
+            ] {
+                let _guards = clear_all_override_envs();
+                let _model = EnvGuard::set(model_key, "[\"a\",\"b\"]");
+                let _parent = parent.map(|v| EnvGuard::set("CRUISE_RETRY", v));
+                let _child = child.map(|v| EnvGuard::set("CRUISE_RETRY_MODEL_FALLBACK", v));
+                let mut config = WorkflowConfig::from_yaml(MINIMAL_YAML)
+                    .unwrap_or_else(|error| panic!("{error:?}"));
+                config
+                    .apply_env_overrides()
+                    .unwrap_or_else(|error| panic!("{error:?}"));
+                assert_eq!(
+                    config
+                        .retry
+                        .unwrap_or_else(|| panic!("retry configuration missing"))
+                        .model_fallback,
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_env_contract_languages_parent_then_child_and_blank() {
+        let _lock = lock_process();
+        for (child, expected) in [("Japanese", "Japanese"), ("  ", "French")] {
+            let _guards = clear_all_override_envs();
+            let _parent = EnvGuard::set(
+                "CRUISE_LANGUAGES",
+                "{\"pr\":\"French\",\"plan\":\"German\"}",
+            );
+            let _child = EnvGuard::set("CRUISE_LANGUAGE_PR", child);
+            let mut config =
+                WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|error| panic!("{error:?}"));
+            config
+                .apply_env_overrides()
+                .unwrap_or_else(|error| panic!("{error:?}"));
+            assert_eq!(config.effective_pr_language(), expected);
+            assert_eq!(config.effective_plan_language(), "German");
+        }
+    }
+
+    #[test]
+    fn test_env_contract_excluded_create_pr_and_atomic_error() {
+        let _lock = lock_process();
+        let _guards = clear_all_override_envs();
+        let _excluded = EnvGuard::set("CRUISE_CREATE_PR", "false");
+        let mut config =
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|error| panic!("{error:?}"));
+        let original_create_pr = config.create_pr;
+        config
+            .apply_env_overrides()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(config.create_pr, original_create_pr);
+
+        let _valid = EnvGuard::set("CRUISE_MAX_RETRIES", "3");
+        let _invalid = EnvGuard::set("CRUISE_PERMISSION", "bogus");
+        let before = serde_json::to_value(&config).unwrap_or_else(|error| panic!("{error:?}"));
+        let error = err_string(config.apply_env_overrides());
+        assert!(error.contains("CRUISE_PERMISSION"));
+        assert_eq!(
+            serde_json::to_value(&config).unwrap_or_else(|error| panic!("{error:?}")),
+            before
+        );
     }
 
     #[test]
