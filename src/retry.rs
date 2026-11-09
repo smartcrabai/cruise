@@ -201,6 +201,7 @@ const NETWORK_MARKERS: &[&str] = &[
     "broken pipe",
     "network error",
     "fetch failed",
+    "error sending request",
     "name resolution",
     "dns error",
     "stream terminated",
@@ -1899,6 +1900,14 @@ mod tests {
             ("fetch failed", RetryClass::Network),
             ("stream terminated", RetryClass::Network),
             ("request timed out", RetryClass::Network),
+            (
+                "Error: command error: Internal: Failed to send request to OpenAI API: error sending request for url (https://chatgpt.com/backend-api/codex/responses): client error (SendRequest): http2 error: stream error received: unspecific protocol error detected",
+                RetryClass::Network,
+            ),
+            (
+                "Error: command error: OpenCode V2 setup timed out",
+                RetryClass::Network,
+            ),
         ] {
             assert_eq!(classify_retryable(message), Some(expected), "for {message}");
         }
@@ -2113,6 +2122,7 @@ mod tests {
             // transport-looking word must stay permanent.
             "invalid_request_error: max_tokens 500 exceeds the limit",
             "authentication timed out while refreshing the OAuth token",
+            "invalid request: error sending request",
             "tool call terminated: invalid arguments",
         ] {
             assert_eq!(classify_retryable(message), None, "for {message}");

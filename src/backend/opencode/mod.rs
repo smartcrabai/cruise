@@ -145,13 +145,20 @@ fn resolve_effort(
 struct AttemptError {
     message: String,
     provider_failure: Option<types::ModelFailure>,
+    prompt_submitted: bool,
 }
 impl From<String> for AttemptError {
     fn from(message: String) -> Self {
         Self {
             message,
             provider_failure: None,
+            prompt_submitted: false,
         }
+    }
+}
+impl AttemptError {
+    fn requires_retry_barrier(&self) -> bool {
+        self.provider_failure.is_none() && self.prompt_submitted
     }
 }
 impl From<&str> for AttemptError {
@@ -180,7 +187,7 @@ pub(crate) fn stream_agent(config: OpenCodeRunnerConfig, prompt: String) -> Rece
         let terminal = match result {
             Ok(text) => StreamChunk::Done(text),
             Err(error) => {
-                if error.provider_failure.is_none() {
+                if error.requires_retry_barrier() {
                     let _ = tx.send(StreamChunk::RetryBarrier);
                 }
                 if error
@@ -245,6 +252,7 @@ async fn run_attempt(
     let mut conversation_clean = storage.initial_clean;
     let mut catalog_resolution_rejected = false;
     let mut checkpointed = config.resume_session_id.is_some();
+    let mut prompt_submitted = false;
     let result = async {
         let mut bridge =
             tools::Bridge::start(config, &storage.root, &id, cancel.child_token(), tx.clone())
@@ -398,6 +406,7 @@ async fn run_attempt(
                 &cancel,
                 tx,
                 &mut failure,
+                &mut prompt_submitted,
                 &mut conversation_clean,
             )
             .await;
@@ -432,10 +441,17 @@ async fn run_attempt(
     if !conversation_clean {
         safe_failure = None;
     }
-    storage.finish(conversation_clean, checkpointed)?;
+    storage
+        .finish(conversation_clean, checkpointed)
+        .map_err(|message| AttemptError {
+            message,
+            provider_failure: None,
+            prompt_submitted,
+        })?;
     result.map_err(|message| AttemptError {
         message,
         provider_failure: safe_failure,
+        prompt_submitted,
     })
 }
 #[derive(Clone, Copy)]
@@ -450,6 +466,7 @@ async fn execute(
     cancel: &CancellationToken,
     tx: &SyncSender<StreamChunk>,
     failure: &mut Option<types::ModelFailure>,
+    prompt_submitted: &mut bool,
     clean: &mut bool,
 ) -> std::result::Result<String, String> {
     let TurnInput {
@@ -487,6 +504,7 @@ async fn execute(
         text: prompt,
     };
     *clean = false;
+    *prompt_submitted = true;
     tokio::select! {
         ()=cancel.cancelled()=>return Err("OpenCode interrupted".into()),
         result=tokio::time::timeout(Duration::from_secs(15),client.prompt(id,&input))=>{result.map_err(|_|"OpenCode prompt acceptance uncertain: timeout")?.map_err(|e|format!("OpenCode prompt acceptance uncertain: {e}"))?;}
