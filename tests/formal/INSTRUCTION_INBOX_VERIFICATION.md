@@ -3,7 +3,7 @@
 Executed on 2026-11-07 from the repository root on macOS arm64:
 
 - `bash scripts/check_instruction_inbox_specs.sh`: exit 0, report `target/formal-reports/instruction-inbox.ieXoNL/`. Setup, Quint typecheck, five executable tests, seeded simulation and bounded verification all passed. Exact expanded commands and individual exit codes are in `commands.log` and `results.log`.
-- The runner uses Quint 0.33.0, Node 26.12.1 and Temurin 25.0.5+8. The simulation uses the TypeScript backend, seed `20261023`, at most 100 samples and 12 steps. Simulation is not proof.
+- The runner uses Quint 0.33.0, Node 26.13.0 and Temurin 25.0.5+8. The simulation uses the TypeScript backend, seed `20261023`, at most 100 samples and 12 steps. Simulation is not proof.
 - The runner invokes `quint verify --invariant safety --max-steps 4` using Apalache 0.62.1 through `scripts/formal/verify_quint.cjs`. It returned `NoError`, with no violation at the four-step bound. The wrapper logs its complete actual command, including the explicitly pinned backend and fresh server endpoint. Bounded verification is not an unbounded proof or evidence of implementation refinement.
 - `bash scripts/check_instruction_inbox_alloy.sh`: exit 0, report `target/formal-reports/instruction-inbox-alloy.JaWxKD/`. Alloy 6.2.0 with SAT4J returned six UNSAT assertions and one SAT `CarryWitness`. The receipt validator checked every expected result and the witness instance. Alloy scopes are seven states, three IDs and two keys. See `INSTRUCTION_INBOX_ALLOY.md` for the pinned archive checksum and limitations.
 
