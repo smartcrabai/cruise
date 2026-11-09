@@ -7,7 +7,7 @@ tests, seeded simulation and an eight-transition Apalache bounded verification
 of `safety`. It records commands, per-check output and exit statuses under a
 fresh `target/formal-reports/auto-requeue.*` directory. The dedicated
 `auto-requeue-specs` CI job runs the same checks without secrets and uploads
-the evidence. The shared setup pins Node 26.12.1, Quint 0.33.0, Apalache
+the evidence. The shared setup pins Node 26.13.0, Quint 0.33.0, Apalache
 0.62.1, Temurin JDK 25.0.5+8, and Alloy 6.2.0 (SHA-256
 `6b8c1cb5bc93bedfc7c61435c4e1ab6e688a242dc702a394628d9a9801edb78d`).
 
