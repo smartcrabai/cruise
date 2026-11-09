@@ -862,19 +862,20 @@ On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cru
 
 GitHub built-in `wait-ci` steps pin the local `HEAD`. Readiness requires the PR head and CI rollup commit to match that expected commit, an existing `statusCheckRollup.state` of `SUCCESS`, and every GitHub Actions check suite on the commit with a `workflowRun` to be `COMPLETED`. A completed suite with a failing conclusion fails CI; a suite without `workflowRun` (for example, from a third-party app) does not block. Readiness must hold for two consecutive polls; any non-ready poll resets the streak. A PR-head mismatch stays pending for a 90-second grace period to allow API propagation; if it catches up in time, the wait can succeed, but a persistent mismatch after the grace or overall deadline fails with the existing `head_mismatch` diagnostic. The built-in polls every 5 seconds for up to 55 minutes (3300 seconds) within a 60-minute step timeout; unregistered or pending checks are not success. Existing snapshot sessions retain their saved wait command and timeout until explicitly updated; changing a built-in does not rewrite them.
 The shared after-PR CI wait allows up to 60 minutes. If checks are still
-running at its deadline, it reports pending without treating it as a code
-failure or launching the repair prompt; native merge independently rejects
-non-ready CI. On failure, the shared prompt receives wait-ci stderr, enumerates
-every non-success check on the current head, and reads job logs (including
-canceled or timed-out jobs). If diagnostics are empty or truncated, it queries
-the provider directly. It reproduces CI commands, fixes all in-scope failures
-in one pass, and runs the corresponding formatters, linters, and tests before
+running at its deadline and no failed rollup is known, it reports pending
+without treating it as a code failure or launching repair; native merge
+independently rejects non-ready CI. If a GitHub rollup is already failing,
+`wait-ci` keeps polling attached Actions suites until they finish or the
+deadline; at the deadline it preserves the failure and invokes repair with
+the available diagnostics.
+
+The shared repair prompt receives wait-ci stderr, enumerates every
+non-success check on the current head, and reads job logs (including canceled
+or timed-out jobs). If diagnostics are empty or truncated, it queries the
+provider directly. It reproduces CI commands, fixes all in-scope failures in
+one pass, and runs the corresponding formatters, linters, and tests before
 committing. Unrelated or flaky jobs are rerun once or reported clearly; a
 no-change repair does not loop.
-
-When a GitHub rollup is already failing while an Actions suite is still
-running, `wait-ci` waits for all attached suites to finish before sending the
-complete failure set to the repair prompt.
 
 Native GitHub squash merge applies the same CI readiness gate: the PR head and an existing rollup commit must match the expected local `HEAD`, the rollup state must be `SUCCESS`, and every GitHub Actions check suite on that commit with a `workflowRun` must be `COMPLETED`; a completed suite with a failing conclusion fails CI, while suites without `workflowRun` do not block. Readiness must hold for two consecutive polls; any non-ready poll resets the streak. A PR-head mismatch remains pending for up to 90 seconds for API propagation; a transient mismatch that catches up can succeed, while one persisting past the grace or overall readiness deadline fails. The built-in `wait-ci` retains its existing `head_mismatch` diagnostic. The merge also waits for GitHub's `UNKNOWN` mergeability to resolve, polling every 2 seconds for up to 10 minutes (a shorter step timeout still applies). This runtime check protects existing saved workflow snapshots without rewriting them. Conflicts, malformed responses, and unmet policy or review requirements still reject the merge; the final merge request remains single-shot and SHA-pinned.
 

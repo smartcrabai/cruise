@@ -84,21 +84,22 @@ The six general-purpose built-ins share the ordered prelude `pr-ready` →
 `sync-base` → `resolve-conflict` → `push-after-sync` → `wait-ci` →
 `fix-ci-error`. Each caller passes its conflict prompt and task-specific scope
 into the shared resource, which owns the common CI repair prompt. `wait-ci`
-allows up to 60 minutes and reports still-running CI without treating it as a
-code failure. On failure, `fix-ci-error` receives the prior wait diagnostic,
-enumerates all non-success checks for the current head, and reads logs
-(including canceled or timed-out jobs). If diagnostics are empty or truncated,
-it queries the provider directly. It reproduces the corresponding CI commands,
-fixes all genuine in-scope failures in one pass, and runs relevant formatters,
-linters, and tests before committing. Unrelated or flaky jobs are rerun once
-or reported clearly; a repair with no file changes does not loop.
+allows up to 60 minutes. If CI is still running at its deadline with no failed
+rollup, it reports pending without invoking repair. If a GitHub rollup is
+already failing, `wait-ci` keeps polling attached Actions suites until they
+finish or the deadline; the deadline preserves the failure and invokes repair.
 
-When the GitHub rollup is already failing, `wait-ci` waits for all attached
-Actions suites to finish before sending the full failure set to the prompt.
-Changed fixes still route through base synchronization, push, and another CI
-wait. New expanded IDs are `follow-up/pr-ready`, etc. The native
-`squash-merge` remains the final direct root step, never inside the callee.
-Existing session snapshots and saved IDs are not migrated.
+On failure, `fix-ci-error` receives the prior wait diagnostic, enumerates all
+non-success checks for the current head, and reads logs (including canceled or
+timed-out jobs). If diagnostics are empty or truncated, it queries the
+provider directly. It reproduces the corresponding CI commands, fixes all
+genuine in-scope failures in one pass, and runs relevant formatters, linters,
+and tests before committing. Unrelated or flaky jobs are rerun once or
+reported clearly; a repair with no file changes does not loop. Changed fixes
+still route through base synchronization, push, and another CI wait. New
+expanded IDs are `follow-up/pr-ready`, etc. The native `squash-merge` remains
+the final direct root step, never inside the callee. Existing session
+snapshots and saved IDs are not migrated.
 
 Installed binaries resolve this internal shared resource from embedded data,
 without filesystem fallback. Direct local loads of `builtin/*.yaml` use normal

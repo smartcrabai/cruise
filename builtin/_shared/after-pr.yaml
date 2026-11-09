@@ -602,6 +602,13 @@ steps:
               exit 1
             fi
             if [ "$now" -ge "$deadline" ]; then
+              case "$state" in
+                FAILURE|ERROR)
+                  printf 'GitHub CI still has a failed rollup at the wait deadline for HEAD %s.\n' "$expected_head" >&2
+                  collect_github_failures
+                  ci_diagnostic ci_failed
+                  exit 1 ;;
+              esac
               printf 'GitHub CI did not reach readiness before the wait deadline: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s; no code failure was reported.\n' "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count"
               exit 0
             fi

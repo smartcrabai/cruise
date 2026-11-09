@@ -215,17 +215,18 @@ The six general-purpose built-ins (`tdd`, `refactor`, `add-tests`, `add-formal-s
 
 On GitHub, `follow-up/wait-ci` treats CI as ready only when the PR head and an existing rollup commit match the pinned local `HEAD`, the rollup state is `SUCCESS`, and every GitHub Actions check suite on that commit with a `workflowRun` is `COMPLETED`. A completed suite with a failing conclusion fails the wait; suites without `workflowRun` (such as third-party app checks) do not block. Readiness must hold for two consecutive polls, and any non-ready poll resets the streak. A PR-head mismatch stays pending for up to 90 seconds for API propagation; a persistent mismatch after the grace period or overall deadline fails with the existing `head_mismatch` diagnostic. Native GitHub merge uses the same CI readiness gate, with 2-second polls for up to 10 minutes while waiting for `UNKNOWN` mergeability; the built-in wait uses 5-second polls for up to 55 minutes. GitLab's provider-specific readiness behavior is unchanged. See the [after-PR config reference](../cruise-config/references/after-pr.md#opt-in-native-synchronous-squash-merge) for details.
 
-The after-PR CI wait allows up to 60 minutes; checks still running at the
-deadline are reported without invoking a code-failure repair. On failure, the
-shared prompt receives the wait diagnostic, enumerates every non-success
-check on the current head, reads canceled/timed-out job logs, and reproduces
-the exact CI commands. It fixes all in-scope failures in one pass and runs the
-matching formatters, linters, and tests before committing. Diagnostics that
-are empty or truncated fall back to provider queries. Unrelated/flaky jobs are
-rerun once or reported clearly; no-change repairs do not loop.
+The after-PR CI wait allows up to 60 minutes. If checks are still running at
+its deadline with no failed rollup, it reports pending without invoking
+repair. If the GitHub rollup is already failing, it keeps polling attached
+Actions suites until they finish or the deadline; the deadline preserves the
+failure and invokes repair with available diagnostics.
 
-When the GitHub rollup is already failing, `wait-ci` waits for all attached
-Actions suites to finish before sending the full failure set to the prompt.
+The shared prompt receives wait-ci stderr, enumerates every non-success check
+on the current head, reads canceled/timed-out job logs, and reproduces the
+exact CI commands. Empty or truncated diagnostics fall back to provider
+queries. It fixes all in-scope failures in one pass and runs matching
+formatters, linters, and tests before commit. Unrelated/flaky jobs are rerun
+once or reported clearly; no-change repairs do not loop.
 
 ### `--image`
 

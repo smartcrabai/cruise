@@ -11,4 +11,4 @@
 
 - Retain quality-gate output when sanitizing large streams runs past the post-exit pipe-drain grace.
 - Prevent detached Windows WebUI daemons from inheriting captured CLI output handles and blocking command completion.
-- Route pending after-PR CI away from code repair, wait for all Actions suites before reporting a failed rollup, stop no-change fix loops, and pass current diagnostics to a shared prompt that reads all failed logs and verifies repairs before commit.
+- Route pending CI without a known failure away from repair, preserve failed rollups at the wait deadline, wait for Actions suites before collecting complete failure details, and stop no-change fix loops.

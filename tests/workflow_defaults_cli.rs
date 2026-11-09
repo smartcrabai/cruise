@@ -2186,6 +2186,54 @@ fn builtin_github_wait_ci_collects_failures_after_all_suites_finish() {
 }
 #[cfg(unix)]
 #[test]
+fn builtin_github_wait_ci_reports_known_failure_when_other_suite_times_out() {
+    let fixture = GithubWaitCiFixture::new();
+    let command = builtin_wait_ci_command("tdd");
+    let failed_suite = github_workflow_run_suite("COMPLETED", Some("FAILURE"));
+    let running_suite = github_workflow_run_suite("IN_PROGRESS", None);
+    let failed_check = serde_json::json!({
+        "__typename":"CheckRun",
+        "name":"lint",
+        "status":"COMPLETED",
+        "conclusion":"FAILURE",
+        "detailsUrl":"https://github.com/123/true/actions/runs/901/job/902",
+        "checkSuite":{
+            "status":"COMPLETED",
+            "conclusion":"FAILURE",
+            "workflowRun":{"databaseId":901}
+        }
+    });
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 1),
+            github_ci_suites_response(
+                &fixture.head,
+                &fixture.head,
+                &[failed_suite, running_suite],
+                2,
+                false,
+                None,
+            ),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &[failed_check],
+                1,
+                false,
+                None,
+            ),
+        ],
+        true,
+    );
+    let terminal = text(&output);
+    assert!(!output.status.success(), "{terminal}");
+    assert_eq!(wait_ci_reason(&output), "ci_failed");
+    assert_eq!(wait_ci_payload(&output)["checks"][0]["name"], "lint");
+    assert_eq!(fixture.gh_calls(), 3);
+}
+#[cfg(unix)]
+#[test]
 fn builtin_github_wait_ci_fails_for_completed_suite_without_checkrun_context() {
     let fixture = GithubWaitCiFixture::new();
     let command = builtin_wait_ci_command("tdd");
