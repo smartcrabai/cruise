@@ -455,6 +455,7 @@ enable switching. The
 wider classification and the new backoff schedule still apply, so omit the
 block entirely and use scalar or unset model fields to keep the historical
 behavior.
+For OpenCode, only network-class local V2 API setup/transport failures before prompt submission bypass the retry barrier; rate-limit, client, and server-class local responses do not.
 
 ```yaml
 retry:                    # Optional; accepted by validation for any backend, honored only by SDK backends

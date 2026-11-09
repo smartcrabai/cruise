@@ -160,7 +160,11 @@ impl From<String> for AttemptError {
 }
 impl AttemptError {
     fn requires_retry_barrier(&self) -> bool {
-        self.provider_failure.is_none() && (self.prompt_submitted || self.resume_uncertain)
+        self.provider_failure.is_none()
+            && (self.prompt_submitted
+                || self.resume_uncertain
+                || crate::retry::classify_retryable(&self.message)
+                    != Some(crate::retry::RetryClass::Network))
     }
 }
 impl From<&str> for AttemptError {

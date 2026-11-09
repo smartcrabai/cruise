@@ -825,24 +825,6 @@ impl Fixture {
         on_session_id: Option<&SessionIdCallback<'_>>,
         cancel_token: Option<&CancellationToken>,
     ) -> cruise::error::Result<PromptOutcome> {
-        self.execute_with_checkpoint_and_fallback(
-            model,
-            max_retries,
-            on_session_id,
-            cancel_token,
-            "fixture/fallback",
-        )
-        .await
-    }
-
-    async fn execute_with_checkpoint_and_fallback(
-        &self,
-        model: Option<&str>,
-        max_retries: usize,
-        on_session_id: Option<&SessionIdCallback<'_>>,
-        cancel_token: Option<&CancellationToken>,
-        fallback_model: &str,
-    ) -> cruise::error::Result<PromptOutcome> {
         let env = HashMap::from([("WORKFLOW_VALUE".to_owned(), "step-value".to_owned())]);
         let mcp_servers = cruise::config::McpServers::new();
         let model = model.map(|model| cruise::config::ModelSpec::Single(model.to_owned()));
@@ -866,9 +848,9 @@ impl Fixture {
             permission: PermissionMode::Full,
             tool_policy: cruise::tool_policy::ToolPolicy::default(),
         };
-        let config: RetryConfig = serde_yaml::from_str(&format!(
-            "base_delay_ms: 1\nmodel_fallback: true\nfallback_chains:\n  default: [{fallback_model}]\n"
-        ))
+        let config: RetryConfig = serde_yaml::from_str(
+            "base_delay_ms: 1\nmodel_fallback: true\nfallback_chains:\n  default: [fixture/fallback]\n",
+        )
         .unwrap_or_else(|error| panic!("retry config: {error}"));
         tokio::time::timeout(
             Duration::from_secs(15),
@@ -1330,6 +1312,7 @@ fn catalog_failure_cases() -> Vec<(Catalog, Vec<&'static str>)> {
             vec!["protocol"],
         ),
         (Catalog::Http(StatusCode::UNAUTHORIZED), vec!["401"]),
+        (Catalog::Http(StatusCode::SERVICE_UNAVAILABLE), vec!["503"]),
     ]
 }
 
@@ -2119,11 +2102,10 @@ async fn unavailable_boundary_keeps_checkpointed_session_resumable() {
     let _lock = lock_process();
     let fixture = Fixture::new(Scenario::BoundaryUnavailable).await;
     let _guards = fixture.guards();
-    let model = "fixture/unavailable-boundary-checkpoint";
     // Retry is disabled to isolate the checkpoint's clean-state invariant.
     let checkpoint = |_: &cruise::model_selection::SdkSessionId| Ok(());
     let Err(error) = fixture
-        .execute_with_checkpoint(Some(model), 0, Some(&checkpoint), None)
+        .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
         .await
     else {
         panic!("unavailable boundary accepted");
@@ -2148,7 +2130,7 @@ async fn unavailable_boundary_keeps_checkpointed_session_resumable() {
     );
     let session_id = locked(&fixture.server).session_id.clone();
     assert!(!session_id.is_empty(), "checkpointed session ID missing");
-    let resumed = resume_fixture_with_model(&fixture, &session_id, 0, model).await;
+    let resumed = resume_fixture_with_model(&fixture, &session_id, 0, MODEL).await;
     let Err(resume_error) = resumed else {
         panic!("unavailable boundary accepted a resumed prompt");
     };
@@ -2590,7 +2572,7 @@ async fn missing_provider_in_model_reference_is_rejected_before_cli_launch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_api_http_failures_preserve_status_without_submitting_prompts() {
+async fn local_api_http_failures_keep_status_and_never_become_model_fallback() {
     let _lock = lock_process();
     for status in [
         StatusCode::UNAUTHORIZED,
@@ -2599,13 +2581,9 @@ async fn local_api_http_failures_preserve_status_without_submitting_prompts() {
         StatusCode::TOO_MANY_REQUESTS,
         StatusCode::INTERNAL_SERVER_ERROR,
     ] {
-        let primary = format!("fixture/local-api-primary-{}", status.as_u16());
-        let fallback = format!("fixture/local-api-fallback-{}", status.as_u16());
         let fixture = Fixture::new(Scenario::HandshakeFailure(status)).await;
         let _guards = fixture.guards();
-        let result = fixture
-            .execute_with_checkpoint_and_fallback(Some(&primary), 2, None, None, &fallback)
-            .await;
+        let result = fixture.execute(Some(MODEL), 2).await;
         assert!(
             locked(&fixture.server)
                 .requests
@@ -2625,6 +2603,11 @@ async fn local_api_http_failures_preserve_status_without_submitting_prompts() {
             fixture.prompt_count(),
             0,
             "server failure must not dispatch a provider prompt"
+        );
+        assert_eq!(
+            fixture.launch_count(),
+            1,
+            "local API status failures must not fall back to another model"
         );
         assert!(
             !diagnostic.to_ascii_lowercase().contains("model not found"),

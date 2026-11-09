@@ -124,6 +124,13 @@ fn retry_barrier_preserves_uncertain_prompt_and_resume_state() {
         resume_uncertain: false,
     };
     assert!(!setup.requires_retry_barrier());
+    let local_api_server_error = super::AttemptError {
+        message: "OpenCode local API HTTP 503: fixture server unavailable".to_owned(),
+        provider_failure: None,
+        prompt_submitted: false,
+        resume_uncertain: false,
+    };
+    assert!(local_api_server_error.requires_retry_barrier());
 
     let uncertain = super::AttemptError {
         message: "OpenCode prompt acceptance uncertain: timeout".to_owned(),

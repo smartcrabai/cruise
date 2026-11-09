@@ -109,13 +109,9 @@ mod contracts {
                 json!(null),
             ),
             "unavailable" => (
-                Some(if conversation == "new" {
-                    "fixture/unavailable-new:medium"
-                } else {
-                    "fixture/unavailable-resumed:medium"
-                }),
+                Some("fixture/model:medium"),
                 Catalog::Http(axum::http::StatusCode::SERVICE_UNAVAILABLE),
-                json!({"providerID":"fixture","id":"fallback"}),
+                json!(null),
             ),
             "transport" => (
                 Some(if conversation == "new" {
@@ -217,6 +213,7 @@ mod contracts {
             "missing" => &["catalog", "model"],
             "protocol" => &["protocol"],
             "unauthorized" => &["401"],
+            "unavailable" => &["503"],
             _ => panic!("unknown failure case"),
         };
         for marker in markers {
