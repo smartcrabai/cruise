@@ -30,10 +30,11 @@ pub(crate) struct AutoSquashRequest<'a> {
 }
 
 /// Result of a completed automatic squash operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AutoSquashOutcome {
     Merged,
     AlreadyMerged,
+    ResyncRequired(String),
 }
 
 /// A safe, actionable failure from an automatic squash operation.
@@ -348,12 +349,13 @@ struct GitHubCheckSuitePage {
     end_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum GitHubReadiness {
     Ready,
     AlreadyMerged,
     Pending,
     HeadMismatch,
+    ResyncRequired(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1348,6 +1350,60 @@ async fn github_branch_rules(
     }
     Ok(GitHubBranchRules::Available(rules))
 }
+async fn github_base_contains_head(
+    reference: &ProviderRef,
+    base_branch: &str,
+    head_oid: &str,
+    request: &AutoSquashRequest<'_>,
+) -> Result<bool, AutoSquashError> {
+    let ProviderRef::GitHub {
+        hostname,
+        owner,
+        repo,
+        ..
+    } = reference
+    else {
+        return Err(AutoSquashError::Rejected(
+            "provider URL changed unexpectedly".into(),
+        ));
+    };
+    let endpoint = format!(
+        "repos/{owner}/{repo}/compare/{}...{head_oid}",
+        url_encode_path_segment(base_branch)
+    );
+    let args = vec![
+        "api".to_string(),
+        "--hostname".to_string(),
+        hostname.clone(),
+        "--jq".to_string(),
+        ".status".to_string(),
+        endpoint,
+    ];
+    let output = run_process(
+        "gh",
+        &args,
+        request.working_dir,
+        request.env,
+        request.cancel_token,
+    )
+    .await
+    .map_err(|error| run_error(error, "gh"))?;
+    if !successful(&output) {
+        return Err(AutoSquashError::CommandFailed(
+            "unable to compare GitHub pull request head with its base".to_string(),
+        ));
+    }
+    let status = std::str::from_utf8(&output.stdout)
+        .map_err(|_| AutoSquashError::Rejected("GitHub compare status is unreadable".into()))?
+        .trim();
+    match status {
+        "ahead" | "identical" => Ok(true),
+        "behind" | "diverged" => Ok(false),
+        _ => Err(AutoSquashError::Rejected(
+            "GitHub compare status is unavailable".to_string(),
+        )),
+    }
+}
 
 fn validate_github_required_status_checks(
     rule: &Value,
@@ -1731,10 +1787,57 @@ fn gitlab_merge_args(
     Ok(args)
 }
 
+async fn validate_github_review_policy(
+    reference: &ProviderRef,
+    request: &AutoSquashRequest<'_>,
+    metadata: &GitHubMetadata,
+    check_names: &[String],
+    current_head_ci: bool,
+) -> Result<(), AutoSquashError> {
+    let branch_rules = github_branch_rules(reference, &metadata.base_branch, request).await?;
+    let reviews_required = match branch_rules {
+        GitHubBranchRules::Available(rules) => {
+            validate_github_rules(&rules, current_head_ci.then_some(check_names))?
+        }
+        // The synchronous merge endpoint remains authoritative for rules this plan cannot list.
+        GitHubBranchRules::UnavailableOnPlan => false,
+    };
+    validate_github_review_decision(metadata.review_decision.as_deref(), reviews_required)
+}
+
+async fn github_resync_reason(
+    reference: &ProviderRef,
+    request: &AutoSquashRequest<'_>,
+    expected_head: &str,
+    check_base_ancestry: bool,
+    metadata: &GitHubMetadata,
+) -> Result<Option<String>, AutoSquashError> {
+    if metadata.mergeable == "CONFLICTING"
+        || metadata.merge_state == "DIRTY"
+        || metadata.merge_state == "BEHIND"
+    {
+        return Ok(Some(format!(
+            "GitHub pull request is not confirmed mergeable (mergeable={}, mergeStateStatus={})",
+            metadata.mergeable, metadata.merge_state
+        )));
+    }
+    if !check_base_ancestry {
+        return Ok(None);
+    }
+    if !github_base_contains_head(reference, &metadata.base_branch, expected_head, request).await? {
+        return Ok(Some(format!(
+            "GitHub pull request head {expected_head} does not contain current base branch {}",
+            metadata.base_branch
+        )));
+    }
+    Ok(None)
+}
+
 async fn github_merge_readiness(
     reference: &ProviderRef,
     request: &AutoSquashRequest<'_>,
     expected_head: &str,
+    check_base_ancestry: bool,
     observation: &mut GitHubReadinessObservation,
 ) -> Result<GitHubReadiness, AutoSquashError> {
     let (state, remote_head) = github_identity(reference, request).await?;
@@ -1778,6 +1881,27 @@ async fn github_merge_readiness(
             "GitHub CI failed for the current pull request head".to_string(),
         ));
     }
+    validate_github_review_policy(
+        reference,
+        request,
+        &snapshot.metadata,
+        &check_names,
+        current_head_ci,
+    )
+    .await?;
+    if let Some(reason) = github_resync_reason(
+        reference,
+        request,
+        expected_head,
+        check_base_ancestry,
+        &snapshot.metadata,
+    )
+    .await?
+    {
+        observation.reason = Some("base_sync");
+        return Ok(GitHubReadiness::ResyncRequired(reason));
+    }
+
     let mergeability_pending = match (
         snapshot.metadata.mergeable.as_str(),
         snapshot.metadata.merge_state.as_str(),
@@ -1796,6 +1920,7 @@ async fn github_merge_readiness(
             )));
         }
     };
+
     let (readiness, reason) = if !current_head_ci {
         (
             GitHubReadiness::Pending,
@@ -1813,20 +1938,6 @@ async fn github_merge_readiness(
         (GitHubReadiness::Ready, None)
     };
     observation.reason = reason;
-
-    let branch_rules =
-        github_branch_rules(reference, &snapshot.metadata.base_branch, request).await?;
-    let reviews_required = match branch_rules {
-        GitHubBranchRules::Available(rules) => {
-            validate_github_rules(&rules, current_head_ci.then_some(check_names.as_slice()))?
-        }
-        // The synchronous merge endpoint remains authoritative for rules this plan cannot list.
-        GitHubBranchRules::UnavailableOnPlan => false,
-    };
-    validate_github_review_decision(
-        snapshot.metadata.review_decision.as_deref(),
-        reviews_required,
-    )?;
     Ok(readiness)
 }
 
@@ -1846,6 +1957,95 @@ async fn perform_github(
     .await
 }
 
+async fn poll_github_readiness(
+    reference: &ProviderRef,
+    request: &AutoSquashRequest<'_>,
+    expected_head: &str,
+    deadline: tokio::time::Instant,
+    head_mismatch: bool,
+    check_base_ancestry: bool,
+    observation: &mut GitHubReadinessObservation,
+) -> Result<GitHubReadiness, AutoSquashError> {
+    let attempt = tokio::select! {
+        biased;
+        () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
+        attempt = tokio::time::timeout_at(deadline, async {
+            if local_head(request).await? != expected_head {
+                return Err(AutoSquashError::Rejected(
+                    "local HEAD changed before the merge request".to_string(),
+                ));
+            }
+            github_merge_readiness(
+                reference,
+                request,
+                expected_head,
+                check_base_ancestry,
+                observation,
+            )
+            .await
+        }) => attempt,
+    };
+    match attempt {
+        Ok(readiness) => readiness,
+        Err(_) => Err(observation.deadline_error(head_mismatch)),
+    }
+}
+
+async fn wait_for_github_readiness_poll(
+    request: &AutoSquashRequest<'_>,
+    expected_head: &str,
+    deadline: tokio::time::Instant,
+    poll_interval: Duration,
+    head_mismatch_grace: Duration,
+    head_mismatch_since: Option<tokio::time::Instant>,
+    observation: &GitHubReadinessObservation,
+) -> Result<(), AutoSquashError> {
+    let pending_head = tokio::select! {
+        biased;
+        () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
+        result = tokio::time::timeout_at(deadline, local_head(request)) => match result {
+            Ok(result) => result?,
+            Err(_) => return Err(observation.deadline_error(head_mismatch_since.is_some())),
+        },
+    };
+    if pending_head != expected_head {
+        return Err(AutoSquashError::Rejected(
+            "local HEAD changed while GitHub readiness was pending".to_string(),
+        ));
+    }
+    let now = tokio::time::Instant::now();
+    let remaining = deadline.saturating_duration_since(now);
+    if remaining.is_zero() {
+        return Err(observation.deadline_error(head_mismatch_since.is_some()));
+    }
+    let grace_remaining = head_mismatch_since.map_or(Duration::MAX, |started| {
+        head_mismatch_grace.saturating_sub(now.duration_since(started))
+    });
+    let wait = poll_interval.min(remaining).min(grace_remaining);
+    tokio::select! {
+        biased;
+        () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
+        () = tokio::time::sleep(wait) => {}
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return Err(observation.deadline_error(head_mismatch_since.is_some()));
+    }
+    Ok(())
+}
+
+fn record_github_head_mismatch(
+    head_mismatch_since: &mut Option<tokio::time::Instant>,
+    head_mismatch_grace: Duration,
+    observation: &GitHubReadinessObservation,
+) -> Result<(), AutoSquashError> {
+    let now = tokio::time::Instant::now();
+    let started = *head_mismatch_since.get_or_insert(now);
+    if now.duration_since(started) >= head_mismatch_grace {
+        return Err(observation.deadline_error(true));
+    }
+    Ok(())
+}
+
 async fn perform_github_with_timing(
     reference: &ProviderRef,
     request: &AutoSquashRequest<'_>,
@@ -1858,32 +2058,29 @@ async fn perform_github_with_timing(
     let mut observation = GitHubReadinessObservation::new();
     let mut head_mismatch_since = None;
     let mut ready_observations = 0u8;
+    let mut base_ancestry_checked = false;
     loop {
         check_cancel(request.cancel_token)?;
-        let attempt = tokio::select! {
-            biased;
-            () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
-            attempt = tokio::time::timeout_at(deadline, async {
-                if local_head(request).await? != expected_head {
-                    return Err(AutoSquashError::Rejected(
-                        "local HEAD changed before the merge request".to_string(),
-                    ));
-                }
-                github_merge_readiness(reference, request, expected_head, &mut observation).await
-            }) => attempt,
-        };
-        let readiness = match attempt {
-            Ok(readiness) => readiness?,
-            Err(_) => {
-                return Err(observation.deadline_error(head_mismatch_since.is_some()));
-            }
-        };
+        let check_base_ancestry = !base_ancestry_checked || ready_observations == 1;
+        base_ancestry_checked = true;
+        let readiness = poll_github_readiness(
+            reference,
+            request,
+            expected_head,
+            deadline,
+            head_mismatch_since.is_some(),
+            check_base_ancestry,
+            &mut observation,
+        )
+        .await?;
         match readiness {
             GitHubReadiness::Ready => {
                 head_mismatch_since = None;
                 ready_observations += 1;
                 if ready_observations >= 2 {
-                    break;
+                    check_cancel(request.cancel_token)?;
+                    return run_github_merge(reference, request, expected_head, &mut observation)
+                        .await;
                 }
             }
             GitHubReadiness::AlreadyMerged => {
@@ -1895,61 +2092,27 @@ async fn perform_github_with_timing(
             }
             GitHubReadiness::HeadMismatch => {
                 ready_observations = 0;
-                let now = tokio::time::Instant::now();
-                let started = *head_mismatch_since.get_or_insert(now);
-                if now.duration_since(started) >= head_mismatch_grace {
-                    return Err(observation.deadline_error(true));
-                }
+                record_github_head_mismatch(
+                    &mut head_mismatch_since,
+                    head_mismatch_grace,
+                    &observation,
+                )?;
+            }
+            GitHubReadiness::ResyncRequired(reason) => {
+                return Ok(AutoSquashOutcome::ResyncRequired(reason));
             }
         }
-        let pending_head = tokio::select! {
-            biased;
-            () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
-            result = tokio::time::timeout_at(deadline, local_head(request)) => match result {
-                Ok(result) => result?,
-                Err(_) => return Err(observation.deadline_error(head_mismatch_since.is_some())),
-            },
-        };
-        if pending_head != expected_head {
-            return Err(AutoSquashError::Rejected(
-                "local HEAD changed while GitHub readiness was pending".to_string(),
-            ));
-        }
-        let now = tokio::time::Instant::now();
-        let remaining = deadline.saturating_duration_since(now);
-        if remaining.is_zero() {
-            return Err(observation.deadline_error(head_mismatch_since.is_some()));
-        }
-        let grace_remaining = head_mismatch_since.map_or(Duration::MAX, |started| {
-            head_mismatch_grace.saturating_sub(now.duration_since(started))
-        });
-        let wait = poll_interval.min(remaining).min(grace_remaining);
-        tokio::select! {
-            biased;
-            () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
-            () = tokio::time::sleep(wait) => {}
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(observation.deadline_error(head_mismatch_since.is_some()));
-        }
+        wait_for_github_readiness_poll(
+            request,
+            expected_head,
+            deadline,
+            poll_interval,
+            head_mismatch_grace,
+            head_mismatch_since,
+            &observation,
+        )
+        .await?;
     }
-    check_cancel(request.cancel_token)?;
-    let final_head = tokio::select! {
-        biased;
-        () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
-        result = tokio::time::timeout_at(deadline, local_head(request)) => match result {
-            Ok(result) => result?,
-            Err(_) => return Err(AutoSquashError::Rejected(observation.timeout_message())),
-        },
-    };
-    if final_head != expected_head {
-        return Err(AutoSquashError::Rejected(
-            "local HEAD changed before the merge request".to_string(),
-        ));
-    }
-    check_cancel(request.cancel_token)?;
-
-    run_github_merge(reference, request, expected_head, &mut observation).await
 }
 
 async fn run_github_merge(
@@ -1992,7 +2155,13 @@ async fn run_github_merge(
     match (result, diagnostic) {
         (Err(AutoSquashError::CommandFailed(_)), Some(diagnostic)) => {
             observation.merge_diagnostic = Some(diagnostic);
-            Err(AutoSquashError::CommandFailed(diagnostic.message()))
+            if matches!(diagnostic.reason, GitHubMergeRefusalReason::BaseChanged) {
+                Ok(AutoSquashOutcome::ResyncRequired(
+                    diagnostic.reason.description().to_string(),
+                ))
+            } else {
+                Err(AutoSquashError::CommandFailed(diagnostic.message()))
+            }
         }
         (result, _) => result,
     }

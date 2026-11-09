@@ -1138,12 +1138,13 @@ async fn execute_step_kind_inner(
             {
                 return Err(CruiseError::Interrupted);
             }
-            match merge_result {
+            let resync_required = match merge_result {
                 Ok(crate::pr_merge::automatic::AutoSquashOutcome::Merged) => {
                     crate::status_eprintln!("{} squash merge confirmed", style("v").green().bold());
                     if let Some(log) = ctx.on_step_log {
                         log("info", "squash merge confirmed");
                     }
+                    false
                 }
                 Ok(crate::pr_merge::automatic::AutoSquashOutcome::AlreadyMerged) => {
                     crate::status_eprintln!(
@@ -1153,6 +1154,23 @@ async fn execute_step_kind_inner(
                     if let Some(log) = ctx.on_step_log {
                         log("info", "pull request was already merged");
                     }
+                    false
+                }
+                Ok(crate::pr_merge::automatic::AutoSquashOutcome::ResyncRequired(reason))
+                    if has_if_fail =>
+                {
+                    crate::status_eprintln!(
+                        "  {} {reason}; routing to base synchronization",
+                        style("R").cyan()
+                    );
+                    if let Some(log) = ctx.on_step_log {
+                        log("warning", &reason);
+                    }
+                    *failed += 1;
+                    true
+                }
+                Ok(crate::pr_merge::automatic::AutoSquashOutcome::ResyncRequired(reason)) => {
+                    return Err(CruiseError::SquashMergeFailed(reason));
                 }
                 Err(crate::pr_merge::automatic::AutoSquashError::Cancelled) => {
                     return Err(CruiseError::Interrupted);
@@ -1160,11 +1178,11 @@ async fn execute_step_kind_inner(
                 Err(error) => {
                     return Err(CruiseError::SquashMergeFailed(error.to_string()));
                 }
-            }
-            log_step_result(step_start.elapsed(), true);
+            };
+            log_step_result(step_start.elapsed(), !resync_required);
             Ok(StepExecOutcome {
                 option_next: None,
-                failed: false,
+                failed: resync_required,
                 skip_step_reason: None,
             })
         }
@@ -3085,6 +3103,111 @@ steps:
         assert!(result.is_err());
     }
 
+    #[tokio::test]
+    async fn if_fail_sync_route_is_bounded_by_max_retries() {
+        let yaml = r"
+command: [echo]
+steps:
+  sync-base:
+    command: 'true'
+  squash-merge:
+    command: 'exit 1'
+    if:
+      fail: sync-base
+";
+        let result = run_config_with_retries(yaml, "", None, 2, 0).await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(CruiseError::LoopProtection {
+                    from,
+                    to,
+                    max_retries: 2,
+                    edge_counts,
+                    ..
+                }) if from == "sync-base"
+                    && to == "squash-merge"
+                    && edge_counts.iter().any(|(edge_from, edge_to, traversals)| {
+                        edge_from == "squash-merge" && edge_to == "sync-base" && *traversals == 2
+                    })
+            ),
+            "repeated if.fail sync must stop at its edge budget: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_after_pr_edge_budget_reduces_resyncs_after_ci_fixes() {
+        for (ci_failures, expected_merge_attempts) in [(0_usize, 3_usize), (1, 2), (2, 1)] {
+            let root = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+            let yaml = format!(
+                r#"
+command: [echo]
+steps:
+  sync-base:
+    command: 'printf sync >> sync-count'
+  resolve-conflict:
+    skip: prev.success
+    command: 'true'
+  push-after-sync:
+    command: 'true'
+  wait-ci:
+    command: |-
+      count=0
+      if [ -f wait-count ]; then count=$(cat wait-count); fi
+      count=$((count + 1))
+      printf '%s\n' "$count" > wait-count
+      if [ "$count" -le {ci_failures} ]; then exit 1; fi
+      exit 0
+  fix-ci-error:
+    skip: prev.success
+    command: 'printf fix >> fix-count'
+    next: wait-ci
+  squash-merge:
+    command: 'printf merge >> merge-count; exit 1'
+    if:
+      fail: sync-base
+"#
+            );
+            let result = run_config_inner(
+                &yaml,
+                "",
+                None,
+                root.path().to_path_buf(),
+                3,
+                0,
+                None,
+                None,
+                &NoOpOptionHandler,
+                &[],
+            )
+            .await;
+
+            assert!(
+                matches!(
+                    &result,
+                    Err(CruiseError::LoopProtection { max_retries: 3, .. })
+                ),
+                "{ci_failures} CI fixes should exhaust the shared edge budget: {result:?}"
+            );
+            let merge_attempts = std::fs::read_to_string(root.path().join("merge-count"))
+                .unwrap_or_default()
+                .matches("merge")
+                .count();
+            assert_eq!(
+                merge_attempts,
+                expected_merge_attempts,
+                "{ci_failures} CI fixes should leave {} base resyncs",
+                expected_merge_attempts - 1
+            );
+            let fix_attempts = std::fs::read_to_string(root.path().join("fix-count"))
+                .unwrap_or_default()
+                .matches("fix")
+                .count();
+            assert_eq!(fix_attempts, ci_failures);
+        }
+    }
     #[tokio::test]
     async fn test_zero_max_retries_rejects_first_budgeted_transition() {
         // Given: a linear workflow with no loop edge.

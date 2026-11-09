@@ -32,7 +32,7 @@ fi
 source target/formal-tools/env.sh
 Q="$ROOT/tests/formal/node_modules/.bin/quint"
 MODEL=tests/formal/pr_review_fix.qnt
-run_check versions bash -c '[[ $(node --version) == v26.12.1 ]] && node --version && [[ $("$1" --version) == 0.33.0 ]] && "$1" --version && java -version && java -XshowSettings:properties -version 2>&1 | grep -E "java.runtime.version = 25\\.0\\.5\\+8-LTS" && rustc +1.99.1 --version' _ "$Q"
+run_check versions bash -c '[[ $(node --version) == v26.13.0 ]] && node --version && [[ $("$1" --version) == 0.33.0 ]] && "$1" --version && java -version && java -XshowSettings:properties -version 2>&1 | grep -E "java.runtime.version = 25\\.0\\.5\\+8-LTS" && rustc +1.99.1 --version' _ "$Q"
 run_check alloy-version java -jar target/formal-tools/alloy-6.2.0.jar version
 run_check alloy-exec-help java -jar target/formal-tools/alloy-6.2.0.jar help exec
 run_check quint-typecheck "$Q" typecheck "$MODEL"

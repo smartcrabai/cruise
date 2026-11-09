@@ -415,7 +415,7 @@ Without a retry policy, cruise retries the same model with exponential backoff w
 The `retry:` block is accepted by configuration validation for any backend but affects retry behavior only for SDK backends. In SDK mode, declaring it,
 or using a workflow-level model array with fallback entries, widens rate-limit
 handling into a fallback policy: 5xx, HTTP 4xx other than 429, 401, 403, 407,
-and 408, and network failures become retryable too,
+and 408, and network failures (including request-send transport errors and SDK setup timeouts before prompt acceptance) become retryable too,
 the backoff switches to `base_delay_ms` doubling to an 8s ceiling, and those
 failures switch immediately to the next usable fallback when
 `--rate-limit-retries` is above zero and no visible text was streamed. A 429
@@ -455,6 +455,7 @@ enable switching. The
 wider classification and the new backoff schedule still apply, so omit the
 block entirely and use scalar or unset model fields to keep the historical
 behavior.
+For OpenCode, only network-class local V2 API setup/transport failures before prompt submission bypass the retry barrier; rate-limit, client, and server-class local responses do not.
 
 ```yaml
 retry:                    # Optional; accepted by validation for any backend, honored only by SDK backends

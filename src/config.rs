@@ -1198,7 +1198,7 @@ pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<(
     use crate::error::CruiseError;
 
     for (group_name, group) in &config.groups {
-        if let Some(ref if_cond) = group.if_condition {
+        if let Some(if_cond) = &group.if_condition {
             if if_cond.fail.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "group '{group_name}' uses if.fail, which is not supported at the group level",
@@ -1213,10 +1213,10 @@ pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<(
     }
 
     for (name, step) in &config.after_pr {
-        if let Some(ref if_cond) = step.if_condition {
-            if if_cond.fail.is_some() {
+        if let Some(if_cond) = &step.if_condition {
+            if if_cond.fail.is_some() && step.squash_merge != Some(true) {
                 return Err(CruiseError::InvalidStepConfig(format!(
-                    "step '{name}' in after-pr uses if.fail, which is not supported in after-pr steps",
+                    "step '{name}' in after-pr uses if.fail, which is only supported on native squash-merge",
                 )));
             }
             if if_cond.no_file_changes.is_some() {
@@ -1771,6 +1771,16 @@ pub(crate) fn validate_squash_merge_step(
     if !merge_gate {
         return Err(invalid("requires exactly the 'merge' flag"));
     }
+    if step.if_condition.as_ref().is_some_and(|condition| {
+        condition.file_changed.is_some()
+            || condition.no_file_changes.is_some()
+            || condition
+                .fail
+                .as_ref()
+                .is_none_or(|fail| !matches!(fail, FailAction::Goto(_)))
+    }) {
+        return Err(invalid("if supports only a named if.fail recovery route"));
+    }
     if step.model.is_some()
         || step.prompt.is_some()
         || step.prompt_file.is_some()
@@ -1780,7 +1790,6 @@ pub(crate) fn validate_squash_merge_step(
         || step.command.is_some()
         || step.parallel.is_some()
         || step.next.is_some()
-        || step.if_condition.is_some()
         || step.group.is_some()
         || step.workflow_call.is_some()
         || step.computer_use.is_some()
@@ -4943,6 +4952,32 @@ after-pr:
         assert!(
             msg.contains("after-pr") || msg.contains("notify"),
             "error should mention after-pr step, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_if_fail_on_native_squash_merge() {
+        let yaml = r"
+command: [echo]
+flags:
+  merge: {}
+steps:
+  build:
+    command: cargo build
+after-pr:
+  sync:
+    command: echo sync
+  squash-merge:
+    squash-merge: true
+    flag: merge
+    if:
+      fail: sync
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = validate_config(&config);
+        assert!(
+            result.is_ok(),
+            "expected native squash-merge recovery route to validate: {result:?}"
         );
     }
 

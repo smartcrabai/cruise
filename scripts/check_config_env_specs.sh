@@ -32,7 +32,7 @@ fi
 source target/formal-tools/env.sh
 Q="$ROOT/tests/formal/node_modules/.bin/quint"
 MODEL=tests/formal/config_env_override.qnt
-run_check versions bash -c '[[ $(node --version) == v26.12.1 ]] && node --version && java -version'
+run_check versions bash -c '[[ $(node --version) == v26.13.0 ]] && node --version && java -version'
 run_check quint-version "$Q" --version
 run_check quint-typecheck "$Q" typecheck "$MODEL"
 run_check quint-test "$Q" test "$MODEL" --main config_env_override --backend typescript --seed 20261107 --out-itf "$RUN/test_{test}_{seq}.itf.json"

@@ -40,7 +40,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
@@ -77,7 +77,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
       - name: Install pinned Rust
@@ -117,7 +117,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
@@ -155,7 +155,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
@@ -193,7 +193,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: |
             tests/formal/package-lock.json
@@ -233,7 +233,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: |
             tests/formal/package-lock.json
@@ -273,7 +273,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
@@ -317,7 +317,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
@@ -355,7 +355,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
@@ -406,7 +406,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
@@ -443,7 +443,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
       - name: Install pinned Rust
@@ -477,7 +477,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
@@ -515,7 +515,7 @@ jobs:
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: '26.12.1'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
