@@ -12,7 +12,7 @@ use cruise::error::CruiseError;
 use cruise::flags::{self, FlagValues};
 use cruise::graph::{TransitionReason, build_graph};
 use cruise::resolver::{ConfigSource, resolve_workflow_config};
-use cruise::workflow::compile;
+use cruise::workflow::{CompiledWorkflow, compile};
 use cruise::workflow_call::resolve_workflow_calls_from_path_with_defaults;
 use cruise::workflow_cmd::eject_builtin;
 use cruise::workflow_defaults::WorkflowDefaults;
@@ -34,9 +34,9 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-fn assert_after_pr_contract(config: WorkflowConfig) {
-    validate_config(&config).unwrap();
-    let compiled = compile(config).unwrap();
+/// The native merge step routes confirmed behind/conflicting outcomes back to
+/// `follow-up/sync-base` over a backward edge bounded by `max_retries`.
+fn assert_native_merge_resyncs_to_sync_base(compiled: &CompiledWorkflow) {
     let native_merge_steps: Vec<_> = compiled
         .after_pr
         .iter()
@@ -76,6 +76,12 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
             "{name} -> {target} must be a backward edge governed by max_retries"
         );
     }
+}
+
+fn assert_after_pr_contract(config: WorkflowConfig) {
+    validate_config(&config).unwrap();
+    let compiled = compile(config).unwrap();
+    assert_native_merge_resyncs_to_sync_base(&compiled);
     let ids: Vec<_> = compiled.after_pr.keys().map(String::as_str).collect();
     assert_eq!(ids, AFTER_PR_IDS);
     assert!(
