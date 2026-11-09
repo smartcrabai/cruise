@@ -116,11 +116,12 @@ async fn cancelling_boundary_acquisition_never_submits_prompt() {
     server.abort();
 }
 #[test]
-fn setup_timeout_does_not_create_a_retry_barrier_but_uncertain_prompt_does() {
+fn retry_barrier_preserves_uncertain_prompt_and_resume_state() {
     let setup = super::AttemptError {
         message: "OpenCode V2 setup timed out".to_owned(),
         provider_failure: None,
         prompt_submitted: false,
+        resume_uncertain: false,
     };
     assert!(!setup.requires_retry_barrier());
 
@@ -128,8 +129,16 @@ fn setup_timeout_does_not_create_a_retry_barrier_but_uncertain_prompt_does() {
         message: "OpenCode prompt acceptance uncertain: timeout".to_owned(),
         provider_failure: None,
         prompt_submitted: true,
+        resume_uncertain: false,
     };
     assert!(uncertain.requires_retry_barrier());
+    let dirty_resume = super::AttemptError {
+        message: "OpenCode setup timeout left resumed session unclean".to_owned(),
+        provider_failure: None,
+        prompt_submitted: false,
+        resume_uncertain: true,
+    };
+    assert!(dirty_resume.requires_retry_barrier());
 }
 
 #[tokio::test]
