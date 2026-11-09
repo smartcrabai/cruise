@@ -142,7 +142,8 @@ steps:
 
 ### Constraints on `if.fail`
 
-- Cannot be used inside `after-pr` steps.
+- In `after-pr`, `if.fail` is supported only on the native `squash-merge: true` step; it is rejected on every other after-PR step.
+- On the native step, GitHub's confirmed behind/diverged base ancestry or `CONFLICTING`/`DIRTY` mergeability can route to `if.fail`; other readiness failures remain errors. The built-in `follow-up/sync-base` handler runs the existing sync-base → resolve-conflict → push-after-sync → wait-ci → fix-ci-error loop, whose retries remain bounded by the effective `--max-retries` / workflow `max_retries` setting (default 3). This GitHub-only ancestry check does not change GitLab behavior.
 - Cannot be used in a group-level `if:`.
 - With `if.fail` set, recoverable prompt-step errors are caught and routed to the handler instead of aborting the workflow. Missing-model errors from jcode prompts bypass the handler and abort the workflow.
 - Without `if.fail`, a failed command step does **not** abort the workflow — it proceeds normally and the next step can branch on `{prev.success}` / `{prev.stderr}`. A `no-file-changes` failure without `if.fail` aborts the workflow.

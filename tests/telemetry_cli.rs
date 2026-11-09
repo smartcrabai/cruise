@@ -3773,6 +3773,14 @@ if [ "$1" = "api" ]; then
   esac
   head=$(git rev-parse HEAD) || exit 97
   case "$*" in
+    *"/rules/branches/"*)
+      printf '[]\n'
+      exit 0
+      ;;
+    *compare/*)
+      printf 'ahead\n'
+      exit 0
+      ;;
     *checkSuites*)
       printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
       exit 0
@@ -3844,6 +3852,10 @@ if [ "$1" = "api" ]; then
       printf '[]\n'
       exit 0
       ;;
+    *compare/*)
+      printf 'ahead\n'
+      exit 0
+      ;;
     *checkSuites*)
       head=$(git rev-parse HEAD) || exit 97
       printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
@@ -3897,6 +3909,7 @@ if [ "$1" = "api" ]; then
       echo 'stderr-secret-8241' >&2
       exit 1 ;;
     *"/rules/branches/"*) echo '[]'; exit 0 ;;
+    *compare/*) echo 'ahead'; exit 0 ;;
     *checkSuites*)
       head=$(git rev-parse HEAD) || exit 97
       printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
@@ -4195,16 +4208,16 @@ fn assert_expected_head_readiness(root: &std::path::Path) -> String {
         .parse::<usize>()
         .unwrap_or_else(|error| panic!("parse fake status count: {error}"));
     assert_eq!(
-        status_count, 4,
-        "native readiness should observe stale CI, current-head pending CI, then two current-head green CI observations"
+        status_count, 5,
+        "native readiness should observe stale CI, current-head pending CI, two green polls, and a final merge-time check"
     );
     let status_sequence = std::fs::read_to_string(root.join("fake-gh-status-sequence"))
         .unwrap_or_else(|error| panic!("read fake status sequence: {error}"));
     let status_sequence: Vec<_> = status_sequence.lines().collect();
     assert_eq!(
         status_sequence.len(),
-        4,
-        "fake provider should observe stale, pending, and two consecutive ready polls: {status_sequence:?}"
+        5,
+        "fake provider should observe stale, pending, two consecutive ready polls, and the final gate: {status_sequence:?}"
     );
     assert!(
         status_sequence[0].starts_with("UNKNOWN ") && status_sequence[0].ends_with(OLD_HEAD),
@@ -4230,6 +4243,11 @@ fn assert_expected_head_readiness(root: &std::path::Path) -> String {
         status_sequence[3],
         expected_status.as_str(),
         "native readiness should merge after the second consecutive green poll: {status_sequence:?}"
+    );
+    assert_eq!(
+        status_sequence[4],
+        expected_status.as_str(),
+        "the merge-time readiness gate must confirm current-head CI again: {status_sequence:?}"
     );
     expected_head
 }
@@ -4288,6 +4306,22 @@ fn assert_single_guarded_merge(scenario: &MergeCliCase, expected_head: &str) {
         merge_writes.len(),
         1,
         "the fake gh log should contain one merge write: {gh_calls}"
+    );
+    let compare_calls: Vec<_> = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| call.contains("compare/main...").then_some(index))
+        .collect();
+    assert_eq!(
+        compare_calls.len(),
+        2,
+        "native readiness must check ancestry before waiting and immediately before merging: {gh_calls}"
+    );
+    assert!(
+        compare_calls
+            .last()
+            .is_some_and(|index| { index.checked_add(1) == Some(merge_writes[0].0) }),
+        "the final ancestry check must immediately precede the guarded merge: {gh_calls}"
     );
     assert!(
         wait_ci < status_calls[0]

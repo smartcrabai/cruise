@@ -1138,12 +1138,13 @@ async fn execute_step_kind_inner(
             {
                 return Err(CruiseError::Interrupted);
             }
-            match merge_result {
+            let resync_required = match merge_result {
                 Ok(crate::pr_merge::automatic::AutoSquashOutcome::Merged) => {
                     crate::status_eprintln!("{} squash merge confirmed", style("v").green().bold());
                     if let Some(log) = ctx.on_step_log {
                         log("info", "squash merge confirmed");
                     }
+                    false
                 }
                 Ok(crate::pr_merge::automatic::AutoSquashOutcome::AlreadyMerged) => {
                     crate::status_eprintln!(
@@ -1153,6 +1154,23 @@ async fn execute_step_kind_inner(
                     if let Some(log) = ctx.on_step_log {
                         log("info", "pull request was already merged");
                     }
+                    false
+                }
+                Ok(crate::pr_merge::automatic::AutoSquashOutcome::ResyncRequired(reason))
+                    if has_if_fail =>
+                {
+                    crate::status_eprintln!(
+                        "  {} {reason}; routing to base synchronization",
+                        style("R").cyan()
+                    );
+                    if let Some(log) = ctx.on_step_log {
+                        log("warning", &reason);
+                    }
+                    *failed += 1;
+                    true
+                }
+                Ok(crate::pr_merge::automatic::AutoSquashOutcome::ResyncRequired(reason)) => {
+                    return Err(CruiseError::SquashMergeFailed(reason));
                 }
                 Err(crate::pr_merge::automatic::AutoSquashError::Cancelled) => {
                     return Err(CruiseError::Interrupted);
@@ -1160,11 +1178,11 @@ async fn execute_step_kind_inner(
                 Err(error) => {
                     return Err(CruiseError::SquashMergeFailed(error.to_string()));
                 }
-            }
-            log_step_result(step_start.elapsed(), true);
+            };
+            log_step_result(step_start.elapsed(), !resync_required);
             Ok(StepExecOutcome {
                 option_next: None,
-                failed: false,
+                failed: resync_required,
                 skip_step_reason: None,
             })
         }
@@ -3085,6 +3103,38 @@ steps:
         assert!(result.is_err());
     }
 
+    #[tokio::test]
+    async fn if_fail_sync_route_is_bounded_by_max_retries() {
+        let yaml = r"
+command: [echo]
+steps:
+  sync-base:
+    command: 'true'
+  squash-merge:
+    command: 'exit 1'
+    if:
+      fail: sync-base
+";
+        let result = run_config_with_retries(yaml, "", None, 2, 0).await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(CruiseError::LoopProtection {
+                    from,
+                    to,
+                    max_retries: 2,
+                    edge_counts,
+                    ..
+                }) if from == "sync-base"
+                    && to == "squash-merge"
+                    && edge_counts.iter().any(|(edge_from, edge_to, traversals)| {
+                        edge_from == "squash-merge" && edge_to == "sync-base" && *traversals == 2
+                    })
+            ),
+            "repeated if.fail sync must stop at its edge budget: {result:?}"
+        );
+    }
     #[tokio::test]
     async fn test_zero_max_retries_rejects_first_budgeted_transition() {
         // Given: a linear workflow with no loop edge.
