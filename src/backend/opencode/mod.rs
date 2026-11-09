@@ -429,7 +429,7 @@ async fn run_attempt(
         .await;
         // Without a submitted prompt, this attempt did not alter conversation history.
         if !prompt_submitted {
-            conversation_clean = storage.initial_clean;
+            conversation_clean = storage.initial_clean || checkpointed;
         }
         let stop = runtime.stop().await;
         let bridge_stop = bridge.stop().await;

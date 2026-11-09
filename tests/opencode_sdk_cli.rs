@@ -1309,8 +1309,6 @@ fn catalog_failure_cases() -> Vec<(Catalog, Vec<&'static str>)> {
             vec!["protocol"],
         ),
         (Catalog::Http(StatusCode::UNAUTHORIZED), vec!["401"]),
-        (Catalog::Http(StatusCode::SERVICE_UNAVAILABLE), vec!["503"]),
-        (Catalog::Transport, vec!["transport"]),
     ]
 }
 
@@ -1412,6 +1410,27 @@ async fn catalog_resolution_failures_never_send_prompts_or_mutate_resume_models(
             }
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_catalog_transport_error_uses_fallback_before_prompt() {
+    let _lock = lock_process();
+    let fixture = Fixture::new(Scenario::Complete).await;
+    let _guards = fixture.guards();
+    set_catalog(&fixture, Catalog::Transport);
+    let outcome = fixture
+        .execute(Some("fixture/catalog-transport-primary:medium"), 2)
+        .await
+        .unwrap_or_else(|error| panic!("catalog transport failure should fall back: {error}"));
+
+    assert_eq!(outcome.result.output, ANSWER);
+    assert_eq!(fixture.prompt_count(), 1);
+    assert_eq!(fixture.launch_count(), 2);
+    assert_eq!(
+        selected_models(&fixture),
+        vec![json!({"providerID":"fixture","id":"fallback"})]
+    );
+    fixture.assert_stopped();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2075,18 +2094,48 @@ async fn retained_history_is_fenced_before_current_turn_recovery() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unavailable_boundary_admits_no_prompt() {
+async fn unavailable_boundary_keeps_checkpointed_session_resumable() {
     let _lock = lock_process();
     let fixture = Fixture::new(Scenario::BoundaryUnavailable).await;
     let _guards = fixture.guards();
-    let error = fixture
-        .execute(Some(MODEL), 2)
+    // Retry is disabled to isolate the checkpoint's clean-state invariant.
+    let checkpoint = |_: &cruise::model_selection::SdkSessionId| Ok(());
+    let Err(error) = fixture
+        .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
         .await
-        .err()
-        .unwrap_or_else(|| panic!("unavailable boundary accepted"));
+    else {
+        panic!("unavailable boundary accepted");
+    };
     assert!(error.to_string().contains("boundary"), "{error}");
     assert_eq!(fixture.prompt_count(), 0);
     assert_eq!(fixture.launch_count(), 1);
+    let manifest = std::fs::read_dir(fixture.root.path().join("data/cruise/opencode"))
+        .unwrap_or_else(|error| panic!("storage directory: {error}"))
+        .next()
+        .unwrap_or_else(|| panic!("checkpointed storage missing"))
+        .unwrap_or_else(|error| panic!("storage entry: {error}"))
+        .path()
+        .join("manifest.json");
+    let value: Value = serde_json::from_slice(
+        &std::fs::read(manifest).unwrap_or_else(|error| panic!("manifest: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("manifest JSON: {error}"));
+    assert_eq!(
+        value["clean"], true,
+        "a checkpointed pre-prompt failure must keep resume safe"
+    );
+    let session_id = locked(&fixture.server).session_id.clone();
+    assert!(!session_id.is_empty(), "checkpointed session ID missing");
+    let resumed = resume_fixture_with_model(&fixture, &session_id, 0, MODEL).await;
+    let Err(resume_error) = resumed else {
+        panic!("unavailable boundary accepted a resumed prompt");
+    };
+    assert!(
+        resume_error.to_string().contains("boundary"),
+        "resuming after a pre-prompt failure must reach the boundary: {resume_error}"
+    );
+    assert_eq!(fixture.prompt_count(), 0);
+    assert_eq!(fixture.launch_count(), 2);
     fixture.assert_stopped();
 }
 
