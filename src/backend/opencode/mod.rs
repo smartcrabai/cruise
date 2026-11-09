@@ -290,7 +290,14 @@ async fn run_attempt(
                     .plugins(&cwd)
                     .await
                     .map_err(|error| error.to_string())?;
-                bridge.wait_ready(&cancel).await?;
+                Ok(())
+            })
+            .await
+            .map_err(|_| "OpenCode V2 setup timed out".to_owned())?;
+            setup?;
+            // Keep missing-plugin errors distinct from retryable API timeouts.
+            bridge.wait_ready(&cancel).await?;
+            let setup = tokio::time::timeout(Duration::from_secs(7), async {
                 let model = if let Some(mut request) = request {
                     if let Some(effort) = request.effort {
                         let resolution = async {

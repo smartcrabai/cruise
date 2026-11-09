@@ -38,10 +38,20 @@ Feature: Owned OpenCode V2 execution through Cruise's real Executor
       | protocol     | resumed      |
       | unauthorized | new          |
       | unauthorized | resumed      |
-      | unavailable  | new          |
-      | unavailable  | resumed      |
-      | transport    | new          |
-      | transport    | resumed      |
+
+  @retry @fallback
+  Scenario Outline: Transient catalog failures use the configured fallback
+    When the Executor selects <selection> on a <conversation> conversation
+    Then the transient catalog error succeeds on the fallback model
+    And the catalog was requested 1 times
+    And the owned CLI has been reaped before the Executor returns
+
+    Examples:
+      | selection   | conversation |
+      | unavailable | new          |
+      | unavailable | resumed      |
+      | transport   | new          |
+      | transport   | resumed      |
 
   @compatibility @no-catalog
   Scenario Outline: Existing model forms do not depend on a working capability catalog

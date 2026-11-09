@@ -40,6 +40,7 @@ pub(crate) enum Scenario {
     Malformed,
     UncertainAcceptance,
     HandshakeFailure(StatusCode),
+    TransientInfoTimeout,
     Pending,
     PluginDisabled,
     ProviderFailure { status: u16, side_effect: bool },
@@ -328,6 +329,16 @@ async fn serve(State(server): State<Arc<Server>>, request: Request) -> Response 
         }
         (Method::GET, "/api/info") => {
             locked(&server).plugin_ready = false;
+            let delay_first_info = matches!(server.scenario, Scenario::TransientInfoTimeout)
+                && locked(&server)
+                    .requests
+                    .iter()
+                    .filter(|request| request.path == "/api/info")
+                    .count()
+                    == 1;
+            if delay_first_info {
+                tokio::time::sleep(Duration::from_secs(8)).await;
+            }
             if let Scenario::HandshakeFailure(status) = server.scenario {
                 return (
                     status,
@@ -2699,7 +2710,14 @@ async fn missing_required_plugin_stops_before_prompt_and_does_not_fallback() {
     let _lock = lock_process();
     let fixture = Fixture::new(Scenario::PluginDisabled).await;
     let _guards = fixture.guards();
-    assert!(fixture.execute(Some(MODEL), 2).await.is_err());
+    let Err(error) = fixture.execute(Some(MODEL), 2).await else {
+        panic!("missing required plugin should fail before prompt submission");
+    };
+    assert!(
+        error.to_string().contains("required native plugin"),
+        "unexpected plugin failure: {error}"
+    );
+    assert_eq!(fixture.launch_count(), 1);
     assert_eq!(fixture.prompt_count(), 0);
     assert_eq!(
         locked(&fixture.server)
@@ -2708,6 +2726,26 @@ async fn missing_required_plugin_stops_before_prompt_and_does_not_fallback() {
             .filter(|request| request.method == Method::POST && request.path == "/api/session")
             .count(),
         0
+    );
+    fixture.assert_stopped();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_setup_timeout_uses_fallback_without_replaying_first_prompt() {
+    let _lock = lock_process();
+    let fixture = Fixture::new(Scenario::TransientInfoTimeout).await;
+    let _guards = fixture.guards();
+    let outcome = fixture
+        .execute(Some("fixture/transient-info-timeout"), 2)
+        .await
+        .unwrap_or_else(|error| panic!("transient setup timeout should fall back: {error}"));
+
+    assert_eq!(outcome.result.output, ANSWER);
+    assert_eq!(fixture.prompt_count(), 1);
+    assert_eq!(fixture.launch_count(), 2);
+    assert_eq!(
+        selected_models(&fixture),
+        vec![json!({"providerID":"fixture","id":"fallback"})]
     );
     fixture.assert_stopped();
 }
