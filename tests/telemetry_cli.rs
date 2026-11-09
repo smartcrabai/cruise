@@ -4147,6 +4147,10 @@ fn rejected_squash_merge_persists_github_mergeability_and_exports_it() {
             panic!("expected failed session after merge readiness rejection: {session:#?}");
         };
         assert!(
+            phase_error.starts_with("automatic squash merge failed:"),
+            "without if.fail, the resync outcome must remain a SquashMergeFailed error: {phase_error}"
+        );
+        assert!(
             phase_error.contains("mergeable=CONFLICTING"),
             "saved phase error omitted actual mergeable value: {phase_error}"
         );
@@ -4213,14 +4217,14 @@ steps:
   work:
     command: "printf changed > merge-resync.txt"
 after-pr:
-  sync-base:
+  follow-up/sync-base:
     command: "printf sync >> \"$FAKE_SYNC_LOG\""
   squash-merge:
     squash-merge: true
     flag: merge
     timeout: "10"
     if:
-      fail: sync-base
+      fail: follow-up/sync-base
 "#;
     let mut scenario = merge_diagnostics_case(false, workflow);
     let sync_log = scenario.cli.root.path().join("fake-sync.log");

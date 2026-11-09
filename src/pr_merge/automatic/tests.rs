@@ -1804,6 +1804,33 @@ async fn github_refusal_fixture(
 }
 
 #[tokio::test]
+async fn github_base_changed_merge_refusal_requests_resynchronization() {
+    let response = format!(
+        "HTTP/2 405\r\nX-Secret: header-secret\r\n\r\n{}",
+        json!({"message":"Base branch was modified. Review and try the merge again."})
+    );
+    let (fixture, result) = github_refusal_fixture(response.as_bytes(), None).await;
+
+    assert!(
+        matches!(&result, Ok(AutoSquashOutcome::ResyncRequired(reason)) if reason.contains("Base branch changed")),
+        "unexpected result: {result:?}"
+    );
+    assert!(
+        fixture.effect_lines().is_empty(),
+        "base-change refusal must not be recorded as a successful merge"
+    );
+    assert_eq!(
+        fixture
+            .provider_log()
+            .lines()
+            .filter(|line| line.contains("pulls/7/merge"))
+            .count(),
+        1,
+        "the refusal must not trigger another merge write"
+    );
+}
+
+#[tokio::test]
 async fn github_refusal_canonical_reasons_are_safe_and_not_inferred_from_status() {
     for (status, message, reason) in [
         (405, "Pull Request is not mergeable", "merge_not_performed"),
@@ -1811,11 +1838,6 @@ async fn github_refusal_canonical_reasons_are_safe_and_not_inferred_from_status(
             409,
             "Head branch was modified. Review and try the merge again.",
             "head_changed",
-        ),
-        (
-            405,
-            "Base branch was modified. Review and try the merge again.",
-            "base_changed",
         ),
         (
             405,

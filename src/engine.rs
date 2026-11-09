@@ -3135,6 +3135,79 @@ steps:
             "repeated if.fail sync must stop at its edge budget: {result:?}"
         );
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_after_pr_edge_budget_reduces_resyncs_after_ci_fixes() {
+        for (ci_failures, expected_merge_attempts) in [(0_usize, 3_usize), (1, 2), (2, 1)] {
+            let root = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+            let yaml = format!(
+                r#"
+command: [echo]
+steps:
+  sync-base:
+    command: 'printf sync >> sync-count'
+  resolve-conflict:
+    skip: prev.success
+    command: 'true'
+  push-after-sync:
+    command: 'true'
+  wait-ci:
+    command: |-
+      count=0
+      if [ -f wait-count ]; then count=$(cat wait-count); fi
+      count=$((count + 1))
+      printf '%s\n' "$count" > wait-count
+      if [ "$count" -le {ci_failures} ]; then exit 1; fi
+      exit 0
+  fix-ci-error:
+    skip: prev.success
+    command: 'printf fix >> fix-count'
+    next: wait-ci
+  squash-merge:
+    command: 'printf merge >> merge-count; exit 1'
+    if:
+      fail: sync-base
+"#
+            );
+            let result = run_config_inner(
+                &yaml,
+                "",
+                None,
+                root.path().to_path_buf(),
+                3,
+                0,
+                None,
+                None,
+                &NoOpOptionHandler,
+                &[],
+            )
+            .await;
+
+            assert!(
+                matches!(
+                    &result,
+                    Err(CruiseError::LoopProtection { max_retries: 3, .. })
+                ),
+                "{ci_failures} CI fixes should exhaust the shared edge budget: {result:?}"
+            );
+            let merge_attempts = std::fs::read_to_string(root.path().join("merge-count"))
+                .unwrap_or_default()
+                .matches("merge")
+                .count();
+            assert_eq!(
+                merge_attempts,
+                expected_merge_attempts,
+                "{ci_failures} CI fixes should leave {} base resyncs",
+                expected_merge_attempts - 1
+            );
+            let fix_attempts = std::fs::read_to_string(root.path().join("fix-count"))
+                .unwrap_or_default()
+                .matches("fix")
+                .count();
+            assert_eq!(fix_attempts, ci_failures);
+        }
+    }
     #[tokio::test]
     async fn test_zero_max_retries_rejects_first_budgeted_transition() {
         // Given: a linear workflow with no loop edge.

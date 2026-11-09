@@ -2155,7 +2155,13 @@ async fn run_github_merge(
     match (result, diagnostic) {
         (Err(AutoSquashError::CommandFailed(_)), Some(diagnostic)) => {
             observation.merge_diagnostic = Some(diagnostic);
-            Err(AutoSquashError::CommandFailed(diagnostic.message()))
+            if matches!(diagnostic.reason, GitHubMergeRefusalReason::BaseChanged) {
+                Ok(AutoSquashOutcome::ResyncRequired(
+                    diagnostic.reason.description().to_string(),
+                ))
+            } else {
+                Err(AutoSquashError::CommandFailed(diagnostic.message()))
+            }
         }
         (result, _) => result,
     }
