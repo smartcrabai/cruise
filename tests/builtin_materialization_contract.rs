@@ -6,10 +6,11 @@ use std::process::Command;
 
 use cruise::builtin_workflows::BUILTIN_WORKFLOWS;
 use cruise::config::{
-    PermissionMode, ReviewerScope, SkipCondition, WorkflowConfig, validate_config,
+    FailAction, PermissionMode, ReviewerScope, SkipCondition, WorkflowConfig, validate_config,
 };
 use cruise::error::CruiseError;
 use cruise::flags::{self, FlagValues};
+use cruise::graph::{TransitionReason, build_graph};
 use cruise::resolver::{ConfigSource, resolve_workflow_config};
 use cruise::workflow::compile;
 use cruise::workflow_call::resolve_workflow_calls_from_path_with_defaults;
@@ -26,6 +27,7 @@ const AFTER_PR_IDS: [&str; 7] = [
     "follow-up/fix-ci-error",
     "squash-merge",
 ];
+const MAX_RETRIES: usize = 3;
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -35,6 +37,45 @@ fn write(path: &Path, text: &str) {
 fn assert_after_pr_contract(config: WorkflowConfig) {
     validate_config(&config).unwrap();
     let compiled = compile(config).unwrap();
+    let native_merge_steps: Vec<_> = compiled
+        .after_pr
+        .iter()
+        .filter(|(_, step)| step.squash_merge == Some(true))
+        .collect();
+    assert!(!native_merge_steps.is_empty());
+    let graph = build_graph(&compiled.to_after_pr_compiled(), MAX_RETRIES).unwrap();
+    assert_eq!(graph.max_retries, MAX_RETRIES);
+    for (name, step) in native_merge_steps {
+        let target = match step
+            .if_condition
+            .as_ref()
+            .and_then(|condition| condition.fail.as_ref())
+        {
+            Some(FailAction::Goto(target)) => target,
+            other => panic!("{name} must route merge failures to sync-base, got {other:?}"),
+        };
+        assert_eq!(target, "follow-up/sync-base", "{name}");
+        let node = graph
+            .nodes
+            .get(name)
+            .unwrap_or_else(|| panic!("missing graph node for {name}"));
+        let edge = node
+            .successors
+            .iter()
+            .find(|edge| {
+                matches!(
+                    &edge.reason,
+                    TransitionReason::IfFailGoto { target: edge_target }
+                        if edge_target == target
+                )
+            })
+            .unwrap_or_else(|| panic!("missing if.fail edge from {name} to {target}"));
+        assert_eq!(edge.target.as_deref(), Some(target.as_str()), "{name}");
+        assert!(
+            graph.nodes.get_index_of(target).unwrap() < graph.nodes.get_index_of(name).unwrap(),
+            "{name} -> {target} must be a backward edge governed by max_retries"
+        );
+    }
     let ids: Vec<_> = compiled.after_pr.keys().map(String::as_str).collect();
     assert_eq!(ids, AFTER_PR_IDS);
     assert!(

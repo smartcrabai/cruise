@@ -43,6 +43,23 @@ if [ "$1" = "api" ]; then
     exit 0
   fi
   case "$*" in
+    *compare/*)
+      if [ -n "${FAKE_GH_COMPARE_STATUS_SEQUENCE:-}" ]; then
+        calls=$(cat "$FAKE_GH_COMPARE_STATUS_CALLS" 2>/dev/null || printf '0')
+        calls=$((calls + 1))
+        printf '%s\n' "$calls" > "$FAKE_GH_COMPARE_STATUS_CALLS"
+        remaining=$calls
+        response=
+        while IFS= read -r item || [ -n "$item" ]; do
+          response=$item
+          remaining=$((remaining - 1))
+          [ "$remaining" -le 0 ] && break
+        done < "$FAKE_GH_COMPARE_STATUS_SEQUENCE"
+        printf '%s\n' "$response"
+      else
+        printf '%s\n' "${FAKE_GH_COMPARE_STATUS:-ahead}"
+      fi
+      ;;
     *graphql*)
       # Model gh api -F coercion for GraphQL String! variables.
       case "$*" in
@@ -230,6 +247,7 @@ impl Fixture {
                 self.effects.display().to_string(),
             ),
             ("FAKE_MERGED".to_string(), self.merged.display().to_string()),
+            ("FAKE_GH_COMPARE_STATUS".to_string(), "ahead".to_string()),
             ("FAKE_EXPECTED_HEAD".to_string(), self.head.clone()),
             (
                 "FAKE_GH_IDENTITY".to_string(),
@@ -970,30 +988,19 @@ async fn github_blocks_failed_ci_and_review_requirements_without_merge() {
 }
 
 #[tokio::test]
-async fn github_blocks_drafts_conflicts_and_head_races() {
+async fn github_blocks_drafts_and_head_races() {
     let fixture = Fixture::new();
     let other_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let mut draft = github_status(&fixture.head);
     draft["data"]["repository"]["pullRequest"]["isDraft"] = json!(true);
-    let mut conflict = github_status(&fixture.head);
-    conflict["data"]["repository"]["pullRequest"]["mergeable"] = json!("CONFLICTING");
-    let cases = [
-        (
-            "draft",
-            github_open_identity(&fixture.head),
-            draft,
-            json!([]),
-        ),
-        (
-            "conflict",
-            github_open_identity(&fixture.head),
-            conflict,
-            json!([]),
-        ),
-    ];
-    for (reason, identity, status, rules) in cases {
-        assert_github_rejected(&fixture, reason, &identity, &status, &rules).await;
-    }
+    assert_github_rejected(
+        &fixture,
+        "draft",
+        &github_open_identity(&fixture.head),
+        &draft,
+        &json!([]),
+    )
+    .await;
 
     fixture.configure_github_sequence(
         &github_open_identity(other_head),
@@ -1020,34 +1027,121 @@ async fn github_blocks_drafts_conflicts_and_head_races() {
 }
 
 #[tokio::test]
-async fn github_mergeability_rejection_reports_observed_values_without_merge() {
-    for (mergeable, merge_state_status) in [("CONFLICTING", "DIRTY"), ("MERGEABLE", "UNSTABLE")] {
-        let fixture = Fixture::new();
-        let mut status = github_status(&fixture.head);
-        status["data"]["repository"]["pullRequest"]["mergeable"] = json!(mergeable);
-        status["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!(merge_state_status);
-        fixture.configure_github(&github_open_identity(&fixture.head), &status, &json!([]));
+async fn github_conflicting_pull_request_requests_resynchronization_without_merging() {
+    let fixture = Fixture::new();
+    let mut conflict = github_status(&fixture.head);
+    conflict["data"]["repository"]["pullRequest"]["mergeable"] = json!("CONFLICTING");
+    conflict["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("DIRTY");
+    fixture.configure_github(&github_open_identity(&fixture.head), &conflict, &json!([]));
 
-        let result =
-            squash_merge(fixture.request("https://github.com/acme/service/pull/7", None)).await;
-        let reason = match result {
-            Err(AutoSquashError::Rejected(reason)) => reason,
-            other => panic!("{mergeable}/{merge_state_status}: {other:?}"),
-        };
-        assert!(
-            reason.contains(&format!("mergeable={mergeable}")),
-            "{reason}"
-        );
-        assert!(
-            reason.contains(&format!("mergeStateStatus={merge_state_status}")),
-            "{reason}"
-        );
-        assert_eq!(
-            fixture.effect_lines(),
-            Vec::<String>::new(),
-            "{mergeable}/{merge_state_status} must not issue a merge"
-        );
-    }
+    let result =
+        squash_merge(fixture.request("https://github.com/acme/service/pull/7", None)).await;
+
+    assert!(
+        matches!(&result, Ok(AutoSquashOutcome::ResyncRequired(reason)) if reason.contains("mergeable=CONFLICTING") && reason.contains("mergeStateStatus=DIRTY")),
+        "unexpected result: {result:?}"
+    );
+    assert!(
+        fixture.effect_lines().is_empty(),
+        "conflicting PR must not merge"
+    );
+}
+
+#[tokio::test]
+async fn github_behind_pull_request_requests_resynchronization_without_merging() {
+    let mut fixture = Fixture::new();
+    fixture
+        .env
+        .insert("FAKE_GH_COMPARE_STATUS".to_string(), "behind".to_string());
+    fixture.configure_github(
+        &github_open_identity(&fixture.head),
+        &github_status(&fixture.head),
+        &json!([]),
+    );
+
+    let result =
+        squash_merge(fixture.request("https://github.com/acme/service/pull/7", None)).await;
+
+    assert!(
+        matches!(&result, Ok(AutoSquashOutcome::ResyncRequired(reason)) if reason.contains("does not contain current base")),
+        "unexpected result: {result:?}"
+    );
+    assert!(
+        fixture
+            .provider_log()
+            .contains(&format!("compare/main...{}", fixture.head)),
+        "GitHub ancestry must be checked against the current base and pinned head"
+    );
+    assert!(
+        fixture.effect_lines().is_empty(),
+        "behind PR must not merge"
+    );
+}
+
+#[tokio::test]
+async fn github_base_advance_after_ready_polls_prevents_the_merge() {
+    let mut fixture = Fixture::new();
+    let sequence = fixture.temp.path().join("github_compare_sequence");
+    let calls = fixture.temp.path().join("github_compare_calls");
+    fs::write(&sequence, "ahead\nbehind\n")
+        .unwrap_or_else(|error| panic!("write compare sequence: {error}"));
+    fixture.env.insert(
+        "FAKE_GH_COMPARE_STATUS_SEQUENCE".to_string(),
+        sequence.display().to_string(),
+    );
+    fixture.env.insert(
+        "FAKE_GH_COMPARE_STATUS_CALLS".to_string(),
+        calls.display().to_string(),
+    );
+    fixture.configure_github(
+        &github_open_identity(&fixture.head),
+        &github_status(&fixture.head),
+        &json!([]),
+    );
+
+    let result = run_github_with_head_mismatch_grace(
+        &fixture,
+        None,
+        Duration::from_secs(5),
+        Duration::from_millis(1),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    assert!(
+        matches!(&result, Ok(AutoSquashOutcome::ResyncRequired(reason)) if reason.contains("does not contain current base")),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(calls).unwrap_or_else(|error| panic!("read compare calls: {error}")),
+        "2\n",
+        "the final readiness gate must compare the base again"
+    );
+    assert!(
+        fixture.effect_lines().is_empty(),
+        "a moved base must prevent the SHA-pinned merge"
+    );
+}
+
+#[tokio::test]
+async fn github_unstable_mergeability_is_still_rejected_without_merging() {
+    let fixture = Fixture::new();
+    let mut unstable = github_status(&fixture.head);
+    unstable["data"]["repository"]["pullRequest"]["mergeable"] = json!("MERGEABLE");
+    unstable["data"]["repository"]["pullRequest"]["mergeStateStatus"] = json!("UNSTABLE");
+    fixture.configure_github(&github_open_identity(&fixture.head), &unstable, &json!([]));
+
+    let result =
+        squash_merge(fixture.request("https://github.com/acme/service/pull/7", None)).await;
+
+    assert!(
+        matches!(&result, Err(AutoSquashError::Rejected(reason)) if reason.contains("mergeable=MERGEABLE") && reason.contains("mergeStateStatus=UNSTABLE")),
+        "unexpected result: {result:?}"
+    );
+    assert!(
+        fixture.effect_lines().is_empty(),
+        "unstable PR must not merge"
+    );
 }
 
 #[tokio::test]
@@ -1107,7 +1201,8 @@ async fn github_current_head_ci_failure_wins_over_unstable_mergeability() {
     let reference = super::parse_provider_ref(url).unwrap_or_else(|error| panic!("{error}"));
     let mut observation = super::GitHubReadinessObservation::new();
     let result =
-        super::github_merge_readiness(&reference, &request, &fixture.head, &mut observation).await;
+        super::github_merge_readiness(&reference, &request, &fixture.head, false, &mut observation)
+            .await;
 
     let reason = match result {
         Err(AutoSquashError::Rejected(reason)) => reason,
@@ -1219,8 +1314,8 @@ async fn github_paginated_check_suite_timeline_waits_for_completion() {
         pending_second_page.clone(),
         completed_page.clone(),
         completed_second_page.clone(),
-        completed_page,
-        completed_second_page,
+        completed_page.clone(),
+        completed_second_page.clone(),
     ]);
 
     let result = run_github_with_timing(
@@ -1466,7 +1561,8 @@ async fn github_timeout_diagnostic_uses_latest_observation() {
     let reference = super::parse_provider_ref(url).unwrap_or_else(|error| panic!("{error}"));
     let mut observation = super::GitHubReadinessObservation::new();
     let readiness =
-        super::github_merge_readiness(&reference, &request, &fixture.head, &mut observation).await;
+        super::github_merge_readiness(&reference, &request, &fixture.head, false, &mut observation)
+            .await;
 
     assert!(
         matches!(readiness, Ok(super::GitHubReadiness::Pending)),
@@ -1708,6 +1804,33 @@ async fn github_refusal_fixture(
 }
 
 #[tokio::test]
+async fn github_base_changed_merge_refusal_requests_resynchronization() {
+    let response = format!(
+        "HTTP/2 405\r\nX-Secret: header-secret\r\n\r\n{}",
+        json!({"message":"Base branch was modified. Review and try the merge again."})
+    );
+    let (fixture, result) = github_refusal_fixture(response.as_bytes(), None).await;
+
+    assert!(
+        matches!(&result, Ok(AutoSquashOutcome::ResyncRequired(reason)) if reason.contains("Base branch changed")),
+        "unexpected result: {result:?}"
+    );
+    assert!(
+        fixture.effect_lines().is_empty(),
+        "base-change refusal must not be recorded as a successful merge"
+    );
+    assert_eq!(
+        fixture
+            .provider_log()
+            .lines()
+            .filter(|line| line.contains("pulls/7/merge"))
+            .count(),
+        1,
+        "the refusal must not trigger another merge write"
+    );
+}
+
+#[tokio::test]
 async fn github_refusal_canonical_reasons_are_safe_and_not_inferred_from_status() {
     for (status, message, reason) in [
         (405, "Pull Request is not mergeable", "merge_not_performed"),
@@ -1715,11 +1838,6 @@ async fn github_refusal_canonical_reasons_are_safe_and_not_inferred_from_status(
             409,
             "Head branch was modified. Review and try the merge again.",
             "head_changed",
-        ),
-        (
-            405,
-            "Base branch was modified. Review and try the merge again.",
-            "base_changed",
         ),
         (
             405,

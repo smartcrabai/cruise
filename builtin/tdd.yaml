@@ -842,3 +842,5 @@ after-pr:
     flag: merge
     squash-merge: true
     timeout: 10m
+    if:
+      fail: follow-up/sync-base

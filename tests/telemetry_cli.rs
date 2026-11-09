@@ -3746,10 +3746,10 @@ fn merge_cli_case(telemetry_enabled: bool, workflow_yaml: &str, gh_script: &str)
     }
 }
 
-fn merge_diagnostics_case(telemetry_enabled: bool) -> MergeCliCase {
+fn merge_diagnostics_case(telemetry_enabled: bool, workflow_yaml: &str) -> MergeCliCase {
     merge_cli_case(
         telemetry_enabled,
-        "command: [cat]\ncreate_pr: true\nflags:\n  merge: {}\nsteps:\n  work:\n    command: \"printf changed > merge-diagnostic.txt\"\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n",
+        workflow_yaml,
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_GH_LOG"
 if [ "$1" = "--version" ]; then
@@ -3773,6 +3773,14 @@ if [ "$1" = "api" ]; then
   esac
   head=$(git rev-parse HEAD) || exit 97
   case "$*" in
+    *"/rules/branches/"*)
+      printf '[]\n'
+      exit 0
+      ;;
+    *compare/*)
+      printf 'ahead\n'
+      exit 0
+      ;;
     *checkSuites*)
       printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
       exit 0
@@ -3844,6 +3852,10 @@ if [ "$1" = "api" ]; then
       printf '[]\n'
       exit 0
       ;;
+    *compare/*)
+      printf 'ahead\n'
+      exit 0
+      ;;
     *checkSuites*)
       head=$(git rev-parse HEAD) || exit 97
       printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
@@ -3897,6 +3909,7 @@ if [ "$1" = "api" ]; then
       echo 'stderr-secret-8241' >&2
       exit 1 ;;
     *"/rules/branches/"*) echo '[]'; exit 0 ;;
+    *compare/*) echo 'ahead'; exit 0 ;;
     *checkSuites*)
       head=$(git rev-parse HEAD) || exit 97
       printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
@@ -4106,7 +4119,10 @@ fn pin_inline_config_snapshot(fixture: &Fixture, session_id: &str) -> PathBuf {
 #[test]
 fn rejected_squash_merge_persists_github_mergeability_and_exports_it() {
     for telemetry_enabled in [false, true] {
-        let scenario = merge_diagnostics_case(telemetry_enabled);
+        let scenario = merge_diagnostics_case(
+            telemetry_enabled,
+            "command: [cat]\ncreate_pr: true\nflags:\n  merge: {}\nsteps:\n  work:\n    command: \"printf changed > merge-diagnostic.txt\"\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n",
+        );
         let borrowed = borrowed_env(&scenario.env);
         let fixture = &scenario.cli;
         let gh_log = &scenario.gh_log;
@@ -4130,6 +4146,10 @@ fn rejected_squash_merge_persists_github_mergeability_and_exports_it() {
         let SessionPhase::Failed(phase_error) = &session.phase else {
             panic!("expected failed session after merge readiness rejection: {session:#?}");
         };
+        assert!(
+            phase_error.starts_with("automatic squash merge failed:"),
+            "without if.fail, the resync outcome must remain a SquashMergeFailed error: {phase_error}"
+        );
         assert!(
             phase_error.contains("mergeable=CONFLICTING"),
             "saved phase error omitted actual mergeable value: {phase_error}"
@@ -4186,6 +4206,73 @@ fn rejected_squash_merge_persists_github_mergeability_and_exports_it() {
     }
 }
 
+#[test]
+fn native_resync_outcome_routes_to_sync_base_and_loop_budget_stops_retries() {
+    let workflow = r#"
+command: [cat]
+create_pr: true
+flags:
+  merge: {}
+steps:
+  work:
+    command: "printf changed > merge-resync.txt"
+after-pr:
+  follow-up/sync-base:
+    command: "printf sync >> \"$FAKE_SYNC_LOG\""
+  squash-merge:
+    squash-merge: true
+    flag: merge
+    timeout: "10"
+    if:
+      fail: follow-up/sync-base
+"#;
+    let mut scenario = merge_diagnostics_case(false, workflow);
+    let sync_log = scenario.cli.root.path().join("fake-sync.log");
+    scenario.env.push((
+        "FAKE_SYNC_LOG".to_string(),
+        sync_log.to_string_lossy().into_owned(),
+    ));
+    let borrowed = borrowed_env(&scenario.env);
+    let fixture = &scenario.cli;
+    let session_id = create_merge_session(fixture, &borrowed);
+    let manager = SessionManager::new(fixture.root.path().join("data/cruise"));
+    let run = fixture
+        .cli_command(&["run", session_id.as_str()], &borrowed)
+        .output()
+        .unwrap_or_else(|error| panic!("run resync native merge: {error}"));
+
+    assert!(
+        !run.status.success(),
+        "conflicting PR loop unexpectedly succeeded"
+    );
+    let session = manager
+        .load(&session_id)
+        .unwrap_or_else(|error| panic!("load resync session: {error}"));
+    let SessionPhase::Failed(phase_error) = &session.phase else {
+        panic!("expected loop protection after repeated resyncs: {session:#?}");
+    };
+    assert!(
+        phase_error.to_lowercase().contains("loop protection"),
+        "resync loop should exhaust the existing edge budget: {phase_error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sync_log)
+            .unwrap_or_else(|error| panic!("read sync-base calls: {error}"))
+            .matches("sync")
+            .count(),
+        4,
+        "the native resync outcome must route back to sync-base until its edge budget is spent"
+    );
+    let gh_calls = std::fs::read_to_string(&scenario.gh_log)
+        .unwrap_or_else(|error| panic!("read fake gh log: {error}"));
+    assert!(
+        !gh_calls
+            .lines()
+            .any(|call| call.starts_with("api ") && call.contains("/merge")),
+        "a conflicting PR must never issue a native merge write: {gh_calls}"
+    );
+}
+
 fn assert_expected_head_readiness(root: &std::path::Path) -> String {
     const OLD_HEAD: &str = "0000000000000000000000000000000000000001";
 
@@ -4196,7 +4283,7 @@ fn assert_expected_head_readiness(root: &std::path::Path) -> String {
         .unwrap_or_else(|error| panic!("parse fake status count: {error}"));
     assert_eq!(
         status_count, 4,
-        "native readiness should observe stale CI, current-head pending CI, then two current-head green CI observations"
+        "native readiness should observe stale CI, current-head pending CI, and two current-head green polls"
     );
     let status_sequence = std::fs::read_to_string(root.join("fake-gh-status-sequence"))
         .unwrap_or_else(|error| panic!("read fake status sequence: {error}"));
@@ -4288,6 +4375,22 @@ fn assert_single_guarded_merge(scenario: &MergeCliCase, expected_head: &str) {
         merge_writes.len(),
         1,
         "the fake gh log should contain one merge write: {gh_calls}"
+    );
+    let compare_calls: Vec<_> = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| call.contains("compare/main...").then_some(index))
+        .collect();
+    assert_eq!(
+        compare_calls.len(),
+        2,
+        "native readiness must check ancestry before waiting and immediately before merging: {gh_calls}"
+    );
+    assert!(
+        compare_calls
+            .last()
+            .is_some_and(|index| { index.checked_add(1) == Some(merge_writes[0].0) }),
+        "the final ancestry check must immediately precede the guarded merge: {gh_calls}"
     );
     assert!(
         wait_ci < status_calls[0]
