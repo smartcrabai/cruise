@@ -64,11 +64,29 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
         );
     }
     let fix = &compiled.after_pr["follow-up/fix-ci-error"];
-    assert_eq!(fix.next.as_deref(), Some("follow-up/wait-ci"));
+    assert_eq!(fix.next, None);
     assert_eq!(
         fix.if_condition.as_ref().unwrap().file_changed.as_deref(),
         Some("follow-up/sync-base")
     );
+    let prompt = fix
+        .prompt
+        .as_deref()
+        .unwrap_or_else(|| panic!("missing fix-ci-error prompt"));
+    for required in [
+        "Previous wait-ci diagnostic (stderr):",
+        "Enumerate every check",
+        "Read the complete logs for every non-success Actions job",
+        "follow the check URL to its provider log",
+        "reproduce every failure locally",
+        "Before committing, run the corresponding repository formatters, linters, and tests",
+        "rerun only the failed job(s) once",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "fix-ci-error prompt omitted {required:?}"
+        );
+    }
     let enabled_ids = |values: FlagValues| {
         let skipped = flags::preflight_skips(&compiled, &values, &[]);
         compiled
@@ -141,7 +159,7 @@ fn verify_local_builtin_resources(root: &Path) {
     let local = root.join("local-builtin");
     write(
         &local.join("_shared/after-pr.yaml"),
-        "inputs: [resolve_conflict_prompt, fix_ci_error_prompt]\nsteps:\n  local-only:\n    command: 'true'\n",
+        "inputs: [resolve_conflict_prompt, fix_ci_error_scope]\nsteps:\n  local-only:\n    command: 'true'\n",
     );
     for builtin in BUILTIN_WORKFLOWS {
         let path = local.join(format!("{}.yaml", builtin.name));
@@ -191,7 +209,7 @@ fn verify_builtin_repair_policy(project: &Path) {
         }
         assert_eq!(
             config.after_pr["follow-up/wait-ci"].timeout.as_deref(),
-            Some("30m")
+            Some("60m")
         );
         assert_eq!(
             config.after_pr["squash-merge"].timeout.as_deref(),

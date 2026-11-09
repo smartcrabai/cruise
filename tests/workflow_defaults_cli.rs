@@ -928,6 +928,7 @@ fn run_gitlab_wait_ci_command_with_details(
     std::fs::write(&trace_count, "0\n")
         .unwrap_or_else(|error| panic!("initialize glab trace count: {error}"));
     cruise::test_support::write_executable_script(&bin.join("glab"), FAKE_GLAB_SCRIPT);
+    cruise::test_support::write_executable_script(&bin.join("sleep"), "#!/bin/sh\nexit 0\n");
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
@@ -1163,7 +1164,7 @@ count=$(cat "$WAIT_CI_DATE_COUNT" 2>/dev/null || printf 0)
 count=$((count + 1))
 printf '%s\n' "$count" > "$WAIT_CI_DATE_COUNT"
 if [ "${WAIT_CI_TIMEOUT-0}" = 1 ] && [ "$count" -gt 1 ]; then
-  printf '1900\n'
+  printf '100000\n'
 elif [ "$count" -eq 1 ]; then
   printf '100\n'
 elif [ "$count" -eq 2 ]; then
@@ -1749,7 +1750,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
-    assert_eq!(wait_ci_reason(&output), "head_mismatch");
+    assert_eq!(wait_ci_reason(&output), "head_mismatch", "{terminal}");
     assert_eq!(wait_ci_payload(&output)["truncated"], false);
     assert_eq!(fixture.gh_calls(), 2);
 
@@ -1798,10 +1799,58 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
             true,
         );
         let terminal = text(&output);
-        assert!(!output.status.success(), "{terminal}");
+        assert!(output.status.success(), "{terminal}");
+        assert!(
+            terminal.contains("no code failure was reported"),
+            "{terminal}"
+        );
         assert_eq!(fixture.gh_calls(), 1);
         assert_eq!(fixture.date_calls(), 2);
     }
+
+    let fixture = GithubWaitCiFixture::new();
+    let output = fixture.run(
+        &command,
+        &[github_ci_response(
+            &fixture.head,
+            &fixture.head,
+            Some("PENDING"),
+            1,
+        )],
+        true,
+    );
+    let terminal = text(&output);
+    assert!(output.status.success(), "{terminal}");
+    assert!(
+        terminal.contains("no code failure was reported"),
+        "{terminal}"
+    );
+    assert_eq!(fixture.gh_calls(), 1);
+
+    let fixture = GithubWaitCiFixture::new();
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_suites_response(
+                &fixture.head,
+                &fixture.head,
+                &[github_workflow_run_suite("IN_PROGRESS", None)],
+                1,
+                false,
+                None,
+            ),
+        ],
+        true,
+    );
+    let terminal = text(&output);
+    assert!(output.status.success(), "{terminal}");
+    assert!(
+        terminal.contains("no code failure was reported"),
+        "{terminal}"
+    );
+    assert_eq!(fixture.gh_calls(), 2);
+    assert_eq!(fixture.date_calls(), 2);
 }
 #[cfg(unix)]
 #[test]
@@ -2142,7 +2191,12 @@ fn builtin_github_wait_ci_allows_transient_head_mismatch_but_rejects_persistent_
         false,
     );
     assert!(!output.status.success(), "{}", text(&output));
-    assert_eq!(wait_ci_reason(&output), "head_mismatch");
+    assert_eq!(
+        wait_ci_reason(&output),
+        "head_mismatch",
+        "{}",
+        text(&output)
+    );
     assert_eq!(fixture.gh_calls(), 2);
 }
 
@@ -2342,4 +2396,18 @@ fn builtin_gitlab_wait_ci_rejects_unmatched_pipeline_details() {
         assert_eq!(payload["checks"], serde_json::json!([]));
         assert_eq!(payload["truncated"], true);
     }
+}
+#[cfg(unix)]
+#[test]
+fn builtin_gitlab_wait_ci_pending_timeout_is_not_a_code_failure() {
+    let command =
+        builtin_wait_ci_command_for_url("tdd", "https://gitlab.com/owner/repo/-/merge_requests/42");
+    let output = run_gitlab_wait_ci_command(&command, r#"{"id":1,"status":"running"}"#, 0, "");
+    let terminal = text(&output);
+    assert!(output.status.success(), "{terminal}");
+    assert!(
+        terminal
+            .contains("GitLab CI remained pending after 220 polls; no code failure was reported."),
+        "{terminal}"
+    );
 }

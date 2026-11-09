@@ -11,3 +11,4 @@
 
 - Retain quality-gate output when sanitizing large streams runs past the post-exit pipe-drain grace.
 - Prevent detached Windows WebUI daemons from inheriting captured CLI output handles and blocking command completion.
+- Route pending after-PR CI away from code repair and stop no-change fix loops; pass current CI diagnostics to a shared prompt that reads all failed logs and verifies repairs before commit.

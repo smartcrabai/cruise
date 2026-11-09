@@ -80,13 +80,21 @@ after-pr:
 
 The six general-purpose built-ins have an explicit, default-off `merge` flag. The built-in after-PR prelude uses `flag: [after_pr, merge]` on its `follow-up` workflow call, propagated to all six expanded steps, so either flag runs it; the native final action is gated only by `merge`. `-f merge` therefore runs the prelude even when `after_pr` is off, and the prelude runs once. `-f after_pr` alone never merges. No PR is created or merged when the workflow has `create_pr: false` (including `research`), uses `exec`/current-branch mode, or has no commits eligible for PR creation; opted-in actions are skipped with a reason. The merge flag does not override read-only or no-PR policy.
 
-The six general-purpose built-ins share the ordered prelude `pr-ready` → `sync-base` →
-`resolve-conflict` → `push-after-sync` → `wait-ci` → `fix-ci-error`. Each caller
-passes its own full conflict/CI repair prompts via `with`; the shared callee has
-no flags. New expanded IDs are `follow-up/pr-ready`, etc. Internal retry and
-file-change transitions stay inside that call. The native `squash-merge` remains
-the final direct root step, never inside the callee. Existing session snapshots
-and saved IDs are not migrated.
+The six general-purpose built-ins share the ordered prelude `pr-ready` →
+`sync-base` → `resolve-conflict` → `push-after-sync` → `wait-ci` →
+`fix-ci-error`. Each caller passes its conflict prompt and task-specific scope
+into the shared resource, which owns the common CI repair prompt. `wait-ci`
+allows up to 60 minutes and reports still-running CI without treating it as a
+code failure. On failure, `fix-ci-error` receives the prior wait diagnostic,
+enumerates all non-success checks for the current head, reads logs (including
+canceled or timed-out jobs), reproduces the corresponding CI commands, and
+fixes all genuine in-scope failures in one pass. Before committing, it runs
+the relevant formatters, linters, and tests. Unrelated or flaky jobs are
+rerun once or reported clearly; a repair with no file changes does not loop.
+Changed fixes still route through base synchronization, push, and another CI
+wait. New expanded IDs are `follow-up/pr-ready`, etc. The native
+`squash-merge` remains the final direct root step, never inside the callee.
+Existing session snapshots and saved IDs are not migrated.
 
 Installed binaries resolve this internal shared resource from embedded data,
 without filesystem fallback. Direct local loads of `builtin/*.yaml` use normal

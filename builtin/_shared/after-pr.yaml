@@ -1,4 +1,4 @@
-inputs: [resolve_conflict_prompt, fix_ci_error_prompt]
+inputs: [resolve_conflict_prompt, fix_ci_error_scope]
 steps:
   pr-ready:
     command: |-
@@ -18,7 +18,7 @@ steps:
     command: |-
       git push
   wait-ci:
-    timeout: 30m
+    timeout: 60m
     command: |-
       diagnostic_payload='{{"checks":[],"truncated":false}}'
       ci_diagnostic() {{
@@ -387,7 +387,7 @@ steps:
           http_status=unknown
           attempt=0
           diagnostic_stderr="$(git rev-parse --git-dir)/cruise-ci-query.stderr"
-          while [ "$attempt" -lt 30 ]; do
+          while [ "$attempt" -lt 220 ]; do
             if response=$(glab ci get --merge-request {pr.number} --output json 2>"$diagnostic_stderr"); then
               query_status=0
             else
@@ -448,11 +448,10 @@ steps:
           done
           if [ "$query_status" -ne 0 ]; then
             ci_diagnostic api_error
-          else
-            ci_diagnostic timeout
+            exit 1
           fi
-          echo "CI remained pending after 30 polls." >&2
-          exit 1 ;;
+          printf 'GitLab CI remained pending after 220 polls; no code failure was reported.\n'
+          exit 0 ;;
         *)
           provider=github
           state=unobserved
@@ -479,7 +478,7 @@ steps:
           query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{state contexts(first:1) {{totalCount}}}}}}}}}}}}'
           detail_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{contexts(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{__typename ... on CheckRun {{name status conclusion detailsUrl checkSuite {{status conclusion workflowRun {{databaseId}}}}}} ... on StatusContext {{context state targetUrl}}}}}}}}}}}}}}'
           suite_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid checkSuites(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{status conclusion workflowRun {{databaseId}}}}}}}}}}}}}}'
-          deadline=$(( $(date +%s) + 1740 ))
+          deadline=$(( $(date +%s) + 3300 ))
           head_mismatch_since=
           ready_streak=0
           diagnostic_stderr="$(git rev-parse --git-dir)/cruise-ci-query.stderr"
@@ -609,9 +608,8 @@ steps:
               exit 1
             fi
             if [ "$now" -ge "$deadline" ]; then
-              printf 'GitHub CI timed out: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
-              ci_diagnostic timeout
-              exit 1
+              printf 'GitHub CI did not reach readiness before the wait deadline: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s; no code failure was reported.\n' "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count"
+              exit 0
             fi
             printf 'Waiting for GitHub CI: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count"
             sleep 5
@@ -621,7 +619,30 @@ steps:
     skip: prev.success
     allow_commit: true
     permission: full
-    prompt: "{inputs.fix_ci_error_prompt}"
+    prompt: |-
+      Original request: {input}
+
+      Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
+
+      Task/report scope:
+      {inputs.fix_ci_error_scope}
+
+      Previous wait-ci diagnostic (stderr):
+      {prev.stderr}
+
+      CI for PR/MR #{pr.number} ({pr.url}) did not become ready. Treat the diagnostic as a hint, not a complete list: if it is empty or truncated, query the provider directly.
+
+      First determine the exact current PR/MR head. Enumerate every check for that head that is not successful, including canceled/cancelled, timed-out, pending, and skipped checks; distinguish completed failures from checks that are still running. Do not inspect only the first reported failure.
+
+      For GitHub, inspect all check runs and status contexts for that commit, including paginated results. Read the complete logs for every non-success Actions job (`gh run view RUN_ID --log`, or `gh run view RUN_ID --job JOB_ID --log`); use `gh run view RUN_ID --json jobs` to identify jobs. For GitLab, enumerate all pipeline jobs, including canceled and timed-out jobs, and read each non-success job log with `glab ci trace JOB_ID --pipeline-id PIPELINE_ID`. Do not rely only on a failure summary or `--log-failed`.
+      For third-party status checks without an Actions or GitLab job, follow the check URL to its provider log; if no log is exposed, report that explicitly.
+
+      For canceled or timed-out jobs, follow the final progress lines to identify the exact hung or slow test; do not treat a timeout as an unexplained CI failure. Inspect the CI workflow definition and reproduce every failure locally using the commands that the corresponding job runs. Diagnose all failures on this head before editing, then fix every genuine in-scope failure in this one iteration.
+
+      Before committing, run the corresponding repository formatters, linters, and tests for every failed job, including the exact CI commands. For Rust CI that includes `cargo fmt`, `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings -A clippy::large_futures`, and the relevant `cargo test --all-features` targets. Never commit before reproducing and verifying the fixes.
+
+      If a failure is demonstrably unrelated to these changes or flaky, confirm it also fails on the base or rerun only the failed job(s) once (`gh run rerun RUN_ID --failed` on GitHub, or retry the specific job on GitLab), then wait for that rerun to finish. Do not modify unrelated code or repeat the rerun. If it remains red or cannot be reproduced, make no code changes and report the exact check/job and clear reason instead of looping.
+
+      Preserve the task/report scope and unrelated user work. Never weaken, remove, skip, or disable tests, scanners, assertions, required checks, or policy to get green. Stage and commit only verified in-scope fixes; do not push, create, or merge a PR because the following shared steps handle base synchronization and push. If there is no in-scope fix, make no code changes and state why clearly.
     if:
       file-changed: sync-base
-    next: wait-ci

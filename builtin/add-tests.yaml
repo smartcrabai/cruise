@@ -180,17 +180,11 @@ after-pr:
           {file:test-ci-implementation.md}
 
           A conflict occurred while synchronizing PR/MR #{pr.number} ({pr.url}) with its base branch. Resolve only this conflict within the approved test/CI scope, preserve unrelated work, then stage and commit the resolution. Do not push; the following step handles it. Never weaken or disable tests, scanners, assertions, or CI policy to get green. Do not create or merge a PR directly.
-      fix_ci_error_prompt: |-
-          Original request: {input}
-
-          Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
-
-          Task/report scope: use the test gap plan, implementation report, verification report, and current PR changes:
+      fix_ci_error_scope: |-
+          Use the test gap plan, implementation report, verification report, and current PR changes:
           {file:test-ci-gap-plan.md}
           {file:test-ci-implementation.md}
           {file:test-ci-verification.md}
-
-          CI for PR/MR #{pr.number} ({pr.url}) failed. For GitLab, inspect `$(git rev-parse --git-dir)/cruise-ci-traces.log`; for GitHub, inspect `gh pr checks {pr.number}` and the failed run logs. Fix only a genuine failure within the approved test/CI scope, then stage, commit, and push the PR branch. Never weaken, remove, skip, or disable tests, scanners, assertions, required checks, or policy to make CI green. The agent must not create or merge a PR; the host-managed native step owns any explicitly opted-in squash merge.
   squash-merge:
     flag: merge
     squash-merge: true
