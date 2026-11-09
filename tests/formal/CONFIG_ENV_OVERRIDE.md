@@ -40,7 +40,7 @@ runner validates every command in the JSON receipt, failing on mismatches.
 The executable Gherkin feature `tests/features/config_env.feature` uses the
 production CLI in isolated temporary directories, complementing existing Rust
 integration tests. The runner uses checksum-pinned Temurin JDK 25.0.5+8 and
-Alloy 6.2.0, Node 26.12.1, Quint 0.33.0, Apalache 0.62.1 and Rust 1.99.1.
+Alloy 6.2.0, Node 26.13.0, Quint 0.33.0, Apalache 0.62.1 and Rust 1.99.1.
 `.github/workflows/config-env-specs.yml` runs it without secrets and uploads
 commands, logs and receipts. Principal commands, in addition to setup:
 
