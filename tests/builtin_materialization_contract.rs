@@ -78,6 +78,7 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
         "Enumerate every check",
         "Read the complete logs for every non-success Actions job",
         "follow the check URL to its provider log",
+        "glab ci trace JOB_ID --pipeline-id PIPELINE_ID",
         "reproduce every failure locally",
         "Before committing, run the corresponding repository formatters, linters, and tests",
         "rerun only the failed job(s) once",

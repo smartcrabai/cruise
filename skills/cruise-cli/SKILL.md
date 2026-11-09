@@ -217,11 +217,15 @@ On GitHub, `follow-up/wait-ci` treats CI as ready only when the PR head and an e
 
 The after-PR CI wait allows up to 60 minutes; checks still running at the
 deadline are reported without invoking a code-failure repair. On failure, the
-shared repair prompt enumerates every non-success check on the current head,
-reads logs including canceled or timed-out jobs, reproduces CI commands, fixes
-all in-scope failures in one pass, and runs the matching formatters, linters,
-and tests before committing. Unrelated or flaky failures are rerun once or
-reported clearly, and a no-change repair does not loop.
+shared prompt receives the wait diagnostic, enumerates every non-success
+check on the current head, reads canceled/timed-out job logs, and reproduces
+the exact CI commands. It fixes all in-scope failures in one pass and runs the
+matching formatters, linters, and tests before committing. Diagnostics that
+are empty or truncated fall back to provider queries. Unrelated/flaky jobs are
+rerun once or reported clearly; no-change repairs do not loop.
+
+When the GitHub rollup is already failing, `wait-ci` waits for all attached
+Actions suites to finish before sending the full failure set to the prompt.
 
 ### `--image`
 

@@ -86,11 +86,15 @@ The six general-purpose built-ins share the ordered prelude `pr-ready` →
 into the shared resource, which owns the common CI repair prompt. `wait-ci`
 allows up to 60 minutes and reports still-running CI without treating it as a
 code failure. On failure, `fix-ci-error` receives the prior wait diagnostic,
-enumerates all non-success checks for the current head, reads logs (including
-canceled or timed-out jobs), reproduces the corresponding CI commands, and
-fixes all genuine in-scope failures in one pass. Before committing, it runs
-the relevant formatters, linters, and tests. Unrelated or flaky jobs are
-rerun once or reported clearly; a repair with no file changes does not loop.
+enumerates all non-success checks for the current head, and reads logs
+(including canceled or timed-out jobs). If diagnostics are empty or truncated,
+it queries the provider directly. It reproduces the corresponding CI commands,
+fixes all genuine in-scope failures in one pass, and runs relevant formatters,
+linters, and tests before committing. Unrelated or flaky jobs are rerun once
+or reported clearly; a repair with no file changes does not loop.
+
+When the GitHub rollup is already failing, `wait-ci` waits for all attached
+Actions suites to finish before sending the full failure set to the prompt.
 Changed fixes still route through base synchronization, push, and another CI
 wait. New expanded IDs are `follow-up/pr-ready`, etc. The native
 `squash-merge` remains the final direct root step, never inside the callee.

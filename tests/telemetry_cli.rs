@@ -3327,11 +3327,15 @@ if [ "$1" = api ] && [ "$2" = graphql ]; then
     case "$argument" in
       *'contexts(first:1)'*) query_kind=summary ;;
       *'contexts(first:100'*) query_kind=details ;;
+      *'checkSuites(first:100'*) query_kind=suite ;;
     esac
   done
   case "$query_kind" in
     summary)
       printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"state":"FAILURE","contexts":{"totalCount":4}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
+      exit 0 ;;
+    suite)
+      printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","checkSuites":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"status":"COMPLETED","conclusion":"FAILURE","workflowRun":{"databaseId":789}}]}}}}}\n' "$head" "$head"
       exit 0 ;;
     details)
       printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s"},"object":{"oid":"%s","statusCheckRollup":{"contexts":{"totalCount":4,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"successful-check-not-exported","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://url-user-secret:url-pass-secret@github.com/owner/repo/actions/runs/789/job/456?token=url-query-secret#url-fragment-secret","checkSuite":{"workflowRun":{"databaseId":789}}},{"__typename":"StatusContext","context":"successful-context-not-exported","state":"SUCCESS"},{"__typename":"StatusContext","context":"deploy-prod","state":"ERROR","targetUrl":"https://status-user-secret:status-pass-secret@example.test/deploy/42?private_token=status-query-secret#status-fragment-secret"}]}}}}},"extensions":{"message":"Authorization: Bearer private-provider-response-secret"}}\n' "$head" "$head"
