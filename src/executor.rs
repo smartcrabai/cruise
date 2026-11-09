@@ -2795,6 +2795,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transient_transport_and_setup_errors_switch_to_the_next_model() {
+        for (sdk, primary, spare, message) in [
+            (
+                "jcode",
+                "test-transient-http2/primary",
+                "test-transient-http2/spare",
+                "Error: command error: Internal: Failed to send request to OpenAI API: error sending request for url (https://chatgpt.com/backend-api/codex/responses): client error (SendRequest): http2 error: stream error received: unspecific protocol error detected",
+            ),
+            (
+                "opencode",
+                "test-opencode-setup/primary",
+                "test-opencode-setup/spare",
+                "Error: command error: OpenCode V2 setup timed out",
+            ),
+        ] {
+            let models = recorder();
+            let models_sink = Arc::clone(&models);
+            let env = HashMap::new();
+            let mut req = base_req(&env);
+            req.model = fixture_model(Some(primary));
+            req.max_retries = 1;
+
+            let outcome = run_with_fallback(
+                &req,
+                sdk,
+                Some(fast_policy(&[(primary, &[spare])])),
+                |model| {
+                    let model = model.unwrap_or_default();
+                    record(&models_sink, model);
+                    Ok(if model == primary {
+                        canned(vec![StreamChunk::Error(message.to_owned())])
+                    } else {
+                        canned(vec![StreamChunk::Done("fallback answered".to_owned())])
+                    })
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{sdk} fallback should answer: {error}"));
+
+            assert_eq!(outcome.result.output, "fallback answered");
+            assert_eq!(recorded(&models), [primary, spare], "{sdk}");
+        }
+    }
+
+    #[tokio::test]
     async fn fallback_switches_immediately_on_rate_limit_without_retrying_the_primary() {
         let models = recorder();
         let models_sink = Arc::clone(&models);

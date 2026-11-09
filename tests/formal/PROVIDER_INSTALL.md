@@ -15,7 +15,7 @@ The runner uses the shared pinned tool setup, saves logs under a fresh
 14 steps. Simulation is not proof and bounded verification cannot establish
 unbounded correctness or liveness.
 
-The tool setup pins Node 26.12.1, Quint 0.33.0, Apalache 0.62.1,
+The tool setup pins Node 26.13.0, Quint 0.33.0, Apalache 0.62.1,
 Temurin JDK 25.0.5+8, Alloy 6.2.0 and Rust 1.99.1. The JDK and Alloy
 release artifacts are checked against the SHA-256 values in
 `scripts/setup_formal.sh`. The runner records exact argv and all results in

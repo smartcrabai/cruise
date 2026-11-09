@@ -26,7 +26,7 @@ use cruise::test_support::{EnvGuard, lock_process, write_executable_script};
 use futures::StreamExt as _;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 
 pub(crate) const ANSWER: &str = "V2 response: \u{65e5}\u{672c}\u{8a9e}\n";
 pub(crate) const MODEL: &str = "fixture/team/model:2026#precise";
@@ -40,6 +40,7 @@ pub(crate) enum Scenario {
     Malformed,
     UncertainAcceptance,
     HandshakeFailure(StatusCode),
+    TransientInfoTimeout { after_session: bool },
     Pending,
     PluginDisabled,
     ProviderFailure { status: u16, side_effect: bool },
@@ -74,6 +75,7 @@ struct Observations {
     pending: Option<String>,
     plugin_ready: bool,
     notices: Vec<String>,
+    info_timeout_waiting: bool,
 }
 
 struct Server {
@@ -84,6 +86,7 @@ struct Server {
     observations: Mutex<Observations>,
     events: broadcast::Sender<Option<String>>,
     catalog: Mutex<Catalog>,
+    info_timeout_release: Notify,
 }
 
 fn locked(server: &Server) -> std::sync::MutexGuard<'_, Observations> {
@@ -327,7 +330,36 @@ async fn serve(State(server): State<Arc<Server>>, request: Request) -> Response 
             Json(json!({"location":{"directory":server.repo},"data": []})).into_response()
         }
         (Method::GET, "/api/info") => {
-            locked(&server).plugin_ready = false;
+            let (delay_first_info, release_info_timeout) = {
+                let mut observations = locked(&server);
+                observations.plugin_ready = false;
+                let info_calls = observations
+                    .requests
+                    .iter()
+                    .filter(|request| request.path == "/api/info")
+                    .count();
+                let has_session = !observations.session_id.is_empty();
+                let delay = match server.scenario {
+                    Scenario::TransientInfoTimeout { after_session } => {
+                        let expected_call = if after_session { 2 } else { 1 };
+                        info_calls == expected_call && has_session == after_session
+                    }
+                    _ => false,
+                };
+                if delay {
+                    observations.info_timeout_waiting = true;
+                }
+                let release = !delay && observations.info_timeout_waiting;
+                if release {
+                    observations.info_timeout_waiting = false;
+                }
+                (delay, release)
+            };
+            if delay_first_info {
+                server.info_timeout_release.notified().await;
+            } else if release_info_timeout {
+                server.info_timeout_release.notify_one();
+            }
             if let Scenario::HandshakeFailure(status) = server.scenario {
                 return (
                     status,
@@ -724,6 +756,7 @@ impl Fixture {
             observations: Mutex::new(Observations::default()),
             events,
             catalog: Mutex::new(Catalog::Models(json!([]))),
+            info_timeout_release: Notify::new(),
         });
         let router = Router::new()
             .fallback(serve)
@@ -815,7 +848,10 @@ impl Fixture {
             permission: PermissionMode::Full,
             tool_policy: cruise::tool_policy::ToolPolicy::default(),
         };
-        let config: RetryConfig = serde_yaml::from_str("base_delay_ms: 1\nmodel_fallback: true\nfallback_chains:\n  default: [fixture/fallback]\n").unwrap_or_else(|error| panic!("retry config: {error}"));
+        let config: RetryConfig = serde_yaml::from_str(
+            "base_delay_ms: 1\nmodel_fallback: true\nfallback_chains:\n  default: [fixture/fallback]\n",
+        )
+        .unwrap_or_else(|error| panic!("retry config: {error}"));
         tokio::time::timeout(
             Duration::from_secs(15),
             with_active_policy(
@@ -1277,7 +1313,6 @@ fn catalog_failure_cases() -> Vec<(Catalog, Vec<&'static str>)> {
         ),
         (Catalog::Http(StatusCode::UNAUTHORIZED), vec!["401"]),
         (Catalog::Http(StatusCode::SERVICE_UNAVAILABLE), vec!["503"]),
-        (Catalog::Transport, vec!["transport"]),
     ]
 }
 
@@ -1379,6 +1414,27 @@ async fn catalog_resolution_failures_never_send_prompts_or_mutate_resume_models(
             }
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_catalog_transport_error_uses_fallback_before_prompt() {
+    let _lock = lock_process();
+    let fixture = Fixture::new(Scenario::Complete).await;
+    let _guards = fixture.guards();
+    set_catalog(&fixture, Catalog::Transport);
+    let outcome = fixture
+        .execute(Some("fixture/catalog-transport-primary:medium"), 2)
+        .await
+        .unwrap_or_else(|error| panic!("catalog transport failure should fall back: {error}"));
+
+    assert_eq!(outcome.result.output, ANSWER);
+    assert_eq!(fixture.prompt_count(), 1);
+    assert_eq!(fixture.launch_count(), 2);
+    assert_eq!(
+        selected_models(&fixture),
+        vec![json!({"providerID":"fixture","id":"fallback"})]
+    );
+    fixture.assert_stopped();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2042,18 +2098,48 @@ async fn retained_history_is_fenced_before_current_turn_recovery() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unavailable_boundary_admits_no_prompt() {
+async fn unavailable_boundary_keeps_checkpointed_session_resumable() {
     let _lock = lock_process();
     let fixture = Fixture::new(Scenario::BoundaryUnavailable).await;
     let _guards = fixture.guards();
-    let error = fixture
-        .execute(Some(MODEL), 2)
+    // Retry is disabled to isolate the checkpoint's clean-state invariant.
+    let checkpoint = |_: &cruise::model_selection::SdkSessionId| Ok(());
+    let Err(error) = fixture
+        .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
         .await
-        .err()
-        .unwrap_or_else(|| panic!("unavailable boundary accepted"));
+    else {
+        panic!("unavailable boundary accepted");
+    };
     assert!(error.to_string().contains("boundary"), "{error}");
     assert_eq!(fixture.prompt_count(), 0);
     assert_eq!(fixture.launch_count(), 1);
+    let manifest = std::fs::read_dir(fixture.root.path().join("data/cruise/opencode"))
+        .unwrap_or_else(|error| panic!("storage directory: {error}"))
+        .next()
+        .unwrap_or_else(|| panic!("checkpointed storage missing"))
+        .unwrap_or_else(|error| panic!("storage entry: {error}"))
+        .path()
+        .join("manifest.json");
+    let value: Value = serde_json::from_slice(
+        &std::fs::read(manifest).unwrap_or_else(|error| panic!("manifest: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("manifest JSON: {error}"));
+    assert_eq!(
+        value["clean"], true,
+        "a checkpointed pre-prompt failure must keep resume safe"
+    );
+    let session_id = locked(&fixture.server).session_id.clone();
+    assert!(!session_id.is_empty(), "checkpointed session ID missing");
+    let resumed = resume_fixture_with_model(&fixture, &session_id, 0, MODEL).await;
+    let Err(resume_error) = resumed else {
+        panic!("unavailable boundary accepted a resumed prompt");
+    };
+    assert!(
+        resume_error.to_string().contains("boundary"),
+        "resuming after a pre-prompt failure must reach the boundary: {resume_error}"
+    );
+    assert_eq!(fixture.prompt_count(), 0);
+    assert_eq!(fixture.launch_count(), 2);
     fixture.assert_stopped();
 }
 
@@ -2518,6 +2604,11 @@ async fn local_api_http_failures_keep_status_and_never_become_model_fallback() {
             0,
             "server failure must not dispatch a provider prompt"
         );
+        assert_eq!(
+            fixture.launch_count(),
+            1,
+            "local API status failures must not fall back to another model"
+        );
         assert!(
             !diagnostic.to_ascii_lowercase().contains("model not found"),
             "API failure misclassified as provider model absence: {diagnostic}"
@@ -2596,10 +2687,10 @@ async fn unavailable_durable_log_fails_without_replaying_the_input() {
         .await
         .err()
         .unwrap_or_else(|| panic!("unrecoverable event loss cannot report success"));
+    let diagnostic = error.to_string();
     assert!(
-        error
-            .to_string()
-            .contains("durable reconciliation failed: OpenCode local API HTTP 503")
+        diagnostic.contains("durable reconciliation failed: OpenCode local API HTTP 503"),
+        "unexpected durable log failure: {diagnostic}"
     );
     assert_eq!(fixture.prompt_count(), 1);
     assert_eq!(fixture.launch_count(), 1);
@@ -2699,7 +2790,14 @@ async fn missing_required_plugin_stops_before_prompt_and_does_not_fallback() {
     let _lock = lock_process();
     let fixture = Fixture::new(Scenario::PluginDisabled).await;
     let _guards = fixture.guards();
-    assert!(fixture.execute(Some(MODEL), 2).await.is_err());
+    let Err(error) = fixture.execute(Some(MODEL), 2).await else {
+        panic!("missing required plugin should fail before prompt submission");
+    };
+    assert!(
+        error.to_string().contains("required native plugin"),
+        "unexpected plugin failure: {error}"
+    );
+    assert_eq!(fixture.launch_count(), 1);
     assert_eq!(fixture.prompt_count(), 0);
     assert_eq!(
         locked(&fixture.server)
@@ -2708,6 +2806,80 @@ async fn missing_required_plugin_stops_before_prompt_and_does_not_fallback() {
             .filter(|request| request.method == Method::POST && request.path == "/api/session")
             .count(),
         0
+    );
+    fixture.assert_stopped();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_setup_timeout_uses_fallback_without_replaying_first_prompt() {
+    let _lock = lock_process();
+    let fixture = Fixture::new(Scenario::TransientInfoTimeout {
+        after_session: false,
+    })
+    .await;
+    let _guards = fixture.guards();
+    let outcome = fixture
+        .execute(Some("fixture/transient-info-timeout"), 2)
+        .await
+        .unwrap_or_else(|error| panic!("transient setup timeout should fall back: {error}"));
+
+    assert_eq!(outcome.result.output, ANSWER);
+    assert_eq!(fixture.prompt_count(), 1);
+    assert_eq!(fixture.launch_count(), 2);
+    assert_eq!(
+        selected_models(&fixture),
+        vec![json!({"providerID":"fixture","id":"fallback"})]
+    );
+    fixture.assert_stopped();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_setup_timeout_on_resumed_session_falls_back_safely() {
+    let _lock = lock_process();
+    let fixture = Fixture::new(Scenario::TransientInfoTimeout {
+        after_session: true,
+    })
+    .await;
+    let _guards = fixture.guards();
+    let checkpoint = |_: &cruise::model_selection::SdkSessionId| Ok(());
+    let first = fixture
+        .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
+        .await
+        .unwrap_or_else(|error| panic!("initial resumed-session fixture turn failed: {error}"));
+    let session_id = first.session_id.map_or_else(
+        || panic!("initial turn must return a resumable session ID"),
+        |session| session.id,
+    );
+    let baseline_prompts = fixture.prompt_count();
+    let baseline_launches = fixture.launch_count();
+    let baseline_selections = selected_models(&fixture).len();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(15),
+        resume_fixture_with_model(
+            &fixture,
+            &session_id,
+            2,
+            "fixture/transient-resumed-setup-timeout",
+        ),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("resumed setup fallback did not finish: {error}"))
+    .unwrap_or_else(|error| panic!("resumed setup timeout should fall back: {error}"));
+
+    assert_eq!(outcome.result.output, ANSWER);
+    assert_eq!(fixture.prompt_count(), baseline_prompts + 1);
+    assert_eq!(fixture.launch_count(), baseline_launches + 2);
+    assert_eq!(
+        &selected_models(&fixture)[baseline_selections..],
+        &[json!({"providerID":"fixture","id":"fallback"})]
+    );
+    assert_eq!(
+        outcome
+            .session_id
+            .as_ref()
+            .map(|session| session.id.as_str()),
+        Some(session_id.as_str())
     );
     fixture.assert_stopped();
 }
