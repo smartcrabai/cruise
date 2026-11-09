@@ -1170,7 +1170,7 @@ async fn github_pending_ci_with_unstable_mergeability_waits_for_current_head_suc
     .await;
 
     assert_eq!(result, Ok(AutoSquashOutcome::Merged));
-    assert_eq!(fixture.github_status_call_count(), 4);
+    assert_eq!(fixture.github_status_call_count(), 3);
     assert_eq!(fixture.effect_lines().len(), 1);
 }
 
@@ -1245,7 +1245,7 @@ async fn github_stale_unstable_ci_waits_for_current_head_success() {
     .await;
 
     assert_eq!(result, Ok(AutoSquashOutcome::Merged));
-    assert_eq!(fixture.github_status_call_count(), 5);
+    assert_eq!(fixture.github_status_call_count(), 4);
     assert_eq!(fixture.effect_lines().len(), 1);
 }
 
@@ -1280,7 +1280,7 @@ async fn github_null_and_empty_unstable_ci_registration_waits_for_checks() {
     .await;
 
     assert_eq!(result, Ok(AutoSquashOutcome::Merged));
-    assert_eq!(fixture.github_status_call_count(), 5);
+    assert_eq!(fixture.github_status_call_count(), 4);
     assert_eq!(fixture.effect_lines().len(), 1);
 }
 
@@ -1316,8 +1316,6 @@ async fn github_paginated_check_suite_timeline_waits_for_completion() {
         completed_second_page.clone(),
         completed_page.clone(),
         completed_second_page.clone(),
-        completed_page.clone(),
-        completed_second_page,
     ]);
 
     let result = run_github_with_timing(
@@ -1329,8 +1327,8 @@ async fn github_paginated_check_suite_timeline_waits_for_completion() {
     .await;
 
     assert_eq!(result, Ok(AutoSquashOutcome::Merged));
-    assert_eq!(fixture.github_status_call_count(), 4);
-    assert_eq!(fixture.github_suite_call_count(), 8);
+    assert_eq!(fixture.github_status_call_count(), 3);
+    assert_eq!(fixture.github_suite_call_count(), 6);
     assert_eq!(fixture.effect_lines().len(), 1);
 }
 
@@ -1370,8 +1368,8 @@ async fn github_pr_773_queued_actions_suite_without_check_run_context_blocks_rea
     .await;
 
     assert_eq!(result, Ok(AutoSquashOutcome::Merged));
-    assert_eq!(fixture.github_status_call_count(), 5);
-    assert_eq!(fixture.github_suite_call_count(), 5);
+    assert_eq!(fixture.github_status_call_count(), 4);
+    assert_eq!(fixture.github_suite_call_count(), 4);
     assert_eq!(fixture.effect_lines().len(), 1);
 }
 
@@ -1430,7 +1428,7 @@ async fn github_queued_third_party_suite_without_workflow_run_does_not_block() {
     .await;
 
     assert_eq!(result, Ok(AutoSquashOutcome::Merged));
-    assert_eq!(fixture.github_suite_call_count(), 3);
+    assert_eq!(fixture.github_suite_call_count(), 2);
     assert_eq!(fixture.effect_lines().len(), 1);
 }
 
@@ -1464,8 +1462,8 @@ async fn github_readiness_requires_two_consecutive_ready_observations() {
     .await;
 
     assert_eq!(result, Ok(AutoSquashOutcome::Merged));
-    assert_eq!(fixture.github_status_call_count(), 5);
-    assert_eq!(fixture.github_suite_call_count(), 5);
+    assert_eq!(fixture.github_status_call_count(), 4);
+    assert_eq!(fixture.github_suite_call_count(), 4);
     assert_eq!(fixture.effect_lines().len(), 1);
 }
 
@@ -1492,7 +1490,7 @@ async fn github_transient_head_mismatch_waits_then_merges_after_matching_head() 
     .await;
 
     assert_eq!(result, Ok(AutoSquashOutcome::Merged));
-    assert_eq!(fixture.github_status_call_count(), 3);
+    assert_eq!(fixture.github_status_call_count(), 2);
     assert!(fixture.github_identity_call_count() >= 3);
     assert_eq!(fixture.effect_lines().len(), 1);
 }

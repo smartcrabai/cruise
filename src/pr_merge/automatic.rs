@@ -2061,7 +2061,7 @@ async fn perform_github_with_timing(
     let mut base_ancestry_checked = false;
     loop {
         check_cancel(request.cancel_token)?;
-        let check_base_ancestry = !base_ancestry_checked;
+        let check_base_ancestry = !base_ancestry_checked || ready_observations == 1;
         base_ancestry_checked = true;
         let readiness = poll_github_readiness(
             reference,
@@ -2078,46 +2078,9 @@ async fn perform_github_with_timing(
                 head_mismatch_since = None;
                 ready_observations += 1;
                 if ready_observations >= 2 {
-                    let final_readiness = poll_github_readiness(
-                        reference,
-                        request,
-                        expected_head,
-                        deadline,
-                        head_mismatch_since.is_some(),
-                        true,
-                        &mut observation,
-                    )
-                    .await?;
-                    match final_readiness {
-                        GitHubReadiness::Ready => {
-                            check_cancel(request.cancel_token)?;
-                            return run_github_merge(
-                                reference,
-                                request,
-                                expected_head,
-                                &mut observation,
-                            )
-                            .await;
-                        }
-                        GitHubReadiness::AlreadyMerged => {
-                            return Ok(AutoSquashOutcome::AlreadyMerged);
-                        }
-                        GitHubReadiness::ResyncRequired(reason) => {
-                            return Ok(AutoSquashOutcome::ResyncRequired(reason));
-                        }
-                        GitHubReadiness::Pending => {
-                            ready_observations = 0;
-                            head_mismatch_since = None;
-                        }
-                        GitHubReadiness::HeadMismatch => {
-                            ready_observations = 0;
-                            record_github_head_mismatch(
-                                &mut head_mismatch_since,
-                                head_mismatch_grace,
-                                &observation,
-                            )?;
-                        }
-                    }
+                    check_cancel(request.cancel_token)?;
+                    return run_github_merge(reference, request, expected_head, &mut observation)
+                        .await;
                 }
             }
             GitHubReadiness::AlreadyMerged => {
