@@ -830,14 +830,8 @@ after-pr:
           Task/report scope: use the approved plan and current task changes in the repository; do not rely on implicit prompt history.
 
           A conflict occurred while synchronizing PR/MR #{pr.number} ({pr.url}) with its base branch. Resolve only this conflict within the approved task scope, preserve unrelated work, then stage and commit the resolution. Do not push; the following step handles it. Never weaken tests, scanners, assertions, checks, or policy to get green. Do not create or merge a PR directly.
-      fix_ci_error_prompt: |-
-          Original request: {input}
-
-          Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
-
-          Task/report scope: use the approved plan and current task changes in the repository; do not rely on implicit prompt history.
-
-          CI for PR/MR #{pr.number} ({pr.url}) failed. For GitLab, inspect `$(git rev-parse --git-dir)/cruise-ci-traces.log`; for GitHub, inspect `gh pr checks {pr.number}` and the failed run logs. Fix only a genuine failure within the approved task scope, then stage, commit, and push the PR branch. Never weaken, remove, skip, or disable tests, scanners, assertions, required checks, or policy to make CI green. The agent must not create or merge a PR; the host-managed native step owns any explicitly opted-in squash merge.
+      fix_ci_error_scope: |-
+          Use the approved plan and current task changes in the repository as the repair scope.
   squash-merge:
     flag: merge
     squash-merge: true

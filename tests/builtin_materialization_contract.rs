@@ -12,7 +12,7 @@ use cruise::error::CruiseError;
 use cruise::flags::{self, FlagValues};
 use cruise::graph::{TransitionReason, build_graph};
 use cruise::resolver::{ConfigSource, resolve_workflow_config};
-use cruise::workflow::compile;
+use cruise::workflow::{CompiledWorkflow, compile};
 use cruise::workflow_call::resolve_workflow_calls_from_path_with_defaults;
 use cruise::workflow_cmd::eject_builtin;
 use cruise::workflow_defaults::WorkflowDefaults;
@@ -34,9 +34,9 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-fn assert_after_pr_contract(config: WorkflowConfig) {
-    validate_config(&config).unwrap();
-    let compiled = compile(config).unwrap();
+/// The native merge step routes confirmed behind/conflicting outcomes back to
+/// `follow-up/sync-base` over a backward edge bounded by `max_retries`.
+fn assert_native_merge_resyncs_to_sync_base(compiled: &CompiledWorkflow) {
     let native_merge_steps: Vec<_> = compiled
         .after_pr
         .iter()
@@ -76,6 +76,12 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
             "{name} -> {target} must be a backward edge governed by max_retries"
         );
     }
+}
+
+fn assert_after_pr_contract(config: WorkflowConfig) {
+    validate_config(&config).unwrap();
+    let compiled = compile(config).unwrap();
+    assert_native_merge_resyncs_to_sync_base(&compiled);
     let ids: Vec<_> = compiled.after_pr.keys().map(String::as_str).collect();
     assert_eq!(ids, AFTER_PR_IDS);
     assert!(
@@ -105,11 +111,30 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
         );
     }
     let fix = &compiled.after_pr["follow-up/fix-ci-error"];
-    assert_eq!(fix.next.as_deref(), Some("follow-up/wait-ci"));
+    assert_eq!(fix.next, None);
     assert_eq!(
         fix.if_condition.as_ref().unwrap().file_changed.as_deref(),
         Some("follow-up/sync-base")
     );
+    let prompt = fix
+        .prompt
+        .as_deref()
+        .unwrap_or_else(|| panic!("missing fix-ci-error prompt"));
+    for required in [
+        "Previous wait-ci diagnostic (stderr):",
+        "Enumerate every check",
+        "Read the complete logs for every non-success Actions job",
+        "follow the check URL to its provider log",
+        "glab ci trace JOB_ID --pipeline-id PIPELINE_ID",
+        "reproduce every failure locally",
+        "Before committing, run the corresponding repository formatters, linters, and tests",
+        "rerun only the failed job(s) once",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "fix-ci-error prompt omitted {required:?}"
+        );
+    }
     let enabled_ids = |values: FlagValues| {
         let skipped = flags::preflight_skips(&compiled, &values, &[]);
         compiled
@@ -182,7 +207,7 @@ fn verify_local_builtin_resources(root: &Path) {
     let local = root.join("local-builtin");
     write(
         &local.join("_shared/after-pr.yaml"),
-        "inputs: [resolve_conflict_prompt, fix_ci_error_prompt]\nsteps:\n  local-only:\n    command: 'true'\n",
+        "inputs: [resolve_conflict_prompt, fix_ci_error_scope]\nsteps:\n  local-only:\n    command: 'true'\n",
     );
     for builtin in BUILTIN_WORKFLOWS {
         let path = local.join(format!("{}.yaml", builtin.name));
@@ -232,7 +257,7 @@ fn verify_builtin_repair_policy(project: &Path) {
         }
         assert_eq!(
             config.after_pr["follow-up/wait-ci"].timeout.as_deref(),
-            Some("30m")
+            Some("60m")
         );
         assert_eq!(
             config.after_pr["squash-merge"].timeout.as_deref(),

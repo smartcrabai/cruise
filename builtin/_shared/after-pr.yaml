@@ -1,4 +1,4 @@
-inputs: [resolve_conflict_prompt, fix_ci_error_prompt]
+inputs: [resolve_conflict_prompt, fix_ci_error_scope]
 steps:
   pr-ready:
     command: |-
@@ -18,7 +18,7 @@ steps:
     command: |-
       git push
   wait-ci:
-    timeout: 30m
+    timeout: 60m
     command: |-
       diagnostic_payload='{{"checks":[],"truncated":false}}'
       ci_diagnostic() {{
@@ -97,8 +97,10 @@ steps:
                 if ($node.checkSuite | type) == "object"
                   and ($node.checkSuite.workflowRun | type) == "object"
                   and $node.checkSuite.status == "COMPLETED"
-                  and (["FAILURE","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE","STALE"] | index($node.checkSuite.conclusion)) != null then
-                  {{check:{{name:$node.name,state:$node.checkSuite.conclusion,run_id:$node.checkSuite.workflowRun.databaseId,url:$node.detailsUrl,run_expected:true,url_expected:true,checkrun:true}},bad:false}}
+                  and (["FAILURE","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE","STALE"] | index($node.checkSuite.conclusion)) != null
+                  and ($node.conclusion | type) == "string"
+                  and (["SUCCESS","NEUTRAL","SKIPPED"] | index($node.conclusion)) == null then
+                  {{check:{{name:$node.name,state:$node.conclusion,run_id:$node.checkSuite.workflowRun.databaseId,url:$node.detailsUrl,run_expected:true,url_expected:true,checkrun:true}},bad:false}}
                 elif ($node.status | type) != "string" or $node.status == "" then {{check:null,bad:true}}
                 elif $node.status == "COMPLETED" then
                   if ($node.conclusion | type) != "string" then {{check:null,bad:true}}
@@ -220,6 +222,8 @@ steps:
       }}
       github_actions_status() {{
         actions_state=ready
+        actions_failed=false
+        actions_pending=false
         actions_seen=0
         suites_total=
         seen_cursors=' '
@@ -276,11 +280,8 @@ steps:
           fi
           page_node_count=$(printf '%s' "$page" | jq -r '.node_count')
           actions_seen=$((actions_seen + page_node_count))
-          if [ "$(printf '%s' "$page" | jq -r '.failed')" = true ]; then
-            actions_state=failed
-            return
-          fi
-          if [ "$(printf '%s' "$page" | jq -r '.pending')" = true ]; then actions_state=pending; fi
+          if [ "$(printf '%s' "$page" | jq -r '.failed')" = true ]; then actions_failed=true; fi
+          if [ "$(printf '%s' "$page" | jq -r '.pending')" = true ]; then actions_pending=true; fi
           if [ "$(printf '%s' "$page" | jq -r '.more')" != true ]; then
             detail_page_available=false
             break
@@ -301,12 +302,15 @@ steps:
             return
           fi
         done
-        if [ "$actions_seen" -ne "$suites_total" ]; then actions_state=pending; fi
+        if [ "$actions_pending" = true ] || [ "$actions_seen" -ne "$suites_total" ]; then
+          actions_state=pending
+        elif [ "$actions_failed" = true ]; then
+          actions_state=failed
+        fi
       }}
       collect_gitlab_failures() {{
         if [ -z "$observed_pipeline_id" ] || ! printf '%s' "$1" | jq -e --argjson observed "$observed_pipeline_id" 'def valid_id: if type == "number" then . > 0 and . == floor and (tostring | test("^[1-9][0-9]{{0,19}}$")) else false end; . as $pipeline | type == "object" and ($pipeline.id | valid_id) and $pipeline.id == $observed' >/dev/null 2>&1; then
           diagnostic_payload='{{"checks":[],"truncated":true}}'
-          gitlab_trace_jobs=
           return
         fi
         gitlab_details=$(printf '%s' "$1" | jq -ac '
@@ -358,23 +362,16 @@ steps:
           | ([$sanitized[] | select(.check != null) | .check]) as $valid
           | {{
               checks:$valid[:10],
-              truncated:(($jobs_valid | not) or ([$jobs[] | select(type != "object")] | length) > 0 or ([$jobs[] | select(type == "object" and ((.status | known_job_status) | not))] | length) > 0 or ($failed | length) == 0 or ([$sanitized[] | select(.bad)] | length) > 0 or ($valid | length) > 10 or $run_id == null),
-              trace_jobs:(if ($pipeline.id | type) == "number" then [$failed[] | select((.id | type) == "number") | "\($pipeline.id) \(.id)"] else [] end)
+              truncated:(($jobs_valid | not) or ([$jobs[] | select(type != "object")] | length) > 0 or ([$jobs[] | select(type == "object" and ((.status | known_job_status) | not))] | length) > 0 or ($failed | length) == 0 or ([$sanitized[] | select(.bad)] | length) > 0 or ($valid | length) > 10 or $run_id == null)
             }}
         ' 2>/dev/null)
         if [ -z "$gitlab_details" ]; then
           diagnostic_payload='{{"checks":[],"truncated":true}}'
-          gitlab_trace_jobs=
           return
         fi
         if ! diagnostic_payload=$(printf '%s' "$gitlab_details" | jq -ac '{{checks, truncated}}'); then
           diagnostic_payload='{{"checks":[],"truncated":true}}'
-          gitlab_trace_jobs=
           return
-        fi
-        if ! gitlab_trace_jobs=$(printf '%s' "$gitlab_details" | jq -r '.trace_jobs[]?'); then
-          diagnostic_payload='{{"checks":[],"truncated":true}}'
-          gitlab_trace_jobs=
         fi
       }}
       case "{pr.url}" in
@@ -385,9 +382,9 @@ steps:
           head_matches=unknown
           check_count=unknown
           http_status=unknown
-          attempt=0
+          deadline=$(( $(date +%s) + 3300 ))
           diagnostic_stderr="$(git rev-parse --git-dir)/cruise-ci-query.stderr"
-          while [ "$attempt" -lt 30 ]; do
+          while :; do
             if response=$(glab ci get --merge-request {pr.number} --output json 2>"$diagnostic_stderr"); then
               query_status=0
             else
@@ -428,31 +425,22 @@ steps:
                     collect_gitlab_failures "$gitlab_details_response"
                   else
                     diagnostic_payload='{{"checks":[],"truncated":true}}'
-                    gitlab_trace_jobs=
                   fi
                 fi
                 ci_diagnostic "$diagnostic_reason"
-                if [ "$diagnostic_reason" = ci_failed ]; then
-                  log="$(git rev-parse --git-dir)/cruise-ci-traces.log"
-                  : > "$log"
-                  printf '%s\n' "$gitlab_trace_jobs" | while read -r pid jid; do
-                    [ -n "$pid" ] && [ -n "$jid" ] || continue
-                    printf '=== job %s (pipeline %s) ===\n' "$jid" "$pid" >> "$log"
-                    glab ci trace "$jid" --pipeline-id "$pid" >> "$log" 2>&1 || true
-                  done
-                fi
                 exit 1 ;;
             esac
+            if ! now=$(date +%s); then
+              printf 'Unable to check the GitLab CI wait deadline for PR/MR #%s.\n' {pr.number} >&2
+              ci_diagnostic clock_error
+              exit 1
+            fi
+            if [ "$now" -ge "$deadline" ]; then
+              printf 'GitLab CI remained pending at the wait deadline; no code failure was reported.\n'
+              exit 0
+            fi
             sleep 15
-            attempt=$((attempt + 1))
-          done
-          if [ "$query_status" -ne 0 ]; then
-            ci_diagnostic api_error
-          else
-            ci_diagnostic timeout
-          fi
-          echo "CI remained pending after 30 polls." >&2
-          exit 1 ;;
+          done ;;
         *)
           provider=github
           state=unobserved
@@ -479,7 +467,7 @@ steps:
           query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{state contexts(first:1) {{totalCount}}}}}}}}}}}}'
           detail_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{contexts(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{__typename ... on CheckRun {{name status conclusion detailsUrl checkSuite {{status conclusion workflowRun {{databaseId}}}}}} ... on StatusContext {{context state targetUrl}}}}}}}}}}}}}}'
           suite_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid checkSuites(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{status conclusion workflowRun {{databaseId}}}}}}}}}}}}}}'
-          deadline=$(( $(date +%s) + 1740 ))
+          deadline=$(( $(date +%s) + 3300 ))
           head_mismatch_since=
           ready_streak=0
           diagnostic_stderr="$(git rev-parse --git-dir)/cruise-ci-query.stderr"
@@ -583,10 +571,15 @@ steps:
                       exit 1 ;;
                   esac ;;
                 FAILURE|ERROR)
-                  printf 'GitHub CI failed for PR #%s: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' {pr.number} "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
-                  collect_github_failures
-                  ci_diagnostic ci_failed
-                  exit 1 ;;
+                  github_actions_status
+                  case "$actions_state" in
+                    pending) ;;
+                    failed|ready)
+                      printf 'GitHub CI failed for PR #%s: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' {pr.number} "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
+                      collect_github_failures
+                      ci_diagnostic ci_failed
+                      exit 1 ;;
+                  esac ;;
                 PENDING|EXPECTED) ;;
                 *)
                   printf 'GitHub returned unknown CI state for PR #%s: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' {pr.number} "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
@@ -609,9 +602,15 @@ steps:
               exit 1
             fi
             if [ "$now" -ge "$deadline" ]; then
-              printf 'GitHub CI timed out: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count" >&2
-              ci_diagnostic timeout
-              exit 1
+              case "$state" in
+                FAILURE|ERROR)
+                  printf 'GitHub CI still has a failed rollup at the wait deadline for HEAD %s.\n' "$expected_head" >&2
+                  collect_github_failures
+                  ci_diagnostic ci_failed
+                  exit 1 ;;
+              esac
+              printf 'GitHub CI did not reach readiness before the wait deadline: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s; no code failure was reported.\n' "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count"
+              exit 0
             fi
             printf 'Waiting for GitHub CI: expected HEAD %s, PR HEAD %s, rollup HEAD %s, state %s, checks %s.\n' "$expected_head" "$pr_head" "$rollup_head" "$state" "$check_count"
             sleep 5
@@ -621,7 +620,30 @@ steps:
     skip: prev.success
     allow_commit: true
     permission: full
-    prompt: "{inputs.fix_ci_error_prompt}"
+    prompt: |-
+      Original request: {input}
+
+      Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
+
+      Task/report scope:
+      {inputs.fix_ci_error_scope}
+
+      Previous wait-ci diagnostic (stderr):
+      {prev.stderr}
+
+      CI for PR/MR #{pr.number} ({pr.url}) did not become ready. Treat the diagnostic as a hint, not a complete list: if it is empty or truncated, query the provider directly.
+
+      First determine the exact current PR/MR head. Enumerate every check for that head that is not successful, including canceled/cancelled, timed-out, pending, and skipped checks; distinguish completed failures from checks that are still running. Do not inspect only the first reported failure.
+
+      For GitHub, inspect all check runs and status contexts for that commit, including paginated results. Read the complete logs for every non-success Actions job (`gh run view RUN_ID --log`, or `gh run view RUN_ID --job JOB_ID --log`); use `gh run view RUN_ID --json jobs` to identify jobs. For GitLab, enumerate all pipeline jobs, including canceled and timed-out jobs, and read each non-success job log with `glab ci trace JOB_ID --pipeline-id PIPELINE_ID`. Do not rely only on a failure summary or `--log-failed`.
+      For third-party status checks without an Actions or GitLab job, follow the check URL to its provider log; if no log is exposed, report that explicitly.
+
+      For canceled or timed-out jobs, follow the final progress lines to identify the exact hung or slow test; do not treat a timeout as an unexplained CI failure. Inspect the CI workflow definition and reproduce every failure locally using the commands that the corresponding job runs. Diagnose all failures on this head before editing, then fix every genuine in-scope failure in this one iteration.
+
+      Before committing, run the corresponding repository formatters, linters, and tests for every failed job, including the exact CI commands. Never commit before reproducing and verifying the fixes.
+
+      If a failure is demonstrably unrelated to these changes or flaky, confirm it also fails on the base or rerun only the failed job(s) once (`gh run rerun RUN_ID --failed` on GitHub, or retry the specific job on GitLab), then wait for that rerun to finish. Do not modify unrelated code or repeat the rerun. If it remains red or cannot be reproduced, make no code changes and report the exact check/job and clear reason instead of looping.
+
+      Preserve the task/report scope and unrelated user work. Never weaken, remove, skip, or disable tests, scanners, assertions, required checks, or policy to get green. Stage and commit only verified in-scope fixes; do not push, create, or merge a PR because the following shared steps handle base synchronization and push. If there is no in-scope fix, make no code changes and state why clearly.
     if:
       file-changed: sync-base
-    next: wait-ci

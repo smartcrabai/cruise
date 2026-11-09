@@ -22,5 +22,5 @@ workflow_make:
   - request
   - repair
 workflow_inputs:
-  - inputs.fix_ci_error_prompt
+  - inputs.fix_ci_error_scope
   - inputs.resolve_conflict_prompt

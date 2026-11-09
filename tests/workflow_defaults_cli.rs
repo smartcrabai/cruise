@@ -924,10 +924,24 @@ fn run_gitlab_wait_ci_command_with_details(
     let get_count = root.path().join("glab-details-count");
     std::fs::write(&get_count, "0\n")
         .unwrap_or_else(|error| panic!("initialize glab detail count: {error}"));
-    let trace_count = root.path().join("glab-trace-count");
-    std::fs::write(&trace_count, "0\n")
-        .unwrap_or_else(|error| panic!("initialize glab trace count: {error}"));
+    let date_count = root.path().join("date-count");
     cruise::test_support::write_executable_script(&bin.join("glab"), FAKE_GLAB_SCRIPT);
+    cruise::test_support::write_executable_script(&bin.join("sleep"), "#!/bin/sh\nexit 0\n");
+    cruise::test_support::write_executable_script(
+        &bin.join("date"),
+        r#"#!/bin/sh
+count=$(cat "$WAIT_CI_DATE_COUNT" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$WAIT_CI_DATE_COUNT"
+if [ "$count" -eq 1 ]; then
+  printf '100\n'
+elif [ "$count" -eq 2 ]; then
+  printf '105\n'
+else
+  printf '100000\n'
+fi
+"#,
+    );
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
@@ -944,7 +958,7 @@ fn run_gitlab_wait_ci_command_with_details(
         .env("WAIT_CI_STATUS_EXIT", status_exit.to_string())
         .env("WAIT_CI_STATUS_STDERR", status_stderr)
         .env("WAIT_CI_STATUS_CALLS", &get_count)
-        .env("WAIT_CI_TRACE_CALLS", &trace_count)
+        .env("WAIT_CI_DATE_COUNT", &date_count)
         .output()
         .unwrap_or_else(|error| panic!("run builtin GitLab wait-ci command: {error}"));
     let calls = std::fs::read_to_string(get_count)
@@ -959,33 +973,7 @@ fn run_gitlab_wait_ci_command_with_details(
     assert_eq!(
         calls.trim(),
         expected_detail_calls,
-        "failed-job details should be fetched once and reused for traces"
-    );
-    let expected_trace_calls = match (
-        serde_json::from_str::<serde_json::Value>(status_response).ok(),
-        serde_json::from_str::<serde_json::Value>(details_response).ok(),
-    ) {
-        (Some(status), Some(details))
-            if status_exit == 0
-                && status["status"] == "failed"
-                && status["id"].is_number()
-                && details["id"].is_number()
-                && details["id"] == status["id"] =>
-        {
-            details["jobs"].as_array().map_or(0, |jobs| {
-                jobs.iter()
-                    .filter(|job| job["status"] == "failed" && job["id"].is_number())
-                    .count()
-            })
-        }
-        _ => 0,
-    };
-    let traces = std::fs::read_to_string(trace_count)
-        .unwrap_or_else(|error| panic!("read fake glab trace count: {error}"));
-    assert_eq!(
-        traces.trim().parse::<usize>().unwrap_or(usize::MAX),
-        expected_trace_calls,
-        "failed-job traces should use the single details response"
+        "failed-job details should be fetched once"
     );
     output
 }
@@ -993,12 +981,6 @@ fn run_gitlab_wait_ci_command_with_details(
 #[cfg(unix)]
 const FAKE_GLAB_SCRIPT: &str = r#"#!/bin/sh
 case "$1:$2" in
-  ci:trace)
-    count=$(cat "$WAIT_CI_TRACE_CALLS" 2>/dev/null || printf 0)
-    count=$((count + 1))
-    printf '%s\n' "$count" > "$WAIT_CI_TRACE_CALLS"
-    printf 'local trace output\n'
-    exit 0 ;;
   ci:get) ;;
   *) printf 'unexpected fake glab call: %s\n' "$*" >&2; exit 91 ;;
 esac
@@ -1077,18 +1059,25 @@ if [ "$typed_owner" != true ] || [ "$typed_name" != true ] || [ "$typed_head" !=
   exit 0
 fi
 detail_count=0
+query_kind=unknown
 case "$*" in
-  *'contexts(first:100,after:$after)'*|*'checkSuites(first:100,after:$after)'*)
-    detail_count=$(cat "$WAIT_CI_GH_DETAIL_COUNT" 2>/dev/null || printf 0)
-    detail_count=$((detail_count + 1))
-    printf '%s\n' "$detail_count" > "$WAIT_CI_GH_DETAIL_COUNT"
-    if [ -n "$typed_after" ] && [ "$typed_after" != "$WAIT_CI_GH_EXPECTED_CURSOR" ]; then
-      printf 'GitHub details pagination did not advance its cursor: %s\n' "$*" >&2
-      exit 97
-    fi ;;
-  *'contexts(first:1)'*) ;;
+  *'contexts(first:100,after:$after)'*)
+    query_kind=details ;;
+  *'checkSuites(first:100,after:$after)'*)
+    query_kind=suites ;;
+  *'contexts(first:1)'*)
+    query_kind=summary ;;
   *) printf 'GraphQL request did not query a supported wait-ci connection: %s\n' "$*" >&2; exit 98 ;;
 esac
+if [ "$query_kind" = details ] || [ "$query_kind" = suites ]; then
+  detail_count=$(cat "$WAIT_CI_GH_DETAIL_COUNT" 2>/dev/null || printf 0)
+  detail_count=$((detail_count + 1))
+  printf '%s\n' "$detail_count" > "$WAIT_CI_GH_DETAIL_COUNT"
+  if [ -n "$typed_after" ] && [ "$typed_after" != "$WAIT_CI_GH_EXPECTED_CURSOR" ]; then
+    printf 'GitHub details pagination did not advance its cursor: %s\n' "$*" >&2
+    exit 97
+  fi
+fi
 if [ "$detail_count" -gt 0 ]; then
   case "$*" in
     *'databaseId status conclusion'*|*'status conclusion workflowRun'*) ;;
@@ -1098,7 +1087,7 @@ fi
 count=$(cat "$WAIT_CI_GH_COUNT" 2>/dev/null || printf 0)
 count=$((count + 1))
 printf '%s\n' "$count" > "$WAIT_CI_GH_COUNT"
-if [ "${WAIT_CI_GH_DETAIL_FAILURE-0}" = 1 ] && [ "$detail_count" -gt 0 ]; then
+if [ "${WAIT_CI_GH_DETAIL_FAILURE-0}" = 1 ] && [ "$query_kind" = details ]; then
   printf 'fake GitHub details response failed\n' >&2
   exit 95
 fi
@@ -1163,7 +1152,7 @@ count=$(cat "$WAIT_CI_DATE_COUNT" 2>/dev/null || printf 0)
 count=$((count + 1))
 printf '%s\n' "$count" > "$WAIT_CI_DATE_COUNT"
 if [ "${WAIT_CI_TIMEOUT-0}" = 1 ] && [ "$count" -gt 1 ]; then
-  printf '1900\n'
+  printf '100000\n'
 elif [ "$count" -eq 1 ]; then
   printf '100\n'
 elif [ "$count" -eq 2 ]; then
@@ -1373,6 +1362,11 @@ fn github_workflow_run_suite(status: &str, conclusion: Option<&str>) -> serde_js
         "workflowRun":{"databaseId":901}
     })
 }
+#[cfg(unix)]
+fn github_completed_suite_response(head: &str, conclusion: Option<&str>) -> serde_json::Value {
+    let suite = github_workflow_run_suite("COMPLETED", conclusion);
+    github_ci_suites_response(head, head, std::slice::from_ref(&suite), 1, false, None)
+}
 
 #[cfg(unix)]
 fn github_workflow_run_check(status: &str, conclusion: Option<&str>) -> serde_json::Value {
@@ -1381,7 +1375,7 @@ fn github_workflow_run_check(status: &str, conclusion: Option<&str>) -> serde_js
         _ => "COMPLETED",
     };
     let check_conclusion = if status == "COMPLETED" {
-        Some("SUCCESS")
+        conclusion
     } else {
         None
     };
@@ -1447,13 +1441,25 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     }
 
     let command = builtin_wait_ci_command("tdd");
-    let failure_nodes = [
+    let mut failure_nodes = (0..12)
+        .map(|index| {
+            serde_json::json!({
+                "__typename":"CheckRun",
+                "name":format!("successful-job-{index}"),
+                "status":"COMPLETED",
+                "conclusion":"SUCCESS",
+                "detailsUrl":format!("https://github.com/123/true/actions/runs/111/job/{}", 300 + index),
+                "checkSuite":{"status":"COMPLETED","conclusion":"FAILURE","workflowRun":{"databaseId":111}}
+            })
+        })
+        .collect::<Vec<_>>();
+    failure_nodes.extend([
         serde_json::json!({"__typename":"CheckRun","name":"passing","status":"COMPLETED","conclusion":"SUCCESS"}),
-        serde_json::json!({"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://user:password@github.com/123/true/actions/runs/111/job/222?access_token=secret#private","checkSuite":{"workflowRun":{"databaseId":111}}}),
+        serde_json::json!({"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://user:password@github.com/123/true/actions/runs/111/job/222?access_token=secret#private","checkSuite":{"status":"COMPLETED","conclusion":"FAILURE","workflowRun":{"databaseId":111}}}),
         serde_json::json!({"__typename":"StatusContext","context":"lint","state":"ERROR","targetUrl":"https://user:password@ci.example/check?token=secret#private"}),
-        serde_json::json!({"__typename":"CheckRun","name":"deploy","status":"COMPLETED","conclusion":"CANCELLED","detailsUrl":"https://github.com/123/true/actions/runs/333/job/444","checkSuite":{"workflowRun":{"databaseId":333}}}),
+        serde_json::json!({"__typename":"CheckRun","name":"deploy","status":"COMPLETED","conclusion":"CANCELLED","detailsUrl":"https://github.com/123/true/actions/runs/333/job/444","checkSuite":{"status":"COMPLETED","conclusion":"FAILURE","workflowRun":{"databaseId":333}}}),
         serde_json::json!({"__typename":"CheckRun","name":"running","status":"IN_PROGRESS","conclusion":null}),
-    ];
+    ]);
     let fixture = GithubWaitCiFixture::new();
     let output = fixture.run(
         &command,
@@ -1464,11 +1470,12 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
                 Some("FAILURE"),
                 failure_nodes.len(),
             ),
+            github_completed_suite_response(&fixture.head, Some("FAILURE")),
             github_ci_details_response(
                 &fixture.head,
                 &fixture.head,
                 &failure_nodes,
-                5,
+                failure_nodes.len(),
                 false,
                 None,
             ),
@@ -1490,7 +1497,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     assert_eq!(wait_ci_reason(&output), "ci_failed");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("password"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret"));
-    assert_eq!(fixture.gh_calls(), 2);
+    assert_eq!(fixture.gh_calls(), 3);
     let fixture = GithubWaitCiFixture::new();
     let oversized_url = format!("https://ci.example/{}", "a".repeat(1100));
     let mismatched_refs = [
@@ -1503,6 +1510,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         &command,
         &[
             github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 4),
+            github_completed_suite_response(&fixture.head, Some("FAILURE")),
             github_ci_details_response(
                 &fixture.head,
                 &fixture.head,
@@ -1546,6 +1554,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         &command,
         &[
             github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 10),
+            github_completed_suite_response(&fixture.head, Some("FAILURE")),
             github_ci_details_response(
                 &fixture.head,
                 &fixture.head,
@@ -1580,6 +1589,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         &command,
         &[
             github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 2),
+            github_completed_suite_response(&fixture.head, Some("FAILURE")),
             github_ci_details_response(
                 &fixture.head,
                 &fixture.head,
@@ -1594,7 +1604,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     let payload = wait_ci_payload(&output);
     assert_eq!(payload["checks"], serde_json::json!([]));
     assert_eq!(payload["truncated"], true);
-    assert_eq!(fixture.gh_calls(), 2);
+    assert_eq!(fixture.gh_calls(), 3);
 
     let fixture = GithubWaitCiFixture::new();
     let first_page = [
@@ -1609,6 +1619,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         &command,
         &[
             github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 4),
+            github_completed_suite_response(&fixture.head, Some("FAILURE")),
             github_ci_details_response(
                 &fixture.head,
                 &fixture.head,
@@ -1632,13 +1643,14 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         ])
     );
     assert_eq!(payload["truncated"], true);
-    assert_eq!(fixture.gh_calls(), 3);
+    assert_eq!(fixture.gh_calls(), 4);
 
     let fixture = GithubWaitCiFixture::new();
     let output = fixture.run(
         &command,
         &[
             github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 1),
+            github_completed_suite_response(&fixture.head, Some("FAILURE")),
             github_ci_details_response(
                 &fixture.head,
                 &fixture.head,
@@ -1652,7 +1664,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     assert_eq!(wait_ci_payload(&output)["checks"], serde_json::json!([]));
     assert_eq!(wait_ci_payload(&output)["truncated"], true);
-    assert_eq!(fixture.gh_calls(), 2);
+    assert_eq!(fixture.gh_calls(), 3);
 
     let fixture = GithubWaitCiFixture::new();
     let long_name = "x".repeat(130);
@@ -1671,6 +1683,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         &command,
         &[
             github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 12),
+            github_completed_suite_response(&fixture.head, Some("FAILURE")),
             github_ci_details_response(
                 &fixture.head,
                 &fixture.head,
@@ -1694,7 +1707,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         128
     );
     assert_eq!(payload["truncated"], true);
-    assert_eq!(fixture.gh_calls(), 2);
+    assert_eq!(fixture.gh_calls(), 3);
 
     let fixture = GithubWaitCiFixture::new();
     let malformed_page = serde_json::json!({
@@ -1712,6 +1725,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         &command,
         &[
             github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 1),
+            github_completed_suite_response(&fixture.head, Some("FAILURE")),
             malformed_page,
         ],
         false,
@@ -1722,17 +1736,15 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     let fixture = GithubWaitCiFixture::new();
     let output = fixture.run_detail_error(
         &command,
-        &[github_ci_response(
-            &fixture.head,
-            &fixture.head,
-            Some("FAILURE"),
-            1,
-        )],
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 1),
+            github_completed_suite_response(&fixture.head, Some("FAILURE")),
+        ],
     );
     assert_eq!(wait_ci_reason(&output), "ci_failed");
     assert_eq!(wait_ci_payload(&output)["checks"], serde_json::json!([]));
     assert_eq!(wait_ci_payload(&output)["truncated"], true);
-    assert_eq!(fixture.gh_calls(), 2);
+    assert_eq!(fixture.gh_calls(), 3);
     assert!(
         !String::from_utf8_lossy(&output.stderr).contains("fake GitHub details response failed")
     );
@@ -1749,7 +1761,7 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     );
     let terminal = text(&output);
     assert!(!output.status.success(), "{terminal}");
-    assert_eq!(wait_ci_reason(&output), "head_mismatch");
+    assert_eq!(wait_ci_reason(&output), "head_mismatch", "{terminal}");
     assert_eq!(wait_ci_payload(&output)["truncated"], false);
     assert_eq!(fixture.gh_calls(), 2);
 
@@ -1798,10 +1810,58 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
             true,
         );
         let terminal = text(&output);
-        assert!(!output.status.success(), "{terminal}");
+        assert!(output.status.success(), "{terminal}");
+        assert!(
+            terminal.contains("no code failure was reported"),
+            "{terminal}"
+        );
         assert_eq!(fixture.gh_calls(), 1);
         assert_eq!(fixture.date_calls(), 2);
     }
+
+    let fixture = GithubWaitCiFixture::new();
+    let output = fixture.run(
+        &command,
+        &[github_ci_response(
+            &fixture.head,
+            &fixture.head,
+            Some("PENDING"),
+            1,
+        )],
+        true,
+    );
+    let terminal = text(&output);
+    assert!(output.status.success(), "{terminal}");
+    assert!(
+        terminal.contains("no code failure was reported"),
+        "{terminal}"
+    );
+    assert_eq!(fixture.gh_calls(), 1);
+
+    let fixture = GithubWaitCiFixture::new();
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("SUCCESS"), 1),
+            github_ci_suites_response(
+                &fixture.head,
+                &fixture.head,
+                &[github_workflow_run_suite("IN_PROGRESS", None)],
+                1,
+                false,
+                None,
+            ),
+        ],
+        true,
+    );
+    let terminal = text(&output);
+    assert!(output.status.success(), "{terminal}");
+    assert!(
+        terminal.contains("no code failure was reported"),
+        "{terminal}"
+    );
+    assert_eq!(fixture.gh_calls(), 2);
+    assert_eq!(fixture.date_calls(), 2);
 }
 #[cfg(unix)]
 #[test]
@@ -2059,6 +2119,121 @@ fn builtin_github_wait_ci_fails_for_completed_failed_workflow_run() {
 }
 #[cfg(unix)]
 #[test]
+fn builtin_github_wait_ci_collects_failures_after_all_suites_finish() {
+    let fixture = GithubWaitCiFixture::new();
+    let command = builtin_wait_ci_command("tdd");
+    let failed_suite = github_workflow_run_suite("COMPLETED", Some("FAILURE"));
+    let running_suite = github_workflow_run_suite("IN_PROGRESS", None);
+    let successful_suite = github_workflow_run_suite("COMPLETED", Some("SUCCESS"));
+    let failed_check = serde_json::json!({
+        "__typename":"CheckRun",
+        "name":"unit-tests",
+        "status":"COMPLETED",
+        "conclusion":"FAILURE",
+        "detailsUrl":"https://github.com/123/true/actions/runs/901/job/902",
+        "checkSuite":{
+            "status":"COMPLETED",
+            "conclusion":"FAILURE",
+            "workflowRun":{"databaseId":901}
+        }
+    });
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 1),
+            github_ci_suites_response(
+                &fixture.head,
+                &fixture.head,
+                &[failed_suite.clone(), running_suite],
+                2,
+                false,
+                None,
+            ),
+            github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 1),
+            github_ci_suites_response(
+                &fixture.head,
+                &fixture.head,
+                &[failed_suite, successful_suite],
+                2,
+                false,
+                None,
+            ),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &[failed_check],
+                1,
+                false,
+                None,
+            ),
+        ],
+        false,
+    );
+    let terminal = text(&output);
+    assert!(!output.status.success(), "{terminal}");
+    assert_eq!(wait_ci_reason(&output), "ci_failed");
+    assert_eq!(
+        wait_ci_payload(&output)["checks"],
+        serde_json::json!([{
+            "name":"unit-tests",
+            "state":"FAILURE",
+            "run_id":"901",
+            "job_id":"902",
+            "url":"https://github.com/123/true/actions/runs/901/job/902"
+        }])
+    );
+    assert_eq!(fixture.gh_calls(), 5);
+}
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_reports_known_failure_when_other_suite_times_out() {
+    let fixture = GithubWaitCiFixture::new();
+    let command = builtin_wait_ci_command("tdd");
+    let failed_suite = github_workflow_run_suite("COMPLETED", Some("FAILURE"));
+    let running_suite = github_workflow_run_suite("IN_PROGRESS", None);
+    let failed_check = serde_json::json!({
+        "__typename":"CheckRun",
+        "name":"lint",
+        "status":"COMPLETED",
+        "conclusion":"FAILURE",
+        "detailsUrl":"https://github.com/123/true/actions/runs/901/job/902",
+        "checkSuite":{
+            "status":"COMPLETED",
+            "conclusion":"FAILURE",
+            "workflowRun":{"databaseId":901}
+        }
+    });
+    let output = fixture.run(
+        &command,
+        &[
+            github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 1),
+            github_ci_suites_response(
+                &fixture.head,
+                &fixture.head,
+                &[failed_suite, running_suite],
+                2,
+                false,
+                None,
+            ),
+            github_ci_details_response(
+                &fixture.head,
+                &fixture.head,
+                &[failed_check],
+                1,
+                false,
+                None,
+            ),
+        ],
+        true,
+    );
+    let terminal = text(&output);
+    assert!(!output.status.success(), "{terminal}");
+    assert_eq!(wait_ci_reason(&output), "ci_failed");
+    assert_eq!(wait_ci_payload(&output)["checks"][0]["name"], "lint");
+    assert_eq!(fixture.gh_calls(), 3);
+}
+#[cfg(unix)]
+#[test]
 fn builtin_github_wait_ci_fails_for_completed_suite_without_checkrun_context() {
     let fixture = GithubWaitCiFixture::new();
     let command = builtin_wait_ci_command("tdd");
@@ -2142,7 +2317,12 @@ fn builtin_github_wait_ci_allows_transient_head_mismatch_but_rejects_persistent_
         false,
     );
     assert!(!output.status.success(), "{}", text(&output));
-    assert_eq!(wait_ci_reason(&output), "head_mismatch");
+    assert_eq!(
+        wait_ci_reason(&output),
+        "head_mismatch",
+        "{}",
+        text(&output)
+    );
     assert_eq!(fixture.gh_calls(), 2);
 }
 
@@ -2189,6 +2369,7 @@ fn builtin_github_wait_ci_retains_failures_with_malformed_optional_run_refs() {
         &command,
         &[
             github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), nodes.len()),
+            github_completed_suite_response(&fixture.head, Some("FAILURE")),
             github_ci_details_response(
                 &fixture.head,
                 &fixture.head,
@@ -2342,4 +2523,19 @@ fn builtin_gitlab_wait_ci_rejects_unmatched_pipeline_details() {
         assert_eq!(payload["checks"], serde_json::json!([]));
         assert_eq!(payload["truncated"], true);
     }
+}
+#[cfg(unix)]
+#[test]
+fn builtin_gitlab_wait_ci_pending_timeout_is_not_a_code_failure() {
+    let command =
+        builtin_wait_ci_command_for_url("tdd", "https://gitlab.com/owner/repo/-/merge_requests/42");
+    let output = run_gitlab_wait_ci_command(&command, r#"{"id":1,"status":"running"}"#, 0, "");
+    let terminal = text(&output);
+    assert!(output.status.success(), "{terminal}");
+    assert!(
+        terminal.contains(
+            "GitLab CI remained pending at the wait deadline; no code failure was reported."
+        ),
+        "{terminal}"
+    );
 }

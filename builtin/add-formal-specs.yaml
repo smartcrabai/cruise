@@ -98,16 +98,10 @@ after-pr:
           {file:formal-specs/model.md}
 
           A conflict occurred while synchronizing PR/MR #{pr.number} ({pr.url}) with its base branch. Resolve only conflicts within the audited formal-specification scope, preserve unrelated work, then stage and commit the resolution. Do not push; the following step handles it. Never weaken requirements, assertions, model bounds, Gherkin checks, scanners, CI gates, or other policy to get green. Do not create or merge a PR directly.
-      fix_ci_error_prompt: |-
-          Original request: {input}
-
-          Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
-
-          Task/report scope: use the guaranteed formal audit and model design reports plus current PR changes:
+      fix_ci_error_scope: |-
+          Use the formal audit and model design reports plus current PR changes:
           {file:formal-specs/audit.md}
           {file:formal-specs/model.md}
-
-          CI for PR/MR #{pr.number} ({pr.url}) failed. For GitLab, inspect `$(git rev-parse --git-dir)/cruise-ci-traces.log`; for GitHub, inspect `gh pr checks {pr.number}` and the failed run logs. Fix only a genuine failure within the audited formal-specification scope, then stage, commit, and push the PR branch. Never weaken requirements, assertions, model bounds, Gherkin checks, scanners, CI gates, or other policy to make CI green. The agent must not create or merge a PR; the host-managed native step owns any explicitly opted-in squash merge.
   squash-merge:
     flag: merge
     squash-merge: true
