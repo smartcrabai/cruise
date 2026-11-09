@@ -114,9 +114,13 @@ mod contracts {
                 json!(null),
             ),
             "transport" => (
-                Some("fixture/model:medium"),
+                Some(if conversation == "new" {
+                    "fixture/transport-new:medium"
+                } else {
+                    "fixture/transport-resumed:medium"
+                }),
                 Catalog::Transport,
-                json!(null),
+                json!({"providerID":"fixture","id":"fallback"}),
             ),
             "native" => (
                 Some(MODEL),
@@ -176,6 +180,23 @@ mod contracts {
         }
     }
 
+    #[then("the transient catalog error succeeds on the fallback model")]
+    fn transient_catalog_fallback(w: &mut OpenCodeWorld) {
+        let fixture = w.fixture.as_ref().unwrap();
+        let outcome = w.outcome.as_ref().unwrap().as_ref().unwrap();
+        let expected = json!({"providerID":"fixture","id":"fallback"});
+
+        assert_eq!(outcome.result.output, ANSWER);
+        assert_eq!(
+            &selected_models(fixture)[w.baseline_selections..],
+            std::slice::from_ref(&expected)
+        );
+        assert_eq!(fixture.prompt_count(), w.baseline_prompts + 1);
+        if let Some(id) = &w.retained_id {
+            assert_eq!(outcome.session_id.as_ref().unwrap().id.as_str(), id);
+        }
+    }
+
     #[then("selection fails explicitly without a prompt or conversation model mutation")]
     fn selection_failure(w: &mut OpenCodeWorld) {
         let diagnostic = w
@@ -193,7 +214,6 @@ mod contracts {
             "protocol" => &["protocol"],
             "unauthorized" => &["401"],
             "unavailable" => &["503"],
-            "transport" => &["transport"],
             _ => panic!("unknown failure case"),
         };
         for marker in markers {
@@ -359,7 +379,7 @@ mod contracts {
             "malformed" => &["malformed SSE JSON"],
             "uncertain-acceptance" => &["prompt acceptance uncertain"],
             "tool-effect" => &["fixture provider failure"],
-            "plugin-disabled" => &["setup timed out", "required native plugin"],
+            "plugin-disabled" => &["required native plugin"],
             "checkpoint-refused" => &["checkpoint-refused"],
             _ => panic!("no expected failure category for {}", w.case),
         };

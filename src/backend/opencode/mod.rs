@@ -145,13 +145,26 @@ fn resolve_effort(
 struct AttemptError {
     message: String,
     provider_failure: Option<types::ModelFailure>,
+    prompt_submitted: bool,
+    resume_uncertain: bool,
 }
 impl From<String> for AttemptError {
     fn from(message: String) -> Self {
         Self {
             message,
             provider_failure: None,
+            prompt_submitted: false,
+            resume_uncertain: false,
         }
+    }
+}
+impl AttemptError {
+    fn requires_retry_barrier(&self) -> bool {
+        self.provider_failure.is_none()
+            && (self.prompt_submitted
+                || self.resume_uncertain
+                || crate::retry::classify_retryable(&self.message)
+                    != Some(crate::retry::RetryClass::Network))
     }
 }
 impl From<&str> for AttemptError {
@@ -180,7 +193,7 @@ pub(crate) fn stream_agent(config: OpenCodeRunnerConfig, prompt: String) -> Rece
         let terminal = match result {
             Ok(text) => StreamChunk::Done(text),
             Err(error) => {
-                if error.provider_failure.is_none() {
+                if error.requires_retry_barrier() {
                     let _ = tx.send(StreamChunk::RetryBarrier);
                 }
                 if error
@@ -243,8 +256,9 @@ async fn run_attempt(
     let storage = runtime::Storage::prepare(config, id.clone(), cwd.clone())?;
     let mut safe_failure = None;
     let mut conversation_clean = storage.initial_clean;
-    let mut catalog_resolution_rejected = false;
     let mut checkpointed = config.resume_session_id.is_some();
+    let mut prompt_submitted = false;
+    let mut session_untouched = false;
     let result = async {
         let mut bridge =
             tools::Bridge::start(config, &storage.root, &id, cancel.child_token(), tx.clone())
@@ -271,6 +285,7 @@ async fn run_attempt(
             let url = runtime.startup(&cancel).await?;
             let client =
                 client::Client::new(url, runtime.password.clone()).map_err(|e| e.to_string())?;
+            session_untouched = true;
             let setup = tokio::time::timeout(Duration::from_secs(7), async {
                 let info = client.info().await.map_err(|e| e.to_string())?;
                 if !info.version.starts_with("2.") {
@@ -282,7 +297,14 @@ async fn run_attempt(
                     .plugins(&cwd)
                     .await
                     .map_err(|error| error.to_string())?;
-                bridge.wait_ready(&cancel).await?;
+                Ok(())
+            })
+            .await
+            .map_err(|_| "OpenCode V2 setup timed out".to_owned())?;
+            setup?;
+            // Keep missing-plugin errors distinct from retryable API timeouts.
+            bridge.wait_ready(&cancel).await?;
+            let setup = tokio::time::timeout(Duration::from_secs(7), async {
                 let model = if let Some(mut request) = request {
                     if let Some(effort) = request.effort {
                         let resolution = async {
@@ -294,10 +316,7 @@ async fn run_attempt(
                                 .map_err(|error| error.to_string())
                         }
                         .await;
-                        if let Err(error) = resolution {
-                            catalog_resolution_rejected = true;
-                            return Err(error);
-                        }
+                        resolution?;
                     }
                     Some(request.model)
                 } else {
@@ -314,6 +333,7 @@ async fn run_attempt(
                     {
                         return Err("OpenCode resume refused: pending inbox inputs".into());
                     }
+                    session_untouched = false;
                     client
                         .permissions(&id, &rules)
                         .await
@@ -323,6 +343,7 @@ async fn run_attempt(
                     }
                     session
                 } else {
+                    session_untouched = false;
                     client
                         .create(&types::CreateSession {
                             id: &id,
@@ -354,7 +375,7 @@ async fn run_attempt(
                     .environment(&id, &variables)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok(())
+                Ok::<(), String>(())
             })
             .await
             .map_err(|_| "OpenCode V2 setup timed out".to_owned())?;
@@ -398,6 +419,7 @@ async fn run_attempt(
                 &cancel,
                 tx,
                 &mut failure,
+                &mut prompt_submitted,
                 &mut conversation_clean,
             )
             .await;
@@ -415,6 +437,10 @@ async fn run_attempt(
             result
         }
         .await;
+        // Setup/API reads before the first session write leave history untouched.
+        if session_untouched {
+            conversation_clean = storage.initial_clean || checkpointed;
+        }
         let stop = runtime.stop().await;
         let bridge_stop = bridge.stop().await;
         if stop.is_err() || bridge_stop.is_err() {
@@ -423,19 +449,25 @@ async fn run_attempt(
         }
         stop?;
         bridge_stop?;
-        if catalog_resolution_rejected {
-            conversation_clean = storage.initial_clean;
-        }
         turn_result
     }
     .await;
     if !conversation_clean {
         safe_failure = None;
     }
-    storage.finish(conversation_clean, checkpointed)?;
+    storage
+        .finish(conversation_clean, checkpointed)
+        .map_err(|message| AttemptError {
+            message,
+            provider_failure: None,
+            prompt_submitted,
+            resume_uncertain: config.resume_session_id.is_some() && !conversation_clean,
+        })?;
     result.map_err(|message| AttemptError {
         message,
         provider_failure: safe_failure,
+        prompt_submitted,
+        resume_uncertain: config.resume_session_id.is_some() && !conversation_clean,
     })
 }
 #[derive(Clone, Copy)]
@@ -450,6 +482,7 @@ async fn execute(
     cancel: &CancellationToken,
     tx: &SyncSender<StreamChunk>,
     failure: &mut Option<types::ModelFailure>,
+    prompt_submitted: &mut bool,
     clean: &mut bool,
 ) -> std::result::Result<String, String> {
     let TurnInput {
@@ -487,6 +520,7 @@ async fn execute(
         text: prompt,
     };
     *clean = false;
+    *prompt_submitted = true;
     tokio::select! {
         ()=cancel.cancelled()=>return Err("OpenCode interrupted".into()),
         result=tokio::time::timeout(Duration::from_secs(15),client.prompt(id,&input))=>{result.map_err(|_|"OpenCode prompt acceptance uncertain: timeout")?.map_err(|e|format!("OpenCode prompt acceptance uncertain: {e}"))?;}

@@ -88,6 +88,7 @@ async fn cancelling_boundary_acquisition_never_submits_prompt() {
     .unwrap_or_else(|error| panic!("client: {error}"));
     let (tx, _rx) = std::sync::mpsc::sync_channel(128);
     let mut failure = None;
+    let mut prompt_submitted = false;
     let mut clean = false;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -101,16 +102,50 @@ async fn cancelling_boundary_acquisition_never_submits_prompt() {
             &cancel,
             &tx,
             &mut failure,
+            &mut prompt_submitted,
             &mut clean,
         ),
     )
     .await
     .unwrap_or_else(|error| panic!("cancellation: {error}"));
     assert!(result.is_err());
+    assert!(!prompt_submitted);
     assert!(clean);
     assert!(failure.is_none());
     assert_eq!(prompts.load(Ordering::SeqCst), 0);
     server.abort();
+}
+#[test]
+fn retry_barrier_preserves_uncertain_prompt_and_resume_state() {
+    let setup = super::AttemptError {
+        message: "OpenCode V2 setup timed out".to_owned(),
+        provider_failure: None,
+        prompt_submitted: false,
+        resume_uncertain: false,
+    };
+    assert!(!setup.requires_retry_barrier());
+    let local_api_server_error = super::AttemptError {
+        message: "OpenCode local API HTTP 503: fixture server unavailable".to_owned(),
+        provider_failure: None,
+        prompt_submitted: false,
+        resume_uncertain: false,
+    };
+    assert!(local_api_server_error.requires_retry_barrier());
+
+    let uncertain = super::AttemptError {
+        message: "OpenCode prompt acceptance uncertain: timeout".to_owned(),
+        provider_failure: None,
+        prompt_submitted: true,
+        resume_uncertain: false,
+    };
+    assert!(uncertain.requires_retry_barrier());
+    let dirty_resume = super::AttemptError {
+        message: "OpenCode setup timeout left resumed session unclean".to_owned(),
+        provider_failure: None,
+        prompt_submitted: false,
+        resume_uncertain: true,
+    };
+    assert!(dirty_resume.requires_retry_barrier());
 }
 
 #[tokio::test]
