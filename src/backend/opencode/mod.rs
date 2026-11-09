@@ -250,7 +250,6 @@ async fn run_attempt(
     let storage = runtime::Storage::prepare(config, id.clone(), cwd.clone())?;
     let mut safe_failure = None;
     let mut conversation_clean = storage.initial_clean;
-    let mut catalog_resolution_rejected = false;
     let mut checkpointed = config.resume_session_id.is_some();
     let mut prompt_submitted = false;
     let result = async {
@@ -309,10 +308,7 @@ async fn run_attempt(
                                 .map_err(|error| error.to_string())
                         }
                         .await;
-                        if let Err(error) = resolution {
-                            catalog_resolution_rejected = true;
-                            return Err(error);
-                        }
+                        resolution?;
                     }
                     Some(request.model)
                 } else {
@@ -369,7 +365,7 @@ async fn run_attempt(
                     .environment(&id, &variables)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok(())
+                Ok::<(), String>(())
             })
             .await
             .map_err(|_| "OpenCode V2 setup timed out".to_owned())?;
@@ -431,6 +427,10 @@ async fn run_attempt(
             result
         }
         .await;
+        // Without a submitted prompt, this attempt did not alter conversation history.
+        if !prompt_submitted {
+            conversation_clean = storage.initial_clean;
+        }
         let stop = runtime.stop().await;
         let bridge_stop = bridge.stop().await;
         if stop.is_err() || bridge_stop.is_err() {
@@ -439,9 +439,6 @@ async fn run_attempt(
         }
         stop?;
         bridge_stop?;
-        if catalog_resolution_rejected {
-            conversation_clean = storage.initial_clean;
-        }
         turn_result
     }
     .await;

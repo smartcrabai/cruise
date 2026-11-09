@@ -26,7 +26,7 @@ use cruise::test_support::{EnvGuard, lock_process, write_executable_script};
 use futures::StreamExt as _;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 
 pub(crate) const ANSWER: &str = "V2 response: \u{65e5}\u{672c}\u{8a9e}\n";
 pub(crate) const MODEL: &str = "fixture/team/model:2026#precise";
@@ -40,7 +40,7 @@ pub(crate) enum Scenario {
     Malformed,
     UncertainAcceptance,
     HandshakeFailure(StatusCode),
-    TransientInfoTimeout,
+    TransientInfoTimeout { after_session: bool },
     Pending,
     PluginDisabled,
     ProviderFailure { status: u16, side_effect: bool },
@@ -75,6 +75,7 @@ struct Observations {
     pending: Option<String>,
     plugin_ready: bool,
     notices: Vec<String>,
+    info_timeout_waiting: bool,
 }
 
 struct Server {
@@ -85,6 +86,7 @@ struct Server {
     observations: Mutex<Observations>,
     events: broadcast::Sender<Option<String>>,
     catalog: Mutex<Catalog>,
+    info_timeout_release: Notify,
 }
 
 fn locked(server: &Server) -> std::sync::MutexGuard<'_, Observations> {
@@ -328,16 +330,35 @@ async fn serve(State(server): State<Arc<Server>>, request: Request) -> Response 
             Json(json!({"location":{"directory":server.repo},"data": []})).into_response()
         }
         (Method::GET, "/api/info") => {
-            locked(&server).plugin_ready = false;
-            let delay_first_info = matches!(server.scenario, Scenario::TransientInfoTimeout)
-                && locked(&server)
+            let (delay_first_info, release_info_timeout) = {
+                let mut observations = locked(&server);
+                observations.plugin_ready = false;
+                let info_calls = observations
                     .requests
                     .iter()
                     .filter(|request| request.path == "/api/info")
-                    .count()
-                    == 1;
+                    .count();
+                let has_session = !observations.session_id.is_empty();
+                let delay = match server.scenario {
+                    Scenario::TransientInfoTimeout { after_session } => {
+                        let expected_call = if after_session { 2 } else { 1 };
+                        info_calls == expected_call && has_session == after_session
+                    }
+                    _ => false,
+                };
+                if delay {
+                    observations.info_timeout_waiting = true;
+                }
+                let release = !delay && observations.info_timeout_waiting;
+                if release {
+                    observations.info_timeout_waiting = false;
+                }
+                (delay, release)
+            };
             if delay_first_info {
-                tokio::time::sleep(Duration::from_secs(8)).await;
+                server.info_timeout_release.notified().await;
+            } else if release_info_timeout {
+                server.info_timeout_release.notify_one();
             }
             if let Scenario::HandshakeFailure(status) = server.scenario {
                 return (
@@ -735,6 +756,7 @@ impl Fixture {
             observations: Mutex::new(Observations::default()),
             events,
             catalog: Mutex::new(Catalog::Models(json!([]))),
+            info_timeout_release: Notify::new(),
         });
         let router = Router::new()
             .fallback(serve)
@@ -2733,7 +2755,10 @@ async fn missing_required_plugin_stops_before_prompt_and_does_not_fallback() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transient_setup_timeout_uses_fallback_without_replaying_first_prompt() {
     let _lock = lock_process();
-    let fixture = Fixture::new(Scenario::TransientInfoTimeout).await;
+    let fixture = Fixture::new(Scenario::TransientInfoTimeout {
+        after_session: false,
+    })
+    .await;
     let _guards = fixture.guards();
     let outcome = fixture
         .execute(Some("fixture/transient-info-timeout"), 2)
@@ -2746,6 +2771,57 @@ async fn transient_setup_timeout_uses_fallback_without_replaying_first_prompt() 
     assert_eq!(
         selected_models(&fixture),
         vec![json!({"providerID":"fixture","id":"fallback"})]
+    );
+    fixture.assert_stopped();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_setup_timeout_on_resumed_session_falls_back_safely() {
+    let _lock = lock_process();
+    let fixture = Fixture::new(Scenario::TransientInfoTimeout {
+        after_session: true,
+    })
+    .await;
+    let _guards = fixture.guards();
+    let checkpoint = |_: &cruise::model_selection::SdkSessionId| Ok(());
+    let first = fixture
+        .execute_with_checkpoint(Some(MODEL), 0, Some(&checkpoint), None)
+        .await
+        .unwrap_or_else(|error| panic!("initial resumed-session fixture turn failed: {error}"));
+    let session_id = first.session_id.map_or_else(
+        || panic!("initial turn must return a resumable session ID"),
+        |session| session.id,
+    );
+    let baseline_prompts = fixture.prompt_count();
+    let baseline_launches = fixture.launch_count();
+    let baseline_selections = selected_models(&fixture).len();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(15),
+        resume_fixture_with_model(
+            &fixture,
+            &session_id,
+            2,
+            "fixture/transient-resumed-setup-timeout",
+        ),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("resumed setup fallback did not finish: {error}"))
+    .unwrap_or_else(|error| panic!("resumed setup timeout should fall back: {error}"));
+
+    assert_eq!(outcome.result.output, ANSWER);
+    assert_eq!(fixture.prompt_count(), baseline_prompts + 1);
+    assert_eq!(fixture.launch_count(), baseline_launches + 2);
+    assert_eq!(
+        &selected_models(&fixture)[baseline_selections..],
+        &[json!({"providerID":"fixture","id":"fallback"})]
+    );
+    assert_eq!(
+        outcome
+            .session_id
+            .as_ref()
+            .map(|session| session.id.as_str()),
+        Some(session_id.as_str())
     );
     fixture.assert_stopped();
 }
