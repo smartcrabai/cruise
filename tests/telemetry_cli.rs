@@ -4279,17 +4279,29 @@ after-pr:
 
 #[test]
 fn native_resync_starts_fresh_ci_fix_budget_and_retries_merge() {
-    let workflow = r#"
+    run_native_resync_ci_fix_budget_case(None, 6);
+}
+
+#[test]
+fn native_resync_resets_group_retry_budget_between_passes() {
+    run_native_resync_ci_fix_budget_case(Some(2), 4);
+}
+
+fn run_native_resync_ci_fix_budget_case(group_max_retries: Option<usize>, expected_waits: usize) {
+    let group_retry_budget =
+        group_max_retries.map_or_else(String::new, |max| format!("    max_retries: {max}\n"));
+    let workflow = format!(
+        r#"
 command: [cat]
 create_pr: true
 flags:
-  merge: {}
+  merge: {{}}
 steps:
   work:
     command: "printf changed > merge-resync.txt"
 groups:
   ci-fix-loop:
-    if:
+{group_retry_budget}    if:
       file-changed: follow-up/ci-fix-loop
     steps:
       wait-ci:
@@ -4324,7 +4336,8 @@ after-pr:
     timeout: "10"
     if:
       fail: follow-up/sync-base
-"#;
+"#
+    );
     let gh_script = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_GH_LOG"
 if [ "$1" = "--version" ]; then
@@ -4399,7 +4412,7 @@ fi
 printf 'refusing unexpected fake gh command\n' >&2
 exit 97
 "#;
-    let mut scenario = merge_cli_case(false, workflow, gh_script);
+    let mut scenario = merge_cli_case(false, &workflow, gh_script);
     for (name, file) in [
         ("FAKE_SYNC_LOG", "fake-sync.log"),
         ("FAKE_WAIT_LOG", "fake-ci-waits.log"),
@@ -4439,8 +4452,8 @@ exit 97
             .unwrap_or_else(|error| panic!("read CI wait calls: {error}"))
             .lines()
             .count(),
-        6,
-        "each of the two passes must run two failing waits and one successful wait"
+        expected_waits,
+        "unexpected wait-ci attempts with group max_retries={group_max_retries:?}"
     );
     assert_eq!(
         std::fs::read_to_string(scenario.cli.root.path().join("fake-ci-fixes.log"))

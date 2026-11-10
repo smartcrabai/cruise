@@ -579,7 +579,7 @@ fn accept_transition(
             })
             .transpose()?;
         if transition.native_resync {
-            reset_after_pr_edge_budgets(ctx, graph, from, transition, &key)?;
+            reset_after_pr_pass_budgets(ctx, graph, from, transition, &key)?;
         }
         graph.state.edge_counts.insert(
             key,
@@ -606,7 +606,7 @@ fn accept_transition(
     graph.state.pending = None;
     Ok(())
 }
-fn reset_after_pr_edge_budgets(
+fn reset_after_pr_pass_budgets(
     ctx: &ExecutionContext<'_>,
     graph: &mut ExecutionGraph,
     from: &str,
@@ -632,6 +632,7 @@ fn reset_after_pr_edge_budgets(
             counter.budgeted_traversals = 0;
         }
     }
+    graph.state.group_counts.clear();
     Ok(())
 }
 
