@@ -4256,8 +4256,8 @@ after-pr:
         panic!("expected loop protection after repeated resyncs: {session:#?}");
     };
     assert!(
-        phase_error.to_lowercase().contains("loop protection"),
-        "resync loop should exhaust the existing edge budget: {phase_error}"
+        phase_error.contains("edge squash-merge -> follow-up/sync-base exceeded max retries 3"),
+        "native resync must exhaust its own edge after max_retries: {phase_error}"
     );
     assert_eq!(
         std::fs::read_to_string(sync_log)
@@ -4274,6 +4274,258 @@ after-pr:
             .lines()
             .any(|call| call.starts_with("api ") && call.contains("/merge")),
         "a conflicting PR must never issue a native merge write: {gh_calls}"
+    );
+}
+
+#[test]
+fn native_resync_starts_fresh_ci_fix_budget_and_retries_merge() {
+    let workflow = r#"
+command: [cat]
+create_pr: true
+flags:
+  merge: {}
+steps:
+  work:
+    command: "printf changed > merge-resync.txt"
+groups:
+  ci-fix-loop:
+    if:
+      file-changed: follow-up/ci-fix-loop
+    steps:
+      wait-ci:
+        command: |
+          count=$(cat "$FAKE_PASS_WAIT_COUNT" 2>/dev/null || printf '0')
+          count=$((count + 1))
+          printf '%s\n' "$count" > "$FAKE_PASS_WAIT_COUNT"
+          printf 'wait\n' >> "$FAKE_WAIT_LOG"
+          if [ "$count" -lt 3 ]; then exit 1; fi
+          exit 0
+      fix-ci:
+        command: |
+          count=$(cat "$FAKE_FIX_COUNT" 2>/dev/null || printf '0')
+          count=$((count + 1))
+          printf '%s\n' "$count" > "$FAKE_FIX_COUNT"
+          printf 'fixed-%s\n' "$count" > merge-resync-recovery.txt
+          git add merge-resync-recovery.txt
+          git -c user.name='Cruise Test' -c user.email=test@example.com commit -m 'Repair CI'
+          git push
+          printf 'fix\n' >> "$FAKE_FIX_LOG"
+        skip: prev.success
+after-pr:
+  follow-up/sync-base:
+    command: |
+      printf 'sync\n' >> "$FAKE_SYNC_LOG"
+      printf '0\n' > "$FAKE_PASS_WAIT_COUNT"
+  follow-up/ci-fix-loop:
+    group: ci-fix-loop
+  squash-merge:
+    squash-merge: true
+    flag: merge
+    timeout: "10"
+    if:
+      fail: follow-up/sync-base
+"#;
+    let gh_script = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+if [ "$1" = "--version" ]; then
+  printf 'gh version 2.0.0\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  printf 'https://github.com/acme/service/pull/7\n'
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  case "$*" in
+    *"/merge"*)
+      attempts=$(cat "$FAKE_GH_WRITE_ATTEMPTS" 2>/dev/null || printf '0')
+      attempts=$((attempts + 1))
+      printf '%s\n' "$attempts" > "$FAKE_GH_WRITE_ATTEMPTS" || exit 97
+      head=$(git rev-parse HEAD) || exit 97
+      status_count=$(cat "$FAKE_GH_STATUS_COUNT" 2>/dev/null || printf '0')
+      if [ "$attempts" -ne 1 ] || [ "$status_count" -lt 3 ]; then
+        printf 'rejected early or duplicate merge write\n' >&2
+        exit 97
+      fi
+      case " $* " in
+        *"sha=$head"*) ;;
+        *)
+          printf 'merge write did not pin the current HEAD\n' >&2
+          exit 97
+          ;;
+      esac
+      printf '1\n' > "$FAKE_GH_SUCCESSFUL_WRITES" || exit 97
+      printf 'MERGED\n' > "$FAKE_GH_MERGED" || exit 97
+      printf '{"merged":true}\n'
+      exit 0
+      ;;
+    *"/rules/branches/"*)
+      printf '[]\n'
+      exit 0
+      ;;
+    *compare/*)
+      printf 'ahead\n'
+      exit 0
+      ;;
+    *checkSuites*)
+      head=$(git rev-parse HEAD) || exit 97
+      printf '{"data":{"repository":{"object":{"oid":"%s","checkSuites":{"totalCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n' "$head"
+      exit 0
+      ;;
+    *statusCheckRollup*)
+      head=$(git rev-parse HEAD) || exit 97
+      count=$(cat "$FAKE_GH_STATUS_COUNT" 2>/dev/null || printf '0')
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FAKE_GH_STATUS_COUNT" || exit 97
+      if [ "$count" -eq 1 ]; then
+        mergeable=CONFLICTING
+        merge_state=BEHIND
+      else
+        mergeable=MERGEABLE
+        merge_state=CLEAN
+      fi
+      printf '%s %s %s\n' "$mergeable" "$merge_state" "$head" >> "$FAKE_GH_STATUS_SEQUENCE"
+      printf '{"data":{"repository":{"squashMergeAllowed":true,"pullRequest":{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","mergeable":"%s","mergeStateStatus":"%s","reviewDecision":"APPROVED","mergeQueueEntry":null,"autoMergeRequest":null,"statusCheckRollup":{"state":"SUCCESS","commit":{"oid":"%s"},"contexts":{"totalCount":1,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}}}\n' "$head" "$mergeable" "$merge_state" "$head"
+      exit 0
+      ;;
+    *graphql*)
+      head=$(git rev-parse HEAD) || exit 97
+      state=$(cat "$FAKE_GH_MERGED" 2>/dev/null || printf 'OPEN')
+      printf '{"data":{"repository":{"pullRequest":{"state":"%s","headRefOid":"%s"}}}}\n' "$state" "$head"
+      exit 0
+      ;;
+  esac
+fi
+printf 'refusing unexpected fake gh command\n' >&2
+exit 97
+"#;
+    let mut scenario = merge_cli_case(false, workflow, gh_script);
+    for (name, file) in [
+        ("FAKE_SYNC_LOG", "fake-sync.log"),
+        ("FAKE_WAIT_LOG", "fake-ci-waits.log"),
+        ("FAKE_FIX_LOG", "fake-ci-fixes.log"),
+        ("FAKE_PASS_WAIT_COUNT", "fake-pass-wait-count"),
+        ("FAKE_FIX_COUNT", "fake-fix-count"),
+    ] {
+        scenario.env.push((
+            name.to_string(),
+            scenario
+                .cli
+                .root
+                .path()
+                .join(file)
+                .to_string_lossy()
+                .into_owned(),
+        ));
+    }
+    let borrowed = borrowed_env(&scenario.env);
+    let session_id = create_merge_session(&scenario.cli, &borrowed);
+    let run = scenario
+        .cli
+        .cli_command(&["run", session_id.as_str()], &borrowed)
+        .output()
+        .unwrap_or_else(|error| panic!("run resync recovery merge: {error}"));
+    assert_success(&run);
+    assert_eq!(
+        std::fs::read_to_string(scenario.cli.root.path().join("fake-sync.log"))
+            .unwrap_or_else(|error| panic!("read sync-base calls: {error}"))
+            .lines()
+            .count(),
+        2,
+        "the initial pass and the single resync must both reach sync-base"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scenario.cli.root.path().join("fake-ci-waits.log"))
+            .unwrap_or_else(|error| panic!("read CI wait calls: {error}"))
+            .lines()
+            .count(),
+        6,
+        "each of the two passes must run two failing waits and one successful wait"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scenario.cli.root.path().join("fake-ci-fixes.log"))
+            .unwrap_or_else(|error| panic!("read CI fix calls: {error}"))
+            .lines()
+            .count(),
+        4,
+        "both passes must retain their two CI-fix iterations"
+    );
+    let status_sequence =
+        std::fs::read_to_string(scenario.cli.root.path().join("fake-gh-status-sequence"))
+            .unwrap_or_else(|error| panic!("read fake status sequence: {error}"));
+    let status_sequence: Vec<_> = status_sequence.lines().collect();
+    assert_eq!(
+        status_sequence.len(),
+        3,
+        "one conflicting response must trigger resync, followed by two clean retry polls: {status_sequence:?}"
+    );
+    assert!(
+        status_sequence[0].starts_with("CONFLICTING BEHIND "),
+        "the first native attempt must receive the confirmed resync state: {status_sequence:?}"
+    );
+    assert!(
+        status_sequence[1].starts_with("MERGEABLE CLEAN ")
+            && status_sequence[1] == status_sequence[2],
+        "the retried native merge must observe two clean readiness polls: {status_sequence:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scenario.cli.root.path().join("fake-gh-status-count"))
+            .unwrap_or_else(|error| panic!("read native status poll count: {error}"))
+            .trim(),
+        "3",
+        "native merge must make exactly one rejected and two clean status queries"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scenario.cli.root.path().join("fake-gh-write-attempts"))
+            .unwrap_or_else(|error| panic!("read native merge write attempts: {error}"))
+            .trim(),
+        "1",
+        "only the clean retry may issue a merge write"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scenario.cli.root.path().join("fake-gh-successful-writes"))
+            .unwrap_or_else(|error| panic!("read accepted merge writes: {error}"))
+            .trim(),
+        "1",
+        "the retry must be accepted exactly once"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scenario.cli.root.path().join("fake-gh-merged"))
+            .unwrap_or_else(|error| panic!("read fake merged state: {error}"))
+            .trim(),
+        "MERGED",
+        "the native retry must confirm the PR as merged"
+    );
+    let gh_calls = std::fs::read_to_string(&scenario.gh_log)
+        .unwrap_or_else(|error| panic!("read fake gh call log: {error}"));
+    let calls: Vec<_> = gh_calls.lines().collect();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.contains("graphql") && call.contains("statusCheckRollup"))
+            .count(),
+        3,
+        "fake GitHub must return one resync response and two clean retry responses: {gh_calls}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.contains("compare/main..."))
+            .count(),
+        2,
+        "the clean retry must check base ancestry during readiness and immediately before merging: {gh_calls}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.starts_with("api ") && call.contains("/merge"))
+            .count(),
+        1,
+        "exactly one native merge write must follow the resync"
+    );
+    assert!(
+        !calls.iter().any(|call| call.starts_with("pr merge ")),
+        "the native merge must not fall back to an unguarded gh pr merge: {gh_calls}"
     );
 }
 

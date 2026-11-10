@@ -511,6 +511,7 @@ mod contracts {
             target: Some("first".into()),
             reason: TransitionReason::IfFailRetry,
             budgeted: true,
+            native_resync: false,
             group_retry: None,
         });
         let cases = [
