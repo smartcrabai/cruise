@@ -195,6 +195,7 @@ fn finish_parallel_step(
     Ok(StepExecOutcome {
         option_next: None,
         failed,
+        native_resync_required: false,
         skip_step_reason: None,
     })
 }

@@ -478,6 +478,7 @@ fn invalid_pending_transition_is_rejected_without_modifying_the_checkpoint() {
         target: Some("first".into()),
         reason: TransitionReason::IfFailRetry,
         budgeted: true,
+        native_resync: false,
         group_retry: None,
     });
     save_graph(&saved, &path).unwrap();

@@ -42,6 +42,8 @@ pub struct Transition {
     pub target: Option<NodeId>,
     pub reason: TransitionReason,
     pub budgeted: bool,
+    #[serde(default)]
+    pub native_resync: bool,
     pub group_retry: Option<String>,
 }
 

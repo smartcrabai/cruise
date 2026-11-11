@@ -106,6 +106,7 @@ fn transition(target: Option<String>, reason: TransitionReason, budgeted: bool) 
         target,
         reason,
         budgeted,
+        native_resync: false,
         group_retry: None,
     }
 }
@@ -116,6 +117,8 @@ pub(crate) struct StepExecOutcome {
     pub option_next: Option<String>,
     /// True if the step failed (non-zero exit, prompt error, or timeout).
     pub failed: bool,
+    /// True only when native squash merge requires base resynchronization.
+    pub native_resync_required: bool,
     /// Reason captured from a successful `skip_step` tool call (SDK mode only;
     /// see [`crate::sdk_tools::skip_step_tool`]). `Some` means the agent
     /// explicitly declared that making no file changes this turn was
@@ -575,6 +578,9 @@ fn accept_transition(
                     .ok_or_else(|| CruiseError::Other("group retry counter overflow".into()))
             })
             .transpose()?;
+        if transition.native_resync {
+            reset_after_pr_pass_budgets(ctx, graph, from, transition, &key)?;
+        }
         graph.state.edge_counts.insert(
             key,
             crate::graph::EdgeCounter {
@@ -598,6 +604,35 @@ fn accept_transition(
     graph.state.current.clone_from(&transition.target);
     graph.state.completed = transition.target.is_none();
     graph.state.pending = None;
+    Ok(())
+}
+fn reset_after_pr_pass_budgets(
+    ctx: &ExecutionContext<'_>,
+    graph: &mut ExecutionGraph,
+    from: &str,
+    transition: &Transition,
+    resync_edge: &(String, String),
+) -> Result<()> {
+    if ctx
+        .compiled
+        .steps
+        .get(from)
+        .is_none_or(|step| step.squash_merge != Some(true))
+        || !matches!(
+            (&transition.reason, transition.target.as_deref()),
+            (TransitionReason::IfFailGoto { target }, Some(to)) if target == to
+        )
+    {
+        return Err(CruiseError::Other(format!(
+            "invalid native resync transition from '{from}'"
+        )));
+    }
+    for (edge, counter) in &mut graph.state.edge_counts {
+        if edge != resync_edge {
+            counter.budgeted_traversals = 0;
+        }
+    }
+    graph.state.group_counts.clear();
     Ok(())
 }
 
@@ -825,6 +860,7 @@ async fn step_loop_iteration(
         let mut if_fail_next: Option<String> = None;
         let mut if_fail_retry = false;
 
+        let native_resync_required = outcome.native_resync_required;
         if step_failed {
             match if_fail {
                 Some(FailAction::Goto(name)) => {
@@ -976,6 +1012,7 @@ async fn step_loop_iteration(
         } else {
             TransitionReason::Sequential
         };
+        let native_resync = native_resync_required && if_fail_next.is_some();
         let effective_next = if_fail_next
             .or(if_fail_retry.then(|| current_step.to_string()))
             .or(gate_retry.then(|| current_step.to_string()))
@@ -992,6 +1029,7 @@ async fn step_loop_iteration(
             target,
             reason,
             budgeted: true,
+            native_resync,
             group_retry,
         })
     }
@@ -1059,6 +1097,7 @@ async fn execute_step_kind_inner(
             Ok(StepExecOutcome {
                 option_next: None,
                 failed: false,
+                native_resync_required: false,
                 skip_step_reason: None,
             })
         }
@@ -1183,6 +1222,7 @@ async fn execute_step_kind_inner(
             Ok(StepExecOutcome {
                 option_next: None,
                 failed: resync_required,
+                native_resync_required: resync_required,
                 skip_step_reason: None,
             })
         }
@@ -1221,6 +1261,7 @@ async fn execute_step_kind_inner(
                     Ok(StepExecOutcome {
                         option_next: None,
                         failed: false,
+                        native_resync_required: false,
                         skip_step_reason,
                     })
                 }
@@ -1234,6 +1275,7 @@ async fn execute_step_kind_inner(
                     Ok(StepExecOutcome {
                         option_next: None,
                         failed: true,
+                        native_resync_required: false,
                         skip_step_reason: None,
                     })
                 }
@@ -1251,6 +1293,7 @@ async fn execute_step_kind_inner(
                     Ok(StepExecOutcome {
                         option_next: None,
                         failed: true,
+                        native_resync_required: false,
                         skip_step_reason: None,
                     })
                 }
@@ -1282,6 +1325,7 @@ async fn execute_step_kind_inner(
                     Ok(StepExecOutcome {
                         option_next: None,
                         failed: !success,
+                        native_resync_required: false,
                         skip_step_reason: None,
                     })
                 }
@@ -1295,6 +1339,7 @@ async fn execute_step_kind_inner(
                     Ok(StepExecOutcome {
                         option_next: None,
                         failed: true,
+                        native_resync_required: false,
                         skip_step_reason: None,
                     })
                 }
@@ -1308,6 +1353,7 @@ async fn execute_step_kind_inner(
             Ok(StepExecOutcome {
                 option_next: result,
                 failed: false,
+                native_resync_required: false,
                 skip_step_reason: None,
             })
         }
@@ -3138,7 +3184,7 @@ steps:
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn shared_after_pr_edge_budget_reduces_resyncs_after_ci_fixes() {
+    async fn generic_command_if_fail_keeps_shared_edge_budget() {
         for (ci_failures, expected_merge_attempts) in [(0_usize, 3_usize), (1, 2), (2, 1)] {
             let root = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
             let yaml = format!(
@@ -3189,7 +3235,7 @@ steps:
                     &result,
                     Err(CruiseError::LoopProtection { max_retries: 3, .. })
                 ),
-                "{ci_failures} CI fixes should exhaust the shared edge budget: {result:?}"
+                "{ci_failures} CI fixes should keep consuming the generic command's shared edge budget: {result:?}"
             );
             let merge_attempts = std::fs::read_to_string(root.path().join("merge-count"))
                 .unwrap_or_default()
@@ -3208,6 +3254,130 @@ steps:
             assert_eq!(fix_attempts, ci_failures);
         }
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "covers the native resync budget boundary"
+    )]
+    #[test]
+    fn native_resync_resets_other_after_pr_budgets_and_preserves_its_own_limit() {
+        let yaml = r"
+command: [echo]
+flags:
+  merge: {}
+steps:
+  work:
+    command: 'true'
+after-pr:
+  sync-base:
+    command: 'true'
+  resolve-conflict:
+    skip: prev.success
+    command: 'true'
+  push-after-sync:
+    command: 'true'
+  wait-ci:
+    command: 'true'
+  fix-ci-error:
+    skip: prev.success
+    command: 'true'
+    next: wait-ci
+  squash-merge:
+    squash-merge: true
+    flag: merge
+    if:
+      fail: sync-base
+";
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("compile native resync workflow: {error}"))
+            .to_after_pr_compiled();
+        let mut graph = crate::graph::build_graph(&compiled, 3)
+            .unwrap_or_else(|error| panic!("build after-pr graph: {error}"));
+        for edge in graph.edge_pairs() {
+            graph.state.edge_counts.insert(
+                edge,
+                crate::graph::EdgeCounter {
+                    traversals: 3,
+                    budgeted_traversals: 3,
+                },
+            );
+        }
+        let resync_edge = ("squash-merge".to_owned(), "sync-base".to_owned());
+        graph.state.edge_counts.insert(
+            resync_edge.clone(),
+            crate::graph::EdgeCounter {
+                traversals: 7,
+                budgeted_traversals: 1,
+            },
+        );
+        let ctx = ExecutionContext {
+            instructions: None,
+            usage_session_id: None,
+            compiled: &compiled,
+            max_retries: 3,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            config_reloader: None,
+            working_dir: None,
+            skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
+            on_step_log: None,
+        };
+        let resync = Transition {
+            target: Some("sync-base".to_owned()),
+            reason: TransitionReason::IfFailGoto {
+                target: "sync-base".to_owned(),
+            },
+            budgeted: true,
+            native_resync: true,
+            group_retry: None,
+        };
+
+        for expected_resyncs in [2, 3] {
+            accept_transition(&ctx, &mut graph, "squash-merge", &resync)
+                .unwrap_or_else(|error| panic!("native resync should be allowed: {error}"));
+            assert_eq!(
+                graph.state.edge_counts[&resync_edge],
+                crate::graph::EdgeCounter {
+                    traversals: expected_resyncs + 6,
+                    budgeted_traversals: expected_resyncs,
+                }
+            );
+            assert!(
+                graph
+                    .state
+                    .edge_counts
+                    .iter()
+                    .filter(|(edge, _)| *edge != &resync_edge)
+                    .all(|(_, count)| count.traversals == 3 && count.budgeted_traversals == 0),
+                "native resync must clear budgets without losing traversal history"
+            );
+        }
+
+        let Err(error) = accept_transition(&ctx, &mut graph, "squash-merge", &resync) else {
+            panic!("native resync must stop at max_retries");
+        };
+        assert!(
+            matches!(
+                &error,
+                CruiseError::LoopProtection {
+                    from,
+                    to,
+                    max_retries: 3,
+                    edge_counts,
+                    ..
+                } if from == "squash-merge"
+                    && to == "sync-base"
+                    && edge_counts.iter().any(|(edge_from, edge_to, traversals)| {
+                        edge_from == "squash-merge" && edge_to == "sync-base" && *traversals == 3
+                    })
+            ),
+            "resync limit must be enforced on its own edge: {error:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_zero_max_retries_rejects_first_budgeted_transition() {
         // Given: a linear workflow with no loop edge.
