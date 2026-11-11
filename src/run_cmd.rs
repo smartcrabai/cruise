@@ -5519,7 +5519,7 @@ steps:
         }
 
         struct FlagRunFixture {
-            process: ProcessStateGuard,
+            _process: ProcessStateGuard,
             _tmp: TempDir,
             repo: PathBuf,
             manager: SessionManager,
@@ -5546,7 +5546,7 @@ steps:
                 manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
                 write_config(&manager, &session.id, CONFIG);
                 Self {
-                    process,
+                    _process: process,
                     _tmp: tmp,
                     repo,
                     manager,
@@ -5607,21 +5607,6 @@ steps:
             f.session.phase = SessionPhase::Running;
             f.session.current_step = Some("e2e-test".into());
             f.session.flags = FlagValues::from([("docs".into(), true), ("e2e".into(), false)]);
-            f.save();
-            run(run_args(&f.session.id))
-                .await
-                .unwrap_or_else(|e| panic!("{e:?}"));
-            assert!(!f.repo.join("e2e.txt").exists());
-            assert!(f.repo.join("docs.txt").exists());
-            assert_eq!(f.loaded().flags, f.session.flags);
-        }
-
-        #[tokio::test(flavor = "current_thread")]
-        async fn non_tty_run_preserves_saved_flag_values() {
-            let mut f = FlagRunFixture::new();
-            f.process.set_env(TEST_STDIN_IS_TERMINAL_ENV, "0");
-            f.process.remove_env(SELECTION_ENV);
-            f.session.flags.insert("docs".into(), true);
             f.save();
             run(run_args(&f.session.id))
                 .await

@@ -140,8 +140,8 @@ CLI itself exits zero. Its own negative unit tests run in CI.
 `.github/workflows/ci.yml`'s `workflow-flags-specs` job runs the aggregate command
 on relevant pull requests and pushes to main with read-only contents permission,
 pinned Node/Rust, no secrets, and no external agent/model account. The runner
-now executes both the unchanged execution-start models and the new skip-selection
-models, strict production Gherkin, failure controls and production regression
+now executes the run/exec flag-boundary models and skip-selection models, strict
+production Gherkin, failure controls and production regression
 tests. Missing prerequisites are failures, not skips. Independent checks still
 run after a failure, and their accumulated exit status is nonzero.
 

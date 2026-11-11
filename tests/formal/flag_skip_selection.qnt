@@ -78,7 +78,7 @@ module flag_skip_selection {
     record({ ...s, phase: 3, forwardedKeys: names,
       forwardedOn: s.savedOn.intersect(names) }, "forward") }
   action enterRun = all { s.phase == 3,
-    record({ ...s, phase: 4, runPrompts: if (s.forwardedKeys == Set()) 1 else 0 }, "run") }
+    record({ ...s, phase: 4, runPrompts: 0 }, "run") }
   action idle = record(s, "idle")
   action step = any { begin, change, cancel, confirm, create, executeNow, enterRun, idle }
 
