@@ -9,8 +9,8 @@ session or its history. `NEVER.md` and the repository contribution requirements
 remain applicable. The plan's R1-R3 and sections 1.1-1.3, 2.3-2.7 and 6 are the
 requirements, not the current implementation's accidental behavior.
 
-The existing `workflow_flags.qnt` and `.als` describe the execution-start
-boundary and are deliberately unchanged. The new `flag_skip_selection.qnt` and
+The `workflow_flags.qnt` and `.als` describe the execution-start
+boundary. The `flag_skip_selection.qnt` and
 `.als` describe approval/new-session selection and Execute now forwarding. The
 historical `WORKFLOW_FLAGS_VERIFICATION.md` is also unchanged.
 
@@ -23,7 +23,7 @@ historical `WORKFLOW_FLAGS_VERIFICATION.md` is also unchanged.
 | Prune disabled parent/expanded/after-pr IDs, preserve unknown free-text IDs | `flags::drop_disabled_skips`, TUI flag toggling, application creation | Quint `pruning`, API-create tests and Alloy pruning assertions/witnesses, application/TUI/helper tests |
 | Newly saved session and selection history contain the sanitized selection | `application::create_session_inner`, approval skip history | Quint `atomicity`, Alloy history assertions/witnesses, production state/history assertions |
 | All flags off can yield an empty list without enabling free-text fallback | TUI `all_skip_choices`, `step_is_text`, `render_skip_choices` | Quint full/all-gated/unknown catalogs and `allGatedOffStaysListTest`, TUI production tests |
-| Execute now forwards declared keys, including explicit OFF, with no second flag prompt | `PlanDisposition::ExecuteNow`, `RunArgs.flags`, `should_prompt_flags` | Quint `forwarding`, Alloy forwarding assertions/witnesses, real PTY Gherkin and `flags_cli` |
+| Execute now forwards declared keys, including explicit OFF, with no second flag prompt | `PlanDisposition::ExecuteNow`, `RunArgs.flags`, `run_single_loaded` merge | Quint `forwarding`, Alloy forwarding assertions/witnesses, real PTY Gherkin and `flags_cli` |
 | Resume options remain unfiltered, config changes retain their separate history/flags-off semantics | list `main_ids`, WebUI `settings_html`, `/webui/new/steps` versus `/webui/new/steps/flags` | Quint `eligibility`/resume test, Alloy resume assertion, real list PTY and WebUI route tests |
 
 ## Abstraction and limits

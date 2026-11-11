@@ -281,17 +281,9 @@ mod contracts {
         w.before = w.state_bytes();
     }
 
-    #[when("I run the workflow in a terminal and select e2e instead")]
-    fn select(w: &mut FlagWorld) {
-        w.run(&["run", ID], true, Some(b" \x1b[B \r"));
-    }
-    #[when("I run the workflow in a terminal and clear all flags")]
-    fn clear(w: &mut FlagWorld) {
-        w.run(&["run", ID], true, Some(b"\x1b[B \r"));
-    }
-    #[when("I run the workflow in a terminal and accept saved flags")]
-    fn accept(w: &mut FlagWorld) {
-        w.run(&["run", ID], true, Some(b"\r"));
+    #[when("I run the workflow in a terminal")]
+    fn terminal(w: &mut FlagWorld) {
+        w.run(&["run", ID], true, None);
     }
     #[when("I run the workflow in a terminal with explicit e2e and docs off")]
     fn explicit(w: &mut FlagWorld) {
@@ -305,10 +297,6 @@ mod contracts {
     fn dry(w: &mut FlagWorld) {
         w.run(&["run", ID, "--dry-run"], true, None);
         assert!(w.success, "{}", w.transcript);
-    }
-    #[when("I cancel workflow flag selection")]
-    fn cancel(w: &mut FlagWorld) {
-        w.run(&["run", ID], true, Some(b"\x1b"));
     }
     #[when("I cancel flag selection for an ephemeral exec")]
     fn cancel_exec(w: &mut FlagWorld) {
@@ -326,7 +314,7 @@ mod contracts {
             ),
         )
         .unwrap_or_else(|e| panic!("config: {e}"));
-        w.run(&["run", ID], true, Some(b"\r"));
+        w.run(&["run", ID], true, None);
         assert!(!w.success, "first execution should fail: {}", w.transcript);
         let state = w.manager().load(ID).unwrap_or_else(|e| panic!("load: {e}"));
         assert!(
@@ -355,14 +343,6 @@ mod contracts {
             );
         }
     }
-    #[then("no optional effects run")]
-    fn none(w: &mut FlagWorld) {
-        assert!(w.success, "{}", w.transcript);
-        assert!(w.repo.join("build.txt").exists());
-        for name in ["e2e.txt", "docs.txt"] {
-            assert!(!w.repo.join(name).exists());
-        }
-    }
     #[then("no workflow effects run")]
     fn no_effects(w: &mut FlagWorld) {
         for name in ["build.txt", "e2e.txt", "docs.txt"] {
@@ -373,23 +353,12 @@ mod contracts {
     fn no_prompt(w: &mut FlagWorld) {
         assert!(!w.transcript.contains(PROMPT), "{}", w.transcript);
     }
-    #[then(regex = r"^the saved flags enable (e2e|docs) and disable (docs|e2e)$")]
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "Cucumber capture arguments are owned"
-    )]
-    fn saved(w: &mut FlagWorld, enabled: String, disabled: String) {
-        assert!(w.transcript.contains(PROMPT), "{}", w.transcript);
+    #[then("the planned session flags are unchanged")]
+    fn flags_unchanged(w: &mut FlagWorld) {
+        let before: SessionState = serde_json::from_slice(&w.before)
+            .unwrap_or_else(|e| panic!("parse original state: {e}"));
         let state = w.manager().load(ID).unwrap_or_else(|e| panic!("load: {e}"));
-        assert_eq!(state.flags.get(&enabled), Some(&true));
-        assert_eq!(state.flags.get(&disabled), Some(&false));
-    }
-    #[then("both saved declared flags are explicitly off")]
-    fn off(w: &mut FlagWorld) {
-        let state = w.manager().load(ID).unwrap_or_else(|e| panic!("load: {e}"));
-        for name in ["e2e", "docs"] {
-            assert_eq!(state.flags.get(name), Some(&false));
-        }
+        assert_eq!(state.flags, before.flags);
     }
     #[then("the planned session is unchanged")]
     fn unchanged(w: &mut FlagWorld) {
@@ -687,7 +656,7 @@ mod contracts {
                 .unwrap_or_else(|e| panic!("parse feature: {e}"));
         assert_eq!(
             feature.scenarios.len(),
-            15,
+            12,
             "scenario inventory must not silently become empty"
         );
         let writer = FlagWorld::cucumber()

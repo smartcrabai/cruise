@@ -78,6 +78,15 @@ pub(crate) async fn run_resolved(
         return Ok(());
     }
 
+    let flag_values = if req.flags.is_empty() {
+        crate::run_cmd::select_flag_values(config, &crate::flags::FlagValues::new())?.ok_or_else(
+            || crate::error::CruiseError::Other("workflow flag selection cancelled".into()),
+        )?
+    } else {
+        flag_values
+    };
+    let run_flags = flag_values.iter().map(|(k, v)| (k.clone(), *v)).collect();
+
     let session_id = SessionManager::new_session_id();
     let operation = crate::telemetry::Operation::execution("exec", &session_id, None);
     let result = async {
@@ -95,7 +104,7 @@ pub(crate) async fn run_resolved(
             dry_run: false,
             cleanup_after_pr: false,
             no_cleanup_after_pr: false,
-            flags: req.flags,
+            flags: run_flags,
         };
         crate::run_cmd::run_with_operation(run_args, &operation).await
     }

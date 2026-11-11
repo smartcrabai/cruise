@@ -91,8 +91,8 @@ fact Trace {
     openPrompt[a,b] or flags[a,b] or selectSkips[a,b] or commit[a,b]
     or create[a,b] or execute[a,b] or cancel[a,b] or idle[a,b]
 }
-// should_prompt_flags is false when explicit declared assignments are present.
-pred nextRunPrompts[a: State] { no a.forwardedNames and some declared }
+// RunArgs.flags are merged into saved flags; run never prompts.
+pred nextRunPrompts[a: State] { a != a }
 assert CandidateSemantics {
   all a: State |
     Plain in a.candidates and UnknownId not in a.candidates
