@@ -84,7 +84,7 @@ The six general-purpose built-ins share the ordered prelude `pr-ready` →
 `sync-base` → `resolve-conflict` → `push-after-sync` → `wait-ci` →
 `fix-ci-error`. Each caller passes its conflict prompt and task-specific scope
 into the shared resource, which owns the common CI repair prompt. `wait-ci`
-allows up to 60 minutes. If CI is still running at its deadline with no failed
+allows up to 60 minutes. For a confirmed current-head GitHub conflict, it exits promptly after validating the commit and rollup unless CI reports a failure. Failed CI retains its diagnostic and repair path, including waiting for running Actions suites. A stale PR head still observes the propagation grace period. If CI is still running at its deadline with no failed
 rollup, it reports pending without invoking repair. If a GitHub rollup is
 already failing, `wait-ci` keeps polling attached Actions suites until they
 finish or the deadline; the deadline preserves the failure and invokes repair.

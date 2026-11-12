@@ -1103,7 +1103,11 @@ if [ ! -f "$response" ]; then
   printf 'no fake GitHub response for request %s\n' "$count" >&2
   exit 94
 fi
-cat "$response"
+# GraphQL returns only requested fields, even when the fixture has more data.
+case "$*" in
+  *mergeable*) cat "$response" ;;
+  *) jq 'del(.data.repository.pullRequest.mergeable, .data.repository.pullRequest.mergeStateStatus)' "$response" ;;
+esac
 "#;
 
 #[cfg(unix)]
@@ -1274,7 +1278,7 @@ fn github_ci_response(
     serde_json::json!({
         "data": {
             "repository": {
-                "pullRequest": {"headRefOid": pr_head},
+                "pullRequest": {"headRefOid": pr_head, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"},
                 "object": {
                     "oid": rollup_head,
                     "statusCheckRollup": rollup
@@ -1282,6 +1286,116 @@ fn github_ci_response(
             }
         }
     })
+}
+
+#[cfg(unix)]
+fn github_ci_mergeability(
+    mut response: serde_json::Value,
+    mergeable: &str,
+    state: &str,
+) -> serde_json::Value {
+    response["data"]["repository"]["pullRequest"]["mergeable"] = mergeable.into();
+    response["data"]["repository"]["pullRequest"]["mergeStateStatus"] = state.into();
+    response
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_current_head_conflict_exits_before_waiting() {
+    let fixture = GithubWaitCiFixture::new();
+    let response = github_ci_mergeability(
+        github_ci_response(&fixture.head, &fixture.head, None, 0),
+        "CONFLICTING",
+        "DIRTY",
+    );
+    let output = fixture.run(&builtin_wait_ci_command("tdd"), &[response], true);
+    let terminal = text(&output);
+    assert!(output.status.success(), "{terminal}");
+    assert_eq!(fixture.gh_calls(), 1, "{terminal}");
+    assert_eq!(fixture.date_calls(), 1, "reached the deadline: {terminal}");
+    assert!(
+        !fixture.gh_detail_count.exists(),
+        "unexpected detail query: {terminal}"
+    );
+    let message = terminal.to_lowercase();
+    assert!(
+        message.contains("conflict") && message.contains("pull_request"),
+        "{terminal}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_conflict_preserves_failure_and_validation() {
+    let command = builtin_wait_ci_command("tdd");
+    let fixture = GithubWaitCiFixture::new();
+    let response = github_ci_mergeability(github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 1), "CONFLICTING", "DIRTY");
+    let output = fixture.run(&command, &[
+        response,
+        github_completed_suite_response(&fixture.head, Some("FAILURE")),
+        github_ci_details_response(&fixture.head, &fixture.head, &[], 0, false, None),
+    ], false);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert_eq!(wait_ci_reason(&output), "ci_failed", "{}", text(&output));
+
+    for (field, reason) in [("object", "rollup_head_missing"), ("statusCheckRollup", "malformed_rollup"), ("state", "invalid_ci_state")] {
+        let fixture = GithubWaitCiFixture::new();
+        let mut response = github_ci_mergeability(github_ci_response(&fixture.head, &fixture.head, Some("PENDING"), 1), "CONFLICTING", "DIRTY");
+        match field {
+            "object" => response["data"]["repository"]["object"] = serde_json::Value::Null,
+            "statusCheckRollup" => { response["data"]["repository"]["object"].as_object_mut().unwrap().remove(field); },
+            _ => { response["data"]["repository"]["object"]["statusCheckRollup"].as_object_mut().unwrap().remove(field); },
+        }
+        let output = fixture.run(&command, &[response], false);
+        assert!(!output.status.success(), "{}", text(&output));
+        assert_eq!(wait_ci_reason(&output), reason, "{}", text(&output));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_stale_head_conflict_waits_for_head_propagation() {
+    let fixture = GithubWaitCiFixture::new();
+    let stale = "2222222222222222222222222222222222222222";
+    let response = github_ci_mergeability(
+        github_ci_response(stale, &fixture.head, None, 0),
+        "CONFLICTING",
+        "DIRTY",
+    );
+    let output = fixture.run(
+        &builtin_wait_ci_command("tdd"),
+        &[response.clone(), response],
+        false,
+    );
+    let terminal = text(&output);
+    assert!(!output.status.success(), "{terminal}");
+    assert_eq!(wait_ci_reason(&output), "head_mismatch", "{terminal}");
+    assert_eq!(fixture.gh_calls(), 2, "{terminal}");
+    assert!(!terminal.contains("pull_request"), "{terminal}");
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_github_wait_ci_unknown_mergeability_waits_until_deadline() {
+    let fixture = GithubWaitCiFixture::new();
+    let response = github_ci_mergeability(
+        github_ci_response(&fixture.head, &fixture.head, None, 0),
+        "UNKNOWN",
+        "UNKNOWN",
+    );
+    let output = fixture.run(&builtin_wait_ci_command("tdd"), &[response], true);
+    let terminal = text(&output);
+    assert!(output.status.success(), "{terminal}");
+    assert_eq!(fixture.gh_calls(), 1, "{terminal}");
+    assert!(
+        fixture.date_calls() >= 2,
+        "did not wait for deadline: {terminal}"
+    );
+    assert!(
+        terminal.contains("deadline") && terminal.contains("no code failure"),
+        "{terminal}"
+    );
+    assert!(!terminal.contains("pull_request"), "{terminal}");
 }
 
 #[cfg(unix)]

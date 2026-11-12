@@ -464,7 +464,7 @@ steps:
             ci_diagnostic repository_invalid
             exit 1
           fi
-          query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{state contexts(first:1) {{totalCount}}}}}}}}}}}}'
+          query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid mergeable mergeStateStatus}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{state contexts(first:1) {{totalCount}}}}}}}}}}}}'
           detail_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid statusCheckRollup {{contexts(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{__typename ... on CheckRun {{name status conclusion detailsUrl checkSuite {{status conclusion workflowRun {{databaseId}}}}}} ... on StatusContext {{context state targetUrl}}}}}}}}}}}}}}'
           suite_query='query($owner:String!,$name:String!,$number:Int!,$head:GitObjectID!,$after:String) {{ repository(owner:$owner,name:$name) {{ pullRequest(number:$number) {{headRefOid}} object(oid:$head) {{... on Commit {{oid checkSuites(first:100,after:$after) {{totalCount pageInfo {{hasNextPage endCursor}} nodes {{status conclusion workflowRun {{databaseId}}}}}}}}}}}}}}'
           deadline=$(( $(date +%s) + 3300 ))
@@ -586,6 +586,11 @@ steps:
                   ci_diagnostic unknown_state
                   exit 1 ;;
               esac
+            fi
+            if [ "$rollup_head" = "$expected_head" ] && [ "$state" != FAILURE ] && [ "$state" != ERROR ] && [ "$(printf '%s' "$response" | jq -r '.data.repository.pullRequest.mergeable')" = CONFLICTING ]; then
+              merge_state=$(printf '%s' "$response" | jq -r '.data.repository.pullRequest.mergeStateStatus')
+              printf 'GitHub PR #%s has a merge conflict (mergeStateStatus=%s); pull_request workflows do not run while the conflict remains unresolved.\n' {pr.number} "$merge_state"
+              exit 0
             fi
             if [ "$poll_ready" = true ]; then
               ready_streak=$((ready_streak + 1))
