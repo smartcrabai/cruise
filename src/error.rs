@@ -22,6 +22,9 @@ pub enum CruiseError {
     #[error("{0}")]
     AgentAuthExpired(String),
 
+    #[error("{0}")]
+    BaseCiFailed(String),
+
     #[error("undefined variable: {{{0}}}")]
     UndefinedVariable(String),
 
@@ -123,6 +126,7 @@ impl CruiseError {
             Self::InvalidStepConfig(_) => "invalid_step_config",
             Self::MissingJcodeModel(_) => "model_unavailable",
             Self::AgentAuthExpired(_) => "agent_auth_expired",
+            Self::BaseCiFailed(_) => "base_ci_failed",
             Self::UndefinedVariable(_) => "undefined_variable",
             Self::EmptyVariableReference => "empty_variable_reference",
             Self::InvalidTemplateSyntax(_) => "invalid_template_syntax",
@@ -350,6 +354,7 @@ mod tests {
                 CruiseError::AgentAuthExpired("secret".into()),
                 "agent_auth_expired",
             ),
+            (CruiseError::BaseCiFailed("secret".into()), "base_ci_failed"),
             (
                 CruiseError::UndefinedVariable("secret".into()),
                 "undefined_variable",

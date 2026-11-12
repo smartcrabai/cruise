@@ -642,13 +642,6 @@ async fn run_single_loaded(
                 crate::agent_auth::AuthScope::Execution,
                 Some(&execution_dir),
             )?;
-            if session.pr_skipped_reason.take().is_some() {
-                initial_fingerprint = save_session_state_with_conflict_resolution(
-                    &manager,
-                    &session,
-                    initial_fingerprint,
-                )?;
-            }
         }
         let cli_flags = crate::flags::from_cli(&args.flags)?;
         crate::flags::validate_names(&config, &cli_flags)?;
@@ -695,6 +688,16 @@ async fn run_single_loaded(
                 &start_node,
                 &crate::flags::preflight_skips(&compiled, &session.flags, &session.skipped_steps),
             )?;
+        }
+        if !args.dry_run {
+            crate::base_ci::ensure_base_ci_not_failing(&session)?;
+            if session.pr_skipped_reason.take().is_some() {
+                initial_fingerprint = save_session_state_with_conflict_resolution(
+                    &manager,
+                    &session,
+                    initial_fingerprint,
+                )?;
+            }
         }
         Ok((
             config,
@@ -2149,6 +2152,116 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_single_loaded_dry_run_bypasses_expired_agent_auth() {
         check_expired_agent_auth_execution(true).await;
+    }
+
+    async fn check_base_ci_execution(dry_run: bool) {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let _lock = crate::test_support::lock_process();
+        let _home = EnvGuard::set("HOME", tmp.path());
+        let _config = EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("config"));
+        let _data = EnvGuard::set("XDG_DATA_HOME", tmp.path().join("data"));
+        let _state = EnvGuard::set("XDG_STATE_HOME", tmp.path().join("state"));
+        let _override = EnvGuard::remove("CRUISE_CONFIG");
+        let _forge = EnvGuard::remove("CRUISE_FORGE");
+        let _auth = EnvGuard::set("CRUISE_SKIP_AGENT_AUTH_CHECK", "1");
+        let _notifications = EnvGuard::set("CRUISE_DISABLE_NOTIFICATIONS", "1");
+        let _herdr = EnvGuard::set("CRUISE_DISABLE_HERDR", "1");
+        let _terminal = EnvGuard::set(TEST_STDIN_IS_TERMINAL_ENV, "0");
+        let _workspace = EnvGuard::set(TEST_WORKSPACE_MODE_ENV, "worktree");
+
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("{e:?}"));
+        let log = tmp.path().join("gh.log");
+        let gh = bin.join("gh");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = '--version' ]; then\n  echo 'gh version test'\n  exit 0\nfi\nprintf '%s\\n' '{{\"data\":{{\"repository\":{{\"defaultBranchRef\":{{\"name\":\"main\",\"target\":{{\"oid\":\"abc123456789\",\"statusCheckRollup\":{{\"state\":\"FAILURE\"}}}}}}}}}}}}'\n",
+            log.display()
+        );
+        fs::write(&gh, script).unwrap_or_else(|e| panic!("{e:?}"));
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let _path = crate::test_support::prepend_to_path(&bin);
+
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        run_git_ok(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        );
+        let manager = SessionManager::new(tmp.path().join("data/cruise"));
+        let id = "20261024000002";
+        let mut session = SessionState::new(
+            id.to_string(),
+            repo,
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "base CI test".to_string(),
+        );
+        session.phase = SessionPhase::Planned;
+        session.workspace_mode = WorkspaceMode::Worktree;
+        session.pr_skipped_reason = Some(crate::session::PrSkippedReason::Disabled);
+        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
+        write_config(&manager, id, &single_command_config("test", "true"));
+        let state_path = manager.sessions_dir().join(id).join("state.json");
+        let before = fs::read(&state_path).unwrap_or_else(|e| panic!("{e:?}"));
+        let (session, initial_fingerprint) = manager
+            .load_with_fingerprint(id)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut args = run_args(id);
+        args.dry_run = dry_run;
+        let mut workflow_failed = false;
+        let result = run_single_loaded(
+            args,
+            WorkspaceOverride::RespectSession,
+            &NoOpOptionHandler,
+            CancellationToken::new(),
+            &NoopObserver,
+            LoadedRunSession {
+                manager: manager.clone(),
+                session_id: id.to_string(),
+                session,
+                initial_fingerprint,
+            },
+            &mut workflow_failed,
+        )
+        .await;
+        assert!(!workflow_failed);
+        if dry_run {
+            assert!(result.is_ok(), "dry-run must bypass base CI: {result:?}");
+            assert!(!log.exists(), "dry-run must not invoke gh");
+        } else {
+            let Err(error) = result else {
+                panic!("failing base CI must reject execution");
+            };
+            assert_eq!(error.telemetry_type(), "base_ci_failed", "{error}");
+            let calls = fs::read_to_string(&log).unwrap_or_else(|e| panic!("{e:?}"));
+            assert!(calls.contains("graphql"), "expected GraphQL call: {calls}");
+        }
+        assert!(!manager.worktrees_dir().exists());
+        assert!(!manager.clones_dir().exists());
+        assert_eq!(
+            fs::read(&state_path).unwrap_or_else(|e| panic!("{e:?}")),
+            before
+        );
+        assert_eq!(
+            manager.load(id).unwrap_or_else(|e| panic!("{e:?}")).phase,
+            SessionPhase::Planned
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_single_loaded_rejects_failing_base_ci_before_workspace() {
+        check_base_ci_execution(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_single_loaded_dry_run_bypasses_base_ci() {
+        check_base_ci_execution(true).await;
     }
 
     struct PauseOptionHandler;

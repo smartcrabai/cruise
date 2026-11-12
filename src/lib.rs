@@ -7,6 +7,7 @@ pub mod ask_handler;
 pub mod attachments;
 pub mod auto_requeue;
 pub mod backend;
+mod base_ci;
 pub mod batch_run;
 pub mod branch_diff;
 pub mod builtin_workflows;
