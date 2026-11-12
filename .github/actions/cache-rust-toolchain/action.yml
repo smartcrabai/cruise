@@ -19,7 +19,7 @@ runs:
       env:
         RUST_COMPONENTS: ${{ inputs.components }}
       run: |
-        host=$(rustup show host)
+        host=$(rustc -vV | awk '$1 == "host:" { print $2; exit }')
         toolchain="$HOME/.rustup/toolchains/1.99.1-$host"
         required=(rustc cargo)
         case "$RUST_COMPONENTS" in
