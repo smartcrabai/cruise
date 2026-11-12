@@ -20,7 +20,7 @@ sig State {
   exists: one Bool, prompts: one Int, event: one Event
 }
 pred eligible {
-  Input.dry = No and no Input.cli and Input.single = Yes and Input.fresh = Yes
+  Input.exec = Yes and Input.dry = No and no Input.cli
   and some Input.declared and Input.tty = Yes
 }
 pred assign[b: State, p: Phase, on, keys, disk, diskKeys: set Flag,
@@ -31,7 +31,7 @@ pred assign[b: State, p: Phase, on, keys, disk, diskKeys: set Flag,
 }
 pred initial[a: State] {
   a.phase = Preparing and a.enabled in a.present and a.saved = a.enabled
-  and a.savedPresent = a.present and a.exists = Yes and a.prompts = 0
+  and a.savedPresent = a.present and a.exists = (Input.exec = Yes => No else Yes) and a.prompts = 0
   and no a.engine and no a.selected and a.event = Init
 }
 pred prepare[a,b: State] {
@@ -61,7 +61,7 @@ pred cancel[a,b: State] {
 }
 pred start[a,b: State] {
   a.phase = Ready
-  assign[b,Running,a.enabled,a.present,a.enabled,a.present,a.exists,a.prompts,a.enabled,a.selected]
+  assign[b,Running,a.enabled,a.present,a.enabled,a.present,Yes,a.prompts,a.enabled,a.selected]
   b.event = Start
 }
 pred idle[a,b: State] {
@@ -76,6 +76,7 @@ fact Trace {
 assert PromptGate {
   all a: State | a.prompts >= 0 and a.prompts <= 1
     and (a.phase = Prompting implies eligible and Input.valid = Yes and a.prompts = 1)
+    and (a.phase = Prompting implies a.exists = No)
     and (a.event in Select + Cancel implies eligible and Input.valid = Yes)
     and (not eligible implies a.prompts = 0)
 }
@@ -101,7 +102,7 @@ assert Domains {
   all a: State | a.enabled in a.present and a.saved in a.savedPresent
 }
 pred SelectionWitness {
-  Input.declared = E2E + Docs and Input.exec = No and first.enabled = Docs + Unknown
+  Input.declared = E2E + Docs and Input.exec = Yes and first.enabled = Docs + Unknown
   some a: State | a.event = Select and a.selected = E2E
   some a: State | a.phase = Running and a.saved = E2E + Unknown and a.present = Flag
 }
@@ -115,9 +116,9 @@ pred ExplicitOffWitness {
   Input.valid = Yes and Input.dry = No and Input.tty = Yes
   some a: State | a.phase = Running and a.saved = Docs and a.prompts = 0
 }
-pred CancellationWitness {
-  Input.exec = No and first.enabled = Docs
-  some a: State | a.phase = Cancelled and a.exists = Yes and a.saved = Docs
+pred SavedRunWitness {
+  Input.exec = No and Input.valid = Yes and Input.dry = No and no Input.cli and first.enabled = Docs
+  some a: State | a.phase = Running and a.exists = Yes and a.saved = Docs and a.prompts = 0
 }
 pred ExecCancellationWitness {
   Input.exec = Yes
@@ -129,7 +130,7 @@ pred PreflightWitness {
 }
 pred SuppressedWitness {
   Input.valid = Yes and Input.dry = No and no Input.cli and some Input.declared
-  (Input.tty = No or Input.single = No or Input.fresh = No)
+  (Input.tty = No or Input.exec = No)
   first.enabled = Docs and Unknown in first.present - first.enabled
   some a: State | a.phase = Running and a.saved = Docs and a.prompts = 0
 }
@@ -145,7 +146,7 @@ check Domains for 9 but exactly 9 State, 5 Int expect 0
 run SelectionWitness for 9 but exactly 9 State, 5 Int expect 1
 run EmptyWitness for 9 but exactly 9 State, 5 Int expect 1
 run ExplicitOffWitness for 9 but exactly 9 State, 5 Int expect 1
-run CancellationWitness for 9 but exactly 9 State, 5 Int expect 1
+run SavedRunWitness for 9 but exactly 9 State, 5 Int expect 1
 run ExecCancellationWitness for 9 but exactly 9 State, 5 Int expect 1
 run PreflightWitness for 9 but exactly 9 State, 5 Int expect 1
 run SuppressedWitness for 9 but exactly 9 State, 5 Int expect 1

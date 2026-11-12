@@ -1,24 +1,13 @@
 @workflow_flags
 Feature: Select workflow flags before dependent skips and execution
-  The execution boundary asks once, preserves saved choices, and never prompts automation.
+  Run uses saved choices without asking; exec and approval can ask for flags.
 
-  Scenario: Select an optional step and persist explicit off values
+  Scenario: Terminal run uses saved flags without prompting
     Given an isolated planned workflow with docs enabled
-    When I run the workflow in a terminal and select e2e instead
-    Then only the e2e optional effect runs
-    And the saved flags enable e2e and disable docs
-
-  Scenario: Confirm an empty selection to turn every declared flag off
-    Given an isolated planned workflow with docs enabled
-    When I run the workflow in a terminal and clear all flags
-    Then no optional effects run
-    And both saved declared flags are explicitly off
-
-  Scenario: Enter retains saved defaults
-    Given an isolated planned workflow with docs enabled
-    When I run the workflow in a terminal and accept saved flags
+    When I run the workflow in a terminal
     Then only the docs optional effect runs
-    And the saved flags enable docs and disable e2e
+    And no flag selection prompt is displayed
+    And the planned session flags are unchanged
 
   Scenario: Explicit CLI flags suppress selection
     Given an isolated planned workflow with docs enabled
@@ -37,13 +26,6 @@ Feature: Select workflow flags before dependent skips and execution
     When I dry run the workflow in a terminal
     Then no workflow effects run
     And no flag selection prompt is displayed
-    And the planned session is unchanged
-
-  Scenario: Cancel selection without mutating a planned session
-    Given an isolated planned workflow with docs enabled
-    When I cancel workflow flag selection
-    Then selection fails with a cancellation diagnostic
-    And no workflow effects run
     And the planned session is unchanged
 
   Scenario: Cancel ephemeral exec and clean up its session

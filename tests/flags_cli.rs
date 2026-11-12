@@ -524,12 +524,13 @@ steps:
     }
 
     #[test]
-    fn run_enter_keeps_saved_flag_selection_and_persists_explicit_off_values() {
+    fn terminal_run_uses_saved_flags_without_prompting() {
         let f = Fixture::new();
         let (manager, id) = planned_session(&f, true);
-        let (success, text) = cli_in_pty(&f, &["run", &id], &[("Run E2E", b"\r")]);
+        // Cancel an unexpected selector so a regression fails promptly.
+        let (success, text) = cli_in_pty(&f, &["run", &id], &[("Run E2E", b"\x1b")]);
+        assert!(!text.contains(FLAG_PROMPT), "{text}");
         assert!(success, "{text}");
-        assert!(text.contains(FLAG_PROMPT), "{text}");
         assert!(
             f.repo.join("docs.txt").exists(),
             "saved docs should start selected: {text}"
@@ -540,31 +541,34 @@ steps:
             .unwrap_or_else(|error| panic!("load session: {error}"));
         assert_eq!(
             state.flags,
-            cruise::flags::FlagValues::from([("docs".into(), true), ("e2e".into(), false)])
+            cruise::flags::FlagValues::from([("docs".into(), true)])
         );
     }
 
     #[test]
-    fn run_cancelling_flag_selection_keeps_the_planned_session_unchanged() {
+    fn terminal_run_extends_saved_flags_with_cli_assignment() {
         let f = Fixture::new();
-        let (manager, id) = planned_session(&f, true);
-        let before = manager
-            .load(&id)
-            .unwrap_or_else(|error| panic!("load session: {error}"));
-        let (success, text) = cli_in_pty(&f, &["run", &id], &[("Run E2E", b"\x1b")]);
-        assert!(!success, "{text}");
-        assert!(text.contains("workflow flag selection cancelled"), "{text}");
-        let state = manager
-            .load(&id)
-            .unwrap_or_else(|error| panic!("load session: {error}"));
-        assert_eq!(state.phase, cruise::session::SessionPhase::Planned);
-        assert_eq!(state.flags, before.flags);
-        assert!(state.current_step.is_none());
-        assert!(!f.repo.join("build.txt").exists(), "{text}");
+        let (_, id) = planned_session(&f, true);
+        let (success, text) = cli_in_pty(&f, &["run", &id, "-f", "e2e"], &[]);
+        assert!(success, "{text}");
+        assert!(!text.contains(FLAG_PROMPT), "{text}");
+        assert!(f.repo.join("docs.txt").exists(), "{text}");
+        assert!(f.repo.join("e2e.txt").exists(), "{text}");
     }
 
     #[test]
-    fn run_without_usable_plan_fails_before_flag_selection() {
+    fn terminal_run_cli_off_overrides_saved_flag() {
+        let f = Fixture::new();
+        let (_, id) = planned_session(&f, true);
+        let (success, text) = cli_in_pty(&f, &["run", &id, "-f", "docs=off"], &[]);
+        assert!(success, "{text}");
+        assert!(!text.contains(FLAG_PROMPT), "{text}");
+        assert!(f.repo.join("build.txt").exists(), "{text}");
+        assert!(!f.repo.join("docs.txt").exists(), "{text}");
+    }
+
+    #[test]
+    fn run_without_usable_plan_fails_without_flag_selection() {
         let f = Fixture::new();
         let (manager, id) = planned_session(&f, false);
         let (success, text) = cli_in_pty(&f, &["run", &id], &[]);

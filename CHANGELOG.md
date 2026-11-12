@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Stop prompting for workflow flags on `cruise run`; saved session values and explicit `-f/--flag` assignments now control execution. `exec` and `force_exec` still prompt before creating a transient session.
+
 ### Added
 
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.

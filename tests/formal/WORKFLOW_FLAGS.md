@@ -2,8 +2,8 @@
 
 ## Authority and traceability
 
-This suite implements the 2026-10-24 planning-to-execution task in `plan.md`,
-sections 1, 2.1, 2.2, 2.4, 2.5 and 2.6. Approval-time flag selection is a
+This suite models the run and exec workflow-flag execution boundaries.
+Approval-time flag selection is a
 separate UI boundary outside these execution models, as are TUI/WebUI, history,
 background planning workers and batch selection. Execute now forwards its
 approval-time choices as explicit CLI assignments, using the modeled
@@ -12,12 +12,12 @@ Selection is per invocation, not a new persisted confirmation bit.
 
 | Contract from the plan | Production authority | Quint / Alloy | Executed production checks |
 | --- | --- | --- | --- |
-| Ask once only for a fresh, single, non-dry, TTY invocation with declarations and no explicit CLI assignment | `run_cmd::should_prompt_flags`, `prompt_flag_values`, `run_single_loaded` | `promptGate` / `PromptGate`, suppression tests and witnesses | Gherkin interactive, explicit CLI, nonterminal, dry-run and real interrupted/resumed scenarios; `workflow_flag_tests` covers batch and no declarations |
-| Saved enabled flags are the initial selection; Enter keeps them | `prompt_flag_values` default indices | `keepDefaultsTest`, `selectionTest`, `SelectionWitness` | Gherkin Enter retains saved defaults |
-| A selection writes true/false for every declared key, retaining undeclared keys including explicit off | `flags::apply_enabled` | `explicitSelection` / `ExplicitSelection`, empty-selection test/witness, sparse saved input domain | Gherkin selected/empty state assertions plus `flags_contract` tests |
+| Run never asks; fresh exec asks on a TTY with declarations, no explicit CLI assignment and no dry run, before creating its session | `exec_cmd::run_resolved`, `run_cmd::select_flag_values`, `run_single_loaded` | `promptGate` / `PromptGate`, saved-run and suppression tests and witnesses | Gherkin terminal run and exec cancellation; `flags_cli` exec and force-exec PTY cases |
+| Run retains saved flags, including sparse keys, unless CLI assignments override them | `run_single_loaded` CLI merge | `savedRunTest` / `SavedRunWitness`, `cliAuthority` / `CliAuthority` | Gherkin terminal run and `flags_cli` saved-flag cases |
+| A selection writes true/false for every declared key, retaining undeclared keys including explicit off | `flags::apply_enabled` | `explicitSelection` / `ExplicitSelection`, empty-selection test/witness, sparse saved input domain | `flags_contract` tests; exec PTY selection cases |
 | Any `-f`, including explicit off, wins and suppresses execution-start selection; Execute now forwards approval-time choices as explicit CLI assignments | `run_single_loaded` CLI merge, `plan_cmd` ExecuteNow forwarding, `exec_cmd::run_resolved` forwarding | `cliAuthority` / `CliAuthority`, `explicitOffTest` / `ExplicitOffWitness` | Gherkin explicit CLI; `flags_cli` PTY cases for exec, ExecuteNow and force_exec plan/root/background paths |
-| Reject invalid config, unusable plan, retry/compile/resume failures before asking | prepare ordering in `run_single_loaded` | abstract `valid` preflight gate and rejection test/witness | `flags_cli::run_without_usable_plan_fails_before_flag_selection`; unit selected-flags preflight validation test |
-| Cancellation leaves planned session unchanged and disposes owned ephemeral exec | `prompt_flag_values`, `run_with_operation`, `dispose_exec_session_if_owned` | `persistence` / `Persistence`, cancellation tests and witnesses | Gherkin byte-for-byte state preservation, no shell effects, diagnostic and directory cleanup assertions |
+| Reject invalid exec input before asking; flag-aware validation follows selection and forwarding | `exec_cmd::run_resolved`, `run_single_loaded` | abstract `valid` preflight gate and rejection test/witness | `flags_cli` gated-cycle and unusable-plan cases |
+| Cancelling exec selection creates no ephemeral session and performs no execution | `exec_cmd::run_resolved` | `promptGate`, `persistence` / `Persistence`, exec cancellation test and witness | Gherkin and PTY cancellation, diagnostic and directory assertions |
 | Persist selected values through existing workspace save, then pass them to engine | `run_single_loaded` workspace save and engine flag_values | `persistence` / `Persistence`, selection test/witness | Gherkin checks `state.json` and actual shell files; unit integration checks |
 
 The models describe observable lifecycle stages, displayed prompt count, working
@@ -25,12 +25,13 @@ flag values, explicitly present keys, persisted values, session existence, and
 values passed to execution. They do not duplicate Rust data structures or graph
 compilation algorithms. Two declared flags and one undeclared saved key are the
 finite representative domain. Both sparse absence and explicitly saved false
-are represented. Input `fresh` means `current_step.is_none()`, and `single`
-means `WorkspaceOverride::RespectSession`, not absence of saved flag settings.
+are represented. Inputs `fresh` and `single` distinguish run variants but do
+not affect the prompt gate. Fresh exec normally starts with an empty flag map;
+the broader input domain also exercises the selection helper's preservation rules.
 `cli` is the set of explicitly assigned names even when `cliOn` is empty.
 
 A single modeled invocation proceeds from preparing to prompting or ready,
-then selection/cancellation, or from ready to successful workspace persistence
+then selection/cancellation before exec session creation, or from ready to successful workspace persistence
 and engine entry. Invalid preflight rejects without a prompt. `idle` pads short
 traces to the bound. Successful workspace setup, flag-dependent graph validation
 and save are abstracted as the successful `start` action. Their failure modes

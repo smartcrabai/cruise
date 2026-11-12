@@ -91,8 +91,6 @@ fact Trace {
     openPrompt[a,b] or flags[a,b] or selectSkips[a,b] or commit[a,b]
     or create[a,b] or execute[a,b] or cancel[a,b] or idle[a,b]
 }
-// should_prompt_flags is false when explicit declared assignments are present.
-pred nextRunPrompts[a: State] { no a.forwardedNames and some declared }
 assert CandidateSemantics {
   all a: State |
     Plain in a.candidates and UnknownId not in a.candidates
@@ -126,7 +124,7 @@ assert CommittedSelection {
 assert ExecuteForwarding {
   all a: State | a.phase = Running implies
     a.forwardedNames = declared and a.forwardedOn = a.flags & declared
-    and Legacy not in a.forwardedNames and not nextRunPrompts[a]
+    and Legacy not in a.forwardedNames
 }
 assert ResumeUnfiltered { all a: State | a.resume = mainExpanded }
 assert ApplicationCreate {
