@@ -19,7 +19,7 @@ runs:
       env:
         RUST_COMPONENTS: ${{ inputs.components }}
       run: |
-        host=$(rustc -vV | awk '$1 == "host:" { print $2; exit }')
+        host=$(rustc -vV | awk '$1 == "host:" { host=$2 } END { print host }')
         toolchain="$HOME/.rustup/toolchains/1.99.1-$host"
         required=(rustc cargo)
         case "$RUST_COMPONENTS" in
@@ -33,7 +33,7 @@ runs:
         for component in "${required[@]}"; do
           [[ -x "$toolchain/bin/$component" ]] || valid=false
         done
-        rustup toolchain list | grep -Fq "1.99.1-$host" || valid=false
+        rustup toolchain list | grep -F "1.99.1-$host" >/dev/null || valid=false
         if [[ "$valid" == true ]]; then
           echo "Using cached Rust 1.99.1 toolchain ($host; $RUST_COMPONENTS)"
         else
@@ -46,7 +46,7 @@ runs:
         fi
         version=$("$toolchain/bin/rustc" --version)
         [[ "$version" == 'rustc 1.99.1 (58cf8f9c3 2026-10-13)' ]] || { echo "Unexpected cached Rust toolchain: $version" >&2; exit 1; }
-        rustup toolchain list | grep -Fq "1.99.1-$host" || { echo "Rustup did not register cached toolchain 1.99.1-$host" >&2; exit 1; }
+        rustup toolchain list | grep -F "1.99.1-$host" >/dev/null || { echo "Rustup did not register cached toolchain 1.99.1-$host" >&2; exit 1; }
         for component in "${required[@]}"; do
           [[ -x "$toolchain/bin/$component" ]] || { echo "Rust component is missing: $component" >&2; exit 1; }
         done
