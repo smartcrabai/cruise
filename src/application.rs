@@ -2572,11 +2572,16 @@ impl CruiseApplication {
     /// Returns an error when the session, configuration, or workflow cannot be loaded or compiled.
     pub fn session_dag(&self, id: &str) -> Result<Option<crate::graph::ExecutionGraph>> {
         let state = self.manager.load(id)?;
-        let path = self.manager.dag_path(id);
+        let after_pr = state.execution_stage == crate::session::SessionExecutionStage::AfterPr;
+        let path = if after_pr {
+            self.manager.after_pr_dag_path(id)
+        } else {
+            self.manager.dag_path(id)
+        };
         // The checkpoint is authoritative even when state.json was not updated
         // after the graph save.  This also keeps corrupt and legacy files
         // observable instead of silently rebuilding or deleting them.
-        if state.has_dag || path.exists() {
+        if after_pr || state.has_dag || path.exists() {
             return crate::graph::persistence::load_graph(&path).map(Some);
         }
         let config = self.manager.load_config(&state)?;
@@ -2619,16 +2624,30 @@ impl CruiseApplication {
             .load_config(&state)
             .and_then(crate::workflow::compile)
         {
-            Ok(compiled) => Ok(Some((
-                crate::flags::enabled_graph(&graph, &compiled, &state.flags),
-                None,
-            ))),
-            Err(error) if state.has_dag || self.manager.dag_path(id).exists() => Ok(Some((
-                graph,
-                Some(format!(
-                    "Flag filtering unavailable; showing persisted graph read-only: {error}"
-                )),
-            ))),
+            Ok(compiled) => {
+                let compiled =
+                    if state.execution_stage == crate::session::SessionExecutionStage::AfterPr {
+                        compiled.to_after_pr_compiled()
+                    } else {
+                        compiled
+                    };
+                Ok(Some((
+                    crate::flags::enabled_graph(&graph, &compiled, &state.flags),
+                    None,
+                )))
+            }
+            Err(error)
+                if state.has_dag
+                    || self.manager.dag_path(id).exists()
+                    || self.manager.after_pr_dag_path(id).exists() =>
+            {
+                Ok(Some((
+                    graph,
+                    Some(format!(
+                        "Flag filtering unavailable; showing persisted graph read-only: {error}"
+                    )),
+                )))
+            }
             Err(error) => Err(error),
         }
     }
@@ -3682,6 +3701,10 @@ impl CruiseApplication {
         };
         let skipped_steps = state.skipped_steps.clone();
         let flags = state.flags.clone();
+        if state.execution_id.is_none() {
+            state.execution_id = Some(uuid::Uuid::new_v4().to_string());
+            persist(&state)?;
+        }
         let result = crate::retry::with_active_policy(retry_policy, async {
             let outcome = crate::worktree_pr::publish_worktree_pr(
                 &ctx,
@@ -3698,7 +3721,31 @@ impl CruiseApplication {
             )
             .await?;
             if matches!(outcome, crate::worktree_pr::PublicationOutcome::Created) {
-                crate::worktree_pr::run_after_pr_steps(
+                if !compiled.after_pr.is_empty() {
+                    state.execution_stage = crate::session::SessionExecutionStage::AfterPr;
+                    state.current_step = None;
+                    state.current_step_is_node_id = false;
+                    persist(&state)?;
+                }
+                let checkpoint_path = manager.after_pr_dag_path(id);
+                let checkpoint =
+                    |node: &crate::engine::NodeCheckpoint<'_>,
+                     graph: &crate::graph::ExecutionGraph| {
+                        if self.runtime.persist_if_active(claim, || {
+                            crate::graph::persistence::save_graph(graph, &checkpoint_path)?;
+                            let mut snapshot = manager.load(id)?;
+                            snapshot.execution_stage =
+                                crate::session::SessionExecutionStage::AfterPr;
+                            snapshot.current_step = Some(node.node_id.clone());
+                            snapshot.current_step_is_node_id = true;
+                            manager.save(&snapshot)
+                        })? {
+                            Ok(())
+                        } else {
+                            Err(CruiseError::Interrupted)
+                        }
+                    };
+                let result = crate::worktree_pr::run_after_pr_steps_with_checkpoint(
                     &compiled,
                     Some(id),
                     &mut vars,
@@ -3712,8 +3759,18 @@ impl CruiseApplication {
                     &option,
                     Some(&on_log),
                     None,
+                    Some(crate::worktree_pr::AfterPrCheckpoint {
+                        execution_id: state.execution_id.as_deref(),
+                        resume: None,
+                    }),
+                    &checkpoint,
                 )
-                .await?;
+                .await;
+                let saved = manager.load(id)?;
+                state.execution_stage = saved.execution_stage;
+                state.current_step = saved.current_step;
+                state.current_step_is_node_id = saved.current_step_is_node_id;
+                result?;
             }
             Ok(())
         })
@@ -3735,6 +3792,13 @@ impl CruiseApplication {
     ) -> Result<SessionState> {
         let (compiled, ctx) = publication;
         if matches!(result, Err(CruiseError::Interrupted)) || claim.token().is_cancelled() {
+            let mut saved = self.manager.load(id)?;
+            if saved.execution_stage == crate::session::SessionExecutionStage::AfterPr {
+                saved.phase = SessionPhase::Suspended;
+                saved.clear_pending_input();
+                saved.clear_runner();
+                self.manager.save(&saved)?;
+            }
             sink.send(ApplicationEvent::RunCancelled {
                 session_id: id.to_string(),
             })?;
@@ -4166,7 +4230,8 @@ fn setup_run_blocking(
     if state.pr_target.is_some() {
         crate::pr_review_fix::validate_workflow(&config)?;
     }
-    let workspace_mode = if state.pr_target.is_some() {
+    let after_pr = state.execution_stage == crate::session::SessionExecutionStage::AfterPr;
+    let workspace_mode = if state.pr_target.is_some() || after_pr {
         WorkspaceMode::Worktree
     } else if state.exec {
         WorkspaceMode::CurrentBranch
@@ -4189,7 +4254,7 @@ fn setup_run_blocking(
     crate::config::validate_group_retry_budget(&config, max_retries)?;
     let retry_policy = crate::retry::policy_for_config(config.retry.clone());
     let compiled = crate::workflow::compile(config)?;
-    if state.pr_target.is_some() {
+    if state.pr_target.is_some() && !after_pr {
         crate::pr_review_fix::validate_effective_workflow(
             &compiled,
             &state.flags,
@@ -4197,27 +4262,52 @@ fn setup_run_blocking(
         )?;
     }
     let mut dag = crate::graph::build_graph(&compiled, max_retries)?;
-    let entry = crate::graph::persistence::prepare_resume(
-        &mut dag,
-        &manager.dag_path(id),
-        state.has_dag,
-        state.current_step.as_deref(),
-        state.current_step_is_node_id,
-        state.execution_id.as_deref(),
-    )?;
-    crate::graph::validation::validate_workflow(
-        &compiled,
-        &dag,
-        &entry,
-        &crate::flags::preflight_skips(&compiled, &state.flags, &state.skipped_steps),
-    )?;
-    if state.repo.is_some() || state.pr_target.is_some() {
+    let entry = if after_pr {
+        dag.start.clone()
+    } else {
+        crate::graph::persistence::prepare_resume(
+            &mut dag,
+            &manager.dag_path(id),
+            state.has_dag,
+            state.current_step.as_deref(),
+            state.current_step_is_node_id,
+            state.execution_id.as_deref(),
+        )?
+    };
+    if !after_pr {
+        crate::graph::validation::validate_workflow(
+            &compiled,
+            &dag,
+            &entry,
+            &crate::flags::preflight_skips(&compiled, &state.flags, &state.skipped_steps),
+        )?;
+    }
+    if !after_pr && (state.repo.is_some() || state.pr_target.is_some()) {
         crate::forge::ensure_forge_available(crate::forge::session_forge(&state))?;
     }
     let workspace_phase = crate::telemetry::Operation::phase("workspace");
     let workspace_result = (|| {
-        let (workspace, repo_clone_created) =
-            prepare_run_workspace(manager, runtime_handle, &mut state, workspace_mode, token)?;
+        let (workspace, repo_clone_created) = if after_pr {
+            let ctx = state
+                .worktree_context()
+                .filter(|ctx| ctx.path.is_dir())
+                .ok_or_else(|| {
+                    CruiseError::Other(
+                        "Cannot resume after-PR steps without the original worktree".into(),
+                    )
+                })?;
+            if state.pr_url.is_none() {
+                return Err(CruiseError::Other(
+                    "Cannot resume after-PR steps without a PR URL".into(),
+                ));
+            }
+            (
+                crate::workspace::ExecutionWorkspace::Worktree { ctx, reused: true },
+                false,
+            )
+        } else {
+            prepare_run_workspace(manager, runtime_handle, &mut state, workspace_mode, token)?
+        };
         crate::workspace::update_session_workspace(&mut state, &workspace);
         state.workspace_mode = workspace_mode;
         Ok((workspace, repo_clone_created))
@@ -4274,8 +4364,7 @@ struct RunInputs {
 
 fn prepare_run_inputs(manager: &SessionManager, setup: &mut RunSetup) -> Result<RunInputs> {
     let plan_path = setup.state.plan_path(&manager.sessions_dir());
-    let mut vars =
-        crate::variable::VariableStore::new(setup.state.template_input(&manager.sessions_dir()));
+    let mut vars = setup.state.run_variables(&manager.sessions_dir())?;
     vars.set_named_file(crate::session::PLAN_VAR, plan_path);
     vars.set_artifacts_root(setup.state.artifacts_path(&manager.sessions_dir()));
     let tracker = crate::file_tracker::FileTracker::with_root(setup.workspace.path().to_path_buf());
@@ -4412,6 +4501,9 @@ impl WorktreeRun<'_> {
             return Ok(());
         }
         setup.state.pr_workflow_vars = Some(inputs.vars.clone());
+        if setup.state.execution_id.is_none() {
+            setup.state.execution_id = Some(uuid::Uuid::new_v4().to_string());
+        }
         if !self
             .claim
             .runtime
@@ -4429,8 +4521,14 @@ impl WorktreeRun<'_> {
         };
         let pr_sink = Arc::clone(self.sink);
         let manager_for_pr = self.manager.clone();
-        let persist_pr = move |snapshot: &SessionState| {
-            manager_for_pr.save(snapshot)?;
+        let persist_pr = |snapshot: &SessionState| {
+            if !self
+                .claim
+                .runtime
+                .persist_if_active(self.claim, || manager_for_pr.save(snapshot))?
+            {
+                return Err(CruiseError::Interrupted);
+            }
             let url = snapshot.pr_url.clone().ok_or_else(|| {
                 CruiseError::Other("PR creation completed without a URL".to_string())
             })?;
@@ -4439,9 +4537,35 @@ impl WorktreeRun<'_> {
                 url,
             })
         };
-        crate::retry::with_active_policy(
+        let checkpoint_path = self.manager.after_pr_dag_path(&setup.state.id);
+        let checkpoint_id = setup.state.id.clone();
+        let execution_id = setup.state.execution_id.clone();
+        let target_url = setup
+            .state
+            .pr_target
+            .as_ref()
+            .map(|target| target.url.clone());
+        let checkpoint = |node: &crate::engine::NodeCheckpoint<'_>,
+                          graph: &crate::graph::ExecutionGraph| {
+            if self.claim.runtime.persist_if_active(self.claim, || {
+                crate::graph::persistence::save_graph(graph, &checkpoint_path)?;
+                let mut state = self.manager.load(&checkpoint_id)?;
+                if state.pr_url.is_none() {
+                    state.pr_url.clone_from(&target_url);
+                }
+                state.execution_stage = crate::session::SessionExecutionStage::AfterPr;
+                state.current_step = Some(node.node_id.clone());
+                state.current_step_is_node_id = true;
+                self.manager.save(&state)
+            })? {
+                Ok(())
+            } else {
+                Err(CruiseError::Interrupted)
+            }
+        };
+        let result = crate::retry::with_active_policy(
             setup.retry_policy.clone(),
-            crate::worktree_pr::handle_worktree_pr_with_persistence(
+            crate::worktree_pr::handle_worktree_pr_with_checkpoint(
                 self.worktree,
                 &setup.compiled,
                 &mut inputs.vars,
@@ -4457,9 +4581,19 @@ impl WorktreeRun<'_> {
                 Some(&on_pr_processing),
                 Some(&persist_pr),
                 self.instructions,
+                Some(crate::worktree_pr::AfterPrCheckpoint {
+                    execution_id: execution_id.as_deref(),
+                    resume: None,
+                }),
+                &checkpoint,
             ),
         )
-        .await
+        .await;
+        let saved = self.manager.load(&setup.state.id)?;
+        setup.state.execution_stage = saved.execution_stage;
+        setup.state.current_step = saved.current_step;
+        setup.state.current_step_is_node_id = saved.current_step_is_node_id;
+        result
     }
 }
 
@@ -4489,6 +4623,60 @@ async fn execute_run(
     };
     let logger = crate::session::SessionLogger::new(manager.run_log_path(id));
     let on_log = run_log_callback(logger, id.to_string(), log_sink, batch_started);
+    if setup.state.execution_stage == crate::session::SessionExecutionStage::AfterPr {
+        let checkpoint_path = manager.after_pr_dag_path(id);
+        let saved_step = setup.state.current_step.clone();
+        let is_node_id = setup.state.current_step_is_node_id;
+        let execution_id = setup.state.execution_id.clone();
+        let checkpoint = |node: &crate::engine::NodeCheckpoint<'_>,
+                          graph: &crate::graph::ExecutionGraph| {
+            if claim.runtime.persist_if_active(claim, || {
+                crate::graph::persistence::save_graph(graph, &checkpoint_path)?;
+                let mut state = manager.load(id)?;
+                state.execution_stage = crate::session::SessionExecutionStage::AfterPr;
+                state.current_step = Some(node.node_id.clone());
+                state.current_step_is_node_id = true;
+                manager.save(&state)
+            })? {
+                Ok(())
+            } else {
+                Err(CruiseError::Interrupted)
+            }
+        };
+        let result = crate::retry::with_active_policy(
+            setup.retry_policy.clone(),
+            crate::worktree_pr::run_after_pr_steps_with_checkpoint(
+                &setup.compiled,
+                Some(id),
+                &mut inputs.vars,
+                &mut inputs.tracker,
+                setup.max_retries,
+                setup.rate_limit_retries,
+                setup.workspace.path(),
+                &inputs.skipped_steps,
+                &inputs.flags,
+                Some(&claim.token),
+                &option,
+                Some(&on_log),
+                instructions,
+                Some(crate::worktree_pr::AfterPrCheckpoint {
+                    execution_id: execution_id.as_deref(),
+                    resume: Some(crate::worktree_pr::AfterPrResume {
+                        path: &checkpoint_path,
+                        saved_step: saved_step.as_deref(),
+                        is_node_id,
+                    }),
+                }),
+                &checkpoint,
+            ),
+        )
+        .await;
+        let saved = manager.load(id)?;
+        setup.state.execution_stage = saved.execution_stage;
+        setup.state.current_step = saved.current_step;
+        setup.state.current_step_is_node_id = saved.current_step_is_node_id;
+        return result.map(|()| false);
+    }
     let on_node_start =
         node_checkpoint_callback(manager.clone(), id.to_string(), manager.dag_path(id));
     let config_reloader = crate::session_config::config_reloader_for_reference(
@@ -5470,6 +5658,74 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn worktree_run_persists_after_pr_graph() -> Result<()> {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::tempdir()?;
+        let _home = crate::test_support::set_fake_home(temp.path());
+        let repo = application_reload_test_repo(&temp);
+        let (bin, _) = install_application_test_gh(&temp);
+        let _path = crate::test_support::prepend_to_path(&bin);
+        let id = "20261020000005";
+        let (app, manager, _) = setup_application_no_pr_reload(&temp, &repo, id);
+        std::fs::write(
+            temp.path().join("workflow.yaml"),
+            "command: [cat]\ncreate_pr: true\ncleanup_after_pr: false\nsteps:\n  implement: {command: 'touch change.txt'}\nafter-pr:\n  verify: {command: 'true'}\n",
+        )?;
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_: ApplicationEvent| Ok(()));
+        let result = app
+            .run_with_log_sink(id, RunRequest::default(), sink, None)
+            .await?;
+        assert_eq!(result.phase, SessionPhase::Completed);
+        assert_eq!(
+            result.execution_stage,
+            crate::session::SessionExecutionStage::AfterPr
+        );
+        assert!(manager.after_pr_dag_path(id).is_file());
+        assert!(manager.dag_path(id).is_file());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_resumes_after_pr_without_reexecuting_main_or_publishing() -> Result<()> {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::tempdir()?;
+        let _home = crate::test_support::set_fake_home(temp.path());
+        let (app, manager, mut state, workflow_marker, after_marker) = create_pr_fixture(&temp);
+        state.phase = SessionPhase::Failed("after PR failure".into());
+        state.execution_stage = crate::session::SessionExecutionStage::AfterPr;
+        state.pr_url = Some("https://github.com/example/repo/pull/42".into());
+        let compiled = crate::workflow::compile(manager.load_config(&state)?)?;
+        let mut graph = crate::graph::build_graph(
+            &compiled.to_after_pr_compiled(),
+            crate::config::DEFAULT_MAX_RETRIES,
+        )?;
+        graph.state.execution_id.clone_from(&state.execution_id);
+        graph.state.current = Some(graph.start.clone());
+        state.current_step = Some(graph.start.clone());
+        state.current_step_is_node_id = true;
+        manager.save(&state)?;
+        let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_: ApplicationEvent| Ok(()));
+        assert!(
+            app.run_with_log_sink(&state.id, RunRequest::default(), Arc::clone(&sink), None)
+                .await
+                .is_err()
+        );
+        assert!(!workflow_marker.exists());
+        assert!(!after_marker.exists());
+        crate::graph::persistence::save_graph(&graph, &manager.after_pr_dag_path(&state.id))?;
+        let result = app
+            .run_with_log_sink(&state.id, RunRequest::default(), sink, None)
+            .await?;
+        assert_eq!(result.phase, SessionPhase::Completed);
+        assert!(!workflow_marker.exists());
+        assert_eq!(std::fs::read_to_string(after_marker)?, "x");
+        assert_eq!(result.pr_url, state.pr_url);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn create_pr_recovery_restores_workflow_variables() {
         let _lock = crate::test_support::lock_process();
         let temp = tempfile::tempdir()
@@ -5709,6 +5965,31 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn create_pr_after_pr_cancellation_suspends_saved_checkpoint() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::tempdir().unwrap();
+        let (app, manager, mut state, _, _) = create_pr_fixture(&temp);
+        state.execution_stage = crate::session::SessionExecutionStage::AfterPr;
+        state.current_step = Some("verify".into());
+        state.current_step_is_node_id = true;
+        state.pr_url = Some("https://github.com/example/repo/pull/1".into());
+        manager.save(&state).unwrap();
+        let compiled = crate::workflow::compile(manager.load_config(&state).unwrap()).unwrap();
+        let ctx = state.worktree_context().unwrap();
+        let claim = app.runtime.try_begin(&state.id, OperationKind::CreatePr).unwrap();
+        let sink = |_: ApplicationEvent| Ok(());
+        let result = app.finish_create_pr(&state.id, &claim, &sink, state.clone(), (&compiled, &ctx), Err(CruiseError::Interrupted));
+        assert!(matches!(result, Err(CruiseError::Interrupted)));
+        let saved = manager.load(&state.id).unwrap();
+        assert_eq!(saved.phase, SessionPhase::Suspended);
+        assert_eq!(saved.execution_stage, state.execution_stage);
+        assert_eq!(saved.current_step, state.current_step);
+        assert!(saved.current_step_is_node_id);
+        assert_eq!(saved.pr_url, state.pr_url);
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn create_pr_cancellation_retains_pr_failed() {
         let _lock = crate::test_support::lock_process();
@@ -5818,6 +6099,52 @@ mod tests {
                 .phase,
             SessionPhase::Planned
         );
+    }
+
+    #[test]
+    fn session_display_dag_uses_after_pr_checkpoint_and_flags() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let id = SessionManager::new_session_id();
+        let mut state = SessionState::new(
+            id.clone(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "after PR graph".to_string(),
+        );
+        manager.create(&state)?;
+        std::fs::write(
+            manager.sessions_dir().join(&id).join("config.yaml"),
+            "command: [echo]\nflags:\n  optional: {}\nsteps:\n  main: {command: 'true'}\nafter-pr:\n  first: {command: 'true'}\n  hidden: {flag: optional, command: 'true'}\n",
+        )?;
+        let config = manager.load_config(&state)?;
+        let compiled = crate::workflow::compile(config)?;
+        let graph = crate::graph::build_graph(
+            &compiled.to_after_pr_compiled(),
+            crate::config::DEFAULT_MAX_RETRIES,
+        )?;
+        crate::graph::persistence::save_graph(&graph, &manager.after_pr_dag_path(&id))?;
+        state.execution_stage = crate::session::SessionExecutionStage::AfterPr;
+        manager.save(&state)?;
+        let app = CruiseApplication::new(manager.clone());
+        assert_eq!(app.session_dag(&id)?, Some(graph));
+        let display = app
+            .session_display_dag(&id)?
+            .ok_or_else(|| CruiseError::Other("missing displayed graph".into()))?;
+        assert_eq!(
+            display
+                .nodes
+                .values()
+                .map(|node| node.step_name.as_str())
+                .collect::<Vec<_>>(),
+            ["first"]
+        );
+        std::fs::remove_file(manager.after_pr_dag_path(&id))?;
+        assert!(
+            app.session_dag(&id).is_err(),
+            "missing active checkpoint must not rebuild main graph"
+        );
+        Ok(())
     }
 
     #[test]

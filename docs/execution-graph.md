@@ -82,8 +82,9 @@ finite ceiling and default 3, persist new-format counters across resume, reject
 provably exitless execution before side effects, and require explicit restart
 rather than guessing legacy counts. This is not a claim that the earlier
 confirmation attempts obtained answers. There is no unlimited-mode setting,
-backend/authentication change, per-iteration history or independently resumable
-after-pr phase.
+backend/authentication change or per-iteration history. The main workflow uses
+`dag.json`, while after-PR has its own `after-pr-dag.json` checkpoint and can
+resume independently without rerunning the main workflow or publishing again.
 
 ## Final validation
 

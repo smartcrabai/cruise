@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Resume fatal after-PR failures from their separate graph checkpoint, preserving retry counts and avoiding repeated main-workflow and PR-publication effects. Legacy sessions without the stage marker retain their previous after-PR restart behavior.
 - Native GitHub squash merges check current-base ancestry and route confirmed behind/diverged or conflicting pull requests through bounded base-sync recovery. Only native `ResyncRequired` routing starts a fresh after-PR pass budget: reset `budgeted_traversals` for every edge except `squash-merge` → `if.fail` target and clear group retry counts, preserving edge traversal history. The resync edge remains capped at `max_retries`, while generic `if.fail` retains shared budgets. Worst case: up to `max_retries` resyncs, each pass allowing up to `max_retries - 1` CI-fix iterations; zero retry budget permits no resync. Other readiness failures and GitLab behavior are unchanged.
 
 - Retain quality-gate output when sanitizing large streams runs past the post-exit pipe-drain grace.
