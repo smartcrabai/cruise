@@ -942,7 +942,7 @@ async fn run_single_loaded(
         let result = {
             let execution = crate::retry::with_active_policy(
                 retry_policy.clone(),
-                crate::worktree_pr::run_after_pr_steps_with_checkpoint(
+                Box::pin(crate::worktree_pr::run_after_pr_steps_with_checkpoint(
                     &compiled,
                     Some(&session_id),
                     &mut vars,
@@ -965,7 +965,7 @@ async fn run_single_loaded(
                         }),
                     }),
                     &on_checkpoint,
-                ),
+                )),
             );
             tokio::pin!(execution);
             tokio::select! {
@@ -1078,7 +1078,7 @@ async fn run_single_loaded(
                             let result = tokio::select! {
                                 result = crate::retry::with_active_policy(
                                     retry_policy.clone(),
-                                    crate::worktree_pr::handle_worktree_pr_with_checkpoint(
+                                    Box::pin(crate::worktree_pr::handle_worktree_pr_with_checkpoint(
                                         ctx,
                                         &compiled,
                                         &mut vars,
@@ -1096,7 +1096,7 @@ async fn run_single_loaded(
                                         instructions.as_ref(),
                                         Some(crate::worktree_pr::AfterPrCheckpoint { execution_id: execution_id.as_deref(), resume: None }),
                                         &on_checkpoint,
-                                    ),
+                                    )),
                                 ) => result,
                                 _ = tokio::signal::ctrl_c() => {
                                     cancel_token.cancel();
