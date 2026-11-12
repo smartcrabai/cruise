@@ -337,7 +337,7 @@ try {
     }
     await noOverflow();
     await settings.getByRole('button', { name: 'Close', exact: true }).click();
-    await page.getByRole('button', { name: 'Replan', exact: true }).click();
+    await page.getByRole('button', { name: 'Fix', exact: true }).click();
     const editor = page.locator(`#editor-${id} textarea`);
     await editor.waitFor();
     assert.equal(await editor.evaluate(el => getComputedStyle(el).fontSize), '16px', 'R8 editor uses mobile font size');

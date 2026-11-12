@@ -273,6 +273,13 @@ harness = false
 name = "pr_failed_bdd"
 path = "tests/pr_failed_bdd.rs"
 
+[[test]]
+harness = false
+name = "plan_revision_bdd"
+path = "tests/plan_revision_bdd.rs"
+# Unix subprocess fixture, run explicitly by check_plan_revision_specs.sh.
+test = false
+
 [profile.release]
 codegen-units = 1
 lto = true

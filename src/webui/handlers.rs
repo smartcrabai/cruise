@@ -269,13 +269,6 @@ pub(crate) async fn editor(
                 "Submit",
                 true,
             ),
-            "replan" => (
-                "feedback",
-                "Replan",
-                "Optional guidance for the new plan...",
-                "Replan",
-                false,
-            ),
             other => {
                 return Err(CruiseError::Other(format!("unknown editor '{other}'")));
             }
@@ -732,28 +725,6 @@ pub(crate) async fn generate(
             &id,
             Some(OperationKind::Generate),
         )?))
-    })
-}
-
-pub(crate) async fn replan(
-    UiState(state): UiState,
-    Path(id): Path<String>,
-    axum::extract::Form(pairs): Form,
-) -> Response {
-    let fields = Fields::from(pairs);
-    run(&state, "Replan", || {
-        let application = state.application.clone();
-        let (sink, _log) = state.hub.sinks();
-        let request = PlanRequest {
-            feedback: fields.opt("feedback"),
-            interactive: Interactive::new(true),
-            ..PlanRequest::default()
-        };
-        let spawn_id = id.clone();
-        super::ops::spawn(async move { application.replan(&spawn_id, request, sink).await });
-        let mut body = partials::header_and_row(&state, &id, Some(OperationKind::Replan))?;
-        body.push_str(&partials::clear(&format!("editor-{id}")));
-        Ok(html(body))
     })
 }
 

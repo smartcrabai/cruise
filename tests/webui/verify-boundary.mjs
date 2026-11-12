@@ -13,7 +13,7 @@ const cases = [
   { id: '20261107000000011', phase: 'AwaitingApproval', plan: true, visible: true, name: 'approval' },
   { id: '20261107000000012', phase: 'AwaitingApproval', plan: false, visible: false, name: 'missing-plan' },
   { id: '20261107000000013', phase: 'Draft', plan: true, visible: false, name: 'draft' },
-  { id: '20261107000000014', phase: 'Planned', plan: true, visible: false, name: 'planned' },
+  { id: '20261107000000014', phase: 'Planned', plan: true, visible: true, name: 'planned' },
 ];
 const plan = '# Saved plan\n\nKeep this plan unchanged.\n';
 let server, closed, browser, logs = '';

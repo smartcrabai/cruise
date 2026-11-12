@@ -32,6 +32,15 @@ These are bounded abstractions, not a proof of the Rust implementation. In
 particular, failure or crash between the base commit and marker persistence is
 not modeled, and the modeled cleanup failure leaves both resources intact.
 
+For modeled planning-action offers and the production checks for client parity,
+phase preservation and prompt delivery, see `PLAN_REVISION.md` and run
+`bash scripts/check_plan_revision_specs.sh`. The `plan-revision-specs` CI job
+runs the Quint and Alloy models, production-connected Gherkin and negative
+controls; results are retained under `target/formal-reports/plan-revision.*`.
+The formal models are not a production refinement proof; the BDD checks those
+production behaviors directly.
+
+
 For bounded batch auto-requeue safety, see `AUTO_REQUEUE.md` and run
 `bash scripts/check_auto_requeue_specs.sh`. The dedicated `auto-requeue-specs`
 CI job retains verification receipts and traces.

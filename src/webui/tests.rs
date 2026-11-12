@@ -940,6 +940,10 @@ fn sidebar_rows_and_direct_session_components_render_badge_contents() {
     let header = render("components/session-header");
     assert!(header.contains("Awaiting Approval"), "{header}");
     assert!(header.contains("Add a WebUI"), "{header}");
+    assert!(header.contains("/editor/fix"), "{header}");
+    assert!(header.contains("/editor/ask"), "{header}");
+    assert!(header.contains("/verify"), "{header}");
+    assert!(!header.contains("/replan"), "{header}");
 }
 
 #[test]
@@ -1128,6 +1132,13 @@ async fn unknown_session_is_404() {
     let (status, _, _) = get(&harness, "/sessions/nope", &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _, _) = get(&harness, "/no-such-page", &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn replan_route_is_not_exposed_by_the_webui() {
+    let harness = harness();
+    let (status, _, _) = post(&harness, "/webui/sessions/example/replan", "").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 

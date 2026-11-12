@@ -1573,7 +1573,7 @@ fn phase_specific_action_palettes_expose_the_supported_operations() {
     assert_palette(&mut tui, &["Approve", "Ask About Plan"]);
     tui.send(b"[[");
     tui.send(b"j");
-    assert_palette(&mut tui, &["Run in Worktree", "Replan"]);
+    assert_palette(&mut tui, &["Run in Worktree", "Fix Plan"]);
     tui.send(b"[[");
     tui.send(b"j");
     assert_palette(&mut tui, &["Retry", "Edit Current Step"]);

@@ -367,7 +367,6 @@ pub(crate) fn router(state: WebState) -> Router {
             post(handlers::use_input_as_plan),
         )
         .route("/webui/sessions/{id}/generate", post(handlers::generate))
-        .route("/webui/sessions/{id}/replan", post(handlers::replan))
         .route("/webui/sessions/{id}/fix", post(handlers::fix))
         .route("/webui/sessions/{id}/ask", post(handlers::ask))
         .route("/webui/sessions/{id}/verify", post(handlers::verify))

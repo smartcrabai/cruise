@@ -58,7 +58,6 @@ fn actions() -> SessionActionsVm {
         show_create_pr: true,
         run_label: "Retry".to_string(),
         show_reset: true,
-        show_replan: true,
         show_discard: true,
         show_delete: true,
         show_cancel: true,
