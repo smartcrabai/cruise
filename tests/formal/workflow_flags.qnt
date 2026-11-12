@@ -12,12 +12,12 @@ module workflow_flags {
   var s: State
   var before: State
   var event: str
-  pure def eligible(i: Input): bool = not(i.dry) and i.cli == Set()
-    and i.single and i.fresh and i.declared != Set() and i.tty
-  pure def initial(on: Set[int], storedKeys: Set[int]): State = { phase: 0, enabled: on, present: storedKeys,
-    saved: on, savedPresent: storedKeys, exists: true, prompts: 0, engine: Set(), selected: Set() }
+  pure def eligible(i: Input): bool = i.exec and not(i.dry) and i.cli == Set()
+    and i.declared != Set() and i.tty
+  pure def initial(i: Input, on: Set[int], storedKeys: Set[int]): State = { phase: 0, enabled: on, present: storedKeys,
+    saved: on, savedPresent: storedKeys, exists: not(i.exec), prompts: 0, engine: Set(), selected: Set() }
   action initKeys(i: Input, on: Set[int], storedKeys: Set[int]): bool = all {
-    input' = i, s' = initial(on, storedKeys), before' = initial(on, storedKeys), event' = "init" }
+    input' = i, s' = initial(i, on, storedKeys), before' = initial(i, on, storedKeys), event' = "init" }
   action initWith(i: Input, on: Set[int]): bool = initKeys(i, on, on)
   action init = {
     nondet dry = Set(false, true).oneOf()
@@ -54,7 +54,7 @@ module workflow_flags {
     record({ ...s, phase: 4, exists: not(input.exec) }, "cancel") }
   // Workspace success is abstracted here. Only then are flags saved and executed.
   action start = all { s.phase == 2,
-    record({ ...s, phase: 3, saved: s.enabled, savedPresent: s.present,
+    record({ ...s, phase: 3, exists: true, saved: s.enabled, savedPresent: s.present,
       engine: s.enabled }, "start") }
   action idle = record(s, "idle")
   action step = any { prepare, reject, choose, cancel, start, idle }
@@ -64,6 +64,7 @@ module workflow_flags {
     s.phase == 1 implies eligible(input) and input.valid and s.prompts == 1,
     Set("select", "cancel").contains(event) implies eligible(input) and input.valid,
     not(eligible(input)) implies s.prompts == 0,
+    s.phase == 1 implies not(s.exists),
   }
   val explicitSelection = event == "select" implies all {
     s.enabled.intersect(input.declared) == s.selected,
@@ -88,7 +89,7 @@ module workflow_flags {
   val safety = promptGate and explicitSelection and cliAuthority and persistence and domains
 
   pure val interactive = { dry: false, cli: Set(), cliOn: Set(), single: true,
-    fresh: true, declared: Set(0, 1), tty: true, valid: true, exec: false }
+    fresh: true, declared: Set(0, 1), tty: true, valid: true, exec: true }
   run selectionTest = initWith(interactive, Set(1, 2)).then(prepare)
     .then(selectFlags(Set(0))).expect(s.enabled == Set(0, 2) and s.present == Set(0, 1, 2) and safety)
     .then(start).expect(s.saved == Set(0, 2) and s.engine == s.saved and s.prompts == 1 and safety)
@@ -98,9 +99,9 @@ module workflow_flags {
     .then(prepare).then(start).expect(s.saved == Set(1) and s.prompts == 0 and safety)
   run dryRunTest = initWith({ ...interactive, dry: true }, Set(0)).then(prepare)
     .expect(s.phase == 6 and s.saved == Set(0) and safety)
-  run batchTest = initWith({ ...interactive, single: false }, Set(0)).then(prepare).then(start)
+  run batchTest = initWith({ ...interactive, exec: false, single: false }, Set(0)).then(prepare).then(start)
     .expect(s.prompts == 0 and s.saved == Set(0) and safety)
-  run resumeTest = initWith({ ...interactive, fresh: false }, Set(1)).then(prepare).then(start)
+  run resumeTest = initWith({ ...interactive, exec: false, fresh: false }, Set(1)).then(prepare).then(start)
     .expect(s.prompts == 0 and s.saved == Set(1) and safety)
   run nonTerminalTest = initWith({ ...interactive, tty: false }, Set(1)).then(prepare).then(start)
     .expect(s.prompts == 0 and s.saved == Set(1) and safety)
@@ -109,8 +110,8 @@ module workflow_flags {
   run keepDefaultsTest = initKeys(interactive, Set(1), Set(0, 1, 2)).then(prepare)
     .expect(s.enabled == Set(1) and safety).then(selectFlags(Set(1))).then(start)
     .expect(s.saved == Set(1) and s.savedPresent == Set(0, 1, 2) and safety)
-  run cancellationTest = initWith(interactive, Set(1)).then(prepare).then(cancel)
-    .expect(s.phase == 4 and s.saved == Set(1) and s.exists and safety)
+  run savedRunTest = initWith({ ...interactive, exec: false }, Set(1)).then(prepare).then(start)
+    .expect(s.saved == Set(1) and s.prompts == 0 and s.exists and safety)
   run execCancellationTest = initWith({ ...interactive, exec: true }, Set())
     .then(prepare).then(cancel).expect(not(s.exists) and s.engine == Set() and safety)
   run preflightTest = initWith({ ...interactive, valid: false }, Set(1)).then(reject)
