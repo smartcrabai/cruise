@@ -10,7 +10,7 @@ runs:
   steps:
     - name: Cache checksum-pinned Node.js archive
       if: ${{ runner.os == 'Linux' && runner.arch == 'X64' }}
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/node-v26.13.0-linux-x64.tar.xz
         key: node-v1-${{ runner.os }}-${{ runner.arch }}-26.13.0-d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997
@@ -39,14 +39,14 @@ runs:
       with:
         components: ${{ inputs.rust-components }}
     - name: Cache checksum-pinned formal downloads
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ${{ runner.temp }}/cruise-formal-tools/*.tar.gz
           ${{ runner.temp }}/cruise-formal-tools/alloy-6.2.0.jar
         key: formal-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/setup_formal.sh', 'scripts/check_instruction_inbox_alloy.sh') }}
     - name: Cache checksum-pinned Apalache distribution
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.quint/cache/apalache-0.62.1.tgz
         key: apalache-v1-${{ runner.os }}-${{ runner.arch }}-0.62.1-38202a8c4ebeb3ab73e0fe5a7e4bb948442d46ad5de8a7fb45c9e5cac2beb2a6
