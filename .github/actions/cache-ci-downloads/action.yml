@@ -20,3 +20,8 @@ runs:
           target/formal-tools/*.tar.gz
           target/formal-tools/alloy-6.2.0.jar
         key: formal-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/setup_formal.sh', 'scripts/check_instruction_inbox_alloy.sh') }}
+    - name: Cache checksum-pinned Apalache distribution
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ~/.quint/cache/apalache-0.62.1.tgz
+        key: apalache-v1-${{ runner.os }}-${{ runner.arch }}-0.62.1-38202a8c4ebeb3ab73e0fe5a7e4bb948442d46ad5de8a7fb45c9e5cac2beb2a6

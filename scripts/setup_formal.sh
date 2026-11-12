@@ -54,6 +54,22 @@ fetch 'https://github.com/AlloyTools/org.alloytools.alloy/releases/download/v6.2
 # The lockfile overrides Quint's adm-zip to 0.6.1 to fix ZIP extraction advisories.
 npm ci --prefix "$ROOT/tests/formal" --ignore-scripts
 [[ $("$ROOT/tests/formal/node_modules/.bin/quint" --version) == 0.33.0 ]]
+
+# Quint 0.33.0 otherwise fetches this distribution without verifying its checksum.
+QUINT_HOME=${QUINT_HOME:-"$HOME/.quint"}
+APALACHE_VERSION=0.62.1
+APALACHE_DIST="$QUINT_HOME/apalache-dist-$APALACHE_VERSION"
+APALACHE_ARCHIVE="$QUINT_HOME/cache/apalache-$APALACHE_VERSION.tgz"
+mkdir -p "$QUINT_HOME/cache" "$APALACHE_DIST"
+fetch "https://github.com/apalache-mc/apalache/releases/download/v$APALACHE_VERSION/apalache.tgz" "$APALACHE_ARCHIVE" 38202a8c4ebeb3ab73e0fe5a7e4bb948442d46ad5de8a7fb45c9e5cac2beb2a6
+APALACHE_TEMP=$(mktemp -d "$APALACHE_DIST/download.XXXXXX")
+trap 'rm -rf "$APALACHE_TEMP"' EXIT
+tar -xzf "$APALACHE_ARCHIVE" -C "$APALACHE_TEMP"
+[[ -x "$APALACHE_TEMP/apalache/bin/apalache-mc" ]]
+rm -rf "$APALACHE_DIST/apalache"
+mv "$APALACHE_TEMP/apalache" "$APALACHE_DIST/apalache"
+rm -rf "$APALACHE_TEMP"
+trap - EXIT
 # Bash-escaped paths work even when the repository path contains spaces.
 # shellcheck disable=SC2016 # PATH must expand when env.sh is sourced, not now.
 printf 'export JAVA_HOME=%q\nexport PATH=%q:$PATH\n' "$JAVA_HOME" "$JAVA_HOME/bin" > "$TOOLS/env.sh"
