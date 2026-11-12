@@ -258,6 +258,10 @@ impl Drop for Collector {
 }
 
 fn read_request(mut stream: TcpStream) -> Option<CapturedRequest> {
+    // Accepted sockets inherit the listener's non-blocking mode on BSD/macOS.
+    stream
+        .set_nonblocking(false)
+        .unwrap_or_else(|error| panic!("set collector blocking: {error}"));
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap_or_else(|error| panic!("set collector read timeout: {error}"));

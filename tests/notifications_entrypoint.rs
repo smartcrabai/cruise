@@ -230,6 +230,12 @@ fn cli_plan_posts_plan_ready_to_webhook_and_exits_zero() {
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // BSD/macOS accepted sockets inherit the listener's
+                    // non-blocking mode; reads must block until the request
+                    // arrives (bounded by the read timeout).
+                    stream
+                        .set_nonblocking(false)
+                        .unwrap_or_else(|error| panic!("{error:?}"));
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap_or_else(|error| panic!("{error:?}"));
