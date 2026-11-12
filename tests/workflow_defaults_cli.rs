@@ -1329,22 +1329,48 @@ fn builtin_github_wait_ci_current_head_conflict_exits_before_waiting() {
 fn builtin_github_wait_ci_conflict_preserves_failure_and_validation() {
     let command = builtin_wait_ci_command("tdd");
     let fixture = GithubWaitCiFixture::new();
-    let response = github_ci_mergeability(github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 1), "CONFLICTING", "DIRTY");
-    let output = fixture.run(&command, &[
-        response,
-        github_completed_suite_response(&fixture.head, Some("FAILURE")),
-        github_ci_details_response(&fixture.head, &fixture.head, &[], 0, false, None),
-    ], false);
+    let response = github_ci_mergeability(
+        github_ci_response(&fixture.head, &fixture.head, Some("FAILURE"), 1),
+        "CONFLICTING",
+        "DIRTY",
+    );
+    let output = fixture.run(
+        &command,
+        &[
+            response,
+            github_completed_suite_response(&fixture.head, Some("FAILURE")),
+            github_ci_details_response(&fixture.head, &fixture.head, &[], 0, false, None),
+        ],
+        false,
+    );
     assert!(!output.status.success(), "{}", text(&output));
     assert_eq!(wait_ci_reason(&output), "ci_failed", "{}", text(&output));
 
-    for (field, reason) in [("object", "rollup_head_missing"), ("statusCheckRollup", "malformed_rollup"), ("state", "invalid_ci_state")] {
+    for (field, reason) in [
+        ("object", "rollup_head_missing"),
+        ("statusCheckRollup", "malformed_rollup"),
+        ("state", "invalid_ci_state"),
+    ] {
         let fixture = GithubWaitCiFixture::new();
-        let mut response = github_ci_mergeability(github_ci_response(&fixture.head, &fixture.head, Some("PENDING"), 1), "CONFLICTING", "DIRTY");
+        let mut response = github_ci_mergeability(
+            github_ci_response(&fixture.head, &fixture.head, Some("PENDING"), 1),
+            "CONFLICTING",
+            "DIRTY",
+        );
         match field {
             "object" => response["data"]["repository"]["object"] = serde_json::Value::Null,
-            "statusCheckRollup" => { response["data"]["repository"]["object"].as_object_mut().unwrap().remove(field); },
-            _ => { response["data"]["repository"]["object"]["statusCheckRollup"].as_object_mut().unwrap().remove(field); },
+            "statusCheckRollup" => {
+                response["data"]["repository"]["object"]
+                    .as_object_mut()
+                    .unwrap_or_else(|| panic!("fixture commit must be an object"))
+                    .remove(field);
+            }
+            _ => {
+                response["data"]["repository"]["object"]["statusCheckRollup"]
+                    .as_object_mut()
+                    .unwrap_or_else(|| panic!("fixture rollup must be an object"))
+                    .remove(field);
+            }
         }
         let output = fixture.run(&command, &[response], false);
         assert!(!output.status.success(), "{}", text(&output));
