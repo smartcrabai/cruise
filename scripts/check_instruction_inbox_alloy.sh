@@ -28,7 +28,7 @@ fetch 'https://github.com/AlloyTools/org.alloytools.alloy/releases/download/v6.2
 ln -sfn "$DOWNLOADS/alloy-6.2.0.jar" "$TOOLS/alloy-6.2.0.jar"
 JDK=$(mktemp -d "$TOOLS/alloy-jdk.XXXXXX")
 trap 'rm -rf "$JDK"' EXIT
-tar -xzf "$TOOLS/$asset" -C "$JDK" --strip-components=1
+tar -xzf "$DOWNLOADS/$asset" -C "$JDK" --strip-components=1
 JAVA="$JDK/$java_subdir/bin/java"
 "$JAVA" -XshowSettings:properties -version > "$RUN/java-version.log" 2>&1
 grep -Eq 'java.runtime.version = 25\.0\.5\+8-LTS[[:space:]]*$' "$RUN/java-version.log"
