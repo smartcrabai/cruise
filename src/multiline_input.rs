@@ -138,7 +138,7 @@ fn map_signal(signal: Signal) -> Option<InputResult> {
     match signal {
         Signal::Success(text) if text.trim().is_empty() => None,
         Signal::Success(text) => Some(InputResult::Submitted(text)),
-        Signal::CtrlC | Signal::CtrlD => Some(InputResult::Cancelled),
+        Signal::CtrlC(_) | Signal::CtrlD => Some(InputResult::Cancelled),
         _ => None,
     }
 }
@@ -249,9 +249,17 @@ mod tests {
     #[test]
     fn test_map_signal_ctrl_c_returns_cancelled() {
         // Given: the user pressed Ctrl+C
-        // When: Signal::CtrlC is mapped
-        let result = map_signal(Signal::CtrlC);
+        // When: Signal::CtrlC with an empty buffer is mapped
+        let result = map_signal(Signal::CtrlC(String::new()));
         // Then: returns Some(Cancelled)
+        assert_eq!(result, Some(InputResult::Cancelled));
+    }
+
+    #[test]
+    fn test_map_signal_ctrl_c_discards_buffer_and_returns_cancelled() {
+        // Given: the user pressed Ctrl+C with text in the buffer
+        let result = map_signal(Signal::CtrlC("draft text".to_string()));
+        // Then: the buffer is discarded and the input is cancelled
         assert_eq!(result, Some(InputResult::Cancelled));
     }
 
