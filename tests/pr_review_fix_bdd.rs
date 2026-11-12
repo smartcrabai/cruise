@@ -199,7 +199,7 @@ esac
             owns_branch: false,
         };
         world.result = Some(
-            cruise::worktree_pr::handle_worktree_pr_with_persistence(
+            cruise::worktree_pr::handle_worktree_pr_with_checkpoint(
                 &ctx,
                 &compiled,
                 &mut vars,
@@ -215,6 +215,8 @@ esac
                 None,
                 None,
                 None,
+                None,
+                &|_, _| Ok(()),
             )
             .await,
         );

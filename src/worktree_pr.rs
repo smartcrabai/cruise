@@ -164,9 +164,9 @@ fn squash_merge_enabled(compiled: &CompiledWorkflow, flags: &crate::flags::FlagV
 /// execution, persistence, or cancellation fails.
 #[expect(
     clippy::too_many_arguments,
-    reason = "all params are needed for PR flow"
+    reason = "PR flow needs workflow and persistence context"
 )]
-pub async fn handle_worktree_pr_with_persistence(
+pub async fn handle_worktree_pr_with_checkpoint(
     ctx: &worktree::WorktreeContext,
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
@@ -182,6 +182,12 @@ pub async fn handle_worktree_pr_with_persistence(
     on_pr_processing: Option<&PrProcessingCallback<'_>>,
     on_pr_created: Option<&PrCreatedCallback<'_>>,
     instructions: Option<&crate::instruction_inbox::RunInbox>,
+    checkpoint: Option<AfterPrCheckpoint<'_>>,
+    on_checkpoint: &(
+         dyn Fn(&crate::engine::NodeCheckpoint<'_>, &crate::graph::ExecutionGraph) -> Result<()>
+             + Send
+             + Sync
+     ),
 ) -> Result<()> {
     if cancel_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(CruiseError::Interrupted);
@@ -189,7 +195,7 @@ pub async fn handle_worktree_pr_with_persistence(
     if let Some(target) = session.pr_target.clone() {
         prepare_review_fix(ctx, &target, session, vars, on_pr_processing)?;
         ensure_review_fix_committed_and_push(ctx, &target.head_branch, cancel_token).await?;
-        return run_after_pr_steps(
+        return run_after_pr_steps_with_checkpoint(
             compiled,
             Some(&session.id),
             vars,
@@ -203,6 +209,8 @@ pub async fn handle_worktree_pr_with_persistence(
             option_handler,
             on_step_log,
             instructions,
+            checkpoint,
+            on_checkpoint,
         )
         .await;
     }
@@ -224,7 +232,7 @@ pub async fn handle_worktree_pr_with_persistence(
         if cancel_token.is_some_and(CancellationToken::is_cancelled) {
             return Err(CruiseError::Interrupted);
         }
-        run_after_pr_steps(
+        run_after_pr_steps_with_checkpoint(
             compiled,
             Some(&session.id),
             vars,
@@ -238,6 +246,8 @@ pub async fn handle_worktree_pr_with_persistence(
             option_handler,
             on_step_log,
             instructions,
+            checkpoint,
+            on_checkpoint,
         )
         .await?;
     }
@@ -656,10 +666,28 @@ async fn generate_pr_via_sdk_tool(
     }
 }
 
-/// Run the after-PR workflow steps. Cancellation, missing-model errors, and
-/// GitHub review failures always propagate; other errors only warn unless
-/// native squash merge is opted in.
+/// Saved position used to resume the after-PR graph.
+#[derive(Clone, Copy)]
+pub struct AfterPrResume<'a> {
+    /// Path to the persisted graph checkpoint.
+    pub path: &'a Path,
+    /// Saved step name or node ID, depending on `is_node_id`.
+    pub saved_step: Option<&'a str>,
+    /// Whether `saved_step` is a graph node ID instead of a step name.
+    pub is_node_id: bool,
+}
+
+/// Session identity and optional saved position for after-PR execution.
+#[derive(Clone, Copy)]
+pub struct AfterPrCheckpoint<'a> {
+    /// Execution ID the checkpoint must match.
+    pub execution_id: Option<&'a str>,
+    /// Graph path and saved position to restore, when resuming.
+    pub resume: Option<AfterPrResume<'a>>,
+}
+
 #[expect(clippy::too_many_arguments, reason = "mirrors the PR flow parameters")]
+#[cfg(test)]
 pub(crate) async fn run_after_pr_steps(
     compiled: &CompiledWorkflow,
     usage_session_id: Option<&str>,
@@ -675,16 +703,96 @@ pub(crate) async fn run_after_pr_steps(
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
     instructions: Option<&crate::instruction_inbox::RunInbox>,
 ) -> Result<()> {
+    run_after_pr_steps_with_checkpoint(
+        compiled,
+        usage_session_id,
+        vars,
+        tracker,
+        max_retries,
+        rate_limit_retries,
+        working_dir,
+        skipped_steps,
+        flags,
+        cancel_token,
+        option_handler,
+        on_step_log,
+        instructions,
+        None,
+        &|_, _| Ok(()),
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the PR flow parameters and checkpoint context"
+)]
+pub(crate) async fn run_after_pr_steps_with_checkpoint(
+    compiled: &CompiledWorkflow,
+    usage_session_id: Option<&str>,
+    vars: &mut VariableStore,
+    tracker: &mut FileTracker,
+    max_retries: usize,
+    rate_limit_retries: usize,
+    working_dir: &std::path::Path,
+    skipped_steps: &[String],
+    flags: &crate::flags::FlagValues,
+    cancel_token: Option<&CancellationToken>,
+    option_handler: &dyn OptionHandler,
+    on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
+    instructions: Option<&crate::instruction_inbox::RunInbox>,
+    checkpoint: Option<AfterPrCheckpoint<'_>>,
+    on_checkpoint: &(
+         dyn Fn(&crate::engine::NodeCheckpoint<'_>, &crate::graph::ExecutionGraph) -> Result<()>
+             + Send
+             + Sync
+     ),
+) -> Result<()> {
     if compiled.after_pr.is_empty() {
+        if checkpoint.is_some_and(|cp| cp.resume.is_some()) {
+            return Err(CruiseError::Other(
+                "cannot resume an empty after-pr workflow".into(),
+            ));
+        }
         return Ok(());
     }
     let critical_merge_enabled = squash_merge_enabled(compiled, flags);
     let after_compiled = compiled.to_after_pr_compiled();
     let mut dag = crate::graph::build_graph(&after_compiled, max_retries)?;
+    let start = if let Some(cp) = checkpoint {
+        if let Some(resume) = cp.resume {
+            if !resume.path.is_file() {
+                return Err(CruiseError::Other(
+                    "missing after-pr execution checkpoint; explicitly restart the session".into(),
+                ));
+            }
+            let saved = crate::graph::persistence::load_graph(resume.path).map_err(|error| {
+                CruiseError::Other(format!("failed to load after-pr checkpoint: {error}"))
+            })?;
+            if cp.execution_id.is_none() || saved.state.execution_id.as_deref() != cp.execution_id {
+                return Err(CruiseError::Other(
+                    "after-pr checkpoint has no matching execution identity; explicitly restart the session".into(),
+                ));
+            }
+            crate::graph::persistence::prepare_resume(
+                &mut dag,
+                resume.path,
+                true,
+                resume.saved_step,
+                resume.is_node_id,
+                cp.execution_id,
+            )?
+        } else {
+            dag.state.execution_id = cp.execution_id.map(str::to_owned);
+            dag.start.clone()
+        }
+    } else {
+        dag.start.clone()
+    };
     crate::graph::validation::validate_execution_graph(
         &dag,
         &after_compiled,
-        &dag.start,
+        &start,
         &crate::flags::preflight_skips(compiled, flags, skipped_steps),
         "after-pr",
     )?;
@@ -703,7 +811,16 @@ pub(crate) async fn run_after_pr_steps(
         flags,
         on_step_log,
     };
-    match execute_steps_with_graph(&ctx, vars, tracker, &mut dag, &|_cp, _dag| Ok(())).await {
+    let checkpoint_failed = std::sync::atomic::AtomicBool::new(false);
+    let persist = |cp: &crate::engine::NodeCheckpoint<'_>, graph: &crate::graph::ExecutionGraph| {
+        let result = on_checkpoint(cp, graph);
+        if result.is_err() {
+            checkpoint_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        result
+    };
+    match execute_steps_with_graph(&ctx, vars, tracker, &mut dag, &persist).await {
+        Err(e) if checkpoint_failed.load(std::sync::atomic::Ordering::Relaxed) => Err(e),
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
         Err(e @ (CruiseError::MissingJcodeModel(_) | CruiseError::GitHubReviewFailed { .. })) => {
             Err(e)
@@ -1720,6 +1837,27 @@ mod tests {
     use tempfile::TempDir;
 
     #[cfg(unix)]
+    fn install_failing_gh_stub(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let gh_log = root.join("gh.log");
+        let gh = bin_dir.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 1\n",
+                gh_log.display()
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut permissions = std::fs::metadata(&gh)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap_or_else(|e| panic!("{e:?}"));
+        (bin_dir, gh_log)
+    }
+    #[cfg(unix)]
     async fn exercise_publication_failure(mode: &str) -> (Result<()>, SessionState, bool) {
         let tmp = TempDir::new()
             .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
@@ -1780,7 +1918,7 @@ mod tests {
         } else {
             None
         };
-        let result = handle_worktree_pr_with_persistence(
+        let result = handle_worktree_pr_with_checkpoint(
             &ctx,
             &compiled,
             &mut vars,
@@ -1796,6 +1934,8 @@ mod tests {
             None,
             callback,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
         (result, session, marker.exists())
@@ -2660,23 +2800,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             },
             "PR description logging task".to_string(),
         );
-        let bin_dir = plan_temp.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        let gh_log = plan_temp.path().join("gh.log");
-        let gh = bin_dir.join("gh");
-        std::fs::write(
-            &gh,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 1\n",
-                gh_log.display()
-            ),
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        let mut permissions = std::fs::metadata(&gh)
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&gh, permissions).unwrap_or_else(|e| panic!("{e:?}"));
+        let (bin_dir, gh_log) = install_failing_gh_stub(plan_temp.path());
         let _path = crate::test_support::prepend_to_path(&bin_dir);
 
         let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -2692,7 +2816,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             processing_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         };
-        let result = handle_worktree_pr_with_persistence(
+        let result = handle_worktree_pr_with_checkpoint(
             &ctx,
             &compiled,
             &mut vars,
@@ -2708,6 +2832,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             Some(&on_pr_processing),
             None,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
 
@@ -2800,6 +2926,179 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         assert!(
             matches!(fatal, Err(CruiseError::InvalidStepConfig(_))),
             "native merge opt-in must propagate preceding after-pr errors: {fatal:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_pr_checkpoint_failure_is_fatal_before_effects() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut compiled = minimal_compiled_workflow(Vec::new());
+        compiled.after_pr.insert(
+            "work".to_string(),
+            crate::config::StepConfig {
+                command: Some(crate::config::StringOrVec::Single("touch ran".to_string())),
+                ..Default::default()
+            },
+        );
+        let mut vars = VariableStore::new("test".to_string());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let result = run_after_pr_steps_with_checkpoint(
+            &compiled,
+            None,
+            &mut vars,
+            &mut tracker,
+            10,
+            0,
+            tmp.path(),
+            &[],
+            &crate::flags::NO_FLAGS,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+            None,
+            Some(AfterPrCheckpoint {
+                execution_id: Some("execution"),
+                resume: None,
+            }),
+            &|_, _| Err(CruiseError::Other("checkpoint failed".into())),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!tmp.path().join("ran").exists());
+    }
+
+    #[tokio::test]
+    async fn after_pr_missing_checkpoint_fails_before_effects() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut compiled = minimal_compiled_workflow(Vec::new());
+        compiled.after_pr.insert(
+            "work".to_string(),
+            crate::config::StepConfig {
+                command: Some(crate::config::StringOrVec::Single("touch ran".to_string())),
+                ..Default::default()
+            },
+        );
+        let mut vars = VariableStore::new("test".to_string());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let path = tmp.path().join("missing.json");
+        let result = run_after_pr_steps_with_checkpoint(
+            &compiled,
+            None,
+            &mut vars,
+            &mut tracker,
+            10,
+            0,
+            tmp.path(),
+            &[],
+            &crate::flags::NO_FLAGS,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+            None,
+            Some(AfterPrCheckpoint {
+                execution_id: Some("execution"),
+                resume: Some(AfterPrResume {
+                    path: &path,
+                    saved_step: None,
+                    is_node_id: false,
+                }),
+            }),
+            &|_, _| Ok(()),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!tmp.path().join("ran").exists());
+    }
+
+    #[tokio::test]
+    async fn after_pr_warning_stops_remaining_steps_without_merge() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut compiled = minimal_compiled_workflow(Vec::new());
+        compiled.after_pr.insert(
+            "broken".to_string(),
+            crate::config::StepConfig {
+                command: Some(crate::config::StringOrVec::Single("true".to_string())),
+                timeout: Some("invalid-timeout".to_string()),
+                ..Default::default()
+            },
+        );
+        compiled.after_pr.insert(
+            "later".to_string(),
+            crate::config::StepConfig {
+                command: Some(crate::config::StringOrVec::Single(
+                    "touch later".to_string(),
+                )),
+                ..Default::default()
+            },
+        );
+        let mut vars = VariableStore::new("test".to_string());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let result = run_after_pr_steps(
+            &compiled,
+            None,
+            &mut vars,
+            &mut tracker,
+            10,
+            0,
+            tmp.path(),
+            &[],
+            &crate::flags::NO_FLAGS,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "ordinary errors remain warnings: {result:?}"
+        );
+        assert!(
+            !tmp.path().join("later").exists(),
+            "warning must not continue the graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_pr_cancellation_propagates_without_merge() {
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let mut compiled = minimal_compiled_workflow(Vec::new());
+        compiled.after_pr.insert(
+            "work".to_string(),
+            crate::config::StepConfig {
+                command: Some(crate::config::StringOrVec::Single("touch ran".to_string())),
+                ..Default::default()
+            },
+        );
+        let token = CancellationToken::new();
+        token.cancel();
+        let mut vars = VariableStore::new("test".to_string());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let result = run_after_pr_steps(
+            &compiled,
+            None,
+            &mut vars,
+            &mut tracker,
+            10,
+            0,
+            tmp.path(),
+            &[],
+            &crate::flags::NO_FLAGS,
+            Some(&token),
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(CruiseError::Interrupted)),
+            "cancellation must propagate: {result:?}"
+        );
+        assert!(
+            !tmp.path().join("ran").exists(),
+            "cancelled work must not run"
         );
     }
 
@@ -3019,7 +3318,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             Ok(())
         };
 
-        let result = handle_worktree_pr_with_persistence(
+        let result = handle_worktree_pr_with_checkpoint(
             &ctx,
             &compiled,
             &mut vars,
@@ -3035,6 +3334,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             None,
             Some(&on_pr_created),
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
 
