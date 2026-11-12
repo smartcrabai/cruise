@@ -21,7 +21,6 @@ use crate::session::{
     SessionFileContents, SessionLogger, SessionManager, SessionPhase, SessionState,
     SessionStateFingerprint, WorkspaceMode, current_iso8601,
 };
-use crate::variable::VariableStore;
 #[cfg(test)]
 use crate::workflow::CompiledWorkflow;
 use crate::workspace::{ExecutionWorkspace, prepare_execution_workspace, update_session_workspace};
@@ -980,7 +979,7 @@ async fn run_single_loaded(
         };
         let saved = lock_unpoisoned(&snapshot);
         session.execution_stage = saved.execution_stage;
-        session.current_step = saved.current_step.clone();
+        session.current_step.clone_from(&saved.current_step);
         session.current_step_is_node_id = saved.current_step_is_node_id;
         result
     } else {
@@ -1035,6 +1034,9 @@ async fn run_single_loaded(
                         }
                         ExecutionWorkspace::Worktree { ctx, .. } => {
                             session.pr_workflow_vars = Some(vars.clone());
+                            session
+                                .execution_id
+                                .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
                             let expected = *lock_unpoisoned(&session_fingerprint);
                             let fingerprint = save_session_state_with_conflict_resolution(
                                 &manager, session, expected,
@@ -1103,7 +1105,7 @@ async fn run_single_loaded(
                             };
                             let saved = lock_unpoisoned(&snapshot);
                             session.execution_stage = saved.execution_stage;
-                            session.current_step = saved.current_step.clone();
+                            session.current_step.clone_from(&saved.current_step);
                             session.current_step_is_node_id = saved.current_step_is_node_id;
                             result
                         }
@@ -1633,6 +1635,7 @@ mod tests {
     use crate::config::DEFAULT_MAX_RETRIES;
     use crate::option_handler::NoOpOptionHandler;
     use crate::session::WorkspaceMode;
+    use crate::variable::VariableStore;
     use crate::worktree_pr::{
         CommitOutcome, PrAttemptOutcome, attempt_pr_creation, build_pr_prompt,
         extract_last_path_segment, parse_pr_metadata, strip_code_block,
@@ -3151,7 +3154,7 @@ steps:
             processing_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         };
-        let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+        let result = crate::worktree_pr::handle_worktree_pr_with_checkpoint(
             &f.ctx,
             &compiled,
             &mut vars,
@@ -3167,6 +3170,8 @@ steps:
             Some(&on_pr_processing),
             None,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
 
@@ -3243,7 +3248,7 @@ steps:
         );
         session.pr_skipped_reason = Some(crate::session::PrSkippedReason::Disabled);
 
-        let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+        let result = crate::worktree_pr::handle_worktree_pr_with_checkpoint(
             &ctx,
             &compiled,
             &mut vars,
@@ -3259,6 +3264,8 @@ steps:
             None,
             None,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
 
@@ -3307,7 +3314,7 @@ steps:
         let mut json = serde_json::to_value(state)?;
         json["worktree_base_branch"] = serde_json::json!("develop");
         let mut session: SessionState = serde_json::from_value(json)?;
-        let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+        let result = crate::worktree_pr::handle_worktree_pr_with_checkpoint(
             &f.ctx,
             &compiled,
             &mut vars,
@@ -3323,6 +3330,8 @@ steps:
             None,
             None,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
         assert!(result.is_ok(), "{result:?}");
@@ -3421,7 +3430,7 @@ steps:
             "first line\nsecond line".to_string(),
         );
         session.forge = Some(forge);
-        crate::worktree_pr::handle_worktree_pr_with_persistence(
+        crate::worktree_pr::handle_worktree_pr_with_checkpoint(
             &f.ctx,
             &compiled,
             &mut vars,
@@ -3437,6 +3446,8 @@ steps:
             None,
             None,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -3530,7 +3541,7 @@ steps:
             );
             session.title = Some("  ".to_string());
             session.forge = Some(forge);
-            let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+            let result = crate::worktree_pr::handle_worktree_pr_with_checkpoint(
                 &f.ctx,
                 &compiled,
                 &mut vars,
@@ -3546,6 +3557,8 @@ steps:
                 None,
                 None,
                 None,
+                None,
+                &|_, _| Ok(()),
             )
             .await;
             let Err(error) = result else {

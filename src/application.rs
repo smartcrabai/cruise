@@ -3642,36 +3642,17 @@ impl CruiseApplication {
         sink: Arc<dyn ApplicationEventSink>,
         log_sink: Option<Arc<dyn LogSink>>,
     ) -> Result<SessionState> {
-        let mut state = self.manager.load(id)?;
-        if !matches!(state.phase, SessionPhase::PrFailed(_)) {
-            return Err(CruiseError::Other(format!(
-                "session {id} is in '{}' phase; Create PR applies only to PR Failed sessions",
-                state.phase.label()
-            )));
-        }
-        let config = self.manager.load_config(&state)?;
-        crate::config::validate_config(&config)?;
-        let max_retries = crate::config::resolve_effective_max_retries(None, &config);
-        crate::config::validate_group_retry_budget(&config, max_retries)?;
-        let retry_policy = crate::retry::policy_for_config(config.retry.clone());
-        let compiled = crate::workflow::compile(config)?;
-        if !compiled.create_pr {
-            return Err(CruiseError::Other(
-                "pull-request creation is disabled by the workflow config".to_string(),
-            ));
-        }
-        let ctx = state.worktree_context().ok_or_else(|| {
-            CruiseError::Other(format!(
-                "worktree for {id} is missing; use Reset to Planned and Run to recreate it"
-            ))
-        })?;
-        let sessions_dir = self.manager.sessions_dir();
-        let mut vars = state.pr_workflow_vars.clone().unwrap_or_else(|| {
-            crate::variable::VariableStore::new(state.template_input(&sessions_dir))
-        });
-        vars.set_named_file(crate::session::PLAN_VAR, state.plan_path(&sessions_dir));
-        vars.set_artifacts_root(state.artifacts_path(&sessions_dir));
-        let mut tracker = crate::file_tracker::FileTracker::with_root(ctx.path.clone());
+        let CreatePrSetup {
+            mut state,
+            compiled,
+            ctx,
+            max_retries,
+            retry_policy,
+            mut vars,
+            mut tracker,
+            skipped_steps,
+            flags,
+        } = prepare_create_pr(&self.manager, id)?;
         let option = RuntimeOptionHandler {
             runtime: Arc::clone(&claim.runtime),
             sink: Arc::clone(&sink),
@@ -3681,30 +3662,11 @@ impl CruiseApplication {
         };
         let logger = crate::session::SessionLogger::new(self.manager.run_log_path(id));
         let on_log = run_log_callback(logger, id.to_string(), log_sink, false);
-        sink.send(ApplicationEvent::RunStarted {
-            session_id: id.to_string(),
-        })?;
-        sink.send(ApplicationEvent::RunPhase {
-            session_id: id.to_string(),
-            phase: "Creating PR".to_string(),
-        })?;
+        send_create_pr_started(sink.as_ref(), id)?;
         let manager = self.manager.clone();
-        let persist = |snapshot: &SessionState| {
-            if self
-                .runtime
-                .persist_if_active(claim, || manager.save(snapshot))?
-            {
-                Ok(())
-            } else {
-                Err(CruiseError::Interrupted)
-            }
-        };
-        let skipped_steps = state.skipped_steps.clone();
-        let flags = state.flags.clone();
-        if state.execution_id.is_none() {
-            state.execution_id = Some(uuid::Uuid::new_v4().to_string());
-            persist(&state)?;
-        }
+        let persist =
+            |snapshot: &SessionState| persist_create_pr_session(&manager, claim, snapshot);
+        ensure_create_pr_execution_id(&mut state, &persist)?;
         let result = crate::retry::with_active_policy(retry_policy, async {
             let outcome = crate::worktree_pr::publish_worktree_pr(
                 &ctx,
@@ -4160,6 +4122,99 @@ impl CruiseApplication {
     }
 }
 
+fn send_create_pr_started(sink: &dyn ApplicationEventSink, id: &str) -> Result<()> {
+    sink.send(ApplicationEvent::RunStarted {
+        session_id: id.to_string(),
+    })?;
+    sink.send(ApplicationEvent::RunPhase {
+        session_id: id.to_string(),
+        phase: "Creating PR".to_string(),
+    })
+}
+
+fn persist_create_pr_session(
+    manager: &SessionManager,
+    claim: &OperationClaim,
+    snapshot: &SessionState,
+) -> Result<()> {
+    if claim
+        .runtime
+        .persist_if_active(claim, || manager.save(snapshot))?
+    {
+        Ok(())
+    } else {
+        Err(CruiseError::Interrupted)
+    }
+}
+fn ensure_create_pr_execution_id(
+    state: &mut SessionState,
+    persist: &dyn Fn(&SessionState) -> Result<()>,
+) -> Result<()> {
+    if state.execution_id.is_none() {
+        state.execution_id = Some(uuid::Uuid::new_v4().to_string());
+        persist(state)?;
+    }
+    Ok(())
+}
+
+struct CreatePrSetup {
+    state: SessionState,
+    compiled: crate::workflow::CompiledWorkflow,
+    ctx: crate::worktree::WorktreeContext,
+    max_retries: usize,
+    retry_policy: Option<Arc<crate::retry::RetryPolicy>>,
+    vars: crate::variable::VariableStore,
+    tracker: crate::file_tracker::FileTracker,
+    skipped_steps: Vec<String>,
+    flags: crate::flags::FlagValues,
+}
+
+fn prepare_create_pr(manager: &SessionManager, id: &str) -> Result<CreatePrSetup> {
+    let state = manager.load(id)?;
+    if !matches!(state.phase, SessionPhase::PrFailed(_)) {
+        return Err(CruiseError::Other(format!(
+            "session {id} is in '{}' phase; Create PR applies only to PR Failed sessions",
+            state.phase.label()
+        )));
+    }
+    let config = manager.load_config(&state)?;
+    crate::config::validate_config(&config)?;
+    let max_retries = crate::config::resolve_effective_max_retries(None, &config);
+    crate::config::validate_group_retry_budget(&config, max_retries)?;
+    let retry_policy = crate::retry::policy_for_config(config.retry.clone());
+    let compiled = crate::workflow::compile(config)?;
+    if !compiled.create_pr {
+        return Err(CruiseError::Other(
+            "pull-request creation is disabled by the workflow config".to_string(),
+        ));
+    }
+    let ctx = state.worktree_context().ok_or_else(|| {
+        CruiseError::Other(format!(
+            "worktree for {id} is missing; use Reset to Planned and Run to recreate it"
+        ))
+    })?;
+    let sessions_dir = manager.sessions_dir();
+    let mut vars = state.pr_workflow_vars.clone().unwrap_or_else(|| {
+        crate::variable::VariableStore::new(state.template_input(&sessions_dir))
+    });
+    vars.set_named_file(crate::session::PLAN_VAR, state.plan_path(&sessions_dir));
+    vars.set_artifacts_root(state.artifacts_path(&sessions_dir));
+    let tracker = crate::file_tracker::FileTracker::with_root(ctx.path.clone());
+    let skipped_steps = state.skipped_steps.clone();
+    let flags = state.flags.clone();
+    Ok(CreatePrSetup {
+        state,
+        compiled,
+        ctx,
+        max_retries,
+        retry_policy,
+        vars,
+        tracker,
+        skipped_steps,
+        flags,
+    })
+}
+
 struct RunSetup {
     state: SessionState,
     compiled: crate::workflow::CompiledWorkflow,
@@ -4199,6 +4254,45 @@ fn prepare_run_workspace(
             }
         };
     Ok((workspace, repo_clone_created))
+}
+
+fn prepare_run_execution_workspace(
+    manager: &SessionManager,
+    runtime_handle: &tokio::runtime::Handle,
+    state: &mut SessionState,
+    workspace_mode: WorkspaceMode,
+    after_pr: bool,
+    token: &CancellationToken,
+) -> Result<(crate::workspace::ExecutionWorkspace, bool)> {
+    let workspace_phase = crate::telemetry::Operation::phase("workspace");
+    let workspace_result = (|| {
+        let (workspace, repo_clone_created) = if after_pr {
+            let ctx = state
+                .worktree_context()
+                .filter(|ctx| ctx.path.is_dir())
+                .ok_or_else(|| {
+                    CruiseError::Other(
+                        "Cannot resume after-PR steps without the original worktree".into(),
+                    )
+                })?;
+            if state.pr_url.is_none() {
+                return Err(CruiseError::Other(
+                    "Cannot resume after-PR steps without a PR URL".into(),
+                ));
+            }
+            (
+                crate::workspace::ExecutionWorkspace::Worktree { ctx, reused: true },
+                false,
+            )
+        } else {
+            prepare_run_workspace(manager, runtime_handle, state, workspace_mode, token)?
+        };
+        crate::workspace::update_session_workspace(state, &workspace);
+        state.workspace_mode = workspace_mode;
+        Ok((workspace, repo_clone_created))
+    })();
+    workspace_phase.finish_result(&workspace_result);
+    workspace_result
 }
 
 fn setup_run_blocking(
@@ -4285,35 +4379,14 @@ fn setup_run_blocking(
     if !after_pr && (state.repo.is_some() || state.pr_target.is_some()) {
         crate::forge::ensure_forge_available(crate::forge::session_forge(&state))?;
     }
-    let workspace_phase = crate::telemetry::Operation::phase("workspace");
-    let workspace_result = (|| {
-        let (workspace, repo_clone_created) = if after_pr {
-            let ctx = state
-                .worktree_context()
-                .filter(|ctx| ctx.path.is_dir())
-                .ok_or_else(|| {
-                    CruiseError::Other(
-                        "Cannot resume after-PR steps without the original worktree".into(),
-                    )
-                })?;
-            if state.pr_url.is_none() {
-                return Err(CruiseError::Other(
-                    "Cannot resume after-PR steps without a PR URL".into(),
-                ));
-            }
-            (
-                crate::workspace::ExecutionWorkspace::Worktree { ctx, reused: true },
-                false,
-            )
-        } else {
-            prepare_run_workspace(manager, runtime_handle, &mut state, workspace_mode, token)?
-        };
-        crate::workspace::update_session_workspace(&mut state, &workspace);
-        state.workspace_mode = workspace_mode;
-        Ok((workspace, repo_clone_created))
-    })();
-    workspace_phase.finish_result(&workspace_result);
-    let (workspace, repo_clone_created) = workspace_result?;
+    let (workspace, repo_clone_created) = prepare_run_execution_workspace(
+        manager,
+        runtime_handle,
+        &mut state,
+        workspace_mode,
+        after_pr,
+        token,
+    )?;
     Ok(RunSetup {
         state,
         compiled,
@@ -4471,6 +4544,53 @@ async fn run_engine_steps(
     .await
 }
 
+fn persist_after_pr_checkpoint(
+    manager: &SessionManager,
+    claim: &OperationClaim,
+    checkpoint_path: &Path,
+    id: &str,
+    target_url: Option<&str>,
+    node: &crate::engine::NodeCheckpoint<'_>,
+    graph: &crate::graph::ExecutionGraph,
+) -> Result<()> {
+    if claim.runtime.persist_if_active(claim, || {
+        crate::graph::persistence::save_graph(graph, checkpoint_path)?;
+        let mut state = manager.load(id)?;
+        if state.pr_url.is_none() {
+            state.pr_url = target_url.map(str::to_owned);
+        }
+        state.execution_stage = crate::session::SessionExecutionStage::AfterPr;
+        state.current_step = Some(node.node_id.clone());
+        state.current_step_is_node_id = true;
+        manager.save(&state)
+    })? {
+        Ok(())
+    } else {
+        Err(CruiseError::Interrupted)
+    }
+}
+fn persist_created_pr(
+    manager: &SessionManager,
+    claim: &OperationClaim,
+    sink: &dyn ApplicationEventSink,
+    snapshot: &SessionState,
+) -> Result<()> {
+    if !claim
+        .runtime
+        .persist_if_active(claim, || manager.save(snapshot))?
+    {
+        return Err(CruiseError::Interrupted);
+    }
+    let url = snapshot
+        .pr_url
+        .clone()
+        .ok_or_else(|| CruiseError::Other("PR creation completed without a URL".to_string()))?;
+    sink.send(ApplicationEvent::PrCreated {
+        session_id: snapshot.id.clone(),
+        url,
+    })
+}
+
 struct WorktreeRun<'a> {
     instructions: Option<&'a crate::instruction_inbox::RunInbox>,
     manager: &'a SessionManager,
@@ -4522,20 +4642,7 @@ impl WorktreeRun<'_> {
         let pr_sink = Arc::clone(self.sink);
         let manager_for_pr = self.manager.clone();
         let persist_pr = |snapshot: &SessionState| {
-            if !self
-                .claim
-                .runtime
-                .persist_if_active(self.claim, || manager_for_pr.save(snapshot))?
-            {
-                return Err(CruiseError::Interrupted);
-            }
-            let url = snapshot.pr_url.clone().ok_or_else(|| {
-                CruiseError::Other("PR creation completed without a URL".to_string())
-            })?;
-            pr_sink.send(ApplicationEvent::PrCreated {
-                session_id: snapshot.id.clone(),
-                url,
-            })
+            persist_created_pr(&manager_for_pr, self.claim, pr_sink.as_ref(), snapshot)
         };
         let checkpoint_path = self.manager.after_pr_dag_path(&setup.state.id);
         let checkpoint_id = setup.state.id.clone();
@@ -4547,21 +4654,15 @@ impl WorktreeRun<'_> {
             .map(|target| target.url.clone());
         let checkpoint = |node: &crate::engine::NodeCheckpoint<'_>,
                           graph: &crate::graph::ExecutionGraph| {
-            if self.claim.runtime.persist_if_active(self.claim, || {
-                crate::graph::persistence::save_graph(graph, &checkpoint_path)?;
-                let mut state = self.manager.load(&checkpoint_id)?;
-                if state.pr_url.is_none() {
-                    state.pr_url.clone_from(&target_url);
-                }
-                state.execution_stage = crate::session::SessionExecutionStage::AfterPr;
-                state.current_step = Some(node.node_id.clone());
-                state.current_step_is_node_id = true;
-                self.manager.save(&state)
-            })? {
-                Ok(())
-            } else {
-                Err(CruiseError::Interrupted)
-            }
+            persist_after_pr_checkpoint(
+                self.manager,
+                self.claim,
+                &checkpoint_path,
+                &checkpoint_id,
+                target_url.as_deref(),
+                node,
+                graph,
+            )
         };
         let result = crate::retry::with_active_policy(
             setup.retry_policy.clone(),
@@ -4597,6 +4698,59 @@ impl WorktreeRun<'_> {
     }
 }
 
+async fn resume_after_pr(
+    manager: &SessionManager,
+    claim: &OperationClaim,
+    setup: &mut RunSetup,
+    inputs: &mut RunInputs,
+    option: &RuntimeOptionHandler,
+    on_log: &crate::step::command::StepLogCallback<'_>,
+    instructions: Option<&crate::instruction_inbox::RunInbox>,
+) -> Result<bool> {
+    let id = claim.session_id();
+    let checkpoint_path = manager.after_pr_dag_path(id);
+    let saved_step = setup.state.current_step.clone();
+    let is_node_id = setup.state.current_step_is_node_id;
+    let execution_id = setup.state.execution_id.clone();
+    let checkpoint = |node: &crate::engine::NodeCheckpoint<'_>,
+                      graph: &crate::graph::ExecutionGraph| {
+        persist_after_pr_checkpoint(manager, claim, &checkpoint_path, id, None, node, graph)
+    };
+    let result = crate::retry::with_active_policy(
+        setup.retry_policy.clone(),
+        crate::worktree_pr::run_after_pr_steps_with_checkpoint(
+            &setup.compiled,
+            Some(id),
+            &mut inputs.vars,
+            &mut inputs.tracker,
+            setup.max_retries,
+            setup.rate_limit_retries,
+            setup.workspace.path(),
+            &inputs.skipped_steps,
+            &inputs.flags,
+            Some(&claim.token),
+            option,
+            Some(on_log),
+            instructions,
+            Some(crate::worktree_pr::AfterPrCheckpoint {
+                execution_id: execution_id.as_deref(),
+                resume: Some(crate::worktree_pr::AfterPrResume {
+                    path: &checkpoint_path,
+                    saved_step: saved_step.as_deref(),
+                    is_node_id,
+                }),
+            }),
+            &checkpoint,
+        ),
+    )
+    .await;
+    let saved = manager.load(id)?;
+    setup.state.execution_stage = saved.execution_stage;
+    setup.state.current_step = saved.current_step;
+    setup.state.current_step_is_node_id = saved.current_step_is_node_id;
+    result.map(|()| false)
+}
+
 async fn execute_run(
     manager: &SessionManager,
     claim: &OperationClaim,
@@ -4624,58 +4778,16 @@ async fn execute_run(
     let logger = crate::session::SessionLogger::new(manager.run_log_path(id));
     let on_log = run_log_callback(logger, id.to_string(), log_sink, batch_started);
     if setup.state.execution_stage == crate::session::SessionExecutionStage::AfterPr {
-        let checkpoint_path = manager.after_pr_dag_path(id);
-        let saved_step = setup.state.current_step.clone();
-        let is_node_id = setup.state.current_step_is_node_id;
-        let execution_id = setup.state.execution_id.clone();
-        let checkpoint = |node: &crate::engine::NodeCheckpoint<'_>,
-                          graph: &crate::graph::ExecutionGraph| {
-            if claim.runtime.persist_if_active(claim, || {
-                crate::graph::persistence::save_graph(graph, &checkpoint_path)?;
-                let mut state = manager.load(id)?;
-                state.execution_stage = crate::session::SessionExecutionStage::AfterPr;
-                state.current_step = Some(node.node_id.clone());
-                state.current_step_is_node_id = true;
-                manager.save(&state)
-            })? {
-                Ok(())
-            } else {
-                Err(CruiseError::Interrupted)
-            }
-        };
-        let result = crate::retry::with_active_policy(
-            setup.retry_policy.clone(),
-            crate::worktree_pr::run_after_pr_steps_with_checkpoint(
-                &setup.compiled,
-                Some(id),
-                &mut inputs.vars,
-                &mut inputs.tracker,
-                setup.max_retries,
-                setup.rate_limit_retries,
-                setup.workspace.path(),
-                &inputs.skipped_steps,
-                &inputs.flags,
-                Some(&claim.token),
-                &option,
-                Some(&on_log),
-                instructions,
-                Some(crate::worktree_pr::AfterPrCheckpoint {
-                    execution_id: execution_id.as_deref(),
-                    resume: Some(crate::worktree_pr::AfterPrResume {
-                        path: &checkpoint_path,
-                        saved_step: saved_step.as_deref(),
-                        is_node_id,
-                    }),
-                }),
-                &checkpoint,
-            ),
+        return resume_after_pr(
+            manager,
+            claim,
+            setup,
+            inputs,
+            &option,
+            &on_log,
+            instructions,
         )
         .await;
-        let saved = manager.load(id)?;
-        setup.state.execution_stage = saved.execution_stage;
-        setup.state.current_step = saved.current_step;
-        setup.state.current_step_is_node_id = saved.current_step_is_node_id;
-        return result.map(|()| false);
     }
     let on_node_start =
         node_checkpoint_callback(manager.clone(), id.to_string(), manager.dag_path(id));
@@ -5968,20 +6080,41 @@ mod tests {
     #[test]
     fn create_pr_after_pr_cancellation_suspends_saved_checkpoint() {
         let _lock = crate::test_support::lock_process();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let (app, manager, mut state, _, _) = create_pr_fixture(&temp);
         state.execution_stage = crate::session::SessionExecutionStage::AfterPr;
         state.current_step = Some("verify".into());
         state.current_step_is_node_id = true;
         state.pr_url = Some("https://github.com/example/repo/pull/1".into());
-        manager.save(&state).unwrap();
-        let compiled = crate::workflow::compile(manager.load_config(&state).unwrap()).unwrap();
-        let ctx = state.worktree_context().unwrap();
-        let claim = app.runtime.try_begin(&state.id, OperationKind::CreatePr).unwrap();
+        manager
+            .save(&state)
+            .unwrap_or_else(|error| panic!("save after-PR session: {error}"));
+        let config = manager
+            .load_config(&state)
+            .unwrap_or_else(|error| panic!("load after-PR config: {error}"));
+        let compiled = crate::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("compile after-PR config: {error}"));
+        let ctx = state
+            .worktree_context()
+            .unwrap_or_else(|| panic!("session fixture has no worktree context"));
+        let claim = app
+            .runtime
+            .try_begin(&state.id, OperationKind::CreatePr)
+            .unwrap_or_else(|error| panic!("claim create-PR operation: {error}"));
         let sink = |_: ApplicationEvent| Ok(());
-        let result = app.finish_create_pr(&state.id, &claim, &sink, state.clone(), (&compiled, &ctx), Err(CruiseError::Interrupted));
+        let result = app.finish_create_pr(
+            &state.id,
+            &claim,
+            &sink,
+            state.clone(),
+            (&compiled, &ctx),
+            Err(CruiseError::Interrupted),
+        );
         assert!(matches!(result, Err(CruiseError::Interrupted)));
-        let saved = manager.load(&state.id).unwrap();
+        let saved = manager
+            .load(&state.id)
+            .unwrap_or_else(|error| panic!("reload suspended session: {error}"));
         assert_eq!(saved.phase, SessionPhase::Suspended);
         assert_eq!(saved.execution_stage, state.execution_stage);
         assert_eq!(saved.current_step, state.current_step);

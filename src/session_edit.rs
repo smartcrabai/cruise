@@ -268,24 +268,35 @@ mod tests {
             repo.join("cruise.yaml"),
             "command: [local]\nsteps:\n  main-only:\n    command: echo main\nafter-pr:\n  review-only:\n    command: echo review\n  final-only:\n    command: echo final\n",
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("write fixture workflow: {error}"));
         let mut session = make_session(id, repo);
         session.phase = SessionPhase::Failed("review failed".into());
         session.current_step = Some("review-only".into());
         session.execution_id = Some("old-execution".into());
         session.has_dag = true;
-        manager.create(&session).unwrap();
+        manager
+            .create(&session)
+            .unwrap_or_else(|error| panic!("create fixture session: {error}"));
         let dir = manager.sessions_dir().join(id);
         let path = dir.join("state.json");
-        let mut json: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        json["execution_stage"] = serde_json::json!("AfterPr");
-        fs::write(path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
-        let config = crate::config::WorkflowConfig::from_yaml(
-            &fs::read_to_string(repo.join("cruise.yaml")).unwrap(),
+        let mut json: serde_json::Value = serde_json::from_slice(
+            &fs::read(&path).unwrap_or_else(|error| panic!("read fixture session: {error}")),
         )
-        .unwrap();
-        let compiled = crate::workflow::compile(config).unwrap();
+        .unwrap_or_else(|error| panic!("parse fixture session: {error}"));
+        json["execution_stage"] = serde_json::json!("AfterPr");
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&json)
+                .unwrap_or_else(|error| panic!("serialize fixture session: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("save fixture session: {error}"));
+        let config = crate::config::WorkflowConfig::from_yaml(
+            &fs::read_to_string(repo.join("cruise.yaml"))
+                .unwrap_or_else(|error| panic!("read fixture workflow: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("parse fixture workflow: {error}"));
+        let compiled = crate::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("compile fixture workflow: {error}"));
         for (workflow, path) in [
             (compiled.clone(), manager.dag_path(id)),
             (
@@ -293,9 +304,11 @@ mod tests {
                 dir.join("after-pr-dag.json"),
             ),
         ] {
-            let mut graph = crate::graph::build_graph(&workflow, 3).unwrap();
+            let mut graph = crate::graph::build_graph(&workflow, 3)
+                .unwrap_or_else(|error| panic!("build fixture graph: {error}"));
             graph.state.execution_id = Some("old-execution".into());
-            crate::graph::persistence::save_graph(&graph, &path).unwrap();
+            crate::graph::persistence::save_graph(&graph, &path)
+                .unwrap_or_else(|error| panic!("save fixture graph: {error}"));
         }
     }
 
@@ -308,17 +321,25 @@ mod tests {
         }
     }
 
+    fn execution_stage(session: &SessionState) -> serde_json::Value {
+        serde_json::to_value(session)
+            .unwrap_or_else(|error| panic!("serialize fixture session: {error}"))["execution_stage"]
+            .clone()
+    }
+
     #[test]
     fn after_pr_manual_step_uses_active_workflow() {
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create fixture repo: {error}"));
         let manager = SessionManager::new(tmp.path().join("data"));
         let id = "20260619000101";
         after_pr_fixture(&manager, &repo, id);
-        let main_before = fs::read(manager.dag_path(id)).unwrap();
+        let main_before = fs::read(manager.dag_path(id))
+            .unwrap_or_else(|error| panic!("read main checkpoint: {error}"));
 
         let rejected = update_session_settings(
             &manager,
@@ -330,7 +351,11 @@ mod tests {
             "main-only step must not be accepted in after-PR stage"
         );
         assert_eq!(
-            manager.load(id).unwrap().current_step.as_deref(),
+            manager
+                .load(id)
+                .unwrap_or_else(|error| panic!("reload fixture session: {error}"))
+                .current_step
+                .as_deref(),
             Some("review-only")
         );
 
@@ -339,68 +364,82 @@ mod tests {
             id,
             step_edit(CurrentStepUpdate::Set("final-only".into())),
         )
-        .expect("after-PR step should be accepted");
-        let loaded = manager.load(id).unwrap();
+        .unwrap_or_else(|error| panic!("after-PR step should be accepted: {error}"));
+        let loaded = manager
+            .load(id)
+            .unwrap_or_else(|error| panic!("reload updated session: {error}"));
         assert_eq!(loaded.current_step.as_deref(), Some("final-only"));
+        assert_eq!(execution_stage(&loaded), "AfterPr");
         assert_eq!(
-            serde_json::to_value(&loaded).unwrap()["execution_stage"],
-            "AfterPr"
+            fs::read(manager.dag_path(id))
+                .unwrap_or_else(|error| panic!("reread main checkpoint: {error}")),
+            main_before
         );
-        assert_eq!(fs::read(manager.dag_path(id)).unwrap(), main_before);
     }
 
     #[test]
     fn after_pr_clear_step_returns_to_main_and_invalidates_checkpoints() {
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create fixture repo: {error}"));
         let manager = SessionManager::new(tmp.path().join("data"));
         let id = "20260619000102";
         after_pr_fixture(&manager, &repo, id);
-        assert_eq!(
-            serde_json::to_value(manager.load(id).unwrap()).unwrap()["execution_stage"],
-            "AfterPr"
-        );
+        let session = manager
+            .load(id)
+            .unwrap_or_else(|error| panic!("load fixture session: {error}"));
+        assert_eq!(execution_stage(&session), "AfterPr");
 
-        update_session_settings(&manager, id, step_edit(CurrentStepUpdate::Clear)).unwrap();
-        let loaded = manager.load(id).unwrap();
+        update_session_settings(&manager, id, step_edit(CurrentStepUpdate::Clear))
+            .unwrap_or_else(|error| panic!("clear after-PR current step: {error}"));
+        let loaded = manager
+            .load(id)
+            .unwrap_or_else(|error| panic!("reload cleared session: {error}"));
         assert_eq!(loaded.current_step, None);
         assert!(!loaded.has_dag);
         assert_ne!(loaded.execution_id.as_deref(), Some("old-execution"));
         assert!(!manager.dag_path(id).exists());
         assert!(!manager.after_pr_dag_path(id).exists());
-        let stage = serde_json::to_value(&loaded).unwrap()["execution_stage"].clone();
+        let stage = execution_stage(&loaded);
         assert!(stage.is_null() || stage == "Main");
     }
 
     #[test]
     fn after_pr_reset_to_planned_returns_to_main_and_invalidates_checkpoints() {
         let _lock = crate::test_support::lock_process();
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
         let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create fixture repo: {error}"));
         let manager = SessionManager::new(tmp.path().join("data"));
         let id = "20260619000103";
         after_pr_fixture(&manager, &repo, id);
-        assert_eq!(
-            serde_json::to_value(manager.load(id).unwrap()).unwrap()["execution_stage"],
-            "AfterPr"
-        );
+        let session = manager
+            .load(id)
+            .unwrap_or_else(|error| panic!("load fixture session: {error}"));
+        assert_eq!(execution_stage(&session), "AfterPr");
 
-        let mut session = manager.load(id).unwrap();
+        let mut session = manager
+            .load(id)
+            .unwrap_or_else(|error| panic!("reload fixture session: {error}"));
         session.reset_to_planned();
-        manager.save(&session).unwrap();
-        let loaded = manager.load(id).unwrap();
+        manager
+            .save(&session)
+            .unwrap_or_else(|error| panic!("save reset session: {error}"));
+        let loaded = manager
+            .load(id)
+            .unwrap_or_else(|error| panic!("reload reset session: {error}"));
         assert_eq!(loaded.phase, SessionPhase::Planned);
         assert_eq!(loaded.current_step, None);
         assert!(!loaded.has_dag);
         assert_ne!(loaded.execution_id.as_deref(), Some("old-execution"));
         assert!(!manager.dag_path(id).exists());
         assert!(!manager.after_pr_dag_path(id).exists());
-        let stage = serde_json::to_value(&loaded).unwrap()["execution_stage"].clone();
+        let stage = execution_stage(&loaded);
         assert!(stage.is_null() || stage == "Main");
     }
 

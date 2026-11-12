@@ -164,52 +164,9 @@ fn squash_merge_enabled(compiled: &CompiledWorkflow, flags: &crate::flags::FlagV
 /// execution, persistence, or cancellation fails.
 #[expect(
     clippy::too_many_arguments,
-    reason = "all params are needed for PR flow"
-)]
-pub async fn handle_worktree_pr_with_persistence(
-    ctx: &worktree::WorktreeContext,
-    compiled: &CompiledWorkflow,
-    vars: &mut VariableStore,
-    tracker: &mut FileTracker,
-    session: &mut SessionState,
-    rate_limit_retries: usize,
-    max_retries: usize,
-    skipped_steps: &[String],
-    flags: &crate::flags::FlagValues,
-    cancel_token: Option<&CancellationToken>,
-    option_handler: &dyn OptionHandler,
-    on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
-    on_pr_processing: Option<&PrProcessingCallback<'_>>,
-    on_pr_created: Option<&PrCreatedCallback<'_>>,
-    instructions: Option<&crate::instruction_inbox::RunInbox>,
-) -> Result<()> {
-    handle_worktree_pr_with_checkpoint(
-        ctx,
-        compiled,
-        vars,
-        tracker,
-        session,
-        rate_limit_retries,
-        max_retries,
-        skipped_steps,
-        flags,
-        cancel_token,
-        option_handler,
-        on_step_log,
-        on_pr_processing,
-        on_pr_created,
-        instructions,
-        None,
-        &|_, _| Ok(()),
-    )
-    .await
-}
-
-#[expect(
-    clippy::too_many_arguments,
     reason = "PR flow needs workflow and persistence context"
 )]
-pub(crate) async fn handle_worktree_pr_with_checkpoint(
+pub async fn handle_worktree_pr_with_checkpoint(
     ctx: &worktree::WorktreeContext,
     compiled: &CompiledWorkflow,
     vars: &mut VariableStore,
@@ -709,19 +666,23 @@ async fn generate_pr_via_sdk_tool(
     }
 }
 
-/// Run the after-PR workflow steps. Cancellation, missing-model errors, and
-/// GitHub review failures always propagate; other errors only warn unless
-/// native squash merge is opted in.
+/// Saved position used to resume the after-PR graph.
 #[derive(Clone, Copy)]
-pub(crate) struct AfterPrResume<'a> {
+pub struct AfterPrResume<'a> {
+    /// Path to the persisted graph checkpoint.
     pub path: &'a Path,
+    /// Saved step name or node ID, depending on `is_node_id`.
     pub saved_step: Option<&'a str>,
+    /// Whether `saved_step` is a graph node ID instead of a step name.
     pub is_node_id: bool,
 }
 
+/// Session identity and optional saved position for after-PR execution.
 #[derive(Clone, Copy)]
-pub(crate) struct AfterPrCheckpoint<'a> {
+pub struct AfterPrCheckpoint<'a> {
+    /// Execution ID the checkpoint must match.
     pub execution_id: Option<&'a str>,
+    /// Graph path and saved position to restore, when resuming.
     pub resume: Option<AfterPrResume<'a>>,
 }
 
@@ -1876,6 +1837,27 @@ mod tests {
     use tempfile::TempDir;
 
     #[cfg(unix)]
+    fn install_failing_gh_stub(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
+        let gh_log = root.join("gh.log");
+        let gh = bin_dir.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 1\n",
+                gh_log.display()
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        let mut permissions = std::fs::metadata(&gh)
+            .unwrap_or_else(|e| panic!("{e:?}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap_or_else(|e| panic!("{e:?}"));
+        (bin_dir, gh_log)
+    }
+    #[cfg(unix)]
     async fn exercise_publication_failure(mode: &str) -> (Result<()>, SessionState, bool) {
         let tmp = TempDir::new()
             .unwrap_or_else(|error| panic!("failed to create test directory: {error:?}"));
@@ -1936,7 +1918,7 @@ mod tests {
         } else {
             None
         };
-        let result = handle_worktree_pr_with_persistence(
+        let result = handle_worktree_pr_with_checkpoint(
             &ctx,
             &compiled,
             &mut vars,
@@ -1952,6 +1934,8 @@ mod tests {
             None,
             callback,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
         (result, session, marker.exists())
@@ -2816,23 +2800,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             },
             "PR description logging task".to_string(),
         );
-        let bin_dir = plan_temp.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        let gh_log = plan_temp.path().join("gh.log");
-        let gh = bin_dir.join("gh");
-        std::fs::write(
-            &gh,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 1\n",
-                gh_log.display()
-            ),
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        let mut permissions = std::fs::metadata(&gh)
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&gh, permissions).unwrap_or_else(|e| panic!("{e:?}"));
+        let (bin_dir, gh_log) = install_failing_gh_stub(plan_temp.path());
         let _path = crate::test_support::prepend_to_path(&bin_dir);
 
         let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -2848,7 +2816,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             processing_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         };
-        let result = handle_worktree_pr_with_persistence(
+        let result = handle_worktree_pr_with_checkpoint(
             &ctx,
             &compiled,
             &mut vars,
@@ -2864,6 +2832,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             Some(&on_pr_processing),
             None,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
 
@@ -3348,7 +3318,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             Ok(())
         };
 
-        let result = handle_worktree_pr_with_persistence(
+        let result = handle_worktree_pr_with_checkpoint(
             &ctx,
             &compiled,
             &mut vars,
@@ -3364,6 +3334,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             None,
             Some(&on_pr_created),
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
 

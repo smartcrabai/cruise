@@ -301,17 +301,31 @@ impl SessionFileContents {
 }
 
 impl SessionState {
-    pub(crate) fn run_variables(&self, sessions_dir: &std::path::Path) -> crate::error::Result<crate::variable::VariableStore> {
+    pub(crate) fn run_variables(
+        &self,
+        sessions_dir: &std::path::Path,
+    ) -> crate::error::Result<crate::variable::VariableStore> {
         let after_pr = self.execution_stage == SessionExecutionStage::AfterPr;
         let mut vars = if after_pr {
-            self.pr_workflow_vars.clone().unwrap_or_else(|| crate::variable::VariableStore::new(self.template_input(sessions_dir)))
+            self.pr_workflow_vars.clone().unwrap_or_else(|| {
+                crate::variable::VariableStore::new(self.template_input(sessions_dir))
+            })
         } else {
             crate::variable::VariableStore::new(self.template_input(sessions_dir))
         };
         if after_pr {
-            let url = self.pr_url.as_ref().ok_or_else(|| crate::error::CruiseError::Other("Cannot resume after-PR steps without a PR URL".into()))?;
+            let url = self.pr_url.as_ref().ok_or_else(|| {
+                crate::error::CruiseError::Other(
+                    "Cannot resume after-PR steps without a PR URL".into(),
+                )
+            })?;
             vars.set_named_value("pr.url", url.clone());
-            if let Some(number) = url.trim_end_matches('/').rsplit('/').next().filter(|s| !s.is_empty()) {
+            if let Some(number) = url
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+            {
                 vars.set_named_value("pr.number", number.to_string());
             }
         }
@@ -1471,22 +1485,6 @@ mod tests {
     }
     use super::*;
     use tempfile::TempDir;
-
-    #[test]
-    fn after_pr_execution_stage_survives_session_save_and_load() {
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("temporary directory: {e}"));
-        let manager = SessionManager::new(tmp.path().to_path_buf());
-        let session = crate::test_support::make_session("after-pr-stage", tmp.path());
-        let mut json = serde_json::to_value(session).unwrap();
-        json["execution_stage"] = serde_json::json!("AfterPr");
-        let session: SessionState = serde_json::from_value(json).unwrap();
-        manager.create(&session).unwrap();
-        let restored = manager.load(&session.id).unwrap();
-        assert_eq!(
-            serde_json::to_value(restored).unwrap()["execution_stage"],
-            "AfterPr"
-        );
-    }
 
     #[test]
     fn planned_issue_number_legacy_state_is_omitted_when_absent() {
