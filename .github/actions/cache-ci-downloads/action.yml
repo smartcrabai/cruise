@@ -1,0 +1,22 @@
+name: Cache CI downloads
+description: Cache checksum-verified formal and Rust toolchain downloads.
+inputs:
+  rust-components:
+    description: Rust toolchain components included in the cache key.
+    required: false
+    default: minimal
+runs:
+  using: composite
+  steps:
+    - name: Cache Rust toolchain archives
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ~/.rustup/downloads
+        key: rustup-v1-${{ runner.os }}-${{ runner.arch }}-1.99.1-${{ inputs.rust-components }}
+    - name: Cache checksum-pinned formal downloads
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: |
+          target/formal-tools/*.tar.gz
+          target/formal-tools/alloy-6.2.0.jar
+        key: formal-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/setup_formal.sh', 'scripts/check_instruction_inbox_alloy.sh') }}

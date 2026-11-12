@@ -45,6 +45,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Configure jcode home
         env:
