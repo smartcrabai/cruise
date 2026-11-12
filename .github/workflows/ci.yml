@@ -36,6 +36,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -43,9 +45,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -74,14 +73,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -113,6 +112,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -120,9 +121,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -151,6 +149,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -158,9 +158,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -189,6 +186,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -198,9 +197,6 @@ jobs:
           cache-dependency-path: |
             tests/formal/package-lock.json
             tests/formal/opencode-cli/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -229,6 +225,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -238,9 +236,6 @@ jobs:
           cache-dependency-path: |
             tests/formal/package-lock.json
             tests/formal/opencode-cli/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -269,6 +264,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -276,9 +273,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -313,6 +307,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -320,9 +316,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -351,6 +344,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -358,9 +353,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -402,6 +394,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -409,9 +403,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -440,14 +431,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -473,6 +464,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -480,9 +473,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -511,6 +501,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Cache CI downloads
+        uses: ./.github/actions/cache-ci-downloads
 
       - name: Install pinned Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -518,9 +510,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Checkpoint and quality-gate Quint, Alloy and production BDD contracts
         run: bash scripts/check_formal.sh
