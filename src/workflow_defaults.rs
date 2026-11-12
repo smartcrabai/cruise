@@ -149,6 +149,7 @@ struct DefaultsFile {
     cleanup_after_pr: Option<bool>,
     auto_fetch: Option<bool>,
     base_branch: Option<String>,
+    check_base_ci: Option<bool>,
     force_exec: Option<bool>,
     computer_use: Option<bool>,
     permission: Option<PermissionMode>,
@@ -196,6 +197,7 @@ pub struct WorkflowDefaults {
     cleanup_after_pr: Option<bool>,
     auto_fetch: Option<bool>,
     base_branch: Option<String>,
+    check_base_ci: Option<bool>,
     force_exec: Option<bool>,
     computer_use: Option<Sourced<bool>>,
     permission: Option<Sourced<PermissionMode>>,
@@ -318,6 +320,10 @@ fn load_file(path: &Path) -> Result<Option<DefaultsFile>> {
 }
 
 impl WorkflowDefaults {
+    #[must_use]
+    pub fn check_base_ci(&self) -> bool {
+        self.check_base_ci.unwrap_or(true)
+    }
     /// Load the user and project defaults layers.
     ///
     /// # Errors
@@ -378,6 +384,7 @@ impl WorkflowDefaults {
         self.cleanup_after_pr = file.cleanup_after_pr.or(self.cleanup_after_pr);
         self.auto_fetch = file.auto_fetch.or(self.auto_fetch);
         self.base_branch = file.base_branch.or(self.base_branch.take());
+        self.check_base_ci = file.check_base_ci.or(self.check_base_ci);
         self.force_exec = file.force_exec.or(self.force_exec);
         self.computer_use = sourced(file.computer_use, path).or(self.computer_use.take());
         self.permission = sourced(file.permission, path).or(self.permission.take());
@@ -768,6 +775,40 @@ mod tests {
             crate::workflow::compile(config),
             Err(CruiseError::ConfigParseError(_))
         ));
+    }
+
+    #[test]
+    fn check_base_ci_defaults_to_enabled() {
+        let env = env();
+        let defaults = WorkflowDefaults::load(Some(env.project.path()))
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(defaults.check_base_ci());
+    }
+
+    #[test]
+    fn check_base_ci_project_overrides_user() {
+        let env = env();
+        write(&env.user_file, "check_base_ci: false\n");
+        let defaults = WorkflowDefaults::load(Some(env.project.path()))
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(!defaults.check_base_ci());
+
+        write(&env.project_file, "check_base_ci: true\n");
+        let defaults = WorkflowDefaults::load(Some(env.project.path()))
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(defaults.check_base_ci());
+    }
+
+    #[test]
+    fn check_base_ci_rejects_non_boolean_values() {
+        let env = env();
+        for value in ["'false'", "42", "[true]"] {
+            write(&env.project_file, &format!("check_base_ci: {value}\n"));
+            assert!(matches!(
+                WorkflowDefaults::load(Some(env.project.path())),
+                Err(CruiseError::ConfigParseError(_))
+            ));
+        }
     }
 
     #[test]

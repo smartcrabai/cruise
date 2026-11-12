@@ -6,6 +6,7 @@ mod ask_handler;
 mod attachments;
 mod auto_requeue;
 mod backend;
+mod base_ci;
 mod batch_dashboard;
 #[cfg_attr(not(test), expect(dead_code))]
 mod batch_run;
