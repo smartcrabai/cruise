@@ -1420,7 +1420,6 @@ pub enum SessionAction {
     Discard,
     RunWorktree,
     RunCurrentBranch,
-    Replan,
     EditSettings,
     Retry,
     CreatePr,
@@ -3188,9 +3187,11 @@ impl CruiseApplication {
                     if state.pr_target.is_none() {
                         actions.push(SessionAction::Publish);
                     }
-                }
-                if state.pr_target.is_none() {
-                    actions.push(SessionAction::Replan);
+                    actions.extend([
+                        SessionAction::Fix,
+                        SessionAction::Ask,
+                        SessionAction::Verify,
+                    ]);
                 }
                 actions.extend([SessionAction::EditSettings, SessionAction::Delete]);
             }
@@ -3287,6 +3288,18 @@ impl CruiseApplication {
         }
     }
 
+    fn validate_plan_request_text(operation: OperationKind, request: &PlanRequest) -> Result<()> {
+        let has_text = request.feedback.is_some() || request.question.is_some();
+        if has_text && !matches!(operation, OperationKind::Fix | OperationKind::Ask) {
+            let message = if operation == OperationKind::Replan {
+                "replan does not accept feedback; use fix".to_string()
+            } else {
+                format!("{operation:?} cannot render this planning input")
+            };
+            return Err(CruiseError::Other(message));
+        }
+        Ok(())
+    }
     async fn plan_with_operation(
         &self,
         id: &str,
@@ -3294,6 +3307,7 @@ impl CruiseApplication {
         sink: Arc<dyn ApplicationEventSink>,
         operation: OperationKind,
     ) -> Result<SessionState> {
+        Self::validate_plan_request_text(operation, &request)?;
         let execution = crate::telemetry::Operation::execution(execution_kind(operation), id, None);
         let result = async {
             let _quiet = crate::console_mode::quiet_guard();
@@ -3410,11 +3424,11 @@ impl CruiseApplication {
             .await
     }
 
-    /// Replan a session using the supplied request.
+    /// Replan a session after settings change, without user feedback or questions.
     ///
     /// # Errors
     ///
-    /// Returns an error when planning, session persistence, or event delivery fails.
+    /// Returns an error when user text is supplied, planning, persistence, or event delivery fails.
     pub async fn replan(
         &self,
         id: &str,
@@ -6175,6 +6189,40 @@ mod tests {
     }
 
     #[test]
+    fn capabilities_planned_offers_plan_review_actions_for_usable_plan() {
+        let temp = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let mut state = SessionState::new(
+            "planned-capabilities".to_string(),
+            temp.path().to_path_buf(),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "task".to_string(),
+        );
+        state.phase = SessionPhase::Planned;
+        manager
+            .create(&state)
+            .unwrap_or_else(|error| panic!("create session: {error}"));
+        std::fs::write(state.plan_path(&manager.sessions_dir()), "# plan")
+            .unwrap_or_else(|error| panic!("write plan: {error}"));
+
+        assert_eq!(
+            app.capabilities(&state),
+            vec![
+                SessionAction::RunWorktree,
+                SessionAction::RunCurrentBranch,
+                SessionAction::Publish,
+                SessionAction::Fix,
+                SessionAction::Ask,
+                SessionAction::Verify,
+                SessionAction::EditSettings,
+                SessionAction::Delete,
+            ]
+        );
+    }
+
+    #[test]
     fn capabilities_pr_failed_offers_only_publication_and_terminal_actions() {
         let temp = tempfile::tempdir()
             .unwrap_or_else(|error| panic!("create temporary directory: {error}"));
@@ -7663,16 +7711,9 @@ after-pr:
         .await
         .unwrap_or_else(|e| panic!("{e}"));
 
-        app.replan(
-            &session.id,
-            PlanRequest {
-                feedback: Some("tighten it".to_string()),
-                ..PlanRequest::default()
-            },
-            sink,
-        )
-        .await
-        .unwrap_or_else(|e| panic!("{e}"));
+        app.replan(&session.id, PlanRequest::default(), sink)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
 
         let plan = app
             .session_plan(&session.id)
@@ -8339,16 +8380,9 @@ after-pr:
         )
         .await
         .unwrap_or_else(|e| panic!("ask failed: {e}"));
-        app.replan(
-            &session.id,
-            PlanRequest {
-                feedback: Some("replan the task".to_string()),
-                ..PlanRequest::default()
-            },
-            run_operation(&events),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("replan failed: {e}"));
+        app.replan(&session.id, PlanRequest::default(), run_operation(&events))
+            .await
+            .unwrap_or_else(|e| panic!("replan failed: {e}"));
 
         let events = events
             .lock()

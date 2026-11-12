@@ -3102,10 +3102,6 @@ impl TuiApp {
                 "Current step (blank resumes from beginning)",
                 PendingCommand::Session(SessionAction::EditCurrentStep),
             ),
-            SessionAction::Replan => self.open_input(
-                "Describe the changes for the new plan",
-                PendingCommand::Session(SessionAction::Replan),
-            ),
             SessionAction::Generate
             | SessionAction::Verify
             | SessionAction::Answer
@@ -3192,18 +3188,6 @@ impl TuiApp {
                 } else {
                     self.set_error("Session already has active work".to_string());
                 }
-            }
-            PendingCommand::Session(SessionAction::Replan) => {
-                if value.trim().is_empty() {
-                    self.set_error("Replan feedback must not be empty".to_string());
-                    return;
-                }
-                let request = PlanRequest {
-                    feedback: Some(value),
-                    interactive: Interactive::new(true),
-                    ..PlanRequest::default()
-                };
-                self.start_replan(id, request);
             }
             PendingCommand::Session(SessionAction::EditSettings) => {
                 self.apply_edit_settings_input(id, &value, regenerate);
@@ -3367,8 +3351,7 @@ impl TuiApp {
             | SessionAction::Ask
             | SessionAction::Tell
             | SessionAction::EditSettings
-            | SessionAction::EditCurrentStep
-            | SessionAction::Replan => self.apply_action(action),
+            | SessionAction::EditCurrentStep => self.apply_action(action),
             SessionAction::Discard => match self.application.discard_session(&id) {
                 Ok(()) => {
                     self.invalidate(&id, true, true, true);
@@ -3899,7 +3882,6 @@ pub fn action_label(action: SessionAction) -> &'static str {
         SessionAction::Discard => "Discard",
         SessionAction::RunWorktree => "Run in Worktree",
         SessionAction::RunCurrentBranch => "Run on Current Branch",
-        SessionAction::Replan => "Replan",
         SessionAction::EditSettings => "Edit Settings",
         SessionAction::Retry => "Retry",
         SessionAction::CreatePr => "Create PR",
@@ -4464,15 +4446,20 @@ mod tests {
     #[test]
     fn ask_operation_is_running_and_mutations_do_not_imply_running() {
         let app = app_without_lock();
-        let ask_id = "ask-session";
-        let ask_state = sidebar_session(ask_id, SessionPhase::AwaitingApproval);
-        let ask_claim = app
-            .application
-            .runtime()
-            .try_begin(ask_id, crate::application::OperationKind::Ask)
-            .unwrap_or_else(|error| panic!("failed to claim ask session: {error}"));
-        assert_eq!(app.sidebar_status(&ask_state), SidebarStatus::Running);
-        drop(ask_claim);
+        for (index, phase) in [SessionPhase::AwaitingApproval, SessionPhase::Planned]
+            .into_iter()
+            .enumerate()
+        {
+            let ask_id = format!("ask-session-{index}");
+            let ask_state = sidebar_session(&ask_id, phase);
+            let ask_claim = app
+                .application
+                .runtime()
+                .try_begin(&ask_id, crate::application::OperationKind::Ask)
+                .unwrap_or_else(|error| panic!("failed to claim ask session: {error}"));
+            assert_eq!(app.sidebar_status(&ask_state), SidebarStatus::Running);
+            drop(ask_claim);
+        }
 
         for (index, operation) in [
             crate::application::OperationKind::BatchQueued,
@@ -4505,15 +4492,20 @@ mod tests {
     #[test]
     fn verify_operation_is_running_in_the_sidebar() {
         let app = app_without_lock();
-        let id = "verify-session";
-        let state = sidebar_session(id, SessionPhase::AwaitingApproval);
-        let claim = app
-            .application
-            .runtime()
-            .try_begin(id, crate::application::OperationKind::Verify)
-            .unwrap_or_else(|error| panic!("failed to claim verify session: {error}"));
-        assert_eq!(app.sidebar_status(&state), SidebarStatus::Running);
-        drop(claim);
+        for (index, phase) in [SessionPhase::AwaitingApproval, SessionPhase::Planned]
+            .into_iter()
+            .enumerate()
+        {
+            let id = format!("verify-session-{index}");
+            let state = sidebar_session(&id, phase);
+            let claim = app
+                .application
+                .runtime()
+                .try_begin(&id, crate::application::OperationKind::Verify)
+                .unwrap_or_else(|error| panic!("failed to claim verify session: {error}"));
+            assert_eq!(app.sidebar_status(&state), SidebarStatus::Running);
+            drop(claim);
+        }
     }
 
     #[test]
@@ -8402,34 +8394,33 @@ mod tests {
     }
 
     #[test]
-    fn replan_opens_feedback_input() {
-        let mut app = app();
-        add_session(&mut app, "planned", crate::session::SessionPhase::Planned);
-        app.apply_action(SessionAction::Replan);
-        assert!(matches!(
-            app.modal,
-            Some(Modal::Input {
-                command: PendingCommand::Session(SessionAction::Replan),
-                ..
-            })
-        ));
-    }
-
-    #[tokio::test]
-    async fn replan_dispatches_feedback_work_without_running_llm() {
-        let mut app = app();
-        add_session(&mut app, "planned", crate::session::SessionPhase::Planned);
-        app.apply_input_command(
-            PendingCommand::Session(SessionAction::Replan),
-            "change the deployment step".to_string(),
-            false,
+    fn planned_palette_offers_fix_ask_and_verify() {
+        let mut fixture = persisted_fixture(&[(1, crate::session::SessionPhase::Planned)]);
+        let plan_path = fixture
+            .manager
+            .sessions_dir()
+            .join(test_session_id(1))
+            .join("plan.md");
+        std::fs::write(plan_path, "# plan")
+            .unwrap_or_else(|error| panic!("write planned session plan: {error}"));
+        fixture.app.refresh();
+        fixture.app.open_palette();
+        let Some(Modal::Palette { actions, .. }) = fixture.app.modal.as_ref() else {
+            panic!("palette expected");
+        };
+        assert_eq!(
+            actions,
+            &[
+                SessionAction::RunWorktree,
+                SessionAction::RunCurrentBranch,
+                SessionAction::Publish,
+                SessionAction::Fix,
+                SessionAction::Ask,
+                SessionAction::Verify,
+                SessionAction::EditSettings,
+                SessionAction::Delete,
+            ]
         );
-        assert_eq!(app.status.as_deref(), Some("Replanning started"));
-        assert!(
-            app.registry.busy("planned"),
-            "replan should reserve the session operation slot"
-        );
-        app.registry.shutdown().await;
     }
 
     #[test]
@@ -8442,21 +8433,6 @@ mod tests {
         assert!(
             matches!(app.modal, Some(Modal::Error(message)) if message == "Task description or an image attachment is required")
         );
-    }
-
-    #[test]
-    fn replan_rejects_empty_feedback_before_dispatch() {
-        let mut app = app();
-        add_session(&mut app, "planned", crate::session::SessionPhase::Planned);
-        app.apply_input_command(
-            PendingCommand::Session(SessionAction::Replan),
-            "  ".to_string(),
-            false,
-        );
-        assert!(
-            matches!(app.modal, Some(Modal::Error(message)) if message == "Replan feedback must not be empty")
-        );
-        assert_eq!(app.application.runtime().active_operation("planned"), None);
     }
 
     #[test]
@@ -8595,7 +8571,7 @@ mod tests {
     }
 
     #[test]
-    fn fix_plan_finished_awaiting_approval_enqueues_plan_ready() {
+    fn fix_plan_finished_in_approval_or_planned_phase_enqueues_plan_ready() {
         let mut app = app();
         add_session(
             &mut app,
@@ -8610,6 +8586,25 @@ mod tests {
         app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
             session_id: "session".to_string(),
             phase: "Awaiting Approval".to_string(),
+        }));
+
+        let notification = take_one_notification(&mut app);
+        assert_eq!(
+            notification.kind,
+            crate::desktop_notifications::WorkflowNotificationKind::PlanReady
+        );
+        add_session(
+            &mut app,
+            "planned-session",
+            crate::session::SessionPhase::Planned,
+        );
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanStarted {
+            session_id: "planned-session".to_string(),
+            operation: crate::application::OperationKind::Fix,
+        }));
+        app.apply_event(UiEvent::Control(ApplicationEvent::PlanFinished {
+            session_id: "planned-session".to_string(),
+            phase: "Planned".to_string(),
         }));
 
         let notification = take_one_notification(&mut app);

@@ -20,7 +20,6 @@ pub(crate) struct SessionActionsVm {
     pub show_create_pr: bool,
     pub run_label: String,
     pub show_reset: bool,
-    pub show_replan: bool,
     pub show_discard: bool,
     pub show_delete: bool,
     pub show_cancel: bool,
@@ -68,20 +67,20 @@ pub(crate) fn session_actions(
         || is_fixing
         || (is_phase_running && !is_awaiting_refresh);
     let has_plan_error = session.plan_error.is_some();
-    let awaiting_approval_with_plan = session.phase == "Awaiting Approval"
-        && !is_locally_running
-        && !is_fixing
-        && !session.fix_in_progress
-        && session.plan_available;
     let usable_plan = session.plan_available && !has_plan_error;
-    let show_approve = awaiting_approval_with_plan && !has_plan_error;
+    let review_phase_with_plan = (session.phase == "Awaiting Approval" && session.plan_available)
+        || (session.phase == "Planned" && usable_plan);
+    let review_actions_available =
+        review_phase_with_plan && !is_locally_running && !is_fixing && !session.fix_in_progress;
+    let show_approve =
+        session.phase == "Awaiting Approval" && review_actions_available && !has_plan_error;
     let show_publish_issue = session.pr_target.is_none()
         && (session.phase == "Awaiting Approval" || session.phase == "Planned")
         && usable_plan
         && !is_locally_running
         && !is_active_run;
-    let show_fix = awaiting_approval_with_plan;
-    let show_ask = awaiting_approval_with_plan && !has_plan_error;
+    let show_fix = review_actions_available;
+    let show_ask = review_actions_available && !has_plan_error;
     let show_verify = show_ask && !has_pending_prompt;
     let show_create_worktree = !is_active_run && session.phase == "Planned" && usable_plan;
     let show_run = !is_active_run
@@ -101,7 +100,6 @@ pub(crate) fn session_actions(
             || session.phase == "Failed"
             || session.phase == "PR Failed"
             || session.phase == "Completed");
-    let show_replan = session.pr_target.is_none() && !is_active_run && session.phase == "Planned";
     let show_discard = !is_locally_running && session.phase == "Awaiting Approval";
     let show_delete =
         !is_locally_running && session.phase != "Running" && session.phase != "Awaiting Approval";
@@ -127,7 +125,6 @@ pub(crate) fn session_actions(
         show_create_pr,
         run_label: run_label.to_string(),
         show_reset,
-        show_replan,
         show_discard,
         show_delete,
         show_cancel,
@@ -252,24 +249,28 @@ mod tests {
         let planned = session_actions(&planned, None, false);
         assert!(!planned.show_publish_issue);
         assert!(!planned.show_run);
-        assert!(planned.show_replan);
+        assert!(!planned.show_fix);
+        assert!(!planned.show_ask);
+        assert!(!planned.show_verify);
     }
 
     #[test]
-    fn planned_sessions_show_workspace_and_replan_not_review_or_resume() {
+    fn planned_sessions_show_review_and_workspace_actions() {
         let ready = actions("Planned", true, None, false);
         assert!(ready.show_create_worktree);
-        assert!(ready.show_replan);
+        assert!(ready.show_fix);
+        assert!(ready.show_ask);
+        assert!(ready.show_verify);
         assert!(ready.show_publish_issue);
-        assert!(!ready.show_fix);
-        assert!(!ready.show_ask);
         assert!(!ready.show_approve);
         assert!(!ready.show_run);
         assert!(ready.show_delete);
 
         let missing = actions("Planned", false, None, false);
         assert!(!missing.show_create_worktree);
-        assert!(missing.show_replan);
+        assert!(!missing.show_fix);
+        assert!(!missing.show_ask);
+        assert!(!missing.show_verify);
         assert!(!missing.show_publish_issue);
     }
 
@@ -360,7 +361,6 @@ mod tests {
         assert!(!value.show_create_worktree);
         assert!(!value.show_run);
         assert!(!value.show_reset);
-        assert!(!value.show_replan);
         assert!(!value.show_delete);
         assert_eq!(value.status, "running");
     }
@@ -413,7 +413,6 @@ mod tests {
         assert!(!value.show_create_worktree);
         assert!(!value.show_run);
         assert!(!value.show_reset);
-        assert!(!value.show_replan);
         assert!(!value.show_cancel);
 
         assert!(!actions("Draft", false, Some(OperationKind::Run), false).show_generate_plan);
@@ -454,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_action_follows_usable_approval_and_is_suppressed_when_busy()
+    fn verify_action_follows_reviewable_plan_and_is_suppressed_when_busy()
     -> Result<(), Box<dyn std::error::Error>> {
         let show_verify =
             |phase, available, operation, pending| -> Result<bool, Box<dyn std::error::Error>> {
@@ -465,11 +464,12 @@ mod tests {
                     .ok_or_else(|| "showVerify must be serialized as a boolean".into())
             };
         assert!(show_verify("Awaiting Approval", true, None, false)?);
+        assert!(show_verify("Planned", true, None, false)?);
         assert!(!show_verify("Awaiting Approval", false, None, false)?);
+        assert!(!show_verify("Planned", false, None, false)?);
         for phase in [
             "Draft",
             "Awaiting Input",
-            "Planned",
             "Running",
             "Suspended",
             "Failed",
@@ -483,16 +483,25 @@ mod tests {
             Some(OperationKind::Ask),
             false
         )?);
+        assert!(!show_verify(
+            "Planned",
+            true,
+            Some(OperationKind::Ask),
+            false
+        )?);
         assert!(!show_verify("Awaiting Approval", true, None, true)?);
+        assert!(!show_verify("Planned", true, None, true)?);
 
-        let mut session = make_session("Awaiting Approval");
-        session.plan_available = true;
-        session.plan_error = Some("provider unavailable".to_string());
-        let value = serde_json::to_value(session_actions(&session, None, false))?;
-        assert_eq!(
-            value.get("showVerify"),
-            Some(&serde_json::Value::Bool(false))
-        );
+        for phase in ["Awaiting Approval", "Planned"] {
+            let mut session = make_session(phase);
+            session.plan_available = true;
+            session.plan_error = Some("provider unavailable".to_string());
+            let value = serde_json::to_value(session_actions(&session, None, false))?;
+            assert_eq!(
+                value.get("showVerify"),
+                Some(&serde_json::Value::Bool(false))
+            );
+        }
         Ok(())
     }
 
@@ -524,12 +533,12 @@ mod tests {
             "showPublishIssue",
             "showFix",
             "showAsk",
+            "showVerify",
             "showCreateWorktree",
             "showRun",
             "showCreatePr",
             "runLabel",
             "showReset",
-            "showReplan",
             "showDiscard",
             "showDelete",
             "showCancel",
