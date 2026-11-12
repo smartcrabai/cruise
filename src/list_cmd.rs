@@ -779,10 +779,8 @@ async fn edit_session_settings_interactive(
         Some(values)
     };
 
-    // Load config to enumerate available step names for the multi-select.
-    // Main-phase steps and after-pr steps are kept separate: after-pr IDs are
-    // labelled so the user can tell them apart, and current_step is restricted
-    // to main-phase expanded IDs (after-pr steps are not valid resume points).
+    // Load separate step lists for skip labels and stage-specific resume choices.
+    // Main- and after-PR steps remain distinct in the skip selector.
     let (main_nodes, after_pr_nodes) = match config.as_ref() {
         Some(config) => {
             let main = list_skippable_steps(config).unwrap_or_default();
@@ -791,10 +789,6 @@ async fn edit_session_settings_interactive(
         }
         None => (Vec::new(), Vec::new()),
     };
-    let main_ids: Vec<String> = main_nodes
-        .iter()
-        .flat_map(|n| n.expanded_step_ids.clone())
-        .collect();
     let effective_flags = flags.as_ref().unwrap_or(&session.flags);
     let skip_main_nodes = crate::flags::skip_candidates(&main_nodes, effective_flags);
     let skip_after_nodes = crate::flags::skip_candidates(&after_pr_nodes, effective_flags);
@@ -806,7 +800,18 @@ async fn edit_session_settings_interactive(
         .iter()
         .flat_map(|n| n.expanded_step_ids.clone())
         .collect();
-
+    let resume_ids: Vec<&str> =
+        if session.execution_stage == crate::session::SessionExecutionStage::AfterPr {
+            after_pr_nodes
+                .iter()
+                .flat_map(|node| node.expanded_step_ids.iter().map(String::as_str))
+                .collect()
+        } else {
+            main_nodes
+                .iter()
+                .flat_map(|node| node.expanded_step_ids.iter().map(String::as_str))
+                .collect()
+        };
     let choices: Vec<StepChoice> = skip_main_ids
         .iter()
         .map(|id| StepChoice {
@@ -855,11 +860,11 @@ async fn edit_session_settings_interactive(
     };
 
     // For Failed/Suspended sessions, allow changing current_step interactively.
-    // Only main-phase expanded IDs are valid resume points.
+    // The active stage determines which workflow's steps are valid resume points.
     let current_step_update = if matches!(
         &session.phase,
         SessionPhase::Failed(_) | SessionPhase::Suspended
-    ) && !main_ids.is_empty()
+    ) && !resume_ids.is_empty()
     {
         let keep = format!(
             "Keep ({})",
@@ -867,7 +872,7 @@ async fn edit_session_settings_interactive(
         );
         let clear = "From beginning (clear)".to_string();
         let mut choices = vec![keep.clone(), clear.clone()];
-        choices.extend(main_ids);
+        choices.extend(resume_ids.iter().map(|id| (*id).to_owned()));
         let prompt = list_text("cli.list.prompt.resume_step", "Resume from step:");
         match inquire::Select::new(&prompt, choices).prompt() {
             Ok(choice) if choice == keep => CurrentStepUpdate::Unchanged,

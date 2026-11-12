@@ -21,7 +21,6 @@ use crate::session::{
     SessionFileContents, SessionLogger, SessionManager, SessionPhase, SessionState,
     SessionStateFingerprint, WorkspaceMode, current_iso8601,
 };
-use crate::variable::VariableStore;
 #[cfg(test)]
 use crate::workflow::CompiledWorkflow;
 use crate::workspace::{ExecutionWorkspace, prepare_execution_workspace, update_session_workspace};
@@ -598,7 +597,21 @@ async fn run_single_loaded(
         if session.pr_target.is_some() {
             crate::pr_review_fix::validate_workflow(&config)?;
         }
-        let effective_workspace_mode = if session.pr_target.is_some() {
+        if session.execution_stage == crate::session::SessionExecutionStage::AfterPr {
+            let path = session.worktree_path.as_ref().ok_or_else(|| {
+                CruiseError::Other(
+                    "Cannot resume after-PR steps without the original worktree".into(),
+                )
+            })?;
+            if !path.is_dir() || session.pr_url.is_none() {
+                return Err(CruiseError::Other(
+                    "Cannot resume after-PR steps without the original worktree and PR URL".into(),
+                ));
+            }
+        }
+        let effective_workspace_mode = if session.pr_target.is_some()
+            || session.execution_stage == crate::session::SessionExecutionStage::AfterPr
+        {
             WorkspaceMode::Worktree
         } else if args.dry_run {
             session.workspace_mode
@@ -654,27 +667,35 @@ async fn run_single_loaded(
         let retry_policy = crate::retry::policy_for_config(config.retry.clone());
         let compiled = crate::workflow::compile(config.clone())?;
         let mut dag = crate::graph::build_graph(&compiled, effective_max_retries)?;
-        let start_node = crate::graph::persistence::prepare_resume(
-            &mut dag,
-            &manager.dag_path(&session.id),
-            session.has_dag,
-            session.current_step.as_deref(),
-            session.current_step_is_node_id,
-            session.execution_id.as_deref(),
-        )?;
-        if session.pr_target.is_some() {
+        let after_pr_resume =
+            session.execution_stage == crate::session::SessionExecutionStage::AfterPr;
+        let start_node = if after_pr_resume {
+            dag.start.clone()
+        } else {
+            crate::graph::persistence::prepare_resume(
+                &mut dag,
+                &manager.dag_path(&session.id),
+                session.has_dag,
+                session.current_step.as_deref(),
+                session.current_step_is_node_id,
+                session.execution_id.as_deref(),
+            )?
+        };
+        if session.pr_target.is_some() && !after_pr_resume {
             crate::pr_review_fix::validate_effective_workflow(
                 &compiled,
                 &session.flags,
                 &session.skipped_steps,
             )?;
         }
-        crate::graph::validation::validate_workflow(
-            &compiled,
-            &dag,
-            &start_node,
-            &crate::flags::preflight_skips(&compiled, &session.flags, &session.skipped_steps),
-        )?;
+        if !after_pr_resume {
+            crate::graph::validation::validate_workflow(
+                &compiled,
+                &dag,
+                &start_node,
+                &crate::flags::preflight_skips(&compiled, &session.flags, &session.skipped_steps),
+            )?;
+        }
         Ok((
             config,
             effective_max_retries,
@@ -719,7 +740,9 @@ async fn run_single_loaded(
             session.worktree_path = None;
             session.worktree_branch = None;
         }
-        if session.repo.is_some() || session.pr_target.is_some() {
+        let after_pr_resume =
+            session.execution_stage == crate::session::SessionExecutionStage::AfterPr;
+        if !after_pr_resume && (session.repo.is_some() || session.pr_target.is_some()) {
             crate::forge::ensure_forge_available(crate::forge::session_forge(&session))?;
         }
         if cancel_token.is_cancelled() {
@@ -729,20 +752,33 @@ async fn run_single_loaded(
         if cancel_token.is_cancelled() {
             return Err(CruiseError::Interrupted);
         }
-        // Repo-backed sessions execute in a temporary clone; re-create it if the
-        // post-approval cleanup (or a previous run) removed it.
-        if crate::repo_clone::ensure_repo_session_workspace(&manager, &mut session)? {
-            crate::status_eprintln!(
-                "{} clone: {}",
-                style("->").cyan(),
-                session.base_dir.display()
-            );
-        }
-        if cancel_token.is_cancelled() {
-            return Err(CruiseError::Interrupted);
-        }
-        let execution_workspace =
-            prepare_execution_workspace(&manager, &mut session, effective_workspace_mode)?;
+        let execution_workspace = if after_pr_resume {
+            let ctx = session.worktree_context().ok_or_else(|| {
+                CruiseError::Other(format!(
+                    "worktree for {session_id} is missing; reset the session to restart"
+                ))
+            })?;
+            if !ctx.path.is_dir() {
+                return Err(CruiseError::Other(format!(
+                    "worktree for {session_id} is missing; reset the session to restart"
+                )));
+            }
+            ExecutionWorkspace::Worktree { ctx, reused: true }
+        } else {
+            // Repo-backed sessions execute in a temporary clone; re-create it if the
+            // post-approval cleanup (or a previous run) removed it.
+            if crate::repo_clone::ensure_repo_session_workspace(&manager, &mut session)? {
+                crate::status_eprintln!(
+                    "{} clone: {}",
+                    style("->").cyan(),
+                    session.base_dir.display()
+                );
+            }
+            if cancel_token.is_cancelled() {
+                return Err(CruiseError::Interrupted);
+            }
+            prepare_execution_workspace(&manager, &mut session, effective_workspace_mode)?
+        };
         log_execution_workspace(&execution_workspace);
         update_session_workspace(&mut session, &execution_workspace);
         session.set_runner_to_current_process();
@@ -763,7 +799,8 @@ async fn run_single_loaded(
     let mut instructions = open_run_inbox(&manager, &session_id);
 
     let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = VariableStore::new(session.template_input(&manager.sessions_dir()));
+    let after_pr_resume = session.execution_stage == crate::session::SessionExecutionStage::AfterPr;
+    let mut vars = session.run_variables(&manager.sessions_dir())?;
     vars.set_named_file(PLAN_VAR, plan_path);
     vars.set_artifacts_root(session.artifacts_path(&manager.sessions_dir()));
     let mut tracker = FileTracker::with_root(execution_workspace.path().to_path_buf());
@@ -809,7 +846,14 @@ async fn run_single_loaded(
     };
     let workflow_operation = crate::telemetry::Operation::phase("workflow");
     let exec_result: Result<_> = async {
-        let exec_result = {
+        let exec_result = if after_pr_resume {
+            Ok(crate::engine::ExecutionResult {
+                run: 0,
+                skipped: 0,
+                failed: 0,
+                reloaded_workflow: None,
+            })
+        } else {
             let ctx = crate::engine::ExecutionContext {
                 usage_session_id: Some(&session_id),
                 compiled: &compiled,
@@ -849,7 +893,9 @@ async fn run_single_loaded(
         };
 
         let exec_result = exec_result.and_then(|result| {
-            crate::graph::persistence::save_graph(&dag, &manager.dag_path(&session_id))?;
+            if !after_pr_resume {
+                crate::graph::persistence::save_graph(&dag, &manager.dag_path(&session_id))?;
+            }
             Ok(result)
         });
         exec_result.map(|mut result| {
@@ -876,104 +922,200 @@ async fn run_single_loaded(
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let overall_result = match exec_result {
-        Ok(exec) => {
-            logger.write(&format!(
-                "v completed -- run: {}, skipped: {}, failed: {}",
-                exec.run, exec.skipped, exec.failed
-            ));
-            if session.exec {
-                crate::worktree_pr::log_after_pr_skipped(
+    let overall_result = if after_pr_resume {
+        let checkpoint_path = manager.after_pr_dag_path(&session.id);
+        let execution_id = session.execution_id.clone();
+        let saved_step = session.current_step.clone();
+        let is_node_id = session.current_step_is_node_id;
+        let snapshot = Mutex::new(session.clone());
+        let on_checkpoint = |cp: &NodeCheckpoint<'_>, dag: &crate::graph::ExecutionGraph| {
+            let mut state = lock_unpoisoned(&snapshot);
+            crate::graph::persistence::save_graph(dag, &checkpoint_path)?;
+            state.execution_stage = crate::session::SessionExecutionStage::AfterPr;
+            state.current_step = Some(cp.node_id.clone());
+            state.current_step_is_node_id = true;
+            let mut fingerprint = lock_unpoisoned(&session_fingerprint);
+            *fingerprint =
+                save_session_state_with_conflict_resolution(&manager, &state, *fingerprint)?;
+            Ok(())
+        };
+        let result = {
+            let execution = crate::retry::with_active_policy(
+                retry_policy.clone(),
+                Box::pin(crate::worktree_pr::run_after_pr_steps_with_checkpoint(
                     &compiled,
-                    &flag_values,
+                    Some(&session_id),
+                    &mut vars,
+                    &mut tracker,
+                    effective_max_retries,
+                    args.rate_limit_retries,
+                    execution_workspace.path(),
                     &skipped_steps,
-                    "exec sessions do not create pull requests",
-                );
-                if exec.failed > 0 {
-                    Err(CruiseError::Other(format!(
-                        "workflow completed with {} failed step(s)",
-                        exec.failed
-                    )))
-                } else {
-                    Ok(())
+                    &flag_values,
+                    Some(&cancel_token),
+                    &notifying_option_handler,
+                    Some(&on_step_log),
+                    instructions.as_ref(),
+                    Some(crate::worktree_pr::AfterPrCheckpoint {
+                        execution_id: execution_id.as_deref(),
+                        resume: Some(crate::worktree_pr::AfterPrResume {
+                            path: &checkpoint_path,
+                            saved_step: saved_step.as_deref(),
+                            is_node_id,
+                        }),
+                    }),
+                    &on_checkpoint,
+                )),
+            );
+            tokio::pin!(execution);
+            tokio::select! {
+                result = &mut execution => result,
+                _ = tokio::signal::ctrl_c() => {
+                    cancel_token.cancel();
+                    let _ = execution.await;
+                    Err(CruiseError::Interrupted)
                 }
-            } else {
-                match &execution_workspace {
-                    ExecutionWorkspace::CurrentBranch { .. } => {
-                        crate::worktree_pr::log_after_pr_skipped(
-                            &compiled,
-                            &flag_values,
-                            &skipped_steps,
-                            "current-branch workspaces do not create pull requests",
-                        );
+            }
+        };
+        let saved = lock_unpoisoned(&snapshot);
+        session.execution_stage = saved.execution_stage;
+        session.current_step.clone_from(&saved.current_step);
+        session.current_step_is_node_id = saved.current_step_is_node_id;
+        result
+    } else {
+        match exec_result {
+            Ok(exec) => {
+                logger.write(&format!(
+                    "v completed -- run: {}, skipped: {}, failed: {}",
+                    exec.run, exec.skipped, exec.failed
+                ));
+                if session.exec {
+                    crate::worktree_pr::log_after_pr_skipped(
+                        &compiled,
+                        &flag_values,
+                        &skipped_steps,
+                        "exec sessions do not create pull requests",
+                    );
+                    if exec.failed > 0 {
+                        Err(CruiseError::Other(format!(
+                            "workflow completed with {} failed step(s)",
+                            exec.failed
+                        )))
+                    } else {
                         Ok(())
                     }
-                    ExecutionWorkspace::Worktree { .. }
-                        if !compiled.create_pr && session.pr_target.is_none() =>
-                    {
-                        if cancel_token.is_cancelled() {
-                            Err(CruiseError::Interrupted)
-                        } else {
-                            session.pr_skipped_reason =
-                                Some(crate::session::PrSkippedReason::Disabled);
+                } else {
+                    match &execution_workspace {
+                        ExecutionWorkspace::CurrentBranch { .. } => {
                             crate::worktree_pr::log_after_pr_skipped(
                                 &compiled,
                                 &flag_values,
                                 &skipped_steps,
-                                "pull-request creation is disabled",
+                                "current-branch workspaces do not create pull requests",
                             );
                             Ok(())
                         }
-                    }
-                    ExecutionWorkspace::Worktree { ctx, .. } => {
-                        session.pr_workflow_vars = Some(vars.clone());
-                        let expected = *lock_unpoisoned(&session_fingerprint);
-                        let fingerprint = save_session_state_with_conflict_resolution(
-                            &manager, session, expected,
-                        )?;
-                        *lock_unpoisoned(&session_fingerprint) = fingerprint;
-                        let on_pr_processing = || {
-                            observer.on_phase(&session_id, RunPhase::CreatingPr);
-                            Ok(())
-                        };
-                        let persist_pr = |snapshot: &SessionState| {
-                            let fingerprint = manager.save_with_fingerprint(snapshot)?;
-                            *lock_unpoisoned(&session_fingerprint) = fingerprint;
-                            Ok(())
-                        };
-                        tokio::select! {
-                            result = crate::retry::with_active_policy(
-                                retry_policy.clone(),
-                                crate::worktree_pr::handle_worktree_pr_with_persistence(
-                                    ctx,
-                                    &compiled,
-                                    &mut vars,
-                                    &mut tracker,
-                                    session,
-                                    args.rate_limit_retries,
-                                    effective_max_retries,
-                                    &skipped_steps,
-                                    &flag_values,
-                                    Some(&cancel_token),
-                                    &notifying_option_handler,
-                                    Some(&on_step_log),
-                                    Some(&on_pr_processing),
-                                    Some(&persist_pr),
-                                    instructions.as_ref(),
-                                ),
-                            ) => result,
-                            _ = tokio::signal::ctrl_c() => {
-                                cancel_token.cancel();
+                        ExecutionWorkspace::Worktree { .. }
+                            if !compiled.create_pr && session.pr_target.is_none() =>
+                        {
+                            if cancel_token.is_cancelled() {
                                 Err(CruiseError::Interrupted)
-                            },
+                            } else {
+                                session.pr_skipped_reason =
+                                    Some(crate::session::PrSkippedReason::Disabled);
+                                crate::worktree_pr::log_after_pr_skipped(
+                                    &compiled,
+                                    &flag_values,
+                                    &skipped_steps,
+                                    "pull-request creation is disabled",
+                                );
+                                Ok(())
+                            }
+                        }
+                        ExecutionWorkspace::Worktree { ctx, .. } => {
+                            session.pr_workflow_vars = Some(vars.clone());
+                            session
+                                .execution_id
+                                .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
+                            let expected = *lock_unpoisoned(&session_fingerprint);
+                            let fingerprint = save_session_state_with_conflict_resolution(
+                                &manager, session, expected,
+                            )?;
+                            *lock_unpoisoned(&session_fingerprint) = fingerprint;
+                            let on_pr_processing = || {
+                                observer.on_phase(&session_id, RunPhase::CreatingPr);
+                                Ok(())
+                            };
+                            let checkpoint_path = manager.after_pr_dag_path(&session.id);
+                            let execution_id = session.execution_id.clone();
+                            let mut checkpoint_snapshot = session.clone();
+                            if let Some(target) = &session.pr_target {
+                                checkpoint_snapshot.pr_url = Some(target.url.clone());
+                            }
+                            let snapshot = Mutex::new(checkpoint_snapshot);
+                            let persist_pr = |state: &SessionState| {
+                                let fingerprint = manager.save_with_fingerprint(state)?;
+                                *lock_unpoisoned(&snapshot) = state.clone();
+                                *lock_unpoisoned(&session_fingerprint) = fingerprint;
+                                Ok(())
+                            };
+                            let on_checkpoint =
+                                |cp: &NodeCheckpoint<'_>, dag: &crate::graph::ExecutionGraph| {
+                                    let mut state = lock_unpoisoned(&snapshot);
+                                    crate::graph::persistence::save_graph(dag, &checkpoint_path)?;
+                                    state.execution_stage =
+                                        crate::session::SessionExecutionStage::AfterPr;
+                                    state.current_step = Some(cp.node_id.clone());
+                                    state.current_step_is_node_id = true;
+                                    let mut fingerprint = lock_unpoisoned(&session_fingerprint);
+                                    *fingerprint = save_session_state_with_conflict_resolution(
+                                        &manager,
+                                        &state,
+                                        *fingerprint,
+                                    )?;
+                                    Ok(())
+                                };
+                            let result = tokio::select! {
+                                result = crate::retry::with_active_policy(
+                                    retry_policy.clone(),
+                                    Box::pin(crate::worktree_pr::handle_worktree_pr_with_checkpoint(
+                                        ctx,
+                                        &compiled,
+                                        &mut vars,
+                                        &mut tracker,
+                                        session,
+                                        args.rate_limit_retries,
+                                        effective_max_retries,
+                                        &skipped_steps,
+                                        &flag_values,
+                                        Some(&cancel_token),
+                                        &notifying_option_handler,
+                                        Some(&on_step_log),
+                                        Some(&on_pr_processing),
+                                        Some(&persist_pr),
+                                        instructions.as_ref(),
+                                        Some(crate::worktree_pr::AfterPrCheckpoint { execution_id: execution_id.as_deref(), resume: None }),
+                                        &on_checkpoint,
+                                    )),
+                                ) => result,
+                                _ = tokio::signal::ctrl_c() => {
+                                    cancel_token.cancel();
+                                    Err(CruiseError::Interrupted)
+                                },
+                            };
+                            let saved = lock_unpoisoned(&snapshot);
+                            session.execution_stage = saved.execution_stage;
+                            session.current_step.clone_from(&saved.current_step);
+                            session.current_step_is_node_id = saved.current_step_is_node_id;
+                            result
                         }
                     }
                 }
             }
-        }
-        Err(e) => {
-            logger.write(&format!("x failed: {}", e.detailed_message()));
-            Err(e)
+            Err(e) => {
+                logger.write(&format!("x failed: {}", e.detailed_message()));
+                Err(e)
+            }
         }
     };
 
@@ -1493,6 +1635,7 @@ mod tests {
     use crate::config::DEFAULT_MAX_RETRIES;
     use crate::option_handler::NoOpOptionHandler;
     use crate::session::WorkspaceMode;
+    use crate::variable::VariableStore;
     use crate::worktree_pr::{
         CommitOutcome, PrAttemptOutcome, attempt_pr_creation, build_pr_prompt,
         extract_last_path_segment, parse_pr_metadata, strip_code_block,
@@ -3011,7 +3154,7 @@ steps:
             processing_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         };
-        let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+        let result = crate::worktree_pr::handle_worktree_pr_with_checkpoint(
             &f.ctx,
             &compiled,
             &mut vars,
@@ -3027,6 +3170,8 @@ steps:
             Some(&on_pr_processing),
             None,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
 
@@ -3103,7 +3248,7 @@ steps:
         );
         session.pr_skipped_reason = Some(crate::session::PrSkippedReason::Disabled);
 
-        let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+        let result = crate::worktree_pr::handle_worktree_pr_with_checkpoint(
             &ctx,
             &compiled,
             &mut vars,
@@ -3119,6 +3264,8 @@ steps:
             None,
             None,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
 
@@ -3167,7 +3314,7 @@ steps:
         let mut json = serde_json::to_value(state)?;
         json["worktree_base_branch"] = serde_json::json!("develop");
         let mut session: SessionState = serde_json::from_value(json)?;
-        let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+        let result = crate::worktree_pr::handle_worktree_pr_with_checkpoint(
             &f.ctx,
             &compiled,
             &mut vars,
@@ -3183,6 +3330,8 @@ steps:
             None,
             None,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await;
         assert!(result.is_ok(), "{result:?}");
@@ -3281,7 +3430,7 @@ steps:
             "first line\nsecond line".to_string(),
         );
         session.forge = Some(forge);
-        crate::worktree_pr::handle_worktree_pr_with_persistence(
+        crate::worktree_pr::handle_worktree_pr_with_checkpoint(
             &f.ctx,
             &compiled,
             &mut vars,
@@ -3297,6 +3446,8 @@ steps:
             None,
             None,
             None,
+            None,
+            &|_, _| Ok(()),
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -3390,7 +3541,7 @@ steps:
             );
             session.title = Some("  ".to_string());
             session.forge = Some(forge);
-            let result = crate::worktree_pr::handle_worktree_pr_with_persistence(
+            let result = crate::worktree_pr::handle_worktree_pr_with_checkpoint(
                 &f.ctx,
                 &compiled,
                 &mut vars,
@@ -3406,6 +3557,8 @@ steps:
                 None,
                 None,
                 None,
+                None,
+                &|_, _| Ok(()),
             )
             .await;
             let Err(error) = result else {

@@ -80,6 +80,14 @@ pub enum WorkspaceMode {
     CurrentBranch,
 }
 
+/// The workflow whose checkpoint and current step are active.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionExecutionStage {
+    #[default]
+    Main,
+    AfterPr,
+}
+
 /// Commit identity recorded before invoking Git's squash commit.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct LocalMergeIntent {
@@ -214,6 +222,9 @@ pub struct SessionState {
     /// remains authoritative even if saving this flag was interrupted.
     #[serde(default)]
     pub has_dag: bool,
+    /// Distinguishes the main workflow from the post-PR workflow on resume.
+    #[serde(default)]
+    pub execution_stage: SessionExecutionStage,
     /// Identifies an explicitly requested execution, independently of display state.
     #[serde(default)]
     pub execution_id: Option<String>,
@@ -290,6 +301,36 @@ impl SessionFileContents {
 }
 
 impl SessionState {
+    pub(crate) fn run_variables(
+        &self,
+        sessions_dir: &std::path::Path,
+    ) -> crate::error::Result<crate::variable::VariableStore> {
+        let after_pr = self.execution_stage == SessionExecutionStage::AfterPr;
+        let mut vars = if after_pr {
+            self.pr_workflow_vars.clone().unwrap_or_else(|| {
+                crate::variable::VariableStore::new(self.template_input(sessions_dir))
+            })
+        } else {
+            crate::variable::VariableStore::new(self.template_input(sessions_dir))
+        };
+        if after_pr {
+            let url = self.pr_url.as_ref().ok_or_else(|| {
+                crate::error::CruiseError::Other(
+                    "Cannot resume after-PR steps without a PR URL".into(),
+                )
+            })?;
+            vars.set_named_value("pr.url", url.clone());
+            if let Some(number) = url
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+            {
+                vars.set_named_value("pr.number", number.to_string());
+            }
+        }
+        Ok(vars)
+    }
     #[must_use]
     pub fn new(id: String, base_dir: PathBuf, config: SessionConfigRef, input: String) -> Self {
         Self {
@@ -333,6 +374,7 @@ impl SessionState {
             cleanup_after_pr_override: None,
             attachments: vec![],
             has_dag: false,
+            execution_stage: SessionExecutionStage::Main,
             execution_id: Some(uuid::Uuid::new_v4().to_string()),
             current_step_is_node_id: false,
             published_issue_url: None,
@@ -520,6 +562,7 @@ impl SessionState {
         self.runner_pid = None;
         self.runner_started_at = None;
         self.has_dag = false;
+        self.execution_stage = SessionExecutionStage::Main;
         self.execution_id = Some(uuid::Uuid::new_v4().to_string());
         self.current_step_is_node_id = false;
     }
@@ -624,6 +667,14 @@ impl SessionManager {
         self.sessions_dir()
             .join(session_id)
             .join(crate::dag::DAG_FILE_NAME)
+    }
+
+    /// Path to the independent after-PR graph checkpoint.
+    #[must_use]
+    pub fn after_pr_dag_path(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir()
+            .join(session_id)
+            .join("after-pr-dag.json")
     }
 
     /// Generate a new unique session ID from current UTC time.
@@ -820,11 +871,17 @@ impl SessionManager {
             && path.is_file()
             && self.load(&state.id)?.execution_id != state.execution_id
         {
-            let checkpoint = self.dag_path(&state.id);
-            if checkpoint.exists() {
-                let archive = checkpoint
-                    .with_file_name(format!("dag.previous.{}.json", Uuid::new_v4().simple()));
-                std::fs::rename(&checkpoint, archive)?;
+            for (checkpoint, prefix) in [
+                (self.dag_path(&state.id), "dag"),
+                (self.after_pr_dag_path(&state.id), "after-pr-dag"),
+            ] {
+                if checkpoint.exists() {
+                    let archive = checkpoint.with_file_name(format!(
+                        "{prefix}.previous.{}.json",
+                        Uuid::new_v4().simple()
+                    ));
+                    std::fs::rename(&checkpoint, archive)?;
+                }
             }
         }
         let json = serde_json::to_vec_pretty(state)
