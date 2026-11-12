@@ -3,7 +3,8 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TOOLS="$ROOT/target/formal-tools"
-mkdir -p "$TOOLS"
+DOWNLOADS="${RUNNER_TEMP:-${XDG_CACHE_HOME:-$HOME/.cache}}/cruise-formal-tools"
+mkdir -p "$TOOLS" "$DOWNLOADS"
 if [[ $(node --version) != v26.13.0 ]]; then
   echo 'Node 26.13.0 is required (CI uses actions/setup-node).' >&2
   exit 1
@@ -41,16 +42,17 @@ case "$(uname -s)-$(uname -m)" in
     ;;
   *) echo 'Supported formal platforms: Darwin aarch64 and Linux x64' >&2; exit 1 ;;
 esac
-fetch "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/$asset" "$TOOLS/$asset" "$digest"
+fetch "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/$asset" "$DOWNLOADS/$asset" "$digest"
 # Always extract the verified archive rather than trusting a stale executable.
 mkdir -p "$TOOLS/jdk-25.0.5+8"
-tar -xzf "$TOOLS/$asset" -C "$TOOLS/jdk-25.0.5+8" --strip-components=1
+tar -xzf "$DOWNLOADS/$asset" -C "$TOOLS/jdk-25.0.5+8" --strip-components=1
 JAVA_HOME="$TOOLS/jdk-25.0.5+8/$java_subdir"
 export JAVA_HOME
 export PATH="$JAVA_HOME/bin:$PATH"
 java -version 2>&1 | tee "$TOOLS/java-version.log"
 java -XshowSettings:properties -version 2>&1 | grep -Eq 'java.runtime.version = 25\.0\.5\+8-LTS[[:space:]]*$'
-fetch 'https://github.com/AlloyTools/org.alloytools.alloy/releases/download/v6.2.0/org.alloytools.alloy.dist.jar' "$TOOLS/alloy-6.2.0.jar" 6b8c1cb5bc93bedfc7c61435c4e1ab6e688a242dc702a394628d9a9801edb78d
+fetch 'https://github.com/AlloyTools/org.alloytools.alloy/releases/download/v6.2.0/org.alloytools.alloy.dist.jar' "$DOWNLOADS/alloy-6.2.0.jar" 6b8c1cb5bc93bedfc7c61435c4e1ab6e688a242dc702a394628d9a9801edb78d
+ln -sfn "$DOWNLOADS/alloy-6.2.0.jar" "$TOOLS/alloy-6.2.0.jar"
 # The lockfile overrides Quint's adm-zip to 0.6.1 to fix ZIP extraction advisories.
 npm ci --prefix "$ROOT/tests/formal" --ignore-scripts
 [[ $("$ROOT/tests/formal/node_modules/.bin/quint" --version) == 0.33.0 ]]

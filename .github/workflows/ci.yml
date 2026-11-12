@@ -46,9 +46,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
-
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -84,8 +81,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -127,9 +122,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
-
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -166,9 +158,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -209,9 +198,6 @@ jobs:
             tests/formal/package-lock.json
             tests/formal/opencode-cli/package-lock.json
 
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
-
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -251,9 +237,6 @@ jobs:
             tests/formal/package-lock.json
             tests/formal/opencode-cli/package-lock.json
 
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
-
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -290,9 +273,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -337,9 +317,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
-
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -376,9 +353,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -430,9 +404,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
-
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -468,8 +439,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -504,9 +473,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -544,9 +510,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Checkpoint and quality-gate Quint, Alloy and production BDD contracts
         run: bash scripts/check_formal.sh

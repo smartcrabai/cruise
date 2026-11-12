@@ -26,8 +26,6 @@ jobs:
           node-version: '26.13.0'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
       - name: Run locale specifications
         run: bash scripts/check_ui_locale_specs.sh
       - name: Upload specification evidence
