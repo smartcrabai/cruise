@@ -1,0 +1,52 @@
+name: Cache Rust toolchain
+description: Cache and validate the pinned Rust 1.99.1 host toolchain and components.
+inputs:
+  components:
+    description: Rust 1.99.1 component profile required by the job.
+    required: false
+    default: minimal
+runs:
+  using: composite
+  steps:
+    - name: Cache installed Rust 1.99.1 toolchain
+      if: ${{ runner.os == 'Linux' && runner.arch == 'X64' }}
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ~/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu
+        key: rust-toolchain-v1-${{ runner.os }}-${{ runner.arch }}-1.99.1-58cf8f9c35b355199727627d07ae34a4e2846d67-x86_64-unknown-linux-gnu-${{ inputs.components }}
+    - name: Validate or install Rust 1.99.1
+      shell: bash
+      env:
+        RUST_COMPONENTS: ${{ inputs.components }}
+      run: |
+        host=$(rustc -vV | awk '$1 == "host:" { host=$2 } END { print host }')
+        toolchain="$HOME/.rustup/toolchains/1.99.1-$host"
+        required=(rustc cargo)
+        case "$RUST_COMPONENTS" in
+          minimal) ;;
+          minimal-clippy-rustfmt) required+=(clippy-driver cargo-clippy rustfmt cargo-fmt) ;;
+          *) echo "Unsupported Rust component profile: $RUST_COMPONENTS" >&2; exit 1 ;;
+        esac
+        valid=true
+        version=$("$toolchain/bin/rustc" --version 2>/dev/null || true)
+        [[ "$version" == 'rustc 1.99.1 (58cf8f9c3 2026-10-13)' ]] || valid=false
+        for component in "${required[@]}"; do
+          [[ -x "$toolchain/bin/$component" ]] || valid=false
+        done
+        rustup toolchain list | grep -F "1.99.1-$host" >/dev/null || valid=false
+        if [[ "$valid" == true ]]; then
+          echo "Using cached Rust 1.99.1 toolchain ($host; $RUST_COMPONENTS)"
+        else
+          echo "Installing Rust 1.99.1 toolchain ($host; $RUST_COMPONENTS)"
+          if [[ "$RUST_COMPONENTS" == minimal-clippy-rustfmt ]]; then
+            rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          else
+            rustup toolchain install 1.99.1 --profile minimal
+          fi
+        fi
+        version=$("$toolchain/bin/rustc" --version)
+        [[ "$version" == 'rustc 1.99.1 (58cf8f9c3 2026-10-13)' ]] || { echo "Unexpected cached Rust toolchain: $version" >&2; exit 1; }
+        rustup toolchain list | grep -F "1.99.1-$host" >/dev/null || { echo "Rustup did not register cached toolchain 1.99.1-$host" >&2; exit 1; }
+        for component in "${required[@]}"; do
+          [[ -x "$toolchain/bin/$component" ]] || { echo "Rust component is missing: $component" >&2; exit 1; }
+        done

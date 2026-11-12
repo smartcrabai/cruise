@@ -12,7 +12,15 @@ unset WEBUI_BDD_FEATURE WEBUI_BDD_ASSETS WEBUI_BDD_BIN
 export PLAYWRIGHT_SKIP_BROWSER_GC=1
 npm ci --prefix tests/webui --ignore-scripts
 case $(uname -s) in
-  Linux) tests/webui/node_modules/.bin/playwright install --with-deps chromium ;;
+  Linux)
+    # Avoid apt's network-dependent dependency installation in CI. Chromium's
+    # launch check below fails if the hosted image lacks a required library.
+    if [[ ${CI:-} == true ]]; then
+      tests/webui/node_modules/.bin/playwright install chromium
+    else
+      tests/webui/node_modules/.bin/playwright install --with-deps chromium
+    fi
+    ;;
   Darwin) tests/webui/node_modules/.bin/playwright install chromium ;;
   *) echo 'BLOCKED: browser suite requires supported POSIX production fixtures' >&2; exit 1 ;;
 esac

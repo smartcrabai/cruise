@@ -1,0 +1,52 @@
+name: Cache CI downloads
+description: Cache verified CI downloads and pinned toolchains.
+inputs:
+  rust-components:
+    description: Rust toolchain components included in the cache key.
+    required: false
+    default: minimal
+runs:
+  using: composite
+  steps:
+    - name: Cache checksum-pinned Node.js archive
+      if: ${{ runner.os == 'Linux' && runner.arch == 'X64' }}
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ${{ runner.temp }}/node-v26.13.0-linux-x64.tar.xz
+        key: node-v1-${{ runner.os }}-${{ runner.arch }}-26.13.0-d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997
+    - name: Install checksum-verified Node.js toolchain
+      if: ${{ runner.os == 'Linux' && runner.arch == 'X64' }}
+      shell: bash
+      run: |
+        version=26.13.0
+        digest=d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997
+        archive="$RUNNER_TEMP/node-v$version-linux-x64.tar.xz"
+        if [[ ! -f "$archive" ]] || [[ $(sha256sum "$archive" | awk '{print $1}') != "$digest" ]]; then
+          rm -f "$archive"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://nodejs.org/dist/v$version/node-v$version-linux-x64.tar.xz" \
+            -o "$archive.part"
+          printf '%s  %s\n' "$digest" "$archive.part" | sha256sum --check --status
+          mv "$archive.part" "$archive"
+        fi
+        tool="$RUNNER_TOOL_CACHE/node/$version/x64"
+        rm -rf "$tool"
+        mkdir -p "$tool"
+        tar -xJf "$archive" --strip-components=1 -C "$tool"
+        touch "${tool}.complete"
+    - name: Cache and validate Rust toolchain
+      uses: ./.github/actions/cache-rust-toolchain
+      with:
+        components: ${{ inputs.rust-components }}
+    - name: Cache checksum-pinned formal downloads
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: |
+          ${{ runner.temp }}/cruise-formal-tools/*.tar.gz
+          ${{ runner.temp }}/cruise-formal-tools/alloy-6.2.0.jar
+        key: formal-tools-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/setup_formal.sh', 'scripts/check_instruction_inbox_alloy.sh') }}
+    - name: Cache checksum-pinned Apalache distribution
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ~/.quint/cache/apalache-0.62.1.tgz
+        key: apalache-v1-${{ runner.os }}-${{ runner.arch }}-0.62.1-38202a8c4ebeb3ab73e0fe5a7e4bb948442d46ad5de8a7fb45c9e5cac2beb2a6

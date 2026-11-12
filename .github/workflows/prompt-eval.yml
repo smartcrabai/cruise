@@ -45,14 +45,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Cache and install Rust toolchain
+        uses: ./.github/actions/cache-rust-toolchain
 
       - name: Configure jcode home
         env:
           JCODE_HOME: ${{ runner.temp }}/prompt-eval-jcode-home
         run: echo "JCODE_HOME=$JCODE_HOME" >> "$GITHUB_ENV"
-
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
 
       - name: Install jcode
         run: bash action/scripts/install-jcode.sh
