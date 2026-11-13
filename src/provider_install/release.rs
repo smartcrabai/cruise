@@ -465,8 +465,8 @@ mod tests {
             }
         }
 
-        fn json(body: serde_json::Value) -> Self {
-            Self::ok(serde_json::to_vec(&body).unwrap())
+        fn json(body: &serde_json::Value) -> Self {
+            Self::ok(serde_json::to_vec(body).unwrap())
         }
 
         fn text(body: &str) -> Self {
@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_all_supported_target_layouts_from_provider_metadata() {
+    fn resolves_jcode_target_layouts_from_provider_metadata() {
         let jcode_keys = [
             "linux-x86_64",
             "linux-aarch64",
@@ -596,7 +596,7 @@ mod tests {
             "windows-aarch64",
         ];
         for key in jcode_keys {
-            let server = Server::new(vec![Reply::json(jcode_metadata(key))]);
+            let server = Server::new(vec![Reply::json(&jcode_metadata(key))]);
             let release = latest_from(Provider::Jcode, key, &server.base).unwrap();
             assert_eq!(release.version, VERSION);
             assert_eq!(release.target.key, key);
@@ -622,7 +622,10 @@ mod tests {
             let requests = server.finish();
             assert!(requests[0].starts_with("GET /repos/1jehuang/jcode/releases/latest "));
         }
+    }
 
+    #[test]
+    fn resolves_claude_target_layouts_from_provider_metadata() {
         let claude_keys = [
             "darwin-arm64",
             "darwin-x64",
@@ -636,7 +639,7 @@ mod tests {
         for key in claude_keys {
             let server = Server::new(vec![
                 Reply::text(VERSION),
-                Reply::json(claude_manifest(key)),
+                Reply::json(&claude_manifest(key)),
             ]);
             let release = latest_from(Provider::Claude, key, &server.base).unwrap();
             let binary = if key.starts_with("win32-") {
@@ -660,7 +663,10 @@ mod tests {
                 "GET /claude-code-releases/{VERSION}/manifest.json "
             )));
         }
+    }
 
+    #[test]
+    fn resolves_opencode_target_layouts_from_provider_metadata() {
         let opencode_keys = [
             "darwin-arm64",
             "darwin-x64",
@@ -676,7 +682,7 @@ mod tests {
             "windows-arm64",
         ];
         for key in opencode_keys {
-            let server = Server::new(vec![Reply::json(npm_metadata(key))]);
+            let server = Server::new(vec![Reply::json(&npm_metadata(key))]);
             let release = latest_from(Provider::OpenCode, key, &server.base).unwrap();
             assert_eq!(release.version, VERSION);
             assert_eq!(
@@ -711,28 +717,27 @@ mod tests {
 
         let mut bad = jcode_metadata("linux-x86_64");
         bad["draft"] = true.into();
-        assert_jcode_error(bad);
+        assert_jcode_error(&bad);
         let mut bad = jcode_metadata("linux-x86_64");
         bad["prerelease"] = true.into();
-        assert_jcode_error(bad);
+        assert_jcode_error(&bad);
         let mut bad = jcode_metadata("linux-x86_64");
         bad["tag_name"] = "v1.2.3-rc.1".into();
-        assert_jcode_error(bad);
+        assert_jcode_error(&bad);
         let mut bad = jcode_metadata("linux-x86_64");
         bad["assets"][0]["digest"] = serde_json::Value::Null;
-        assert_jcode_error(bad);
+        assert_jcode_error(&bad);
         let mut bad = jcode_metadata("linux-x86_64");
         bad["assets"][0]["digest"] = "sha256:not-a-hash".into();
-        assert_jcode_error(bad);
+        assert_jcode_error(&bad);
         let mut bad = jcode_metadata("linux-x86_64");
         bad["assets"][0]["browser_download_url"] = "https://evil.example/file.tgz".into();
-        assert_jcode_error(bad);
+        assert_jcode_error(&bad);
         let mut bad = jcode_metadata("linux-x86_64");
-        bad["assets"][0]["browser_download_url"] = format!(
+        bad["assets"][0]["browser_download_url"] =
             "https://github.com/1jehuang/jcode/releases/download/v9.9.9/jcode-linux-x86_64.tar.gz"
-        )
-        .into();
-        assert_jcode_error(bad);
+                .into();
+        assert_jcode_error(&bad);
 
         let server = Server::new(vec![Reply::text("1.2.3-rc.1")]);
         assert!(latest_from(Provider::Claude, "darwin-arm64", &server.base).is_err());
@@ -744,7 +749,7 @@ mod tests {
             serde_json::json!({"version":VERSION,"platforms":{"darwin-arm64":{"binary":"../evil","checksum":SHA256,"size":123}}}),
             serde_json::json!({"version":VERSION,"platforms":{"darwin-arm64":{"binary":"claude","checksum":"bad","size":123}}}),
         ] {
-            let server = Server::new(vec![Reply::text(VERSION), Reply::json(manifest)]);
+            let server = Server::new(vec![Reply::text(VERSION), Reply::json(&manifest)]);
             assert!(latest_from(Provider::Claude, "darwin-arm64", &server.base).is_err());
             server.finish();
         }
@@ -757,13 +762,13 @@ mod tests {
             serde_json::json!({"name":"@opencode/cli-linux-x64","version":VERSION,"dist":{"tarball":"https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-1.2.3.tgz","integrity":"sha512-invalid"}}),
             serde_json::json!({"name":"@opencode/cli-linux-x64","version":VERSION,"dist":{"tarball":"https://registry.npmjs.org/@opencode/cli-linux-x64/-/cli-linux-x64-1.2.3.tgz"}}),
         ] {
-            let server = Server::new(vec![Reply::json(metadata)]);
+            let server = Server::new(vec![Reply::json(&metadata)]);
             assert!(latest_from(Provider::OpenCode, "linux-x64", &server.base).is_err());
             server.finish();
         }
     }
 
-    fn assert_jcode_error(metadata: serde_json::Value) {
+    fn assert_jcode_error(metadata: &serde_json::Value) {
         let server = Server::new(vec![Reply::json(metadata)]);
         assert!(latest_from(Provider::Jcode, "linux-x86_64", &server.base).is_err());
         server.finish();
@@ -799,11 +804,11 @@ mod tests {
 
     #[test]
     fn digest_validation_rejects_invalid_encodings() {
-        for digest in ["".to_string(), "0".into(), "g".repeat(64), "0".repeat(63)] {
+        for digest in [String::new(), "0".into(), "g".repeat(64), "0".repeat(63)] {
             assert!(Digest::Sha256(digest).validate().is_err());
         }
         for digest in [
-            "".to_string(),
+            String::new(),
             "sha512-not-base64".into(),
             format!("sha512-{}", "A".repeat(88)),
         ] {
