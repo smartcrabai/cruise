@@ -91,7 +91,7 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | Serve the local browser UI (add `-o`/`--open` to launch the browser) | `cruise webui` |
 | Manage the background browser UI | `cruise webui start`, `cruise webui status [--json]`, `cruise webui restart`, `cruise webui stop [--force]` |
 | Update Cruise itself | `cruise update` |
-| Install a pinned provider CLI or inspect managed provider status | `cruise install <jcode\|claude\|opencode> [--force]` / `cruise install --status` |
+| Install/update a provider CLI to the latest stable version or inspect managed status | `cruise install <jcode\|claude\|opencode> [--force]` / `cruise install --status` |
 | Inspect in-progress update transactions across installations (read-only; no network access or changes) | `cruise update --status` |
 | Install / update / remove / list a GitHub workflow package, including root-manifest bundles (confirms first; `--yes` required without a TTY) | `cruise workflow add owner/repo[/path.yaml][@ref]` / `update <name>` / `remove <name>` / `list` |
 | Draft a new workflow YAML from a description | `cruise workflow generate "description" --name <name> [--user] [--config <path>]` |
@@ -103,7 +103,9 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 
 ### Managed provider CLIs
 
-`cruise install <jcode|claude|opencode>` installs the version pinned by this Cruise build. Use `--force` to reinstall and `cruise install --status` for read-only, offline status. Provider authentication remains separate. Resolution prefers nonempty process environment overrides (`CRUISE_JCODE_CLI_PATH`, `CRUISE_CLAUDE_CLI_PATH`, `CRUISE_OPENCODE_CLI_PATH`), then a valid managed installation, then PATH. Invalid overrides fail instead of falling back. Workflow `env:` cannot set the explicit provider overrides, but its `PATH` controls PATH fallback for the child. Running workflows never installs providers. `cruise update` updates Cruise, not providers; rerun install when the build's pin changes.
+`cruise install <jcode|claude|opencode>` checks upstream release metadata on every install invocation and selects the latest stable CLI (`claude` uses its stable channel). A healthy managed installation at that version is reused; an installation at another version is updated. `--force` downloads the selected latest version again. Installation requires network access to release metadata and downloads; upstream changes may affect compatibility. Downloads use publisher-supplied checksums, not independent signatures. `cruise install --status` is read-only and offline: it reports the recorded installed version without claiming it is latest. Managed-runtime validation uses the version recorded for that installation, not a Cruise-build pin. Provider authentication remains separate.
+
+Resolution prefers nonempty process environment overrides (`CRUISE_JCODE_CLI_PATH`, `CRUISE_CLAUDE_CLI_PATH`, `CRUISE_OPENCODE_CLI_PATH`), then a valid managed installation, then PATH. Invalid overrides fail instead of falling back. Workflow `env:` cannot set the explicit provider overrides, but its `PATH` controls PATH fallback for the child. Running workflows never installs providers. `cruise update` updates Cruise, not providers.
 
 For managed-only jcode authentication, read `relative_path` from `providers/jcode/install.json` under the Cruise data directory, then invoke that binary with `login <provider>` or `auth status`. The data directory is `$XDG_DATA_HOME/cruise`, or `~/.local/share/cruise` on Unix when unset. On Windows without `XDG_DATA_HOME`, it is `%LOCALAPPDATA%\cruise\data` when `LOCALAPPDATA` is available, otherwise the home-directory fallback applies. Quote paths containing spaces.
 

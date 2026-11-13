@@ -82,3 +82,6 @@ cruise install opencode
 cruise install --status
 cruise install jcode --force
 ```
+Each `cruise install <provider>` invocation checks that provider's latest stable release metadata (`claude` uses its stable channel). Cruise reuses a healthy managed installation at the selected version and updates an installation at another version. `--force` downloads the selected latest version again.
+
+Provider installation requires network access to release metadata and downloads, and upstream changes may affect compatibility. Downloads are verified with publisher-supplied checksums, not independent signatures. `cruise install --status` works offline and reports the recorded installed version without claiming it is latest. Managed-runtime validation uses the version recorded for the installation, not a version pinned by the Cruise build.

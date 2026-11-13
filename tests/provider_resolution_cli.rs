@@ -10,7 +10,7 @@ use std::time::UNIX_EPOCH;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-const VERSION: &str = "0.99.1";
+const VERSION: &str = "0.1.0";
 const OVERRIDE: &str = "CRUISE_JCODE_CLI_PATH";
 
 struct Fixture {
@@ -144,7 +144,7 @@ fn effective(line: &str, expected: &str) {
 fn override_wins_over_ready_managed_and_path_and_empty_override_is_ignored() {
     let Some(target) = target() else { return };
     let f = Fixture::new();
-    let managed = f.record(target);
+    f.record(target);
     let override_path = f.root.path().join("override-jcode");
     f.stub(&override_path);
     let line = row(&f.status(Some(&override_path)));
@@ -159,12 +159,14 @@ fn override_wins_over_ready_managed_and_path_and_empty_override_is_ignored() {
     );
     effective(&line, "override");
     let line = row(&f.status(Some(Path::new(""))));
+    assert_eq!(line.split_whitespace().nth(1), Some(VERSION), "{line}");
+    assert!(line.contains("ready"), "{line}");
+    let path = f.path.join("jcode");
     assert!(
         line.contains(
-            managed
-                .to_str()
-                .unwrap_or_else(|| panic!("managed path is not UTF-8: {}", managed.display()))
-        ) || line.to_ascii_lowercase().contains("ready"),
+            path.to_str()
+                .unwrap_or_else(|| panic!("PATH candidate is not UTF-8: {}", path.display()))
+        ),
         "{line}"
     );
     effective(&line, "managed");
@@ -196,9 +198,9 @@ fn invalid_override_never_falls_back_to_ready_managed_or_path() {
 }
 
 #[test]
-fn stale_and_damaged_records_fall_back_to_path_without_modification() {
+fn malformed_and_damaged_records_fall_back_to_path_without_modification() {
     let Some(target) = target() else { return };
-    for damage in ["stale", "stamp", "json", "traversal"] {
+    for damage in ["stamp", "json", "version", "traversal"] {
         let f = Fixture::new();
         let binary = f.record(target);
         let record = f.data.join("cruise/providers/jcode/install.json");
@@ -212,8 +214,8 @@ fn stale_and_damaged_records_fall_back_to_path_without_modification() {
                 &fs::read(&record).unwrap_or_else(|e| panic!("read record: {e}")),
             )
             .unwrap_or_else(|e| panic!("parse record: {e}"));
-            if damage == "stale" {
-                value["version"] = "0.1.0".into();
+            if damage == "version" {
+                value["version"] = "not-semver".into();
             } else {
                 value["relative_path"] = "../outside".into();
             }
@@ -229,11 +231,7 @@ fn stale_and_damaged_records_fall_back_to_path_without_modification() {
         let line = row(&output);
         effective(&line, "path");
         assert!(
-            line.to_ascii_lowercase().contains(if damage == "stale" {
-                "stale"
-            } else {
-                "damaged"
-            }),
+            line.to_ascii_lowercase().contains("damaged"),
             "{damage}: {line}"
         );
         assert!(

@@ -80,3 +80,6 @@ cruise install opencode
 cruise install --status
 cruise install jcode --force
 ```
+每次调用 `cruise install <provider>` 都会查询该 provider 最新稳定版的发布元数据（`claude` 使用 stable channel）。若托管安装已是该版本且状态正常，则会复用；若为其他版本，则会更新。`--force` 会重新下载所选的最新版本。
+
+安装需要联网访问发布元数据和下载文件，上游变更可能影响兼容性。下载文件会使用发布者提供的校验和进行验证，但这不是独立签名。`cruise install --status` 可离线运行，只报告记录的已安装版本，不声称该版本是最新的。托管运行时也根据记录的实际安装版本进行验证，而非依据 Cruise 构建固定的版本。

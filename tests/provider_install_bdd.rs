@@ -7,7 +7,9 @@ mod contracts {
     use std::{
         fs,
         os::unix::fs::PermissionsExt as _,
+        path::Path,
         process::{Command, Output},
+        time::UNIX_EPOCH,
     };
 
     #[derive(Debug, Default, cucumber::World)]
@@ -15,6 +17,7 @@ mod contracts {
         root: Option<tempfile::TempDir>,
         output: Option<Output>,
         missing_override: bool,
+        valid_override: bool,
     }
 
     impl InstallWorld {
@@ -36,6 +39,8 @@ mod contracts {
                 .args(args);
             if self.missing_override {
                 command.env("CRUISE_JCODE_CLI_PATH", self.root().join("missing"));
+            } else if self.valid_override {
+                command.env("CRUISE_JCODE_CLI_PATH", self.root().join("override"));
             }
             self.output = Some(command.output().unwrap());
         }
@@ -68,35 +73,140 @@ mod contracts {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
-    #[given("the jcode override points to a missing file")]
-    fn missing_override(w: &mut InstallWorld) {
-        w.missing_override = true;
+    fn recorded_jcode(root: &Path, version: &str) {
+        let dir = root.join("data/cruise/providers/jcode");
+        let relative_path = format!("{version}/jcode");
+        let binary = dir.join(&relative_path);
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\necho invoked >> '{}'\n",
+                root.join("executed").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let metadata = fs::metadata(&binary).unwrap();
+        let mtime_unix_nanos = metadata
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("macos", "aarch64") => "macos-aarch64",
+            ("macos", "x86_64") => "macos-x86_64",
+            ("linux", "aarch64") if !cfg!(target_env = "musl") => "linux-aarch64",
+            ("linux", "x86_64") if !cfg!(target_env = "musl") => "linux-x86_64",
+            unsupported => panic!("unsupported jcode fixture target: {unsupported:?}"),
+        };
+        let record = serde_json::json!({
+            "schema": 1,
+            "provider": "jcode",
+            "version": version,
+            "target": target,
+            "relative_path": relative_path,
+            "sha256": "0".repeat(64),
+            "len": metadata.len(),
+            "mtime_unix_nanos": mtime_unix_nanos,
+            "source_url": "https://example.invalid/jcode"
+        });
+        fs::write(
+            dir.join("install.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
     }
+    fn jcode_row(w: &InstallWorld) -> String {
+        w.text()
+            .lines()
+            .find(|line| line.split_whitespace().next() == Some("jcode"))
+            .unwrap()
+            .to_owned()
+    }
+
     #[when("I run provider status")]
     fn status(w: &mut InstallWorld) {
         w.run(&["install", "--status"]);
     }
+    #[given("a valid older recorded jcode installation")]
+    fn older_record(w: &mut InstallWorld) {
+        recorded_jcode(w.root(), "0.1.0");
+    }
+    #[given("the recorded jcode binary has been damaged")]
+    fn damaged_record(w: &mut InstallWorld) {
+        recorded_jcode(w.root(), "0.1.0");
+        fs::write(
+            w.root().join("data/cruise/providers/jcode/0.1.0/jcode"),
+            b"damaged binary",
+        )
+        .unwrap();
+    }
+    #[given("the jcode override points to a valid file")]
+    fn valid_override(w: &mut InstallWorld) {
+        let path = w.root().join("override");
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\necho invoked >> '{}'\n",
+                w.root().join("executed").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        w.valid_override = true;
+    }
+    #[given("the jcode override points to a missing file")]
+    fn missing_override(w: &mut InstallWorld) {
+        w.missing_override = true;
+    }
     #[when(regex = r"^I run install with (.+)$")]
-    fn install(w: &mut InstallWorld, args: String) {
+    fn install(w: &mut InstallWorld, captures: &[String]) {
         let mut command = vec!["install"];
-        command.extend(args.split_whitespace());
+        command.extend(captures[0].split_whitespace());
         w.run(&command);
     }
-    #[then("status reports all pinned providers")]
-    fn pins(w: &mut InstallWorld) {
+    #[then("status reports no installed versions and uses PATH")]
+    fn versions(w: &mut InstallWorld) {
         assert!(w.output().status.success(), "{}", w.text());
         let text = w.text();
-        for value in [
-            "jcode",
-            "claude",
-            "opencode",
-            "0.99.1",
-            "2.1.250",
-            "2.1.3",
-            "EFFECTIVE",
-        ] {
+        for value in ["VERSION", "EFFECTIVE"] {
             assert!(text.contains(value), "missing {value}: {text}");
         }
+        for provider in ["jcode", "claude", "opencode"] {
+            let row = text
+                .lines()
+                .find(|line| line.split_whitespace().next() == Some(provider))
+                .unwrap();
+            assert_eq!(row.split_whitespace().nth(1), Some("-"), "{row}");
+            assert_eq!(row.split_whitespace().last(), Some("path"), "{row}");
+        }
+    }
+    #[then("status reports the recorded older jcode version as managed")]
+    fn older_version_is_managed(w: &mut InstallWorld) {
+        assert!(w.output().status.success(), "{}", w.text());
+        let row = jcode_row(w);
+        assert_eq!(row.split_whitespace().nth(1), Some("0.1.0"), "{row}");
+        assert!(row.contains("ready"), "{row}");
+        assert_eq!(row.split_whitespace().last(), Some("managed"), "{row}");
+    }
+    #[then("status reports the damaged jcode install and falls back to PATH")]
+    fn damaged_falls_back(w: &mut InstallWorld) {
+        assert!(w.output().status.success(), "{}", w.text());
+        let row = jcode_row(w);
+        assert!(row.contains("damaged"), "{row}");
+        assert_eq!(row.split_whitespace().last(), Some("path"), "{row}");
+    }
+    #[then("status reports the jcode override as effective")]
+    fn override_effective(w: &mut InstallWorld) {
+        assert!(w.output().status.success(), "{}", w.text());
+        let row = jcode_row(w);
+        assert!(
+            row.contains(w.root().join("override").to_str().unwrap()),
+            "{row}"
+        );
+        assert_eq!(row.split_whitespace().last(), Some("override"), "{row}");
     }
     #[then("the install command fails")]
     fn fails(w: &mut InstallWorld) {
@@ -104,20 +214,20 @@ mod contracts {
     }
     #[then("the jcode status reports an override error")]
     fn override_error(w: &mut InstallWorld) {
-        let text = w.text();
-        let row = text
-            .lines()
-            .find(|line| line.split_whitespace().next() == Some("jcode"))
-            .unwrap();
+        let row = jcode_row(w);
         assert!(
             row.contains(w.root().join("missing").to_str().unwrap()),
             "{row}"
         );
         assert_eq!(row.split_whitespace().last(), Some("error"), "{row}");
     }
+    #[then("no provider ran")]
+    fn no_provider_ran(w: &mut InstallWorld) {
+        assert!(!w.root().join("executed").exists());
+    }
     #[then("no provider ran and no data directory was created")]
     fn no_side_effects(w: &mut InstallWorld) {
-        assert!(!w.root().join("executed").exists());
+        no_provider_ran(w);
         assert!(!w.root().join("data").exists());
     }
     pub async fn main() {

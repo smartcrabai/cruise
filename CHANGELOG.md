@@ -6,6 +6,7 @@
 
 - Stop prompting for workflow flags on `cruise run`; saved session values and explicit `-f/--flag` assignments now control execution. `exec` and `force_exec` still prompt before creating a transient session.
 - Split the README into English, Japanese, and Simplified Chinese documentation under `docs/en/`, `docs/ja/`, and `docs/zh/`.
+- Resolve managed provider installs to each provider's latest stable release, skipping healthy matches and reporting recorded installed versions in offline status.
 
 ### Added
 

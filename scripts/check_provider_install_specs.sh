@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Standalone, test-only provider install model checks using the shared pins.
+# Standalone, test-only provider install contract and model checks.
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT" || exit 1
@@ -38,6 +38,7 @@ run_check alloy-solvers java -jar target/formal-tools/alloy-6.2.0.jar solvers
 run_check alloy java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --solver sat4j --type json --output "$RUN/alloy" tests/formal/provider_install.als
 run_check alloy-receipt node scripts/formal/check_alloy_receipt.cjs tests/formal/provider_install.als "$RUN/alloy/receipt.json"
 run_check receipt-validator-tests node --test scripts/formal/check_alloy_receipt.test.cjs
+run_check provider-install-unit cargo +1.99.1 test --locked --lib provider_install::
 run_check provider-install-bdd cargo +1.99.1 test --locked --test provider_install_bdd
 run_check provider-install-cli cargo +1.99.1 test --locked --test provider_install_cli --test provider_resolution_cli
 printf 'Aggregate exit status: %s\n' "$status" | tee -a "$RUN/results.log"

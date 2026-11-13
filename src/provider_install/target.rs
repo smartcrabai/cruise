@@ -16,10 +16,10 @@ fn musl_from_maps(maps: &str) -> Option<bool> {
     }
 }
 
-/// Detects the current machine's pinned target for the provider.
+/// Detects the current machine's provider artifact target.
 ///
 /// # Errors
-/// Returns an error if this OS, architecture, or libc has no pinned build.
+/// Returns an error if this OS, architecture, or libc has no supported release.
 pub fn detect_target_key(provider: Provider) -> Result<&'static str> {
     let arch = std::env::consts::ARCH;
     let musl = cfg!(target_os = "linux")
@@ -34,10 +34,10 @@ pub fn detect_target_key(provider: Provider) -> Result<&'static str> {
     target_key_for(provider, std::env::consts::OS, arch, musl, avx2)
 }
 
-/// Maps host characteristics to the provider's artifact key.
+/// Maps host characteristics to a provider artifact key.
 ///
 /// # Errors
-/// Returns an error if the supplied platform has no pinned build.
+/// Returns an error if the supplied platform has no supported release.
 pub fn target_key_for(
     provider: Provider,
     os: &str,
@@ -77,7 +77,7 @@ pub fn target_key_for(
     };
     key.ok_or_else(|| {
         CruiseError::Other(format!(
-            "no pinned {} build for {os}-{arch}; set {} or install {} on PATH",
+            "no {} build for {os}-{arch}; set {} or install {} on PATH",
             name(provider),
             provider.env_override(),
             name(provider)
@@ -187,31 +187,8 @@ mod tests {
         let error = target_key_for(Jcode, "linux", "x86_64", true, true)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("no pinned jcode build for linux-x86_64"));
+        assert!(error.contains("no jcode build for linux-x86_64"));
         assert!(error.contains("CRUISE_JCODE_CLI_PATH"));
         assert!(target_key_for(Claude, "freebsd", "x86_64", false, true).is_err());
-    }
-    #[test]
-    fn mappings_cover_pins() {
-        for provider in [Provider::Jcode, Provider::Claude, Provider::OpenCode] {
-            for os in ["linux", "macos", "windows"] {
-                for arch in ["x86_64", "aarch64"] {
-                    for musl in [false, true] {
-                        for avx in [false, true] {
-                            if let Ok(key) = target_key_for(provider, os, arch, musl, avx) {
-                                assert!(
-                                    super::super::pins::pin(provider)
-                                        .targets
-                                        .iter()
-                                        .any(|pin| pin.key == key)
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        assert!(target_key_for(Provider::Jcode, "linux", "x86_64", true, true).is_err());
-        assert!(target_key_for(Provider::OpenCode, "freebsd", "x86_64", false, true).is_err());
     }
 }

@@ -18,7 +18,7 @@ Commands:
   exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve or manage the local browser UI (start, stop, restart, status)
-  install      Install a pinned provider CLI or inspect managed provider status
+  install      Install/update a provider CLI to its latest stable version or inspect managed status
   update       Update a managed native installation; `--status` lists recorded transactions read-only
   workflow     Manage workflows: list/eject built-ins, generate, interactively make or check YAML (`doctor`), install GitHub packages (`add`, `remove`, `update`)
 
@@ -37,7 +37,7 @@ Options:
 <a id="cruise-install"></a>
 ## `cruise install`
 
-`cruise install <jcode|claude|opencode> [--force]` は provider CLI をインストールします。`cruise install --status` は管理対象インストールの状態を確認します。provider CLI は、環境変数による override、Cruise が管理するインストール、PATH の順に解決されます。インストールコマンドの例は[管理対象プロバイダー CLI](installation.md#managed-provider-clis)を参照してください。
+`cruise install <jcode|claude|opencode> [--force]` は provider の最新安定版 CLI をインストールします（`claude` は stable チャネル）。各呼び出しでリリースメタデータを確認し、同じバージョンの正常な管理対象インストールは再利用し、別バージョンなら更新します。`--force` は選択された最新バージョンを再ダウンロードします。`cruise install --status` は読み取り専用でオフライン動作し、最新かどうかを主張せず、記録されたインストール済みバージョンを表示します。provider CLI は環境変数による override、Cruise 管理インストール、PATH の順に解決されます。認証は各 provider が管理します。詳細は[管理対象プロバイダー CLI](installation.md#managed-provider-clis)を参照してください。
 
 <a id="cruise-workflow-generate"></a>
 ## `cruise workflow generate`
