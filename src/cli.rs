@@ -139,7 +139,7 @@ pub enum Commands {
     Webui(WebuiArgs),
     /// Update Cruise itself or inspect an in-progress update.
     Update(UpdateArgs),
-    /// Install a pinned provider CLI or inspect provider status.
+    /// Install the latest stable provider CLI or inspect provider status.
     Install(InstallArgs),
     /// List, eject, generate, and install workflows.
     #[command(subcommand)]
@@ -388,7 +388,7 @@ pub struct InstallArgs {
     /// Inspect providers without making changes.
     #[arg(long, conflicts_with = "force")]
     pub status: bool,
-    /// Reinstall even when the pinned version is already present.
+    /// Reinstall the latest version even when already present.
     #[arg(long)]
     pub force: bool,
 }

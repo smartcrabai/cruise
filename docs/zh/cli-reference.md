@@ -18,7 +18,7 @@ Commands:
   exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
   webui        Serve or manage the local browser UI (start, stop, restart, status)
-  install      Install a pinned provider CLI or inspect managed provider status
+  install      Install/update a provider CLI to its latest stable version or inspect managed status
   update       Update a managed native installation; `--status` lists recorded transactions read-only
   workflow     Manage workflows: list/eject built-ins, generate, interactively make or check YAML (`doctor`), install GitHub packages (`add`, `remove`, `update`)
 
@@ -37,7 +37,7 @@ Options:
 <a id="cruise-install"></a>
 ## `cruise install`
 
-`cruise install <jcode|claude|opencode> [--force]` 会安装 provider CLI。`cruise install --status` 会检查托管安装。Provider CLI 按以下顺序解析：环境变量覆盖项、Cruise 托管安装、PATH。安装命令示例请参阅[托管的 provider CLI](installation.md#managed-provider-clis)。
+`cruise install <jcode|claude|opencode> [--force]` 会安装 provider 的最新稳定版 CLI（`claude` 使用 stable channel）。每次调用都会查询发布元数据，复用版本相同且状态正常的托管安装，并更新其他版本；`--force` 会重新下载所选的最新版本。`cruise install --status` 为只读、离线操作，仅报告记录的已安装版本，不声称它是最新版本。Provider CLI 按环境变量覆盖项、Cruise 托管安装、PATH 的顺序解析。身份验证由各 provider 管理。详情请参阅[托管的 provider CLI](installation.md#managed-provider-clis)。
 
 <a id="cruise-workflow-generate"></a>
 ## `cruise workflow generate`
