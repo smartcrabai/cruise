@@ -30,7 +30,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/smartcrabai/cruise
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/smartcrabai/cruise/releases/latest/download/cruise-installer.sh | sh
 ```
 
-シェルおよび PowerShell インストーラーは `cruise` を `$CARGO_HOME/bin`（通常は `~/.cargo/bin`。Windows では `CARGO_HOME` 未設定時に `%USERPROFILE%\.cargo\bin`）へ配置します。このディレクトリを `PATH` に含めてください。サポート対象の管理インストールでは `cruise update` を使えます。下記の[更新](#updating-cruise)を参照してください。特定のリリースをインストールするには、インストーラー URL の `/releases/latest/` を `/releases/download/v<version>/` に置き換えます（例: `v0.2.15`）。Homebrew でインストールした場合は、以後も Homebrew で管理してください。
+シェルおよび PowerShell インストーラーは `CARGO_HOME` の設定にかかわらず `cruise` を `~/.local/bin`（Windows では `%USERPROFILE%\.local\bin`）へ配置します。このディレクトリを `PATH` に含めてください。サポート対象の管理インストールでは `cruise update` を使えます。下記の[更新](#updating-cruise)を参照してください。特定のリリースをインストールするには、インストーラー URL の `/releases/latest/` を `/releases/download/v<version>/` に置き換えます（例: `v0.2.15`）。Homebrew でインストールした場合は、以後も Homebrew で管理してください。
 
 <a id="homebrew"></a>
 ### Homebrew
@@ -58,13 +58,13 @@ cruise --version; cruise update; cruise --version
 
 | インストール方法 | 更新方法 |
 |---|---|
-| 正規の `$CARGO_HOME/bin` にあるシェルまたは PowerShell インストーラー版 | `cruise update` |
+| `~/.local/bin`（Windows では `%USERPROFILE%\.local\bin`）へのシェルまたは PowerShell インストール、または既存の正規 `$CARGO_HOME/bin` インストール | `cruise update` |
 | 正規の `$CARGO_HOME/bin` にあるソースビルド版 | `cruise update`。ローカルのソースビルドやビルド時の変更ではなく、公式ランタイムをインストールします |
 | Homebrew | `brew upgrade smartcrabai/tap/cruise` |
 | GitHub Action、Docker イメージ、その他の外部インストール | その配布方法に応じた元の更新方法を使います |
 | `CRUISE_RUNTIME` が設定されているすべてのインストール | オーバーライドを解除し、管理ランチャーから `cruise update` を実行します |
 
-「管理対象」かどうかは Cargo のインストール台帳ではなく、正規の `$CARGO_HOME/bin` にあるかで判定されます。アップデーターが切り替えるのはランタイム選択のみです。固定の `cruise` ランチャー（Windows では `cruise.exe`）はそのまま残り、更新ごとにバージョン付きの `cruise-runtime-managed-…` ランタイムと `.json` サイドカーが追加され、`.cruise-runtime-active` が切り替わります。古いランタイムも保持されます。ネイティブ更新は Cargo を実行せず、Cargo のインストール台帳も変更しません。カスタムのソースビルド版が必要な場合は、ソースから再ビルドしてインストールしてください。
+「管理対象」かどうかは Cargo のインストール台帳ではなく、実行ファイルの場所（既定のインストーラー先 `~/.local/bin`（Windows では `%USERPROFILE%\.local\bin`）または正規の `$CARGO_HOME/bin`）で判定されます。アップデーターが切り替えるのはランタイム選択のみです。固定の `cruise` ランチャー（Windows では `cruise.exe`）はそのまま残り、更新ごとにバージョン付きの `cruise-runtime-managed-…` ランタイムと `.json` サイドカーが追加され、`.cruise-runtime-active` が切り替わります。古いランタイムも保持されます。ネイティブ更新は Cargo を実行せず、Cargo のインストール台帳も変更しません。カスタムのソースビルド版が必要な場合は、ソースから再ビルドしてインストールしてください。
 
 Cruise を更新しても、すでに実行中の WebUI プロセスのコードは置き換わりません。更新後に `cruise webui status` でそのバージョンと現在のランタイムを比較し、`cruise webui restart` で更新済みランタイムを読み込んでください。再起動すると実行中の WebUI 操作がキャンセルされるため、適切なタイミングで行ってください。
 

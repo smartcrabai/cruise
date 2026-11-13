@@ -29,7 +29,7 @@ cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
 # Path that installers should place binaries in
-install-path = "CARGO_HOME"
+install-path = "~/.local/bin"
 # The installers to generate for each app
 installers = ["shell", "powershell", "homebrew"]
 # Publish jobs to run in CI
