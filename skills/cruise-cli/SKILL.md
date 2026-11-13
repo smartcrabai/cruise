@@ -125,23 +125,24 @@ cruise --version; cruise update; cruise --version
 
 | Installation | Update method |
 |---|---|
-| Shell or PowerShell installer at canonical `$CARGO_HOME/bin` | `cruise update` |
+| Shell or PowerShell installer at `~/.local/bin` (on Windows, `%USERPROFILE%\.local\bin`), or an existing installer install at canonical `$CARGO_HOME/bin` | `cruise update` |
 | Source-built install at canonical `$CARGO_HOME/bin` | `cruise update` installs the official runtime; local source changes/build-time features are not preserved |
 | Homebrew | `brew upgrade smartcrabai/tap/cruise` |
 | GitHub Action, Docker, or another external install | Use its original distribution method |
 | `CRUISE_RUNTIME` override set | Unset it; run update from the managed launcher |
 
-Managed means the executable resolves into canonical `$CARGO_HOME/bin`, not that Cargo’s install ledger claims it. Updating adds a versioned `cruise-runtime-managed-…` runtime and `.json` sidecar, then switches `.cruise-runtime-active`; the fixed `cruise` (`cruise.exe` on Windows) launcher and older runtimes remain. The updater does not run Cargo or modify its install ledger. Homebrew, Action, Docker, and other external installs are not changed by this command. Published versions without the updater—including v0.2.16—cannot update themselves. An updater-capable build can select v0.2.16, but that published runtime cannot perform another native update. Bootstrap by installing an updater-enabled release with its platform installer, or rebuilding/installing that source version; use native updates only while the installed runtime includes the updater.
+Managed means the executable resolves into the installer default `~/.local/bin` (on Windows, `%USERPROFILE%\.local\bin`) or canonical `$CARGO_HOME/bin`, not that Cargo’s install ledger claims it. Updating adds a versioned `cruise-runtime-managed-…` runtime and `.json` sidecar, then switches `.cruise-runtime-active`; the fixed `cruise` (`cruise.exe` on Windows) launcher and older runtimes remain. The updater does not run Cargo or modify its install ledger. Homebrew, Action, Docker, and other external installs are not changed by this command. Published versions without the updater—including v0.2.16—cannot update themselves. An updater-capable build can select v0.2.16, but that published runtime cannot perform another native update. Bootstrap by installing an updater-enabled release with its platform installer, or rebuilding/installing that source version; use native updates only while the installed runtime includes the updater.
 
 The updater downloads over HTTPS and checks the release manifest’s SHA-256 against the payload. The checksum comes from the same release publisher; it is not an independent signature.
 
 `cruise update --status` prints recorded transactions for installations in sorted order and is read-only: no network, lock, or repair. Its transaction file is `$XDG_STATE_HOME/cruise/installations/<installation-id>/update-transaction.json` (default `~/.local/state/cruise/installations/<installation-id>/update-transaction.json`; on Windows, `%LOCALAPPDATA%\cruise\state\installations\<installation-id>\update-transaction.json` when `XDG_STATE_HOME` is unset). Status reports the recorded phase/error, not proof of the active runtime. A failed transaction keeps its error; rerun `cruise update` to reconcile an interruption. Failures before activation leave the previous selection, and a failed post-activation launcher probe restores it. If completion/cleanup warns after activation, the update is already applied; inspect status and retry rather than treating it as rolled back.
 
-Older versioned runtimes coexist in `$CARGO_HOME/bin` (Windows default `%USERPROFILE%\.cargo\bin`). To pin an installed version, run that exact sibling with `--version`, confirm its `.json` sidecar matches the current fixed launcher/runtime baseline, and set `.cruise-runtime-active` to its exact basename; do not delete runtime files. The baseline is the fixed launcher/runtime size-and-mtime stamp: a reinstall that changes it invalidates the overlay, while a same-size, same-mtime replacement is not detected. Legacy pointers or pinning an older launcher may still require manual retirement. Before retiring the pointer, confirm the fixed sibling itself runs:
+Older versioned runtimes coexist beside the fixed launcher in its installation directory: `~/.local/bin` (Windows `%USERPROFILE%\.local\bin`) for the installer default, or canonical `$CARGO_HOME/bin` (Windows default `%USERPROFILE%\.cargo\bin`) for legacy Cargo/source-built installs. To pin an installed version, run that exact sibling with `--version`, confirm its `.json` sidecar matches the current fixed launcher/runtime baseline, and set `.cruise-runtime-active` to its exact basename; do not delete runtime files. The baseline is the fixed launcher/runtime size-and-mtime stamp: a reinstall that changes it invalidates the overlay, while a same-size, same-mtime replacement is not detected. Legacy pointers or pinning an older launcher may still require manual retirement. Before retiring the pointer, confirm the fixed sibling itself runs:
 
 ```sh
 # macOS / Linux
-bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+# For legacy Cargo/source-built installs, set this to their actual bin directory instead.
+bin="$HOME/.local/bin"
 archive="$bin/.cruise-runtime-active.archive"
 retired="$bin/.cruise-runtime-active.retired"
 test ! -e "$archive" && test ! -e "$retired" &&
@@ -152,7 +153,8 @@ test ! -e "$archive" && test ! -e "$retired" &&
 
 ```powershell
 # Windows
-$bin = if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME 'bin' } else { Join-Path $HOME '.cargo\bin' }
+# For legacy Cargo/source-built installs, set $bin to their actual installation bin.
+$bin = Join-Path $HOME '.local\bin'
 $runtime = Join-Path $bin 'cruise-runtime.exe'
 $pointer = Join-Path $bin '.cruise-runtime-active'
 $archive = "$pointer.archive"

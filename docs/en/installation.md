@@ -32,7 +32,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/smartcrabai/cruise
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/smartcrabai/cruise/releases/latest/download/cruise-installer.sh | sh
 ```
 
-The shell and PowerShell installers place `cruise` in `$CARGO_HOME/bin` (normally `~/.cargo/bin`; on Windows, `%USERPROFILE%\.cargo\bin` when `CARGO_HOME` is unset). Keep that directory on your `PATH`. Supported managed installs can use `cruise update`; see [Updating Cruise](#updating-cruise) below. To install a pinned release, replace `/releases/latest/` in the installer URL with `/releases/download/v<version>/`, for example `v0.2.15`. Keep Homebrew installations managed with Homebrew.
+The shell and PowerShell installers place `cruise` in `~/.local/bin` (on Windows, `%USERPROFILE%\.local\bin`), regardless of `CARGO_HOME`. Keep that directory on your `PATH`. Supported managed installs can use `cruise update`; see [Updating Cruise](#updating-cruise) below. To install a pinned release, replace `/releases/latest/` in the installer URL with `/releases/download/v<version>/`, for example `v0.2.15`. Keep Homebrew installations managed with Homebrew.
 
 <a id="homebrew"></a>
 ### Homebrew
@@ -60,13 +60,13 @@ cruise --version; cruise update; cruise --version
 
 | Installation | Update method |
 |---|---|
-| Shell or PowerShell installer in canonical `$CARGO_HOME/bin` | `cruise update` |
-| Source-built installation in canonical `$CARGO_HOME/bin` | `cruise update`; it installs the official runtime, not your local source build or its build-time changes |
+| Shell or PowerShell installer at `~/.local/bin` (on Windows, `%USERPROFILE%\.local\bin`), or an existing installer install at canonical `$CARGO_HOME/bin` | `cruise update` |
+| Source-built installation at canonical `$CARGO_HOME/bin` | `cruise update`; it installs the official runtime, not your local source build or its build-time changes |
 | Homebrew | `brew upgrade smartcrabai/tap/cruise` |
 | GitHub Action, Docker image, or another external installation | Use that distribution's original update method |
 | Any installation with `CRUISE_RUNTIME` set | Unset the override and run `cruise update` from the managed launcher |
 
-“Managed” is determined by the canonical `$CARGO_HOME/bin` location, not Cargo's install ledger. The updater replaces only the runtime selection: the fixed `cruise` launcher (`cruise.exe` on Windows) remains in place; each update adds a versioned `cruise-runtime-managed-…` runtime and `.json` sidecar and switches `.cruise-runtime-active`. Older runtimes are retained. Native update does not run Cargo or change its install ledger. If you need a custom source-built runtime, rebuild and install it from source instead.
+“Managed” is determined by the executable's location: the installer default `~/.local/bin` (on Windows, `%USERPROFILE%\.local\bin`) or canonical `$CARGO_HOME/bin`, not Cargo's install ledger. The updater replaces only the runtime selection: the fixed `cruise` launcher (`cruise.exe` on Windows) remains in place; each update adds a versioned `cruise-runtime-managed-…` runtime and `.json` sidecar and switches `.cruise-runtime-active`. Older runtimes are retained. Native update does not run Cargo or change its install ledger. If you need a custom source-built runtime, rebuild and install it from source instead.
 
 Updating Cruise does not replace the code in an already running WebUI process. After an update, use `cruise webui status` to compare its version with the current runtime and `cruise webui restart` to load the updated runtime. Restart cancels active WebUI operations, so choose a suitable time.
 

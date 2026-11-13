@@ -30,7 +30,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/smartcrabai/cruise
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/smartcrabai/cruise/releases/latest/download/cruise-installer.sh | sh
 ```
 
-shell 和 PowerShell 安装程序会将 `cruise` 安装到 `$CARGO_HOME/bin`（通常为 `~/.cargo/bin`；Windows 上若未设置 `CARGO_HOME`，则为 `%USERPROFILE%\.cargo\bin`）。请确保该目录位于 `PATH` 中。受支持的托管安装可使用 `cruise update`；参见下文[更新 Cruise](#updating-cruise)。若要安装固定版本，请将安装程序 URL 中的 `/releases/latest/` 替换为 `/releases/download/v<version>/`，例如 `v0.2.15`。Homebrew 安装应继续由 Homebrew 管理。
+shell 和 PowerShell 安装程序会将 `cruise` 安装到 `~/.local/bin`（Windows 上为 `%USERPROFILE%\.local\bin`），不受 `CARGO_HOME` 设置影响。请确保该目录位于 `PATH` 中。受支持的托管安装可使用 `cruise update`；参见下文[更新 Cruise](#updating-cruise)。若要安装固定版本，请将安装程序 URL 中的 `/releases/latest/` 替换为 `/releases/download/v<version>/`，例如 `v0.2.15`。Homebrew 安装应继续由 Homebrew 管理。
 
 <a id="homebrew"></a>
 ### Homebrew
@@ -58,13 +58,13 @@ cruise --version; cruise update; cruise --version
 
 | 安装方式 | 更新方法 |
 |---|---|
-| 通过 shell 或 PowerShell 安装程序安装到规范的 `$CARGO_HOME/bin` | `cruise update` |
+| 使用 shell 或 PowerShell 安装程序安装到 `~/.local/bin`（Windows 上为 `%USERPROFILE%\.local\bin`），或现有的规范 `$CARGO_HOME/bin` 安装 | `cruise update` |
 | 在规范的 `$CARGO_HOME/bin` 中从源码构建安装 | `cruise update`；它会安装官方 runtime，而非本地源码构建版本或其构建时更改 |
 | Homebrew | `brew upgrade smartcrabai/tap/cruise` |
 | GitHub Action、Docker 镜像或其他外部安装 | 使用其原始分发方式更新 |
 | 设置了 `CRUISE_RUNTIME` 的任何安装 | 取消设置该覆盖项，然后从托管 launcher 运行 `cruise update` |
 
-“托管”由规范的 `$CARGO_HOME/bin` 位置决定，而非 Cargo 的安装账本。更新程序只替换 runtime 选择：固定的 `cruise` launcher（Windows 上为 `cruise.exe`）保持不变；每次更新都会添加带版本号的 `cruise-runtime-managed-…` runtime 和 `.json` sidecar，并切换 `.cruise-runtime-active`。旧 runtime 会保留。原生更新不会运行 Cargo，也不会更改其安装账本。如果需要自定义的源码构建 runtime，请从源码重新构建并安装。
+“托管”由可执行文件的位置决定：安装程序默认目录 `~/.local/bin`（Windows 上为 `%USERPROFILE%\.local\bin`）或规范的 `$CARGO_HOME/bin`，而非 Cargo 的安装账本。更新程序只替换 runtime 选择：固定的 `cruise` launcher（Windows 上为 `cruise.exe`）保持不变；每次更新都会添加带版本号的 `cruise-runtime-managed-…` runtime 和 `.json` sidecar，并切换 `.cruise-runtime-active`。旧 runtime 会保留。原生更新不会运行 Cargo，也不会更改其安装账本。如果需要自定义的源码构建 runtime，请从源码重新构建并安装。
 
 更新 Cruise 不会替换已经运行的 WebUI 进程中的代码。更新后，使用 `cruise webui status` 将其版本与当前 runtime 比较，再使用 `cruise webui restart` 加载更新后的 runtime。重启会取消活跃的 WebUI 操作，请选择合适的时间。
 
