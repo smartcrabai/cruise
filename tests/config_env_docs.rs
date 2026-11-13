@@ -26,7 +26,10 @@ fn documented_configuration_overrides_cover_the_public_contract() {
         "CRUISE_LANGUAGE_PLAN",
         "CRUISE_RUN_ALL_PARALLELISM",
     ];
-    for (document, text) in [("docs/en/configuration.md", configuration), ("skills/cruise-cli/SKILL.md", skill)] {
+    for (document, text) in [
+        ("docs/en/configuration.md", configuration),
+        ("skills/cruise-cli/SKILL.md", skill),
+    ] {
         for name in names {
             assert!(
                 text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
