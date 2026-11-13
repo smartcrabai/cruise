@@ -156,7 +156,7 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 cucumber = "=0.23.0"
-jsonschema = { version = "=0.61.0", default-features = false }
+jsonschema = { version = "=0.61.1", default-features = false }
 opentelemetry-proto = { version = "=0.33.1", features = [
   "gen-tonic-messages",
   "trace",
