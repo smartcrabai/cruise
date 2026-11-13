@@ -41,4 +41,4 @@ cruise run
 
 Browse the [English topic index](docs/en/README.md) for CLI, session, SDK, workflow, GitHub Actions, and telemetry guides.
 
-Development, support, and license: [development guide](docs/en/README.md#development-build) · [support](docs/en/README.md#support) · [license](docs/en/README.md#license) · [LICENSE](LICENSE).
+Development, support, and license: [development guide](docs/en/README.md#development-build) · [support](docs/en/README.md#support) · [LICENSE](LICENSE).
