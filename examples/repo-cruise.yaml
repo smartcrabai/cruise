@@ -4,7 +4,7 @@
 # `cruise.yml` / `.cruise.yaml` / `.cruise.yml`, or any `*.yaml`/`*.yml` under
 # a `.cruise/` directory). The action's own config resolution picks it up
 # automatically -- no `config:` input needed, as long as the `config` input
-# is left empty (see "config resolution" in ../docs/github-actions.md).
+# is left empty (see "config resolution" in ../docs/en/github-actions.md).
 #
 # Without a repo config at all, the action generates a similar write-tests ->
 # implement default on the fly (see resolve-config.sh in the action itself),

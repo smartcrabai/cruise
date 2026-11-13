@@ -409,7 +409,7 @@ expected_fail_body="body=❌ **cruise** failed after 0s.
 assert_eq "finalize: failure body is exactly the run-log link plus the single-line FAIL_REASON -- no additional log excerpt" \
   "$expected_fail_body" "${GH_ARGV[5]:-}"
 
-# Security-relevant contract (docs/github-actions.md "Run logs are never
+# Security-relevant contract (docs/en/github-actions.md "Run logs are never
 # posted back to the issue"): FAIL_REASON is the only channel finalize.sh
 # has for surfacing text about the run, and passing it straight through to
 # the gh PATCH body (asserted above/below) is intentional. What must NOT

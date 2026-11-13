@@ -196,7 +196,7 @@ fi
 # is parsed from the new one, not the quoted one.
 #
 # Command-word matching is intentionally strict (first token only) -- see
-# docs/github-actions.md's "Command grammar" section for the exact rule and
+# docs/en/github-actions.md's "Command grammar" section for the exact rule and
 # its false-positive/negative edge cases (e.g. a sentence that happens to
 # start with "fix").
 out proceed true

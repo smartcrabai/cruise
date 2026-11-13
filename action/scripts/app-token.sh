@@ -10,7 +10,7 @@
 #   3. Otherwise, fall back to the workflow's own GITHUB_TOKEN (used_app=false)
 #      -- cruise still runs, but PRs it opens with that token won't trigger
 #      other `on: pull_request` workflows (a GitHub Actions anti-recursion
-#      rule; see docs/github-actions.md).
+#      rule; see docs/en/github-actions.md).
 #
 # The resolved token is masked (`::add-mask::`) before being written to
 # GITHUB_OUTPUT and is never otherwise printed.
