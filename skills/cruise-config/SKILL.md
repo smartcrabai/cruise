@@ -3,7 +3,7 @@ name: cruise-config
 description: Use when creating or editing a cruise YAML config file (cruise.yaml / .cruise.yaml). Covers inline and file-backed prompt steps (`prompt` / `prompt_file`), parallel prompt/command blocks, variables, flow control, groups, after-pr, and validation rules — full spec is split across reference docs.
 ---
 
-cruise is a workflow orchestrator that drives coding agent CLIs like `claude -p` via a YAML config. This skill documents the config file format.
+cruise is a YAML-driven coding-agent workflow orchestrator with the jcode SDK as its primary, default backend (`sdk: jcode`). Claude and OpenCode SDK backends and custom CLI commands are also supported. This skill documents the config file format.
 
 Workflow composition keeps string `workflow_call` references and supports required
 callee `inputs` with string-valued caller `with` mappings. See

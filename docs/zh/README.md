@@ -7,9 +7,9 @@
   <img src="../icon.png" alt="cruise logo" width="160" height="160">
 </p>
 
-Cruise 是一款 CLI 工具，用于编排由 YAML 配置文件定义的编码代理工作流。
+Cruise 是一款以 jcode SDK 为主要且默认后端（`sdk: jcode`）的 YAML 驱动编码代理工作流编排工具。
 
-Cruise 封装了 `claude -p` 等 CLI 编码代理，并通过声明式工作流驱动它们：规划 → 审批 → 编写测试 → 实现 → 测试 → 审查 → 可选地创建 PR 并运行 PR 后自动化流程。它负责在步骤间传递变量、条件分支和循环控制。
+Cruise 通过声明式工作流驱动编码代理：规划 → 审批 → 编写测试 → 实现 → 测试 → 审查 → 可选地创建 PR 并运行 PR 后自动化流程。它负责在步骤间传递变量、条件分支和循环控制。同时支持 Claude 和 OpenCode SDK 后端以及自定义 CLI 命令。
 
 > **注意：** Cruise 可在 macOS、Linux 和 Windows（x86-64，`x86_64-pc-windows-msvc`）上运行。开发和测试主要在 macOS 上进行；Linux 和 Windows 上的验证相对较少。
 

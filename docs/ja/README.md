@@ -6,9 +6,9 @@
   <img src="../icon.png" alt="cruise logo" width="160" height="160">
 </p>
 
-YAML 設定ファイルで定義した coding agent ワークフローを統括する CLI ツールです。
+jcode SDK を標準バックエンド（`sdk: jcode`）とする、YAML ベースの coding agent ワークフローオーケストレーターです。
 
-Cruise は `claude -p` などの CLI coding agent をラップし、宣言型ワークフローに沿って計画 → 承認 → テスト作成 → 実装 → テスト → レビュー → 任意で PR 作成と after-PR 自動処理を進めます。ステップ間の変数の受け渡し、条件分岐、ループ制御を処理します。
+Cruise は宣言型ワークフローに沿って計画 → 承認 → テスト作成 → 実装 → テスト → レビュー → 任意で PR 作成と after-PR 自動処理を進めます。ステップ間の変数の受け渡し、条件分岐、ループ制御を処理します。Claude・OpenCode の SDK バックエンドと任意の CLI コマンドにも対応します。
 
 > **注意:** Cruise は macOS、Linux、Windows（x86-64、`x86_64-pc-windows-msvc`）で動作します。開発とテストは主に macOS で行われています。Linux と Windows での検証範囲は比較的限定されています。
 

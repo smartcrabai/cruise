@@ -4,9 +4,9 @@
   <img src="docs/icon.png" alt="cruise logo" width="160" height="160">
 </p>
 
-A CLI tool that orchestrates coding agent workflows defined in a YAML config file.
+A YAML-driven coding-agent workflow orchestrator with the jcode SDK as its primary, default backend (`sdk: jcode`).
 
-Cruise wraps CLI coding agents such as `claude -p` and drives them through a declarative workflow: plan → approve → write tests → implement → test → review → optionally open a PR and run after-PR automation. It handles variable passing between steps, conditional branching, and loop control.
+Cruise drives agents through declarative workflows: plan → approve → write tests → implement → test → review → optionally open a PR and run after-PR automation. It handles variable passing between steps, conditional branching, and loop control. Claude and OpenCode SDK backends and custom CLI commands are also supported.
 
 > **Note:** Cruise runs on macOS, Linux, and Windows (x86-64, `x86_64-pc-windows-msvc`). Development and testing happen primarily on macOS; Linux and Windows have been verified less extensively.
 
