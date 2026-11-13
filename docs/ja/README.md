@@ -6,11 +6,9 @@
   <img src="../icon.png" alt="cruise logo" width="160" height="160">
 </p>
 
-jcode SDK を標準バックエンド（`sdk: jcode`）とする、YAML ベースの coding agent ワークフローオーケストレーターです。
+Cruise は YAML ベースの AI ワークフローオーケストレーターです。
 
-Cruise は宣言型ワークフローに沿って計画 → 承認 → テスト作成 → 実装 → テスト → レビュー → 任意で PR 作成と after-PR 自動処理を進めます。ステップ間の変数の受け渡し、条件分岐、ループ制御を処理します。Claude・OpenCode の SDK バックエンドと任意の CLI コマンドにも対応します。
-
-> **注意:** Cruise は macOS、Linux、Windows（x86-64、`x86_64-pc-windows-msvc`）で動作します。開発とテストは主に macOS で行われています。Linux と Windows での検証範囲は比較的限定されています。
+Cruise は宣言型ワークフローに沿って計画 → 承認 → テスト作成 → 実装 → テスト → レビュー → 任意で PR 作成と after-PR のような処理を、半決定的に自動で進めます。ステップ間の変数の受け渡し、条件分岐、ループ制御が可能です。Jcodeをベースとしており、リソース消費もかなり小さくなっています。Claude・OpenCode の SDK バックエンドと任意の CLI コマンド（`codex exec` 等）にも対応します。
 
 ## ドキュメント
 
@@ -38,16 +36,8 @@ Cruise は宣言型ワークフローに沿って計画 → 承認 → テスト
 cargo build --bin cruise --bin cruise-runtime
 ```
 
-`cargo test --all-features --test workflow_defaults_cli` は、Unix では 1 MiB のメインスタック予算で CLI の起動も検査します。Windows CI ではネイティブのメインスレッド上限を検証します。
-
 <a id="support"></a>
 
 ## サポート
 
 Cruise が役に立った場合は、開発と保守を支援するため[smartcrabai へのスポンサー](https://github.com/sponsors/smartcrabai)をご検討ください。
-
-<a id="license"></a>
-
-## ライセンス
-
-MIT

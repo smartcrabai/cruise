@@ -37,7 +37,7 @@ Options:
 <a id="cruise-install"></a>
 ## `cruise install`
 
-`cruise install <jcode|claude|opencode> [--force]` 会安装此构建版本固定指定的 provider 版本。`cruise install --status` 会检查受管理的安装，不访问网络，也不会产生副作用。关于解析和身份验证详情，请参阅[受管理的 provider CLI](installation.md#managed-provider-clis)。
+`cruise install <jcode|claude|opencode> [--force]` 会安装 provider CLI。`cruise install --status` 会检查托管安装。Provider CLI 按以下顺序解析：环境变量覆盖项、Cruise 托管安装、PATH。安装命令示例请参阅[托管的 provider CLI](installation.md#managed-provider-clis)。
 
 <a id="cruise-workflow-generate"></a>
 ## `cruise workflow generate`
@@ -46,9 +46,8 @@ Options:
 cruise workflow generate <DESCRIPTION> --name <NAME> [--user] [--config <PATH>]
 ```
 
-根据描述草拟新的 workflow YAML。后端按常规配置解析规则选择（`--config`、`CRUISE_CONFIG`、本地文件、用户 workflows，或内置的 `tdd` workflow）。文件保存到 `./.cruise/<NAME>.yaml`；使用 `--user` 时则保存到用户 workflow 目录（`~/.config/cruise/workflows/`）。`NAME` 只能包含字母、数字、`-` 和 `_`。
+根据描述草拟新的 workflow YAML。文件保存到 `./.cruise/<NAME>.yaml`；使用 `--user` 时则保存到用户 workflow 目录（`~/.config/cruise/workflows/`）。`NAME` 只能包含字母、数字、`-` 和 `_`。
 
-- 回复必须是原始 YAML（不得使用 Markdown 代码围栏）。每个候选项都会在关闭所有 flags 并使用隔离默认值时接受 doctor 静态检查（相对于目标目录解析引用、验证配置、重试预算、编译和图检查）。检查失败时，会将诊断信息和之前的候选项发回，最多修复 3 次（总计 4 轮后端调用）。如果仍然无效，则不会写入任何内容。
 - 通过验证的 YAML 会按返回内容原样保存。同名文件绝不会被覆盖；若文件已存在，则不会调用后端。
 - 生成的 workflow 不会运行，也不会创建 session。
 - 验证不能证明命令安全或 workflow 一定成功。所选 agent 后端仍保留其常规权限，因此生成过程中可能修改仓库。运行前请检查 YAML。
@@ -64,13 +63,13 @@ cruise workflow make --name <NAME> [--user] [--config <PATH>] [--from <SELECTOR>
 
 通过对话创建单个 workflow YAML。stdin 和 stdout 都必须是终端；非交互式起草请使用 `workflow generate`。可选描述会作为第一条请求提交。`--config` 用于选择后端配置，`--from` 用于提供只读参考 workflow，例如 `builtin:tdd` 或文件路径。Cruise 读取参考文件但不会写入它，不过未沙箱化的命令后端可能会修改它。目标路径在启动时即确定：`./.cruise/<NAME>.yaml`，或者使用 `--user` 时的用户 workflow 目录。现有目标不会被覆盖，保留的项目名称 `default` 不能使用。
 
-输入请求以创建或修改草稿。助手可以提问，但不会因此修改草稿。使用 `/show` 检查当前草稿，使用 `/accept` 选择 **写入 workflow**、**继续编辑**或**取消**。在请求提示处按 Escape 或 Ctrl+C 会取消；在审批菜单处按它们会返回编辑。只有选择“写入”才会创建目标文件，并且写入前会重新读取并验证暂存的 YAML。workflow 不会运行，也不会创建 session。
+输入请求以创建或修改草稿。助手可以提问，但不会因此修改草稿。使用 `/show` 检查当前草稿，使用 `/accept` 选择 **写入 workflow**、**继续编辑**或**取消**。只有选择“写入”才会创建目标文件。workflow 不会运行，也不会创建 session。
 
-候选项会通过与 `workflow generate` 相同的 `exec` 预检；每次请求最多修复三次。如果所有尝试都失败，之前的草稿会保持不变。后端回复可以包含说明文字以及最多一个 `<cruise-workflow>` 块；不含该块的回复只作为对话内容。验证不证明命令安全，因此运行前请检查结果。
+每次请求都会验证候选项，并最多尝试修复三次。如果所有尝试都失败，之前的草稿会保持不变。验证不能保证命令安全，因此运行前请检查结果。
 
 写入或取消后，草稿和 `conversation.jsonl` 会保留在 `$XDG_DATA_HOME/cruise/workflow-make/<id>/`（通常为 `~/.local/share/cruise/workflow-make/<id>/`）下。日志包含请求内容。`cruise clean` 不会删除这些目录；不再需要时请手动删除。
 
-后端会被要求以只读方式操作项目目录。某轮执行期间检测到仓库发生变化（包括用户并发所做的更改）会导致该轮失败。命令后端没有沙箱：变更检测不等于阻止修改，而且不覆盖某些路径。如果后端可能改动了仓库，请检查仓库状态。
+命令后端没有沙箱。如果后端可能改动了仓库，请检查仓库状态。
 
 <a id="cruise-workflow-doctor"></a>
 ## `cruise workflow doctor`
@@ -86,7 +85,7 @@ Doctor 对 workflow YAML 执行静态检查，不会执行它，也不会创建 
 
 检查项包括本地 prompt 和 workflow 引用、配置、路由目标、重试预算、flag 名称以及图可达性。解析使用与执行相同的默认值和环境变量覆盖。GitHub workflow 引用会正常解析，可能需要网络访问。Doctor 不会测试后端、模型、身份验证、provider 连通性、命令安全性或依赖运行时的模板变量。
 
-在所选 flags 下，不可达的 step 是警告，不一定是缺陷：由 flag 控制的路径可能本来就不可达。如果从起点无法到达正常出口，则无法到达正常出口的可达环路属于错误。如果存在正常出口，但另一个可达环路无法退出，doctor 会发出警告。已修改的已安装 package 和已弃用的语言设置也会产生警告。
+在所选 flags 下，不可达的 step 是警告，不一定是缺陷。如果从起点无法到达正常出口，则无法到达正常出口的可达环路属于错误。
 
 人类可读报告写入 stdout。`--json` 输出单个对象，包含 `schema_version: 1`、`ok`、`exit_code`、`summary`（`checked`、`passed`、`failed`、`errors`、`warnings`）以及有序的 `targets`。每个 target 包含自身、类型（`project`、`user`、`builtin` 或 `file`）、package 状态、路径、状态（`ok`、`warning`、`error` 或 `unresolved`）、step 数量、重试上限、已声明 flags 和有序诊断。诊断包含 `level`、`code`、`stage`、可空的 `step` 和 `message`。自动化应使用 `code` 和 `step`，不要依赖 message 的措辞。
 
@@ -99,7 +98,7 @@ Doctor 对 workflow YAML 执行静态检查，不会执行它，也不会创建 
 cruise ssh [OPTIONS] <DESTINATION> [-- <CRUISE_ARGS>...]
 ```
 
-`cruise ssh` 会启动一个 `ssh` 客户端进程，并将完整命令委托给远程 `cruise`。未转发参数时，如果有 PTY，远程 `cruise` 会启动 TUI。目标可以是 OpenSSH 的 `[user@]host`，也可以是 `~/.ssh/config` 别名；端口、身份文件、agent 和 ProxyJump 请通过该配置指定。
+`cruise ssh` 会通过 OpenSSH 在远程 `cruise` 上运行命令。未转发参数时，如果有 PTY，远程 `cruise` 会启动 TUI。目标可以是 OpenSSH 的 `[user@]host`，也可以是 `~/.ssh/config` 别名；端口、身份文件、agent 和 ProxyJump 请通过该配置指定。
 
 选项：
 
@@ -148,31 +147,29 @@ Options:
 
 **GitHub issue 输入。** 可使用 `cruise plan '#12'`、`cruise plan --issue 12 'additional instructions'`，或将 `#12` 放在第一行、后续行写附加指令。第一行必须只包含 issue 引用。根命令的位置参数、`--plan`、`draft` 以及 TUI 和 WebUI 的 New Session 任务字段也接受这种语法。只有 `plan` 和 `draft` 接受 `--issue`，根命令和 `exec` 不接受。Issue 查询使用 `gh` 和当前仓库 origin；若提供 `--repo`，则使用其指定仓库。不支持 GitLab issue 输入。Issue 标题、正文、标签和评论会成为任务输入；受支持的 GitHub 图片会作为 session 附件保存，并排在用户提供的图片之前。Issue 编号会写入分支名称和 PR 的关闭引用。Issue 输入会退出 `force_exec` 模式。检索到的 issue 内容是不可信输入，可能包含 prompt injection。
 
-`cruise plan` 会在调用 LLM 前，在 `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` 创建隔离的 git worktree，因此规划阶段的编辑不会触及你的工作副本。Worktree 模式下，`cruise run` 会复用同一 worktree；选择 Current-branch 模式或取消规划时会自动清理它（`--repo` session 会在审批时移除它，并在运行时重新克隆）。非 git 目录会发出警告并在原位置规划，但 `cruise run` 仍需要 git 仓库。
+非 git 目录会发出警告并在原位置规划，但 `cruise run` 仍需要 git 仓库。
 
-成功生成计划后，会通过已启用的渠道（包括已配置的 webhook）尽力发送 **Plan ready** 通知。非取消的生成失败会发送 **Failed**；取消时不发送通知，通知投递不会影响现有清理或错误处理路径。
+指定 `--skip-planning` 时不会调用 LLM：输入会直接写入 `plan.md`。在交互式 TTY 上前台运行 `cruise plan --skip-planning` 仍会打开计划审批菜单；对于非 TTY stdin 和后台根命令 `cruise --plan --skip-planning` 路径，则会自动审批为 Planned。（如果 `force_exec: true`，除非使用 issue 输入或其他退出方式，否则 workflow 会直接执行；显式传入 `--no-force-exec` 可退出。）空输入或仅含空白的输入会被拒绝。若你已自行编写计划，只想让 Cruise 执行它，可使用此选项。
 
-使用 `--skip-planning` 时不会调用 LLM：输入（去除首尾空白后）会直接写入 `plan.md`。在交互式 TTY 上前台运行 `cruise plan --skip-planning` 仍会打开计划审批菜单；对于非 TTY stdin 和后台根命令 `cruise --plan --skip-planning` 路径，则会自动审批为 `Planned`。（如果 `force_exec: true`，除非使用 issue 输入或其他退出方式，否则 workflow 会直接执行；显式传入 `--no-force-exec` 可退出。）空输入或仅含空白的输入会被拒绝。若你已自行编写计划，只想让 cruise 执行它，可使用此选项。WebUI 的 New Session 表单也提供相同功能：勾选 **“将输入用作计划（跳过 LLM 规划）”**；提交按钮仍显示为 **“创建并规划”**。
+指定 `--grill` 后，SDK 规划会进入访谈模式：agent 一次提出一个问题，并在写入 `plan.md` 前推荐回答。它要求使用 SDK 后端（包括默认的 `jcode` 后端）、交互式终端以及 `interactive_planning: true`。它与 `--skip-planning` 冲突，且仅用于初始规划。
 
-使用 `--grill` 时，SDK 规划会变成访谈：agent 一次提出一个问题，并在写入 `plan.md` 前推荐回答。它要求使用 SDK 后端（包括默认的 `jcode` 后端）、交互式终端以及 `interactive_planning: true`；否则 Cruise 会报告错误并丢弃新 session。它与 `--skip-planning` 冲突，且仅用于初始规划；Fix/Ask 轮次、重新规划、草稿和后台规划仍使用标准 prompt。WebUI 的 New Session 表单也提供相同功能，通过 **“向我提问”** 开关启用（与“将输入用作计划”互斥）。
+即使 workflow 配置中的 `interactive_planning: true`，传入 `--no-interactive-planning` 后，SDK 规划也会采用直接写入文件的流程。该 flag 与 `--grill` 冲突。
 
-使用 `--no-interactive-planning` 时，即使 workflow 配置中的 `interactive_planning: true`，SDK 规划也会采用直接写入文件的流程。Agent 会像 `command` 模式一样直接写入 `plan.md`。该 flag 与 `--grill` 冲突；它等价于设置 `interactive_planning: false`，但仅影响当前 session。WebUI 的 New Session 表单也提供相同功能，通过 **“非交互式规划”** 复选框启用（与“向我提问”互斥）。
-
-**内置 workflow flags。** 六个通用内置 workflow（`tdd`、`refactor`、`add-tests`、`add-formal-specs`、`research` 和 `security`）声明了 `after_pr` 和 `merge`；除非显式启用，否则所有 flags 都为关闭状态。`pr-review-fix` 不声明任何 flags。`tdd` 和 `refactor` 还声明了 `browser_e2e`、`app_e2e` 和 `formal_methods`。例如，`cruise plan -c builtin:tdd -f browser_e2e,app_e2e "task"` 仅启用两个 E2E flags；`cruise plan -c builtin:tdd -f merge "task"` 则选择执行 after-PR 自动化以及原生同步 squash merge。`-f browser_e2e,app_e2e,merge` 可组合这些选项。`merge` 会执行与 `after_pr` 相同的 after-PR 前置流程，且只执行一次；仅启用 `after_pr` 绝不会合并。隐含的前置流程不会在 session 的稀疏保存 flag 映射中添加或重写 `after_pr`。
+**内置 workflow flags。** 六个通用内置 workflow（`tdd`、`refactor`、`add-tests`、`add-formal-specs`、`research` 和 `security`）声明了 `after_pr` 和 `merge`；除非显式启用，否则所有 flags 都为关闭状态。`pr-review-fix` 不声明任何 flags。`tdd` 和 `refactor` 还声明了 `browser_e2e`、`app_e2e` 和 `formal_methods`。例如，`cruise plan -c builtin:tdd -f browser_e2e,app_e2e "task"` 仅启用两个 E2E flags；`cruise plan -c builtin:tdd -f merge "task"` 则选择执行 after-PR 自动化以及原生同步 squash merge。`-f browser_e2e,app_e2e,merge` 可组合这些选项。`merge` 会执行与 `after_pr` 相同的 after-PR 前置流程，且只执行一次；仅启用 `after_pr` 绝不会合并。
 
 - `browser_e2e` 启用实际的浏览器操作、断言和失败修复。
 - `app_e2e` 启用适用的移动端和桌面端原生应用操作，并使用仓库/平台原生 runner。
 - `after_pr` 启用 after-PR 自动化，但不执行合并。
-- `merge` 选择相同的 after-PR 前置流程，并在最后执行原生同步 squash merge。在 GitHub 上，合并就绪检查会核对当前 base 的祖先关系；确认 PR 落后/分叉，或状态为 `CONFLICTING`/`DIRTY` 时，会转入内置的同步 base 恢复流程。只有 `squash-merge` 通过原生 `ResyncRequired` 路由到其 `if.fail` 目标时，才会启动新一轮 after-PR 流程：它会重置除 `squash-merge` → target 以外每条 after-PR 边的 `budgeted_traversals`，并清除 group 重试计数，同时保留边遍历历史。重新同步边仍受 `max_retries` 限制；通用 `if.fail` 保留共享预算。最坏情况下最多重新同步 `max_retries` 次，每轮允许最多 `max_retries - 1` 次 CI 修复迭代；重试预算为零时不会重新同步。其他就绪检查失败仍会失败，GitLab 行为不变。它不会启用自动合并、绕过策略或使用合并队列。
+- `merge` 选择相同的 after-PR 前置流程，并在最后执行原生同步 squash merge。在 GitHub 上，合并前会自动同步并恢复落后于 base 或存在冲突的 PR。GitLab 不执行此恢复。它不会启用自动合并、绕过策略或使用合并队列。
 - `formal_methods` 启用 workflow 级可执行 Quint、Alloy 和 Gherkin 规范及 CI；它不是初始计划模式。
 
 `research` 仍为只读且 `create_pr: false`；`merge` 不会创建 PR，也不会覆盖该禁止创建 PR 的策略。如果因为未创建 PR 而无法执行已启用的 after-PR 操作（包括 `research`、`exec`、Current-branch 运行或没有提交的运行），Cruise 会跳过该操作并打印原因。
 
-使用 `--repo <owner/repository>` 时，session 的目标会从当前目录切换为 GitHub 或 GitLab 仓库。仓库通过 `gh repo clone`（GitLab 使用 `glab repo clone`）克隆到 `$XDG_DATA_HOME/cruise/clones/<session-id>/`，并成为 session 的基目录。Repo session 始终以 Worktree 模式运行，并且仍需要 `gh`/`glab` 访问仓库。若 `create_pr: false`，Cruise 会跳过自动提交、推送、PR 创建、`after-pr` 和基于 PR 的清理，同时保留常规 session、产物和 worktree/克隆。否则，计划获批后会移除规划 worktree 和克隆（仅保留分支名称），然后 `cruise run` 会重新克隆并创建 worktree；PR 创建后会移除克隆。成功运行若没有新的分支提交，会在不尝试创建 PR 的情况下完成；现有分支提交仍可用于创建 PR。Repo 或本地 worktree session 的发布失败都会进入 **PR Failed**，并保留 workspace 以便通过 **Create PR** 恢复，而不会重新运行 workflow。若配置文件位于克隆内（或找不到配置文件时使用内置的 `tdd`），会将其复制到 `sessions/<session-id>/config.yaml`，以便克隆移除后仍可读取，包括内联的 `prompt_file` 内容；外部 `-c` 路径或 `CRUISE_CONFIG` 文件则原位引用。`--repo` 也适用于后台规划（`cruise --plan "task" --repo owner/repository`）。WebUI 的 New Session 表单也提供相同功能：切换到 **“目录 / 仓库（GitHub 或 GitLab）”** 来源，并使用由 `gh repo list`（若 `CRUISE_FORGE=gitlab` 则使用 `glab repo list`）提供的仓库选择器（也接受自由格式的 `owner/repository` 输入）。
+使用 `--repo <owner/repository>` 时，session 的目标会从当前目录切换为 GitHub 或 GitLab 仓库。Repo session 始终以 Worktree 模式运行，并且仍需要 `gh`/`glab` 访问仓库。若 `create_pr: false`，Cruise 会跳过自动提交、推送、PR 创建、`after-pr` 和基于 PR 的清理。成功运行若没有新的分支提交，会在不尝试创建 PR 的情况下完成；现有分支提交仍可用于创建 PR。Repo 或本地 worktree session 的发布失败都会进入 **PR Failed**，并保留 workspace 以便通过 **Create PR** 恢复，而不会重新运行 workflow。`--repo` 也适用于后台规划（`cruise --plan "task" --repo owner/repository`）。自由输入的 `owner/repository` 也受支持。
 
 **修复现有 GitHub PR 的评审。** 在仓库中运行 `cruise plan --pr 12`，或运行 `cruise plan --repo owner/repo --pr 12 "focus on tests"`；如出现提示，先审批生成的计划，再运行 `cruise run <session-id>`。可选的位置文本是附加指令；此模式不会读取 stdin，也不会调用 LLM 生成计划。TUI 和 WebUI 的新建 session 表单也接受 GitHub 仓库的 PR 编号。此功能需要已通过身份验证的 `gh`。PR 必须处于开放状态，并且在同一仓库中具有非空 head 分支；支持 draft PR，但不支持 fork PR 和 GitLab merge request。`--grill` 和 `--image` 不能与 `--pr` 同时使用。
 
-默认 workflow 是 `builtin:pr-review-fix`，而不是项目 workflow。自定义 `-c` workflow 必须启用 PR 处理，并包含一个设置了 `reviewers: all` 的 after-PR `github-review` step。内置 workflow 不声明 flags，会使用 `git pull --ff-only` 同步现有 head，并在不创建或合并 PR 的情况下处理评审。Session 固定在 PR head 分支的隔离 worktree 上，并跟踪 `origin/<head>`；分支已分叉或已在其他位置检出时会报错，而不是重置。清理会移除 worktree，但保留 PR head 分支。评审循环会提交并推送修复、回复或解决符合条件的讨论串，并写入 `review-report.json`。失败时会保留可重试的 session。PR session 不提供“发布为 Issue”和“重新规划”。
+默认 workflow 是 `builtin:pr-review-fix`，而不是项目 workflow。自定义 `-c` workflow 必须启用 PR 处理，并包含一个设置了 `reviewers: all` 的 after-PR `github-review` step。内置 workflow 不声明 flags，不创建或合并 PR，仅处理评审。评审循环会提交并推送修复、回复或解决目标讨论串；失败的 session 可以重试。PR session 不提供“发布为 Issue”和“重新规划”。
 
 <a id="cruise-draft"></a>
 ## `cruise draft`
@@ -211,17 +208,15 @@ Options:
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable; conflicts with --all)
 ```
 
-**Workflow flags。** Workflow 配置可以声明 `flags:`，并通过 `flag: <name>` 将它们附加到 steps。只有有效值为 on 时，带 flag 的 step 才会运行；未设置的 flags 默认为 off。使用 `--flag NAME` 启用一个，使用 `--flag browser_e2e,app_e2e` 启用多个，也可以重复使用 `--flag`；`-f` 是 `--flag` 的别名。仍支持显式的 `NAME=on|off|true|false` assignment，因此 `--flag NAME=off` 可覆盖已保存的启用值。每次 `cruise run` 都会将保存的 flag 值与显式 CLI 覆盖合并；即使没有 flag selector，也包括全新运行、恢复运行、`run --all` 和从 `cruise list` 选择 Run。未知名称会被拒绝，且 `--flag` 与 `--all` 冲突。除非已提供 `-f/--flag`，否则 Approve 和 Execute now 会先选择 flags，再选择要跳过的 steps。在该选择器中，已保存的启用值会预先选中；按 Space 切换选项，按 Enter 确认，已选 flags 保存为 on，未选 flags 保存为 off。未选择任何项时，所有已声明 flags 均为 off。Execute now 会转发该 flag 选择，执行开始时不会再次提示。若未提供 `-f/--flag`，`cruise exec` 和 `force_exec` 入口会在 TTY 上选择 flags，但 dry run 或未声明任何 flags 的 workflow 不会提示。TUI 和 WebUI 的 Info 标签页会以 `NAME=on|off` 显示所有已声明 flags，未指定的 flags 显示为 off。TUI New Session 中的 flags 初始为 off，按 Enter 可直接继续，无需选择；WebUI 的 on/off 选择器默认设为 off。CLI、TUI 和 WebUI 的跳过选择器，以及 WebUI 和 TUI 的 Graph 标签页，都会隐藏被 flag 禁用的 steps；旧版无版本号的图 checkpoint 则不做过滤，照常显示。TUI 的 Edit Settings 对话框接受 `flag:NAME=on|off` 行。参见[顶层结构](../../skills/cruise-config/references/top-level.md#flags)。
+**Workflow flags。** Workflow 配置可以声明 `flags:`，并通过 `flag: <name>` 将它们附加到 steps。只有有效值为 on 时，带 flag 的 step 才会运行；未设置的 flags 默认为 off。使用 `--flag NAME` 启用一个，使用 `--flag browser_e2e,app_e2e` 启用多个，也可以重复使用 `--flag`；`-f` 是 `--flag` 的别名。仍支持显式的 `NAME=on|off|true|false` assignment，因此 `--flag NAME=off` 可覆盖已保存的启用值。每次 `cruise run` 都会将保存的 flag 值与显式 CLI 覆盖合并，且不会显示 flag 选择器；这包括全新运行、恢复运行、`run --all` 和从 `cruise list` 选择 Run。未知名称会被拒绝，且 `--flag` 与 `--all` 冲突。若未提供 `-f/--flag`，Approve 和 Execute now 会先选择 flags，再选择要跳过的 steps。已保存的启用 flags 会预先选中；按 Space 切换，按 Enter 确认。若未选择任何项，所有已声明 flags 均为 off。
 
-`--all` 默认按顺序运行所有 Planned 或 Suspended session。它始终强制使用 Worktree 模式（即使 session 最初以 current-branch 模式启动）。所有 session 完成后会打印汇总表，显示每个 session 的结果和 PR 链接。如果 session 状态文件无法重新载入以生成汇总，该 session 会报告为 `Failed`，并列出状态路径和错误，但整个批次仍会完成。`--all` 和 `[SESSION]` 不能同时使用。
+`--all` 默认按顺序运行所有 Planned 或 Suspended session。无论 session 最初以何种模式创建，都会强制使用 Worktree 模式。所有 session 完成后会打印汇总表，显示每个 session 的结果和 PR 链接。`--all` 和 `[SESSION]` 不能同时使用。
 
-每次运行尝试只要到达已持久化的 `Completed` 或 `Failed` 状态，就会通过已启用的渠道（包括已配置的 webhook）尽力发送通知。这包括自动重试前的中间失败。Run All 批次不会额外发送汇总通知。Option 提示和交互式规划问题会在等待输入前立即发送 **Action required**。
+`--parallelism <N>` 是仅对当前调用生效的覆盖设置，用于在 `--all` 期间并发运行最多 `N` 个 session。省略时默认为 `1`（顺序运行），必须至少为 `1`，且只有指定 `--all` 时才可用。每个 session 都在自己的 worktree 中运行；一个 session 失败不会停止其他 worker；Ctrl+C 会暂停正在运行的 session，并停止安排新的 session。
 
-`--parallelism <N>` 是仅对当前调用生效的覆盖设置，用于在 `--all` 期间并发运行最多 `N` 个 session。省略时默认为 `1`（顺序运行），必须至少为 `1`，且只有指定 `--all` 时才可用。每个并发 session 仍在自己的 worktree 中运行；一个 session 失败不会停止其他 worker；Ctrl+C 会暂停正在运行的 session，并停止安排新的 session。此 flag 不读取或修改已持久化的 WebUI/TUI 设置（`cruise config --set-parallelism`）。
+`--auto-requeue-max-attempts <N>` 仅覆盖本批次的自动重新排队上限。默认值为 `0`（禁用）。
 
-`--auto-requeue-max-attempts <N>` 仅覆盖本批次使用的已持久化 auto-requeue 上限。与 parallelism 不同，如果省略此 flag，CLI Run All 会读取已持久化的上限。默认值为 `0`（禁用）。
-
-当 stderr 是交互式终端且未设置 `--dry-run` 时，`run --all` 会显示实时仪表板，列出每个已安排 session 的标题、当前 step、状态和已用时间；详细 agent 输出仍保存在该 session 的 `sessions/{id}/run.log` 中。在 CI 等非 TTY 环境或执行 `--dry-run` 时，会保留常规日志输出和最终汇总行为。
+当 stderr 是交互式终端且未设置 `--dry-run` 时，`run --all` 会显示实时仪表板，列出每个已安排 session 的标题、当前 step、状态和已用时间。在 CI 等非 TTY 环境或执行 `--dry-run` 时，会保留常规日志输出和最终汇总。
 
 <a id="cruise-exec"></a>
 ## `cruise exec`
@@ -246,9 +241,9 @@ Options:
   -f, --flag <NAME[,NAME...]>     Enable named workflow flags; NAME=on|off|true|false also works (repeatable; see Workflow flags)
 ```
 
-直接在当前目录运行 workflow steps：不生成计划、不创建 git worktree，也不会自动创建 PR。Workflow 运行期间会记录一个临时 session；进入终止阶段后会自动删除。因等待输入而暂停的 session（`Running`），或因 Ctrl+C 中断的 session（`Suspended`）会保留，并可通过 `cruise run <id>` 恢复；exec session 不会被 `cruise run` 自动选中，也不会纳入 `cruise run --all`。允许存在未提交的更改；cruise 会在这些更改之上运行，不会 stash、提交或重置工作树，并会警告 workflow 生成的文件可能与现有更改混在一起。仍然必须处于一个已附加的分支上。
+直接在当前目录运行 workflow steps：不生成计划、不创建 git worktree，也不会自动创建 PR。因等待输入而暂停的 session（`Running`），或因 Ctrl+C 中断的 session（`Suspended`）会保留，并可通过 `cruise run <id>` 恢复；exec session 不会被 `cruise run` 自动选中，也不会纳入 `cruise run --all`。允许存在未提交的更改；Cruise 会在这些更改之上运行，不会 stash、提交或重置工作树，并会警告 workflow 生成的文件可能与现有更改混在一起。仍然必须处于一个已附加的分支上。
 
-`--instant` 会显式选择在内存中组装 workflow，而不是解析 `CRUISE_CONFIG` 或本地 workflow 文件。未指定该选项时，`cruise exec` 仍使用常规配置解析：没有配置文件时，交互式终端会在分类选择器中提供内置 workflow；非交互执行会自动选择 `tdd`。Instant 要求非空白任务，并包含一个 implement step。Workflow 默认值可以在开头插入 command pre-steps。它不会将 workflow 写入仓库；session 存在期间，现有 session 会保留 inline 配置快照。Workflow 默认值和环境变量覆盖仍然生效，且 `CRUISE_SDK` / `CRUISE_MODEL` 会覆盖 `--sdk` / `--model`。
+`--instant` 会在内存中组装一个包含单个 implement step 的 workflow，不解析 workflow YAML。未指定时，`cruise exec` 仍使用常规配置解析。没有配置文件时，交互式终端会在分类选择器中提供内置 workflow；非交互执行会自动选择 `tdd`。Instant 要求非空白任务。Workflow 默认值可以在开头插入 command pre-steps；workflow 默认值和环境变量覆盖仍然生效，且 `CRUISE_SDK` / `CRUISE_MODEL` 优先于 `--sdk` / `--model`。
 
 ```sh
 cruise exec --instant --sdk jcode --model my-model --review --review-rounds 2 \
@@ -256,9 +251,9 @@ cruise exec --instant --sdk jcode --model my-model --review --review-rounds 2 \
 cruise exec --instant --dry-run "implement the feature"
 ```
 
-Review 会修复已确认的缺陷；当 review 轮次更改了文件时，会在指定轮数内重复执行（默认 2 轮）。某轮未产生更改时循环结束；最后允许的轮次中所做的修改不会再接受 review。验证命令按提供顺序在实现和任何 review 之后运行；命令失败会使运行失败，不会启动自动修复循环。空验证命令以及包含大括号的命令会被拒绝。`--max-retries`、`--rate-limit-retries` 和 `--dry-run` 也适用；若 `--max-retries` 预算小于 review 轮数，则无效。Instant 不声明 workflow flags，且不能与 `-c` 或 `-f` 同时使用。它要求在已附加分支的 git 仓库中运行。远程使用方式为 `cruise ssh <host> -- exec --instant "task"`。
+Review 会修复已确认的缺陷；当 review 轮次更改了文件时，会在指定轮数内重复执行（默认 2 轮）。某轮未产生更改时循环结束。验证命令按提供顺序在实现和 review 之后运行；命令失败会使运行失败，不会启动自动修复循环。`--max-retries`、`--rate-limit-retries` 和 `--dry-run` 也适用；若 `--max-retries` 预算小于 review 轮数，则无效。Instant 不声明 workflow flags，且不能与 `-c` 或 `-f` 同时使用。它要求在已附加分支的 git 仓库中运行。远程使用方式为 `cruise ssh <host> -- exec --instant "task"`。
 
-当 workflow 配置中设置了 `force_exec: true` 时，传统的位置参数形式 `cruise "task"`（精确输入 `ssh` 和 `mcp-bridge` 除外，因为它们保留给对应子命令）、`cruise plan "task"` 和 `cruise --plan "task"` 都会使用当前目录执行路径，不进行规划、不创建 worktree，也不创建 PR。`--no-force-exec`、`--repo`、`--grill`、issue 输入和图片附件会退出该模式；`--skip-planning` 和 `--no-interactive-planning` 不会退出。由于直接执行没有 plan worker，后台 `--plan` 会以前台方式运行。如果 stdin 是 TTY 且没有提供 `-f/--flag`，`exec` 和这些 `force_exec` 入口会在创建 session 前显示 flag 选择器；dry run、管道输入（包括 `--plan stdin`）以及未声明 flags 的 workflow 不会提示。按 ID 恢复保留的 exec session 时，会沿用其已保存 flags，不会提示。
+当 workflow 配置中设置了 `force_exec: true` 时，传统的位置参数形式 `cruise "task"`、`cruise plan "task"` 和 `cruise --plan "task"` 都会使用当前目录执行路径，不进行规划、不创建 worktree，也不创建 PR。`--no-force-exec`、`--repo`、`--grill`、issue 输入和图片附件会退出该模式；`--skip-planning` 和 `--no-interactive-planning` 不会退出。
 
 <a id="cruise---plan"></a>
 ## `cruise --plan`
@@ -267,13 +262,13 @@ Review 会修复已确认的缺陷；当 review 轮次更改了文件时，会�
 cruise --plan <INPUT|stdin> [--skip-planning] [--no-force-exec] [--repo <OWNER/REPO>] [--image <PATH>]... [--flag <VALUE>]...
 ```
 
-立即创建 session，在分离的 worker 中启动计划生成，然后返回新 session ID。Worker 运行期间，`cruise list` 会将该 session 显示为 `Planning`。若生成失败，session 内部仍处于 `AwaitingApproval` 阶段，但 `cruise list` 会显示 `Plan Failed`；规划成功前审批会保持禁用状态。
+立即创建 session，在分离的 worker 中启动计划生成，然后返回新 session ID。Worker 运行期间，`cruise list` 会将该 session 显示为 `Planning`。若生成失败，`cruise list` 会显示 `Plan Failed`；规划成功前审批会保持禁用状态。
 
-添加 `--skip-planning` 会完全跳过后台 worker：输入会直接写入 `plan.md`，session 创建时即处于 `Planned` 状态，无需审批（若 `force_exec: true`，除非使用 issue 输入或其他退出方式，否则 workflow 会直接执行；显式传入 `--no-force-exec` 可退出）。不带 `--plan` 时也可使用此 flag（例如 `cruise --skip-planning "task"`），此时行为与 `cruise plan --skip-planning "task"` 相同。
+添加 `--skip-planning` 会跳过后台 worker：输入会直接写入 `plan.md`，session 创建时即处于 `Planned` 状态，无需审批（若 `force_exec: true`，除非使用 issue 输入或其他退出方式，否则 workflow 会直接执行；显式传入 `--no-force-exec` 可退出）。不带 `--plan` 时也可使用此 flag（例如 `cruise --skip-planning "task"`），此时行为与 `cruise plan --skip-planning "task"` 相同。
 
-此处也接受 `--repo <owner>/<repository>`，其行为与 [`cruise plan`](#cruise-plan) 中描述的一样：仓库会克隆到临时目录，session 以该克隆为目标。此路径不支持 `--grill`，因为后台规划期间没有交互用户可接受访谈。
+此处也接受 `--repo <owner>/<repository>`，并按 [`cruise plan`](#cruise-plan) 中所述将该仓库作为 session 目标。此路径不支持 `--grill`，因为后台规划期间没有交互用户可接受访谈。
 
-没有子命令、没有 `--plan` 且没有位置输入时，若 stdin 不是 TTY，则会读取到结尾并将去除首尾空白的内容作为位置输入。因此，`echo "task" | cruise` 会使用传统的位置参数路径，按 `cruise plan "task"` 规划（仍适用 `--skip-planning`、`--no-force-exec`、`--repo` 和 `--image`）。空白管道输入会被忽略；stdin 为交互式时，不带参数的调用仍会打开 TUI。若要在后台规划路径上显式读取管道输入，请传入 `--plan stdin`。
+没有子命令、没有 `--plan` 且没有位置输入时，若 stdin 不是 TTY，则会读取到结尾并将内容作为位置输入。因此，`echo "task" | cruise` 会使用传统的位置参数路径，按 `cruise plan "task"` 规划（仍适用 `--skip-planning`、`--no-force-exec`、`--repo` 和 `--image`）。stdin 为交互式时，不带参数的调用仍会打开 TUI。若要在后台规划路径上显式读取管道输入，请传入 `--plan stdin`。
 
 <a id="cruise-tell"></a>
 ## `cruise tell`
@@ -287,7 +282,7 @@ cruise ssh devbox --cwd /srv/project -- tell <session-id> "Check the logs"
 
 只能向正在运行的 Running session 提交指令。省略指令可从非交互式 stdin 读取；`--log` 会读取指令历史，不会提交指令。被接受不代表已送达：当前正在运行的 agent step 无法看到新指令。指令会追加到下一个 agent prompt 中，包括并行块中的所有 prompt 子步骤，但不包括 command 或 option steps。它不能更改权限、提交策略、输出格式或 workflow 转换。
 
-每条指令都会去除首尾空白，长度上限为 8,192 字节；最多可有 20 条待处理指令，总计最多 65,536 字节。已送达或过期的项目均为终止状态。运行完成时，未送达的指令会过期；运行失败或暂停时会保留这些指令，供之后的运行使用；重置为 planned 时会使它们过期。投递至少一次：若发生崩溃或未能记录确认，可能会重复投递。Session 的 XDG 数据目录会存储 `instructions.jsonl` 及其锁文件；`--log` 会显示状态。不要在指令中放入机密。
+每条指令都会去除首尾空白，长度上限为 8,192 字节；最多可有 20 条待处理指令，总计最多 65,536 字节。运行完成时，未送达的指令会过期；运行失败或暂停时会保留这些指令，供之后的运行使用；重置为 planned 时会使它们过期。不要在指令中放入机密。
 
 <a id="cruise-list"></a>
 ## `cruise list`
@@ -299,7 +294,7 @@ Options:
       --json   Print all sessions as a JSON array to stdout instead of opening the interactive selector
 ```
 
-不带 flags 时，会打开交互式 session 浏览器，其菜单取决于每个 session 所处阶段（参见 [`cruise list` 操作](sessions.md#cruise-list-actions)）。使用 `--json` 时，会将所有 session 以 JSON 数组输出（id、phase、input、PR URL、plan-error 信息、`pending_instructions` 等），然后退出；适合脚本处理或将 session 状态提供给外部工具。
+不带 flags 时，会打开交互式 session 浏览器，其菜单取决于每个 session 所处阶段（参见 [`cruise list` 操作](sessions.md#cruise-list-actions)）。使用 `--json` 时，会将所有 session 以 JSON 数组输出，然后退出。
 
 <a id="cruise-diff"></a>
 ## `cruise diff`
@@ -308,9 +303,9 @@ Options:
 cruise diff <SESSION_ID> [--stat]
 ```
 
-查看 session 分支的补丁；使用 `--stat` 可查看摘要。比较基点为 session 分支与基仓库当前 HEAD 的 merge-base。随着 HEAD 移动，比较基点可能变化。Worktree 存在时，diff 包含已提交和未提交的受跟踪更改及未跟踪文件，但排除基仓库 `.worktreeinclude` 中列出的未跟踪路径和嵌套仓库。即使受跟踪更改列在 `.worktreeinclude` 中，仍会包含在内。若 worktree 不存在，则只显示分支中已提交的更改。补丁输出上限为 1 MiB，最多包含 200 个未跟踪文件；发生截断时会报告。
+查看 session 分支的补丁；使用 `--stat` 可查看摘要。Worktree 存在时，diff 包含已提交和未提交的受跟踪更改及未跟踪文件。若 worktree 不存在，则只显示分支中已提交的更改。
 
-当终端可用时，完整补丁会通过 `less -R` 显示，否则会直接写入 stdout。`--stat` 会直接写入 stdout。列表中的 **View Diff** 操作会在之后返回菜单。TUI 和 WebUI 也提供 Diff 详情标签页；在 TUI 中按 `r` 刷新，或在 WebUI 标签页中点击 **Refresh** 以重新加载。
+当终端可用时，完整补丁会通过 `less -R` 显示；否则会直接写入 stdout。`--stat` 会直接写入 stdout。
 
 此功能要求 session 有 worktree 分支。不支持 Current-branch session；创建 PR 后的清理期间可能会删除该分支（包括默认的 `builtin:tdd` workflow）。清理后请使用 **Open PR** 查看更改。Diff 输出是文本，不是 JSON。
 
@@ -335,13 +330,13 @@ Options:
 
 `cruise config --set-language ja` 会保存应用设置 `uiLanguage`（读取时也接受 `ui_language`）。使用 `--set-language auto` 可清除该设置，并恢复自动选择。支持的显式标签为 `en`、`zh-CN`、`es`、`fr`、`pt-BR`、`ja` 和 `ko`。大小写不敏感，且可用下划线替代连字符；但不接受 `pt` 和 `en-US` 等其他标签。`cruise config` 会报告生效的 `ui_language` 及其来源：`env`、`config`、`system` 或 `default`。
 
-CLI 和 TUI 的 UI 语言优先级为 `CRUISE_UI_LANGUAGE` > 应用设置 `uiLanguage` > 系统区域设置 > `en`。环境值为空或为 `auto`，以及配置值未设置或为 `auto`，都会使该层保持未指定。无效的环境值会以英语警告并忽略；CLI setter 和应用配置验证会拒绝无效值。POSIX 区域设置检测按顺序使用 `LC_ALL`、`LC_MESSAGES`、`LANG` 和 `LANGUAGE` 中第一个非空值；若该值不受支持，不会尝试后续变量。若环境变量无法确定区域设置，Windows 会查询用户区域设置。macOS 和 Linux 只查询环境变量，因此 GUI 启动时若没有这些变量，默认使用英语。系统区域设置匹配接受地区变体，包括将葡萄牙语区域设置映射为巴西葡萄牙语、将简体中文区域设置映射为 `zh-CN`。
+CLI 和 TUI 的 UI 语言优先级为 `CRUISE_UI_LANGUAGE` > 应用设置 `uiLanguage` > 系统区域设置 > `en`。环境值为空或为 `auto`，以及配置值未设置或为 `auto`，都会使该层保持未指定。无效的环境值会以英语警告并忽略；CLI setter 和应用配置验证会拒绝无效值。
 
-`cruise config --set-auto-requeue-max-attempts <N>` 会为 CLI、TUI 和 WebUI Run All 设置 `run_all_auto_requeue_max_attempts`。CLI flag `--auto-requeue-max-attempts <N>` 会在单个批次中覆盖该值。批次开始时会读取一次此上限。
+`cruise config --set-auto-requeue-max-attempts <N>` 会为 CLI、TUI 和 WebUI Run All 设置 `run_all_auto_requeue_max_attempts`。CLI flag `--auto-requeue-max-attempts <N>` 会在单个批次中覆盖该值。
 
-在机器级 `config.yaml` 中设置 `prevent_sleep: true`（或在 `config.json` 中设置 `"prevent_sleep": true`），可在 macOS 运行期间防止系统休眠；默认值为 `false`。Cruise 会让多个启用此功能且时间重叠的运行共享 `/usr/bin/caffeinate -dis -w <pid>`，并在最后一个运行结束时停止它。这也适用于 CLI、TUI 和 WebUI 运行，但不适用于单独规划。其他操作系统不执行任何操作。加载设置或启动 caffeinate 失败时只会发出警告，不会导致运行失败；后续运行会重试。更改会在下一次运行时生效。项目 `default.yaml` 不支持此设置。
+在机器级 `config.yaml` 中设置 `prevent_sleep: true`（或在 `config.json` 中设置 `"prevent_sleep": true`），可在 macOS 运行期间防止系统休眠；默认值为 `false`。这适用于 CLI、TUI 和 WebUI 运行，但不适用于单独规划。其他操作系统不执行任何操作。更改会在下一次运行时生效。项目 `default.yaml` 不支持此设置。
 
-如果两个文件都存在，则 `config.json` 优先；否则使用现有的 `config.yaml`。两个文件都不存在时，更新设置会创建 `config.json`。文件不会合并；所选文件无效时会报错，不会因此尝试另一种格式。更新会按所选文件格式写回；YAML 注释不会保留。
+如果两个文件都存在，则 `config.json` 优先；否则使用现有的 `config.yaml`。文件不会合并。更新会按所选文件格式写回；YAML 注释不会保留。
 
 <a id="notifications"></a>
 ### 通知
@@ -360,22 +355,22 @@ notifications:
     failed: { desktop: true, sound: true, webhook: true }
 ```
 
-事件键为 `actionRequired`、`planReady`、`completed` 和 `failed`；也接受 `action_required` 和 `plan_ready`。每个事件都可以指定 `desktop`、`sound` 和 `webhook`。省略事件开关时默认为 true，但不能覆盖已禁用的渠道主开关。声音与桌面横幅相互独立。macOS 和 Linux 会在可用时使用系统声音播放器；播放失败会被忽略。Windows 不发送桌面横幅或声音，但支持 webhook。
+事件键为 `actionRequired`、`planReady`、`completed` 和 `failed`；也接受 `action_required` 和 `plan_ready`。每个事件都可以指定 `desktop`、`sound` 和 `webhook`。省略事件开关时默认为 true，但不能覆盖已禁用的渠道主开关。声音与桌面横幅相互独立。Windows 不发送桌面横幅或声音，但支持 webhook。
 
-在 Cruise 进程环境中设置 `CRUISE_NOTIFY_WEBHOOK`，其值为 Slack Incoming Webhook URL。不要将机密 URL 放入设置文件。若该 URL 未设置、为空或不是有效的 HTTP(S) URL，则 webhook 投递会被禁用。Cruise 会 POST 以下形式的 JSON：`{"text":"Cruise: <event> -- <detail>"}`，并转义 Slack 敏感字符 `&`、`<` 和 `>`；detail 最多 60 个字符。请将目标端视为可能会接收到敏感任务详情。请求超时为 10 秒，不跟随重定向，也不会重试。
+在 Cruise 进程环境中设置 `CRUISE_NOTIFY_WEBHOOK`，其值为 Slack Incoming Webhook URL。不要将机密 URL 放入设置文件。若该 URL 未设置、为空或不是有效的 HTTP(S) URL，则 webhook 投递会被禁用。请将目标端视为可能会接收到敏感任务详情。
 
-投递尽最大努力进行。Webhook 失败时，会在 `$XDG_STATE_HOME/cruise/notification-webhook-error` 记录错误，但不包含 URL；若存在该记录，`cruise config` 会显示最近的错误分类和 Unix 时间戳；webhook 成功后会清除此记录。非默认通知设置也会显示在 `cruise config` 中，但绝不会显示 webhook URL。CLI 同步投递通知；TUI 和 WebUI 则会在 UI 路径之外分派投递。
+投递尽最大努力进行。非默认通知设置也会显示在 `cruise config` 中，但绝不会显示 webhook URL。
 
 WebUI session 使用浏览器通知代替服务器端桌面横幅，并使用服务器端声音和 webhook 投递。`desktop` 主开关及事件开关也会控制浏览器通知，但不会控制页面内 toast。`CRUISE_DISABLE_NOTIFICATIONS=1` 会禁用桌面通知、声音和 webhook 投递，但不会抑制 WebUI 浏览器通知。其他取值不会启用此全局开关。
 
-补充 CLI 语言设置说明：`cruise config` 会显示应用设置，包括 `ui_language` 及其有效来源（`env`、`config`、`system` 或 `default`）。使用 `cruise config --set-language <LANG>` 保存 UI 语言，例如：
+使用 `cruise config --set-language <LANG>` 保存 UI 语言，例如：
 
 ```sh
 cruise config --set-language ja
 cruise config --set-language auto
 ```
 
-第二条命令会清除已保存的语言设置，以便采用下一个可用偏好。支持的显式标签为 `en`、`zh-CN`、`es`、`fr`、`pt-BR`、`ja` 和 `ko`。`--set-language` 会拒绝不受支持的值。TUI 还可按 `L` 打开语言选择器。WebUI 的选择则保存在浏览器 cookie 中。有关区域设置优先级以及 UI 语言与 prompt 语言的区别，请参阅[应用程序配置](configuration.md#ui-language)。
+TUI 还可按 `L` 打开语言选择器。WebUI 的选择保存在浏览器 cookie 中，而非应用设置中。有关区域设置优先级以及 UI 语言与 prompt 语言的区别，请参阅[应用程序配置](configuration.md#ui-language)。
 
 `model` 和 `plan_model` 可在任一格式中提供可选的全局模型默认值。每项接受字符串或有序数组：第一项是主模型，其余项是 SDK fallback。两种格式使用相同的字段名和别名。`config.yaml` 示例：
 
@@ -417,14 +412,14 @@ model:
   - openrouter/z-ai/glm-5.3-flash:high
 ```
 
-对应的 JSON 为 `{"model":["openai/gpt-6.1-sol:medium",{"sdk":"claude","model":"claude-sonnet-5-5:medium"},"openrouter/z-ai/glm-5.3-flash:high"]}`。字符串会继承 workflow 的有效 SDK；若未设置 `sdk` 或 `command`，默认使用 `jcode`。每个对象只覆盖自身条目，因此上例中的最后一个字符串会恢复为 jcode。`openai/` 和 `openrouter/` 等 provider 前缀是模型引用，不是 SDK 名称。也支持现有的 `opencode` SDK 选择。
+对应的 JSON 为 `{"model":["openai/gpt-6.1-sol:medium",{"sdk":"claude","model":"claude-sonnet-5-5:medium"},"openrouter/z-ai/glm-5.3-flash:high"]}`。字符串会继承 workflow 的有效 SDK；若未设置 `sdk` 或 `command`，默认使用 `jcode`。`openai/` 和 `openrouter/` 等 provider 前缀是模型引用，不是 SDK 名称。也支持现有的 `opencode` SDK 选择。
 
-对象必须包含非空白 `model`，并且至少包含 `sdk` 或非空的 `disabled_during`；对象只能出现在数组中。不接受未知键和显式的 null SDK。省略 `sdk` 时会继承 workflow SDK，而不是前一条目的 SDK。对象不能与 `command` 组合使用，即使是在 fallback 位置也不行。仅含字符串的旧版 command 数组仍只使用第一个模型。环境模型覆盖会替换整个列表。显式重试链仍是字符串列表，并优先于隐式数组尾部候选项。只有所属 SDK 会收到调用方已保存的 resume ID。切换到另一个 SDK 时不会传入该 ID；返回原 SDK 时可能会重用原 ID 及其保留存储。失败尝试新生成的 ID 不会转发到后续尝试。能力检查会覆盖所有适用候选项：computer use 要求 jcode；远程 HTTP/SSE MCP 不能使用 jcode；OpenCode 不支持旧版 SSE。
+对象必须包含非空白 `model`，并且至少包含 `sdk` 或非空的 `disabled_during`；对象只能出现在数组中。不接受未知键和显式的 null SDK。省略 `sdk` 时会继承 workflow SDK，而不是前一条目的 SDK。对象不能与 `command` 组合使用，即使是在 fallback 位置也不行。仅含字符串的旧版 command 数组仍只使用第一个模型。环境模型覆盖会替换整个列表。能力检查会覆盖所有适用候选项：computer use 要求 jcode；远程 HTTP/SSE MCP 不能使用 jcode；OpenCode 不支持旧版 SSE。
 
 <a id="candidate-unavailable-windows-disabled_during"></a>
 ## 候选模型不可用时间窗口（`disabled_during`）
 
-可在 `model` 或 `plan_model` 数组中为每个候选模型声明不可用时间。该功能适用于 workflow、分层的 `default.yaml` 和应用 JSON/YAML 设置（包括 `planModel` 别名）。这些是由用户维护的排除规则，不是按价格路由，也不是 provider 预设。例如，用户可以为 DeepSeek 候选项选择以下 UTC 时间窗口：
+可在 `model` 或 `plan_model` 数组中为每个候选模型声明不可用时间。该功能适用于 workflow、分层的 `default.yaml` 和应用 JSON/YAML 设置（包括 `planModel` 别名）。这些是由用户维护的排除规则，不是按价格路由，也不是 provider 预设。
 
 ```yaml
 sdk: opencode
@@ -448,9 +443,9 @@ model:
 
 偏移量默认为 UTC；接受 `UTC`、`Z` 或固定的 `+HH:MM` / `-HH:MM`，绝对值最大为 `14:00`。不支持 IANA 名称、夏令时转换或系统本地区域设置。空列表、空白窗口和格式错误的窗口都会导致验证失败。
 
-Cruise 会在每次 prompt 开始时（包括规划、标题、生成 workflow 和 `if.fail.retry` 重跑）以及重试期间切换候选项时检查窗口。它不会中断已经开始输出的 turn。只要与窗口匹配，无论重试策略或重试预算如何，该候选项都会被排除，即使数组中只有一个候选项也是如此。跳过窗口不会消耗重试预算，也不会记录冷却时间。现有冷却仍会独立排除候选项。如果所有候选项都处于禁用窗口或冷却状态，prompt 会失败，且不会启动后端。
+Cruise 会在每次 prompt 开始时以及重试期间切换候选项时检查窗口。它不会中断已经开始输出的 turn。只要与窗口匹配，无论重试策略或重试预算如何，该候选项都会被排除。如果所有候选项都处于禁用窗口或冷却状态，prompt 会失败，且不会启动后端。
 
-排除规则基于 SDK 和基础模型标识，因此更改 effort/variant，以及在显式 `retry.fallback_chains` 中使用匹配的字符串条目，都不能绕过已声明的窗口。能力验证仍会检查禁用候选项。Step 的 `model` 仍是字符串：只有解析后的 SDK 和基础模型都与主候选项匹配时，覆盖值才会继承 workflow 列表及其窗口。若只更改 effort，且 SDK 也匹配，则会保留继承关系。其他覆盖值不会继承 workflow 列表。`subagent_model`、独立的模型对象、step 级窗口字段以及重试链条目上的窗口均不受支持。环境模型覆盖会替换整个列表，包括其中的窗口。
+能力验证仍会检查禁用候选项。只有解析后的 SDK 和基础模型都与主候选项匹配时，覆盖值才会继承 workflow 列表及其窗口。若 SDK 也匹配，只更改 effort 会保留继承关系。其他覆盖值不会继承 workflow 列表。环境模型覆盖会替换整个列表，包括其中的窗口。
 
 <a id="cruise-clean"></a>
 ## `cruise clean`
@@ -459,11 +454,11 @@ Cruise 会在每次 prompt 开始时（包括规划、标题、生成 workflow �
 cruise clean
 ```
 
-通过 `gh pr view`（GitLab 上为 `glab mr view`）检查每个 Completed session 的 PR 状态。PR 已关闭或已合并的 session 会连同其 worktree（以及任何残留的 `--repo` 克隆）一起删除。无法拥有 PR 的终止态 exec/current-branch session（包括旧版 exec 残留）会直接删除，不执行 GitHub 状态检查。若 Planned current-branch session 从未启动，且其 `plan.md` 缺失或为空，也会被删除。Suspended session 和其他 planned session 会继续保留以供恢复。
+通过 `gh pr view`（GitLab 上为 `glab mr view`）检查每个 Completed session 的 PR 状态。PR 已关闭或已合并的 session 会连同其 worktree（以及任何残留的 `--repo` 克隆）一起删除。若 Planned current-branch session 从未启动，且其 `plan.md` 缺失或为空，也会被删除。Suspended session 和其他 planned session 会继续保留以供恢复。
 
 > **注意：** 若 `gh pr create` 失败或未执行，session 可能没有 PR URL。没有 PR URL 的 PR-backed session 会保留；请检查 session 日志，或手动使用 `gh pr create` 重新创建 PR。
 
 <a id="cruise-usage"></a>
 ## `cruise usage`
 
-`cruise usage [--by session,step,purpose,backend,model] [--session ID] [--format text|json|csv]` 汇总本地记录的调用尝试。默认分组方式为 `step,backend,model`，默认格式为文本。缺失的 provider 值视为 unknown，而不是零；总量只包括输入和输出。Command 后端记录为 unavailable。成本使用 provider 报告值，不是估算值。OpenCode 的辅助标题和压缩用量不计入，因此统计值可能偏低。Command 后端内部重试会记为一次调用。`cruise ssh` 会在远程主机记录用量，而不是本地记录。
+`cruise usage [--by session,step,purpose,backend,model] [--session ID] [--format text|json|csv]` 汇总本地记录的调用尝试。默认分组方式为 `step,backend,model`，默认格式为文本。缺失的 provider 值视为 unknown，而不是零；总量只包括输入和输出。成本使用 provider 报告值，不是估算值。

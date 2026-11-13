@@ -4,8 +4,10 @@
 <!-- sakoku-ignore-next-line -->
 [日本語](../ja/workflow-examples.md) · [简体中文](../zh/workflow-examples.md) · [Index](README.md)
 
+<a id="example-config"></a>
 ## Example Config
 
+<a id="full-development-flow"></a>
 ### Full Development Flow
 
 ```yaml
@@ -99,6 +101,7 @@ after-pr:
     command: "echo 'Created PR: {pr.url}'"
 ```
 
+<a id="simple-auto-commit-flow"></a>
 ### Simple Auto-Commit Flow
 
 ```yaml
@@ -131,5 +134,3 @@ steps:
   commit:
     command: "git add -A && git commit -m 'feat: {input}'"
 ```
-
-Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.

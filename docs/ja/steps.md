@@ -27,17 +27,13 @@ steps:
       ANTHROPIC_MODEL: claude-opus-4-5
 ```
 
-`output_file` を設定すると、cruise は完了した backend response を workspace の外にある session の `artifacts/` directory に保存します。file は atomic に書き込まれ、response の完全一致テキストを保持し、workspace 変更検出には含まれません。後続 prompt body から `{file:initial-state.md}` で読み取れます。`prompt_file` から読み込んだ prompt を含め、file reference は prompt 実行の直前に解決され、挿入されたテキストは再帰的に展開されません。artifact 名は相対パスで session directory 内に収まる必要があり、保存／読み込み上限は1 MiBです。空、絶対パス、`.` または `..` path component を含む名前は拒否されます。`reports/initial-state.md` のような subdirectory は使え、書き込み時に directory が作成されます。symbolic link はたどらず拒否します。session の `artifacts/` root や管理対象の親 directory を含め、artifact path 上のどこかに symlink があれば read/write の両方が失敗します。最終 path が既に存在して通常 file でない場合も同様です。
-
-baseline と regression の比較 flow は [`examples/file-artifacts.yaml`](../../examples/file-artifacts.yaml) を参照してください。artifact は session に属し、session を削除すると消去されます。終了状態になった `cruise exec` session は完了後に cleanup されますが、中断された exec session は ID で再開でき、`cruise run` session は再開に備えて artifact を保持します。
+`output_file` を設定すると、cruise は完了した backend response を workspace の外にある session の `artifacts/` directory に保存します。後続 prompt body から `{file:initial-state.md}` で読み取れます。
 
 `instruction` は step 実行直前にユーザーへ表示する message であり、system prompt ではありません。`{input}` が空の場合、message は複数行入力 prompt として使われ、送信されたテキストが `{input}` になります。それ以外の場合は表示されるだけで LLM には送られません。
 
-prompt step は既定で commit guard の対象です。SDK prompt には [`tool restrictions`](sdk.md#tool-restrictions) で説明する暗黙の Git shell 拒否も適用されます。`allow_commit: true` はこれらと guard を解除しますが、明示的な `disallowed_tools` は解除せず、権限を広げません。prompt が意図的に commit を作成する、または Git `HEAD` を動かす必要がある場合に限り `allow_commit: true` を設定してください。省略時および `false` では guard が有効です。guard は従来の `command:` mode とすべての SDK backend（`jcode`、`claude`、`opencode`）を対象とします。command/option step には影響しません。ref 拒否の対象は step が動作する repository で、git common dir により識別します。その repository の main checkout と関連するすべての worktree における `HEAD` および `refs/heads/*` の更新が拒否されます。repository 限定の commit guard は、step 内で作られる使い捨て repository（一時 repository、test suite の repository、別 clone、nested repository）の ref 更新を許可しますが、SDK shell prefix 拒否はこれらの repository を対象とする一致 Git command も拒否します。guard 対象 repository の checkout または linked worktree 内の commit は引き続き拒否されます。検出された ref 移動は step を失敗させます。cruise が index や worktree を reset せず、元の branch reference を復元する場合があります。
+prompt step は既定で commit guard の対象です。SDK prompt には [`tool restrictions`](sdk.md#tool-restrictions) で説明する暗黙の Git shell 拒否も適用されます。`allow_commit: true` はこれらと guard を解除しますが、明示的な `disallowed_tools` は解除せず、権限を広げません。prompt が意図的に commit を作成する、または Git `HEAD` を動かす必要がある場合に限り `allow_commit: true` を設定してください。省略時および `false` では guard が有効です。guard は従来の `command:` mode とすべての SDK backend（`jcode`、`claude`、`opencode`）を対象とします。command/option step には影響しません。
 
-`allow_commit` を省略するか `false` にした場合、編集を未 commit のまま残し、作業中 repository と linked worktree の `HEAD` または local branch ref を動かさず、task から要求されても commit guard を回避しないよう agent に指示を追加します。この notice は Git enforcement を補います。`allow_commit: true` では commit-guard notice を省きますが、明示的な `disallowed_tools` による制限 notice は引き続き追加されます。
-
-`allow_commit: true` は `group:` や `workflow_call:` 呼び出しではなく、実際の prompt に設定してください。guard は step の child 環境に `core.hooksPath` と `CRUISE_GUARD_COMMON_DIR` を注入して実装されます。これにより `reference-transaction` hook を設定し、指定変数の repository 内でのみ ref 更新を拒否します。拒否処理だけが repository に限定されます。注入した hooks path は step の下で実行されるあらゆる repository の Git invocation に適用されるため、guard 対象外で ref 更新できる無関係な repository でも、その repository 独自の hook (`pre-commit`、`commit-msg`、`pre-push` など) は実行されません。hook は Git が hook に渡す `GIT_DIR` から現在の repository を特定し、linked worktree では `commondir` file をたどります。特定できないときは `git rev-parse --git-common-dir` に fallback します。guard は fail-closed です。transaction の repository を解決できない場合は transaction を拒否し、commit guard violation で step を失敗させます。一方、working directory がないか Git worktree 外の directory であれば何もせず正常に進みます。同一ユーザーに対する best-effort policy であり security boundary ではありません。他 repository の状態を事後検査しません。
+`allow_commit: true` は `group:` や `workflow_call:` 呼び出しではなく、実際の prompt に設定してください。
 
 長い prompt は `prompt_file` で file から読み込めます。
 
@@ -46,8 +42,6 @@ steps:
   implement:
     prompt_file: prompts/implement.md
 ```
-
-`prompt_file` には絶対 path、`~/` path、設定 file からの相対 path、GitHub blob/raw URL を指定できます。bare file 名は設定 file と同じ directory から解決されます。GitHub URL は設定 load 時に `gh api` で取得されます。`workflow_call` 内で参照する file は、呼び出された workflow の directory を基準に解決されます。file 内容はそのまま保持され、`prompt` と同じ変数展開を行います。`prompt` と `prompt_file` は相互排他です。repo-backed session で設定が一時 clone にある場合、session snapshot は解決済み prompt 内容を保存するため clone 削除後も使用できます。
 
 解決規則:
 
@@ -101,12 +95,10 @@ steps:
 ```
 
 - すべての child は session の既存 working directory で同時に開始します。互いに独立した command または file 編集を使ってください。cruise は child を分離したり変更を merge したりしません。同じ file や Git state を同時に編集すると競合する場合があります。
-- 各 child は block 開始前の同じ input と `{prev.*}` 値を受け取ります。環境の優先順位は workflow < parallel block < child です。child には `model`、`env`、`skip`、`when`、`timeout` を指定できます。prompt child のみ `instruction`、`computer_use`、`permission`、`disallowed_tools`（parent には設定不可）、および block 内で別名にした artifact を保存する `output_file` も指定できます。parallel の `instruction` は非対話であり、実行時 input が空でない必要があります。input を指定するか、その前に順次実行する instruction step を置いてください。そうしないと入力 editor を開かずに実行エラーになります。command child に `instruction` は指定できません。`prompt_file` は通常どおり設定 file から解決されます。command array は child ごとに順次実行されます。
-  同一 block の sibling が生成した artifact (`{file:...}` が他 child の `output_file` を参照する場合) を読む child prompt は、設定検証時に拒否されます。空の `parallel: {}` block と、空の `command:` array を持つ child も拒否されます。
-- join 後の `{prev.output}` は YAML 宣言順で child 名を key にした JSON object です。各 entry は `output`（prompt text。command は `null`）、`stderr`（実行 error を含む）、`success`、`skipped` を持ちます。すべての child が成功または skip の場合 `{prev.success}` は true です。`{prev.stderr}` は child 名とともに error を連結します。log には `[parent/child]` prefix が付きます。command child に対話 stdin はありません。
-- child の失敗で sibling は取り消されません。通常 step の failure semantics に従い、block 全体が1 step、最大1 failure として扱われます。parent に `if.fail` または `next` を設定してください。retry では block 全体を再実行します。未処理の prompt/execution error は sibling 完了後に workflow を停止します。nonzero command exit と timeout は通常の step failure 経路を使います。
-  ただし2種類の child error は上記集約より優先されます。commit-guard violation または jcode prompt の missing-model error は常に致命的であり、parent に `if.fail` があっても workflow を停止します。一方、child timeout 単独では致命的にならず、常に `{prev.*}` と通常の step failure 経路から報告されます。
-- child timeout の影響はその child のみに及びます。parent timeout は未完了 child を cancel し、failure 経路へ進む前に停止を待ちます。Ctrl+C はすべての child を停止します。resume では既に完了した child を含め、中断した block 全体を再開します。graph 表示と step 選択では block を1 step として扱います。
+- 各 child は block 開始前の同じ input と `{prev.*}` 値を受け取ります。環境の優先順位は workflow < parallel block < child です。child には `model`、`env`、`skip`、`when`、`timeout` を指定できます。prompt child のみ `instruction`、`computer_use`、`permission`、`disallowed_tools`（parent には設定不可）、`output_file` を指定できます。parallel の `instruction` は非対話であり、実行時 input が空でない必要があります。input を指定するか、その前に順次実行する instruction step を置いてください。そうしないと入力 editor を開かずに実行エラーになります。command array は child ごとに順次実行されます。
+- join 後の `{prev.output}` は YAML 宣言順で child 名を key にした JSON object です。各 entry は `output`（prompt text。command は `null`）、`stderr`（実行 error を含む）、`success`、`skipped` を持ちます。すべての child が成功または skip の場合 `{prev.success}` は true です。`{prev.stderr}` は child 名とともに error を連結します。
+- child の失敗で sibling は取り消されません。通常 step の failure semantics に従い、block 全体が1 step、最大1 failure として扱われます。parent に `if.fail` または `next` を設定してください。retry では block 全体を再実行します。
+- child timeout の影響はその child のみに及びます。parent timeout は未完了 child を cancel し、failure 経路へ進む前に停止を待ちます。
 - parallel block は `groups`、`after-pr`、呼び出された workflow 内でも使えます。child は prompt/command step に限られます。child の `next`、`if`、`option`、`plan`、`group`、`workflow_call`、nested `parallel`、`flag`、`allow_commit: true` は拒否されます。`flag` を含む flow control は parent に設定し、commit はその後の順次 step で行います。
 
 <a id="step-timeout"></a>
@@ -153,10 +145,6 @@ steps:
 
 ホストが作成する commit と PR body の整形については、[commit と PR の template](configuration.md#commit-and-pr-templates)を参照してください。
 
-ここにある prompt step は `github-review` prompt を含め workflow `disallowed_tools` を継承し、step で制限を追加できます。native `squash-merge` は prompt ではなく、空でない `disallowed_tools` list を持てません。
-
-GitLab では、組み込み `after-pr` step は `{pr.url}` 内の `/-/merge_requests/` を検出し、`gh` の代わりに `glab`（`glab mr update --ready`、`glab ci get --merge-request`、`glab ci trace`）を使います。
-
 `after-pr` は、`cruise run` が pull request の作成に成功した後で自動実行する step に使います。`steps` と同じ形式なので、inline または file-backed prompt step (`prompt` / `prompt_file`)、command step、group step を定義できます。
 
 ```yaml
@@ -177,7 +165,7 @@ after-pr:
 
 `after-pr` step は PR 作成成功後に限り実行されます。通常の template 変数すべてと、下記の PR 専用変数を使えます。
 
-`after-pr` の prompt step にも同じ default と repository scope の commit guard が適用され、fail-closed 動作をします。組み込み `resolve-conflict` と `fix-ci-error` prompt は PR branch 上で修正を commit する意図があるため明示的に `allow_commit: true` を設定しています。session repository 内で `HEAD` を進める必要がある他の after-PR prompt は個別に opt in する必要があります。command/option step には影響しません。
+`after-pr` の prompt step にも同じ既定の commit guard が適用されます。HEAD を進める必要がある after-PR prompt には個別に `allow_commit: true` を設定してください。
 
 <a id="review-loop-github-review"></a>
 ### Review loop (`github-review`)
@@ -198,9 +186,10 @@ after-pr:
     output_file: review-report.json # optional iteration report in the session artifacts
 ```
 
-bot mode では各 iteration で、列挙した bot が現在の head commit を review するまで待ってから、その bot が開始した未解決 thread をすべての page から取得します。all-reviewer mode では新しい review を待たず、対象となる未解決 thread を直ちに取得します。どちらの mode も head OID と thread data を prompt に追加して実行します。prompt は JSON のみで回答しなければなりません: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`。列挙された thread ID のみ受け付け、各 ID は最大1回です。`viewerCanReply` / `viewerCanResolve` が許可する場合に限り、空でない `reply` または `resolve: true` が必要です。reply の投稿と thread の解決は Cruise 自身が `gh api graphql` で行います（認証済み `gh` が必要）。prompt が作った commit は push され、未 commit 変更が残ると step は失敗します。対象となる未解決 thread がなくなると loop を終了します。`max-iterations` 到達時に thread が残る、timeout、API error、response error は失敗です。他の `after-pr` error は warning のみですが、`github-review` failure は run を `Failed` にします。jcode after-pr prompt の cancellation と missing-model error も伝播し、missing-model error は run/session を失敗させます。reply には idempotency marker があるため、安全に再実行できます。この step は `after-pr` の直下でのみ有効です。
+bot mode では各 iteration で、列挙した bot が現在の head commit を review するまで待ってから、その bot が開始した未解決 thread をすべての page から取得します。all-reviewer mode では新しい review を待たず、対象となる未解決 thread を直ちに取得します。
+どちらの mode も thread data を prompt に追加して実行し、prompt は JSON のみで回答しなければなりません: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`。reply の投稿と thread の解決は Cruise が `gh api graphql` で行います（認証済み `gh` が必要）。prompt が作った commit は push され、未 commit 変更が残ると step は失敗します。`github-review` の失敗は run を `Failed` にします。この step は `after-pr` の直下でのみ有効です。
 
-既定の `reviewers: bots` はこの動作を維持し、空でない一意な `bots` list が必要です。既存の human と bot の feedback を処理するには `github-review: { reviewers: all, max-iterations: 3 }` を使い、`bots` を省略するか空 list にします。この mode は新しい review を待ちません。thread text を agent に渡す前に Cruise は各 author の repository collaborator permission を確認し、`write`、`maintain`、`admin` の author のみを対象にします。404 は permission なしを意味し、それ以外の permission lookup failure では step が失敗します。除外した未解決 thread ID は report に記録されますが、成功を妨げません。対象となる未解決 thread がなくなると loop は成功し、iteration 後も対象 ID 集合が変わらない場合、または iteration limit 到達時に対象 thread が残る場合は失敗します。組み込み PR review workflow は、この mode を60分 timeout、3 iteration、`allow_commit: true` で使用します。
+既定の `reviewers: bots` はこの動作を維持し、空でない一意な `bots` list が必要です。既存の human と bot の feedback を処理するには `github-review: { reviewers: all, max-iterations: 3 }` を使い、`bots` を省略するか空 list にします。この mode は新しい review を待ちません。Cruise は author の repository collaborator permission を確認し、`write`、`maintain`、`admin` の author の thread のみを対象にします。対象となる未解決 thread がなくなると loop は成功し、iteration limit 到達時に対象 thread が残る場合は失敗します。
 
 <a id="variable-reference"></a>
 ## 変数リファレンス

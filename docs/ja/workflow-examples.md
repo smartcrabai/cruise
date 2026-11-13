@@ -132,5 +132,3 @@ steps:
   commit:
     command: "git add -A && git commit -m 'feat: {input}'"
 ```
-
-通常の終了経路がある場合、条件付き cycle は許可されます。実行 preflight が到達可能な cycle を拒否するのは、設定 skip とユーザー選択 skip を考慮した実際の開始位置から通常終了に到達できない場合に限ります。終了不能 cycle に入る可能性がある branch は一律拒否ではなく warning になります。runtime edge budget は引き続き適用されます。

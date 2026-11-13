@@ -1,32 +1,10 @@
-# GitHub Actions guide
-
 **Languages:** [English](../en/github-actions.md)
 <!-- sakoku-ignore-next-line -->
 [日本語](../ja/github-actions.md) · [简体中文](../zh/github-actions.md) · [Index](README.md)
 
-## GitHub Actions
-
-Mention `@cruise` on a GitHub Issue to drive cruise inside GitHub Actions. The action installs the `jcode` CLI and provisions its credentials, so cruise's default `sdk: jcode` backend works with no configuration; it no longer forces a backend, so a repository config that sets `command:`, `sdk: claude`, or `sdk: opencode` still wins and has to bring its own CLI. There is no PR mode -- comments on pull requests are ignored.
-
-**Quickstart:**
-
-1. Install the [`cruise-agent` GitHub App](https://github.com/apps/cruise-agent/installations/new) on your repository (optional; falls back to `GITHUB_TOKEN` otherwise).
-2. Add an `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` repository secret.
-3. Copy [`examples/cruise.yml`](../../examples/cruise.yml) to `.github/workflows/cruise.yml`.
-
-Then open an issue, or comment on one, starting with `@cruise`:
-
-| Mention | Command | What happens |
-|---|---|---|
-| `@cruise`, `@cruise run <request>` | **run** | Plan (or resolve the existing plan comment), implement in a worktree, and open a **draft** pull request. |
-| `@cruise exec <request>` | **exec** | Same planning, but pushes straight to the default branch -- no PR. Advanced/opt-in. |
-| `@cruise plan <request>` | **plan** | Post an LLM-generated plan as a tracking comment. Nothing is executed. |
-| `@cruise fix <feedback>` | **fix** | Revise the existing plan-tracking comment in place. |
-
-See the [examples](../../examples/) directory for drop-in workflow files and a sample repository config.
-
-
-## cruise GitHub Action
+<a id="cruise-github-action"></a>
+<a id="github-actions"></a>
+# cruise GitHub Action
 
 Mention `@cruise` (configurable) on a GitHub Issue to have cruise plan and implement inside GitHub Actions, and open a draft PR when the successful run leaves branch commits and automatic PR creation is enabled -- similar in spirit to [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action), but driving cruise's own plan -> implement -> optional PR workflow through `sdk: jcode` unless the resolved workflow selects another backend -- the action installs the `jcode` CLI and provisions its credentials for you.
 
@@ -34,7 +12,8 @@ This action has **no pull-request mode**: it only reacts to `issues` (opened) an
 
 > Note: restricted prompt steps (`permission: read-only | edit`) run unattended with denied tools rather than prompts, and a read-only step fails if it changes the workspace.
 
-### Quickstart
+<a id="quickstart"></a>
+## Quickstart
 
 1. Install the [`cruise-agent` GitHub App](https://github.com/apps/cruise-agent/installations/new) on your repository (optional -- skip it to fall back to the workflow's `GITHUB_TOKEN`; see [How authentication works](#how-authentication-works)).
 2. Add an `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` repository secret (Settings -> Secrets and variables -> Actions). jcode needs at least one.
@@ -42,32 +21,25 @@ This action has **no pull-request mode**: it only reacts to `issues` (opened) an
 
 Then open an issue, or comment on one, with `@cruise plan <what you want>`. See [Typical workflow](#typical-workflow) for the full plan -> fix -> run -> review loop, [Commands](#commands) below for every mention form, [Providers](#providers) for using something other than Anthropic/OpenAI, and [Setup](#setup) for the detailed walkthrough (full workflow YAML, `permissions:`, version pinning).
 
-### Commands
+<a id="commands"></a>
+## Commands
 
-After the trigger phrase, parsing skips leading whitespace and punctuation, then the first token (with or without a leading `/`, case-insensitive, trailing punctuation like `.`/`,`/`:` stripped before matching) selects what happens. This can cross a newline. `plan`, `fix`, `exec`, and `run` select that command; `/tell` requires its slash. No token or an unknown token defaults to `run`. For the `issues` event, the trigger phrase is matched against the issue title and body concatenated (title first), so a phrase at the end of the title may take its command token from the body's first line.
+The first word after the trigger phrase selects the command (case-insensitive, with an optional leading `/`). `plan`, `fix`, `exec`, and `run` select that command; `/tell` requires its slash. No word or an unknown word defaults to `run`.
+
+Because matching is lexical, a sentence that starts with a command word is parsed as that command; for example, `@cruise fix the flaky test` selects `fix`. Use the slash form (`@cruise /run <request>` or `@cruise /exec <request>`) for free-form requests. If a comment has multiple `@cruise` mentions, only the last is used.
 
 | Mention | Command | What happens |
 |---|---|---|
-| `@cruise`, `@cruise run <request>`, `@cruise /run` | **run** | Resolve the plan (see below; any text typed after `run` is appended as extra instructions), create a session from it verbatim (no LLM planning call), and execute it in a worktree. By default, a draft pull request is opened if the successful run leaves branch commits; a successful no-commit run completes without a PR. A workflow with `create_pr: false` also completes without automatically committing, pushing, opening a PR, or running `after-pr`. The action treats an empty PR result as successful only when `cruise run` exits successfully and the selected session is `Completed` with Cruise-recorded skip reason (`disabled` or `no-commits`); an unexplained missing PR URL remains a failure. Configured `if.no-file-changes` failure/retry behavior remains in force. |
+| `@cruise`, `@cruise run <request>`, `@cruise /run` | **run** | Resolve the plan (see below; text after `run` is appended as extra instructions), create a session from it verbatim (without an LLM planning call), and execute it in a worktree. By default, a successful run that leaves branch commits opens a draft pull request. |
 | `@cruise exec <request>`, `@cruise /exec` | **exec** | Resolve the plan (same as `run`, extra instructions included), then run it directly on the already-checked-out default branch and **push straight to that branch** (no PR). Advanced/opt-in -- see [exec caveats](#exec-caveats). |
-| `@cruise plan <request>`, `@cruise /plan` | **plan** | Run an LLM planning call (`cruise plan`) on the issue's title + body and post the result as a new **plan-tracking comment**. Nothing is executed. (The text typed after `plan` in the triggering comment itself is currently not included -- only the issue's title/body feed the plan.) |
+| `@cruise plan <request>`, `@cruise /plan` | **plan** | Run an LLM planning call (`cruise plan`) on the issue title and body, and post the result as a new **plan-tracking comment**. Nothing is executed. |
 | `@cruise fix <feedback>`, `@cruise /fix <feedback>` | **fix** | Revise the most recent *trusted* plan-tracking comment using `<feedback>`, then **edit that same comment in place** with the revised plan. Fails with a clear message if there is no existing plan comment. |
 | `@cruise /tell <instruction>` | **tell** | Send an instruction to a live `run` job on this issue. Issue comments only; it does not start a run. |
 
 **Plan resolution** (used by `run` and `exec`): the action looks at every comment on the issue for the last one that contains the `<!-- cruise:plan -->` marker and was posted by a **bot account** (`user.type == "Bot"`) whose login is one of its fixed allowlisted identities (`cruise-agent[bot]` or `github-actions[bot]`); a comment posted under any other identity (including a PAT or custom App token) is not reused, and resolution falls back to the issue's own title + body. If a trusted plan comment exists, its plan content is used, otherwise the issue's own title + body is used. Either way, any text typed after the command word in the comment/issue that triggered this run is appended as a "## Additional instructions from the triggering comment" section.
 
-Plan-tracking **comment bodies** are capped at 60,000 characters (GitHub's own limit is 65,536). Only the plan content is trimmed -- the tail is replaced with a truncation note and the reply-hint footer is always re-appended, never silently dropped. The cap applies to the posted comment alone: execution reads the untruncated `plan.md`, so truncation never changes what the agent runs.
-
-#### Command grammar
-
-Command parsing is intentionally strict and mechanical, not natural-language understanding:
-
-- After leading whitespace and `.,!?;:` punctuation, the **first whitespace-delimited word** is checked against `run`/`exec`/`plan`/`fix` (optionally prefixed with `/`) or `/tell` (slash required), case-insensitive, trailing `.,!?;:` stripped. Leading whitespace may include a newline. Bare `@cruise tell ...` remains a `run` request for backwards compatibility.
-- If the body has **multiple `@cruise` mentions** (e.g. a quoted reply that includes an earlier message), the **last** one is used, so replying to an old mention doesn't resurrect its command.
-- Because matching is purely lexical, a plain-English sentence that happens to start with a command word after the mention is parsed as that command -- e.g. `@cruise fix the flaky test` is parsed as the **`fix` command** with feedback `the flaky test`, not as a free-form request to `run`. If there is no existing plan comment yet, this fails with a message telling you to run `@cruise plan` first, rather than silently doing something else.
-- To avoid this kind of ambiguity, prefer the explicit slash form (`@cruise /run <request>`, `@cruise /exec <request>`) for free-form requests, and reserve the bare word form (`@cruise plan ...` / `@cruise fix ...`) for when you actually mean the `plan`/`fix` commands.
-
-### Typical workflow
+<a id="typical-workflow"></a>
+## Typical workflow
 
 An end-to-end example, planning first:
 
@@ -88,19 +60,18 @@ An end-to-end example, planning first:
 > [!WARNING]
 > If the issue's own title or body already contains the trigger phrase, the `issues: [opened]` event fires immediately. The first token after leading whitespace and punctuation, even across a newline, selects `plan`, `fix`, `exec`, or `run`; only a missing or unknown token defaults to `run`. Keep the trigger phrase out of the issue itself when you want to review a plan first; only type it in a follow-up comment.
 
-That immediate-run behavior is also a shortcut when you don't need a review step: a trigger phrase in the issue title/body followed by `run` (or by no token or an unknown token, which defaults to `run`) skips the planning call entirely -- the issue's title + body becomes the plan directly, with any text after the trigger phrase appended as additional instructions.
+Multiple mentions on the same issue queue rather than race each other. It is safe to keep commenting without waiting for each run to finish.
 
-Multiple mentions on the same issue queue rather than race each other: a `plan` comment followed immediately by `fix` and then `run` still runs one at a time, in order (see the `concurrency:` block in [examples/cruise.yml](../../examples/cruise.yml)) -- it's safe to keep commenting without waiting for each run to finish first.
+While a `run` job is active, it checks authorized issue comments. Accepted or rejected comments receive an eyes reaction; accepted text is queued for the next agent prompt, not the prompt currently running.
 
-While a `run` job is active, its in-job poller checks authorized issue comments about every 15 seconds, independently of the queued trigger job. Accepted or rejected comments receive an eyes reaction; acceptance queues text for the next agent prompt, not the currently running prompt. A final sweep handles comments near shutdown. `exec`, planning, and fixing jobs do not run this poller. The same collaborator permission and `allowed_bots` rules apply, and GitHub-sourced text is sanitized. Delivery has the same limits and at-least-once caveat as [`cruise tell`](cli-reference.md#cruise-tell).
+**No response to a tell?** Check that the comment used `/tell`, the author is authorized, and a `run` job for that issue was active. Check the job logs and reaction.
 
-**No response to a tell?** Check that the comment used `/tell`, the author is authorized, and a `run` job for that issue was active. Allow for the polling interval and check the job logs and reaction. A queued trigger job cannot itself reach the other job's process; a late comment may be rejected after the run ends. The eyes reaction indicates handling, not necessarily delivery to an agent prompt.
-
-### Setup
+<a id="setup"></a>
+## Setup
 
 1. **Install the `cruise-agent` GitHub App** on your repository: [github.com/apps/cruise-agent/installations/new](https://github.com/apps/cruise-agent/installations/new). This is what lets the action authenticate as a scoped bot identity (`cruise-agent[bot]`) instead of the workflow's own `GITHUB_TOKEN` -- see [How authentication works](#how-authentication-works) below. You can skip this step; the action still runs, but falls back to `GITHUB_TOKEN` with the limitations described there.
 2. Add an `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` secret to your repository (Settings -> Secrets and variables -> Actions). At least one is required.
-3. Copy [`examples/cruise.yml`](../../examples/cruise.yml) to `.github/workflows/cruise.yml` (the version below is a condensed excerpt -- the file in `examples/` has a one-line comment above each section explaining what it's for):
+3. Copy [`examples/cruise.yml`](../../examples/cruise.yml) to `.github/workflows/cruise.yml` (the version below is a condensed excerpt):
 
    ```yaml
    name: Cruise
@@ -137,17 +108,14 @@ While a `run` job is active, its in-job poller checks authorized issue comments 
 
 4. Open an issue mentioning `@cruise`, or comment `@cruise <command> ...` on an existing one.
 
-The workflow-level `if:` is only a coarse pre-filter (so unrelated events don't spin up a runner); the action independently re-checks the trigger phrase with a strict word-boundary match, verifies the commenter's permissions, and rejects PR comments before doing anything, so it is safe even if the pre-filter is removed.
-
-**Minimum cruise version: v0.2.0** (the first release whose default backend is `sdk: jcode`, which this action's generated configs and credential provisioning assume); the install step rejects an older binary with a clear error. The action also installs the `jcode` CLI itself (input `jcode_version`, default `latest`); the action's provisioning step checks the v0.88.0 floor, and Cruise validates the SDK API handshake and required capabilities at runtime. The default `cruise_version: latest` already satisfies this; pin an explicit tag if you want reproducible installs.
-
-### Providers
+<a id="providers"></a>
+## Providers
 
 This action provisions cruise's default `sdk: jcode` backend (see [below](#sdk-jcode----how-execution-works)); a repository config that names another backend keeps it. jcode ships several dozen providers -- each one just needs its API key, supplied one of three ways:
 
-- **Dedicated inputs** -- `anthropic_api_key` / `openai_api_key` become jcode's `anthropic-api` / `openai-api` credentials (`jcode login <provider>` with the key on stdin) in the jcode home the action pins for the job.
+- **Dedicated inputs** -- `anthropic_api_key` / `openai_api_key` are registered as jcode `anthropic-api` / `openai-api` credentials.
 - **`env`** -- any other provider's key (e.g. `KIMI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`) is exported into the run, where jcode picks it up from the environment.
-- **`providers` + `provider_api_keys`** -- for an OpenAI-compatible endpoint jcode doesn't already know about (a self-hosted gateway, a proxy, ...), each `providers` entry becomes a `[providers.<name>]` profile in that same home, written by `jcode provider add`:
+- **`providers` + `provider_api_keys`** -- for an OpenAI-compatible endpoint jcode does not already know about (a self-hosted gateway or proxy), each `providers` entry becomes a `[providers.<name>]` profile via `jcode provider add`.
 
 ```yaml
 with:
@@ -166,7 +134,8 @@ with:
 
 The profile's key is handed to `jcode provider add --api-key-stdin`, which stores it in an owner-only env file under the job's jcode home -- `config.toml` references it by environment-variable name only, and no key is ever written to a cruise config file.
 
-#### Provider profile schema
+<a id="provider-profile-schema"></a>
+### Provider profile schema
 
 Each key of `providers` is a profile name (ASCII letters, numbers, `-` and `_`, starting with a letter or number, at most 64 characters) mapping to an object with:
 
@@ -179,10 +148,10 @@ Each key of `providers` is a profile name (ASCII letters, numbers, `-` and `_`, 
 - **`no_auth`** (optional, boolean) -- the endpoint takes no credential at all (a local proxy, a dev gateway). A `no_auth` entry must **not** appear in `provider_api_keys`; `provider_api_keys` may be left empty entirely once every `providers` entry is `no_auth`.
 - **`default`** (optional, boolean) -- make the profile jcode's startup default provider/model. At most one entry may set it.
 
-Any key not on this list is rejected with an error naming it -- a typo would otherwise be silently dropped. Value domains (URL scheme, the `auth`/`auth_header` pairing, ...) are validated by `jcode provider add` itself.
+Any key not on this list is rejected with an error naming it -- a typo would otherwise be silently dropped.
 
-
-#### Built-in providers
+<a id="built-in-providers"></a>
+### Built-in providers
 
 | Provider | jcode CLI credential provider | Env var(s) |
 |---|---|---|
@@ -199,9 +168,10 @@ Any key not on this list is rejected with an error naming it -- a typo would oth
 
 The identifiers in this table are for CLI credential provisioning; `jcode login --help` lists accepted IDs. Custom endpoint profiles are provisioned through `providers` / `provider_api_keys` with `jcode provider add`.
 
-#### Kimi for Coding example
+<a id="kimi-for-coding-example"></a>
+### Kimi for Coding example
 
-[Kimi for Coding](https://api.kimi.com/coding/) uses the jcode CLI credential provider `kimi`, authenticated with `KIMI_API_KEY`. The example provisions that credential through the action. Supply a compatible Cruise model through the action's `model` input or the repository's workflow / `.cruise/default.yaml`; the jcode home default alone does not select Cruise's model.
+[Kimi for Coding](https://api.kimi.com/coding/) uses the jcode CLI credential provider `kimi`, authenticated with `KIMI_API_KEY`. Supply a compatible Cruise model through the action's `model` input or the repository workflow / `.cruise/default.yaml`.
 
 ```yaml
 - uses: smartcrabai/cruise@v1
@@ -212,41 +182,31 @@ The identifiers in this table are for CLI credential provisioning; `jcode login 
       KIMI_API_KEY=${{ secrets.KIMI_API_KEY }}
 ```
 
+<a id="sdk-jcode----how-execution-works"></a>
+## sdk: jcode -- how execution works
 
-### sdk: jcode -- how execution works
+Cruise resolves the backend from the repository workflow config and applicable checkout project defaults. A repository workflow config that sets `command:` or `sdk: claude` remains in effect; provide that backend's own CLI and credentials if needed.
 
-The action does not set `CRUISE_SDK`, so Cruise resolves the backend from the repository workflow config and applicable checkout project defaults. The generated default config omits `sdk`; after `.cruise/default.yaml` is applied, Cruise falls back to `sdk: jcode` only when neither `command` nor `sdk` remains set. A repository workflow config that sets `command:` or `sdk: claude` remains in effect; provide that backend's own CLI and credentials if needed.
-
-This action installs the `cruise` binary (`cruise_version`) and the `jcode` CLI (`jcode_version`). It uses the CLI for setup and credential provisioning: `anthropic_api_key` and `openai_api_key` are stored with `jcode login`, and each `providers` entry is written with `jcode provider add`. The action pins the source `JCODE_HOME` under `$RUNNER_TEMP/cruise/jcode-home`.
-
-For SDK execution, Cruise creates a private session home from that source home and inherits its credentials and config. Plan homes persist until the Cruise session is deleted or cleaned; ordinary non-resumable prompt homes are removed after the turn. Pre-session homes left by a crash are pruned after 24 hours, stopping the owned daemon first. The action's temporary source home keeps provisioned credentials away from a persistent runner home. The separate jcode installer home is also isolated under `$RUNNER_TEMP`, including the installer process's `HOME` and shell configuration.
-
-- **Backend** is `sdk: jcode` only when neither `command` nor `sdk` remains set after applicable checkout project defaults are applied.
-- **Authentication** can come from the dedicated key inputs, `providers` / `provider_api_keys`, or provider keys supplied through `env`. The action gate fails if all supported credential inputs are empty; a `no_auth` profile does not require a key.
 - **OpenAI service tier** defaults to `off` when neither the workflow nor process environment defines `JCODE_OPENAI_SERVICE_TIER`; an explicit value is respected.
 - **Model inputs** (`model` / `plan_model`) override the corresponding Cruise settings. Every actual jcode prompt requires an effective Cruise model in `provider/model[:effort]` or bare-model form. `model` may come from the action input, repository workflow, or checkout `.cruise/default.yaml`; the jcode home default and `JCODE_MODEL` do not substitute. `plan_model` is used for planning calls and otherwise falls back to `model`. The optional effort suffix supports `low|medium|high|xhigh|max` and aliases documented in [SDK mode](sdk.md#sdk-mode).
-- **Custom providers** are provisioned as jcode profiles through the CLI; see [Providers](#providers) for their input schema and credentials.
 
-#### Zero-config default
+<a id="zero-config-default"></a>
+### Zero-config default
 
-When `config` is empty, there is no root workflow config, and there are no YAML files directly under `.cruise/`, this action generates a `write-tests -> implement` config with no `sdk`, `model`, or `plan_model` fields. Applicable checkout project defaults and action model inputs must supply a model for jcode prompts; Cruise uses `sdk: jcode` only if neither `command` nor `sdk` remains set.
+When `config` is empty, there is no root workflow config, and there are no YAML files directly under `.cruise/`, this action generates a `write-tests -> implement` config. The applicable checkout project defaults or action model input must supply a model for jcode prompts.
 
-### config resolution
+<a id="config-resolution"></a>
+## config resolution
 
-- **`config` input set** -- resolved to an absolute path and exported as `CRUISE_CONFIG`. Used by the `run`/`plan`/`fix` commands.
-- **`config` input empty, and the repository already has its own config** (`cruise.yaml`/`cruise.yml`/`.cruise.yaml`/`.cruise.yml` at the checkout root, or a workflow YAML under `.cruise/` other than the top-level `.cruise/default.yaml`) -- `CRUISE_CONFIG` is left unset entirely and cruise's own resolver picks that file up, including whichever backend it names (see [above](#sdk-jcode----how-execution-works)). See [`examples/repo-cruise.yaml`](../../examples/repo-cruise.yaml) for a config you can commit as your own `cruise.yaml`.
-- **`config` input empty, with no root workflow config and no YAML directly under `.cruise/`** -- this action generates a default config (`write-tests -> implement` steps with prompts embedded verbatim from this action's `prompts/write-test-first.md`/`prompts/implement-after-tests.md`, no `sdk`/`model`/`plan_model`) and exports it as `CRUISE_CONFIG`; after applicable checkout project defaults are applied, Cruise uses `sdk: jcode` only if neither `command` nor `sdk` remains set. See [Zero-config default](#zero-config-default).
-- **`.cruise/default.yaml` is the only YAML directly under `.cruise/`, with no root workflow config** -- this action leaves `CRUISE_CONFIG` unset. Cruise uses its built-in `tdd` workflow (`builtin/tdd.yaml`) and applies `.cruise/default.yaml` as project defaults. This is distinct from the action-generated two-step config in the previous case.
-- **`exec` always uses its own generated config**, regardless of `config` or the two cases above: a minimal config with a single `implement` step whose prompt is `"{input}"` (also without `sdk`/`model`/`plan_model`). `cruise exec` binds the whole plan text to `{input}` and never runs a planning step (`plan.md` stays empty), so a `{plan}`-based config would silently receive an empty prompt.
-- The action always exports `CRUISE_FORCE_EXEC=false`, so a repository's `force_exec: true` never changes the action's explicit `run`/`plan`/`fix` command flow.
+- **`config` input set** -- resolved to an absolute path and used by `run`/`plan`/`fix`.
+- **`config` input empty, with an existing repository config** -- cruise's own resolver selects the file.
 
-The action uses project defaults from the checkout's `.cruise/default.yaml` only. Its isolated XDG configuration does not load the user's `~/.config/cruise/default.yaml`.
-
-In every case, the `model`/`plan_model` inputs (`CRUISE_MODEL`/`CRUISE_PLAN_MODEL` env overrides, applied by cruise itself) take priority over whatever a config file does or doesn't set.
+In either case, `model`/`plan_model` inputs (`CRUISE_MODEL`/`CRUISE_PLAN_MODEL` environment overrides applied by Cruise itself) take precedence regardless of whether the config file sets them.
 
 Avoid `option:` steps in a config used for CI -- they prompt interactively and there is no terminal attached in Actions.
 
-### `env` input
+<a id="env-input"></a>
+## `env` input
 
 Pass extra environment variables into the cruise process with the `env` input, one `KEY=VALUE` per line:
 
@@ -259,9 +219,10 @@ Pass extra environment variables into the cruise process with the `env` input, o
       FEATURE_FLAG=true
 ```
 
-Blank lines and lines starting with `#` are ignored. Each value is masked (`::add-mask::`) before being exported. Reserved names -- `GITHUB_TOKEN`, `GH_TOKEN`, `PATH`, `HOME`, `SHELL`, the git identity vars (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`), `JCODE_HOME`, `XDG_DATA_HOME`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME`, and anything prefixed `CRUISE_`/`GITHUB_`/`ACTIONS_`/`RUNNER_` -- are skipped with a `::warning::` instead of being overridden, since the action itself manages them. Only those four prefixes are prefix rules; `JCODE_HOME` and the XDG entries are an exact-name list, so an unrelated variable such as `XDG_CACHE_HOME` or `JCODE_OPENAI_SERVICE_TIER` is exported normally. (`CRUISE_*` is a prefix rule, not just `CRUISE_SDK`/`CRUISE_CONFIG`: reach for the dedicated `model`/`plan_model`/`config` inputs rather than a raw `CRUISE_*` variable.) `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` are **not** reserved here -- passing them via `env` (instead of, or alongside, the dedicated `anthropic_api_key`/`openai_api_key` inputs) is a supported way to satisfy the credential gate.
+Blank lines and lines starting with `#` are ignored. Each value is masked (`::add-mask::`) before being exported. Reserved names -- `GITHUB_TOKEN`, `GH_TOKEN`, `PATH`, `HOME`, `SHELL`, git identity vars (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`), `JCODE_HOME`, `XDG_DATA_HOME`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME`, and names prefixed with `CRUISE_`/`GITHUB_`/`ACTIONS_`/`RUNNER_` -- are skipped with a `::warning::` instead of being overridden because the action manages them. `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are not reserved and can be passed through `env`, instead of or alongside their dedicated inputs.
 
-### exec caveats
+<a id="exec-caveats"></a>
+## exec caveats
 
 `exec` pushes **directly to the default branch**, with no PR and no review step. This:
 
@@ -269,22 +230,21 @@ Blank lines and lines starting with `#` are ignored. Each value is masked (`::ad
 - **Is advanced/opt-in.** There is no undo beyond `git revert`. Prefer `run` (which opens a draft PR you can review) unless you specifically want unattended direct pushes.
 - Skips the commit+push step entirely (and reports success) if `cruise exec` produced no file changes.
 
-The action always exports `CRUISE_FORCE_EXEC=false`; repository config cannot silently turn `run`, `plan`, or `fix` into direct execution. Use the explicit `exec` command when direct pushes are intended.
-
-### How authentication works
+<a id="how-authentication-works"></a>
+## How authentication works
 
 By default (`github_token` input left empty), the action tries to authenticate as the `cruise-agent` GitHub App instead of using the workflow's own `GITHUB_TOKEN`:
 
 1. With `permissions: id-token: write` granted, GitHub Actions gives the job a short-lived OIDC token identifying the workflow, repository, and run.
-2. The `token` step exchanges that OIDC token for a **repository-scoped, short-lived cruise-agent App installation token** by calling the `token_exchange_url` service (`POST` with `Authorization: Bearer <OIDC token>`, no body). The exchange service verifies the OIDC token's `repository` claim server-side and only ever issues a token scoped to that repository's installation -- it cannot mint a token for a repository the calling workflow doesn't belong to.
+2. The OIDC token is exchanged for a **repository-scoped, short-lived cruise-agent App installation token**. Only a token scoped to the calling repository is issued.
 3. cruise runs and pushes commits authenticated as `cruise-agent[bot]` using that token. Commits created by the action also add the user who triggered the mention as a `Co-authored-by` trailer using that user's GitHub-provided noreply address.
-4. After the run finishes (success or failure), the action revokes the token (`DELETE /installation/token`) so it can't be reused past the job's lifetime.
 
-If the App isn't installed on the repository (the exchange returns 404), the OIDC token can't be obtained (e.g. `id-token: write` wasn't granted), or the exchange service is unreachable, the action **falls back to the workflow's `GITHUB_TOKEN`** and logs why (a `::notice::` with the App install link for the "not installed" case, a `::warning::` otherwise). cruise still runs in that case, but with two `GITHUB_TOKEN`-specific limitations: draft PRs it opens won't trigger other `on: pull_request` workflows (see [Security](#security)), and commits use `github-actions[bot]` as the author/committer instead of `cruise-agent[bot]`.
+If the App is not installed on the repository, the OIDC token cannot be obtained (for example, `id-token: write` was not granted), or the exchange service is unreachable, the action **falls back to the workflow's `GITHUB_TOKEN`**. cruise still runs, but draft PRs created with `GITHUB_TOKEN` do not trigger other `on: pull_request` workflows, and commits use `github-actions[bot]` as the author/committer.
 
-### Bring your own token
+<a id="bring-your-own-token"></a>
+## Bring your own token
 
-Set `github_token` explicitly (e.g. to a PAT, or a token from your own GitHub App) to skip the OIDC exchange entirely -- the action uses that token for every GitHub API call and push, and never attempts the exchange or revocation:
+Set `github_token` explicitly (e.g. to a PAT or a token from your own GitHub App) to skip the OIDC exchange entirely. The action uses that token for every GitHub API call and push.
 
 ```yaml
 - uses: smartcrabai/cruise@v1
@@ -293,9 +253,10 @@ Set `github_token` explicitly (e.g. to a PAT, or a token from your own GitHub Ap
     github_token: ${{ secrets.MY_PAT }}
 ```
 
-### Self-hosting the token exchange
+<a id="self-hosting-the-token-exchange"></a>
+## Self-hosting the token exchange
 
-The token-exchange service is a small Cloudflare Worker that verifies GitHub Actions OIDC tokens and mints GitHub App installation tokens; see [`../token-exchange/README.md`](README.md) for its source and deployment instructions. If you run your own instance (your own GitHub App, your own Worker), point the action at it with `token_exchange_url`:
+To run a token-exchange service with your own GitHub App and Worker, point the action at it with `token_exchange_url`. See [`../../token-exchange/README.md`](../../token-exchange/README.md) for the source and deployment instructions.
 
 ```yaml
 - uses: smartcrabai/cruise@v1
@@ -306,19 +267,20 @@ The token-exchange service is a small Cloudflare Worker that verifies GitHub Act
 
 Set `token_exchange_url: ""` to disable the exchange outright and always use `github_token`/`GITHUB_TOKEN`.
 
-In both cases the action posts a tracking comment when it starts and rewrites it with the outcome when it finishes -- success with links (a PR for `run`, a commit for `exec`, the plan comment for `plan`/`fix`), or failure with a link to the run. Run logs are deliberately **never** copied into the comment (see [Security](#security)).
+In either case, the action posts a tracking comment when it starts and rewrites it with the outcome when it finishes. Run logs are never copied into issue comments.
 
-### Inputs
+<a id="inputs"></a>
+## Inputs
 
 | Input | Default | Description |
 |---|---|---|
-| `anthropic_api_key` | *(empty)* | Anthropic API key -- stored as jcode's `anthropic-api` credential in the jcode home the action pins for the job. At least one of `anthropic_api_key`, `openai_api_key`, `provider_api_keys`, `providers`, or `env` must be non-empty. |
-| `openai_api_key` | *(empty)* | OpenAI API key -- stored as jcode's `openai-api` credential the same way. At least one of `anthropic_api_key`, `openai_api_key`, `provider_api_keys`, `providers`, or `env` must be non-empty. |
+| `anthropic_api_key` | *(empty)* | Anthropic API key. At least one of `anthropic_api_key`, `openai_api_key`, `provider_api_keys`, `providers`, or `env` must be non-empty. |
+| `openai_api_key` | *(empty)* | OpenAI API key. At least one of `anthropic_api_key`, `openai_api_key`, `provider_api_keys`, `providers`, or `env` must be non-empty. |
 | `github_token` | *(empty)* | Token for GitHub API calls (permission checks, comments, PRs, pushes). Empty (default) tries the cruise-agent App OIDC token exchange first, falling back to the workflow's `GITHUB_TOKEN`; set explicitly to skip the exchange and use that token instead. See [How authentication works](#how-authentication-works). |
 | `token_exchange_url` | `https://cruise-token-exchange.smartcrab.ai/token` | URL of the token-exchange service. Empty disables the exchange (always falls back to `github_token`/`GITHUB_TOKEN`). See [Self-hosting the token exchange](#self-hosting-the-token-exchange). |
 | `trigger_phrase` | `@cruise` | Phrase that must appear (word-boundary match) to trigger a run. For the `issues` event, matching uses the issue title and body concatenated, so a phrase in the title is effective. |
-| `cruise_version` | `latest` | cruise release to install (`latest` or a tag like `v0.2.0`). Requires v0.2.0+; the install step rejects an older binary with a clear error. |
-| `jcode_version` | `latest` | jcode release to install via jcode's own installer (`latest` or a tag like `v0.88.0`). Ignored when a `jcode` is already on PATH; cruise requires jcode v0.88.0 or newer regardless. |
+| `cruise_version` | `latest` | cruise release to install (`latest` or a tag). |
+| `jcode_version` | `latest` | jcode release to install via jcode's own installer (`latest` or a tag). Ignored when `jcode` is already on PATH. |
 | `config` | *(empty)* | Path to a cruise workflow config YAML in your repo, used by `run`/`plan`/`fix` (sets `CRUISE_CONFIG`). Empty lets cruise's own resolver pick a config from the checkout, or its built-in `tdd` workflow. No effect on `exec`. |
 | `model` | *(empty)* | Overrides `CRUISE_MODEL`; for `sdk: jcode`, use `provider/model[:effort]`, a bare model, or leave the override unset. Every actual jcode prompt must resolve an effective Cruise model from this input, the workflow config, checkout `.cruise/default.yaml`, or (for planning prompts) `plan_model`/`CRUISE_PLAN_MODEL`. jcode's configured default and `JCODE_MODEL` do not substitute. |
 | `flags` | *(empty)* | Workflow flag values for `run` (blank lines and lines starting with `#` are ignored). Each remaining line is passed as one `--flag` value and may be a bare `NAME`, a comma-separated list, or explicit `NAME=on\|off\|true\|false` assignments. Flags absent from the input are off; no flag is required. No effect on `exec`, `plan` or `fix`. |
@@ -330,81 +292,48 @@ In both cases the action posts a tracking comment when it starts and rewrites it
 | `git_user_name` | *(empty)* | git `user.name` for commits this action/cruise creates. Empty resolves to `cruise-agent[bot]` when the run used the App token, otherwise `github-actions[bot]`. |
 | `git_user_email` | *(empty)* | git `user.email` for those commits. Empty resolves to match `git_user_name`'s default. Commits still add the triggering user as a `Co-authored-by` trailer when GitHub's event payload includes their login and numeric user id. |
 
-### Outputs
+<a id="outputs"></a>
+## Outputs
 
 | Output | Description |
 |---|---|
 | `command` | `"run"`, `"exec"`, `"plan"`, or `"fix"` -- the command parsed from the mention (empty if the gate skipped the run). |
-| `session_id` | The cruise session ID the run operated on -- resolved as the most recent session in cruise's session list after the command ran. Empty if the gate skipped the run, if the run aborted before reaching that point, or if no session exists at all. |
-| `pr_url` | URL of the pull request cruise opened (the `run` command only); empty when no PR was created. An empty value is valid only after a successful `cruise run` with a selected `Completed` session that records skip reason (`disabled` or `no-commits`); otherwise it remains a failure. |
+| `session_id` | The ID of the cruise session created by the command. |
+| `pr_url` | URL of the pull request cruise opened (the `run` command only); empty when no PR was created. |
 | `commit_url` | URL of the commit cruise pushed to the default branch (the `exec` command only). |
 | `plan_comment_url` | URL of the plan-tracking comment cruise posted or edited (the `plan`/`fix` commands only). |
-| `conclusion` | `success`, `failure`, or `skipped` (mention didn't match, or actor wasn't authorized). A gate-level configuration error -- `python3` missing from the runner, or `anthropic_api_key`/`openai_api_key`/`provider_api_keys`/`providers`/`env` all empty -- is not a skip: the gate writes a non-empty `gate_error` and finalize reports `conclusion=failure`. |
-| `used_app` | `"true"` if the run authenticated with a cruise-agent App installation token, `"false"` if it used `github_token`/`GITHUB_TOKEN`, or an empty string if the gate step skipped the run before the `token` step ran (mention didn't match / actor not authorized). |
+| `conclusion` | `success`, `failure`, or `skipped` (the mention did not match, or the actor was not authorized). |
+| `used_app` | `"true"` if the run authenticated with a cruise-agent App installation token; `"false"` if it used `github_token`/`GITHUB_TOKEN`. |
 
-### Testing the action's step scripts
-
-The composite action's step scripts (`action/scripts/*.sh`) are exercised directly by the suites in `scripts/test_action_*.sh`. The suites fake the runner contract (`GITHUB_ENV`, `GITHUB_OUTPUT`, `RUNNER_TEMP`) and use PATH stubs for `gh`, `curl`, `cruise`, and `jcode`, so the tests are fully hermetic: everything is written under a temp directory, no network access is required, and they run on bash 3.2 as well as bash 5.
-
-| Test suite | Step scripts covered |
-|---|---|
-| `scripts/test_action_gate.sh` | `action/scripts/gate.sh` |
-| `scripts/test_action_token.sh` | `action/scripts/app-token.sh` and `action/scripts/revoke-token.sh` |
-| `scripts/test_action_config_install.sh` | `action/scripts/resolve-config.sh` and `action/scripts/install.sh` |
-| `scripts/test_action_comments.sh` | `action/scripts/comment-start.sh` and `action/scripts/finalize.sh` |
-| `scripts/test_action_run.sh` | `action/scripts/run.sh` and `action/scripts/lib/plan.sh` |
-| `scripts/test_action_provider_config.sh` | `action/scripts/provision-jcode.sh`, `action/scripts/setup-env.sh`, and the credential gate in `gate.sh` |
-
-Run a single suite locally with:
-
-```bash
-bash scripts/test_action_<name>.sh
-```
-
-To run every suite the way CI does, loop over `scripts/test_action_*.sh`:
-
-```bash
-status=0
-for suite in scripts/test_action_*.sh; do
-  echo "== $suite"
-  bash "$suite" || status=1
-done
-exit "$status"
-```
-
-The shared harness is `scripts/lib/action_test_harness.sh`. Any new suite named `scripts/test_action_*.sh` is picked up automatically by the `Test GitHub Action step scripts` step in `.github/workflows/ci.yml`.
-
-### Security
+<a id="security"></a>
+## Security
 
 - **Only repository collaborators can trigger cruise.** The action calls the GitHub collaborator-permission API for the commenting/mentioning user and requires write access (the API reports the `maintain` role as `write`, so maintainers qualify; `triage` and `read` do not). Bot actors are rejected unless explicitly added to `allowed_bots`.
-- **No PR mode.** `issue_comment` events on a pull request (`.issue.pull_request` present) are always denied, regardless of the trigger phrase.
 - **Plan comments are trust-checked, not just marker-checked.** `run`/`exec`/`fix` only treat a comment as an authoritative plan source if it was posted by `cruise-agent[bot]`/`github-actions[bot]` *and* contains the plan marker. Without this, a commenter without write access could post a fake `<!-- cruise:plan -->` comment that a maintainer's later `@cruise run` would execute unreviewed (only the *mention itself* requires an authorized actor -- any other comment on a public issue does not).
-- **The token exchange issues repository-scoped tokens only.** The exchange service validates the `repository` claim embedded in the caller's GitHub Actions OIDC token server-side before minting an installation token, so a workflow can only ever obtain a token scoped to the repository it is actually running in -- never another repository the App happens to be installed on. `permissions: id-token: write` only lets the job *request* that OIDC token from GitHub; it grants no GitHub API access by itself.
-- **Unattended execution.** cruise drives the model through jcode (and, transitively, whatever tools your workflow config allows) without per-action confirmation prompts -- required for unattended CI use, but it also means a successful prompt-injection (see below) has the same blast radius as the workflow's own GitHub token and runner. Only grant the workflow the `permissions:` it needs (`contents: write`, `pull-requests: write`, `issues: write`, plus `id-token: write` if you want the App token exchange), and treat the provider API keys, `GITHUB_TOKEN`, and any App token this action obtains as you would any other CI secret with write access to your repository.
-- **Prompt injection.** Issue bodies and fix feedback are attacker-controlled text that gets embedded in the prompt sent to the model. The action strips hidden-instruction vectors -- HTML comments, `<img>` tags (alt-text payloads), and zero-width/bidi-control Unicode characters -- from that raw GitHub-sourced text before it becomes planning input. This is a mitigation, not a guarantee: instructions written as plain visible text cannot be filtered out. Don't grant this action to a workflow with secrets or permissions beyond what a successful "the agent did whatever the issue text said" outcome would be acceptable for.
+- **The token exchange issues repository-scoped tokens only.** Workflows can obtain a token scoped only to the repository in which they are running. `permissions: id-token: write` only lets the job request an OIDC token from GitHub; it does not itself grant GitHub API access.
+- **Unattended execution.** cruise does not show per-action confirmation prompts. A successful prompt injection (see below) has the same blast radius as the workflow's GitHub token and runner. Grant only the required `permissions:` (`contents: write`, `pull-requests: write`, `issues: write`, plus `id-token: write` for App token exchange), and treat provider API keys, `GITHUB_TOKEN`, and any App token as CI secrets with repository write access.
+- **Prompt injection.** Issue bodies and fix feedback are attacker-controlled text embedded in the model prompt. Before GitHub-sourced text becomes planning input, the action removes hidden instruction vectors. This is a mitigation, not a guarantee; visible plain-text instructions cannot be filtered. Do not grant secrets or permissions beyond what would be acceptable if the agent did everything the issue text asked.
 - **Run logs are never posted back to the issue.** The failure comment links to the Actions run instead of quoting log output. Agent output can contain anything the model was coaxed into printing (including environment values), and GitHub's secret masking only applies to the Actions log viewer -- not to text re-posted through the API -- so copying logs into a public comment would be an exfiltration channel. Logs stay on the run page, which follows your repository's access controls.
-- **The installer is fetched over TLS but not checksum-verified.** The action installs cruise and jcode via their release installer scripts (`curl | sh`). (jcode's installer does verify the release asset's SHA-256 against the published SHA256SUMS; the script itself is not checksummed.) This is the same trust model as rustup et al., but it does mean a compromise of a download endpoint would run attacker code with the job's secrets. Pin `cruise_version`/`jcode_version` to tags if you want to at least avoid silently tracking `latest`.
+- **The installer is fetched over TLS but not checksum-verified.** The action installs cruise and jcode through release installer scripts (`curl | sh`), but the scripts themselves are not checksummed. A compromised download endpoint could run attacker code with the job secrets. Pin `cruise_version`/`jcode_version` to tags to avoid silently tracking `latest`.
 - **PRs opened via `GITHUB_TOKEN` don't trigger other workflows.** This is a deliberate GitHub Actions anti-recursion rule, and it only applies to the plain `GITHUB_TOKEN` fallback path -- PRs/pushes made with the cruise-agent App's installation token (the default, when the App is installed) trigger `on: pull_request` workflows normally, since GitHub treats App-authenticated actions as coming from a distinct actor. If you're on the `GITHUB_TOKEN` fallback and need CI to run on cruise's PRs, either install the App, use your own PAT/GitHub App token via `github_token`, or add a step that closes/reopens the PR.
-- **`exec` pushes directly to the default branch.** See [exec caveats](#exec-caveats).
-- **Runner isolation.** Each run points `XDG_DATA_HOME`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME` at `$RUNNER_TEMP`, so cruise's session/worktree state never leaks between jobs and never touches a persistent runner's home directory. `JCODE_HOME` is exported the same way.
 
-### Troubleshooting
+<a id="troubleshooting"></a>
+## Troubleshooting
 
 - **Nothing happens after mentioning `@cruise`.** Check the workflow run list for a skipped/no-op run: the gate step logs why it declined (event type, action, missing trigger phrase, PR comment, or insufficient actor permission).
 - **"'anthropic_api_key', 'openai_api_key', 'provider_api_keys', 'providers', and 'env' are all empty".** Set at least one dedicated key, `providers`/`provider_api_keys` for a generated profile, or a provider key via `env` (e.g. `KIMI_API_KEY=...`).
 - **"actor '&lt;login&gt;' has insufficient permission: '&lt;permission&gt;'".** The commenter needs `write`, `maintain`, or `admin` access to the repository.
 - **"No existing plan comment found" (fix).** Run `@cruise plan` first; `fix` only edits an existing plan-tracking comment, it doesn't create one.
-- **"cruise completed but no pull request was created" (run).** A missing PR URL is valid only after `cruise run` exits successfully and the selected session is `Completed` with a recorded no-PR skip reason (`disabled` for `create_pr: false` or `no-commits` for a successful no-commit run). Otherwise, inspect the session log for the PR-creation error and check `permissions: pull-requests: write` and branch-protection/repository rules; runs with an unexplained missing PR URL fail.
+- **"cruise completed but no pull request was created" (run).** Check `permissions: pull-requests: write` and branch-protection/repository rules.
 - **`exec`'s push fails.** Usually branch protection on the default branch -- see [exec caveats](#exec-caveats).
-- **Model resolution errors.** Check that the installed jcode CLI is v0.88.0 or newer, that its API bridge supports the session capabilities Cruise needs, and that every actual jcode prompt resolves an effective Cruise model. This requirement is unconditional: jcode's configured default and `JCODE_MODEL` do not substitute. Set the `model`/`plan_model` inputs or configure them in the workflow or checkout `.cruise/default.yaml`, as appropriate for the prompt.
+- **Model resolution errors.** Ensure every actual jcode prompt resolves an effective Cruise model. The jcode configured default and `JCODE_MODEL` do not substitute. Set the `model`/`plan_model` inputs or configure them in the workflow or checkout `.cruise/default.yaml`, as appropriate for the prompt.
 - **Run always falls back to `GITHUB_TOKEN` (`used_app` output is `false`).** Check, in order: the `cruise-agent` App is installed on this repository ([install link](https://github.com/apps/cruise-agent/installations/new)); the workflow grants `permissions: id-token: write`; `token_exchange_url` is not empty and reachable. The `token` step's log line explains which of these failed.
-- **Windows runners** are supported: the install step runs the cargo-dist PowerShell installer (`cruise-installer.ps1`), places the x64 `cruise.exe` under `$RUNNER_TEMP`, and appends that directory to `GITHUB_PATH`. `command:` steps run through `cmd.exe /C`.
 - **Self-hosted runners** need `git`, `curl`, `jq`, `python3`, and the `gh` CLI on `PATH` (all preinstalled on GitHub-hosted runners).
 
-#### FAQ
+<a id="faq"></a>
+### FAQ
 
-- **Why did my brand-new issue immediately turn into a PR instead of posting a plan first?** Its title or body already contained the trigger phrase, so the `issues: [opened]` event fired immediately. The token immediately after the phrase, on the same line, selects `plan`, `fix`, `exec`, or `run`; only a missing or unknown token defaults to `run` -- see the warning in [Typical workflow](#typical-workflow). Leave the trigger phrase out of the issue itself and comment `@cruise plan` afterward if you want to review a plan first.
-- **The pull request cruise opened won't merge / doesn't show up as ready.** All PRs from `run` (and, transitively, `exec`'s equivalent for direct pushes -- though that path has no PR at all) are opened as **drafts**, unconditionally. Mark it "Ready for review" yourself once you've reviewed the diff; see [Typical workflow](#typical-workflow).
-- **My run timed out around 30 minutes.** `write-tests -> implement` (or your own config's equivalent steps) each run a full verification pass (formatting, linting, the whole test suite); on a large repository this measured over 30 minutes end to end during testing. `timeout-minutes: 60` (as used in [`examples/cruise.yml`](../../examples/cruise.yml)) is the recommended starting point -- raise it further for slower test suites.
-- **My second `@cruise` comment on the same issue seems stuck, not running.** It's queued, not lost: the `concurrency:` group in the example workflows serializes runs per-issue (no `cancel-in-progress`), so a `plan` -> `fix` -> `run` sequence executes one step at a time in order. Check the Actions run list -- the earlier run is probably still in progress.
-- **cruise's PR didn't trigger my CI workflow.** Expected when running on the `GITHUB_TOKEN` fallback (no App installed) -- see [Security](#security) and [How authentication works](#how-authentication-works).
+- **Why did my brand-new issue immediately turn into a PR instead of posting a plan first?** Its title or body already contained the trigger phrase, so the `issues: [opened]` event fired immediately. To review a plan first, leave the trigger phrase out of the issue itself and comment `@cruise plan` afterward.
+- **The pull request cruise opened won't merge / doesn't show up as ready.** PRs from `run` are always opened as **drafts**. Review the diff, then mark it "Ready for review" yourself; see [Typical workflow](#typical-workflow).
+- **My run timed out.** Start with `timeout-minutes: 60` as in [`examples/cruise.yml`](../../examples/cruise.yml); increase it further for slower test suites.
+- **My second `@cruise` comment on the same issue seems stuck, not running.** It is queued, not lost. Check the Actions run list; the earlier run may still be in progress.
