@@ -121,7 +121,7 @@ cruise list --json | jq '.[] | select(.id=="<session-id>") | {id, phase, title, 
 
 ## Creating a GitHub issue instead (the @cruise Actions integration)
 
-When the target repository has the cruise GitHub Action installed (`.github/workflows/cruise.yml` + an API-key secret — see `docs/github-actions.md`), a plan can be registered as a **GitHub issue** instead of a local session. Execution then happens on GitHub Actions and ends in a draft PR, with the whole exchange reviewable in the issue thread.
+When the target repository has the cruise GitHub Action installed (`.github/workflows/cruise.yml` + an API-key secret — see `docs/en/github-actions.md`), a plan can be registered as a **GitHub issue** instead of a local session. Execution then happens on GitHub Actions and ends in a draft PR, with the whole exchange reviewable in the issue thread.
 
 The `## Execution settings` section in an issue body is documentation only: it does not select the Actions workflow or set execution flags/skips. The action's `config` input or checkout repository config determines the workflow; its `flags` input supplies declared flags for `run`. The issue body cannot pin a local `-c` config, and the documented action interface has no per-run `skipped_steps` input. Before triggering an issue, confirm the repo-owned Actions/config path implements the required workflow and flags. If non-empty user-selected skips are required but that path cannot set them, do not trigger it; use a local session with the supported settings UI when appropriate.
 

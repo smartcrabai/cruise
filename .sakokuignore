@@ -3,6 +3,9 @@ docs/icon.png
 # Intentionally Japanese docs
 token-exchange/README.md
 skills/cruise-plan/SKILL.md
+# Intentional Japanese and Chinese documentation
+docs/ja/
+docs/zh/
 # Intentionally CJK UI locale catalogs
 i18n/ja.toml
 i18n/ko.toml

@@ -335,7 +335,7 @@ do_exec() {
 
   # Plain `git push` (no explicit refspec): the workflow's checkout already
   # set up branch tracking against the default branch. This pushes straight
-  # to that branch -- no PR, no review step. See docs/github-actions.md for
+  # to that branch -- no PR, no review step. See docs/en/github-actions.md for
   # why this is an advanced/opt-in mode (branch protection interacts badly
   # with an unattended agent pushing directly).
   if ! git -C "$WORKSPACE" push >>"$LOG_FILE" 2>&1; then

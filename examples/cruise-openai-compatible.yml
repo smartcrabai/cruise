@@ -30,7 +30,7 @@ jobs:
       pull-requests: write
       issues: write
       # Needed to exchange this job's OIDC token for a cruise-agent GitHub
-      # App installation token (see docs/github-actions.md). Safe to remove
+      # App installation token (see docs/en/github-actions.md). Safe to remove
       # if you don't use the App (the action falls back to GITHUB_TOKEN).
       id-token: write
     steps:
@@ -43,7 +43,7 @@ jobs:
           # A generated jcode provider profile: each `providers` entry becomes
           # a `[providers.<name>]` table in the jcode home the action pins
           # for the job (JCODE_HOME under $RUNNER_TEMP), written via
-          # `jcode provider add` (see docs/github-actions.md#providers).
+          # `jcode provider add` (see docs/en/github-actions.md#providers).
           # This example marks the generated profile as jcode's startup
           # default. Cruise still needs its own explicit model reference below.
           providers: |

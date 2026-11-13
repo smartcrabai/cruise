@@ -5,6 +5,7 @@
 ### Changed
 
 - Stop prompting for workflow flags on `cruise run`; saved session values and explicit `-f/--flag` assignments now control execution. `exec` and `force_exec` still prompt before creating a transient session.
+- Split the README into English, Japanese, and Simplified Chinese documentation under `docs/en/`, `docs/ja/`, and `docs/zh/`.
 
 ### Added
 

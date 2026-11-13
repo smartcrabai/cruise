@@ -3,7 +3,7 @@
 # "plan tracking" comment used by the plan/fix/run/exec commands. Meant to be
 # `source`d (not executed directly) by run.sh.
 #
-# Comment format (see docs/github-actions.md):
+# Comment format (see docs/en/github-actions.md):
 #
 #   <!-- cruise:plan -->
 #   ## 📋 Plan
@@ -37,7 +37,7 @@ PLAN_AUTHOR_LOGINS="cruise-agent[bot] github-actions[bot]"
 #  - zero-width / bidi-control / other invisible Unicode characters
 # Multiline-safe (Python, not sed). This cannot stop instructions written as
 # plain visible text -- that residual risk is documented in
-# docs/github-actions.md. Applied to raw GitHub-sourced text (issue
+# docs/en/github-actions.md. Applied to raw GitHub-sourced text (issue
 # title/body, fix feedback, extracted plan-comment content, the triggering
 # comment's trailing instructions) before it is used as planning input.
 sanitize_text() {

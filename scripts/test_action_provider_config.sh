@@ -495,7 +495,7 @@ if [ "$status" -ne 0 ] && grep -Fq "'provider_api_keys', 'providers', and 'env' 
 # setup-env.sh: model overrides and the `env` input's reserved names
 # ===========================================================================
 # This loop had no coverage at all, which is exactly how action.yml's and
-# docs/github-actions.md's reserved-name lists drifted from RESERVED_KEYS
+# docs/en/github-actions.md's reserved-name lists drifted from RESERVED_KEYS
 # without anything noticing: both claimed ANTHROPIC_API_KEY/OPENAI_API_KEY
 # were reserved when the code has never treated them that way, and gate.sh
 # deliberately counts a non-empty `env` as a credential source so a provider
@@ -608,7 +608,7 @@ for key in $reserved_line; do
     GIT_AUTHOR_*|GIT_COMMITTER_*|XDG_*) continue ;;  # covered by a collective phrase
   esac
   printf '%s' "$env_desc" | grep -Fq "$key" || drift="$drift $key(missing-from-action.yml)"
-  grep -Fq "\`$key\`" docs/github-actions.md || drift="$drift $key(missing-from-docs)"
+  grep -Fq "\`$key\`" docs/en/github-actions.md || drift="$drift $key(missing-from-docs)"
 done
 for key in ANTHROPIC_API_KEY OPENAI_API_KEY; do
   case " $reserved_line " in *" $key "*) drift="$drift $key(unexpectedly-in-RESERVED_KEYS)" ;; esac
