@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -173,19 +175,36 @@ fn check_group_retry_skip(
     ))
 }
 
-/// Take pre-execution snapshots (per-step, per-group, and per-attempt NFC) as needed.
+/// Read the current git HEAD, recording unreadable or unborn HEADs as `None`.
+fn current_git_head(working_dir: Option<&Path>) -> Option<String> {
+    let mut command = Command::new("git");
+    command.args(["rev-parse", "--verify", "HEAD"]);
+    if let Some(working_dir) = working_dir {
+        command.current_dir(working_dir);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!head.is_empty()).then_some(head)
+}
+
+/// Take pre-execution file snapshots (per-step, per-group, and per-attempt NFC) as needed.
 fn take_pre_snapshots(
     compiled: &CompiledWorkflow,
     tracker: &mut FileTracker,
     current_step: &str,
     step_call_site: Option<&str>,
-    has_if_file_changed: bool,
-    has_no_file_changes_condition: bool,
+    if_condition: Option<&crate::config::IfCondition>,
 ) -> Result<Option<String>> {
-    if has_if_file_changed {
+    if let Some(if_condition) = if_condition
+        && if_condition.file_changed.is_some()
+        && if_condition.no_file_changes.is_none()
+    {
         tracker.take_snapshot(current_step)?;
     }
-    let nfc_key = if has_no_file_changes_condition {
+    let nfc_key = if if_condition.is_some_and(|condition| condition.no_file_changes.is_some()) {
         let key = nfc_snapshot_key(current_step);
         tracker.take_snapshot(&key)?;
         Some(key)
@@ -208,16 +227,25 @@ fn take_pre_snapshots(
     Ok(nfc_key)
 }
 
-/// Determine the next-step override from file-change conditions after step execution.
+/// Determine the next-step override from file and commit change conditions after step execution.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "transition checks use independent workflow and execution inputs"
+)]
 fn resolve_if_next(
     compiled: &CompiledWorkflow,
-    tracker: &mut FileTracker,
+    tracker: &FileTracker,
+    head_before: Option<&Option<String>>,
+    if_condition: Option<&crate::config::IfCondition>,
     current_step: &str,
     step_call_site: Option<&str>,
-    step_if_file_changed: Option<&str>,
+    working_dir: Option<&Path>,
+    step_succeeded: bool,
 ) -> Result<Option<(String, bool)>> {
     // Per-step file-changed check.
-    if let Some(target) = step_if_file_changed {
+    if let Some(target) = if_condition.and_then(|condition| condition.file_changed.as_deref())
+        && if_condition.is_some_and(|condition| condition.no_file_changes.is_none())
+    {
         if tracker.has_files_changed(current_step)? {
             crate::status_eprintln!(
                 "  {} files changed, jumping to: {}",
@@ -231,6 +259,22 @@ fn resolve_if_next(
             style(".").dim()
         );
     }
+    if step_succeeded
+        && let Some(target) = if_condition.and_then(|condition| condition.head_changed.as_deref())
+    {
+        if head_before != Some(&current_git_head(working_dir)) {
+            crate::status_eprintln!(
+                "  {} git HEAD changed, jumping to: {}",
+                style("R").cyan(),
+                target
+            );
+            return Ok(Some((target.to_string(), false)));
+        }
+        crate::status_eprintln!(
+            "  {} git HEAD unchanged (if.head-changed check)",
+            style(".").dim()
+        );
+    }
     // Group file-changed check.
     let Some(call_site) = step_call_site else {
         return Ok(None);
@@ -241,10 +285,10 @@ fn resolve_if_next(
         return Ok(None);
     }
     let Some(invoc) = meta else { return Ok(None) };
-    let Some(ref if_cond) = invoc.if_condition else {
+    let Some(if_cond) = &invoc.if_condition else {
         return Ok(None);
     };
-    let Some(ref target) = if_cond.file_changed else {
+    let Some(target) = &if_cond.file_changed else {
         return Ok(None);
     };
     if tracker.has_files_changed(&group_snapshot_key(call_site))? {
@@ -764,7 +808,6 @@ async fn step_loop_iteration(
     let merged_env = resolve_env(&ctx.compiled.env, &step_config.env, vars)?;
     let kind = StepKind::try_from(step_config.clone())?;
     let if_cond = step_config.if_condition.as_ref();
-    let step_if_file_changed = if_cond.and_then(|c| c.file_changed.as_deref());
     let nfc_cond = if_cond.and_then(|c| c.no_file_changes.as_ref());
     let if_fail = if_cond.and_then(|c| c.fail.as_ref());
 
@@ -790,14 +833,11 @@ async fn step_loop_iteration(
     let operation = crate::telemetry::Operation::start("step", &attributes);
     let mut failed_attempt = false;
     let result: Result<StepOutcome> = async {
-        let nfc_key = take_pre_snapshots(
-            ctx.compiled,
-            tracker,
-            current_step,
-            step_call_site,
-            step_if_file_changed.is_some() && nfc_cond.is_none(),
-            nfc_cond.is_some(),
-        )?;
+        let head_before = if_cond
+            .and_then(|condition| condition.head_changed.as_ref())
+            .map(|_| current_git_head(ctx.working_dir));
+        let nfc_key =
+            take_pre_snapshots(ctx.compiled, tracker, current_step, step_call_site, if_cond)?;
 
         let outcome = execute_step_kind_inner(
             ctx,
@@ -969,13 +1009,12 @@ async fn step_loop_iteration(
             resolve_if_next(
                 ctx.compiled,
                 tracker,
+                head_before.as_ref(),
+                if_cond,
                 current_step,
                 step_call_site,
-                if nfc_cond.is_none() {
-                    step_if_file_changed
-                } else {
-                    None
-                },
+                ctx.working_dir,
+                !step_failed,
             )?
         } else {
             None
@@ -998,6 +1037,8 @@ async fn step_loop_iteration(
             let target = crate::graph::resolve_target(ctx.compiled, target)?;
             if *group {
                 TransitionReason::GroupRetry { target }
+            } else if if_cond.is_some_and(|condition| condition.head_changed.is_some()) {
+                TransitionReason::IfHeadChanged { target }
             } else {
                 TransitionReason::IfFileChanged { target }
             }
@@ -4296,6 +4337,175 @@ steps:
         // implement -> loop_back -> done = 3 steps
         let r = result.unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(r.run, 3, "implement + loop_back + done should all run");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn if_head_changed_ignores_worktree_edits_without_commit() {
+        let repo = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        crate::test_support::init_git_repo(repo.path());
+        std::fs::write(
+            repo.path().join(".gitignore"),
+            "test-results/\n.formal-tools/\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(repo.path().join("tracked.txt"), "before")
+            .unwrap_or_else(|error| panic!("{error}"));
+        crate::test_support::run_git_ok(repo.path(), &["add", ".gitignore", "tracked.txt"]);
+        crate::test_support::run_git_ok(repo.path(), &["commit", "-m", "head condition fixture"]);
+
+        let yaml = r#"
+command: [echo]
+steps:
+  inspect:
+    command: |
+      printf edited > tracked.txt
+      mkdir -p test-results .formal-tools
+      printf result > test-results/result.txt
+      printf cache > .formal-tools/cache
+    if:
+      head-changed: jump
+  continue:
+    command: "printf continued > continued.txt"
+    next: done
+  jump:
+    command: "printf jumped > jumped.txt"
+  done:
+    command: "true"
+"#;
+        run_config_inner(
+            yaml,
+            "",
+            None,
+            repo.path().to_path_buf(),
+            10,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error:?}"));
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("tracked.txt"))
+                .unwrap_or_else(|error| panic!("{error}")),
+            "edited"
+        );
+        assert!(repo.path().join("test-results/result.txt").exists());
+        assert!(repo.path().join(".formal-tools/cache").exists());
+        assert!(repo.path().join("continued.txt").exists());
+        assert!(!repo.path().join("jumped.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn if_head_changed_jumps_after_commit() {
+        let repo = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        crate::test_support::init_git_repo(repo.path());
+        std::fs::write(
+            repo.path().join(".gitignore"),
+            "test-results/\n.formal-tools/\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(repo.path().join("tracked.txt"), "before")
+            .unwrap_or_else(|error| panic!("{error}"));
+        crate::test_support::run_git_ok(repo.path(), &["add", ".gitignore", "tracked.txt"]);
+        crate::test_support::run_git_ok(repo.path(), &["commit", "-m", "head condition fixture"]);
+
+        let yaml = r#"
+command: [echo]
+steps:
+  inspect:
+    command: |
+      printf edited > tracked.txt
+      mkdir -p test-results .formal-tools
+      printf result > test-results/result.txt
+      printf cache > .formal-tools/cache
+      git add tracked.txt
+      git commit -m "verified fix"
+    if:
+      head-changed: jump
+  continue:
+    command: "printf continued > continued.txt"
+    next: done
+  jump:
+    command: "printf jumped > jumped.txt"
+  done:
+    command: "true"
+"#;
+        run_config_inner(
+            yaml,
+            "",
+            None,
+            repo.path().to_path_buf(),
+            10,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error:?}"));
+
+        assert!(repo.path().join("jumped.txt").exists());
+        assert!(!repo.path().join("continued.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn if_head_changed_does_not_jump_after_failed_commit() {
+        let repo = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        crate::test_support::init_git_repo(repo.path());
+        std::fs::write(repo.path().join("tracked.txt"), "before")
+            .unwrap_or_else(|error| panic!("{error}"));
+        crate::test_support::run_git_ok(repo.path(), &["add", "tracked.txt"]);
+        crate::test_support::run_git_ok(repo.path(), &["commit", "-m", "head condition fixture"]);
+        let head_before = current_git_head(Some(repo.path()))
+            .unwrap_or_else(|| panic!("fixture repository should have a HEAD"));
+
+        let yaml = r#"
+command: [echo]
+steps:
+  inspect:
+    command: |
+      printf edited > tracked.txt
+      git add tracked.txt
+      git commit -m "failed commit"
+      exit 1
+    if:
+      head-changed: jump
+  continue:
+    command: "printf continued > continued.txt"
+    next: done
+  jump:
+    command: "printf jumped > jumped.txt"
+  done:
+    command: "true"
+"#;
+        let result = run_config_inner(
+            yaml,
+            "",
+            None,
+            repo.path().to_path_buf(),
+            10,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        let head_after = current_git_head(Some(repo.path()))
+            .unwrap_or_else(|| panic!("failed command should still commit"));
+        assert_ne!(head_after, head_before, "the command must change HEAD");
+
+        assert_eq!(result.failed, 1, "the commit step should remain failed");
+        assert!(repo.path().join("continued.txt").exists());
+        assert!(!repo.path().join("jumped.txt").exists());
     }
 
     #[cfg(unix)]

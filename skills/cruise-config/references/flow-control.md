@@ -75,6 +75,28 @@ When no files change, the workflow proceeds to the next step normally (or follow
 
 Use `cruise workflow doctor <path>` to inspect routing and graph diagnostics without running the workflow. `unreachable_step` is a warning relative to the selected flags, all off by default; use `-f NAME` to check a different selection. `no_normal_exit` is an error when the start cannot reach a normal exit and reaches a cycle. `cycle_may_not_exit` warns when normal exit is possible but a reachable cycle cannot exit. `--strict` makes warnings cause a nonzero exit. Runtime preflight does not emit doctor-only unreachable-step warnings.
 
+## `if: head-changed:` — commit detection
+
+Before a step runs, cruise reads the Git `HEAD` commit OID in the step's working directory (`git rev-parse --verify HEAD`). After the step finishes successfully, it reads `HEAD` again. Different values jump to the named target; equal values follow the normal transition (`next:` if set, otherwise the next step).
+
+An unreadable `HEAD` (for example, a non-Git directory or an unborn repository) is recorded as `none`. Any different before/after values count as a change, including `none` to a commit or a commit to `none`; `none` to `none` is unchanged. This detects committed revisions only: untracked, ignored, or uncommitted file changes do not trigger the jump.
+
+```yaml
+steps:
+  repair:
+    prompt: "Fix the CI failure and commit the verified fix."
+    if:
+      head-changed: sync-base
+```
+
+### Constraints on `if.head-changed`
+
+- Step-level only; rejected in group-level `if:`.
+- Cannot coexist on the same step with `if.file-changed`, `if.no-file-changes`, or `return`.
+- Allowed on `after-pr` steps.
+- A triggered jump uses the same loop-protection budget as `if.file-changed`.
+
+
 ## `if.no-file-changes` — detect no-change
 
 Specifies behavior when a step completes without modifying any workspace files. The value is either `retry` or `failed`.
@@ -97,7 +119,7 @@ steps:
 - The value must be `retry` or `failed`; any other value (including the removed object form `{ fail: true }` / `{ retry: true }`) is a parse error.
 - Cannot be used inside `after-pr` steps.
 - Cannot be used in a group-level `if:`.
-- Can coexist with `if: file-changed` on the same step, but then `file-changed` is **ignored entirely** — `no-file-changes` takes over change detection.
+- Can coexist with `if: file-changed` on the same step, but then `file-changed` is **ignored entirely** — `no-file-changes` takes over change detection. Cannot coexist with `if.head-changed`.
 
 > Migration: the legacy `fail-if-no-file-changes: true` field is rejected as an unknown field. Use `no-file-changes: failed` under the step's `if:` instead.
 
@@ -168,7 +190,7 @@ steps:
     command: echo done
 ```
 
-The non-empty list contains objects with a required nonblank `command` and an optional positive `timeout` (seconds, `m`, or `h`); unknown fields are rejected. After a successful prompt, gates run in order and stop at the first nonzero exit, timeout, or signal. The normal transition, including `if.file-changed`, is applied only after all gates pass. Gates also run for the last step, but not for skipped or failed attempts or an attempt discarded by `if.no-file-changes: retry`.
+The non-empty list contains objects with a required nonblank `command` and an optional positive `timeout` (seconds, `m`, or `h`); unknown fields are rejected. After a successful prompt, gates run in order and stop at the first nonzero exit, timeout, or signal. The normal transition, including `if.file-changed` and `if.head-changed`, is applied only after all gates pass. Gates also run for the last step, but not for skipped or failed attempts or an attempt discarded by `if.no-file-changes: retry`.
 
 Failure retries the same step using its existing self-edge budget, shared with other self-retries. The effective ceiling is `--max-retries`, then `max_retries`, then 3. With no earlier self-retries there are at most `1 + max_retries` gate attempts. At exhaustion, a named `if.fail: <step>` is taken; otherwise execution stops with `QualityGateExhausted`. `if.fail: {retry: true}` does not create a separate budget.
 
@@ -199,10 +221,11 @@ steps:
 5. `no-file-changes: retry` and no files changed → re-execute the same step without running gates.
 6. After a successful prompt, run `quality_gates` if present. Failure retries the step while budget remains; on exhaustion, jump to a named `if.fail` target or stop with `QualityGateExhausted`.
 7. `if.file-changed` and files changed → jump to target (ignored when `if.no-file-changes` is also set).
-8. An option step's selected `next:` → go to that step (`next: ~` falls through to rule 9/10).
-9. If `next:` is set → go to that step.
-10. Otherwise → go to the next step in YAML declaration order.
-11. If there is none → end the workflow.
+8. `if.head-changed` and `HEAD` changed → jump to target.
+9. An option step's selected `next:` → go to that step (`next: ~` falls through to rule 10/11).
+10. If `next:` is set → go to that step.
+11. Otherwise → go to the next step in YAML declaration order.
+12. If there is none → end the workflow.
 
 ## Loop protection
 

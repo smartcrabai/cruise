@@ -143,8 +143,9 @@ The existing **Merge PR** action in `cruise list`, the TUI, and the WebUI remain
 - **After-PR errors:** without native merge opt-in, errors from ordinary `after-pr` steps are warnings except cancellation, missing jcode models, and `github-review` failures, which propagate. With native merge opted in, actual execution errors anywhere in the after-PR run, including before the native step, are fatal and suppress post-PR cleanup. A nonzero command exit status remains command-as-data under existing semantics; the native action independently rechecks current readiness instead of trusting command output.
 - **`if.no-file-changes` is forbidden**: rejected for the same reason.
 - **`if.fail`:** supported only on the native `squash-merge: true` step; rejected on all other `after-pr` steps.
+- **`if.head-changed`:** allowed on `after-pr` steps.
 
-Regular transition rules (`next` / `skip` / `when.exists` / `if.file-changed`) work as usual.
+Regular transition rules (`next` / `skip` / `when.exists` / `if.file-changed` / `if.head-changed`) work as usual.
 
 ## Related: `cleanup_after_pr`
 

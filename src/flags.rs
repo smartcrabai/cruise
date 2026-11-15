@@ -427,7 +427,7 @@ mod enabled_graph_tests {
     #[test]
     fn disabled_jump_target_and_payload_are_rewritten() {
         let (compiled, graph) = fixture(
-            "flags:\n  f: {}\nsteps:\n  a:\n    command: 'true'\n    if:\n      fail: x\n      file-changed: x\n  x: {command: 'true', flag: f}\n  b: {command: 'true'}\n",
+            "flags:\n  f: {}\nsteps:\n  a:\n    command: 'true'\n    if:\n      fail: x\n      file-changed: x\n  x: {command: 'true', flag: f}\n  b:\n    command: 'true'\n    if:\n      head-changed: x\n",
         );
         let projected = enabled_graph(&graph, &compiled, &FlagValues::new());
         for reason in [
@@ -436,12 +436,20 @@ mod enabled_graph_tests {
         ] {
             assert_eq!(target(&projected, "a", &reason), Some("b"));
         }
+        assert_eq!(
+            target(
+                &projected,
+                "b",
+                &TransitionReason::IfHeadChanged { target: "b".into() }
+            ),
+            Some("b")
+        );
     }
 
     #[test]
     fn disabled_final_conditional_jump_becomes_terminal_preserving_reason() {
         let (compiled, graph) = fixture(
-            "flags:\n  f: {}\nsteps:\n  a:\n    command: 'true'\n    if:\n      fail: x\n      file-changed: x\n  x: {command: 'true', flag: f}\n",
+            "flags:\n  f: {}\nsteps:\n  a:\n    command: 'true'\n    if:\n      fail: x\n      file-changed: x\n  b:\n    command: 'true'\n    if:\n      head-changed: x\n  x: {command: 'true', flag: f}\n",
         );
         let projected = enabled_graph(&graph, &compiled, &FlagValues::new());
         assert!(!projected.nodes.contains_key("x"));
@@ -451,6 +459,14 @@ mod enabled_graph_tests {
         ] {
             assert_eq!(target(&projected, "a", &reason), None);
         }
+        assert_eq!(
+            target(
+                &projected,
+                "b",
+                &TransitionReason::IfHeadChanged { target: "x".into() }
+            ),
+            None
+        );
     }
 
     #[test]

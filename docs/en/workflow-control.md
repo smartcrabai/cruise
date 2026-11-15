@@ -86,6 +86,30 @@ steps:
       file-changed: test    # after review, if it modified files, jump back to test
 ```
 
+<a id="conditional-execution-head-changed"></a>
+### Conditional execution: commit detection (`if.head-changed`)
+
+When a step has `if: head-changed: <target>`, cruise reads the Git `HEAD` commit OID in the step's working directory before the step runs (`git rev-parse --verify HEAD`), then reads it again after the step finishes successfully. If the values differ, the workflow jumps to `<target>`; otherwise, it continues normally to the next step (or follows `next:` if set).
+
+If `HEAD` cannot be read (for example, in a non-Git directory or an unborn repository), that value is recorded as `none`. Any different before/after values count as a change, including `none` to a commit or a commit to `none`; `none` to `none` is unchanged. The condition detects committed revisions only: untracked, ignored, and uncommitted file changes do not trigger it.
+
+```yaml
+steps:
+  repair:
+    prompt: "Fix the CI failure and commit the verified fix."
+    if:
+      head-changed: sync-base
+
+  sync-base:
+    command: ./sync-base.sh
+```
+
+**Constraints:**
+- `if.head-changed` is step-level only; it is rejected in group-level `if:` conditions.
+- It cannot be combined on the same step with `if.file-changed`, `if.no-file-changes`, or a `return`.
+- It is allowed on `after-pr` steps.
+- A triggered jump uses the same loop-protection budget as `if.file-changed`.
+
 <a id="no-file-changes-detection-ifno-file-changes"></a>
 ### No file changes detection (`if.no-file-changes`)
 
@@ -111,7 +135,7 @@ steps:
 - The value must be either `retry` or `failed`.
 - Cannot be used in `after-pr` steps (rejected at validation time).
 - Cannot be used at the group level (`if` in group definitions).
-- Parses alongside `if: file-changed` on the same step, but `no-file-changes` disables it: no `file-changed` edge is compiled for that step and no jump to its target ever happens.
+- Can coexist with `if: file-changed` on the same step, but `no-file-changes` disables it: no `file-changed` edge is compiled for that step and no jump to its target ever happens. It cannot coexist with `if.head-changed`.
 
 <a id="declaring-intentional-no-changes"></a>
 #### Declaring intentional no-changes
@@ -153,7 +177,7 @@ Conditional cycles are allowed when a normal exit is possible. Execution preflig
 
 **Constraints:**
 - `if.fail` is rejected at the group level and on every `after-pr` step except native `squash-merge: true`, which accepts only a named jump.
-- On ordinary steps, `if.fail` can be combined with other `if:` keys (`file-changed`, `no-file-changes`); native squash-merge accepts only its named `if.fail` route.
+- On ordinary steps, `if.fail` can be combined with other `if:` keys (`file-changed`, `head-changed`, `no-file-changes`); native squash-merge accepts only its named `if.fail` route.
 
 <a id="quality-gates-quality_gates"></a>
 ### Quality gates (`quality_gates`)
@@ -178,7 +202,7 @@ steps:
     command: echo done
 ```
 
-Each entry requires a nonblank `command` and may specify a positive `timeout` using the usual seconds, `m`, or `h` syntax. Commands run in order after a successful prompt attempt, including the final step, and stop at the first failure. Exit zero without a timeout or signal passes. Skipped steps, failed prompt attempts, and attempts discarded by `if.no-file-changes: retry` do not run gates. A pending `if.file-changed` transition is applied only if the gates pass.
+Each entry requires a nonblank `command` and may specify a positive `timeout` using the usual seconds, `m`, or `h` syntax. Commands run in order after a successful prompt attempt, including the final step, and stop at the first failure. Exit zero without a timeout or signal passes. Skipped steps, failed prompt attempts, and attempts discarded by `if.no-file-changes: retry` do not run gates. Pending `if.file-changed` and `if.head-changed` transitions are applied only if the gates pass.
 
 A failed gate retries the same prompt step before applying its normal transition. The next prompt receives a sanitized, bounded excerpt of the command output as untrusted data. Gate output does not replace `{prev.*}`.
 
@@ -325,7 +349,7 @@ steps:
     command: "git push"
 ```
 
-`returns` is a unique list of labels matching `[A-Za-z_][A-Za-z0-9_-]*`. Every declared label must be used by a callee return and mapped by the caller, with no extra mappings. `on_return` belongs only on a `workflow_call` and null means omission. Destinations must exist in the same parent step map and cannot be workflow call sites. A callee's top-level step may use `return` instead of `next`; on an option step put `return` on individual options instead. A return cannot be combined with `next` on the same step or option, or with `if.file-changed` on the return-bearing step. Returns are not allowed on group or parallel children, call sites, or after-PR steps.
+`returns` is a unique list of labels matching `[A-Za-z_][A-Za-z0-9_-]*`. Every declared label must be used by a callee return and mapped by the caller, with no extra mappings. `on_return` belongs only on a `workflow_call` and null means omission. Destinations must exist in the same parent step map and cannot be workflow call sites. A callee's top-level step may use `return` instead of `next`; on an option step put `return` on individual options instead. A return cannot be combined with `next` on the same step or option, or with `if.file-changed` or `if.head-changed` on the return-bearing step. Returns are not allowed on group or parallel children, call sites, or after-PR steps.
 
 Without a return, normal completion follows the call-site `next` if present, or continues to the next parent step. A skipped return-bearing step does not return; it continues in declaration order, even if the call site has `next`. A call-site `next` is invalid when the callee's final step has a step-level return, but is allowed when returns are on options.
 

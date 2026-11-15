@@ -84,6 +84,30 @@ steps:
       file-changed: test    # after review, if it modified files, jump back to test
 ```
 
+<a id="conditional-execution-head-changed"></a>
+### 条件执行：提交检测（`if.head-changed`）
+
+当步骤具有 `if: head-changed: <target>` 时，Cruise 会在步骤运行前读取该步骤工作目录中的 Git `HEAD` 提交 OID（`git rev-parse --verify HEAD`），并在步骤成功完成后再次读取。如果两个值不同，工作流会跳转到 `<target>`；如果相同，则正常继续执行下一步（若设置了 `next:`，则遵循该设置）。
+
+如果无法读取 `HEAD`（例如目录不在 Git 仓库中，或仓库尚无首个提交），则记为 `none`。前后值只要不同就视为变更，包括从 `none` 变为某个提交，或从某个提交变为 `none`；`none` 到 `none` 则视为未变更。此条件只检测已提交的版本：未跟踪、已忽略或尚未提交的文件变更都不会触发跳转。
+
+```yaml
+steps:
+  repair:
+    prompt: "Fix the CI failure and commit the verified fix."
+    if:
+      head-changed: sync-base
+
+  sync-base:
+    command: ./sync-base.sh
+```
+
+**限制：**
+- `if.head-changed` 只能用于步骤级条件；在组级 `if:` 中会被拒绝。
+- 不能在同一步骤上与 `if.file-changed`、`if.no-file-changes` 或 `return` 同时使用。
+- 可用于 `after-pr` 步骤。
+- 触发的跳转使用与 `if.file-changed` 相同的循环保护预算。
+
 <a id="no-file-changes-detection-ifno-file-changes"></a>
 ### 无文件变更检测（`if.no-file-changes`）
 
@@ -109,7 +133,7 @@ steps:
 - 值必须为 `retry` 或 `failed`。
 - 不能用于 `after-pr` 步骤（会在验证时被拒绝）。
 - 不能用于组级别（组定义中的 `if`）。
-- 可以与同一步骤上的 `if: file-changed` 一起解析，但 `no-file-changes` 会禁用后者：不会为该步骤编译 `file-changed` 边，也绝不会跳转到其目标。
+- 可以与同一步骤上的 `if: file-changed` 一起解析，但 `no-file-changes` 会禁用后者：不会为该步骤编译 `file-changed` 边，也不会跳转到其目标。不能与 `if.head-changed` 同时使用。
 
 <a id="declaring-intentional-no-changes"></a>
 #### 声明有意不作更改
@@ -149,7 +173,7 @@ steps:
 
 **限制：**
 - 组级别以及所有 `after-pr` 步骤均不接受 `if.fail`，但原生 `squash-merge: true` 除外，它只接受跳转到指定名称步骤的形式。
-- 在普通步骤中，`if.fail` 可以与其他 `if:` 键（`file-changed`、`no-file-changes`）组合使用；原生 squash-merge 则只接受指向指定名称步骤的 `if.fail` 路由。
+- 在普通步骤中，`if.fail` 可以与其他 `if:` 键（`file-changed`、`head-changed`、`no-file-changes`）组合使用；原生 squash-merge 则只接受指向指定名称步骤的 `if.fail` 路由。
 
 <a id="quality-gates-quality_gates"></a>
 ### 质量门禁（`quality_gates`）
@@ -174,7 +198,7 @@ steps:
     command: echo done
 ```
 
-每个条目都必须包含非空白的 `command`，并且可以使用常规的秒数、`m` 或 `h` 语法指定一个正的 `timeout`。命令会在提示尝试成功后按顺序运行，包括最后一个步骤，并在首次失败时停止。退出码为零，且未超时、未收到信号时，视为通过。已跳过的步骤、失败的提示尝试，以及被 `if.no-file-changes: retry` 丢弃的尝试都不会运行门禁。只有门禁通过后，才会应用待执行的 `if.file-changed` 转移。
+每个条目都必须包含非空白的 `command`，并且可以使用常规的秒数、`m` 或 `h` 语法指定一个正的 `timeout`。命令会在提示尝试成功后按顺序运行，包括最后一个步骤，并在首次失败时停止。退出码为零，且未超时、未收到信号时，视为通过。已跳过的步骤、失败的提示尝试，以及被 `if.no-file-changes: retry` 丢弃的尝试都不会运行门禁。只有门禁通过后，才会应用待执行的 `if.file-changed` 和 `if.head-changed` 转移。
 
 门禁失败时，会先重试同一个提示步骤，再应用其正常转移。下一次提示会收到经过清理且长度受限的命令输出片段，并将其作为不可信数据处理。门禁输出不会替换 `{prev.*}`。
 
@@ -320,7 +344,7 @@ steps:
     command: "git push"
 ```
 
-`returns` 是一个不含重复项的标签列表，其中的标签须匹配 `[A-Za-z_][A-Za-z0-9_-]*`。每个声明的标签都必须由被调用方的某个返回操作使用，并由调用方映射，且不得有多余的映射。`on_return` 只能用于 `workflow_call`，null 表示省略。目标必须存在于同一个父级步骤映射中，且不能是工作流调用点。被调用工作流的顶层步骤可以使用 `return` 代替 `next`；对于选项步骤，则应将 `return` 放在各个选项上。返回不能与同一步骤或选项上的 `next` 同时使用，也不能与包含该返回的步骤上的 `if.file-changed` 同时使用。不允许在 group 或 parallel 的子步骤、调用点或 PR 后步骤上使用返回。
+`returns` 是一个不含重复项的标签列表，其中的标签须匹配 `[A-Za-z_][A-Za-z0-9_-]*`。每个声明的标签都必须由被调用方的某个返回操作使用，并由调用方映射，且不得有多余的映射。`on_return` 只能用于 `workflow_call`，null 表示省略。目标必须存在于同一个父级步骤映射中，且不能是工作流调用点。被调用工作流的顶层步骤可以使用 `return` 代替 `next`；对于选项步骤，则应将 `return` 放在各个选项上。返回不能与同一步骤或选项上的 `next` 同时使用，也不能与包含该返回的步骤上的 `if.file-changed` 或 `if.head-changed` 同时使用。不允许在 group 或 parallel 的子步骤、调用点或 PR 后步骤上使用返回。
 
 如果未发生返回而正常完成，则保留调用点的 `next`；若调用点没有 `next`，则继续执行父级的下一个步骤。包含返回的步骤被跳过时不会返回，而是按声明顺序继续执行，即使调用点设置了 `next` 也是如此。如果被调用工作流的最后一个步骤具有步骤级返回，则调用点的 `next` 不合法；但返回位于选项上时则允许使用。
 

@@ -84,6 +84,30 @@ steps:
       file-changed: test    # after review, if it modified files, jump back to test
 ```
 
+<a id="conditional-execution-head-changed"></a>
+### コミット検出による条件実行（`if.head-changed`）
+
+step に `if: head-changed: <target>` がある場合、step 実行前にその working directory の Git `HEAD` commit OID を読み取ります（`git rev-parse --verify HEAD`）。step の正常終了後に再度読み取り、値が異なれば workflow は `<target>` へジャンプします。同じ場合は通常どおり次の step に進みます（`next:` があればそれに従います）。
+
+`HEAD` を読み取れない場合（Git 管理外の directory や unborn repository など）は `none` として扱います。前後の値が異なれば変更とみなされ、`none` から commit へ、commit から `none` への変化も対象です。`none` から `none` は変更なしです。検出対象は commit 済み revision のみです。untracked、ignored、未 commit の file 変更では発動しません。
+
+```yaml
+steps:
+  repair:
+    prompt: "Fix the CI failure and commit the verified fix."
+    if:
+      head-changed: sync-base
+
+  sync-base:
+    command: ./sync-base.sh
+```
+
+**制約:**
+- `if.head-changed` は step-level のみで使用できます。group-level `if:` では拒否されます。
+- 同じ step で `if.file-changed`、`if.no-file-changes`、または `return` と併用できません。
+- `after-pr` step では使用できます。
+- 発動した jump は `if.file-changed` と同じ loop-protection budget を使います。
+
 <a id="no-file-changes-detection-ifno-file-changes"></a>
 ### file 変更なしの検出 (`if.no-file-changes`)
 
@@ -109,7 +133,7 @@ steps:
 - 値は `retry` または `failed` のどちらかです。
 - `after-pr` step では使用できません（validation 時に拒否）。
 - group level（group 定義内の `if`）では使えません。
-- 同じ step の `if: file-changed` と併記できますが、`no-file-changes` が無効化します。その step について `file-changed` edge は compile されず、target への jump も起こりません。
+- 同じ step で `if: file-changed` と併用できますが、`no-file-changes` が優先され、その step の `file-changed` edge は compile されず target への jump も起こりません。`if.head-changed` とは併用できません。
 
 <a id="declaring-intentional-no-changes"></a>
 #### 意図した変更なしを宣言する
@@ -149,7 +173,7 @@ steps:
 
 **制約:**
 - group level と `squash-merge: true` の native step を除くすべての `after-pr` step では `if.fail` を拒否します。native `squash-merge: true` が受け付けるのは名前付き jump のみです。
-- 通常 step では `if.fail` を `file-changed`、`no-file-changes` など他の `if:` key と組み合わせられます。native squash-merge では名前付き `if.fail` 経路のみ受け付けます。
+- 通常 step では `if.fail` を他の `if:` key（`file-changed`、`head-changed`、`no-file-changes`）と組み合わせられます。native squash-merge では名前付き `if.fail` 経路のみ受け付けます。
 
 <a id="quality-gates-quality_gates"></a>
 ### Quality gate (`quality_gates`)
@@ -174,7 +198,7 @@ steps:
     command: echo done
 ```
 
-各 entry には空白でない `command` が必要です。通常の秒、`m`、`h` 構文による正の `timeout` を指定できます。command は prompt の成功試行後に順次実行され、最終 step でも実行されます。最初の failure で停止します。skip された step、prompt が失敗した試行、`if.no-file-changes: retry` により破棄された試行では gate は実行されません。保留中の `if.file-changed` 遷移は gate 通過時のみ適用されます。
+各 entry には空白でない `command` が必要です。通常の秒、`m`、`h` 構文による正の `timeout` を指定できます。command は prompt の成功試行後に順次実行され、最終 step でも実行されます。最初の failure で停止します。skip された step、prompt が失敗した試行、`if.no-file-changes: retry` により破棄された試行では gate は実行されません。保留中の `if.file-changed` と `if.head-changed` 遷移は gate 通過時のみ適用されます。
 
 gate 失敗時は通常遷移を適用する前に同じ prompt step を retry します。次の prompt は command output の無害化済み・サイズ制限付き抜粋を untrusted data として受け取ります。gate output は `{prev.*}` を置き換えません。
 
@@ -320,7 +344,7 @@ steps:
     command: "git push"
 ```
 
-`returns` は `[A-Za-z_][A-Za-z0-9_-]*` に一致する一意 label の list です。宣言された各 label は callee return で使われ、caller で対応付けられる必要があり、余分な mapping は認められません。`on_return` は `workflow_call` のみで使え、`null` は省略と同じです。遷移先は同じ parent step map に存在する必要があり、workflow call site は指定できません。callee の top-level step には `next` の代わりに `return` を指定できます。option step では各 option に `return` を指定します。return は同じ step/option の `next`、または return を持つ step の `if.file-changed` と併用できません。group/parallel child、call site、after-PR step に return は指定できません。
+`returns` は `[A-Za-z_][A-Za-z0-9_-]*` に一致する一意 label の list です。宣言された各 label は callee return で使われ、caller で対応付けられる必要があり、余分な mapping は認められません。`on_return` は `workflow_call` のみで使え、`null` は省略と同じです。遷移先は同じ parent step map に存在する必要があり、workflow call site は指定できません。callee の top-level step には `next` の代わりに `return` を指定できます。option step では各 option に `return` を指定します。return は同じ step/option の `next`、または return を持つ step の `if.file-changed` / `if.head-changed` と併用できません。group/parallel child、call site、after-PR step に return は指定できません。
 
 return なしで通常完了すると、call-site `next` があればそこへ進み、なければ次の parent step に続きます。return-bearing step が skip されても return にはなりません。call site に `next` が指定されていても、宣言順の次へ進みます。callee の最終 step に step-level return がある場合、call-site `next` は無効です。return が option 上だけにある場合は指定できます。
 

@@ -11,6 +11,7 @@
 ### Added
 
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.
+- Add the `if.head-changed` step condition, which routes to a target when a step completes successfully with a different Git `HEAD` OID; untracked, ignored, and uncommitted changes do not count.
 - Add locale selection and translations for English, Simplified Chinese, Spanish, French, Brazilian Portuguese, Japanese, and Korean across the CLI, TUI, and WebUI.
 - Add the bounded `plan_revision` Quint/Alloy specification with production Gherkin and negative controls (`scripts/check_plan_revision_specs.sh`) covering planning-input delivery, client action parity, and phase preservation.
 
@@ -25,3 +26,4 @@
 - Prevent detached Windows WebUI daemons from inheriting captured CLI output handles and blocking command completion.
 - Route pending CI without a known failure away from repair, preserve failed rollups at the wait deadline, wait for Actions suites before collecting complete failure details, and stop no-change fix loops.
 - Retry transient SDK transport failures and OpenCode setup timeouts before prompt submission through the existing model fallback policy, while retaining barriers for local OpenCode API rate-limit, client, and server-class failures.
+- The shared after-PR CI repair step now loops back to base sync only when the repair creates a commit (`if.head-changed`), so untracked or ignored build artifacts from reproducing CI no longer rerun sync/push/wait-ci against the same failed run.
