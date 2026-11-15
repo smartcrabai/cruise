@@ -772,13 +772,12 @@ pub(crate) fn validate_callee_returns(call_site: &str, callee: &WorkflowConfig) 
         }
         let labels = step_return_labels(step);
         if !labels.is_empty()
-            && step
-                .if_condition
-                .as_ref()
-                .is_some_and(|condition| condition.file_changed.is_some())
+            && step.if_condition.as_ref().is_some_and(|condition| {
+                condition.file_changed.is_some() || condition.head_changed.is_some()
+            })
         {
             return Err(CruiseError::InvalidStepConfig(
-                "return-bearing step cannot declare if.file-changed".into(),
+                "return-bearing step cannot declare if.file-changed or if.head-changed".into(),
             ));
         }
         for label in labels {
@@ -1220,6 +1219,7 @@ fn rewrite_internal_references(
 
     if let Some(if_condition) = step.if_condition.as_mut() {
         rewrite_optional_step_ref(&mut if_condition.file_changed, call_site, original_ids);
+        rewrite_optional_step_ref(&mut if_condition.head_changed, call_site, original_ids);
         if let Some(FailAction::Goto(next)) = if_condition.fail.as_mut()
             && original_ids.contains(next)
         {
@@ -1314,6 +1314,31 @@ mod tests {
         resolve_workflow_calls_from_path_with_defaults(path, &WorkflowDefaults::default())
             .unwrap_or_else(|e| panic!("unexpected error: {e:?}"))
     }
+    #[test]
+    fn validate_callee_returns_rejects_head_changed_on_return_step() {
+        let callee = WorkflowConfig::from_yaml(
+            r"
+returns: [done]
+steps:
+  finish:
+    command: 'true'
+    return: done
+    if:
+      head-changed: finish
+",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        let Err(error) = validate_callee_returns("call", &callee) else {
+            panic!("expected head-changed return validation to fail");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("return-bearing step") && error.contains("if.head-changed"),
+            "unexpected validation error: {error}"
+        );
+    }
+
     #[test]
     fn legacy_resolver_functions_remain_callable() {
         let _: fn(PathBuf) -> Result<WorkflowConfig> = resolve_workflow_calls_from_path;

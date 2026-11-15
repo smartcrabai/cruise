@@ -113,7 +113,7 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
     let fix = &compiled.after_pr["follow-up/fix-ci-error"];
     assert_eq!(fix.next, None);
     assert_eq!(
-        fix.if_condition.as_ref().unwrap().file_changed.as_deref(),
+        fix.if_condition.as_ref().unwrap().head_changed.as_deref(),
         Some("follow-up/sync-base")
     );
     let prompt = fix

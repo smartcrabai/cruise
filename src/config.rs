@@ -717,9 +717,12 @@ pub struct FailDetailed {
 /// Conditional execution rule.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct IfCondition {
-    /// Only execute this step if the given step's snapshot differs from the current state.
+    /// Jump to the named step when workspace files change during this step.
     #[serde(rename = "file-changed")]
     pub file_changed: Option<String>,
+    /// Jump to this step when the git HEAD commit changes during execution.
+    #[serde(rename = "head-changed")]
+    pub head_changed: Option<String>,
 
     /// Action to take when no workspace file changes are detected after this step.
     #[serde(rename = "no-file-changes")]
@@ -1185,11 +1188,12 @@ fn locale_to_language_name(locale: &str) -> Option<String> {
     Some(language_name.to_string())
 }
 
-/// Validate `if.no-file-changes` usage across all steps and groups.
+/// Validate conditional transitions and no-file-changes usage across steps and groups.
 ///
 /// Enforces:
+/// - `if.head-changed` at group level is rejected.
+/// - `if.head-changed` cannot coexist with `if.file-changed` or `if.no-file-changes`.
 /// - `if.no-file-changes` in `after-pr` steps is rejected.
-/// - `if.no-file-changes` in group-level `if` is rejected.
 ///
 /// # Errors
 ///
@@ -1199,6 +1203,11 @@ pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<(
 
     for (group_name, group) in &config.groups {
         if let Some(if_cond) = &group.if_condition {
+            if if_cond.head_changed.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "group '{group_name}' uses if.head-changed, which is not supported at the group level",
+                )));
+            }
             if if_cond.fail.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "group '{group_name}' uses if.fail, which is not supported at the group level",
@@ -1207,6 +1216,23 @@ pub fn validate_if_conditions(config: &WorkflowConfig) -> crate::error::Result<(
             if if_cond.no_file_changes.is_some() {
                 return Err(CruiseError::InvalidStepConfig(format!(
                     "group '{group_name}' uses if.no-file-changes, which is not supported at the group level",
+                )));
+            }
+        }
+    }
+
+    for (name, step) in config.steps.iter().chain(&config.after_pr) {
+        if let Some(if_cond) = &step.if_condition
+            && if_cond.head_changed.is_some()
+        {
+            if if_cond.file_changed.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' cannot combine if.head-changed with if.file-changed",
+                )));
+            }
+            if if_cond.no_file_changes.is_some() {
+                return Err(CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' cannot combine if.head-changed with if.no-file-changes",
                 )));
             }
         }
@@ -1773,6 +1799,7 @@ pub(crate) fn validate_squash_merge_step(
     }
     if step.if_condition.as_ref().is_some_and(|condition| {
         condition.file_changed.is_some()
+            || condition.head_changed.is_some()
             || condition.no_file_changes.is_some()
             || condition
                 .fail
@@ -4827,6 +4854,50 @@ steps:
     }
 
     #[test]
+    fn test_validate_if_conditions_rejects_head_changed_in_group_if() {
+        let yaml = r"
+command: [echo]
+groups:
+  review:
+    if:
+      head-changed: test
+    steps:
+      simplify:
+        prompt: /simplify
+steps:
+  test:
+    command: cargo test
+  review-pass:
+    group: review
+";
+        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
+        let message = err_string(validate_if_conditions(&config));
+        assert!(
+            message.contains("if.head-changed") && message.contains("group"),
+            "unexpected validation error: {message}"
+        );
+    }
+
+    #[test]
+    fn test_validate_if_conditions_rejects_head_with_file_change_conditions() {
+        for (condition, conflicting_condition) in [
+            ("file-changed: test", "if.file-changed"),
+            ("no-file-changes: failed", "if.no-file-changes"),
+        ] {
+            let yaml = format!(
+                "command: [echo]\nsteps:\n  test:\n    command: cargo test\n    if:\n      {condition}\n      head-changed: test\n"
+            );
+            let config =
+                WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|error| panic!("{error:?}"));
+            let message = err_string(validate_if_conditions(&config));
+            assert!(
+                message.contains("if.head-changed") && message.contains(conflicting_condition),
+                "unexpected validation error: {message}"
+            );
+        }
+    }
+
+    #[test]
     fn test_validate_if_conditions_ok_for_failed() {
         // Given: a step with if.no-file-changes: failed (valid)
         let yaml = r"
@@ -5649,7 +5720,7 @@ steps:
         let if_props = def_properties(schema, "IfCondition");
         assert_has_fields(
             if_props,
-            &["file-changed", "no-file-changes", "fail"],
+            &["file-changed", "head-changed", "no-file-changes", "fail"],
             "IfCondition",
         );
     }

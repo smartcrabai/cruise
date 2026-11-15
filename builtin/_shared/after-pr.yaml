@@ -651,4 +651,4 @@ steps:
 
       Preserve the task/report scope and unrelated user work. Never weaken, remove, skip, or disable tests, scanners, assertions, required checks, or policy to get green. Stage and commit only verified in-scope fixes; do not push, create, or merge a PR because the following shared steps handle base synchronization and push. If there is no in-scope fix, make no code changes and state why clearly.
     if:
-      file-changed: sync-base
+      head-changed: sync-base

@@ -71,7 +71,7 @@ steps:
 - `output_file` is rejected on a group call site for the same reason; set it on the inner prompt step.
 - Empty groups (`steps: {}`) are a validation error.
 - References to undefined groups are a validation error.
-- A group-level `if:` cannot contain `no-file-changes` or `fail` (see [flow-control.md](flow-control.md)); only `file-changed` is allowed at the group level.
+- A group-level `if:` cannot contain `no-file-changes`, `head-changed`, or `fail` (see [flow-control.md](flow-control.md)); only `file-changed` is allowed at the group level.
 - If `if.file-changed` targets a step outside the group, the group's `max_retries` requires one additional unit of the global loop-protection ceiling.
 - Conditional cycles are allowed when a normal exit is possible. Execution preflight rejects a reachable cycle only when no normal exit is reachable from the actual start position, considering configured and user-selected skips. A branch that may enter an exitless cycle produces a warning, not a blanket rejection. Runtime edge budgets still apply.
 

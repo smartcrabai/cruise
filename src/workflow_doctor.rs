@@ -163,6 +163,9 @@ fn routing(compiled: &CompiledWorkflow) -> Vec<Diagnostic> {
             {
                 check(name, "if.file-changed", target);
             }
+            if let Some(target) = &cond.head_changed {
+                check(name, "if.head-changed", target);
+            }
             if let Some(FailAction::Goto(target)) = &cond.fail {
                 check(name, "if.fail", target);
             }
