@@ -38,7 +38,7 @@ pub(crate) fn run(args: &UpdateArgs) -> Result<()> {
         }
         InstallState::External => {
             return Err(CruiseError::Other(format!(
-                "native update is supported only for a managed CARGO_HOME/bin installation; update this external installation using its original distribution method ({})",
+                "native update is supported only for managed CARGO_HOME/bin or ~/.local/bin (%USERPROFILE%\\.local\\bin on Windows) installations; update this external installation using its original distribution method ({})",
                 running.display()
             )));
         }

@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use super::{Provider, pins, record, target};
+use super::{Provider, record, target};
 use crate::error::{CruiseError, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,16 +128,13 @@ fn resolve_optional_root(
         let dir = data_root.join("providers").join(provider.as_str());
         let record_path = dir.join("install.json");
         match record::read_record(&record_path) {
-            Ok(rec)
-                if record::record_valid(provider, pins::pin(provider), target_key, &dir, &rec) =>
-            {
+            Ok(rec) if record::record_valid(provider, target_key, &dir, &rec) => {
                 return Ok(Resolved {
                     program: dir.join(rec.relative_path),
                     source: Source::Managed,
                 });
             }
-            Err(CruiseError::IoError(ref error))
-                if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(CruiseError::IoError(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
             _ if warn => warn_invalid(provider),
             _ => {}
         }
@@ -169,9 +166,8 @@ fn warn_invalid(provider: Provider) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if warned.insert(provider.as_str()) {
         eprintln!(
-            "cruise: managed {} does not match this cruise's pinned {} (or is damaged); checking PATH for {}. Run `cruise install {}`.",
+            "cruise: managed {} is damaged or targets another platform; checking PATH for {}. Run `cruise install {}`.",
             provider.as_str(),
-            pins::pin(provider).version,
             provider.as_str(),
             provider.as_str()
         );
@@ -234,7 +230,7 @@ mod tests {
     fn override_beats_valid_managed_and_invalid_records_fall_back() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("providers/jcode");
-        let version = pins::pin(Provider::Jcode).version;
+        let version = "0.0.1";
         let binary = dir.join(version).join(Provider::Jcode.binary_name());
         fs::create_dir_all(binary.parent().unwrap()).unwrap();
         fs::write(&binary, b"managed").unwrap();
@@ -279,7 +275,7 @@ mod tests {
         for (field, value) in [
             ("schema", serde_json::json!(2)),
             ("provider", serde_json::json!("claude")),
-            ("version", serde_json::json!("0.0.1")),
+            ("version", serde_json::json!("not-a-version")),
             ("target", serde_json::json!("wrong-target")),
             ("relative_path", serde_json::json!("../escape")),
             ("relative_path", serde_json::json!("/absolute/path")),
@@ -361,22 +357,16 @@ mod tests {
     fn valid_record_and_damage_follow_precedence() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("providers/jcode");
-        let binary = dir
-            .join(pins::pin(Provider::Jcode).version)
-            .join(Provider::Jcode.binary_name());
+        let binary = dir.join("0.0.1").join(Provider::Jcode.binary_name());
         fs::create_dir_all(binary.parent().unwrap()).unwrap();
         fs::write(&binary, b"managed").unwrap();
         let stamp = record::stamp(&binary).unwrap();
         let rec = record::InstallRecord {
             schema: 1,
             provider: "jcode".into(),
-            version: pins::pin(Provider::Jcode).version.into(),
+            version: "0.0.1".into(),
             target: "macos-aarch64".into(),
-            relative_path: format!(
-                "{}/{}",
-                pins::pin(Provider::Jcode).version,
-                Provider::Jcode.binary_name()
-            ),
+            relative_path: format!("0.0.1/{}", Provider::Jcode.binary_name()),
             sha256: String::new(),
             len: stamp.len,
             mtime_unix_nanos: stamp.mtime_unix_nanos,

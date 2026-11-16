@@ -419,6 +419,12 @@ fn update_rejects_homebrew_and_external_installs_before_writing_state() {
                 .contains(&expected_diagnostic.to_lowercase()),
             "{kind} update did not explain the required update path: {diagnostic}"
         );
+        if kind == "external" {
+            assert!(
+                diagnostic.contains("CARGO_HOME/bin") && diagnostic.contains("~/.local/bin"),
+                "external update error did not name both supported install locations: {diagnostic}"
+            );
+        }
         assert_eq!(
             file_stamp(&launcher),
             launcher_before,

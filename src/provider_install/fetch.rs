@@ -1,6 +1,6 @@
 use super::{
     Provider,
-    pins::{Archive, Digest, TargetPin},
+    release::{Archive, Digest, Target},
 };
 use crate::{
     error::{CruiseError, Result},
@@ -44,33 +44,15 @@ fn b64(bytes: &[u8]) -> String {
     }
     s
 }
-fn validate_digest(digest: Digest) -> Result<()> {
-    if let Digest::Sha512Sri(expected) = digest {
-        let s = expected
-            .strip_prefix("sha512-")
-            .ok_or_else(|| err("invalid SHA512 SRI"))?;
-        if s.len() != 88
-            || !s.ends_with("==")
-            || !matches!(s.as_bytes()[85], b'A' | b'Q' | b'g' | b'w')
-            || !s.as_bytes()[..86]
-                .iter()
-                .copied()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
-        {
-            return Err(err("invalid SHA512 SRI"));
-        }
-    }
-    Ok(())
-}
 
 pub(crate) fn fetch_and_verify(
-    target: &TargetPin,
+    target: &Target,
     dest: &Path,
     hosts: &[&str],
     #[cfg(test)] source_base: Option<&Url>,
 ) -> Result<()> {
-    validate_digest(target.digest)?;
-    let original = Url::parse(target.url).map_err(|e| err(e.to_string()))?;
+    target.digest.validate()?;
+    let original = Url::parse(&target.url).map_err(|e| err(e.to_string()))?;
     #[cfg(test)]
     let url = if let Some(base) = source_base {
         let loopback = match base.host() {
@@ -141,27 +123,24 @@ pub(crate) fn fetch_and_verify(
         return Err(err("provider download Content-Length mismatch"));
     }
     drop(archive);
-    let actual = match target.digest {
+    match &target.digest {
         Digest::Sha256(expected) => {
             let actual = crate::http_download::hex_digest(&sha256.finalize());
-            if actual != expected {
+            if actual.as_str() != expected.as_str() {
                 return Err(err(format!(
                     "provider SHA256 mismatch: expected {expected}, actual {actual}"
                 )));
             }
-            actual
         }
         Digest::Sha512Sri(expected) => {
             let actual = format!("sha512-{}", b64(&sha512.finalize()));
-            if actual != expected {
+            if actual.as_str() != expected.as_str() {
                 return Err(err(format!(
                     "provider SHA512 mismatch: expected {expected}, actual {actual}"
                 )));
             }
-            actual
         }
-    };
-    let _ = actual;
+    }
     extract_archive(target, dest, &archive_path)?;
     #[cfg(unix)]
     {
@@ -171,7 +150,7 @@ pub(crate) fn fetch_and_verify(
     Ok(())
 }
 
-fn extract_archive(target: &TargetPin, dest: &Path, archive_path: &Path) -> Result<()> {
+fn extract_archive(target: &Target, dest: &Path, archive_path: &Path) -> Result<()> {
     match target.archive {
         Archive::Raw => {
             fs::rename(archive_path, dest)?;
@@ -207,8 +186,14 @@ fn extract_archive(target: &TargetPin, dest: &Path, archive_path: &Path) -> Resu
                     .checked_add(length)
                     .filter(|n| *n <= LIMIT)
                     .ok_or_else(|| err("archive exceeds size limit"))?;
-                let expected = Path::new(target.entry);
-                if ty.is_file() && path != expected {
+                let expected = Path::new(&target.entry);
+                let opencode_metadata = root == Some("package")
+                    && matches!(
+                        target.entry.as_str(),
+                        "package/bin/opencode" | "package/bin/opencode.exe"
+                    )
+                    && path == Path::new("package/package.json");
+                if ty.is_file() && path != expected && !opencode_metadata {
                     return Err(err("unexpected archive entry"));
                 }
                 if ty.is_dir() && !expected.starts_with(path) {
@@ -412,14 +397,14 @@ mod tests {
             tar.append_data(&mut header, name, &b"x"[..]).unwrap();
         }
         tar.into_inner().unwrap().finish().unwrap();
-        let target = TargetPin {
+        let target = Target {
             key: "test",
-            url: "https://example.com/test",
+            url: "https://example.com/test".into(),
             archive: Archive::TarGz {
                 root: Some("package"),
             },
-            entry: "package/bin/opencode",
-            digest: Digest::Sha256("unused"),
+            entry: "package/bin/opencode".into(),
+            digest: Digest::Sha256("unused".into()),
         };
         assert!(
             extract_archive(&target, &dir.path().join("binary"), &archive)
@@ -432,13 +417,12 @@ mod tests {
     #[test]
     fn sha512_mismatch_rejects_download() {
         let body = b"payload";
-        let sri: &'static str =
-            Box::leak(format!("sha512-{}", b64(&Sha512::digest(b"other"))).into_boxed_str());
-        let target = TargetPin {
+        let sri = format!("sha512-{}", b64(&Sha512::digest(b"other")));
+        let target = Target {
             key: "test",
-            url: "https://example.com/test",
+            url: "https://example.com/test".into(),
             archive: Archive::Raw,
-            entry: "test",
+            entry: "test".into(),
             digest: Digest::Sha512Sri(sri),
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -464,12 +448,12 @@ mod tests {
 
     #[test]
     fn truncated_content_length_rejects_download() {
-        let target = TargetPin {
+        let target = Target {
             key: "test",
-            url: "https://example.com/test",
+            url: "https://example.com/test".into(),
             archive: Archive::Raw,
-            entry: "test",
-            digest: Digest::Sha256("unused"),
+            entry: "test".into(),
+            digest: Digest::Sha256("0".repeat(64)),
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
@@ -510,12 +494,11 @@ mod tests {
     fn verified_raw_download_and_probe() {
         let body = b"#!/bin/sh\nprintf '2.1.250 (Claude Code)\\n'\n";
         let hash = crate::http_download::hex_digest(&Sha256::digest(body));
-        let hash: &'static str = Box::leak(hash.into_boxed_str());
-        let target = TargetPin {
+        let target = Target {
             key: "test",
-            url: "https://downloads.claude.ai/test?token=fixture",
+            url: "https://downloads.claude.ai/test?token=fixture".into(),
             archive: Archive::Raw,
-            entry: "claude",
+            entry: "claude".into(),
             digest: Digest::Sha256(hash),
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

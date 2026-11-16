@@ -2,11 +2,11 @@
 
 Steps that run automatically after `cruise run` creates a pull request via `gh pr create` (or `glab mr create` for GitLab; detect it with a `case "{pr.url}" in */-/merge_requests/*)` branch and use `glab` instead of `gh`, as the builtin config does), or on the existing PR in a PR review-fix session. The format is identical to top-level `steps:` — inline or file-backed prompt steps (`prompt` / `prompt_file`), command steps, option steps, parallel prompt/command blocks, `workflow_call` call sites, and group calls are all supported. Built-in `merge` opt-in also runs the configured after-PR prelude before its native final squash step.
 
-The six general-purpose built-ins declare `after_pr` and `merge`, both off by default; `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. `pr-review-fix` declares no flags. `-f after_pr` runs the after-PR prelude without merging. `-f merge` runs that same prelude once, then attempts the final native squash step. The implication does not add or change an `after_pr` entry in the saved sparse flag map.
+The six general-purpose built-ins declare `after_pr` and `merge`, both off by default; `tdd` and `refactor` additionally declare the single `e2e` flag and `formal_methods`. `pr-review-fix` declares no flags. `-f after_pr` runs the after-PR prelude without merging. `-f merge` runs that same prelude once, then attempts the final native squash step. The implication does not add or change an `after_pr` entry in the saved sparse flag map. `e2e` enables applicable web, mobile, and desktop UI E2E; there are no separate browser/app flags.
 
 ```sh
 cruise plan -c builtin:tdd -f merge "task"
-cruise plan -c builtin:tdd -f browser_e2e,app_e2e,merge "task"
+cruise plan -c builtin:tdd -f e2e,merge "task"
 ```
 
 ## Basics
@@ -143,8 +143,9 @@ The existing **Merge PR** action in `cruise list`, the TUI, and the WebUI remain
 - **After-PR errors:** without native merge opt-in, errors from ordinary `after-pr` steps are warnings except cancellation, missing jcode models, and `github-review` failures, which propagate. With native merge opted in, actual execution errors anywhere in the after-PR run, including before the native step, are fatal and suppress post-PR cleanup. A nonzero command exit status remains command-as-data under existing semantics; the native action independently rechecks current readiness instead of trusting command output.
 - **`if.no-file-changes` is forbidden**: rejected for the same reason.
 - **`if.fail`:** supported only on the native `squash-merge: true` step; rejected on all other `after-pr` steps.
+- **`if.head-changed`:** allowed on `after-pr` steps.
 
-Regular transition rules (`next` / `skip` / `when.exists` / `if.file-changed`) work as usual.
+Regular transition rules (`next` / `skip` / `when.exists` / `if.file-changed` / `if.head-changed`) work as usual.
 
 ## Related: `cleanup_after_pr`
 

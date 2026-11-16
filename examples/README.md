@@ -1,6 +1,6 @@
 # Examples
 
-Companion files for [`docs/github-actions.md`](../docs/github-actions.md). See that doc for the full command reference, setup steps, inputs/outputs, and security notes.
+Companion files for [`docs/en/github-actions.md`](../docs/en/github-actions.md). See that doc for the full command reference, setup steps, inputs/outputs, and security notes.
 
 | File | Use it when... |
 |---|---|

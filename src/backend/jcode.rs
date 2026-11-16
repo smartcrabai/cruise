@@ -32,7 +32,7 @@ use crate::backend::stream::{LimitError, StreamChunk};
 use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
-use crate::provider_install::pins::JCODE_MIN_VERSION;
+use crate::provider_install::release::JCODE_MIN_VERSION;
 
 fn usage_round_from_token_usage(
     input: u64,

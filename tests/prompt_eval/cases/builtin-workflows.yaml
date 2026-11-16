@@ -23,14 +23,14 @@ cases:
     vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
     checks: [{min_chars: 20}]
     rubric: [{id: tdd-formal-quality, text: 'The response addresses formal verification or explains why it is not applicable.'}]
-  - id: tdd-browser
-    target: {workflow_step: {path: builtin/tdd.yaml, step: browser-e2e}}
+  - id: tdd-e2e
+    target: {workflow_step: {path: builtin/tdd.yaml, step: e2e}}
     render: step
     output: text
     workspace: tests/prompt_eval/fixtures/addition
     vars: {plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
     checks: [{min_chars: 20}]
-    rubric: [{id: tdd-browser-quality, text: 'The response assesses whether browser end-to-end testing applies.'}]
+    rubric: [{id: tdd-e2e-quality, text: 'For any applicable UI target, the response requires `cruise docs e2e` followed by the matching listed framework policy based on the actual target; it keeps CLI/API/default-stack tests out of optional UI E2E, or supports not-applicable with repository evidence.'}]
   - id: refactor-baseline
     target: {workflow_step: {path: builtin/refactor.yaml, step: baseline}}
     render: step
@@ -54,7 +54,7 @@ cases:
     workspace: tests/prompt_eval/fixtures/addition
     vars: {input: 'Add tests for checked addition.', plan: {file: tests/prompt_eval/fixtures/sample/plan.md}}
     checks: [{min_chars: 20}]
-    rubric: [{id: add-tests-plan-quality, text: 'The response proposes meaningful tests for the existing behavior.'}]
+    rubric: [{id: add-tests-plan-quality, text: 'The response proposes meaningful scoped tests and, for applicable UI targets, requires the common and matching framework policy lookup based on actual targets while keeping UI E2E separate from default CLI/API/service/contract testing.'}]
   - id: formal-audit
     target: {workflow_step: {path: builtin/add-formal-specs.yaml, step: audit}}
     render: step

@@ -47,7 +47,7 @@ inputs:
       URL of the cruise-agent token-exchange service used to trade this job's
       OIDC token for a repository-scoped GitHub App installation token. Empty
       disables the exchange (the action then always falls back to
-      `github_token`/`GITHUB_TOKEN`). See docs/github-actions.md for
+      `github_token`/`GITHUB_TOKEN`). See docs/en/github-actions.md for
       self-hosting your own exchange.
     required: false
     default: "https://cruise-token-exchange.smartcrab.ai/token"
@@ -139,7 +139,7 @@ inputs:
       `default: true` to make the profile jcode's startup default
       provider/model (at most one entry may set it -- a profile is only
       reachable from `model`/`plan_model` when it is the default). See
-      docs/github-actions.md.
+      docs/en/github-actions.md.
     required: false
     default: ""
   provider_api_keys:
@@ -151,7 +151,7 @@ inputs:
       under that same jcode home and references it from `config.toml` by
       environment-variable name only. Required for every `providers` entry
       that isn't `no_auth: true`; may be left empty when every entry is
-      `no_auth`. See docs/github-actions.md.
+      `no_auth`. See docs/en/github-actions.md.
     required: false
     default: ""
   allowed_bots:

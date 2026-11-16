@@ -667,6 +667,9 @@ fn render_dag_graph(
                         crate::graph::TransitionReason::IfFileChanged { .. } => {
                             "IfFileChanged".to_string()
                         }
+                        crate::graph::TransitionReason::IfHeadChanged { .. } => {
+                            "IfHeadChanged".to_string()
+                        }
                         crate::graph::TransitionReason::IfFailGoto { .. } => {
                             "IfFailGoto".to_string()
                         }

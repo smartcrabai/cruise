@@ -438,14 +438,17 @@
         {
           "if": { "required": ["return"] },
           "then": {
-            "not": { "anyOf": [
-              { "required": ["next"] },
-              { "required": ["workflow_call"] },
-              { "required": ["parallel"] },
-              { "required": ["group"] },
-              { "required": ["option"] },
-              { "required": ["if"], "properties": { "if": { "required": ["file-changed"] } } }
-            ] }
+            "not": {
+              "anyOf": [
+                { "required": ["next"] },
+                { "required": ["workflow_call"] },
+                { "required": ["parallel"] },
+                { "required": ["group"] },
+                { "required": ["option"] },
+                { "required": ["if"], "properties": { "if": { "required": ["file-changed"] } } },
+                { "required": ["if"], "properties": { "if": { "required": ["head-changed"] } } }
+              ]
+            }
           }
         },
         {
@@ -454,7 +457,17 @@
             "properties": { "option": { "contains": { "required": ["return"] } } }
           },
           "then": {
-            "not": { "required": ["if"], "properties": { "if": { "required": ["file-changed"] } } }
+            "not": {
+              "required": ["if"],
+              "properties": {
+                "if": {
+                  "anyOf": [
+                    { "required": ["file-changed"] },
+                    { "required": ["head-changed"] }
+                  ]
+                }
+              }
+            }
           }
         },
         {
@@ -747,7 +760,11 @@
       "properties": {
         "file-changed": {
           "type": "string",
-          "description": "Step name to jump to if files were changed during this step's execution"
+          "description": "Step name to jump to if workspace files changed during this step's execution"
+        },
+        "head-changed": {
+          "type": "string",
+          "description": "Step name to jump to if the git HEAD commit changed during this step's execution"
         },
         "no-file-changes": {
           "type": "string",
@@ -770,6 +787,12 @@
           ],
           "description": "Action to take when the step fails (including timeout, non-zero exit, prompt error)."
         }
+      },
+      "not": {
+        "anyOf": [
+          { "required": ["file-changed", "head-changed"] },
+          { "required": ["head-changed", "no-file-changes"] }
+        ]
       }
     },
     "OptionItem": {
@@ -835,6 +858,10 @@
           },
           "description": "Named steps belonging to this group"
         }
+      },
+      "not": {
+        "required": ["if"],
+        "properties": { "if": { "required": ["head-changed"] } }
       }
     },
     "FormalVerifyConfig": {

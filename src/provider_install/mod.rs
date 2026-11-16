@@ -5,8 +5,8 @@ mod fetch;
 #[path = "tests.rs"]
 #[expect(clippy::unwrap_used, reason = "test fixtures must succeed")]
 mod lifecycle_tests;
-pub mod pins;
 mod record;
+pub mod release;
 pub mod resolve;
 pub mod target;
 use crate::error::{CruiseError, Result};
@@ -78,10 +78,10 @@ fn hosts(p: Provider) -> &'static [&'static str] {
         Provider::OpenCode => &["registry.npmjs.org"],
     }
 }
-/// Install the pinned provider build.
+/// Install the latest stable provider build.
 ///
 /// # Errors
-/// Returns an error if the target is unsupported or downloading, verifying, or installing fails.
+/// Returns an error if the target is unsupported or resolving, downloading, verifying, or installing fails.
 pub fn install(provider: Provider, force: bool) -> Result<InstallOutcome> {
     #[cfg(test)]
     {
@@ -89,7 +89,7 @@ pub fn install(provider: Provider, force: bool) -> Result<InstallOutcome> {
             provider,
             force,
             &crate::paths::data_dir()?,
-            pins::pin(provider),
+            |key| release::latest(provider, key),
             hosts(provider),
             None,
         )
@@ -100,7 +100,7 @@ pub fn install(provider: Provider, force: bool) -> Result<InstallOutcome> {
             provider,
             force,
             &crate::paths::data_dir()?,
-            pins::pin(provider),
+            |key| release::latest(provider, key),
             hosts(provider),
         )
     }
@@ -109,16 +109,11 @@ pub(crate) fn install_in(
     provider: Provider,
     force: bool,
     data_root: &Path,
-    pin: &pins::Pin,
+    resolve_latest: impl FnOnce(&'static str) -> Result<release::Release>,
     trust_hosts: &[&str],
     #[cfg(test)] source_base: Option<&Url>,
 ) -> Result<InstallOutcome> {
     let key = target::detect_target_key(provider)?;
-    let target = pin
-        .targets
-        .iter()
-        .find(|t| t.key == key)
-        .ok_or_else(|| CruiseError::Other(format!("no pinned {provider} build for {key}")))?;
     let root = data_root.join("providers");
     let dir = root.join(provider.as_str());
     fs::create_dir_all(&dir)?;
@@ -134,6 +129,15 @@ pub(crate) fn install_in(
         .write(true)
         .open(dir.join(".install.lock"))?;
     lock.lock_exclusive()?;
+    let selected = resolve_latest(key)?;
+    if selected.target.key != key
+        || !semver::Version::parse(&selected.version).is_ok_and(|version| version.pre.is_empty())
+    {
+        return Err(CruiseError::Other(
+            "latest provider release has an invalid version or target".into(),
+        ));
+    }
+    selected.target.digest.validate()?;
     let record_path = dir.join("install.json");
     for item in fs::read_dir(&dir)? {
         let item = item?;
@@ -147,14 +151,18 @@ pub(crate) fn install_in(
     }
     let old = record::read_record(&record_path);
     let reason = match &old {
-        Ok(r) if record::record_valid(provider, pin, key, &dir, r) => {
+        Ok(r) if record::record_valid(provider, key, &dir, r) => {
             if record::sha256(&dir.join(&r.relative_path)).is_ok_and(|hash| hash == r.sha256) {
-                if !force {
+                if r.version == selected.version && !force {
                     return Ok(InstallOutcome::AlreadyInstalled {
-                        version: pin.version.into(),
+                        version: selected.version,
                     });
                 }
-                "force"
+                if r.version == selected.version {
+                    "force"
+                } else {
+                    "update"
+                }
             } else {
                 "integrity"
             }
@@ -167,33 +175,32 @@ pub(crate) fn install_in(
     fs::create_dir(&staging)?;
     let result = (|| {
         let binary = staging.join(provider.binary_name());
+        let version = selected.version;
         #[cfg(test)]
-        fetch::fetch_and_verify(target, &binary, trust_hosts, source_base)?;
+        fetch::fetch_and_verify(&selected.target, &binary, trust_hosts, source_base)?;
         #[cfg(not(test))]
-        fetch::fetch_and_verify(target, &binary, trust_hosts)?;
-        fetch::probe(provider, &binary, pin.version)?;
+        fetch::fetch_and_verify(&selected.target, &binary, trust_hosts)?;
+        fetch::probe(provider, &binary, &version)?;
         let sha256 = record::sha256(&binary)?;
         let stamp = record::stamp(&binary)?;
-        let generation = format!("{}-{}", pin.version, uuid::Uuid::new_v4());
+        let generation = format!("{version}-{}", uuid::Uuid::new_v4());
         let rec = record::InstallRecord {
             schema: 1,
             provider: provider.as_str().into(),
-            version: pin.version.into(),
+            version: version.clone(),
             target: key.into(),
             relative_path: format!("{generation}/{}", provider.binary_name()),
             sha256,
             len: stamp.len,
             mtime_unix_nanos: stamp.mtime_unix_nanos,
-            source_url: target.url.into(),
+            source_url: selected.target.url,
         };
         publish_install(&dir, &staging, &record_path, &rec)?;
         Ok(if reason == "missing" {
-            InstallOutcome::Installed {
-                version: pin.version.into(),
-            }
+            InstallOutcome::Installed { version }
         } else {
             InstallOutcome::Reinstalled {
-                version: pin.version.into(),
+                version,
                 reason: reason.into(),
             }
         })
@@ -248,15 +255,14 @@ pub fn run(provider: Option<Provider>, show_status: bool, force: bool) -> Result
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagedState {
     Ready,
-    Stale,
     Damaged,
 }
 
 #[derive(Debug)]
 pub struct ProviderStatus {
     pub provider: Provider,
-    pub pinned: &'static str,
-    pub managed: Option<(String, ManagedState)>,
+    pub version: Option<String>,
+    pub managed: Option<ManagedState>,
     pub path: Option<PathBuf>,
     pub override_env: Option<String>,
     pub effective: Result<Source>,
@@ -288,18 +294,19 @@ pub(crate) fn status_in(
         let dir = data_root.join("providers").join(p.as_str());
         let rec = record::read_record(&dir.join("install.json"));
         let key = target_key(p);
-        let managed = match rec {
-            Ok(ref r) if key.is_some_and(|k| record::record_valid(p, pins::pin(p), k, &dir, r)) => {
-                Some((r.version.clone(), ManagedState::Ready))
-            }
-            Ok(ref r) if r.version != pins::pin(p).version => {
-                Some((r.version.clone(), ManagedState::Stale))
-            }
-            Ok(ref r) => Some((r.version.clone(), ManagedState::Damaged)),
-            Err(_) if dir.join("install.json").exists() => {
-                Some(("unknown".into(), ManagedState::Damaged))
-            }
-            Err(_) => None,
+        let (version, managed) = match &rec {
+            Ok(r) => (
+                Some(r.version.clone()),
+                Some(
+                    if key.is_some_and(|k| record::record_valid(p, k, &dir, r)) {
+                        ManagedState::Ready
+                    } else {
+                        ManagedState::Damaged
+                    },
+                ),
+            ),
+            Err(_) if dir.join("install.json").exists() => (None, Some(ManagedState::Damaged)),
+            Err(_) => (None, None),
         };
         let path = dirs
             .iter()
@@ -311,7 +318,7 @@ pub(crate) fn status_in(
                 .map(|resolved| resolved.source);
         statuses.push(ProviderStatus {
             provider: p,
-            pinned: pins::pin(p).version,
+            version,
             managed,
             path,
             override_env: ov.map(|value| value.to_string_lossy().into_owned()),
@@ -321,12 +328,12 @@ pub(crate) fn status_in(
     statuses
 }
 fn print_status() -> Result<()> {
-    println!("PROVIDER  PINNED  MANAGED  PATH  OVERRIDE  EFFECTIVE");
+    println!("PROVIDER  VERSION  MANAGED  PATH  OVERRIDE  EFFECTIVE");
     for s in status()? {
-        let managed = match &s.managed {
-            Some((_, ManagedState::Ready)) => "ready",
-            Some((_, ManagedState::Stale)) => "stale",
-            Some((_, ManagedState::Damaged)) => "damaged",
+        let version = s.version.as_deref().unwrap_or("-");
+        let managed = match s.managed {
+            Some(ManagedState::Ready) => "ready",
+            Some(ManagedState::Damaged) => "damaged",
             None => "missing",
         };
         let effective = match s.effective {
@@ -339,7 +346,7 @@ fn print_status() -> Result<()> {
         println!(
             "{}  {}  {}  {}  {}  {}",
             s.provider,
-            s.pinned,
+            version,
             managed,
             s.path
                 .map_or_else(|| "-".into(), |v| v.display().to_string()),
@@ -363,7 +370,7 @@ mod tests {
         assert!(
             statuses
                 .iter()
-                .all(|s| s.managed.is_none() && s.effective.is_err())
+                .all(|s| s.version.is_none() && s.managed.is_none() && s.effective.is_err())
         );
         assert!(!root.exists());
     }
@@ -386,22 +393,22 @@ mod tests {
         assert!(statuses[1].managed.is_none());
     }
     #[test]
-    fn status_reports_managed_record_states() {
+    fn status_reports_recorded_old_version_as_ready() {
         let temp = tempfile::tempdir().unwrap();
-        let p = Provider::Claude;
-        let pin = pins::pin(p);
-        let dir = temp.path().join("providers").join(p.as_str());
-        let version_dir = dir.join(pin.version);
+        let provider = Provider::Claude;
+        let version = "0.0.1";
+        let dir = temp.path().join("providers").join(provider.as_str());
+        let version_dir = dir.join(version);
         fs::create_dir_all(&version_dir).unwrap();
-        let binary = version_dir.join(p.binary_name());
+        let binary = version_dir.join(provider.binary_name());
         fs::write(&binary, b"binary").unwrap();
         let stamp = record::stamp(&binary).unwrap();
-        let mut rec = record::InstallRecord {
+        let rec = record::InstallRecord {
             schema: 1,
-            provider: p.as_str().into(),
-            version: pin.version.into(),
+            provider: provider.as_str().into(),
+            version: version.into(),
             target: "test".into(),
-            relative_path: format!("{}/{}", pin.version, p.binary_name()),
+            relative_path: format!("{version}/{}", provider.binary_name()),
             sha256: record::sha256(&binary).unwrap(),
             len: stamp.len,
             mtime_unix_nanos: stamp.mtime_unix_nanos,
@@ -410,40 +417,30 @@ mod tests {
         let path = dir.join("install.json");
         record::write_record_atomic(&path, &rec).unwrap();
         let statuses = status_in(temp.path(), |_| None, &[], |_| Some("test"));
-        assert_eq!(
-            statuses[1].managed,
-            Some((pin.version.into(), ManagedState::Ready))
-        );
+        assert_eq!(statuses[1].version.as_deref(), Some(version));
+        assert_eq!(statuses[1].managed, Some(ManagedState::Ready));
         assert_eq!(statuses[1].effective.as_ref().ok(), Some(&Source::Managed));
-        rec.version = "0.0.1".into();
-        record::write_record_atomic(&path, &rec).unwrap();
-        let statuses = status_in(temp.path(), |_| None, &[], |_| Some("test"));
-        assert_eq!(
-            statuses[1].managed,
-            Some(("0.0.1".into(), ManagedState::Stale))
-        );
         fs::write(path, b"not json").unwrap();
         let statuses = status_in(temp.path(), |_| None, &[], |_| Some("test"));
-        assert_eq!(
-            statuses[1].managed,
-            Some(("unknown".into(), ManagedState::Damaged))
-        );
+        assert_eq!(statuses[1].version, None);
+        assert_eq!(statuses[1].managed, Some(ManagedState::Damaged));
     }
     #[test]
-    fn record_checks_stamp_and_relative_path() {
+    fn record_accepts_legacy_and_generation_paths_but_rejects_unsafe_versions_and_paths() {
         let temp = tempfile::tempdir().unwrap();
-        let pin = pins::pin(Provider::Claude);
-        let dir = temp.path().join(pin.version);
-        fs::create_dir(&dir).unwrap();
-        let binary = dir.join(Provider::Claude.binary_name());
+        let provider = Provider::Claude;
+        let version = "2.1.250";
+        let version_dir = temp.path().join(version);
+        fs::create_dir(&version_dir).unwrap();
+        let binary = version_dir.join(provider.binary_name());
         fs::write(&binary, b"hello").unwrap();
         let stamp = record::stamp(&binary).unwrap();
         let mut rec = record::InstallRecord {
             schema: 1,
-            provider: "claude".into(),
-            version: pin.version.into(),
+            provider: provider.as_str().into(),
+            version: version.into(),
             target: "test".into(),
-            relative_path: format!("{}/{}", pin.version, Provider::Claude.binary_name()),
+            relative_path: format!("{version}/{}", provider.binary_name()),
             sha256: record::sha256(&binary).unwrap(),
             len: stamp.len,
             mtime_unix_nanos: stamp.mtime_unix_nanos,
@@ -452,42 +449,41 @@ mod tests {
         let path = temp.path().join("install.json");
         record::write_record_atomic(&path, &rec).unwrap();
         let read = record::read_record(&path).unwrap();
-        assert!(record::record_valid(
-            Provider::Claude,
-            pin,
-            "test",
-            temp.path(),
-            &read
-        ));
-        rec.relative_path = "../outside".into();
-        assert!(!record::record_valid(
-            Provider::Claude,
-            pin,
-            "test",
-            temp.path(),
-            &rec
-        ));
-        rec.relative_path = format!(
-            "{}-../{}/{}",
-            pin.version,
-            pin.version,
-            Provider::Claude.binary_name()
-        );
-        assert!(!record::record_valid(
-            Provider::Claude,
-            pin,
-            "test",
-            temp.path(),
-            &rec
-        ));
+        assert!(record::record_valid(provider, "test", temp.path(), &read));
+        let generation = format!("{version}-00000000-0000-0000-0000-000000000000");
+        let generated_binary = temp.path().join(&generation).join(provider.binary_name());
+        fs::create_dir_all(generated_binary.parent().unwrap()).unwrap();
+        fs::write(&generated_binary, b"hello").unwrap();
+        rec.relative_path = format!("{generation}/{}", provider.binary_name());
+        let generated_stamp = record::stamp(&generated_binary).unwrap();
+        rec.len = generated_stamp.len;
+        rec.mtime_unix_nanos = generated_stamp.mtime_unix_nanos;
+        assert!(record::record_valid(provider, "test", temp.path(), &rec));
+        let prerelease = "2.1.250-rc.1";
+        let prerelease_binary = temp.path().join(prerelease).join(provider.binary_name());
+        fs::create_dir_all(prerelease_binary.parent().unwrap()).unwrap();
+        fs::write(&prerelease_binary, b"hello").unwrap();
+        let prerelease_stamp = record::stamp(&prerelease_binary).unwrap();
+        rec.version = prerelease.into();
+        rec.relative_path = format!("{prerelease}/{}", provider.binary_name());
+        rec.len = prerelease_stamp.len;
+        rec.mtime_unix_nanos = prerelease_stamp.mtime_unix_nanos;
+        assert!(record::record_valid(provider, "test", temp.path(), &rec));
+        for (version, relative_path) in [
+            ("../outside", "../outside/claude"),
+            ("2.1.250", "../outside"),
+            ("2.1.250", "/absolute/path"),
+            ("2.1.250", "2.1.250-../2.1.250/claude"),
+        ] {
+            rec.version = version.into();
+            rec.relative_path = relative_path.into();
+            assert!(
+                !record::record_valid(provider, "test", temp.path(), &rec),
+                "accepted {version} at {relative_path}"
+            );
+        }
         fs::write(binary, b"modified").unwrap();
-        assert!(!record::record_valid(
-            Provider::Claude,
-            pin,
-            "test",
-            temp.path(),
-            &read
-        ));
+        assert!(!record::record_valid(provider, "test", temp.path(), &read));
     }
 
     #[test]

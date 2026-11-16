@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-//! Public CLI contracts for planned provider installation. No downloads are attempted.
+//! Public provider-install CLI contracts. Status tests assert offline behavior.
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -29,7 +29,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
-fn status_lists_all_pins_without_creating_data_or_executing_providers() -> std::io::Result<()> {
+fn status_is_offline_and_read_only_when_no_install_is_recorded() -> std::io::Result<()> {
     let temp = TempDir::new()?;
     let root = temp.path();
     fs::create_dir(root.join("bin"))?;
@@ -51,18 +51,25 @@ fn status_lists_all_pins_without_creating_data_or_executing_providers() -> std::
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for value in ["jcode", "claude", "opencode", "0.99.1", "2.1.250", "2.1.3"] {
-        assert!(stdout.contains(value), "missing {value}: {stdout}");
+    for provider in ["jcode", "claude", "opencode"] {
+        assert!(stdout.contains(provider), "missing {provider}: {stdout}");
     }
     for column in [
         "PROVIDER",
-        "PINNED",
+        "VERSION",
         "MANAGED",
         "PATH",
         "OVERRIDE",
         "EFFECTIVE",
     ] {
         assert!(stdout.contains(column), "missing {column}: {stdout}");
+    }
+    assert!(!stdout.contains("PINNED"), "{stdout}");
+    for line in stdout.lines().filter(|line| {
+        ["jcode", "claude", "opencode"].contains(&line.split_whitespace().next().unwrap_or(""))
+    }) {
+        assert_eq!(line.split_whitespace().nth(1), Some("-"), "{line}");
+        assert_eq!(line.split_whitespace().last(), Some("path"), "{line}");
     }
     assert!(!root.join("data").exists());
     assert!(!root.join("executed").exists());
@@ -83,6 +90,18 @@ fn status_preserves_existing_data() -> std::io::Result<()> {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = stdout
+        .lines()
+        .find(|line| line.split_whitespace().next() == Some("jcode"))
+        .unwrap_or_else(|| {
+            panic!(
+                "missing jcode status row (status: {:?}): {stdout}",
+                output.status
+            )
+        });
+    assert_eq!(row.split_whitespace().nth(1), Some("-"), "{row}");
+    assert!(row.contains("damaged"), "{row}");
     assert_eq!(fs::read(&record)?, b"invalid record\n");
     assert_eq!(fs::metadata(&record)?.modified()?, before);
     assert_eq!(fs::read_dir(&dir)?.count(), 1);

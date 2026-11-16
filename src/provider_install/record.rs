@@ -1,4 +1,4 @@
-use super::{Provider, pins::Pin};
+use super::Provider;
 use crate::error::{CruiseError, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -47,24 +47,37 @@ pub(crate) fn read_record(path: &Path) -> Result<InstallRecord> {
 }
 pub(crate) fn record_valid(
     provider: Provider,
-    pin: &Pin,
     target: &str,
     dir: &Path,
     rec: &InstallRecord,
 ) -> bool {
-    let legacy = format!("{}/{}", pin.version, provider.binary_name());
-    let generated = rec
-        .relative_path
-        .strip_prefix(&format!("{}-", pin.version))
-        .and_then(|rest| rest.strip_suffix(&format!("/{}", provider.binary_name())))
-        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id));
-    rec.schema == 1
+    let valid_version = semver::Version::parse(&rec.version).is_ok();
+    let mut components = rec.relative_path.split('/');
+    let (Some(directory), Some(binary)) = (components.next(), components.next()) else {
+        return false;
+    };
+    let legacy = directory == rec.version;
+    let generated = directory
+        .strip_prefix(&rec.version)
+        .and_then(|suffix| suffix.strip_prefix('-'))
+        .is_some_and(is_canonical_uuid);
+    valid_version
+        && rec.schema == 1
         && rec.provider == provider.as_str()
-        && rec.version == pin.version
         && rec.target == target
-        && (rec.relative_path == legacy || generated)
+        && binary == provider.binary_name()
+        && components.next().is_none()
+        && (legacy || generated)
         && stamp(&dir.join(&rec.relative_path))
             .is_ok_and(|s| s.len == rec.len && s.mtime_unix_nanos == rec.mtime_unix_nanos)
+}
+
+fn is_canonical_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
 }
 pub(crate) fn sha256(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path)?;

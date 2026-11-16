@@ -139,11 +139,14 @@ pub enum Commands {
     Webui(WebuiArgs),
     /// Update Cruise itself or inspect an in-progress update.
     Update(UpdateArgs),
-    /// Install a pinned provider CLI or inspect provider status.
+    /// Install the latest stable provider CLI or inspect provider status.
     Install(InstallArgs),
     /// List, eject, generate, and install workflows.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
+    /// Show UI end-to-end testing policies.
+    #[command(subcommand)]
+    Docs(DocsCommand),
     #[command(hide = true)]
     Internal(InternalArgs),
     /// Removed MCP bridge, kept so stale jcode registrations fail instead of planning.
@@ -188,6 +191,16 @@ pub enum WorkflowCommand {
     Remove(WorkflowNameArgs),
     /// Update an installed workflow package to its requested ref's latest commit.
     Update(WorkflowUpdateArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DocsCommand {
+    /// Show common UI E2E policy, or a framework-specific policy.
+    E2e {
+        /// Framework policy ID (see `cruise docs e2e`).
+        #[arg(value_name = "FRAMEWORK")]
+        framework: Option<String>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -388,7 +401,7 @@ pub struct InstallArgs {
     /// Inspect providers without making changes.
     #[arg(long, conflicts_with = "force")]
     pub status: bool,
-    /// Reinstall even when the pinned version is already present.
+    /// Reinstall the latest version even when already present.
     #[arg(long)]
     pub force: bool,
 }
@@ -1265,13 +1278,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_task_named_ssh_uses_explicit_plan_subcommand() {
-        let cli = Cli::parse_from(["cruise", "plan", "ssh"]);
-        match cli.command {
-            Some(Commands::Plan(args)) => assert_eq!(args.input.as_deref(), Some("ssh")),
-            _ => panic!("expected explicit plan subcommand"),
+    fn legacy_tasks_named_like_subcommands_use_explicit_plan_subcommand() {
+        for name in ["ssh", "docs"] {
+            let cli = Cli::parse_from(["cruise", "plan", name]);
+            match cli.command {
+                Some(Commands::Plan(args)) => assert_eq!(args.input.as_deref(), Some(name)),
+                _ => panic!("expected explicit plan subcommand for {name}"),
+            }
+            assert!(Cli::try_parse_from(["cruise", name]).is_err());
         }
-        assert!(Cli::try_parse_from(["cruise", "ssh"]).is_err());
     }
 
     #[test]

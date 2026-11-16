@@ -273,7 +273,7 @@ steps:
 | `flag` | string \| non-empty string array | Declared flag name, or a non-empty list using ANY/OR semantics (the step is enabled when any listed flag is on). String form remains compatible. Allowed on steps, group and `workflow_call` call sites, and parallel parents; call-site gates apply to expanded steps. Not allowed on parallel children, steps inside a group definition, or a callee's own steps (see [flow-control.md](flow-control.md) and [top-level.md](top-level.md#flags)) |
 | `squash-merge` | bool | Native synchronous squash merge; `true` is valid only as the final direct step in `after-pr` and must be gated exactly by `flag: merge`. See [after-pr.md](after-pr.md#opt-in-native-synchronous-squash-merge) |
 | `when` | object | Pre-execution condition: `exists: <glob>` (see [flow-control.md](flow-control.md)) |
-| `if` | object | Conditional execution: `file-changed` / `no-file-changes` / `fail` (see [flow-control.md](flow-control.md)) |
+| `if` | object | Conditional execution: `file-changed` / `head-changed` / `no-file-changes` / `fail` (see [flow-control.md](flow-control.md)) |
 | `timeout` | string | Per-step timeout: `"30"` = seconds, `"5m"` = minutes, `"1h"` = hours; enforced for prompt, command, and parallel steps; option steps ignore it. Command arrays limit each command independently; a parallel parent limits the whole block, while a child timeout affects only that child (see [flow-control.md](flow-control.md)) |
 | `github-review` | object \| null | Review loop valid only directly in `after-pr`: `reviewers: bots` (default, requires nonempty unique `bots`) or `reviewers: all` (omit `bots` or use an empty list, eligible write-authorized authors only); `max-iterations` defaults to `3`. Requires `timeout` and exactly one of `prompt` / `prompt_file`; cannot be combined with `command`, `option`, `parallel`, `group`, or `workflow_call`. `output_file` receives the iteration report (see [after-pr.md](after-pr.md#github-review)) |
 | `env` | object | Per-step environment variables |
@@ -347,7 +347,7 @@ once, and be mapped exactly by the caller. Destinations must exist in the same
 parent step map and cannot be workflow call sites. Null `on_return` means
 omission. A callee top-level step can use `return` instead of `next`; an option
 step must put it on individual options. A return-bearing step cannot use
-`if.file-changed`, and returns are invalid on group or parallel children, call
+`if.file-changed` or `if.head-changed`, and returns are invalid on group or parallel children, call
 sites, and after-PR steps. Roots cannot use return routes or nonempty `returns`.
 
 Routes become explicit `next` edges at load time. Normal fallthrough uses the

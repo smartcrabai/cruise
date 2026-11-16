@@ -113,7 +113,7 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
     let fix = &compiled.after_pr["follow-up/fix-ci-error"];
     assert_eq!(fix.next, None);
     assert_eq!(
-        fix.if_condition.as_ref().unwrap().file_changed.as_deref(),
+        fix.if_condition.as_ref().unwrap().head_changed.as_deref(),
         Some("follow-up/sync-base")
     );
     let prompt = fix
@@ -266,6 +266,112 @@ fn verify_builtin_repair_policy(project: &Path) {
     }
 }
 
+fn assert_builtin_e2e_contract(project: &Path) {
+    for name in ["tdd", "refactor"] {
+        let builtin = BUILTIN_WORKFLOWS
+            .iter()
+            .find(|builtin| builtin.name == name)
+            .unwrap_or_else(|| panic!("missing builtin workflow {name}"));
+        let config = resolve_workflow_config(
+            builtin.yaml,
+            &ConfigSource::NamedBuiltin(name),
+            project,
+            Some(project),
+        )
+        .unwrap();
+
+        assert!(config.flags.contains_key("e2e"), "{name} must declare e2e");
+        // Rejection by name validation also proves the legacy flag is no longer declared.
+        for legacy in ["browser_e2e", "app_e2e"] {
+            let values = [(legacy.to_string(), true)]
+                .into_iter()
+                .collect::<FlagValues>();
+            let error = flags::validate_names(&config, &values).unwrap_err();
+            assert!(
+                error.to_string().contains(legacy),
+                "{name} accepted legacy flag {legacy}"
+            );
+        }
+
+        let compiled = compile(config).unwrap();
+        let enabled = [("e2e".to_string(), true)]
+            .into_iter()
+            .collect::<FlagValues>();
+        let off = flags::preflight_skips(&compiled, &FlagValues::new(), &[]);
+        let on = flags::preflight_skips(&compiled, &enabled, &[]);
+        let expected_e2e_steps: &[&str] = if name == "tdd" {
+            &["e2e"]
+        } else {
+            &["prepare-e2e", "e2e-final-check"]
+        };
+        let actual_e2e_steps = compiled
+            .steps
+            .iter()
+            .filter_map(|(step, config)| {
+                config
+                    .flag
+                    .as_ref()
+                    .is_some_and(|flag| flag.as_slice().iter().any(|name| name == "e2e"))
+                    .then_some(step.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_e2e_steps, expected_e2e_steps, "{name}");
+        for step in expected_e2e_steps {
+            assert!(
+                off.contains(&step.to_string()),
+                "{name} did not gate {step} off"
+            );
+            assert!(!on.contains(&step.to_string()), "{name} gated {step} on");
+        }
+
+        let step_ids = compiled
+            .steps
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let review_prefix = if name == "tdd" {
+            "verify-review-pass/"
+        } else {
+            "verify-refactor-pass/"
+        };
+        let review_positions = step_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, step)| step.starts_with(review_prefix).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(
+            !review_positions.is_empty(),
+            "{name} review phase is missing"
+        );
+        let position = |id: &str| {
+            step_ids
+                .iter()
+                .position(|step| *step == id)
+                .unwrap_or_else(|| panic!("{name} {id} step is missing"))
+        };
+        let first_e2e = position(expected_e2e_steps[0]);
+        let last_e2e = position(expected_e2e_steps[expected_e2e_steps.len() - 1]);
+        let last_review = review_positions[review_positions.len() - 1];
+        assert!(
+            first_e2e < review_positions[0],
+            "{name} E2E must precede review"
+        );
+        // refactor runs its final E2E check after review; tdd has no post-review E2E.
+        assert_eq!(
+            last_review < last_e2e,
+            name == "refactor",
+            "{name} E2E order"
+        );
+        for &index in &review_positions {
+            let id = step_ids[index].to_string();
+            assert!(
+                !off.contains(&id) && !on.contains(&id),
+                "{name} review step {id} was gated"
+            );
+        }
+    }
+}
+
 fn verify_ejected_builtins(root: &Path, project: &Path, config_dir: &Path) {
     // A cwd-local dependency is deliberately invalid. Embedded resolution must ignore it.
     write(&project.join("_shared/after-pr.yaml"), "not: [valid\n");
@@ -354,6 +460,7 @@ fn worker(root: &Path, phase: &str) {
         "eject" => eject_with_host_settings(root, &project, &config_dir),
         "local" => verify_local_builtin_resources(root),
         "repair-policy" => verify_builtin_repair_policy(&project),
+        "e2e-contract" => assert_builtin_e2e_contract(&project),
         "missing-resource" => {
             write(
                 &project.join("_shared/local-only.yaml"),
@@ -453,6 +560,11 @@ fn run_isolated(phases: &[&str]) {
 #[test]
 fn builtin_after_pr_is_scoped_flagged_and_ignores_cwd_dependencies() {
     run_isolated(&["contracts"]);
+}
+
+#[test]
+fn builtin_e2e_phases_are_gated_and_ordered_around_review() {
+    run_isolated(&["e2e-contract"]);
 }
 
 #[test]

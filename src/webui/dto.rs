@@ -170,6 +170,9 @@ pub(crate) fn transition_reason(
         TransitionReason::IfFileChanged { target } => {
             ("ifFileChanged".to_string(), Some(target.clone()))
         }
+        TransitionReason::IfHeadChanged { target } => {
+            ("ifHeadChanged".to_string(), Some(target.clone()))
+        }
         TransitionReason::IfNoFileChangesRetry => ("ifNoFileChangesRetry".to_string(), None),
         TransitionReason::IfNoFileChangesFail => ("ifNoFileChangesFail".to_string(), None),
         TransitionReason::IfFailGoto { target } => ("ifFail".to_string(), Some(target.clone())),

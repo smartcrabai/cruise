@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 #[test]
 fn all_registered_overrides_are_documented() {
     for text in [
-        include_str!("../README.md"),
+        include_str!("../docs/en/configuration.md"),
         include_str!("../skills/cruise-cli/SKILL.md"),
     ] {
         for name in cruise::config_env::all_override_names() {

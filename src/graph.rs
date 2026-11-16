@@ -135,6 +135,8 @@ pub enum TransitionReason {
     Next,
     /// `if.file-changed:` triggered a jump to the named step.
     IfFileChanged { target: String },
+    /// `if.head-changed:` triggered a jump to the named step.
+    IfHeadChanged { target: String },
     /// `if.no-file-changes: retry` re-executes the current step.
     IfNoFileChangesRetry,
     /// `if.no-file-changes: failed` terminates the workflow.
@@ -162,6 +164,7 @@ impl TransitionReason {
             Self::Sequential => "sequential",
             Self::Next => "next",
             Self::IfFileChanged { .. } | Self::GroupRetry { .. } => "if.file-changed",
+            Self::IfHeadChanged { .. } => "if.head-changed",
             Self::IfNoFileChangesRetry => "if.no-file-changes: retry",
             Self::IfNoFileChangesFail => "if.no-file-changes: failed",
             Self::IfFailGoto { .. } => "if.fail",
@@ -322,6 +325,15 @@ pub fn build_graph(compiled: &CompiledWorkflow, max_retries: usize) -> Result<Ex
                     Some(target),
                 )?;
             }
+            if let Some(target) = &cond.head_changed {
+                let target = resolve_target(compiled, target)?;
+                push(
+                    TransitionReason::IfHeadChanged {
+                        target: target.clone(),
+                    },
+                    Some(target),
+                )?;
+            }
             match cond.no_file_changes {
                 Some(NoFileChangesAction::Retry) => {
                     push(TransitionReason::IfNoFileChangesRetry, Some(name.clone()))?;
@@ -444,6 +456,7 @@ impl ExecutionGraph {
                             .map_or(target, |node| &node.step_name);
                         match &mut edge.reason {
                             TransitionReason::IfFileChanged { target }
+                            | TransitionReason::IfHeadChanged { target }
                             | TransitionReason::IfFailGoto { target }
                             | TransitionReason::GroupRetry { target } => {
                                 target.clone_from(step_name);

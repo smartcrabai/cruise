@@ -105,13 +105,23 @@ pub enum InstallState {
 /// Inspect install ownership without changing files. This is also used by the
 /// launch path, so `cruise update --status` remains read-only.
 pub fn inspect(executable: &Path) -> InstallState {
+    let home = home::home_dir();
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
-        .or_else(|| home::home_dir().map(|home| home.join(".cargo")));
-    inspect_with_cargo_home(executable, cargo_home.as_deref())
+        .or_else(|| home.as_ref().map(|home| home.join(".cargo")));
+    inspect_with_inputs(executable, cargo_home.as_deref(), home.as_deref())
 }
 
+#[cfg(test)]
 fn inspect_with_cargo_home(executable: &Path, cargo_home: Option<&Path>) -> InstallState {
+    inspect_with_inputs(executable, cargo_home, None)
+}
+
+fn inspect_with_inputs(
+    executable: &Path,
+    cargo_home: Option<&Path>,
+    home: Option<&Path>,
+) -> InstallState {
     let resolved = fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
     if is_homebrew_path(&resolved) {
         return InstallState::Homebrew;
@@ -120,13 +130,10 @@ fn inspect_with_cargo_home(executable: &Path, cargo_home: Option<&Path>) -> Inst
     let Some(directory) = resolved.parent() else {
         return InstallState::External;
     };
-    let Some(cargo_home) = cargo_home else {
-        return InstallState::External;
-    };
-    let Some(directory) = matching_cargo_home_bin(directory, cargo_home) else {
-        return InstallState::External;
-    };
-    InstallState::Managed(directory)
+    let managed_directory = cargo_home
+        .and_then(|cargo_home| matching_directory(directory, &cargo_home.join("bin")))
+        .or_else(|| home.and_then(|home| matching_directory(directory, &home.join(".local/bin"))));
+    managed_directory.map_or(InstallState::External, InstallState::Managed)
 }
 
 pub fn resolve_runtime(executable: &Path) -> io::Result<PathBuf> {
@@ -142,10 +149,23 @@ fn resolve_runtime_with_inputs(
     override_runtime: Option<&OsStr>,
     cargo_home: Option<&Path>,
 ) -> io::Result<PathBuf> {
+    resolve_runtime_with_install_inputs(executable, override_runtime, cargo_home, None)
+}
+
+#[cfg(test)]
+fn resolve_runtime_with_install_inputs(
+    executable: &Path,
+    override_runtime: Option<&OsStr>,
+    cargo_home: Option<&Path>,
+    home: Option<&Path>,
+) -> io::Result<PathBuf> {
     if let Some(runtime) = override_runtime {
         return require_executable(PathBuf::from(runtime));
     }
-    resolve_runtime_for_install(executable, inspect_with_cargo_home(executable, cargo_home))
+    resolve_runtime_for_install(
+        executable,
+        inspect_with_inputs(executable, cargo_home, home),
+    )
 }
 
 fn resolve_runtime_for_install(
@@ -312,9 +332,8 @@ fn is_homebrew_path(path: &Path) -> bool {
     })
 }
 
-fn matching_cargo_home_bin(install_dir: &Path, cargo_home: &Path) -> Option<PathBuf> {
-    let expected = cargo_home.join("bin");
-    let expected = fs::canonicalize(&expected).unwrap_or(expected);
+fn matching_directory(install_dir: &Path, expected: &Path) -> Option<PathBuf> {
+    let expected = fs::canonicalize(expected).unwrap_or_else(|_| expected.to_path_buf());
     let install_dir = fs::canonicalize(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
     (install_dir == expected).then_some(install_dir)
 }
@@ -323,8 +342,8 @@ fn matching_cargo_home_bin(install_dir: &Path, cargo_home: &Path) -> Option<Path
 mod tests {
     use super::{
         ACTIVE_RUNTIME_FILE, InstallState, ManagedRuntime, inspect_with_cargo_home,
-        install_baseline, metadata_path, resolve_runtime_with_inputs, runtime_name,
-        valid_runtime_name,
+        inspect_with_inputs, install_baseline, metadata_path, resolve_runtime_with_inputs,
+        resolve_runtime_with_install_inputs, runtime_name, valid_runtime_name,
     };
     use std::fs::{self, FileTimes, OpenOptions};
     use std::path::{Path, PathBuf};
@@ -352,6 +371,17 @@ mod tests {
         write_executable(&launcher, b"launcher");
         write_executable(&bin.join(runtime_name()), b"fixed-runtime");
         (cargo_home, bin, launcher)
+    }
+
+    fn local_install(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let home = root.join("home");
+        let bin = home.join(".local/bin");
+        fs::create_dir_all(&bin)
+            .unwrap_or_else(|error| panic!("failed to create local bin: {error}"));
+        let launcher = bin.join(super::launcher_name());
+        write_executable(&launcher, b"launcher");
+        write_executable(&bin.join(runtime_name()), b"fixed-runtime");
+        (home, bin, launcher)
     }
 
     fn managed_name() -> &'static str {
@@ -421,6 +451,24 @@ mod tests {
     }
 
     #[test]
+    fn local_bin_is_managed_independently_of_cargo_home() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let (home, bin, launcher) = local_install(temp.path());
+        let cargo_home = temp.path().join("separate-cargo-home");
+        let canonical_bin = fs::canonicalize(&bin)
+            .unwrap_or_else(|error| panic!("failed to canonicalize local bin: {error}"));
+
+        assert!(matches!(
+            inspect_with_inputs(&launcher, Some(&cargo_home), Some(&home)),
+            InstallState::Managed(directory) if directory == canonical_bin
+        ));
+        assert!(matches!(
+            inspect_with_inputs(&launcher, Some(&cargo_home), None),
+            InstallState::External
+        ));
+    }
+
+    #[test]
     fn runtime_names_allow_legacy_and_managed_basenames_only() {
         assert!(valid_runtime_name("cruise-runtime-0.2.16"));
         assert!(valid_runtime_name(managed_name()));
@@ -429,6 +477,21 @@ mod tests {
         assert!(!valid_runtime_name("cruise-runtime-../outside"));
         assert!(!valid_runtime_name("cruise-runtime-foo\\bar"));
         assert!(!valid_runtime_name("runtime-cruise"));
+    }
+
+    #[test]
+    fn local_bin_selects_managed_runtime_overlay_with_separate_cargo_home() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let (home, bin, launcher) = local_install(temp.path());
+        let cargo_home = temp.path().join("separate-cargo-home");
+        install_overlay(&bin, managed_name());
+
+        assert_eq!(
+            resolve_runtime_with_install_inputs(&launcher, None, Some(&cargo_home), Some(&home))
+                .unwrap_or_else(|error| panic!("resolver failed: {error}")),
+            fs::canonicalize(bin.join(managed_name()))
+                .unwrap_or_else(|error| panic!("failed to canonicalize managed runtime: {error}"))
+        );
     }
 
     #[test]
