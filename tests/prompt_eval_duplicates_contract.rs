@@ -67,10 +67,11 @@ fn prompt_file_hash_normalizes_checkout_line_endings_only() {
 
 #[test]
 fn write_test_first_known_difference_is_reviewed() -> Result<(), Box<dyn std::error::Error>> {
+    // Baseline updated after replacing the removed browser_e2e/app_e2e flag names with e2e.
     check_pair(
         "write-test-first",
         "ff7e29d2890fe3c6b5358076d1f1b9ee607dbee6606be65c18a7e412a012c86d",
-        "b6e4f7b1b1fb5a81176deca7a6a24fea866375322a84c23a8d31d582f31b66b5",
+        "b993830cc3d39cda6c0e7b88e116b311776be0be2f191d8219903482b8b262bf",
     )
 }
 
