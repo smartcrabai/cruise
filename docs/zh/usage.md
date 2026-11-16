@@ -50,8 +50,14 @@ cruise --plan "implement the feature"
 # Interview-style planning: answer one question at a time, then the plan is written (SDK backend + TTY + `interactive_planning: true`)
 cruise plan --grill "implement the feature"
 
-# Enable only browser and app E2E for the built-in test-first workflow
-cruise plan -c builtin:tdd -f browser_e2e,app_e2e "task"
+# Enable applicable UI E2E for the built-in test-first workflow
+cruise plan -c builtin:tdd -f e2e "task"
+
+# 显示通用 UI E2E policy 和 framework ID 列表
+cruise docs e2e
+# 显示 React Native／Expo 或 Tauri policy
+cruise docs e2e react-native
+cruise docs e2e tauri
 
 # Plan against a GitHub repository instead of a local directory (temporary clone)
 cruise plan --repo owner/repository "implement the feature"
@@ -95,6 +101,7 @@ cruise ssh devbox -- run
 cruise ssh devbox -- --plan "implement the feature"
 cruise ssh devbox -- --plan "implement the feature" --repo owner/repository
 
+# 位置参数恰好为 "docs" 时会与保留子命令冲突；请使用 cruise plan "docs"
 # Legacy: positional input without a subcommand is treated as `cruise plan`
 cruise "implement the feature"
 ```

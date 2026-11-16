@@ -1432,13 +1432,13 @@ mod tests {
     #[test]
     fn web_ui_flag_requests_preserve_partial_values_and_omissions() {
         let fields = Fields::from(vec![
-            ("flag.browser_e2e".to_string(), "on".to_string()),
-            ("flag.app_e2e".to_string(), "off".to_string()),
+            ("flag.e2e".to_string(), "on".to_string()),
+            ("flag.formal_methods".to_string(), "off".to_string()),
             ("flag.refactor".to_string(), String::new()),
         ]);
         let request = super::new_session_request(&fields);
-        assert_eq!(request.flags.get("browser_e2e"), Some(&true));
-        assert_eq!(request.flags.get("app_e2e"), Some(&false));
+        assert_eq!(request.flags.get("e2e"), Some(&true));
+        assert_eq!(request.flags.get("formal_methods"), Some(&false));
         assert!(!request.flags.contains_key("refactor"));
         assert!(!request.flags.contains_key("tdd"));
 
@@ -1447,7 +1447,7 @@ mod tests {
             partial_settings
                 .flags
                 .as_ref()
-                .and_then(|flags| flags.get("browser_e2e")),
+                .and_then(|flags| flags.get("e2e")),
             Some(&true)
         );
         assert_eq!(

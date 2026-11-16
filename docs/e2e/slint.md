@@ -1,0 +1,8 @@
+# Slint UI policy
+
+Applies to desktop and embedded apps whose UI is written in Slint (`.slint` files). Apply the [common UI E2E policy](common.md).
+
+- **Visual interaction:** only when suitable visual tooling is absent, run the actual app with Slint's embedded MCP server: `SLINT_EMIT_DEBUG_INFO=1 SLINT_MCP_PORT=<port>` and `--features slint/mcp` on the command line (never add `mcp` to `Cargo.toml` features). Without a display, add `SLINT_BACKEND=headless`. Use its element tree, `@testable` properties, click, drag, and typing tools, save `take_screenshot` output as PNG, and inspect the pixels. The server binds to loopback by default; do not expose it with `SLINT_MCP_HOST`, and stop the app when done.
+- The MCP server and `SLINT_BACKEND=headless` are an unstable, automation-only interface. Headless rendering does not show platform window chrome; report platform-specific rendering it cannot evidence.
+- **Persistent E2E:** only when suitable saved UI tests are absent, add Rust integration tests with `i-slint-backend-testing` as a dev-dependency pinned with `=x.y.z` to exactly the app's `slint` version (it does not follow semver). Initialize with `init_integration_test_with_system_time()` or `init_integration_test_with_mock_time()`, locate elements with `ElementHandle::find_by_accessible_label` or `find_by_element_id`, drive them with `single_click` or accessible actions, and assert application state. Advance animations and timers with `mock_elapsed_time()`, not sleeps.
+- The testing backend renders no pixels and measures text at a fixed size, so its tests are not visual evidence; pair them with MCP screenshots. The testing API is preliminary and Rust-only; for Slint apps in other languages, reuse existing tooling and report missing capability.

@@ -14,6 +14,7 @@ Commands:
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs
   usage        Summarize locally recorded token usage
+  docs         Print embedded common or framework-specific E2E policy
   config       Show or update application-level configuration (`config.json` or `config.yaml`)
   exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
@@ -34,10 +35,40 @@ Options:
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable)
 ```
 
+`docs` という正確な名前は subcommand として予約されています。位置引数が正確に `docs` となる task を計画するには `cruise plan "docs"` を使ってください。
+
 <a id="cruise-install"></a>
 ## `cruise install`
 
 `cruise install <jcode|claude|opencode> [--force]` は provider の最新安定版 CLI をインストールします（`claude` は stable チャネル）。各呼び出しでリリースメタデータを確認し、同じバージョンの正常な管理対象インストールは再利用し、別バージョンなら更新します。`--force` は選択された最新バージョンを再ダウンロードします。`cruise install --status` は読み取り専用でオフライン動作し、最新かどうかを主張せず、記録されたインストール済みバージョンを表示します。provider CLI は環境変数による override、Cruise 管理インストール、PATH の順に解決されます。認証は各 provider が管理します。詳細は[管理対象プロバイダー CLI](installation.md#managed-provider-clis)を参照してください。
+
+<a id="cruise-docs-e2e"></a>
+## `cruise docs e2e`
+
+```sh
+cruise docs e2e
+cruise docs e2e react-native
+cruise docs e2e tauri
+cruise docs e2e exact
+cruise docs e2e slint
+cruise docs e2e browser-extension
+```
+
+Cruise に組み込まれた UI E2E policy を表示します。framework ID を省略すると共通 policy と利用可能な ID 一覧を表示し、指定すると該当 framework の policy を表示します。出力は read-only で実行中の binary に同梱され、Cruise の version にひも付き、offline で利用できます。実行時の file、config、credential は読み込まず、network request や telemetry も行いません。正規の source は [docs/e2e/common.md](../e2e/common.md) と対応する `docs/e2e/<framework>.md` です。
+
+| Framework ID | 適用範囲 |
+|---|---|
+| `browser` | Browser ベースの web UI |
+| `swiftui` | SwiftUI と Apple native iOS/macOS UI |
+| `android` | Android native UI |
+| `react-native` | React Native（Expo を含む） |
+| `electron` | Electron desktop UI |
+| `tauri` | Tauri desktop UI |
+| `exact` | Exact runtime app（Contract + TypeScript） |
+| `slint` | Slint desktop / embedded UI |
+| `browser-extension` | Browser extension |
+
+一覧にない native target も非対応という意味ではありません。repository に既にある適切な tool のみを使い、capability が不足する場合はその旨を記録してください。未掲載の target に新しい default tool を導入しないでください。
 
 <a id="cruise-workflow-generate"></a>
 ## `cruise workflow generate`
@@ -155,10 +186,9 @@ Git 管理されていないディレクトリでは警告を出してその場�
 
 `--no-interactive-planning` を指定すると、workflow config が `interactive_planning: true` でも SDK 計画は直接ファイルに書き込む方式を使います。`--grill` とは併用できません。
 
-**組み込み workflow flag。** 汎用組み込み workflow 6 種（`tdd`、`refactor`、`add-tests`、`add-formal-specs`、`research`、`security`）は `after_pr` と `merge` を宣言し、明示的に有効化しない限り全 flag はオフです。`pr-review-fix` は flag を宣言しません。`tdd` と `refactor` は追加で `browser_e2e`、`app_e2e`、`formal_methods` を宣言します。たとえば `cruise plan -c builtin:tdd -f browser_e2e,app_e2e "task"` は 2 つの E2E flag だけを有効にし、`cruise plan -c builtin:tdd -f merge "task"` は after-PR 自動処理とネイティブ同期 squash merge を有効にします。`-f browser_e2e,app_e2e,merge` で組み合わせられます。`merge` は `after_pr` と同じ after-PR 前処理を 1 回実行します。`after_pr` 単独では merge しません。
+**組み込み workflow flag。** 汎用組み込み workflow 6 種（`tdd`、`refactor`、`add-tests`、`add-formal-specs`、`research`、`security`）は `after_pr` と `merge` を宣言し、明示的に有効化しない限り全 flag はオフです。`pr-review-fix` は flag を宣言しません。`tdd` と `refactor` は追加で単一の `e2e` flag と `formal_methods` を宣言します。browser／app 別の flag はありません。たとえば `cruise plan -c builtin:tdd -f e2e "task"` は E2E を有効にし、`-f e2e,merge` は after-PR 自動処理とネイティブ同期 squash merge を組み合わせます。`merge` は `after_pr` と同じ after-PR 前処理を 1 回実行し、`after_pr` 単独では merge しません。
 
-- `browser_e2e` は実際のブラウザー操作、assertion、失敗修正を有効にします。
-- `app_e2e` は repository／platform 固有 runner を用いた、該当する mobile／desktop native app 操作を有効にします。
+- `e2e` は、適用可能な web／mobile／desktop UI の E2E を、repository にある適切な既存 tool を使って有効にします。prompt は `cruise docs e2e` と `cruise docs e2e <framework>` で組み込みの共通 policy と該当 framework policy を参照します。正規の source は `docs/e2e/` です。ID のない target（未掲載の native target を含む）も非対応ではありません。既存の適切な tool のみを使い、不足する capability を報告し、新しい default tool を導入しないでください。実際の browser／native UI screenshot を撮り、pixel 単位で目視確認して、assertion を含む deterministic な E2E test を保存します。`tdd` では 1 つの `e2e` step が `verify-review-pass` の前に実行されます。`refactor` では `prepare-e2e`（`refactor/e2e-preparation.md` を作成）、既存の `verify-refactor-pass` review、その後の `e2e-final-check`（`refactor/e2e-verification.md` を作成）が実行され、refactor の E2E 2 step はどちらもこの flag が必要です。対象外の機能は not applicable、必要な capability がない場合は blocker として記録し、実行可能な作業は完了して tool／version／setup／result を明記します。
 - `after_pr` は merge なしで after-PR 自動処理を有効にします。
 - `merge` は同じ after-PR 前処理に加えて、最後にネイティブの同期 squash merge を有効にします。GitHub では base から遅れている PR や競合している PR を、merge 前に自動で同期・復旧します。GitLab ではこの復旧は行いません。auto-merge を有効化せず、policy を回避せず、merge queue も使いません。
 - `formal_methods` は workflow レベルの実行可能な Quint、Alloy、Gherkin 仕様と CI を有効にします。初期 plan mode ではありません。
@@ -208,7 +238,7 @@ Options:
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable; conflicts with --all)
 ```
 
-**ワークフラグ。** workflow config では `flags:` を宣言し、`flag: <name>` でステップに関連付けられます。有効値が on の場合だけ flag 付きステップを実行します。未指定の flag はオフです。`--flag NAME`、`--flag browser_e2e,app_e2e` のような複数指定、または `--flag` の繰り返しで有効化します。`-f` は `--flag` の alias です。明示的な `NAME=on|off|true|false` も使えるため、`--flag NAME=off` で保存済みの有効値を上書きできます。すべての `cruise run` は flag selector を出さず、保存済み flag 値と CLI で明示した override を統合します。新規 run、resume、`run --all`、`cruise list` からの Run にも適用されます。未知の名前は拒否され、`--flag` と `--all` は併用できません。`-f/--flag` が指定されていない場合、Approve と Execute now では skip 選択の前に flag を選びます。selector では保存済みの有効 flag が事前選択され、Space で切り替え、Enter で確定します。何も選ばなければ宣言済み flag はすべてオフです。
+**ワークフラグ。** workflow config では `flags:` を宣言し、`flag: <name>` でステップに関連付けられます。有効値が on の場合だけ flag 付きステップを実行します。未指定の flag はオフです。`--flag NAME`、`--flag e2e,formal_methods` のような複数指定、または `--flag` の繰り返しで有効化します。`-f` は `--flag` の alias です。明示的な `NAME=on|off|true|false` も使えるため、`--flag NAME=off` で保存済みの有効値を上書きできます。すべての `cruise run` は flag selector を出さず、保存済み flag 値と CLI で明示した override を統合します。新規 run、resume、`run --all`、`cruise list` からの Run にも適用されます。未知の名前は拒否され、`--flag` と `--all` は併用できません。`-f/--flag` が指定されていない場合、Approve と Execute now では skip 選択の前に flag を選びます。selector では保存済みの有効 flag が事前選択され、Space で切り替え、Enter で確定します。何も選ばなければ宣言済み flag はすべてオフです。
 
 `--all` は Planned または Suspended の全 session を既定で順次実行します。session を最初に作った時点の mode にかかわらず、worktree mode が強制されます。全 session 終了後に各結果と PR link を示す summary table が表示されます。`--all` と `[SESSION]` は併用できません。
 

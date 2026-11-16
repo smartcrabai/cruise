@@ -15,6 +15,7 @@ Commands:
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs
   usage        Summarize locally recorded token usage
+  docs         Print embedded common or framework-specific E2E policy
   config       Show or update application-level configuration (`config.json` or `config.yaml`)
   exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
@@ -35,10 +36,40 @@ Options:
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable)
 ```
 
+The exact subcommand name `docs` takes precedence over legacy positional input. Use `cruise plan "docs"` to plan a task whose exact text is `docs`.
+
 <a id="cruise-install"></a>
 ## `cruise install`
 
 `cruise install <jcode|claude|opencode> [--force]` installs the provider's latest stable CLI release (`claude` uses its stable channel). Each invocation checks release metadata, reuses a healthy managed installation at that version, and updates an installation at another version; `--force` downloads the selected latest version again. `cruise install --status` is read-only and offline: it reports the recorded installed version without claiming it is latest. Provider CLIs are resolved in this order: environment-variable override, Cruise-managed installation, then PATH. Authentication remains provider-managed. See [Managed provider CLIs](installation.md#managed-provider-clis) for details.
+
+<a id="cruise-docs-e2e"></a>
+## `cruise docs e2e`
+
+```sh
+cruise docs e2e
+cruise docs e2e react-native
+cruise docs e2e tauri
+cruise docs e2e exact
+cruise docs e2e slint
+cruise docs e2e browser-extension
+```
+
+Prints Cruise's embedded UI E2E policy. Without a framework ID, it prints the common policy and the available IDs; with an ID, it prints that framework policy. The output is read-only, built into the running binary, tied to its Cruise version, and available offline. It reads no runtime files, config, or credentials, makes no network requests, and sends no telemetry. Canonical sources are [docs/e2e/common.md](../e2e/common.md) and the matching `docs/e2e/<framework>.md`.
+
+| Framework ID | Policy scope |
+|---|---|
+| `browser` | Browser-based web UI |
+| `swiftui` | SwiftUI and native Apple iOS/macOS UI |
+| `android` | Native Android UI |
+| `react-native` | React Native, including Expo |
+| `electron` | Electron desktop UI |
+| `tauri` | Tauri desktop UI |
+| `exact` | Exact runtime apps (Contract + TypeScript) |
+| `slint` | Slint desktop and embedded UI |
+| `browser-extension` | Browser extensions |
+
+Other native targets are not unsupported: use suitable tools already in the repository and report any missing capability. Do not introduce new default tooling for an unlisted target.
 
 <a id="cruise-workflow-generate"></a>
 ## `cruise workflow generate`
@@ -157,10 +188,9 @@ Non-git directories warn and plan in place, but `cruise run` still requires a gi
 
 With `--no-interactive-planning`, SDK planning uses the direct-to-file flow even when the workflow config has `interactive_planning: true`. It conflicts with `--grill`.
 
-**Built-in workflow flags.** The six general-purpose built-ins (`tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`) declare `after_pr` and `merge`; every flag is off unless explicitly enabled. `pr-review-fix` declares no flags. `tdd` and `refactor` additionally declare `browser_e2e`, `app_e2e`, and `formal_methods`. For example, `cruise plan -c builtin:tdd -f browser_e2e,app_e2e "task"` enables only the two E2E flags, while `cruise plan -c builtin:tdd -f merge "task"` opts into after-PR automation and the native synchronous squash merge. `-f browser_e2e,app_e2e,merge` combines them. `merge` runs the same after-PR prelude as `after_pr`, once; `after_pr` alone never merges.
+**Built-in workflow flags.** The six general-purpose built-ins (`tdd`, `refactor`, `add-tests`, `add-formal-specs`, `research`, and `security`) declare `after_pr` and `merge`; every flag is off unless explicitly enabled. `pr-review-fix` declares no flags. `tdd` and `refactor` additionally declare one `e2e` flag and `formal_methods`, with no separate browser/app switches. For example, `cruise plan -c builtin:tdd -f e2e "task"` enables E2E, while `-f e2e,merge` combines it with after-PR automation and native synchronous squash merge. `merge` runs the same after-PR prelude as `after_pr`, once; `after_pr` alone never merges.
 
-- `browser_e2e` enables actual browser exercises, assertions, and failure fixing.
-- `app_e2e` enables applicable mobile and desktop native-app exercises using repository/platform-native runners.
+- `e2e` enables applicable web, mobile, and desktop UI E2E using appropriate tools already in the repository. Its prompts consult the embedded common policy and applicable framework policies with `cruise docs e2e` and `cruise docs e2e <framework>`; see `docs/e2e/` for canonical sources. Targets without a listed ID, including unlisted native targets, are not unsupported: use suitable existing repository tools and report missing capabilities without introducing new defaults. Visually inspect actual browser and native UI screenshots at pixel level, and save deterministic assertion-bearing E2E tests. TDD has one `e2e` step before `verify-review-pass`; refactor runs `prepare-e2e` (writes `refactor/e2e-preparation.md`), the existing `verify-refactor-pass` review, then `e2e-final-check` (writes `refactor/e2e-verification.md`); both refactor E2E steps require this flag. Mark out-of-scope targets not applicable and required-but-unavailable capabilities as blockers; complete reachable work and record exact tools, versions, setup, and results.
 - `after_pr` enables after-PR automation without merging.
 - `merge` opts into the same after-PR prelude plus a final native synchronous squash merge. On GitHub, PRs that are behind the base or have conflicts are automatically synchronized and recovered before merging. This recovery is not performed on GitLab. It does not enable auto-merge, bypass policy, or use a merge queue.
 - `formal_methods` enables workflow-level executable Quint, Alloy, and Gherkin specifications and CI; it is not an initial-plan mode.
@@ -210,7 +240,7 @@ Options:
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable; conflicts with --all)
 ```
 
-**Workflow flags.** A workflow config can declare `flags:` and attach them to steps with `flag: <name>`. A flagged step runs only when its effective value is on; absent flags are off. Enable one with `--flag NAME`, several with `--flag browser_e2e,app_e2e`, or repeat `--flag`; `-f` is an alias for `--flag`. Explicit `NAME=on|off|true|false` assignments are also supported, so `--flag NAME=off` overrides a saved enabled value. Every `cruise run` merges saved flag values with explicit CLI overrides without showing a flag selector, including fresh runs, resumes, `run --all`, and Run from `cruise list`. Unknown names are rejected, and `--flag` conflicts with `--all`. If `-f/--flag` is not supplied, Approve and Execute now select flags before skips. Saved enabled flags are preselected; use Space to toggle and Enter to confirm. If nothing is selected, all declared flags are off.
+**Workflow flags.** A workflow config can declare `flags:` and attach them to steps with `flag: <name>`. A flagged step runs only when its effective value is on; absent flags are off. Enable one with `--flag NAME`, several with `--flag e2e,formal_methods`, or repeat `--flag`; `-f` is an alias for `--flag`. Explicit `NAME=on|off|true|false` assignments are also supported, so `--flag NAME=off` overrides a saved enabled value. Every `cruise run` merges saved flag values with explicit CLI overrides without showing a flag selector, including fresh runs, resumes, `run --all`, and Run from `cruise list`. Unknown names are rejected, and `--flag` conflicts with `--all`. If `-f/--flag` is not supplied, Approve and Execute now select flags before skips. Saved enabled flags are preselected; use Space to toggle and Enter to confirm. If nothing is selected, all declared flags are off.
 
 `--all` runs every Planned or Suspended session in sequence by default. Worktree mode is always forced, regardless of the mode when the session was first created. After all sessions finish, a summary table shows each outcome and PR link. `--all` and `[SESSION]` are mutually exclusive.
 

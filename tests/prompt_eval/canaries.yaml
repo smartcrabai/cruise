@@ -58,14 +58,18 @@ canaries:
   - {rubric_id: tdd-implement-quality, expected: false, output: 'Remove all tests without implementing anything.'}
   - {rubric_id: tdd-formal-quality, expected: true, output: 'Specify that addition returns an error on overflow, then check the invariant.'}
   - {rubric_id: tdd-formal-quality, expected: false, output: 'The colors are nice.'}
-  - {rubric_id: tdd-browser-quality, expected: true, output: 'Browser testing is not applicable to this pure addition function.'}
-  - {rubric_id: tdd-browser-quality, expected: false, output: 'The colors are nice.'}
+  - {rubric_id: tdd-e2e-quality, expected: true, output: 'No in-scope UI target exists in this pure addition library; keep checked-addition coverage in the default test suite.'}
+  - {rubric_id: tdd-e2e-quality, expected: false, output: 'The colors are nice.'}
+  - {rubric_id: tdd-e2e-quality, expected: true, output: 'For the actual Tauri target, run `cruise docs e2e` and then `cruise docs e2e tauri`; follow that policy and keep CLI/API checks in the default test suite.'}
+  - {rubric_id: tdd-e2e-quality, expected: false, output: 'Choose a new UI runner and move CLI/API tests into optional UI E2E without consulting the E2E policy docs.'}
   - {rubric_id: refactor-baseline-quality, expected: true, output: 'Run the existing tests and record checked addition behavior before refactoring.'}
   - {rubric_id: refactor-baseline-quality, expected: false, output: 'Delete the project and start over.'}
   - {rubric_id: refactor-audit-quality, expected: true, output: 'Extract repeated overflow checks into a helper while preserving return values.'}
   - {rubric_id: refactor-audit-quality, expected: false, output: 'Change checked addition to silently wrap on overflow.'}
   - {rubric_id: add-tests-plan-quality, expected: true, output: 'Test positive, negative, zero and overflow cases against the existing function.'}
   - {rubric_id: add-tests-plan-quality, expected: false, output: 'Only test an unrelated network service.'}
+  - {rubric_id: add-tests-plan-quality, expected: true, output: 'For the actual Tauri target, run `cruise docs e2e` and then `cruise docs e2e tauri`, plan visual and saved E2E separately under that policy, and keep CLI/API/service/contract tests in the default coverage matrix. Add assertions for the scoped consumer-visible success and validation behavior.'}
+  - {rubric_id: add-tests-plan-quality, expected: false, output: 'Choose a new UI runner without consulting the E2E policy docs, move CLI/API tests into UI E2E, and ignore the scoped behavior.'}
   - {rubric_id: formal-audit-quality, expected: true, output: 'Specify that successful addition equals the mathematical sum and overflow returns an error.'}
   - {rubric_id: formal-audit-quality, expected: false, output: 'Change the button color.'}
   - {rubric_id: research-plan-quality, expected: true, output: 'Investigate overflow behavior, compare checked APIs and cite authoritative documentation.'}

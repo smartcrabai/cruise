@@ -31,6 +31,7 @@ mod diff_cmd;
 #[cfg(test)]
 mod diff_cmd_contract_tests;
 mod display;
+mod docs_cmd;
 mod draft_cmd;
 #[cfg_attr(
     not(test),
@@ -125,6 +126,9 @@ mod yaml_metadata;
 // Hooks run once per tool call, without constructing a runtime or telemetry.
 fn main() {
     let cli = cli::parse_cli();
+    if let Some(cli::Commands::Docs(command)) = &cli.command {
+        std::process::exit(docs_cmd::run(command));
+    }
     if let Some(cli::Commands::Workflow(cli::WorkflowCommand::Doctor(args))) = &cli.command {
         std::process::exit(workflow_doctor::run(args));
     }
@@ -215,6 +219,9 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             provider_install::run(args.provider, args.status, args.force)
         }
         Some(cli::Commands::Workflow(command)) => run_workflow(command).await,
+        Some(cli::Commands::Docs(_)) => {
+            unreachable!("docs command exits before runtime initialization")
+        }
         Some(cli::Commands::Internal(cli::InternalArgs {
             command:
                 cli::InternalCommand::WebuiServe {

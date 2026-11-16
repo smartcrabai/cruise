@@ -1120,7 +1120,7 @@ mod tests {
             step: Step::Flags,
             ..NewSessionForm::default()
         };
-        form.set_flag_choices(vec![choice("browser_e2e"), choice("app_e2e")]);
+        form.set_flag_choices(vec![choice("e2e"), choice("formal_methods")]);
         assert!(form.flag_values.is_empty());
         assert!(form.request().flags.is_empty());
         assert!(form.validate_step().is_ok());
@@ -1130,29 +1130,29 @@ mod tests {
         form.step = Step::Flags;
         form.toggle_flag();
         assert_eq!(form.step, Step::Flags);
-        assert_eq!(form.flag_values.get("browser_e2e"), Some(&true));
-        assert!(!form.flag_values.contains_key("app_e2e"));
+        assert_eq!(form.flag_values.get("e2e"), Some(&true));
+        assert!(!form.flag_values.contains_key("formal_methods"));
 
         form.flag_cursor = 1;
         form.toggle_flag();
         assert_eq!(form.step, Step::Flags);
         assert_eq!(form.flag_values.len(), 2);
-        assert_eq!(form.flag_values.get("browser_e2e"), Some(&true));
-        assert_eq!(form.flag_values.get("app_e2e"), Some(&true));
+        assert_eq!(form.flag_values.get("e2e"), Some(&true));
+        assert_eq!(form.flag_values.get("formal_methods"), Some(&true));
 
         form.flag_cursor = 0;
         form.toggle_flag();
-        assert_eq!(form.flag_values.get("browser_e2e"), Some(&false));
-        assert_eq!(form.flag_values.get("app_e2e"), Some(&true));
+        assert_eq!(form.flag_values.get("e2e"), Some(&false));
+        assert_eq!(form.flag_values.get("formal_methods"), Some(&true));
         assert_eq!(
-            form.request().flags.get("browser_e2e"),
+            form.request().flags.get("e2e"),
             Some(&false),
             "toggling an enabled flag off should keep its effective value off"
         );
 
-        form.set_flag_choices(vec![choice("browser_e2e"), choice("app_e2e")]);
-        assert_eq!(form.flag_values.get("browser_e2e"), Some(&false));
-        assert_eq!(form.flag_values.get("app_e2e"), Some(&true));
+        form.set_flag_choices(vec![choice("e2e"), choice("formal_methods")]);
+        assert_eq!(form.flag_values.get("e2e"), Some(&false));
+        assert_eq!(form.flag_values.get("formal_methods"), Some(&true));
 
         assert!(form.advance());
         assert_eq!(form.step, Step::SkippedSteps);
