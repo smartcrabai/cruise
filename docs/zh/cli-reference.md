@@ -14,6 +14,7 @@ Commands:
   list         List and manage sessions interactively
   clean        Remove sessions with closed/merged PRs
   usage        Summarize locally recorded token usage
+  docs         Print embedded common or framework-specific E2E policy
   config       Show or update application-level configuration (`config.json` or `config.yaml`)
   exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
@@ -34,10 +35,40 @@ Options:
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable)
 ```
 
+准确名称 `docs` 现在是保留子命令。若要规划位置参数文本恰好为 `docs` 的任务，请使用 `cruise plan "docs"`。
+
 <a id="cruise-install"></a>
 ## `cruise install`
 
 `cruise install <jcode|claude|opencode> [--force]` 会安装 provider 的最新稳定版 CLI（`claude` 使用 stable channel）。每次调用都会查询发布元数据，复用版本相同且状态正常的托管安装，并更新其他版本；`--force` 会重新下载所选的最新版本。`cruise install --status` 为只读、离线操作，仅报告记录的已安装版本，不声称它是最新版本。Provider CLI 按环境变量覆盖项、Cruise 托管安装、PATH 的顺序解析。身份验证由各 provider 管理。详情请参阅[托管的 provider CLI](installation.md#managed-provider-clis)。
+
+<a id="cruise-docs-e2e"></a>
+## `cruise docs e2e`
+
+```sh
+cruise docs e2e
+cruise docs e2e react-native
+cruise docs e2e tauri
+cruise docs e2e exact
+cruise docs e2e slint
+cruise docs e2e browser-extension
+```
+
+显示 Cruise 内置的 UI E2E policy。省略 framework ID 时，会显示通用 policy 和可用 ID 列表；指定 ID 时，会显示对应 framework policy。输出为只读内容，内嵌于正在运行的二进制文件、与其 Cruise 版本绑定，并可离线使用。它不会读取运行时文件、config 或凭据，不会发起网络请求，也不会发送 telemetry。规范 source 为 [docs/e2e/common.md](../e2e/common.md) 及对应的 `docs/e2e/<framework>.md`。
+
+| Framework ID | 策略范围 |
+|---|---|
+| `browser` | 基于 browser 的 web UI |
+| `swiftui` | SwiftUI 和 Apple native iOS/macOS UI |
+| `android` | Android native UI |
+| `react-native` | React Native（包括 Expo） |
+| `electron` | Electron desktop UI |
+| `tauri` | Tauri desktop UI |
+| `exact` | Exact runtime apps（Contract + TypeScript） |
+| `slint` | Slint desktop and embedded UI |
+| `browser-extension` | Browser extensions |
+
+未列出的 native target 并非不受支持：只能使用仓库中已有的适当工具，并报告缺少的 capability。不要为未列出的 target 引入新的默认工具。
 
 <a id="cruise-workflow-generate"></a>
 ## `cruise workflow generate`
@@ -155,10 +186,9 @@ Options:
 
 即使 workflow 配置中的 `interactive_planning: true`，传入 `--no-interactive-planning` 后，SDK 规划也会采用直接写入文件的流程。该 flag 与 `--grill` 冲突。
 
-**内置 workflow flags。** 六个通用内置 workflow（`tdd`、`refactor`、`add-tests`、`add-formal-specs`、`research` 和 `security`）声明了 `after_pr` 和 `merge`；除非显式启用，否则所有 flags 都为关闭状态。`pr-review-fix` 不声明任何 flags。`tdd` 和 `refactor` 还声明了 `browser_e2e`、`app_e2e` 和 `formal_methods`。例如，`cruise plan -c builtin:tdd -f browser_e2e,app_e2e "task"` 仅启用两个 E2E flags；`cruise plan -c builtin:tdd -f merge "task"` 则选择执行 after-PR 自动化以及原生同步 squash merge。`-f browser_e2e,app_e2e,merge` 可组合这些选项。`merge` 会执行与 `after_pr` 相同的 after-PR 前置流程，且只执行一次；仅启用 `after_pr` 绝不会合并。
+**内置 workflow flags。** 六个通用内置 workflow（`tdd`、`refactor`、`add-tests`、`add-formal-specs`、`research` 和 `security`）声明了 `after_pr` 和 `merge`；除非显式启用，否则所有 flags 都为关闭状态。`pr-review-fix` 不声明任何 flags。`tdd` 和 `refactor` 还声明单个 `e2e` flag 和 `formal_methods`，没有单独的 browser/app switches。例如，`cruise plan -c builtin:tdd -f e2e "task"` 会启用 E2E；`-f e2e,merge` 则将其与 after-PR 自动化及原生同步 squash merge 组合使用。`merge` 会执行与 `after_pr` 相同的 after-PR 前置流程，且只执行一次；仅启用 `after_pr` 绝不会合并。
 
-- `browser_e2e` 启用实际的浏览器操作、断言和失败修复。
-- `app_e2e` 启用适用的移动端和桌面端原生应用操作，并使用仓库/平台原生 runner。
+- `e2e` 使用仓库中适当的现有工具，为适用的 web、mobile 和 desktop UI 启用 E2E。prompt 会通过 `cruise docs e2e` 和 `cruise docs e2e <framework>` 查询内嵌的通用 policy 与对应 framework policy；规范 source 位于 `docs/e2e/`。没有对应 ID 的 target（包括未列出的 native target）并非不受支持：只使用仓库已有的适当工具，并报告缺少的 capability，不要引入新的默认工具。对实际 browser 和 native UI 截图进行 pixel 级目视检查，并保存包含 assertions 的 deterministic E2E tests。`tdd` 只有一个 `e2e` step，在 `verify-review-pass` 之前运行；`refactor` 先运行 `prepare-e2e`（写入 `refactor/e2e-preparation.md`），再经过现有的 `verify-refactor-pass` review，最后运行 `e2e-final-check`（写入 `refactor/e2e-verification.md`）；refactor 的两个 E2E steps 都受该 flag 控制。将产品范围之外的目标标记为 not applicable，将缺失的必需 capability 作为 blocker；完成可达的工作，并记录准确的 tools、versions、setup 和 results。
 - `after_pr` 启用 after-PR 自动化，但不执行合并。
 - `merge` 选择相同的 after-PR 前置流程，并在最后执行原生同步 squash merge。在 GitHub 上，合并前会自动同步并恢复落后于 base 或存在冲突的 PR。GitLab 不执行此恢复。它不会启用自动合并、绕过策略或使用合并队列。
 - `formal_methods` 启用 workflow 级可执行 Quint、Alloy 和 Gherkin 规范及 CI；它不是初始计划模式。
@@ -208,7 +238,7 @@ Options:
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable; conflicts with --all)
 ```
 
-**Workflow flags。** Workflow 配置可以声明 `flags:`，并通过 `flag: <name>` 将它们附加到 steps。只有有效值为 on 时，带 flag 的 step 才会运行；未设置的 flags 默认为 off。使用 `--flag NAME` 启用一个，使用 `--flag browser_e2e,app_e2e` 启用多个，也可以重复使用 `--flag`；`-f` 是 `--flag` 的别名。仍支持显式的 `NAME=on|off|true|false` assignment，因此 `--flag NAME=off` 可覆盖已保存的启用值。每次 `cruise run` 都会将保存的 flag 值与显式 CLI 覆盖合并，且不会显示 flag 选择器；这包括全新运行、恢复运行、`run --all` 和从 `cruise list` 选择 Run。未知名称会被拒绝，且 `--flag` 与 `--all` 冲突。若未提供 `-f/--flag`，Approve 和 Execute now 会先选择 flags，再选择要跳过的 steps。已保存的启用 flags 会预先选中；按 Space 切换，按 Enter 确认。若未选择任何项，所有已声明 flags 均为 off。
+**Workflow flags。** Workflow 配置可以声明 `flags:`，并通过 `flag: <name>` 将它们附加到 steps。只有有效值为 on 时，带 flag 的 step 才会运行；未设置的 flags 默认为 off。使用 `--flag NAME` 启用一个，使用 `--flag e2e,formal_methods` 启用多个，也可以重复使用 `--flag`；`-f` 是 `--flag` 的别名。仍支持显式的 `NAME=on|off|true|false` assignment，因此 `--flag NAME=off` 可覆盖已保存的启用值。每次 `cruise run` 都会将保存的 flag 值与显式 CLI 覆盖合并，且不会显示 flag 选择器；这包括全新运行、恢复运行、`run --all` 和从 `cruise list` 选择 Run。未知名称会被拒绝，且 `--flag` 与 `--all` 冲突。若未提供 `-f/--flag`，Approve 和 Execute now 会先选择 flags，再选择要跳过的 steps。已保存的启用 flags 会预先选中；按 Space 切换，按 Enter 确认。若未选择任何项，所有已声明 flags 均为 off。
 
 `--all` 默认按顺序运行所有 Planned 或 Suspended session。无论 session 最初以何种模式创建，都会强制使用 Worktree 模式。所有 session 完成后会打印汇总表，显示每个 session 的结果和 PR 链接。`--all` 和 `[SESSION]` 不能同时使用。
 

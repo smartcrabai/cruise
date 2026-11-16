@@ -144,6 +144,9 @@ pub enum Commands {
     /// List, eject, generate, and install workflows.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
+    /// Show UI end-to-end testing policies.
+    #[command(subcommand)]
+    Docs(DocsCommand),
     #[command(hide = true)]
     Internal(InternalArgs),
     /// Removed MCP bridge, kept so stale jcode registrations fail instead of planning.
@@ -188,6 +191,16 @@ pub enum WorkflowCommand {
     Remove(WorkflowNameArgs),
     /// Update an installed workflow package to its requested ref's latest commit.
     Update(WorkflowUpdateArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DocsCommand {
+    /// Show common UI E2E policy, or a framework-specific policy.
+    E2e {
+        /// Framework policy ID (see `cruise docs e2e`).
+        #[arg(value_name = "FRAMEWORK")]
+        framework: Option<String>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -1265,13 +1278,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_task_named_ssh_uses_explicit_plan_subcommand() {
-        let cli = Cli::parse_from(["cruise", "plan", "ssh"]);
-        match cli.command {
-            Some(Commands::Plan(args)) => assert_eq!(args.input.as_deref(), Some("ssh")),
-            _ => panic!("expected explicit plan subcommand"),
+    fn legacy_tasks_named_like_subcommands_use_explicit_plan_subcommand() {
+        for name in ["ssh", "docs"] {
+            let cli = Cli::parse_from(["cruise", "plan", name]);
+            match cli.command {
+                Some(Commands::Plan(args)) => assert_eq!(args.input.as_deref(), Some(name)),
+                _ => panic!("expected explicit plan subcommand for {name}"),
+            }
+            assert!(Cli::try_parse_from(["cruise", name]).is_err());
         }
-        assert!(Cli::try_parse_from(["cruise", "ssh"]).is_err());
     }
 
     #[test]

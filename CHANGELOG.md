@@ -5,6 +5,7 @@
 ### Changed
 
 - Stop prompting for workflow flags on `cruise run`; saved session values and explicit `-f/--flag` assignments now control execution. `exec` and `force_exec` still prompt before creating a transient session.
+- Breaking change: the built-in `browser_e2e` and `app_e2e` flags are removed without aliases and replaced by `e2e`. TDD's former `browser-e2e` / `app-e2e` steps become one `e2e` step; refactor's browser/app E2E steps are consolidated into `prepare-e2e` and `e2e-final-check`. Saved sessions that enabled `browser_e2e` or `app_e2e` now run without E2E; re-enable it with `cruise run <id> -f e2e`.
 - Split the README into English, Japanese, and Simplified Chinese documentation under `docs/en/`, `docs/ja/`, and `docs/zh/`.
 - Resolve managed provider installs to each provider's latest stable release, skipping healthy matches and reporting recorded installed versions in offline status.
 
@@ -12,6 +13,7 @@
 
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.
 - Add the `if.head-changed` step condition, which routes to a target when a step completes successfully with a different Git `HEAD` OID; untracked, ignored, and uncommitted changes do not count.
+- Add `cruise docs e2e [<framework>]` to read the common E2E policy and the available framework IDs (including new `exact`, `slint`, and `browser-extension` policies), or one embedded framework policy, offline.
 - Add locale selection and translations for English, Simplified Chinese, Spanish, French, Brazilian Portuguese, Japanese, and Korean across the CLI, TUI, and WebUI.
 - Add the bounded `plan_revision` Quint/Alloy specification with production Gherkin and negative controls (`scripts/check_plan_revision_specs.sh`) covering planning-input delivery, client action parity, and phase preservation.
 
