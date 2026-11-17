@@ -728,6 +728,13 @@ async fn run_builtin_after_pr(
 
 #[cfg(unix)]
 async fn verify_builtin_after_pr_behavior(root: &Path) {
+    verify_after_pr_green_ci(root).await;
+    verify_after_pr_committed_repair(root).await;
+    verify_after_pr_no_commit_repair(root).await;
+}
+
+#[cfg(unix)]
+async fn verify_after_pr_green_ci(root: &Path) {
     let green = root.join("green");
     std::fs::create_dir(&green).unwrap();
     init_after_pr_repo(&green);
@@ -742,11 +749,14 @@ async fn verify_builtin_after_pr_behavior(root: &Path) {
     assert!(!started.iter().any(|step| step == "follow-up/fix-ci-error"));
     assert!(!green.join("repair-ran").exists());
     assert_eq!(graph.state.current.as_deref(), Some("squash-merge"));
+}
 
+#[cfg(unix)]
+async fn verify_after_pr_committed_repair(root: &Path) {
     let committed = root.join("committed");
     std::fs::create_dir(&committed).unwrap();
     init_after_pr_repo(&committed);
-    let wait_command = r#"
+    let wait_command = r"
 if [ ! -f .ci-failed-once ]; then
   touch .ci-failed-once
   printf 'CI_FAILURE: unit-test job failed\n' >&2
@@ -754,7 +764,7 @@ if [ ! -f .ci-failed-once ]; then
 fi
 printf 'CI passed\n' >&2
 exit 0
-"#;
+";
     let (result, graph, started) = run_builtin_after_pr(
         &committed,
         wait_command,
@@ -792,7 +802,10 @@ exit 0
             .traversals,
         1
     );
+}
 
+#[cfg(unix)]
+async fn verify_after_pr_no_commit_repair(root: &Path) {
     let no_op = root.join("no-op");
     std::fs::create_dir(&no_op).unwrap();
     init_after_pr_repo(&no_op);
