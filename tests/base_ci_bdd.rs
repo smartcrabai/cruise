@@ -1,20 +1,119 @@
 //! Executable base-CI contracts through the production CLI, with no forge network.
 #![expect(clippy::unwrap_used, reason = "isolated executable contract fixtures")]
 
-#[cfg(unix)]
 mod contracts {
     use cucumber::{World as _, given, then, when};
     use serde_json::json;
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::io::{Read as _, Write as _};
     use std::path::Path;
     use std::path::PathBuf;
     use std::process::{Command, Output, Stdio};
 
     const SESSION: &str = "20261112000000001";
 
-    fn script(path: &Path, contents: &str) {
-        std::fs::write(path, contents).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fn executable(dir: &Path, name: &str) -> PathBuf {
+        dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+    }
+
+    fn real_git() -> PathBuf {
+        std::env::var_os("BASE_CI_REAL_GIT").map_or_else(
+            || {
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                    .map(|dir| executable(&dir, "git"))
+                    .find(|path| path.is_file())
+                    .unwrap_or_else(|| panic!("git must be on PATH"))
+            },
+            PathBuf::from,
+        )
+    }
+
+    pub fn fixture() {
+        let exe = std::env::args_os().next().unwrap();
+        let name = Path::new(&exe).file_stem().unwrap().to_string_lossy();
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        match name.as_ref() {
+            "git" => {
+                if args.iter().any(|s| {
+                    matches!(
+                        s.as_str(),
+                        "fetch"
+                            | "pull"
+                            | "push"
+                            | "clone"
+                            | "ls-remote"
+                            | "remote-https"
+                            | "remote-http"
+                            | "remote-ssh"
+                    )
+                }) {
+                    std::process::exit(91);
+                }
+                let status = Command::new(std::env::var_os("REAL_GIT").unwrap())
+                    .args(&args)
+                    .status()
+                    .unwrap();
+                std::process::exit(status.code().unwrap_or(1));
+            }
+            "gh" | "glab" => {
+                let log =
+                    std::env::var_os(if name == "gh" { "GH_LOG" } else { "GLAB_LOG" }).unwrap();
+                writeln!(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(log)
+                        .unwrap(),
+                    "{}",
+                    args.join(" ")
+                )
+                .unwrap();
+                let joined = args.join(" ");
+                let state = std::env::var("FIXTURE_ROLLUP").unwrap();
+                if joined == "--version" {
+                    println!("{name} version 2.0.0");
+                } else if name == "gh" && joined.contains("graphql") {
+                    if state == "ERROR" {
+                        eprintln!("unavailable");
+                        std::process::exit(1);
+                    }
+                    let rollup = if state == "NONE" {
+                        serde_json::Value::Null
+                    } else {
+                        json!({"state": state})
+                    };
+                    println!(
+                        "{}",
+                        json!({"data":{"repository":{"defaultBranchRef":{"name":"main","target":{"oid":"abcdef1234567890abcdef1234567890abcdef12","statusCheckRollup":rollup}},"ref":{"name":"develop","target":{"oid":"abcdef1234567890abcdef1234567890abcdef12","statusCheckRollup":rollup}}}}})
+                    );
+                } else if name == "glab" && joined.contains("repository/commits/") {
+                    println!(
+                        "{}",
+                        json!({"id":"abcdef1234567890abcdef1234567890abcdef12"})
+                    );
+                } else if name == "glab" && joined.contains("pipelines?") {
+                    println!(
+                        "{}",
+                        if state == "NONE" {
+                            json!([])
+                        } else {
+                            json!([{"status":state}])
+                        }
+                    );
+                } else if name == "glab" && joined.contains("projects/owner%2Frepo") {
+                    println!("{}", json!({"default_branch":"main"}));
+                } else {
+                    std::process::exit(92);
+                }
+                std::process::exit(0);
+            }
+            "cat" => {
+                let mut input = Vec::new();
+                std::io::stdin().read_to_end(&mut input).unwrap();
+                std::io::stdout().write_all(&input).unwrap();
+                std::process::exit(0);
+            }
+            _ => {}
+        }
     }
 
     #[derive(Debug, Default, cucumber::World)]
@@ -65,16 +164,17 @@ mod contracts {
                 .env("CRUISE_UI_LANGUAGE", "en")
                 .env("NO_COLOR", "1")
                 .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env(
-                    "REAL_GIT",
-                    std::env::var("BASE_CI_REAL_GIT").unwrap_or_else(|_| "/usr/bin/git".to_owned()),
-                )
+                .env("GIT_CONFIG_GLOBAL", self.path("empty-gitconfig"))
+                .env("REAL_GIT", real_git())
+                .env("FIXTURE_ROLLUP", &self.rollup)
                 .env("GH_LOG", self.path("gh.log"))
                 .env("GLAB_LOG", self.path("glab.log"))
                 .stdin(Stdio::null())
                 .arg("run")
                 .arg(SESSION);
+            if let Some(root) = std::env::var_os("SystemRoot") {
+                command.env("SystemRoot", root);
+            }
             if dry {
                 command.arg("--dry-run");
             }
@@ -119,41 +219,13 @@ mod contracts {
                 .unwrap()
                 .success()
         );
-        script(
-            &w.path("bin/git"),
-            "#!/bin/sh\nfor arg in \"$@\"; do case \"$arg\" in fetch|pull|push|clone|ls-remote|remote-https|remote-http|remote-ssh) exit 91;; esac; done\nexec \"$REAL_GIT\" \"$@\"\n",
-        );
-        let response = if state == "NONE" {
-            "null".to_owned()
-        } else {
-            json!({"state": state}).to_string()
-        };
-        let result = if state == "ERROR" {
-            "echo unavailable >&2; exit 1".to_owned()
-        } else {
-            format!(
-                "echo '{}'",
-                json!({"data":{"repository":{"defaultBranchRef":{"name":"main","target":{"oid":"abcdef1234567890abcdef1234567890abcdef12","statusCheckRollup":serde_json::from_str::<serde_json::Value>(&response).unwrap()}},"ref":{"name":"develop","target":{"oid":"abcdef1234567890abcdef1234567890abcdef12","statusCheckRollup":serde_json::from_str::<serde_json::Value>(&response).unwrap()}}}}})
+        for name in ["git", "gh", "glab", "cat"] {
+            std::fs::copy(
+                std::env::current_exe().unwrap(),
+                executable(&w.path("bin"), name),
             )
-        };
-        script(
-            &w.path("bin/gh"),
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GH_LOG\"\ncase \"$*\" in --version) echo 'gh version 2.0.0';; *graphql*) {result};; *) exit 92;; esac\n"
-            ),
-        );
-        let pipeline = if state == "NONE" {
-            json!([])
-        } else {
-            json!([{"status": state}])
-        };
-        let commit = json!({"id":"abcdef1234567890abcdef1234567890abcdef12"});
-        script(
-            &w.path("bin/glab"),
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GLAB_LOG\"\ncase \"$*\" in --version) echo 'glab version 1.0.0';; *repository/commits/*) echo '{commit}';; *pipelines\\?*) echo '{pipeline}';; *projects/owner%2Frepo) echo '{{\"default_branch\":\"main\"}}';; *) exit 93;; esac\n"
-            ),
-        );
+            .unwrap();
+        }
         let session_dir = w.state().parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&session_dir).unwrap();
         let state = json!({"id":SESSION,"base_dir":w.path("repo"),"phase":"Planned","config":{"kind":"builtin_snapshot"},"input":"","current_step":null,"created_at":"2026-11-12T00:00:00Z","completed_at":null,"worktree_path":null,"worktree_branch":null,"input_as_plan":true});
@@ -308,12 +380,8 @@ mod contracts {
         assert!(writer.passed_steps() > 0, "no scenarios executed");
     }
 }
-#[cfg(unix)]
 #[tokio::main]
 async fn main() {
+    contracts::fixture();
     contracts::run().await;
-}
-#[cfg(not(unix))]
-fn main() {
-    panic!("base CI BDD specifications require Unix subprocess fixtures");
 }

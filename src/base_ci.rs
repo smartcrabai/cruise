@@ -241,10 +241,18 @@ where
     let sha = required_string(&commit, "id")
         .map_err(|e| format!("branch `{branch}`: {e}"))?
         .to_owned();
-    let pipelines_path = format!("{project_path}/pipelines?ref={encoded_branch}&sha={sha}&order_by=id&sort=desc&per_page=1");
-    let pipelines = command_json(runner, "glab", &["api", "--hostname", &context.host, &pipelines_path])
-        .map_err(|e| format!("branch `{branch}`: {e}"))?;
-    let pipelines = pipelines.as_array().ok_or_else(|| format!("branch `{branch}`: invalid pipelines response"))?;
+    let pipelines_path = format!(
+        "{project_path}/pipelines?ref={encoded_branch}&sha={sha}&order_by=id&sort=desc&per_page=1"
+    );
+    let pipelines = command_json(
+        runner,
+        "glab",
+        &["api", "--hostname", &context.host, &pipelines_path],
+    )
+    .map_err(|e| format!("branch `{branch}`: {e}"))?;
+    let pipelines = pipelines
+        .as_array()
+        .ok_or_else(|| format!("branch `{branch}`: invalid pipelines response"))?;
     let state = match pipelines.first() {
         None => CiState::NoChecks,
         Some(pipeline) => match required_string(pipeline, "status")
@@ -455,10 +463,7 @@ mod tests {
                 &f.session,
                 vec![
                     Ok(output(r#"{"default_branch":"feature/x"}"#, 0)),
-                    Ok(output(
-                        r#"{"id":"abc123456789"}"#,
-                        0,
-                    )),
+                    Ok(output(r#"{"id":"abc123456789"}"#, 0)),
                     Ok(output(&pipeline, 0)),
                 ],
             );
@@ -482,20 +487,38 @@ mod tests {
     #[test]
     fn gitlab_shared_sha_is_scoped_to_selected_ref() {
         let f = fixture(Some("https://gitlab.com/group/sub/project.git"), None);
-        for (selected, other, expected) in [("success", "failed", true), ("failed", "success", false)] {
-            let (result, calls) = run(&f.session, vec![
-                Ok(output(r#"{"default_branch":"feature/é"}"#, 0)),
-                Ok(output(&format!(r#"{{"id":"abc123456789","last_pipeline":{{"status":"{other}"}}}}"#), 0)),
-                Ok(output(&format!(r#"[{{"status":"{selected}"}}]"#), 0)),
-            ]);
+        for (selected, other, expected) in
+            [("success", "failed", true), ("failed", "success", false)]
+        {
+            let (result, calls) = run(
+                &f.session,
+                vec![
+                    Ok(output(r#"{"default_branch":"feature/é"}"#, 0)),
+                    Ok(output(
+                        &format!(
+                            r#"{{"id":"abc123456789","last_pipeline":{{"status":"{other}"}}}}"#
+                        ),
+                        0,
+                    )),
+                    Ok(output(&format!(r#"[{{"status":"{selected}"}}]"#), 0)),
+                ],
+            );
             assert_eq!(result.is_ok(), expected);
-            assert!(calls[2].1.iter().any(|s| s.contains("pipelines?ref=feature%2F%C3%A9&sha=abc123456789")));
+            assert!(
+                calls[2]
+                    .1
+                    .iter()
+                    .any(|s| s.contains("pipelines?ref=feature%2F%C3%A9&sha=abc123456789"))
+            );
         }
-        let (result, _) = run(&f.session, vec![
-            Ok(output(r#"{"default_branch":"main"}"#, 0)),
-            Ok(output(r#"{"id":"abc123456789"}"#, 0)),
-            Ok(output("unavailable", 1)),
-        ]);
+        let (result, _) = run(
+            &f.session,
+            vec![
+                Ok(output(r#"{"default_branch":"main"}"#, 0)),
+                Ok(output(r#"{"id":"abc123456789"}"#, 0)),
+                Ok(output("unavailable", 1)),
+            ],
+        );
         assert!(matches!(result, Err(CruiseError::BaseCiFailed(_))));
     }
 
