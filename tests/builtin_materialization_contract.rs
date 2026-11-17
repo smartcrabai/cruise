@@ -3,6 +3,21 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
+use std::sync::Mutex;
+
+#[cfg(unix)]
+use cruise::config::StringOrVec;
+#[cfg(unix)]
+use cruise::engine::{ExecutionContext, execute_steps_with_graph};
+#[cfg(unix)]
+use cruise::file_tracker::FileTracker;
+#[cfg(unix)]
+use cruise::graph::ExecutionGraph;
+#[cfg(unix)]
+use cruise::option_handler::OptionHandler;
+#[cfg(unix)]
+use cruise::variable::VariableStore;
 
 use cruise::builtin_workflows::BUILTIN_WORKFLOWS;
 use cruise::config::{
@@ -111,30 +126,11 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
         );
     }
     let fix = &compiled.after_pr["follow-up/fix-ci-error"];
-    assert_eq!(fix.next, None);
+    assert_eq!(fix.next.as_deref(), Some("follow-up/wait-ci"));
     assert_eq!(
         fix.if_condition.as_ref().unwrap().head_changed.as_deref(),
         Some("follow-up/sync-base")
     );
-    let prompt = fix
-        .prompt
-        .as_deref()
-        .unwrap_or_else(|| panic!("missing fix-ci-error prompt"));
-    for required in [
-        "Previous wait-ci diagnostic (stderr):",
-        "Enumerate every check",
-        "Read the complete logs for every non-success Actions job",
-        "follow the check URL to its provider log",
-        "glab ci trace JOB_ID --pipeline-id PIPELINE_ID",
-        "reproduce every failure locally",
-        "Before committing, run the corresponding repository formatters, linters, and tests",
-        "rerun only the failed job(s) once",
-    ] {
-        assert!(
-            prompt.contains(required),
-            "fix-ci-error prompt omitted {required:?}"
-        );
-    }
     let enabled_ids = |values: FlagValues| {
         let skipped = flags::preflight_skips(&compiled, &values, &[]);
         compiled
@@ -513,6 +509,12 @@ fn worker(root: &Path, phase: &str) {
             }
         }
         "verify" => verify_ejected_builtins(root, &project, &config_dir),
+        #[cfg(unix)]
+        "after-pr-behavior" => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(verify_builtin_after_pr_behavior(&project)),
         _ => panic!("unknown worker phase"),
     }
 }
@@ -590,4 +592,260 @@ fn missing_embedded_resource_does_not_fall_back_to_valid_local_file() {
 #[test]
 fn builtin_call_back_to_active_embedded_root_is_a_cycle() {
     run_isolated(&["embedded-cycle"]);
+}
+#[cfg(unix)]
+struct NoOpOptionHandler;
+
+#[cfg(unix)]
+impl OptionHandler for NoOpOptionHandler {
+    fn select_option(
+        &self,
+        _: &[cruise::step::OptionChoice],
+        _: Option<&str>,
+    ) -> cruise::error::Result<cruise::step::option::OptionResult> {
+        panic!("unexpected option interaction");
+    }
+}
+
+#[cfg(unix)]
+fn init_after_pr_repo(project: &Path) {
+    let commands: &[&[&str]] = &[
+        &["init", "-q", "-b", "main"],
+        &["config", "user.name", "Cruise Test"],
+        &["config", "user.email", "cruise@example.invalid"],
+        &["config", "commit.gpgsign", "false"],
+        &["config", "core.hooksPath", "/dev/null"],
+        &["commit", "--allow-empty", "-qm", "initial"],
+    ];
+    for args in commands {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(project)
+                .args(*args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+}
+
+#[cfg(unix)]
+fn builtin_after_pr_fixture(
+    project: &Path,
+    wait_command: &str,
+    repair_command: &str,
+) -> CompiledWorkflow {
+    let builtin = BUILTIN_WORKFLOWS
+        .iter()
+        .find(|builtin| builtin.name == "tdd")
+        .unwrap_or_else(|| panic!("missing tdd built-in"));
+    let config = resolve_workflow_config(
+        builtin.yaml,
+        &ConfigSource::NamedBuiltin(builtin.name),
+        project,
+        Some(project),
+    )
+    .unwrap();
+    let mut compiled = compile(config).unwrap().to_after_pr_compiled();
+    for (name, step) in &mut compiled.steps {
+        if step.squash_merge == Some(true) {
+            continue;
+        }
+        let command = match name.as_str() {
+            "follow-up/wait-ci" => wait_command,
+            "follow-up/fix-ci-error" => repair_command,
+            _ => "true",
+        };
+        step.prompt = None;
+        step.prompt_file = None;
+        step.permission = None;
+        step.allow_commit = false;
+        step.command = Some(StringOrVec::Single(command.to_owned()));
+        step.output_file = None;
+        step.quality_gates = None;
+        step.option = None;
+        step.parallel = None;
+        step.group = None;
+        step.workflow_call = None;
+        step.github_review = None;
+    }
+    compiled
+}
+
+#[cfg(unix)]
+async fn run_builtin_after_pr(
+    project: &Path,
+    wait_command: &str,
+    repair_command: &str,
+) -> (
+    cruise::error::Result<cruise::engine::ExecutionResult>,
+    ExecutionGraph,
+    Vec<String>,
+) {
+    let compiled = builtin_after_pr_fixture(project, wait_command, repair_command);
+    let mut graph = build_graph(&compiled, MAX_RETRIES).unwrap();
+    let started = Mutex::new(Vec::new());
+    let on_step_start = |step: &str| {
+        started.lock().unwrap().push(step.to_owned());
+        if step == "squash-merge" {
+            Err(CruiseError::Interrupted)
+        } else {
+            Ok(())
+        }
+    };
+    let flags = [("after_pr".to_owned(), true), ("merge".to_owned(), true)].into();
+    let option_handler = NoOpOptionHandler;
+    let mut vars = VariableStore::new(String::new());
+    let mut tracker = FileTracker::with_root(project.to_path_buf());
+    let result = {
+        let context = ExecutionContext {
+            usage_session_id: None,
+            compiled: &compiled,
+            max_retries: MAX_RETRIES,
+            rate_limit_retries: 0,
+            on_step_start: &on_step_start,
+            cancel_token: None,
+            option_handler: &option_handler,
+            config_reloader: None,
+            working_dir: Some(project),
+            skipped_steps: &[],
+            flags: &flags,
+            on_step_log: None,
+            instructions: None,
+        };
+        execute_steps_with_graph(
+            &context,
+            &mut vars,
+            &mut tracker,
+            &mut graph,
+            &|_, _| Ok(()),
+        )
+        .await
+    };
+    (result, graph, started.into_inner().unwrap())
+}
+
+#[cfg(unix)]
+async fn verify_builtin_after_pr_behavior(root: &Path) {
+    let green = root.join("green");
+    std::fs::create_dir(&green).unwrap();
+    init_after_pr_repo(&green);
+    let (result, graph, started) = run_builtin_after_pr(
+        &green,
+        "printf 'CI passed\\n' >&2; exit 0",
+        "printf 'unexpected repair' > repair-ran",
+    )
+    .await;
+    assert!(matches!(result, Err(CruiseError::Interrupted)));
+    assert!(started.iter().any(|step| step == "squash-merge"));
+    assert!(!started.iter().any(|step| step == "follow-up/fix-ci-error"));
+    assert!(!green.join("repair-ran").exists());
+    assert_eq!(graph.state.current.as_deref(), Some("squash-merge"));
+
+    let committed = root.join("committed");
+    std::fs::create_dir(&committed).unwrap();
+    init_after_pr_repo(&committed);
+    let wait_command = r#"
+if [ ! -f .ci-failed-once ]; then
+  touch .ci-failed-once
+  printf 'CI_FAILURE: unit-test job failed\n' >&2
+  exit 1
+fi
+printf 'CI passed\n' >&2
+exit 0
+"#;
+    let (result, graph, started) = run_builtin_after_pr(
+        &committed,
+        wait_command,
+        "printf repaired > README.md && git add README.md && git commit -m repair",
+    )
+    .await;
+    assert!(
+        matches!(result, Err(CruiseError::Interrupted)),
+        "committed repair stopped before merge: {result:?}"
+    );
+    assert_eq!(
+        started
+            .iter()
+            .filter(|step| step.as_str() == "follow-up/fix-ci-error")
+            .count(),
+        1
+    );
+    assert_eq!(
+        started
+            .iter()
+            .filter(|step| step.as_str() == "follow-up/sync-base")
+            .count(),
+        2
+    );
+    assert!(started.iter().any(|step| step == "squash-merge"));
+    assert_eq!(
+        std::fs::read_to_string(committed.join("README.md")).unwrap(),
+        "repaired"
+    );
+    assert_eq!(
+        graph.state.edge_counts[&(
+            "follow-up/fix-ci-error".to_owned(),
+            "follow-up/sync-base".to_owned()
+        )]
+            .traversals,
+        1
+    );
+
+    let no_op = root.join("no-op");
+    std::fs::create_dir(&no_op).unwrap();
+    init_after_pr_repo(&no_op);
+    let (result, graph, started) = run_builtin_after_pr(
+        &no_op,
+        "printf 'CI_FAILURE: unit-test job failed\\n' >&2; exit 1",
+        "printf 'attempt\\n' >> repair-attempts; printf 'repair made no commit\\n' >&2",
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(CruiseError::LoopProtection {
+            ref from,
+            ref to,
+            max_retries: MAX_RETRIES,
+            ..
+        }) if from == "follow-up/wait-ci" && to == "follow-up/fix-ci-error"
+    ));
+    assert!(!started.iter().any(|step| step == "squash-merge"));
+    assert_eq!(
+        started
+            .iter()
+            .filter(|step| step.as_str() == "follow-up/fix-ci-error")
+            .count(),
+        MAX_RETRIES
+    );
+    assert_eq!(
+        std::fs::read_to_string(no_op.join("repair-attempts"))
+            .unwrap()
+            .lines()
+            .count(),
+        MAX_RETRIES
+    );
+    assert_eq!(graph.state.current.as_deref(), Some("follow-up/wait-ci"));
+    assert_eq!(
+        graph.state.runtime.prev_stderr.as_deref(),
+        Some("CI_FAILURE: unit-test job failed\n")
+    );
+    let pending = graph.state.pending.as_ref().unwrap();
+    assert_eq!(pending.target.as_deref(), Some("follow-up/fix-ci-error"));
+    assert_eq!(pending.reason, TransitionReason::Sequential);
+    assert_eq!(
+        graph.state.edge_counts[&(
+            "follow-up/wait-ci".to_owned(),
+            "follow-up/fix-ci-error".to_owned()
+        )]
+            .budgeted_traversals,
+        MAX_RETRIES
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_after_pr_routes_ci_repair_and_stops_noop_loops() {
+    run_isolated(&["after-pr-behavior"]);
 }
