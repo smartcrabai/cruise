@@ -625,6 +625,7 @@ steps:
     skip: prev.success
     allow_commit: true
     permission: full
+    next: wait-ci
     prompt: |-
       Original request: {input}
 
@@ -643,12 +644,12 @@ steps:
       For GitHub, inspect all check runs and status contexts for that commit, including paginated results. Read the complete logs for every non-success Actions job (`gh run view RUN_ID --log`, or `gh run view RUN_ID --job JOB_ID --log`); use `gh run view RUN_ID --json jobs` to identify jobs. For GitLab, enumerate all pipeline jobs, including canceled and timed-out jobs, and read each non-success job log with `glab ci trace JOB_ID --pipeline-id PIPELINE_ID`. Do not rely only on a failure summary or `--log-failed`.
       For third-party status checks without an Actions or GitLab job, follow the check URL to its provider log; if no log is exposed, report that explicitly.
 
-      For canceled or timed-out jobs, follow the final progress lines to identify the exact hung or slow test; do not treat a timeout as an unexplained CI failure. Inspect the CI workflow definition and reproduce every failure locally using the commands that the corresponding job runs. Diagnose all failures on this head before editing, then fix every genuine in-scope failure in this one iteration.
+      For canceled or timed-out jobs, follow the final progress lines to identify the exact hung or slow test; do not treat a timeout as an unexplained CI failure. Inspect the CI workflow definition and reproduce each failure locally when its platform and tooling are available. If unavailable locally, rely only on concrete evidence from the complete CI log and workflow definition. Handle failures independently: an unsupported, unsafe, or blocked failure remains unresolved and must be reported, but does not block other evidence-backed, in-scope fixes.
 
-      Before committing, run the corresponding repository formatters, linters, and tests for every failed job, including the exact CI commands. Never commit before reproducing and verifying the fixes.
+      Run all applicable repository formatters, linters, and tests for each fix, including exact CI commands wherever the local environment supports them. For a platform-specific failure that cannot be reproduced locally, use its complete CI log and workflow evidence, run all applicable local checks, and report the unavailable verification. Do not claim that fix is fully verified or the repair complete until its actual provider job succeeds; this does not prevent committing independent fixes that pass their applicable local checks.
 
-      If a failure is demonstrably unrelated to these changes or flaky, confirm it also fails on the base or rerun only the failed job(s) once (`gh run rerun RUN_ID --failed` on GitHub, or retry the specific job on GitLab), then wait for that rerun to finish. Do not modify unrelated code or repeat the rerun. If it remains red or cannot be reproduced, make no code changes and report the exact check/job and clear reason instead of looping.
+      If a failure is demonstrably unrelated to these changes or flaky, confirm it also fails on the base or rerun only the failed job(s) once (`gh run rerun RUN_ID --failed` on GitHub, or retry the specific job on GitLab), then wait for that rerun to finish. Do not modify unrelated code or repeat the rerun. If that failure remains red or cannot be reproduced, leave it unresolved and report the exact check/job and clear reason; continue handling other evidence-backed in-scope fixes independently.
 
-      Preserve the task/report scope and unrelated user work. Never weaken, remove, skip, or disable tests, scanners, assertions, required checks, or policy to get green. Stage and commit only verified in-scope fixes; do not push, create, or merge a PR because the following shared steps handle base synchronization and push. If there is no in-scope fix, make no code changes and state why clearly.
+      Preserve the task/report scope and unrelated user work. Never weaken, remove, skip, or disable tests, scanners, assertions, required checks, or policy to get green. Stage and commit only locally verified in-scope fixes and evidence-backed platform repairs after all applicable local checks pass; clearly report any unavailable verification as pending actual provider CI success, and do not declare the repair complete until it succeeds. Do not push, create, or merge a PR because the following shared steps handle base synchronization and push. If there is no in-scope fix, make no code changes and state why clearly.
     if:
       head-changed: sync-base

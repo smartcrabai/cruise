@@ -175,6 +175,10 @@ after-pr:
 
 Prompt steps in `after-pr` are guarded by the same default. Set `allow_commit: true` individually for an after-PR prompt that needs to advance `HEAD`.
 
+Built-in CI repair handles failures independently. An unavailable local platform does not block other evidence-backed, in-scope fixes; platform-specific repairs require complete CI-log and workflow evidence, all applicable local checks, and successful provider CI before they are considered complete. Repair steps never weaken checks or merge the PR themselves.
+
+A committed repair returns through base synchronization and push before CI is checked again. A repair without a commit returns directly to `wait-ci`; only successful CI skips repair and proceeds toward an opted-in merge. Unresolved repairs stop at the existing graph-transition limit. Existing session snapshots retain their saved workflow and checkpoint until explicitly migrated.
+
 <a id="review-loop-github-review"></a>
 ### Review loop (`github-review`)
 
