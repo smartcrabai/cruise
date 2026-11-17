@@ -3659,6 +3659,12 @@ struct MergeCliCase {
 
 fn merge_cli_case(telemetry_enabled: bool, workflow_yaml: &str, gh_script: &str) -> MergeCliCase {
     let cli = Fixture::new(workflow_yaml);
+    // These fixtures exercise after-PR merge behavior, not the base branch CI gate.
+    let defaults = cli.root.path().join("config/cruise");
+    std::fs::create_dir_all(&defaults)
+        .unwrap_or_else(|error| panic!("create fixture defaults directory: {error}"));
+    std::fs::write(defaults.join("default.yaml"), "check_base_ci: false\n")
+        .unwrap_or_else(|error| panic!("write fixture defaults: {error}"));
     let bare = cli.root.path().join("origin.git");
     cruise::test_support::run_git_ok(cli.root.path(), &["init", "--bare", "origin.git"]);
     cruise::test_support::run_git_ok(

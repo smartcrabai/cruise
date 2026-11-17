@@ -93,7 +93,7 @@ fails the load (see [steps.md](steps.md)).
 
 A `default.yaml` may set only `command`, `sdk`, `model`, `plan_model`, `subagent_model`,
 `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `commit_message_template`, `pr_body_template`,
-`base_branch`, `auto_fetch`,
+`base_branch`, `auto_fetch`, `check_base_ci`,
 `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `env`, `retry`, `formal_verify`, `mcp_servers`, and
 `pre_steps`. Unknown keys and workflow-only keys (`description`, `steps`,
 `groups`, `after-pr`, and `create_pr`) are rejected.
@@ -325,6 +325,14 @@ This defaults-only boolean defaults to `false`. Set it to `true` alongside a `ba
 ```yaml
 base_branch: main
 auto_fetch: true
+```
+
+## `check_base_ci`
+
+This defaults-only boolean defaults to `true`; project defaults override user defaults. Before starting a fresh workflow on GitHub or GitLab, Cruise checks CI on the configured `base_branch`, or the forge's default branch if unset. Failing CI or a failure to retrieve the status stops the run; pending or absent checks warn and continue. The check is skipped for CLI dry runs, `exec`, workflow resumes, after-PR resumes, and repositories whose origin cannot be resolved to a supported forge. Set `check_base_ci: false` in user or project `default.yaml` to opt out. For `--repo` sessions, only user defaults are read before the clone exists.
+
+```yaml
+check_base_ci: false
 ```
 
 ## `cleanup_after_pr`

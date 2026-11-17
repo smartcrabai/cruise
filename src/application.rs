@@ -4390,6 +4390,7 @@ fn setup_run_blocking(
             &crate::flags::preflight_skips(&compiled, &state.flags, &state.skipped_steps),
         )?;
     }
+    crate::base_ci::ensure_base_ci_not_failing(&state)?;
     if !after_pr && (state.repo.is_some() || state.pr_target.is_some()) {
         crate::forge::ensure_forge_available(crate::forge::session_forge(&state))?;
     }
@@ -6897,6 +6898,72 @@ after-pr:
                 }
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_run_blocking_rejects_failing_base_ci_before_workspace() {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let _home = isolate_application_config(temp.path());
+        let _skip_auth = crate::test_support::EnvGuard::set("CRUISE_SKIP_AGENT_AUTH_CHECK", "1");
+        let _forge = crate::test_support::EnvGuard::remove("CRUISE_FORGE");
+        let _path = issue_test_repo(
+            temp.path(),
+            "https://github.com/owner/repo.git",
+            r#"#!/bin/sh
+case "$*" in
+  --version) echo 'gh version 2.0' ;;
+  *graphql*) printf '%s\n' '{"data":{"repository":{"defaultBranchRef":{"name":"main","target":{"oid":"abc123456789","statusCheckRollup":{"state":"FAILURE"}}}}}}' ;;
+  *) exit 1 ;;
+esac
+"#,
+        );
+        let manager = SessionManager::new(temp.path().join("data"));
+        let id = "20261024000005";
+        let mut state = SessionState::new(
+            id.to_string(),
+            temp.path().join("repo"),
+            crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None },
+            "application base CI wiring".to_string(),
+        );
+        state.phase = SessionPhase::Planned;
+        state.workspace_mode = WorkspaceMode::Worktree;
+        manager.create(&state).unwrap_or_else(|e| panic!("{e}"));
+        let session_dir = manager.sessions_dir().join(id);
+        std::fs::write(
+            session_dir.join("config.yaml"),
+            "command: [cat]\nsteps:\n  agent:\n    prompt: never invoke an agent\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(session_dir.join("plan.md"), "# Application base CI test\n")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let before =
+            std::fs::read(session_dir.join("state.json")).unwrap_or_else(|e| panic!("{e}"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|e| panic!("{e}"));
+        let result = setup_run_blocking(
+            &manager,
+            runtime.handle(),
+            id,
+            &CancellationToken::new(),
+            Some(WorkspaceMode::Worktree),
+            None,
+            0,
+        );
+        let Err(error) = result else {
+            panic!("failing base CI must reject application execution");
+        };
+        assert_eq!(error.telemetry_type(), "base_ci_failed", "{error}");
+        assert!(error.to_string().contains("main"), "{error}");
+        assert!(!manager.worktrees_dir().exists());
+        assert!(!manager.clones_dir().exists());
+        assert_eq!(
+            std::fs::read(session_dir.join("state.json")).unwrap_or_else(|e| panic!("{e}")),
+            before
+        );
     }
 
     #[test]

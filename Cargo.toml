@@ -240,6 +240,11 @@ test = false
 
 [[test]]
 harness = false
+name = "base_ci_bdd"
+path = "tests/base_ci_bdd.rs"
+
+[[test]]
+harness = false
 name = "subagent_model_bdd"
 path = "tests/subagent_model_bdd.rs"
 required-features = ["test-utils"]

@@ -30,6 +30,11 @@ impl Fixture {
     fn build(legacy_main: bool) -> Self {
         let root =
             tempfile::tempdir().unwrap_or_else(|error| panic!("create fixture root: {error}"));
+        let defaults = root.path().join("config/cruise");
+        std::fs::create_dir_all(&defaults)
+            .unwrap_or_else(|error| panic!("create fixture defaults directory: {error}"));
+        std::fs::write(defaults.join("default.yaml"), "check_base_ci: false\n")
+            .unwrap_or_else(|error| panic!("write fixture defaults: {error}"));
         let repo = Self::setup_repo(&root, legacy_main);
         let manager = SessionManager::new(root.path().join("data/cruise"));
         let id = SessionManager::new_session_id();

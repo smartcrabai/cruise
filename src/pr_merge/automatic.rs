@@ -274,7 +274,7 @@ fn parse_provider_ref(pr_url: &str) -> Result<ProviderRef, AutoSquashError> {
     Err(rejected())
 }
 
-fn url_encode_path_segment(value: &str) -> String {
+pub(crate) fn url_encode_path_segment(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {

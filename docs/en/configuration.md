@@ -60,7 +60,7 @@ After updating settings, retry the command that initiated the request: use `crui
 - `env` and `mcp_servers` merge per key (higher layer wins).
 - `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
 - Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`, `formal_verify`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
-- Worktree settings `base_branch` and `auto_fetch` are defaults-only keys, with project values overriding user values. `auto_fetch: true` requires a nonempty `base_branch` after merging.
+- `base_branch`, `auto_fetch`, and `check_base_ci` are defaults-only keys, with project values overriding user values. For `--repo` sessions, the base-CI check reads user defaults only, not the cloned repository's project defaults. `auto_fetch: true` requires a nonempty `base_branch` after merging; `check_base_ci` defaults to `true`.
 - If defaults specify a backend (`command` / `sdk`) different from the workflow's, validation fails when they fill an unset backend-specific field (`model`, `retry`, `mcp_servers`, etc.). Set the field in the workflow or remove it from `default.yaml`.
 
 `pre_steps:` defines command-only steps (`command`, `env`, `timeout`, `skip`, `when`) inserted at the start of the workflow's `steps` as `pre/<name>`. They do not run in planning or `after-pr`. User steps come first, then project steps; a project step with the same name replaces the user one in place.

@@ -22,6 +22,7 @@ pub(crate) fn is_eligible_error(error: &CruiseError) -> bool {
         | CruiseError::InvalidStepConfig(_)
         | CruiseError::MissingJcodeModel(_)
         | CruiseError::AgentAuthExpired(_)
+        | CruiseError::BaseCiFailed(_)
         | CruiseError::UndefinedVariable(_)
         | CruiseError::EmptyVariableReference
         | CruiseError::InvalidTemplateSyntax(_)
@@ -157,6 +158,9 @@ mod tests {
             "work".into()
         )));
         assert!(!is_eligible_error(&CruiseError::Interrupted));
+        assert!(!is_eligible_error(&CruiseError::BaseCiFailed(
+            "failure".into()
+        )));
         assert!(!is_eligible_error(&CruiseError::PrPublicationFailed(
             "failure".into()
         )));
