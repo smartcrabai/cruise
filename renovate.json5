@@ -1,17 +1,16 @@
 {
   extends: [
-    "config:best-practices"
+    'config:best-practices',
   ],
-  dependencyDashboard: false,
-  // Scan the central source file for Renovate only in the terraforms repository
-  // (additive, so the default patterns are still kept; this path does not
-  // exist in the distribution target repositories).
-  "github-actions": {
+  dependencyDashboard: {
+    enabled: false,
+  },
+  'github-actions': {
     managerFilePatterns: [
-      "/(^|/)environments/shared/cruise/workflow\\.yml$/"
+      '/(^|/)environments/shared/cruise/workflow\\.yml$/',
     ],
   },
-  minimumReleaseAge: "3 days",
+  minimumReleaseAge: '3 days',
   lockFileMaintenance: {
     minimumReleaseAge: null,
   },
@@ -21,62 +20,47 @@
   packageRules: [
     {
       matchUpdateTypes: [
-        "minor",
-        "patch",
-        "digest",
-        "pinDigest"
+        'minor',
+        'patch',
+        'digest',
+        'pinDigest',
       ],
-      groupName: "all minor, patch, and digest updates",
-      groupSlug: "all-minor-patch-digest-updates",
+      groupName: 'all minor, patch, and digest updates',
+      groupSlug: 'all-minor-patch-digest-updates',
     },
     {
       matchUpdateTypes: [
-        "major"
+        'major',
       ],
       prBodyNotes: [
-        "<!-- renovate-major-update -->"
+        '<!-- renovate-major-update -->',
       ],
     },
     {
       matchManagers: [
-        "github-actions"
+        'github-actions',
       ],
-      minimumReleaseAge: "7 days"
+      minimumReleaseAge: '7 days',
     },
     {
-      // Do not let files distributed by Terraform be updated on the repository side
-      // (to avoid fighting over the source of truth). ignorePaths is non-mergeable
-      // and would override the preset's exclusions, so disable via packageRules instead.
       matchFileNames: [
-        ".github/workflows/cruise.yml",
-        "cruise.yaml",
+        '.github/workflows/cruise.yml',
+        'cruise.yaml',
       ],
       enabled: false,
     },
     {
-      // This dependency's upstream source is vendored and referenced through
-      // [patch.crates-io], so its pin can only move with a full re-extraction
-      // of the checked-in copy (scripts/verify_vendored_crate.sh fails on any
-      // mismatch). An automerged version-only bump would leave the patch unused.
       matchDepNames: [
-        "seher-claude-agent-sdk",
+        'seher-claude-agent-sdk',
       ],
       enabled: false,
     },
     {
-      // digest / pinDigest updates carry no releaseTimestamp. Applying
-      // minimumReleaseAge to them makes minimumReleaseAgeBehaviour default to
-      // "timestamp-required", which unconditionally sets stabilityStatus=yellow,
-      // so renovate/stability-days stays pending forever and the PR can never
-      // become mergeable - waiting does not help. A digest only tracks the same
-      // tag, so "N days since release" does not apply. Must stay last so it
-      // overrides the github-actions rule above (string options are non-mergeable
-      // and the last matching packageRule wins).
       matchUpdateTypes: [
-        "digest",
-        "pinDigest"
+        'digest',
+        'pinDigest',
       ],
       minimumReleaseAge: null,
-    }
-  ]
+    },
+  ],
 }
