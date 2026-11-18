@@ -292,7 +292,7 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
             client.delete_session(&session.id, &context).await?;
             return Err(CruiseError::Interrupted);
         }
-        session = match ensure_plan_succeeded(finished.state) {
+        session = match ensure_plan_operation_succeeded(finished) {
             Ok(session) => session,
             Err(error) => {
                 crate::status_eprintln!("Plan generation failed: {error}");
@@ -934,6 +934,13 @@ impl crate::daemon::client::SessionEventHandler for PlanningEvents<'_> {
             self.terminal.on_pending_prompts(prompts)
         }
     }
+    fn is_terminal_state(&self, state: &SessionState) -> bool {
+        crate::daemon::client::SessionEventHandler::is_terminal_state(&self.terminal, state)
+    }
+
+    fn terminal_failure(&self) -> Option<&str> {
+        crate::daemon::client::SessionEventHandler::terminal_failure(&self.terminal)
+    }
 }
 
 async fn drive_plan_operation(
@@ -959,7 +966,7 @@ async fn drive_plan_operation(
     if finished.cancelled_by_user {
         return Err(CruiseError::Interrupted);
     }
-    ensure_plan_succeeded(finished.state)
+    ensure_plan_operation_succeeded(finished)
 }
 
 fn ensure_plan_succeeded(state: SessionState) -> Result<SessionState> {
@@ -970,6 +977,12 @@ fn ensure_plan_succeeded(state: SessionState) -> Result<SessionState> {
         return Err(CruiseError::Other(message.clone()));
     }
     Ok(state)
+}
+fn ensure_plan_operation_succeeded(finished: crate::cli_events::Finished) -> Result<SessionState> {
+    if let Some(error) = finished.failure {
+        return Err(CruiseError::Other(error));
+    }
+    ensure_plan_succeeded(finished.state)
 }
 
 pub async fn launch_background_plan(
@@ -1046,14 +1059,13 @@ pub async fn launch_background_plan(
     if skip_planning {
         // Skip-planning does no model work; wait for it so the session is
         // already `Planned` when this command returns (scripts run it next).
-        let state = client
-            .wait_for_terminal_from(
-                &session.id,
-                stream,
-                &mut |_: &crate::application::ApplicationEvent| Ok(()),
-            )
-            .await?;
-        ensure_plan_succeeded(state)?;
+        let mut events =
+            crate::cli_events::TerminalEvents::new(&client, &session.id).with_plan_chunks(true);
+        let finished = crate::cli_events::drive(&client, &session.id, stream, &mut events).await?;
+        if finished.cancelled_by_user {
+            return Err(CruiseError::Interrupted);
+        }
+        ensure_plan_operation_succeeded(finished)?;
         eprintln!(
             "\n{} Session {} created (input used as plan).",
             style("✓").green().bold(),

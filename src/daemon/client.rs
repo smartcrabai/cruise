@@ -48,6 +48,14 @@ pub(crate) trait SessionEventHandler {
     fn on_pending_prompts(&mut self, _prompts: &[PendingPrompt]) -> Result<()> {
         Ok(())
     }
+
+    fn is_terminal_state(&self, _state: &SessionState) -> bool {
+        true
+    }
+
+    fn terminal_failure(&self) -> Option<&str> {
+        None
+    }
 }
 
 impl<F> SessionEventHandler for F
@@ -389,7 +397,7 @@ impl DaemonClient {
 
         let prompts = self.pending_prompts_or_empty(session_id).await?;
         handler.on_pending_prompts(&prompts)?;
-        Ok(prompts.is_empty().then_some(state))
+        Ok((prompts.is_empty() && handler.is_terminal_state(&state)).then_some(state))
     }
 
     async fn resync_closed_stream<H: SessionEventHandler>(
@@ -402,13 +410,10 @@ impl DaemonClient {
         *last_state = Some(state.clone());
         let prompts = self.pending_prompts_or_empty(session_id).await?;
         handler.on_pending_prompts(&prompts)?;
-        Ok((!active && prompts.is_empty()).then_some(state))
+        Ok((!active && prompts.is_empty() && handler.is_terminal_state(&state)).then_some(state))
     }
 
-    async fn pending_prompts_or_empty(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<PendingPrompt>> {
+    async fn pending_prompts_or_empty(&self, session_id: &str) -> Result<Vec<PendingPrompt>> {
         match self.pending_prompts(session_id).await {
             Ok(prompts) => Ok(prompts),
             Err(CruiseError::IoError(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -878,6 +883,105 @@ mod tests {
 
         assert_eq!(state.phase, SessionPhase::Suspended);
         assert_eq!(state_reads.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn run_failure_event_survives_resync_to_planned_state() -> Result<()> {
+        use axum::response::IntoResponse as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let state_reads = std::sync::Arc::new(AtomicUsize::new(0));
+        let state_reads_route = std::sync::Arc::clone(&state_reads);
+        let router = axum::Router::new()
+            .route(
+                "/api/v1/sessions/failed-resync",
+                axum::routing::get(move || {
+                    let reads = std::sync::Arc::clone(&state_reads_route);
+                    async move {
+                        let active = reads.fetch_add(1, Ordering::SeqCst) == 0;
+                        match test_session_response("failed-resync", SessionPhase::Planned, active)
+                        {
+                            Ok(value) => axum::Json(value).into_response(),
+                            Err(error) => (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                error.to_string(),
+                            )
+                                .into_response(),
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/sessions/failed-resync/prompts",
+                axum::routing::get(|| async {
+                    axum::Json(Vec::<crate::application::PendingPrompt>::new())
+                }),
+            )
+            .route(
+                "/api/v1/events",
+                axum::routing::get(|| async {
+                    let payload = serde_json::json!({
+                        "event": "runFailed",
+                        "data": {
+                            "sessionId": "failed-resync",
+                            "error": "base CI is failing"
+                        }
+                    });
+                    let event = axum::response::sse::Event::default()
+                        .event("app")
+                        .data(payload.to_string());
+                    let events = futures::stream::once(async move {
+                        tokio::time::sleep(Duration::from_millis(1_500)).await;
+                        Ok::<_, std::convert::Infallible>(event)
+                    });
+                    axum::response::sse::Sse::new(events)
+                }),
+            );
+        let (client, server) = test_client(router).await?;
+        let stream = client
+            .events(EventFilter {
+                session: Some("failed-resync".to_owned()),
+                batch: false,
+            })
+            .await?;
+        let mut handler = crate::cli_events::TerminalEvents::new(&client, "failed-resync");
+        let finished = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::cli_events::drive(&client, "failed-resync", stream, &mut handler),
+        )
+        .await
+        .map_err(|error| CruiseError::Other(format!("terminal wait timed out: {error}")))??;
+        server.abort();
+
+        assert_eq!(finished.state.phase, SessionPhase::Planned);
+        assert_eq!(finished.failure.as_deref(), Some("base CI is failing"));
+        assert!(state_reads.load(Ordering::SeqCst) >= 2);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn run_start_surfaces_synchronous_preflight_error() -> Result<()> {
+        let router = axum::Router::new().route(
+            "/api/v1/sessions/sync-start/run",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({"error": "base CI is failing"})),
+                )
+            }),
+        );
+        let (client, server) = test_client(router).await?;
+        let result = client
+            .start_run("sync-start", &crate::application::RunRequest::default())
+            .await;
+        let Err(error) = result else {
+            server.abort();
+            return Err(CruiseError::Other(
+                "synchronous run start unexpectedly succeeded".to_owned(),
+            ));
+        };
+        server.abort();
+
+        assert_eq!(error.to_string(), "base CI is failing");
         Ok(())
     }
 

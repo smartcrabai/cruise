@@ -353,6 +353,12 @@ mod contracts {
         if expected == "rejected" {
             assert!(!w.output.as_ref().unwrap().status.success(), "{text}");
             assert!(text.contains("check_base_ci: false"), "{text}");
+            if w.forge == "GitLab" && w.rollup == "failed" {
+                assert!(
+                    text.contains("CI on base branch `main` (abcdef1) is failing in owner/repo"),
+                    "{text}"
+                );
+            }
             assert_eq!(std::fs::read(w.state()).unwrap(), w.original_state);
             assert!(!w.path(&format!("data/cruise/worktrees/{SESSION}")).exists());
             assert!(!w.path(&format!("data/cruise/clones/{SESSION}")).exists());

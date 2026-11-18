@@ -201,6 +201,12 @@ async fn run_single(client: &DaemonClient, args: RunArgs) -> Result<()> {
         );
         return Err(CruiseError::Interrupted);
     }
+    if let Some(error) = finished.failure.as_ref() {
+        return Err(match &finished.state.phase {
+            SessionPhase::PrFailed(_) => CruiseError::PrPublicationFailed(error.clone()),
+            _ => CruiseError::Other(error.clone()),
+        });
+    }
     match finished.state.phase {
         SessionPhase::Completed => Ok(()),
         SessionPhase::Failed(error) => Err(CruiseError::Other(error)),
@@ -582,16 +588,40 @@ async fn drive_batch(
     events: &mut BatchEvents<'_>,
 ) -> Result<bool> {
     let mut cancelled_by_user = false;
+    let mut batch_seen_active = false;
+    let mut status_resync = tokio::time::interval_at(
+        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(1),
+    );
+    status_resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            signal = tokio::signal::ctrl_c(), if !cancelled_by_user => {
+            _ = status_resync.tick() => {
+                let status: Value = client.get_json("status").await?;
+                let inactive =
+                    batch_inactive_after_start(&status, &mut batch_seen_active);
+                if cancelled_by_user && inactive {
+                    return Ok(true);
+                }
+            }
+            signal = tokio::signal::ctrl_c() => {
                 signal.map_err(|error| CruiseError::Other(format!("failed to listen for Ctrl+C: {error}")))?;
+                if cancelled_by_user {
+                    return Err(CruiseError::Interrupted);
+                }
                 cancelled_by_user = true;
                 eprintln!("Cancelling run --all...");
-                let _ = client.cancel_run_all().await?;
+                batch_seen_active |= client.cancel_run_all().await?;
             }
             item = stream.next() => {
                 if let Some(Ok(event)) = item {
+                    if matches!(
+                        &event,
+                        ApplicationEvent::BatchStarted { .. }
+                            | ApplicationEvent::BatchSessionStarted { .. }
+                    ) {
+                        batch_seen_active = true;
+                    }
                     if let ApplicationEvent::BatchFailed { error } = &event {
                         return Err(CruiseError::Other(error.clone()));
                     }
@@ -605,7 +635,7 @@ async fn drive_batch(
                     }
                 } else {
                     let status: Value = client.get_json("status").await?;
-                    if !status["batchActive"].as_bool().unwrap_or(true) {
+                    if batch_inactive_after_start(&status, &mut batch_seen_active) {
                         return Ok(cancelled_by_user);
                     }
                     stream = client
@@ -634,6 +664,16 @@ async fn drive_batch(
                 }
             }
         }
+    }
+}
+fn batch_inactive_after_start(status: &Value, batch_seen_active: &mut bool) -> bool {
+    match status["batchActive"].as_bool() {
+        Some(true) => {
+            *batch_seen_active = true;
+            false
+        }
+        Some(false) => *batch_seen_active,
+        None => false,
     }
 }
 
@@ -810,6 +850,23 @@ mod tests {
     fn run_all_defaults_to_one_worker_without_a_cli_override() {
         assert_eq!(run_all_parallelism(None), 1);
         assert_eq!(run_all_parallelism(Some(4)), 4);
+    }
+    #[test]
+    fn batch_status_resync_waits_for_a_started_batch_to_become_inactive() {
+        let mut batch_seen_active = false;
+
+        assert!(!batch_inactive_after_start(
+            &serde_json::json!({"batchActive": false}),
+            &mut batch_seen_active
+        ));
+        assert!(!batch_inactive_after_start(
+            &serde_json::json!({"batchActive": true}),
+            &mut batch_seen_active
+        ));
+        assert!(batch_inactive_after_start(
+            &serde_json::json!({"batchActive": false}),
+            &mut batch_seen_active
+        ));
     }
 
     #[test]

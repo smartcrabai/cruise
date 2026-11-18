@@ -13,7 +13,7 @@ use crate::application::{
 };
 use crate::daemon::client::{DaemonClient, EventStream, PromptAnswer, SessionEventHandler};
 use crate::error::{CruiseError, Result};
-use crate::session::SessionState;
+use crate::session::{SessionPhase, SessionState};
 use crate::step::OptionChoice;
 
 /// Final state of a driven session operation.
@@ -22,6 +22,8 @@ pub struct Finished {
     pub state: SessionState,
     /// The user pressed Ctrl+C and the daemon was asked to cancel.
     pub cancelled_by_user: bool,
+    /// A terminal failure event, which may not be reflected in persisted state.
+    pub failure: Option<String>,
 }
 
 /// Consume `stream` until the session's operation ends. Ctrl+C requests
@@ -48,26 +50,28 @@ pub async fn drive<H: SessionEventHandler>(
         std::time::Duration::from_millis(100),
     );
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let wait = client.wait_for_terminal_from(session_id, stream, handler);
-    tokio::pin!(wait);
-    let result = loop {
-        tokio::select! {
-            result = &mut wait => break result,
-            signal = tokio::signal::ctrl_c() => {
-                signal.map_err(|error| {
-                    CruiseError::Other(format!("failed to listen for Ctrl+C: {error}"))
-                })?;
-                match ctrl_c_action(&mut cancelled_by_user) {
-                    CtrlCAction::Cancel => {
-                        eprintln!("Cancelling session {session_id}...");
+    let result = {
+        let wait = client.wait_for_terminal_from(session_id, stream, handler);
+        tokio::pin!(wait);
+        loop {
+            tokio::select! {
+                result = &mut wait => break result,
+                signal = tokio::signal::ctrl_c() => {
+                    signal.map_err(|error| {
+                        CruiseError::Other(format!("failed to listen for Ctrl+C: {error}"))
+                    })?;
+                    match ctrl_c_action(&mut cancelled_by_user) {
+                        CtrlCAction::Cancel => {
+                            eprintln!("Cancelling session {session_id}...");
+                            retry_cancellation = !client.cancel(session_id).await?;
+                        }
+                        CtrlCAction::Exit => return Err(CruiseError::Interrupted),
+                    }
+                }
+                _ = retry.tick(), if retry_cancellation => {
+                    if client.run_session(session_id).await?.1 {
                         retry_cancellation = !client.cancel(session_id).await?;
                     }
-                    CtrlCAction::Exit => return Err(CruiseError::Interrupted),
-                }
-            }
-            _ = retry.tick(), if retry_cancellation => {
-                if client.run_session(session_id).await?.1 {
-                    retry_cancellation = !client.cancel(session_id).await?;
                 }
             }
         }
@@ -102,6 +106,7 @@ pub async fn drive<H: SessionEventHandler>(
         result => result.map(|state| Finished {
             state,
             cancelled_by_user,
+            failure: handler.terminal_failure().map(str::to_owned),
         }),
     }
 }
@@ -138,6 +143,7 @@ pub struct TerminalEvents<'a> {
     client: &'a DaemonClient,
     session_id: String,
     plan_chunks: bool,
+    failure: Option<String>,
     handled_prompts: HashSet<String>,
 }
 
@@ -148,6 +154,7 @@ impl<'a> TerminalEvents<'a> {
             client,
             session_id: session_id.into(),
             plan_chunks: false,
+            failure: None,
             handled_prompts: HashSet::new(),
         }
     }
@@ -215,8 +222,12 @@ impl SessionEventHandler for TerminalEvents<'_> {
                 print_output(*stream, text);
                 Ok(())
             }
-            ApplicationEvent::RunFailed { session_id, error } if self.owns(session_id) => {
-                Err(CruiseError::Other(error.clone()))
+            ApplicationEvent::RunFailed { session_id, error }
+            | ApplicationEvent::PlanFailed { session_id, error }
+                if self.owns(session_id) =>
+            {
+                self.failure = Some(error.clone());
+                Ok(())
             }
             ApplicationEvent::RunPhase { session_id, phase }
                 if self.owns(session_id) && phase == "Creating PR" =>
@@ -241,6 +252,33 @@ impl SessionEventHandler for TerminalEvents<'_> {
             } if self.owns(session_id) => self.option(request_id, Some(prompt), choices),
             _ => Ok(()),
         }
+    }
+
+    fn is_terminal_state(&self, state: &SessionState) -> bool {
+        if self.plan_chunks {
+            state.plan_error.is_some()
+                || matches!(
+                    &state.phase,
+                    SessionPhase::AwaitingApproval
+                        | SessionPhase::AwaitingInput
+                        | SessionPhase::Suspended
+                        | SessionPhase::Completed
+                        | SessionPhase::Failed(_)
+                        | SessionPhase::PrFailed(_)
+                )
+        } else {
+            matches!(
+                &state.phase,
+                SessionPhase::Completed
+                    | SessionPhase::Failed(_)
+                    | SessionPhase::PrFailed(_)
+                    | SessionPhase::Suspended
+            )
+        }
+    }
+
+    fn terminal_failure(&self) -> Option<&str> {
+        self.failure.as_deref()
     }
 
     fn on_pending_prompts(&mut self, prompts: &[PendingPrompt]) -> Result<()> {

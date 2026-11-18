@@ -108,6 +108,12 @@ fn exec_exit_result(finished: crate::cli_events::Finished) -> Result<()> {
     if finished.cancelled_by_user {
         return Err(CruiseError::Interrupted);
     }
+    if let Some(error) = finished.failure.as_ref() {
+        return Err(match &finished.state.phase {
+            SessionPhase::PrFailed(_) => CruiseError::PrPublicationFailed(error.clone()),
+            _ => CruiseError::Other(error.clone()),
+        });
+    }
     match finished.state.phase {
         SessionPhase::Completed => Ok(()),
         SessionPhase::Failed(message) => Err(CruiseError::Other(message)),
