@@ -158,7 +158,8 @@ async fn sessions_api_json_matches_cruise_list_json() {
         daemon
             .home
             .path()
-            .join("project/cruise.yml")
+            .join("project")
+            .join("cruise.yml")
             .to_string_lossy()
             .as_ref()
     );
