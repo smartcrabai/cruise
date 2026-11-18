@@ -236,9 +236,15 @@ async fn run_attempt(
         return Err("OpenCode does not support computer_use".into());
     }
     let request = parse_model_ref(config.model_ref.as_deref()).map_err(|e| e.to_string())?;
+    let default_working_dir = || {
+        home::home_dir()
+            .or_else(|| crate::paths::data_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
     let cwd = match &config.cwd {
-        Some(cwd) => cwd.clone(),
-        None => std::env::current_dir().map_err(|e| e.to_string())?,
+        Some(cwd) if cwd.is_absolute() => cwd.clone(),
+        Some(cwd) => default_working_dir().join(cwd),
+        None => default_working_dir(),
     }
     .canonicalize()
     .map_err(|e| e.to_string())?;

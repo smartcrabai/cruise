@@ -234,6 +234,29 @@ fn start_status_stop_round_trip() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn daemon_process_cwd_is_outside_home_and_data_dirs() -> TestResult {
+    let h = Harness::new()?;
+    let (record, _) = h.start()?;
+    let working_dir = PathBuf::from(
+        record["working_dir"]
+            .as_str()
+            .ok_or("daemon record is missing working_dir")?,
+    );
+    assert!(working_dir.is_absolute());
+    assert!(
+        !working_dir.starts_with(h.home.path()),
+        "daemon cwd must not remain inside HOME: {}",
+        working_dir.display()
+    );
+    assert!(
+        !working_dir.starts_with(h.home.path().join("data")),
+        "daemon cwd must not remain inside XDG_DATA_HOME: {}",
+        working_dir.display()
+    );
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_detached_daemon_survives_start_command_exit() -> TestResult {

@@ -300,24 +300,28 @@ impl DaemonClient {
             session: Some(session_id.to_owned()),
             batch: true,
         };
-        let mut last_state = match self.read_session_state(session_id).await {
-            Ok((state, _)) => Some(state),
-            Err(CruiseError::IoError(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                None
-            }
-            Err(error) => return Err(error),
-        };
-        let prompts = match self.pending_prompts(session_id).await {
-            Ok(prompts) => prompts,
-            Err(CruiseError::IoError(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                Vec::new()
-            }
-            Err(error) => return Err(error),
-        };
-        handler.on_pending_prompts(&prompts)?;
+        let mut last_state = self.initial_wait_state(session_id, handler).await?;
+        let mut resync = tokio::time::interval(Duration::from_secs(1));
+        resync.tick().await;
+        resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
-            while let Some(item) = stream.next().await {
+            loop {
+                let item = tokio::select! {
+                    item = stream.next() => item,
+                    _ = resync.tick() => {
+                        if let Some(state) = self
+                            .resync_open_stream(session_id, &mut last_state, handler)
+                            .await?
+                        {
+                            return Ok(state);
+                        }
+                        continue;
+                    }
+                };
+                let Some(item) = item else {
+                    break;
+                };
                 let Ok(event) = item else {
                     break;
                 };
@@ -335,47 +339,82 @@ impl DaemonClient {
                     };
                 }
             }
-            let active = match self.read_session_state(session_id).await {
-                Ok((state, active)) => {
-                    last_state = Some(state.clone());
-                    if !active {
-                        let prompts = match self.pending_prompts(session_id).await {
-                            Ok(prompts) => prompts,
-                            Err(CruiseError::IoError(error))
-                                if error.kind() == std::io::ErrorKind::NotFound =>
-                            {
-                                Vec::new()
-                            }
-                            Err(error) => return Err(error),
-                        };
-                        handler.on_pending_prompts(&prompts)?;
-                        if prompts.is_empty() {
-                            return Ok(state);
-                        }
-                    }
-                    active
-                }
-                Err(CruiseError::IoError(error))
-                    if error.kind() == std::io::ErrorKind::NotFound =>
-                {
-                    return Err(CruiseError::IoError(error));
-                }
-                Err(error) => return Err(error),
-            };
-            if active {
-                let prompts = match self.pending_prompts(session_id).await {
-                    Ok(prompts) => prompts,
-                    Err(CruiseError::IoError(error))
-                        if error.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        Vec::new()
-                    }
-                    Err(error) => return Err(error),
-                };
-                handler.on_pending_prompts(&prompts)?;
+            if let Some(state) = self
+                .resync_closed_stream(session_id, &mut last_state, handler)
+                .await?
+            {
+                return Ok(state);
             }
             tokio::time::sleep(RETRY_DELAY).await;
             stream = self.events(filter.clone()).await?;
+        }
+    }
+
+    async fn initial_wait_state<H: SessionEventHandler>(
+        &self,
+        session_id: &str,
+        handler: &mut H,
+    ) -> Result<Option<SessionState>> {
+        let state = match self.read_session_state(session_id).await {
+            Ok((state, _)) => Some(state),
+            Err(CruiseError::IoError(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let prompts = self.pending_prompts_or_empty(session_id).await?;
+        handler.on_pending_prompts(&prompts)?;
+        Ok(state)
+    }
+
+    async fn resync_open_stream<H: SessionEventHandler>(
+        &self,
+        session_id: &str,
+        last_state: &mut Option<SessionState>,
+        handler: &mut H,
+    ) -> Result<Option<SessionState>> {
+        let (state, active) = match self.read_session_state(session_id).await {
+            Ok(result) => result,
+            Err(CruiseError::IoError(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                // The operation may dispose a transient session before releasing
+                // its terminal event. An open stream can still deliver that event.
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        *last_state = Some(state.clone());
+        if active {
+            return Ok(None);
+        }
+
+        let prompts = self.pending_prompts_or_empty(session_id).await?;
+        handler.on_pending_prompts(&prompts)?;
+        Ok(prompts.is_empty().then_some(state))
+    }
+
+    async fn resync_closed_stream<H: SessionEventHandler>(
+        &self,
+        session_id: &str,
+        last_state: &mut Option<SessionState>,
+        handler: &mut H,
+    ) -> Result<Option<SessionState>> {
+        let (state, active) = self.read_session_state(session_id).await?;
+        *last_state = Some(state.clone());
+        let prompts = self.pending_prompts_or_empty(session_id).await?;
+        handler.on_pending_prompts(&prompts)?;
+        Ok((!active && prompts.is_empty()).then_some(state))
+    }
+
+    async fn pending_prompts_or_empty(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<PendingPrompt>> {
+        match self.pending_prompts(session_id).await {
+            Ok(prompts) => Ok(prompts),
+            Err(CruiseError::IoError(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(Vec::new())
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -772,6 +811,165 @@ mod tests {
             events,
             vec![ApplicationEvent::RunStarted {
                 session_id: "stream-test".to_owned()
+            }]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wait_for_terminal_resyncs_while_sse_stays_open() -> Result<()> {
+        use axum::response::IntoResponse as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let state_reads = std::sync::Arc::new(AtomicUsize::new(0));
+        let state_reads_route = std::sync::Arc::clone(&state_reads);
+        let router = axum::Router::new()
+            .route(
+                "/api/v1/sessions/missed-terminal",
+                axum::routing::get(move || {
+                    let reads = std::sync::Arc::clone(&state_reads_route);
+                    async move {
+                        let first = reads.fetch_add(1, Ordering::SeqCst) == 0;
+                        let phase = if first {
+                            SessionPhase::Running
+                        } else {
+                            SessionPhase::Suspended
+                        };
+                        match test_session_response("missed-terminal", phase, first) {
+                            Ok(value) => axum::Json(value).into_response(),
+                            Err(error) => (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                error.to_string(),
+                            )
+                                .into_response(),
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/sessions/missed-terminal/prompts",
+                axum::routing::get(|| async {
+                    axum::Json(Vec::<crate::application::PendingPrompt>::new())
+                }),
+            )
+            .route(
+                "/api/v1/events",
+                axum::routing::get(|| async {
+                    axum::response::sse::Sse::new(futures::stream::pending::<
+                        std::result::Result<axum::response::sse::Event, std::convert::Infallible>,
+                    >())
+                }),
+            );
+        let (client, server) = test_client(router).await?;
+        let stream = client
+            .events(EventFilter {
+                session: Some("missed-terminal".to_owned()),
+                batch: false,
+            })
+            .await?;
+        let mut handler = |_: &ApplicationEvent| Ok(());
+        let state = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.wait_for_terminal_from("missed-terminal", stream, &mut handler),
+        )
+        .await
+        .map_err(|error| CruiseError::Other(format!("terminal wait timed out: {error}")))??;
+        server.abort();
+
+        assert_eq!(state.phase, SessionPhase::Suspended);
+        assert_eq!(state_reads.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wait_for_terminal_ignores_404_resync_while_stream_is_open() -> Result<()> {
+        use axum::response::IntoResponse as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let state_reads = std::sync::Arc::new(AtomicUsize::new(0));
+        let state_reads_route = std::sync::Arc::clone(&state_reads);
+        let terminal = serde_json::json!({
+            "event": "runFinished",
+            "data": { "sessionId": "late-terminal", "phase": "Completed" }
+        });
+        let router = axum::Router::new()
+            .route(
+                "/api/v1/sessions/late-terminal",
+                axum::routing::get(move || {
+                    let reads = std::sync::Arc::clone(&state_reads_route);
+                    async move {
+                        if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                            match test_session_response(
+                                "late-terminal",
+                                SessionPhase::Running,
+                                true,
+                            ) {
+                                Ok(value) => axum::Json(value).into_response(),
+                                Err(error) => (
+                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    error.to_string(),
+                                )
+                                    .into_response(),
+                            }
+                        } else {
+                            (
+                                axum::http::StatusCode::NOT_FOUND,
+                                axum::Json(serde_json::json!({ "error": "session disposed" })),
+                            )
+                                .into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/sessions/late-terminal/prompts",
+                axum::routing::get(|| async {
+                    axum::Json(Vec::<crate::application::PendingPrompt>::new())
+                }),
+            )
+            .route(
+                "/api/v1/events",
+                axum::routing::get(move || {
+                    let terminal = terminal.clone();
+                    async move {
+                        let event = axum::response::sse::Event::default()
+                            .event("app")
+                            .data(terminal.to_string());
+                        let events = futures::stream::once(async move {
+                            tokio::time::sleep(Duration::from_millis(1_500)).await;
+                            Ok::<_, std::convert::Infallible>(event)
+                        });
+                        axum::response::sse::Sse::new(events)
+                    }
+                }),
+            );
+        let (client, server) = test_client(router).await?;
+        let stream = client
+            .events(EventFilter {
+                session: Some("late-terminal".to_owned()),
+                batch: false,
+            })
+            .await?;
+        let mut events = Vec::new();
+        let mut handler = |event: &ApplicationEvent| {
+            events.push(event.clone());
+            Ok(())
+        };
+        let state = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.wait_for_terminal_from("late-terminal", stream, &mut handler),
+        )
+        .await
+        .map_err(|error| CruiseError::Other(format!("terminal wait timed out: {error}")))??;
+        server.abort();
+
+        assert_eq!(state.phase, SessionPhase::Completed);
+        assert!(state_reads.load(Ordering::SeqCst) >= 2);
+        assert_eq!(
+            events,
+            vec![ApplicationEvent::RunFinished {
+                session_id: "late-terminal".to_owned(),
+                phase: "Completed".to_owned(),
             }]
         );
         Ok(())

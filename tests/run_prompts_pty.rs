@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(45);
 const SELECTOR_CONFIG: &str = "command: [cat]\ncreate_pr: false\nsteps:\n  choose:\n    option:\n      - selector: Fast path\n        next: fast\n      - selector: Alternate path\n        next: alternate\n  fast:\n    command: %FAST%\n  alternate:\n    command: %ALTERNATE%\n";
 
 struct Fixture {
@@ -545,15 +546,16 @@ impl RunPty {
     }
 
     fn finish(mut self) -> (bool, String) {
-        self.wait_for_exit(false)
+        self.wait_for_exit(WAIT_TIMEOUT)
     }
 
     fn cancel_until_exit(mut self) -> (bool, String) {
-        self.wait_for_exit(true)
+        self.send(b"\x1b");
+        self.wait_for_exit(CANCEL_TIMEOUT)
     }
 
-    fn wait_for_exit(&mut self, dismiss: bool) -> (bool, String) {
-        let deadline = Instant::now() + WAIT_TIMEOUT;
+    fn wait_for_exit(&mut self, timeout: Duration) -> (bool, String) {
+        let deadline = Instant::now() + timeout;
         loop {
             self.answer_terminal_queries();
             if let Some(status) = self
@@ -568,9 +570,6 @@ impl RunPty {
                 "cruise run did not exit:\n{}",
                 self.raw()
             );
-            if dismiss {
-                self.send(b"\x1b");
-            }
             thread::sleep(Duration::from_millis(50));
         }
     }
@@ -666,7 +665,12 @@ fn escape_pauses_and_rerunning_renders_the_pending_option() {
     let session_id = fixture.create_planned_session();
     let mut terminal = fixture.start_run_pty(&session_id);
     terminal.select_current_branch();
-    terminal.wait_for("Alternate path");
+    terminal.wait_for_occurrences("[↑↓ to move, enter to select, type to filter]", 2);
+    let menu = terminal.raw();
+    assert!(
+        menu.contains("Alternate path"),
+        "option menu did not finish rendering: {menu}"
+    );
     let (success, transcript) = terminal.cancel_until_exit();
     assert!(success, "dismissing the menu failed:\n{transcript}");
     assert!(

@@ -477,7 +477,14 @@ fn request_working_dir(request: &NewSessionRequest) -> Result<PathBuf> {
     {
         return Ok(context.cwd.clone());
     }
-    Ok(std::env::current_dir()?)
+    webui_working_dir()
+}
+
+fn webui_working_dir() -> Result<PathBuf> {
+    if let Some(home) = home::home_dir().filter(|home| home.is_dir()) {
+        return Ok(home);
+    }
+    crate::paths::data_dir()
 }
 
 fn resolve_request_path(path: &Path, cwd: &Path) -> PathBuf {
@@ -3108,7 +3115,7 @@ impl CruiseApplication {
         repo: Option<&str>,
     ) -> Result<NewSessionConfigDefaults> {
         let base = if base_dir.as_os_str().is_empty() {
-            std::env::current_dir()?
+            webui_working_dir()?
         } else {
             PathBuf::from(crate::new_session_history::expand_tilde(
                 &base_dir.to_string_lossy(),
@@ -4516,17 +4523,19 @@ impl CruiseApplication {
         } else {
             run.with_context(execution.context()).await
         };
-        if let Some((initial_phase, fingerprint)) = exec_initial {
-            let _guard = execution.context().attach();
-            self.manager
-                .dispose_exec_session_if_owned(id, &initial_phase, fingerprint);
-        }
+        let execution_context = execution.context();
         if claim.pause_requested() && matches!(&result, Err(CruiseError::Interrupted)) {
             execution.finish("paused");
         } else {
             finish_session_operation(execution, &result, unresolved_failed_steps);
         }
-        terminal_sink.operation_finished(id)?;
+        let release_result = terminal_sink.operation_finished(id);
+        if let Some((initial_phase, fingerprint)) = exec_initial {
+            let _guard = execution_context.attach();
+            self.manager
+                .dispose_exec_session_if_owned(id, &initial_phase, fingerprint);
+        }
+        release_result?;
         result
     }
     async fn run_claimed_inner(
@@ -6165,6 +6174,30 @@ mod tests {
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn webui_request_without_context_defaults_to_home() {
+        let _lock = crate::test_support::lock_process();
+        let home = tempfile::TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let _home_guards = crate::test_support::set_fake_home(home.path());
+        let request = NewSessionRequest::default();
+
+        assert_eq!(
+            request_working_dir(&request).unwrap_or_else(|error| panic!("{error}")),
+            home.path().to_path_buf()
+        );
+        let config = home.path().join("workflow.yaml");
+        std::fs::write(
+            &config,
+            "command: [cat]\nsteps:\n  home-step:\n    prompt: home\n",
+        )
+        .unwrap_or_else(|error| panic!("write home workflow: {error}"));
+        let app = CruiseApplication::new(SessionManager::new(home.path().join("data/cruise")));
+        let defaults = app
+            .new_session_config_defaults(Path::new(""), Some("workflow.yaml"), None)
+            .unwrap_or_else(|error| panic!("resolve WebUI home workflow: {error}"));
+        assert!(defaults.steps.iter().any(|step| step.id == "home-step"));
+    }
 
     #[cfg(unix)]
     fn verify_test_session(

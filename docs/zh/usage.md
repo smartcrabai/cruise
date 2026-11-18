@@ -29,7 +29,7 @@ Detached daemon 每 60 秒检查一次 `daemon.log`。日志超过 5 MiB 时，�
 
 此外，若某个 session 仍由另一个被记录为 runner 的 cruise 进程执行（例如升级时仍在进行的 v0.3.0 `cruise run`），daemon 会拒绝对它进行 run 和 planning（HTTP 409，CLI 退出码 1，不修改 state）。v0.3.0 的后台 planning worker 不记录 runner，无法检测，因此请等升级前启动的后台 plan 完成后再操作这些 session。
 
-CLI 客户端负责解析 workflow 配置。它会随每个请求发送工作目录和 workflow override 环境变量（例如 `CRUISE_MODEL`、`CRUISE_PLAN_MODEL` 和 `CRUISE_SDK`），这些内容仅对该请求生效。`PATH`、`GH_TOKEN`、provider 凭据、`CRUISE_FORGE`、`CRUISE_SKIP_AGENT_AUTH_CHECK`、`CRUISE_DISABLE_NOTIFICATIONS`、`CRUISE_COMMIT_COAUTHOR_*` 等进程级变量来自 daemon 的环境；更改后请运行 `cruise daemon restart`。自动启动 daemon 时会从其环境中移除 workflow override 变量；显式运行 `cruise daemon start` 或 `serve` 会保留其环境。WebUI session 使用 daemon 的环境，并以用户 home directory 为工作目录。herdr 状态报告仍由客户端负责。
+CLI 客户端负责解析 workflow 配置。它会随每个请求发送工作目录和 workflow override 环境变量（例如 `CRUISE_MODEL`、`CRUISE_PLAN_MODEL` 和 `CRUISE_SDK`），这些内容仅对该请求生效。`PATH`、`GH_TOKEN`、provider 凭据、`CRUISE_FORGE`、`CRUISE_SKIP_AGENT_AUTH_CHECK`、`CRUISE_DISABLE_NOTIFICATIONS`、`CRUISE_COMMIT_COAUTHOR_*` 等进程级变量来自 daemon 的环境；更改后请运行 `cruise daemon restart`。自动启动 daemon 时会从其环境中移除 workflow override 变量；显式运行 `cruise daemon start` 或 `serve` 会保留其环境。WebUI session 使用 daemon 的环境，工作目录默认是用户 home directory（没有 home 时使用 data directory），与 daemon process 自身的工作目录相互独立。herdr 状态报告仍由客户端负责。
 
 执行 `cruise update` 后，daemon 忙碌时会继续运行旧版本：CLI 客户端会拒绝请求，并提示等待空闲后运行 `cruise daemon restart`；重启前 WebUI 也会继续使用旧版本。空闲 daemon 会在下一个客户端请求时自动重启。
 

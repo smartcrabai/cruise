@@ -45,3 +45,5 @@
 - Retry transient SDK transport failures and OpenCode setup timeouts before prompt submission through the existing model fallback policy, while retaining barriers for local OpenCode API rate-limit, client, and server-class failures.
 - The shared after-PR CI repair step now loops back to base sync only when the repair creates a commit (`if.head-changed`), so untracked or ignored build artifacts from reproducing CI no longer rerun sync/push/wait-ci against the same failed run.
 - Render daemon-run output once with the existing step and parallel-child formatting, and leave sessions runnable when base-CI preflight rejects a run.
+- Keep daemon terminal waits alive through transient session 404s while the event stream can still deliver terminal events; dispose exec sessions only after releasing terminal events.
+- Run approval-title SDK requests from the session workspace.

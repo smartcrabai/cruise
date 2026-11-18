@@ -29,7 +29,7 @@ v0.3.0 の分離 WebUI から更新する場合、旧 server が稼働中の間�
 
 また、別の cruise process が runner として記録され実行中の session（更新時に進行中だった v0.3.0 の `cruise run` など）に対する run と planning を daemon は拒否します（HTTP 409、CLI は exit 1、state は変更しません）。v0.3.0 の background planning worker は runner を記録しないため検出できません。更新前に開始した background plan は完了を待ってから操作してください。
 
-workflow 設定は CLI client 側で解決されます。working directory と `CRUISE_MODEL`、`CRUISE_PLAN_MODEL`、`CRUISE_SDK` などの workflow override 環境変数は各 request とともに送られ、その request にのみ適用されます。`PATH`、`GH_TOKEN`、provider credential、`CRUISE_FORGE`、`CRUISE_SKIP_AGENT_AUTH_CHECK`、`CRUISE_DISABLE_NOTIFICATIONS`、`CRUISE_COMMIT_COAUTHOR_*` などの process-level 変数は daemon の環境から取得されます。変更後は `cruise daemon restart` を実行してください。自動起動では workflow override 変数が daemon 環境から除外されます。明示的な `cruise daemon start` または `serve` ではその環境が保持されます。WebUI session は daemon の環境と home directory を working directory として使います。herdr の報告は引き続き client 側で行われます。
+workflow 設定は CLI client 側で解決されます。working directory と `CRUISE_MODEL`、`CRUISE_PLAN_MODEL`、`CRUISE_SDK` などの workflow override 環境変数は各 request とともに送られ、その request にのみ適用されます。`PATH`、`GH_TOKEN`、provider credential、`CRUISE_FORGE`、`CRUISE_SKIP_AGENT_AUTH_CHECK`、`CRUISE_DISABLE_NOTIFICATIONS`、`CRUISE_COMMIT_COAUTHOR_*` などの process-level 変数は daemon の環境から取得されます。変更後は `cruise daemon restart` を実行してください。自動起動では workflow override 変数が daemon 環境から除外されます。明示的な `cruise daemon start` または `serve` ではその環境が保持されます。WebUI session は daemon の環境を使い、working directory は home directory（home がない場合は data directory）を既定にします。これは daemon process 自体の working directory とは独立しています。herdr の報告は引き続き client 側で行われます。
 
 `cruise update` 後、daemon が busy の間は古い version のまま稼働します。CLI client は `cruise daemon restart` を idle 時に実行するよう案内して request を拒否し、WebUI も再起動まで古い version のままです。idle の daemon は次の client request で自動再起動します。
 

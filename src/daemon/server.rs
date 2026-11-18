@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -120,6 +120,19 @@ pub(crate) async fn run_daemon(
     .await
 }
 
+fn filesystem_root(path: &Path) -> Result<PathBuf> {
+    path.ancestors()
+        .last()
+        .filter(|root| root.is_absolute())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            CruiseError::Other(format!(
+                "cannot determine filesystem root for daemon data directory {}",
+                path.display()
+            ))
+        })
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "Instance startup, serving, and cleanup form one daemon lifecycle boundary."
@@ -142,15 +155,24 @@ async fn run_instance(
             }
         })
         .transpose()?;
+    let home_dir = home::home_dir().filter(|home| home.is_dir());
     let data_dir = crate::paths::data_dir()?;
-    // WebUI "." resolves against the daemon cwd: the home directory, or the
-    // data directory when HOME is unset or missing.
-    let workdir = home::home_dir()
-        .filter(|home| home.is_dir())
-        .unwrap_or_else(|| data_dir.clone());
+    let data_dir = if data_dir.is_absolute() {
+        data_dir
+    } else {
+        let base = if let Some(home) = &home_dir {
+            home.clone()
+        } else {
+            std::env::current_dir()?
+        };
+        base.join(data_dir)
+    };
+    // WebUI requests without a client context default to the home directory,
+    // or the data directory when no home is available. Keep the daemon itself
+    // at the data volume's root so user data can be removed while it is alive.
+    let workdir = home_dir.unwrap_or_else(|| data_dir.clone());
     std::fs::create_dir_all(&workdir)?;
-    std::env::set_current_dir(&workdir)?;
-
+    std::env::set_current_dir(filesystem_root(&data_dir)?)?;
     let assets = assets::prepare(webui_dir, &data_dir)?;
     let application = CruiseApplication::new(SessionManager::new(data_dir));
     let mut state = WebState::new(application, &assets)?;

@@ -152,7 +152,7 @@ impl CommitGuard {
         // Scope the hook to this repository so unrelated repositories below the
         // prompt process keep working with an inherited guard environment.
         let common_dir = guarded_common_dir(cwd, env)?;
-        let hook_dir = install_hook()?;
+        let hook_dir = install_hook(cwd)?;
         let mut guarded_env = build_guard_env(env, &hook_dir)?;
         guarded_env.insert(GUARDED_ENV.to_string(), common_dir);
         let before = head_state(cwd, &guarded_env)?;
@@ -500,7 +500,8 @@ fn effective_env_value(env: &HashMap<String, String>, key: &str) -> Result<Optio
     }
 }
 
-fn install_hook() -> Result<PathBuf> {
+// Relative XDG paths are resolved against the operation's workspace, not the daemon cwd.
+fn install_hook(working_dir: &Path) -> Result<PathBuf> {
     let data_dir = crate::paths::data_dir().map_err(|error| {
         guard_error(format!(
             "cannot determine persistent hook directory: {error}"
@@ -509,9 +510,7 @@ fn install_hook() -> Result<PathBuf> {
     let data_dir = if data_dir.is_absolute() {
         data_dir
     } else {
-        std::env::current_dir()
-            .map_err(|error| guard_error(format!("cannot make hook directory absolute: {error}")))?
-            .join(data_dir)
+        working_dir.join(data_dir)
     };
     let root = data_dir.join(GUARD_DIR);
     let hooks = root.join(HOOK_DIR);
@@ -1064,8 +1063,8 @@ mod tests {
 
         // Put the guard's config into the *process* environment, exactly as an
         // agent-spawned test run would inherit it.
-        let hooks_path =
-            install_hook().unwrap_or_else(|error| panic!("hook install failed: {error}"));
+        let hooks_path = install_hook(guarded.path())
+            .unwrap_or_else(|error| panic!("hook install failed: {error}"));
         let _count = crate::test_support::EnvGuard::set("GIT_CONFIG_COUNT", "1");
         let _key = crate::test_support::EnvGuard::set("GIT_CONFIG_KEY_0", "core.hooksPath");
         let _value = crate::test_support::EnvGuard::set("GIT_CONFIG_VALUE_0", &hooks_path);

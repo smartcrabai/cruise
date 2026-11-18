@@ -207,6 +207,7 @@ async fn generate_approval_title(
         cancel_token,
         Some(&on_notice),
         Some(&state.id),
+        &state.base_dir,
     )
     .await
     {
@@ -228,6 +229,7 @@ async fn generate_title_via_sdk(
     cancel_token: &crate::cancellation::CancellationToken,
     on_notice: Option<&(dyn Fn(&str) + Send + Sync)>,
     usage_session_id: Option<&str>,
+    working_dir: &std::path::Path,
 ) -> Result<String> {
     let title_store = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let tool = crate::sdk_tools::generate_title_tool(std::sync::Arc::clone(&title_store));
@@ -255,7 +257,7 @@ async fn generate_title_via_sdk(
             mcp_servers: &config.mcp_servers,
             on_notice,
             cancel_token: Some(cancel_token),
-            working_dir: None,
+            working_dir: Some(working_dir),
             stream: None,
             tools: vec![tool],
             on_session_id: None,
