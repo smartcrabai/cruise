@@ -66,7 +66,24 @@ cruise --version; cruise update; cruise --version
 
 “托管”由可执行文件的位置决定：安装程序默认目录 `~/.local/bin`（Windows 上为 `%USERPROFILE%\.local\bin`）或规范的 `$CARGO_HOME/bin`，而非 Cargo 的安装账本。更新程序只替换 runtime 选择：固定的 `cruise` launcher（Windows 上为 `cruise.exe`）保持不变；每次更新都会添加带版本号的 `cruise-runtime-managed-…` runtime 和 `.json` sidecar，并切换 `.cruise-runtime-active`。旧 runtime 会保留。原生更新不会运行 Cargo，也不会更改其安装账本。如果需要自定义的源码构建 runtime，请从源码重新构建并安装。
 
-更新 Cruise 不会替换已经运行的 WebUI 进程中的代码。更新后，使用 `cruise webui status` 将其版本与当前 runtime 比较，再使用 `cruise webui restart` 加载更新后的 runtime。重启会取消活跃的 WebUI 操作，请选择合适的时间。
+执行 `cruise update` 后，下一个客户端请求会使用新 runtime 自动重启空闲 daemon。daemon 忙碌时会继续运行旧版本：CLI 客户端会拒绝请求，并提示等待空闲后运行 `cruise daemon restart`；重启前 WebUI 也会继续使用旧版本。使用 `cruise daemon status` 检查 daemon；不要再使用已移除的 `cruise webui status` 或 `restart` 命令。
+
+<a id="docker"></a>
+### Docker
+
+将 Docker 镜像作为长期运行的 service container 启动，并通过 `--env-file` 等方式向该容器提供凭据及其他进程级环境变量：
+
+```sh
+docker run -d --name cruise -p 127.0.0.1:8484:8484 --env-file .env cruise:latest
+```
+
+`docker logs cruise` 会显示 WebUI 登录 URL。URL 中是五分钟后过期、只能使用一次的 nonce，而不是 registry API token。除非确实需要网络访问，否则请仅将服务发布到 loopback（`-p 127.0.0.1:8484:8484`）；daemon 使用明文 HTTP。请在同一个 service container 中运行 CLI 命令。
+
+```sh
+docker exec cruise cruise plan "implement the feature"
+```
+
+一次性容器（例如 `docker run --rm --env-file .env cruise:latest plan "implement the feature"`）可在前台正常运行。命令结束后容器会停止，daemon 也随之停止，因此不要用一次性容器执行后台 `--plan` 或 detached work。请通过 `--env-file` 或 `-e` 将凭据和进程级环境变量提供给 service container。
 
 <a id="managed-provider-clis"></a>
 ### 托管的 provider CLI

@@ -500,6 +500,8 @@ fn new_session_request(fields: &Fields) -> NewSessionRequest {
         attachments,
         skipped_steps: skipped_steps(fields),
         flags: flag_values(fields).unwrap_or_default(),
+        context: None,
+        ..NewSessionRequest::default()
     }
 }
 
@@ -741,7 +743,7 @@ pub(crate) async fn fix(
         let application = state.application.clone();
         let (sink, _log) = state.hub.sinks();
         let spawn_id = id.clone();
-        super::ops::spawn(async move { application.fix(&spawn_id, feedback, sink).await });
+        super::ops::spawn(async move { application.fix(&spawn_id, feedback, None, sink).await });
         let mut body = partials::header_and_row(&state, &id, Some(OperationKind::Fix))?;
         body.push_str(&partials::clear(&format!("editor-{id}")));
         Ok(html(body))
@@ -778,7 +780,7 @@ pub(crate) async fn ask(
         let application = state.application.clone();
         let (sink, _log) = state.hub.sinks();
         let spawn_id = id.clone();
-        super::ops::spawn(async move { application.ask(&spawn_id, question, sink).await });
+        super::ops::spawn(async move { application.ask(&spawn_id, question, None, sink).await });
         let mut body = partials::header_and_row(&state, &id, Some(OperationKind::Ask))?;
         body.push_str(&partials::clear(&format!("editor-{id}")));
         Ok(html(body))
@@ -790,7 +792,7 @@ pub(crate) async fn verify(UiState(state): UiState, Path(id): Path<String>) -> R
         let application = state.application.clone();
         let (sink, _log) = state.hub.sinks();
         let spawn_id = id.clone();
-        super::ops::spawn(async move { application.verify(&spawn_id, sink).await });
+        super::ops::spawn(async move { application.verify(&spawn_id, None, sink).await });
         Ok(html(partials::header_and_row(
             &state,
             &id,
@@ -849,7 +851,7 @@ pub(crate) async fn create_pr(UiState(state): UiState, Path(id): Path<String>) -
                     event_sink.send(event)
                 });
             let result = application
-                .create_pr(&spawn_id, tracking_sink, Some(log_sink))
+                .create_pr(&spawn_id, None, tracking_sink, Some(log_sink))
                 .await;
             if let Err(error) = &result
                 && !terminal.load(std::sync::atomic::Ordering::SeqCst)
@@ -1224,7 +1226,7 @@ pub(crate) async fn start_run_all(
         let failure_sink = Arc::clone(&sink);
         tokio::spawn(async move {
             if let Err(error) = application
-                .run_all_with_parallelism_provider(provider, sink, Some(log_sink))
+                .run_all_with_parallelism_provider(provider, None, sink, Some(log_sink))
                 .await
                 && !matches!(error, CruiseError::Interrupted)
             {

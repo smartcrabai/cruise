@@ -15,6 +15,7 @@
 # non-http base_url -- so the assertions below can be made against real
 # files. Every invocation is also logged verbatim, so the flags this action
 # passes are pinned independently of what the stub then does with them.
+# shellcheck source=scripts/lib/action_test_harness.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/action_test_harness.sh"
 
 # The home provision-jcode.sh inherits; in the real action setup-env.sh
@@ -185,6 +186,7 @@ else
 fi
 # The credential files are jcode's, so their mode must be owner-only. 600 is
 # what `jcode login` produces.
+# shellcheck disable=SC2012
 if [ "$(ls -l "$ENV_DIR/anthropic.env" | cut -c1-10)" = "-rw-------" ]; then
   pass "a stored provider key file is owner-only"
 else
@@ -254,7 +256,7 @@ fi
 # ===========================================================================
 
 unset ANTHROPIC_API_KEY_INPUT OPENAI_API_KEY_INPUT
-export ANTHROPIC_API_KEY_INPUT= OPENAI_API_KEY_INPUT=
+export ANTHROPIC_API_KEY_INPUT='' OPENAI_API_KEY_INPUT=''
 export PROVIDERS_INPUT='{"gw-two":{"base_url":"https://two.example/v1","model":"m2"},"gw-one":{"base_url":"https://one.example/v1","model":"m1","context_window":128000,"default":true}}'
 export PROVIDER_API_KEYS_INPUT=$'gw-two=two-key==\n# ignored\ngw-one=one-key'
 output="$(run_provision)"
@@ -472,13 +474,13 @@ GH="$TMP/gh"
 must printf '%s\n' '#!/usr/bin/env bash' 'echo write' > "$GH"
 must chmod +x "$GH"
 export PATH="$TMP:$PATH"; hash -r
-export GITHUB_EVENT_NAME=issues GITHUB_EVENT_PATH="$EVENT" GITHUB_REPOSITORY=owner/repo ALLOWED_BOTS= TRIGGER_PHRASE=@cruise
+export GITHUB_EVENT_NAME=issues GITHUB_EVENT_PATH="$EVENT" GITHUB_REPOSITORY=owner/repo ALLOWED_BOTS='' TRIGGER_PHRASE=@cruise
 # Explicitly (re)set every credential-source *_INPUT var gate.sh reads,
 # including PROVIDERS_INPUT -- it carries a leftover non-empty value from the
 # providers cases above otherwise, which would make the "all empty" case
 # below pass for the wrong reason (it'd still see a non-empty PROVIDERS_INPUT
 # and never actually hit gate.sh's empty-credential branch at all).
-export PROVIDER_API_KEYS_INPUT='x=k'; export ANTHROPIC_API_KEY_INPUT= OPENAI_API_KEY_INPUT= ENV_INPUT= PROVIDERS_INPUT=
+export PROVIDER_API_KEYS_INPUT='x=k'; export ANTHROPIC_API_KEY_INPUT='' OPENAI_API_KEY_INPUT='' ENV_INPUT='' PROVIDERS_INPUT=''
 if bash action/scripts/gate.sh >/dev/null; then pass "gate accepts provider_api_keys credential"; else fail "gate accepts provider_api_keys credential" "exit=$?"; fi
 
 # gate.sh also accepts `providers` as a credential source on its own: a
@@ -532,16 +534,24 @@ if grep -Fqx 'CRUISE_FORCE_EXEC=false' "$GITHUB_ENV"; then
 else
   fail "setup-env pins CRUISE_FORCE_EXEC=false" "$(cat "$GITHUB_ENV")"
 fi
-# The isolation this action is responsible for: cruise no longer relocates
-# jcode itself, so the credentials only stay off the runner user's real
-# $HOME if setup-env.sh pins JCODE_HOME (and creates it) under RUNNER_TEMP
-# for every later step.
-if [ "$(genv JCODE_HOME)" = "$RUNNER_TEMP/cruise/jcode-home" ] && [ -d "$RUNNER_TEMP/cruise/jcode-home" ]; then
-  pass "setup-env pins JCODE_HOME under RUNNER_TEMP and creates it"
+# XDG state and jcode credentials stay out of the persistent runner home and
+# are isolated per workflow job, including concurrent jobs on a self-hosted
+# runner.
+expected_action_dir="$RUNNER_TEMP/cruise-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-local}"
+if [ "$(genv CRUISE_ACTION_DIR)" = "$expected_action_dir" ] \
+  && [ "$(genv XDG_DATA_HOME)" = "$expected_action_dir/data" ] \
+  && [ "$(genv XDG_CONFIG_HOME)" = "$expected_action_dir/xdg-config" ] \
+  && [ "$(genv XDG_STATE_HOME)" = "$expected_action_dir/xdg-state" ] \
+  && [ "$(genv JCODE_HOME)" = "$expected_action_dir/jcode-home" ] \
+  && [ -d "$expected_action_dir/data" ] \
+  && [ -d "$expected_action_dir/xdg-config" ] \
+  && [ -d "$expected_action_dir/xdg-state" ] \
+  && [ -d "$expected_action_dir/jcode-home" ]; then
+  pass "setup-env scopes all cruise and credential directories to the workflow job"
 else
-  fail "setup-env pins JCODE_HOME under RUNNER_TEMP and creates it" "$(cat "$GITHUB_ENV")"
+  fail "setup-env scopes all cruise and credential directories to the workflow job" "$(cat "$GITHUB_ENV")"
 fi
-export MODEL_INPUT= PLAN_MODEL_INPUT=
+export MODEL_INPUT='' PLAN_MODEL_INPUT=''
 run_setup >/dev/null
 if ! grep -q '^CRUISE_MODEL=' "$GITHUB_ENV" && ! grep -q '^CRUISE_PLAN_MODEL=' "$GITHUB_ENV"; then
   pass "empty model inputs are not exported at all"

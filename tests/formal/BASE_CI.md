@@ -15,6 +15,8 @@ no-workspace terminal outcome for this gate, not a model of all dry-run effects.
 It checks safety rather than liveness and allows stuttering. Verification is
 bounded, not an unbounded proof.
 
+Production admission runs in the daemon's `src/application.rs::setup_run_blocking` before workspace creation. CLI and WebUI requests converge on that application path; `base_ci.feature` exercises the CLI client, not browser transport.
+
 ## CI and pinned toolchain
 
 `bash scripts/check_base_ci_specs.sh` runs all three specifications, logging the exact commands and results to a fresh `target/formal-reports/base-ci.*` directory. It uses `scripts/setup_formal.sh` and the existing npm lockfile: Node 26.13.0, Quint 0.33.0, Apalache 0.62.1 and Temurin JDK 25.0.5+8. The CI simulation uses seed 20261112, 1,000 samples and eight steps. The Apalache bounded verification checks `safety` for eight steps. Neither bounded check proves the implementation correct.

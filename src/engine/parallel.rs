@@ -208,11 +208,14 @@ async fn run_child(
     name: String,
     delivered: Option<&str>,
 ) -> Result<ChildResult> {
+    let output_is_streamed = ctx.on_step_log.is_some() && crate::console_mode::has_status_sink();
     let log = |stream: &str, line: &str| {
         if let Some(log) = ctx.on_step_log {
             log(stream, &format!("[{name}] {line}"));
         }
-        crate::status_eprintln!("[{name}] {line}");
+        if !(output_is_streamed && matches!(stream, "stdout" | "stderr")) {
+            crate::status_eprintln!("[{name}] {line}");
+        }
     };
     if ctx
         .cancel_token
@@ -300,6 +303,7 @@ async fn run_child_inner(
                     false,
                     false,
                     delivered,
+                    ctx.ask_handler,
                 )
                 .await?;
                 true

@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
+import { loginWebUi, waitForWebUiLogin } from './auth.mjs';
 
 const args = process.argv.slice(2);
 if (args[0] === 'option') args.shift();
@@ -42,26 +43,17 @@ try {
   await writeFile(join(sessionDir, 'config.yaml'), `create_pr: false\nsteps:\n  choose:\n    plan: "{plan}"\n    option:\n${choices}\n      - text-input: "Explain your responsive layout choice"\n        next: done\n  done:\n    command: "printf option-completed > option-completed.txt"\n`);
   await writeFile(join(sessionDir, 'plan.md'), '# Option context\n\n' + 'Review the mobile dialog and keep all choices reachable. '.repeat(16));
   server = spawn(process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime'),
-    ['webui', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    ['daemon', 'serve', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   serverClosed = new Promise(ok => server.once('close', ok));
   server.stderr.on('data', data => { logs += data; });
-  const base = await new Promise((ok, fail) => {
-    let output = '';
-    const timeout = setTimeout(() => fail(new Error(`server startup timeout: ${logs}`)), 20000);
-    server.once('error', error => { clearTimeout(timeout); fail(error); });
-    server.once('exit', code => { clearTimeout(timeout); fail(new Error(`server exited ${code}: ${logs}`)); });
-    server.stdout.on('data', data => {
-      output += data;
-      const match = output.match(/http:\/\/127\.0\.0\.1:\d+/);
-      if (match) { clearTimeout(timeout); ok(match[0]); }
-    });
-  });
+  const { base, loginUrl } = await waitForWebUiLogin(server, () => logs);
   // Do not leak Cargo's macOS library search paths into Chromium helper processes.
   const browserEnv = { ...process.env };
   for (const key of ['DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'LD_LIBRARY_PATH']) delete browserEnv[key];
   browser = await chromium.launch({ headless: true, env: browserEnv });
   const context = await browser.newContext({ viewport: { width, height }, reducedMotion: 'reduce' });
   const page = await context.newPage();
+  await loginWebUi(page, loginUrl);
   page.setDefaultTimeout(15000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));

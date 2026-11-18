@@ -40,6 +40,7 @@ fn context<'a>(
         on_step_start: &|_| Ok(()),
         cancel_token: None,
         option_handler: &NoOpOptionHandler,
+        ask_handler: None,
         config_reloader: None,
         working_dir: Some(dir),
         skipped_steps: &[],

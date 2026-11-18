@@ -30,7 +30,7 @@ set -euo pipefail
 
 CONFIG_INPUT="${CONFIG_INPUT:-}"
 WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
-OUT_DIR="${RUNNER_TEMP:-/tmp}/cruise"
+OUT_DIR="${CRUISE_ACTION_DIR:-${RUNNER_TEMP:-/tmp}/cruise}"
 mkdir -p "$OUT_DIR"
 
 # The action's own checkout (where prompts/*.md live), so the generated

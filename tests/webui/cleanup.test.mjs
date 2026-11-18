@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 for (const [bridge, args, prefix] of [
@@ -20,10 +21,13 @@ for (const [bridge, args, prefix] of [
         if (closeRejects) {
           executable = join(root, 'runtime');
           const pidFile = join(root, 'pid');
-          await writeFile(executable, `#!/bin/sh\necho $$ > '${pidFile.replaceAll("'", "'\\''")}'\nprintf 'http://127.0.0.1:12345\\n'\nexec /bin/sleep 60\n`, { mode: 0o755 });
+          await writeFile(executable, `#!/bin/sh\necho $$ > '${pidFile.replaceAll("'", "'\\''")}'\nprintf 'cruise daemon listening on http://127.0.0.1:12345/\\n'\nprintf 'cruise daemon WebUI login: http://127.0.0.1:12345/login?nonce=cleanup-fixture\\n'\nexec /bin/sleep 60\n`, { mode: 0o755 });
           const source = (await readFile(path, 'utf8')).replace(
             "import { chromium } from 'playwright';",
             "const chromium = { launch: async () => ({ version: () => 'cleanup fixture', newContext: async () => { throw new Error('injected context failure'); }, close: async () => { throw new Error('injected close rejection'); } }) };",
+          ).replace(
+            "import { loginWebUi, waitForWebUiLogin } from './auth.mjs';",
+            `import { loginWebUi, waitForWebUiLogin } from '${pathToFileURL(resolve('tests/webui/auth.mjs')).href}';`,
           );
           command = ['--input-type=module', '-e', source, '--', path, ...args];
         }

@@ -1,41 +1,43 @@
 **言語:** [English](../en/usage.md) | [日本語](../ja/usage.md) | [简体中文](../zh/usage.md) · [目次](README.md)
 
 <a id="webui"></a>
-## WebUI
+## Daemon と WebUI
 
-サーバー描画型ブラウザー UI を起動します。
+Cruise はユーザーおよび state directory ごとに 1 つの常駐 daemon を実行します。session command は daemon の client です。対象は `plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`list`、`tell`、`clean`、`diff` です。daemon が起動していなければ、これらの command が必要に応じて自動起動します。`cruise webui` も daemon の起動を確認し、WebUI の login URL を表示します。必要なら browser も開けます。
 
 ```sh
 cruise webui
+cruise webui --open
 ```
 
-このコマンドはフォアグラウンドで実行されます。代わりにバックグラウンドインスタンスを管理するには、次を使います。
+`cruise daemon` で daemon を管理します。
 
 ```sh
-cruise webui start --port 8484
-cruise webui status
-cruise webui status --json
-cruise webui restart --port 8484
-cruise webui stop
+cruise daemon start
+cruise daemon status --json
+cruise daemon restart
+cruise daemon stop --force
+cruise daemon serve
 ```
 
-`start` と `restart` は、後述する同じサーバーオプションを受け付けます。オプションはサブコマンドの後に指定してください。正常なシャットダウンを完了できない場合、`stop --force` で強制終了できます。停止中のインスタンスを示す `status` は、ゼロ以外の終了ステータスを返します。WebUI の停止はセッション削除の要求ではありません。ライフサイクル用コマンドが管理するのはローカルインスタンスです。
+`serve` は container や debugging 用の foreground 実行です。`start`、`restart`、`serve` は `--host`、`--port`、`--webui-dir`、`-o`/`--open` を受け付けます。既定 address は `127.0.0.1:8484` です。port を指定せず 8484 が使用中の場合、Cruise は警告を出して ephemeral port を使います。共有 host では `--port` または `CRUISE_DAEMON_PORT` を明示してください。どちらも `0` は ephemeral port を要求します。`cruise webui` の login URL には registry API token ではなく、5 分で期限切れになる一度だけ使える nonce が含まれます。ログインすると、API token とは別のランダムな in-memory session ID が HttpOnly、SameSite=Strict の `cruise_webui` cookie に設定され、daemon 終了時に無効になります。origin だけでは 401 が表示されます。`-o`/`--open` は 0600 の一時 HTML redirect file を開くため、URL は opener の command line に渡されません。loopback bind は `localhost`、`127.0.0.1`、`[::1]` の Host 名だけを任意の port で受け付け、DNS rebinding に使われる外部 Host 名を拒否しつつ SSH tunnel を許可します。non-loopback bind は平文 HTTP で配信されるため、信頼できる network 内、または TLS proxy の背後でのみ使用してください。
 
-`restart` は別の値を指定しない限り前回のホストとポートを再利用します。停止と再起動は実行中の WebUI 操作のキャンセルを要求します。実行中のセッションは削除されず、中断状態になり、後から再開できます。
+daemon registry と log は `$XDG_STATE_HOME/cruise/daemon/`（通常 `~/.local/state/cruise/daemon/`）にあります。`instance.json` は mode `0600` で、ランダムな API token を含みます。`daemon.log` に daemon log が記録されます。この directory は非公開に保ってください。起動時サービスのインストールも idle 時の自動終了もありません。registry record が削除されると daemon は終了します。従来の `cruise webui start|stop|restart|status` command は削除されました。`cruise daemon ...` を使ってください。
+Detached daemon は 60 秒ごとに `daemon.log` を確認します。5 MiB を超えると、現在の log で `daemon.log.1` を置き換えて live log を truncate します。rotation は 1 世代だけ保持します。
 
-WebUI のインスタンスレコード（`$XDG_STATE_HOME/cruise/webui/instance.json`、通常は `~/.local/state/cruise/webui/`）には制御資格情報が含まれるため、非公開に保ってください。
+v0.3.0 の分離 WebUI から更新する場合、旧 server が稼働中の間は `daemon start`、`restart`、`serve` と client の自動起動を拒否します。先に `cruise daemon stop` を実行してください。旧 server の停止では実行中の作業を cancel し、session は `Suspended` になります。`cruise run <id>` で再開できます。`cruise daemon status` は稼働中の旧 server を表示し、daemon 起動時には停止済みの旧 registry を削除します。
 
-既定 URL は `http://127.0.0.1:8484/` です。次のフラグで変更できます。
+また、別の cruise process が runner として記録され実行中の session（更新時に進行中だった v0.3.0 の `cruise run` など）に対する run と planning を daemon は拒否します（HTTP 409、CLI は exit 1、state は変更しません）。v0.3.0 の background planning worker は runner を記録しないため検出できません。更新前に開始した background plan は完了を待ってから操作してください。
 
-- `--host <ADDR>` — bind するインターフェース（既定 `127.0.0.1`。WebUI に認証機能はないため、信頼できないネットワークに bind しないでください）。
-- `--port <PORT>` — 待ち受ける TCP ポート（既定 `8484`）。
-- `-o`、`--open` — サーバー起動後に既定のブラウザーで WebUI を開きます（既定では開かれません。表示された URL に自分でアクセスしてください）。
-- `--webui-dir <DIR>` — 開発用にディスク上の `templates/` と `static/` を提供します。例: `cruise webui --webui-dir webui`。
-- `Ctrl-C` — サーバーを停止します。実行中の操作はキャンセルされます（セッションは `Suspended` になります）。
+workflow 設定は CLI client 側で解決されます。working directory と `CRUISE_MODEL`、`CRUISE_PLAN_MODEL`、`CRUISE_SDK` などの workflow override 環境変数は各 request とともに送られ、その request にのみ適用されます。`PATH`、`GH_TOKEN`、provider credential、`CRUISE_FORGE`、`CRUISE_SKIP_AGENT_AUTH_CHECK`、`CRUISE_DISABLE_NOTIFICATIONS`、`CRUISE_COMMIT_COAUTHOR_*` などの process-level 変数は daemon の環境から取得されます。変更後は `cruise daemon restart` を実行してください。自動起動では workflow override 変数が daemon 環境から除外されます。明示的な `cruise daemon start` または `serve` ではその環境が保持されます。WebUI session は daemon の環境と home directory を working directory として使います。herdr の報告は引き続き client 側で行われます。
 
-Graph タブは Mermaid を jsDelivr から読み込むため、ネットワーク接続が必要です。それ以外の WebUI タブはオフラインで動作します。
+`cruise update` 後、daemon が busy の間は古い version のまま稼働します。CLI client は `cruise daemon restart` を idle 時に実行するよう案内して request を拒否し、WebUI も再起動まで古い version のままです。idle の daemon は次の client request で自動再起動します。
 
-デスクトップではサイドバーのフッター、モバイルではヘッダーで表示言語を選択します。選択するとページが再読み込みされます。
+foreground command は daemon から進捗を stream します。Ctrl+C は操作をキャンセルします（`run` は `Suspended` になり、planning は元に戻ります）。terminal を閉じても daemon の作業は止まりません。`cruise run <session-id>` または WebUI から再接続できます。Ask と Option の prompt は terminal と WebUI に表示され、先に送信された回答が採用されます。非対話 client に回答待ち prompt がある場合、session は待機し、WebUI または `cruise run <session-id>` から回答できます。`cruise --plan` の planning も detached worker process ではなく daemon 内で実行されます。
+
+session の変更はすべて daemon を経由するため、複数の CLI process と WebUI は安全に同時操作できます。claim により同じ session の作業重複を防ぎます。ローカル専用 command は `config`、`usage`、`update`、`install`、`workflow *`、`docs`、`ssh` とすべての `--dry-run` です。これらはローカル daemon に接続しません。
+
+Graph tab は Mermaid を jsDelivr から読み込むため、ネットワーク接続が必要です。それ以外の WebUI tab はオフラインで動作します。desktop では sidebar footer、mobile では header から表示言語を選択します。選択するとページが再読み込みされます。
 
 <a id="usage"></a>
 # 使い方
@@ -77,7 +79,7 @@ cruise exec "do this"
 # Run one agent without writing a workflow YAML
 cruise exec --instant "do this"
 
-# Open the full interactive keyboard client
+# TTY では bare `cruise` が対話型 session selector（`cruise list` と同じ）を開きます
 cruise
 
 # List and manage sessions with the CLI selector
@@ -90,7 +92,7 @@ cruise diff <SESSION_ID> --stat
 # Remove closed/merged PR sessions and terminal no-PR sessions
 cruise clean
 
-# Open the TUI in a remote project
+# 転送引数がない場合、リモートで `cruise list` を実行します
 cruise ssh devbox --cwd /srv/project
 
 # Run remote commands and forward stdin or root options unchanged
@@ -106,72 +108,13 @@ cruise ssh devbox -- --plan "implement the feature" --repo owner/repository
 cruise "implement the feature"
 ```
 
-CLI と TUI は、**Action required**、**Plan ready**、**Completed**、**Failed** のワークフローイベントに対して、デスクトップ通知、サウンド、Slack webhook をベストエフォートでサポートします。デスクトップ通知には macOS または Linux のデスクトップセッションが必要です。サウンドは既定で無効です。配信に失敗してもワークフロー結果や終了ステータスは変わりません。3 つすべてを無効にするには `CRUISE_DISABLE_NOTIFICATIONS=1` を設定してください。設定と WebUI の動作については[通知](cli-reference.md#notifications)を参照してください。
+ワークフローイベント **Action required**、**Plan ready**、**Completed**、**Failed** の通知は、作業を開始した client（CLI または WebUI）にかかわらず daemon が送信します。サウンドと Slack webhook は常に daemon から配信されます。WebUI browser tab が接続されている場合、デスクトップ通知は browser notification として表示されます。WebUI browser が接続されていない場合、daemon がネイティブのデスクトップ通知を表示します（macOS/Linux のデスクトップセッション）。サウンドは既定で無効です。配信に失敗してもワークフロー結果や終了ステータスは変わりません。daemon の環境に `CRUISE_DISABLE_NOTIFICATIONS=1` を設定し、`cruise daemon restart` で再起動すると、daemon のデスクトップ通知、サウンド、webhook 配信が無効になります。WebUI のブラウザー通知は無効になりません。設定と WebUI の動作については[通知](cli-reference.md#notifications)を参照してください。
 
 <a id="herdr-integration"></a>
 ## herdr 連携
 
-[herdr](https://herdr.dev) ペイン内（`HERDR_ENV=1` に加え `HERDR_PANE_ID` と `HERDR_BIN_PATH` が設定済み）では、TUI、`cruise plan`、`cruise run`、`cruise exec` がライフサイクル状態を報告します。報告はベストエフォートで、ワークフローの成功・失敗・終了ステータスには影響しません。無効にするには `CRUISE_DISABLE_HERDR=1` を設定してください。
+herdr ペイン内（`HERDR_ENV=1` に加え `HERDR_PANE_ID` と `HERDR_BIN_PATH` が設定済み）では、`cruise plan`、`cruise run`、`cruise exec` がライフサイクル状態を報告します。報告はベストエフォートで、ワークフローの成功・失敗・終了ステータスには影響しません。無効にするには `CRUISE_DISABLE_HERDR=1` を設定してください。
 herdr ペインから、実行中のセッションに指示するには `cruise tell <session-id> "instruction"` を使います。
-
-<a id="tui-interactive-keyboard-client"></a>
-## TUI（対話型キーボードクライアント）
-
-引数なしで `cruise` を実行すると、CLI と WebUI に並ぶ第 3 のクライアントである Cruise 公式の対話型キーボードクライアントが開きます。既存の CLI 動作を維持しながら、WebUI のセッション管理ワークフローをターミナルで利用できます。
-
-```sh
-# Open the interactive client
-cruise
-```
-
-一般的な流れ: `cruise` を起動して `n` を押し、Source、作業ディレクトリまたはリポジトリ、ワークフロー設定を選んでからタスクを入力します。通常の計画には `Ctrl-P`、grill 計画には `Ctrl-G`、入力をそのまま計画として使うには `Ctrl-U` を押します。または `Tab` で残りの質問に 1 つずつ回答し、最後に起動モードを選べます。Task の後の質問は Images、宣言済みワークフローフラグ（ある場合）、スキップするステップ（フラグで無効なステップは非表示）、Workspace（Directory セッションのみ）、必要に応じて Dirty tree、Launch です。`1` でセッションを確認または操作し、`3` で計画済みキューを **Run All** から実行します。Run All で `p` を押して共有並列数を編集し、正の整数を入力します。`Enter` で保存、`Esc` でキャンセルします。
-
-TUI の利用には macOS、Linux、Windows 上の対話型 TTY が必要です。自動化インターフェースではありません。自動化、JSON 出力、CI には CLI を使ってください。GitHub を使うワークフローには外部の [`gh` CLI](https://cli.github.com/) が必要です。TUI はこれを同梱も代替もしません。Current-branch のみの作業には `gh` は不要です（GitLab リポジトリでは `glab` が必要です）。
-
-<a id="screens-and-workflows"></a>
-### 画面とワークフロー
-
-TUI には 3 つのビューがあります。
-
-- **Sessions** — 全体のセッション一覧を表示します。セッションを選ぶと **Info**、**Graph**、**Plan**、**Log**、**Diff** の詳細タブを表示します。[`cruise list` の操作一覧](sessions.md#cruise-list-actions)は list メニューの説明であり、TUI の操作全体ではありません。Ask や Option のプロンプト、Clean、worktree/current-branch の選択、Publish as Issue、PR リンクも扱います。
-- **New Session** — 質問を 1 つずつ表示する対話形式でセッションまたは draft を作成します。順序は Source、作業ディレクトリまたはリポジトリ、ワークフロー設定、タスク、画像、ワークフローフラグ（設定が宣言している場合）、スキップするステップ、workspace モード、dirty tree の許可（current-branch 実行のみ）、最後に起動モードです。先の回答で不要になった質問は省略されます。
-- **Run All** — Planned または Suspended セッションを、ライブの並列実行、アプリ内の状態表示、ベル通知とともに実行します。
-
-PR と Issue の URL はテキストとして表示されます。Publish as Issue が成功した場合は、新しい issue の URL も自動的に開きます。それ以外の Markdown リンクはテキストのままです。CLI 専用の `config` と `exec` は TUI 画面ではなく CLI コマンドで利用します。
-
-選択したセッションは、計画中またはフェーズが **Awaiting Input**、**Awaiting Approval**、**Planned** の間は **Plan** タブで、それ以外では **Info** タブで開きます。`ask_user` はモーダルを開かずセッションを一時停止し、セッションを **Awaiting Input** にして、質問をそのセッションの **Plan** タブだけに表示します。そのセッションで `o` を押すか **Answer Prompt** を選ぶと Plan タブを開いて詳細ペインにフォーカスします。`Enter` で編集を開始し、もう一度 `Enter` で送信し、`Esc` で下書きを残したまま編集を終了します。実行をキャンセルするとセッションは `Suspended` になり、計画をキャンセルすると元の状態と計画が復元されます。New Session では空白でないタスクまたは少なくとも 1 つの画像添付が必須で、GitHub ソースではリポジトリが必要です。
-
-<a id="keyboard-map"></a>
-### キーボード一覧
-
-TUI はキーボードのみで操作します。キーは固定で、変更できません。
-
-| キー | 操作 |
-|---|---|
-| `1` / `2` / `3` | Sessions / New Session / Run All を切り替えます |
-| `n` | New Session を最初の質問 Source で開きます。タスク入力前に場所と設定を選びます |
-| `r` | 更新します |
-| `L` | UI 言語または `auto` を選び、アプリケーション設定に保存します |
-| `?` | ヘルプを表示します |
-| `q` / `Ctrl-C` | 終了します。実行中は確認後に作業をキャンセルします |
-| `Ctrl-P` | 現在の回答から New Session を作成し、通常の計画を開始します |
-| `Ctrl-G` | 現在の回答から New Session を作成し、grill 計画を開始します |
-| `Ctrl-U` | 現在の回答から New Session を作成し、入力をそのまま計画として使います |
-| `Ctrl-S` | New Session の回答を draft として保存します |
-| `Tab` / `Shift-Tab` | 次／前の質問に移動します（候補が一致する場合はワークフロー設定の任意パスも含め、Tab で先にパスを補完します）。Sessions ではサイドバーと詳細ペイン間のフォーカスを切り替えます |
-| 矢印キー / `j` / `k` / `PgUp` / `PgDn` / `Home` / `End` | リストや選択肢を移動します。対話画面では `Up` / `Down` でワークフロー設定候補を選択し、最近のディレクトリや `gh` リポジトリを呼び出すか、スキップするステップの一覧を移動します。テキスト質問では `Left` / `Right` / `Home` / `End` で文字列を編集し、`j` / `k` は文字として入力されます。テキスト以外の選択肢では `j` / `k` で移動します。Sessions ではフォーカス位置に応じて矢印キーの動作が変わります。サイドバーではセッションを切り替え（`Right` で詳細ペインへ移動）、詳細ペインでは Info、Plan、Log をスクロールするか Graph ノードを選択し、`Left` / `Right` で詳細タブを切り替えます |
-| `[` / `]` | 詳細タブを切り替えます |
-| `a` | 操作パレットを開きます |
-| `p` | Run All で共有並列数を編集します。`Enter` で保存、`Esc` でキャンセルします |
-| `e` | Run All で自動再キュー上限を編集します。`Enter` で保存、`Esc` でキャンセルします |
-| `o` | Sessions では選択中セッションの Ask を Plan タブで開きます。それ以外では Option キューを処理するか、専用の PR/Issue URL を開きます |
-| `f` | ログを追尾します |
-| `c` | Sessions で Clean 可能なセッションと PR 終了済みセッションのクリーンアップ確認を開きます |
-| `Ctrl-R` | 複数行 Edit Settings 入力で、保存のみ／保存して再生成を切り替えます |
-| `Enter` | Plan Ask では回答の編集を開始または送信します。それ以外では New Session の回答を確定して次の質問へ進むか、セッション開始・draft 保存を行うか、タスク／画像入力に改行を挿入します |
-| `Ctrl-Enter` | 現在の New Session の質問を進めます（タスク／画像エディターでは `Enter` が改行になるため必須）。複数行 Edit Settings では保存します（再生成が選択されていれば再生成も行います） |
-| `Space` | 現在の選択肢または強調表示中のステップのスキップを切り替えます |
-| `Esc` | Plan Ask の編集中は下書きを破棄せず編集を終了します。それ以外では前の質問に戻り、最初の質問では Sessions に戻ります |
 
 <a id="workflow-packages"></a>
 ## ワークフローパッケージ

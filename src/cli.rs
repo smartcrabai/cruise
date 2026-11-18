@@ -113,8 +113,6 @@ mod issue_entrypoint_tests {
 pub enum Commands {
     /// Create an implementation plan for a task.
     Plan(PlanArgs),
-    #[command(hide = true)]
-    PlanWorker(PlanWorkerArgs),
     /// Save a task description as a draft, without generating a plan.
     Draft(DraftArgs),
     /// Execute a planned session.
@@ -135,7 +133,9 @@ pub enum Commands {
     Exec(ExecArgs),
     /// Run a cruise command on a remote host through OpenSSH.
     Ssh(SshArgs),
-    /// Serve or manage the browser UI on this machine.
+    /// Start, stop, restart, and inspect the resident daemon.
+    Daemon(DaemonArgs),
+    /// Print the `WebUI` login URL; optionally open it in the browser.
     Webui(WebuiArgs),
     /// Update Cruise itself or inspect an in-progress update.
     Update(UpdateArgs),
@@ -305,14 +305,16 @@ pub struct InternalArgs {
 pub enum InternalCommand {
     /// Enforce this prompt's jcode pre-tool shell policy.
     JcodePreTool,
-    /// Serve a detached `WebUI` instance.
-    WebuiServe {
+    /// Serve a detached daemon instance.
+    DaemonServe {
         #[arg(long)]
         instance_id: String,
         #[arg(long)]
         host: String,
         #[arg(long)]
-        port: u16,
+        port: Option<u16>,
+        #[arg(long, hide = true)]
+        port_implicit: bool,
         #[arg(long)]
         webui_dir: Option<std::path::PathBuf>,
     },
@@ -332,26 +334,32 @@ pub enum EjectDestination {
     Project,
 }
 
-#[derive(Parser, Debug)]
-#[command(args_conflicts_with_subcommands = true)]
-pub struct WebuiArgs {
-    #[command(flatten)]
-    pub serve: ServeArgs,
+#[derive(clap::Args, Debug)]
+pub struct DaemonArgs {
     #[command(subcommand)]
-    pub action: Option<WebuiAction>,
+    pub command: DaemonCommand,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum WebuiAction {
+pub enum DaemonCommand {
     Start(ServeArgs),
     Stop(StopArgs),
     Restart(ServeArgs),
     Status(StatusArgs),
+    Serve(ServeArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct WebuiArgs {
+    /// Open the `WebUI` through a 0600 temporary redirect file.
+    #[arg(short = 'o', long)]
+    pub open: bool,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct ServeArgs {
-    /// Interface to bind. Non-loopback values expose an unauthenticated UI.
+    /// Interface to bind. `WebUI` access requires the single-use login URL printed by `cruise webui`;
+    /// that URL contains a five-minute nonce, never the registry API token.
     #[arg(long)]
     pub host: Option<String>,
 
@@ -359,7 +367,7 @@ pub struct ServeArgs {
     #[arg(long)]
     pub port: Option<u16>,
 
-    /// Open the `WebUI` in the default browser after the server starts.
+    /// Open the `WebUI` using a private temporary HTML redirect file.
     #[arg(short = 'o', long)]
     pub open: bool,
 
@@ -493,20 +501,6 @@ pub struct DraftArgs {
     pub config: Option<String>,
 }
 
-#[derive(Parser, Debug)]
-pub struct PlanWorkerArgs {
-    /// Session ID whose plan should be generated.
-    #[arg(long)]
-    pub session: String,
-
-    /// Maximum number of retries per LLM call.
-    ///
-    /// SDK fallback policies also use this budget for retryable 4xx, 5xx and
-    /// network failures and fallback switching.
-    #[arg(long, default_value_t = DEFAULT_RATE_LIMIT_RETRIES)]
-    pub rate_limit_retries: usize,
-}
-
 #[derive(Parser, Debug, Clone)]
 #[expect(clippy::struct_excessive_bools)]
 pub struct RunArgs {
@@ -601,7 +595,7 @@ pub struct ConfigArgs {
         value_parser = crate::i18n::resolve::validate_language
     )]
     pub language: Option<String>,
-    /// Set the maximum number of sessions the `WebUI` and TUI run concurrently in `run --all` mode.
+    /// Set the maximum number of sessions the `WebUI` and CLI run concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
     #[arg(long = "set-parallelism", value_name = "N")]
@@ -801,11 +795,6 @@ mod tests {
     #[test]
     fn internal_sync_base_requires_pr_number() {
         assert!(Cli::try_parse_from(["cruise", "internal", "sync-base"]).is_err());
-    }
-
-    #[test]
-    fn tui_is_not_a_subcommand() {
-        assert!(Cli::command().find_subcommand("tui").is_none());
     }
 
     #[test]
@@ -1074,151 +1063,46 @@ mod tests {
         }
     }
 
-    fn webui_open_flag(argv: &[&str]) -> bool {
-        use clap::CommandFactory;
-        let matches = Cli::command()
-            .try_get_matches_from(argv)
-            .unwrap_or_else(|e| panic!("webui args should parse: {e}"));
-        let (name, sub) = matches.subcommand().unwrap_or_else(|| panic!("subcommand"));
-        assert_eq!(name, "webui");
-        sub.try_get_one::<bool>("open")
-            .unwrap_or_else(|e| panic!("webui should define an `open` flag: {e}"))
-            .copied()
-            .unwrap_or(false)
+    #[test]
+    fn daemon_subcommands_parse() {
+        let cli = Cli::parse_from(["cruise", "daemon", "start", "--port", "0"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Start(ServeArgs { port: Some(0), .. })
+            }))
+        ));
+        assert!(Cli::try_parse_from(["cruise", "daemon", "status", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["cruise", "daemon", "stop", "--force"]).is_ok());
+        assert!(Cli::try_parse_from(["cruise", "daemon", "serve", "--host", "127.0.0.1"]).is_ok());
     }
 
     #[test]
-    fn test_webui_open_defaults_to_false() {
-        assert!(!webui_open_flag(&["cruise", "webui"]));
+    fn webui_only_accepts_open_flag() {
+        assert!(Cli::try_parse_from(["cruise", "webui"]).is_ok());
+        assert!(Cli::try_parse_from(["cruise", "webui", "-o"]).is_ok());
+        assert!(Cli::try_parse_from(["cruise", "webui", "start"]).is_err());
     }
 
     #[test]
-    fn test_webui_open_long_flag_sets_true() {
-        assert!(webui_open_flag(&["cruise", "webui", "--open"]));
-    }
-
-    #[test]
-    fn test_webui_open_short_flag_sets_true() {
-        assert!(webui_open_flag(&["cruise", "webui", "-o"]));
-    }
-
-    #[test]
-    fn test_webui_open_short_flag_combines_with_port() {
-        assert!(webui_open_flag(&[
-            "cruise", "webui", "-o", "--port", "9000"
-        ]));
-    }
-
-    #[test]
-    fn test_webui_no_open_flag_is_rejected() {
-        assert!(Cli::try_parse_from(["cruise", "webui", "--no-open"]).is_err());
-    }
-
-    fn webui_matches(argv: &[&str]) -> Result<clap::ArgMatches, clap::Error> {
-        use clap::CommandFactory;
-        Cli::command().try_get_matches_from(argv)
-    }
-
-    fn webui_sub(matches: &clap::ArgMatches) -> &clap::ArgMatches {
-        matches
-            .subcommand_matches("webui")
-            .unwrap_or_else(|| panic!("webui subcommand"))
-    }
-
-    #[test]
-    fn webui_start_parses_host_port_open() {
-        let m = webui_matches(&["cruise", "webui", "start", "--port", "0", "-o"])
-            .unwrap_or_else(|e| panic!("parse: {e}"));
-        let (name, start) = webui_sub(&m)
-            .subcommand()
-            .unwrap_or_else(|| panic!("webui action"));
-        assert_eq!(name, "start");
-        assert_eq!(start.get_one::<u16>("port"), Some(&0));
-        assert_eq!(start.get_one::<bool>("open"), Some(&true));
-        assert_eq!(start.get_one::<String>("host"), None);
-    }
-
-    #[test]
-    fn webui_restart_accepts_serve_flags() {
-        let m = webui_matches(&["cruise", "webui", "restart", "--host", "0.0.0.0"])
-            .unwrap_or_else(|e| panic!("parse: {e}"));
-        let (name, restart) = webui_sub(&m)
-            .subcommand()
-            .unwrap_or_else(|| panic!("webui action"));
-        assert_eq!(name, "restart");
-        assert_eq!(
-            restart.get_one::<String>("host").map(String::as_str),
-            Some("0.0.0.0")
-        );
-        assert_eq!(restart.get_one::<u16>("port"), None);
-    }
-
-    #[test]
-    fn webui_without_subcommand_leaves_host_and_port_unresolved() {
-        let m = webui_matches(&["cruise", "webui"]).unwrap_or_else(|e| panic!("parse: {e}"));
-        let webui = webui_sub(&m);
-        assert!(webui.subcommand().is_none());
-        assert_eq!(webui.get_one::<String>("host"), None);
-        assert_eq!(webui.get_one::<u16>("port"), None);
-    }
-
-    #[test]
-    fn webui_flags_before_subcommand_are_rejected() {
-        assert!(webui_matches(&["cruise", "webui", "--port", "1", "start"]).is_err());
-    }
-
-    #[test]
-    fn webui_stop_accepts_force_only() {
-        let m = webui_matches(&["cruise", "webui", "stop", "--force"])
-            .unwrap_or_else(|e| panic!("parse: {e}"));
-        let (_, stop) = webui_sub(&m)
-            .subcommand()
-            .unwrap_or_else(|| panic!("webui action"));
-        assert_eq!(stop.get_one::<bool>("force"), Some(&true));
-        assert!(webui_matches(&["cruise", "webui", "stop", "--port", "1"]).is_err());
-    }
-
-    #[test]
-    fn webui_status_json_flag() {
-        let m = webui_matches(&["cruise", "webui", "status", "--json"])
-            .unwrap_or_else(|e| panic!("parse: {e}"));
-        let (name, status) = webui_sub(&m)
-            .subcommand()
-            .unwrap_or_else(|| panic!("webui action"));
-        assert_eq!(name, "status");
-        assert_eq!(status.get_one::<bool>("json"), Some(&true));
-    }
-
-    #[test]
-    fn internal_webui_serve_requires_instance_id() {
+    fn internal_daemon_serve_requires_instance_id() {
         assert!(
-            Cli::try_parse_from([
-                "cruise",
-                "internal",
-                "webui-serve",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "0"
-            ])
-            .is_err()
+            Cli::try_parse_from(["cruise", "internal", "daemon-serve", "--host", "127.0.0.1"])
+                .is_err()
         );
         assert!(
             Cli::try_parse_from([
                 "cruise",
                 "internal",
-                "webui-serve",
+                "daemon-serve",
                 "--instance-id",
                 "abc",
                 "--host",
-                "127.0.0.1",
-                "--port",
-                "0"
+                "127.0.0.1"
             ])
             .is_ok()
         );
     }
-
     #[test]
     fn workflow_subcommands_parse() {
         let cli = Cli::parse_from(["cruise", "workflow", "add", "org/repo"]);

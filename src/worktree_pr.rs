@@ -182,6 +182,7 @@ pub async fn handle_worktree_pr_with_checkpoint(
     on_pr_processing: Option<&PrProcessingCallback<'_>>,
     on_pr_created: Option<&PrCreatedCallback<'_>>,
     instructions: Option<&crate::instruction_inbox::RunInbox>,
+    ask_handler: Option<&std::sync::Arc<dyn crate::ask_handler::AskHandler>>,
     checkpoint: Option<AfterPrCheckpoint<'_>>,
     on_checkpoint: &(
          dyn Fn(&crate::engine::NodeCheckpoint<'_>, &crate::graph::ExecutionGraph) -> Result<()>
@@ -209,6 +210,7 @@ pub async fn handle_worktree_pr_with_checkpoint(
             option_handler,
             on_step_log,
             instructions,
+            ask_handler,
             checkpoint,
             on_checkpoint,
         )
@@ -246,6 +248,7 @@ pub async fn handle_worktree_pr_with_checkpoint(
             option_handler,
             on_step_log,
             instructions,
+            ask_handler,
             checkpoint,
             on_checkpoint,
         )
@@ -718,6 +721,7 @@ pub(crate) async fn run_after_pr_steps(
         on_step_log,
         instructions,
         None,
+        None,
         &|_, _| Ok(()),
     )
     .await
@@ -741,6 +745,7 @@ pub(crate) async fn run_after_pr_steps_with_checkpoint(
     option_handler: &dyn OptionHandler,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
     instructions: Option<&crate::instruction_inbox::RunInbox>,
+    ask_handler: Option<&std::sync::Arc<dyn crate::ask_handler::AskHandler>>,
     checkpoint: Option<AfterPrCheckpoint<'_>>,
     on_checkpoint: &(
          dyn Fn(&crate::engine::NodeCheckpoint<'_>, &crate::graph::ExecutionGraph) -> Result<()>
@@ -805,6 +810,7 @@ pub(crate) async fn run_after_pr_steps_with_checkpoint(
         on_step_start: &|_| Ok(()),
         cancel_token,
         option_handler,
+        ask_handler,
         config_reloader: None,
         working_dir: Some(working_dir),
         skipped_steps,
@@ -1935,6 +1941,7 @@ mod tests {
             callback,
             None,
             None,
+            None,
             &|_, _| Ok(()),
         )
         .await;
@@ -2833,6 +2840,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             None,
             None,
             None,
+            None,
             &|_, _| Ok(()),
         )
         .await;
@@ -2956,6 +2964,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             &crate::option_handler::NoOpOptionHandler,
             None,
             None,
+            None,
             Some(AfterPrCheckpoint {
                 execution_id: Some("execution"),
                 resume: None,
@@ -2993,6 +3002,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             &crate::flags::NO_FLAGS,
             None,
             &crate::option_handler::NoOpOptionHandler,
+            None,
             None,
             None,
             Some(AfterPrCheckpoint {
@@ -3333,6 +3343,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             None,
             None,
             Some(&on_pr_created),
+            None,
             None,
             None,
             &|_, _| Ok(()),

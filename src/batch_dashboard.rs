@@ -8,11 +8,21 @@ use std::time::{Duration, Instant};
 use console::{Term, measure_text_width, style};
 use indexmap::IndexMap;
 
+use crate::application::ApplicationEvent;
+#[cfg(test)]
 use crate::error::{CruiseError, Result};
-use crate::option_handler::{OptionHandler, prompt_lock_guard};
+#[cfg(test)]
+use crate::option_handler::OptionHandler;
+use crate::option_handler::prompt_lock_guard;
+#[cfg(test)]
 use crate::run_observer::{RunObserver, RunPhase};
-use crate::session::{SessionPhase, SessionState};
+#[cfg(test)]
+use crate::session::SessionPhase;
+#[cfg(test)]
+use crate::session::SessionState;
+#[cfg(test)]
 use crate::step::OptionChoice;
+#[cfg(test)]
 use crate::step::option::OptionResult;
 
 const DASHBOARD_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
@@ -32,10 +42,13 @@ pub(crate) enum RowStatus {
     Step(String),
     CreatingPr,
     WaitingInput,
-    Completed { pr_url: Option<String> },
+    Completed {
+        pr_url: Option<String>,
+    },
     Failed(String),
     PrFailed(String),
     Suspended,
+    #[cfg(test)]
     Paused,
 }
 
@@ -101,6 +114,7 @@ impl BatchDashboard {
     }
 
     /// Add a row when the scheduler starts a worker.
+    #[cfg(test)]
     pub fn add(&self, session: &SessionState) {
         let mut rows = self.lock_rows();
         rows.insert(
@@ -117,7 +131,108 @@ impl BatchDashboard {
         );
     }
 
+    /// Add a row from the daemon's lightweight session-list response.
+    pub fn add_summary(&self, id: &str, title: &str) {
+        self.lock_rows().insert(
+            id.to_owned(),
+            Row {
+                title: crate::display::truncate(&sanitize_terminal_text(title), MAX_TITLE_CHARS),
+                status: RowStatus::Preparing,
+                started: Instant::now(),
+                finished_at: None,
+            },
+        );
+    }
+
+    /// Apply a daemon event to the matching dashboard row.
+    pub fn on_event(&self, event: &ApplicationEvent) {
+        let mut rows = self.lock_rows();
+        match event {
+            ApplicationEvent::BatchSessionStarted { id } => {
+                let row = rows.entry(id.clone()).or_insert_with(|| Row {
+                    title: id.clone(),
+                    status: RowStatus::Preparing,
+                    started: Instant::now(),
+                    finished_at: None,
+                });
+                row.status = RowStatus::Preparing;
+            }
+            ApplicationEvent::StepStarted { session_id, step } => {
+                if let Some(row) = rows.get_mut(session_id) {
+                    row.status = RowStatus::Step(step.clone());
+                    row.finished_at = None;
+                }
+            }
+            ApplicationEvent::RunPhase { session_id, phase } => {
+                if let Some(row) = rows.get_mut(session_id) {
+                    row.status = if phase == "Creating PR" {
+                        RowStatus::CreatingPr
+                    } else {
+                        RowStatus::Preparing
+                    };
+                }
+            }
+            ApplicationEvent::AskUserRequired { session_id, .. }
+            | ApplicationEvent::OptionRequired { session_id, .. } => {
+                if let Some(row) = rows.get_mut(session_id) {
+                    row.status = RowStatus::WaitingInput;
+                }
+            }
+            ApplicationEvent::RunFinished { session_id, .. } => {
+                if let Some(row) = rows.get_mut(session_id) {
+                    row.status = RowStatus::Completed { pr_url: None };
+                    row.finished_at = Some(Instant::now());
+                }
+            }
+            ApplicationEvent::RunFailed { session_id, error } => {
+                if let Some(row) = rows.get_mut(session_id) {
+                    row.status = RowStatus::Failed(error.clone());
+                    row.finished_at = Some(Instant::now());
+                }
+            }
+            ApplicationEvent::RunCancelled { session_id } => {
+                if let Some(row) = rows.get_mut(session_id) {
+                    row.status = RowStatus::Suspended;
+                    row.finished_at = Some(Instant::now());
+                }
+            }
+            ApplicationEvent::AutoRequeued { session_id, .. } => {
+                if let Some(row) = rows.get_mut(session_id) {
+                    row.status = RowStatus::Preparing;
+                    row.finished_at = None;
+                }
+            }
+            ApplicationEvent::BatchSessionFinished { id, phase, error } => {
+                let row = rows.entry(id.clone()).or_insert_with(|| Row {
+                    title: id.clone(),
+                    status: RowStatus::Preparing,
+                    started: Instant::now(),
+                    finished_at: None,
+                });
+                row.status = match phase.as_str() {
+                    "Completed" => RowStatus::Completed { pr_url: None },
+                    "Suspended" => RowStatus::Suspended,
+                    "PR Failed" | "PrFailed" => {
+                        RowStatus::PrFailed(error.clone().unwrap_or_default())
+                    }
+                    "Failed" => RowStatus::Failed(error.clone().unwrap_or_default()),
+                    "Busy" => RowStatus::Failed(
+                        error
+                            .clone()
+                            .unwrap_or_else(|| "session is already busy".to_owned()),
+                    ),
+                    _ => error.as_ref().map_or(RowStatus::Preparing, |error| {
+                        RowStatus::Failed(error.clone())
+                    }),
+                };
+                row.finished_at = Some(Instant::now());
+            }
+            _ => {}
+        }
+    }
+
     /// Mark a worker's terminal state and retain its elapsed time.
+    #[cfg(test)]
     pub fn finish(&self, id: &str, state: &SessionState, outcome: &Result<()>) {
         let mut rows = self.lock_rows();
         let Some(row) = rows.get_mut(id) else {
@@ -175,16 +290,21 @@ impl BatchDashboard {
 }
 
 fn is_finished(status: &RowStatus) -> bool {
-    matches!(
-        status,
+    match status {
         RowStatus::Completed { .. }
-            | RowStatus::Failed(_)
-            | RowStatus::PrFailed(_)
-            | RowStatus::Suspended
-            | RowStatus::Paused
-    )
+        | RowStatus::Failed(_)
+        | RowStatus::PrFailed(_)
+        | RowStatus::Suspended => true,
+        #[cfg(test)]
+        RowStatus::Paused => true,
+        RowStatus::Preparing
+        | RowStatus::Step(_)
+        | RowStatus::CreatingPr
+        | RowStatus::WaitingInput => false,
+    }
 }
 
+#[cfg(test)]
 impl RunObserver for BatchDashboard {
     fn on_phase(&self, session_id: &str, phase: RunPhase) {
         let mut rows = self.lock_rows();
@@ -231,6 +351,7 @@ fn status_parts(status: &RowStatus) -> (console::StyledObject<&'static str>, Str
             format!("PR failed: {}", sanitize_terminal_text(reason)),
         ),
         RowStatus::Suspended => (style("||").yellow().bold(), "Suspended".to_string()),
+        #[cfg(test)]
         RowStatus::Paused => (style("||").yellow().bold(), "Paused".to_string()),
     }
 }
@@ -293,11 +414,13 @@ fn repaint(
 }
 
 /// Option handler that coordinates an interactive option step with the dashboard.
+#[cfg(test)]
 pub struct DashboardOptionHandler {
     pub(crate) session_id: String,
     pub(crate) dashboard: Arc<BatchDashboard>,
 }
 
+#[cfg(test)]
 impl OptionHandler for DashboardOptionHandler {
     fn select_option(&self, choices: &[OptionChoice], plan: Option<&str>) -> Result<OptionResult> {
         self.dashboard

@@ -1,6 +1,7 @@
 module base_ci_gate
 
-// One atom is one independent invocation. Inputs abstract CLI and UI setup.
+// One atom is one independent client invocation. Entry labels abstract CLI and
+// WebUI clients converging on daemon-owned admission, not separate processes.
 abstract sig Entry {}
 one sig Cli, Ui extends Entry {}
 abstract sig Forge {}

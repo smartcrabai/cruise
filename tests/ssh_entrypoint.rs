@@ -176,7 +176,7 @@ fn assert_ssh_invocation(fixture: &Fixture, destination: &str) -> String {
 }
 
 #[test]
-fn ssh_destination_only_starts_bare_remote_cruise() {
+fn ssh_destination_only_runs_remote_list() {
     let fixture = Fixture::new();
     let output = fixture
         .command()
@@ -195,7 +195,7 @@ fn ssh_destination_only_starts_bare_remote_cruise() {
         "SSH should connect exactly once"
     );
     let command = assert_ssh_invocation(&fixture, "devbox");
-    assert_eq!(command, format!("exec {}", shell_quote("cruise")));
+    assert_eq!(command, "exec 'cruise' 'list'");
 }
 
 #[test]

@@ -952,9 +952,13 @@ fn file_reference_reloader_reloads_when_only_user_defaults_change() {
         "command: [echo]\nsteps:\n  first:\n    command: 'true'\n",
     )
     .unwrap_or_else(|error| panic!("write workflow: {error}"));
-    let reloader =
-        config_reloader_for_reference(&SessionConfigRef::File { path: workflow }, Some(project), 3)
-            .unwrap_or_else(|| panic!("expected a File-reference reloader"));
+    let reloader = config_reloader_for_reference(
+        &SessionConfigRef::File { path: workflow },
+        Some(project),
+        3,
+        None,
+    )
+    .unwrap_or_else(|| panic!("expected a File-reference reloader"));
     assert!(
         reloader()
             .unwrap_or_else(|error| panic!("check initial config: {error}"))
@@ -998,9 +1002,13 @@ fn file_reference_reloader_reloads_when_only_project_defaults_change() {
         "command: [echo]\nsteps:\n  first:\n    command: 'true'\n",
     )
     .unwrap_or_else(|error| panic!("write workflow: {error}"));
-    let reloader =
-        config_reloader_for_reference(&SessionConfigRef::File { path: workflow }, Some(project), 3)
-            .unwrap_or_else(|| panic!("expected a File-reference reloader"));
+    let reloader = config_reloader_for_reference(
+        &SessionConfigRef::File { path: workflow },
+        Some(project),
+        3,
+        None,
+    )
+    .unwrap_or_else(|| panic!("expected a File-reference reloader"));
     assert!(
         reloader()
             .unwrap_or_else(|error| panic!("check initial config: {error}"))
@@ -1147,6 +1155,7 @@ fn mixed_sdk_live_reload_preserves_updated_compiled_candidate_lists() {
         },
         Some(temp.path().to_path_buf()),
         3,
+        None,
     )
     .unwrap_or_else(|| panic!("expected live reloader"));
     assert!(
@@ -1226,6 +1235,7 @@ fn mixed_sdk_defaults_reload_propagates_complete_compiled_candidate_lists() {
         &SessionConfigRef::File { path: workflow },
         Some(temp.path().to_path_buf()),
         3,
+        None,
     )
     .unwrap_or_else(|| panic!("expected live reloader"));
     assert!(

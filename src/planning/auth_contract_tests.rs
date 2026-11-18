@@ -179,7 +179,6 @@ impl Credentials {
             progress: PlanProgress::Hidden,
             rate_limit_retries: 0,
             working_dir: Some(self.dir.path()),
-            grill: false,
             on_session_id: None,
             on_notice: None,
             cancel_token: Some(&token),

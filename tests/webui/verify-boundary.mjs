@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
+import { loginWebUi, waitForWebUiLogin } from './auth.mjs';
 
 const root = await mkdtemp(join(tmpdir(), 'cruise-verify-boundary-'));
 const repo = join(root, 'repo');
@@ -37,19 +38,14 @@ try {
     CRUISE_DISABLE_NOTIFICATIONS: '1', CRUISE_DISABLE_HERDR: '1', NO_COLOR: '1',
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
   server = spawn(process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime'),
-    ['webui', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    ['daemon', 'serve', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   closed = new Promise(ok => server.once('close', ok));
   server.stderr.on('data', chunk => { logs += chunk; });
-  const base = await new Promise((ok, fail) => {
-    let stdout = '';
-    const timer = setTimeout(() => fail(new Error(`startup timeout: ${logs}`)), 20000);
-    server.once('error', error => { clearTimeout(timer); fail(error); });
-    server.once('exit', code => { clearTimeout(timer); fail(new Error(`server exited ${code}: ${logs}`)); });
-    server.stdout.on('data', chunk => { stdout += chunk; const match = stdout.match(/http:\/\/127\.0\.0\.1:\d+/); if (match) { clearTimeout(timer); ok(match[0]); } });
-  });
+  const { base, loginUrl } = await waitForWebUiLogin(server, () => logs);
   const browserEnv = { ...env };
   browser = await chromium.launch({ headless: true, env: browserEnv });
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, reducedMotion: 'reduce' });
+  await loginWebUi(page, loginUrl);
   page.setDefaultTimeout(20000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));

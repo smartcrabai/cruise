@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { chromium } from 'playwright';
+import { loginWebUi, waitForWebUiLogin } from './auth.mjs';
 
 const [contract, rawWidth, rawHeight] = process.argv.slice(2);
 const width = Number(rawWidth), height = Number(rawHeight);
@@ -89,28 +90,19 @@ const env = { PATH: `${bin}:${process.env.PATH}`, HOME: root, XDG_CONFIG_HOME: j
   XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'),
   CRUISE_DISABLE_NOTIFICATIONS: '1', CRUISE_DISABLE_HERDR: '1', CRUISE_UI_LANGUAGE: 'en', NO_COLOR: '1' };
 const server = spawn(process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime'),
-  ['webui', '--port', '0', '--webui-dir', resolve(process.env.WEBUI_BDD_ASSETS || 'webui')],
+  ['daemon', 'serve', '--port', '0', '--webui-dir', resolve(process.env.WEBUI_BDD_ASSETS || 'webui')],
   { env, cwd: join(root, 'repo'), stdio: ['ignore', 'pipe', 'pipe'] });
 const serverClosed = new Promise(ok => server.once('close', ok));
 let logs = '', browser, page;
 server.stderr.on('data', data => { logs += data; });
 const watchdog = setTimeout(() => { console.error('browser contract timed out', logs); server.kill('SIGKILL'); process.exit(1); }, 90000);
 try {
-  const base = await new Promise((ok, fail) => {
-    let text = '';
-    const timeout = setTimeout(() => fail(new Error(`server startup timeout: ${logs}`)), 20000);
-    server.on('error', error => { clearTimeout(timeout); fail(error); });
-    server.on('exit', code => { clearTimeout(timeout); fail(new Error(`server exited ${code}: ${logs}`)); });
-    server.stdout.on('data', chunk => {
-      text += chunk;
-      const match = text.match(/http:\/\/127\.0\.0\.1:\d+/);
-      if (match) { clearTimeout(timeout); ok(match[0]); }
-    });
-  });
+  const { base, loginUrl } = await waitForWebUiLogin(server, () => logs);
   browser = await chromium.launch({ headless: true });
   console.log(`Chromium ${browser.version()}`);
   const context = await browser.newContext({ viewport: { width, height }, reducedMotion: 'reduce', colorScheme: 'light' });
   page = await context.newPage();
+  await loginWebUi(page, loginUrl);
   page.setDefaultTimeout(8000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));

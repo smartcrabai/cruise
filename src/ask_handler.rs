@@ -45,29 +45,15 @@ pub trait AskHandler: Send + Sync {
 /// Used when `ask_user` should never be registered (e.g. the `WebUI` "Ask about the
 /// plan" flow, which has no streaming channel to surface a question on). If it is
 /// invoked anyway it returns an error rather than blocking.
+#[cfg(test)]
 pub struct NoninteractiveAskHandler;
 
+#[cfg(test)]
 impl AskHandler for NoninteractiveAskHandler {
     fn ask_user(&self, _question: &str) -> Result<String> {
         Err(crate::error::CruiseError::Other(
             "ask_user is unavailable in this non-interactive context".to_string(),
         ))
-    }
-}
-
-/// CLI implementation backed by the reedline multiline prompt.
-pub struct CliAskHandler;
-
-impl AskHandler for CliAskHandler {
-    fn ask_user(&self, question: &str) -> Result<String> {
-        crate::desktop_notifications::send_best_effort(
-            crate::desktop_notifications::WorkflowNotificationKind::ActionRequired,
-            None,
-            Some(question),
-            "CLI",
-        );
-        let _blocked = crate::herdr::blocked(question);
-        crate::multiline_input::prompt_multiline(question)?.into_result()
     }
 }
 

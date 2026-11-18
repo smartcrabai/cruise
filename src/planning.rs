@@ -153,7 +153,7 @@ pub fn ask_plan_template(config: &WorkflowConfig) -> &'static str {
 }
 
 /// Where a plan-related prompt is allowed to render transient terminal
-/// progress. CLI callers opt in; event-driven WebUI/TUI callers keep it hidden.
+/// progress. CLI callers opt in; event-driven clients keep it hidden.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlanProgress {
     /// Render the planning loader when stderr is an interactive terminal.
@@ -186,10 +186,6 @@ pub struct PlanPromptCtx<'a> {
     pub rate_limit_retries: usize,
     /// Working directory for the command / agent.
     pub working_dir: Option<&'a Path>,
-    /// "Grill me" mode: drive initial planning with the interview-style template
-    /// ([`PLAN_GRILL_PROMPT_TEMPLATE_SDK`]). SDK + interactive only; validated by
-    /// the caller. Affects only the initial plan turn (not fix/ask).
-    pub grill: bool,
     /// Called when an SDK backend reports its session identity.
     pub on_session_id: Option<&'a crate::executor::SessionIdCallback<'a>>,
     /// Additional destination for model and fallback notices, separate from
@@ -886,7 +882,6 @@ mod tests {
             progress: PlanProgress::Hidden,
             rate_limit_retries: 0,
             working_dir: None,
-            grill: false,
             on_session_id: None,
             on_notice: None,
             cancel_token: None,
@@ -926,7 +921,6 @@ mod tests {
             progress: PlanProgress::Hidden,
             rate_limit_retries: 0,
             working_dir: None,
-            grill: false,
             on_session_id: None,
             on_notice: None,
             cancel_token: Some(&token),
@@ -1019,7 +1013,6 @@ mod tests {
             progress: PlanProgress::Hidden,
             rate_limit_retries: 0,
             working_dir: None,
-            grill: false,
             on_session_id: None,
             on_notice: None,
             cancel_token: Some(&token),

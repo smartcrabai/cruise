@@ -30,4 +30,4 @@ Prompt/input 文本、代理输出、命令正文、工作路径和异常消息�
 
 删改基于模式匹配，不能保证移除任意秘密或个人数据。捕获的 stderr 仍可能包含敏感路径、消息或业务数据。在真实工作负载中启用遥测前，请将后端日志访问权限限制为经授权的操作人员，并设置较短的保留期限。Cruise 不会配置后端 RBAC 或保留策略；这些仍由部署方负责，启用日志不会更改它们。
 
-CLI 正常结束时（包括 workflow 出错）会刷新 provider。Collector/export 失败不会改变 workflow 结果。
+会话工作在 daemon 中运行，因此 `CRUISE_OBSERVABILITY_ENABLED` 和 `OTEL_*` 变量由 daemon 进程读取：由命令自动启动的 daemon 继承该命令的值，已在运行的 daemon 继续使用其启动时的值。修改这些变量后，请在目标环境中运行 `cruise daemon restart`。daemon 会在每个操作结束时、客户端看到结果之前刷新 provider；CLI 命令在结束时（包括 workflow 出错）也会刷新其客户端侧遥测。Collector/export 失败不会改变 workflow 结果。

@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
+import { loginWebUi, requestFreshWebUiLoginUrl, waitForWebUiLogin } from './auth.mjs';
 
 const root = await mkdtemp(join(tmpdir(), 'cruise-language-browser-'));
 const repo = join(root, 'repo');
@@ -31,16 +32,10 @@ try {
   await writeFile(join(session, 'config.yaml'), "steps:\n  first: {command: 'true'}\n");
   await writeFile(join(session, 'plan.md'), '# Browser fixture\n');
   server = spawn(process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime'),
-    ['webui', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    ['daemon', 'serve', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   closed = new Promise(ok => server.once('close', ok));
   server.stderr.on('data', data => { logs += data; });
-  const base = await new Promise((ok, fail) => {
-    let stdout = '';
-    const timeout = setTimeout(() => fail(new Error(`server startup timeout: ${logs}`)), 20000);
-    server.once('error', error => { clearTimeout(timeout); fail(error); });
-    server.once('exit', code => { clearTimeout(timeout); fail(new Error(`server exited ${code}: ${logs}`)); });
-    server.stdout.on('data', data => { stdout += data; const match = stdout.match(/http:\/\/127\.0\.0\.1:\d+/); if (match) { clearTimeout(timeout); ok(match[0]); } });
-  });
+  const { base, loginUrl } = await waitForWebUiLogin(server, () => logs);
   const browserEnv = { ...process.env };
   for (const key of ['DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'LD_LIBRARY_PATH']) delete browserEnv[key];
   browser = await chromium.launch({ headless: true, env: browserEnv });
@@ -48,6 +43,7 @@ try {
   // Only the external Mermaid module is blocked. The real server, HTMX and app.js run normally.
   await context.route('https://cdn.jsdelivr.net/npm/mermaid@11/**', route => route.abort('failed'));
   const page = await context.newPage();
+  await loginWebUi(page, loginUrl);
   page.setDefaultTimeout(15000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -111,6 +107,9 @@ try {
   // A separate context also proves that preferences do not leak between clients.
   const mobile = await browser.newContext({ viewport: { width: 375, height: 800 }, reducedMotion: 'reduce' });
   const mobilePage = await mobile.newPage();
+  const binary = process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime');
+  const mobileLoginUrl = requestFreshWebUiLoginUrl(binary, repo, env);
+  await loginWebUi(mobilePage, mobileLoginUrl);
   assert.equal((await mobilePage.goto(`${base}/sessions/${id}`)).status(), 200);
   assert.equal(await mobilePage.locator('html').getAttribute('lang'), 'en');
   const expectedSessions = new Map([

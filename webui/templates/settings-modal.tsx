@@ -14,7 +14,7 @@ export default function SettingsModal(props) {
           <input id="run-all-auto-requeue" name="runAllAutoRequeueMaxAttempts" type="number" min="0" value={props.runAllAutoRequeueMaxAttempts} class="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-1.5 text-base md:text-sm text-gray-800 dark:text-gray-200 outline-none focus:border-blue-500" />
         </div>
         <div class="flex gap-2 justify-end">
-          <button type="button" hx-on:click="document.getElementById('dialogs').innerHTML = ''" class="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">{props.t.common.cancel}</button>
+          <button type="button" data-close-dialogs class="px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-500 dark:text-gray-400 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">{props.t.common.cancel}</button>
           <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">{props.t.common.save}</button>
         </div>
       </form>

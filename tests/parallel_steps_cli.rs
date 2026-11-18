@@ -122,8 +122,8 @@ steps:
         "[checks/prompt_child] prompt-stderr",
     ] {
         assert!(
-            terminal.contains(line),
-            "missing child prefix for {line}: {terminal}"
+            terminal.lines().any(|output| output == line),
+            "missing child prefix or legacy formatting for {line}: {terminal}"
         );
     }
 }

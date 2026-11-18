@@ -53,6 +53,23 @@ pub(crate) fn resolve_path_with_mode(
     defaults: &WorkflowDefaults,
     doctor: bool,
 ) -> Result<WorkflowConfig> {
+    resolve_path_with_mode_and_env(path, defaults, doctor, crate::config::ConfigEnv::Process)
+}
+
+pub(crate) fn resolve_path_with_env(
+    path: impl Into<PathBuf>,
+    defaults: &WorkflowDefaults,
+    env: crate::config::ConfigEnv<'_>,
+) -> Result<WorkflowConfig> {
+    resolve_path_with_mode_and_env(path, defaults, false, env)
+}
+
+pub(crate) fn resolve_path_with_mode_and_env(
+    path: impl Into<PathBuf>,
+    defaults: &WorkflowDefaults,
+    doctor: bool,
+    env: crate::config::ConfigEnv<'_>,
+) -> Result<WorkflowConfig> {
     let path = path.into();
     let yaml = std::fs::read_to_string(&path)?;
     let mut resolution = WorkflowConfigResolution::from_yaml(&yaml)
@@ -62,7 +79,7 @@ pub(crate) fn resolve_path_with_mode(
         ..CallStack::default()
     };
     resolution.config = load_local_workflow(&path, &mut stack)?;
-    finish_resolved_config(resolution, defaults, true, doctor)
+    finish_resolved_config(resolution, defaults, true, doctor, env)
 }
 
 /// Resolve `workflow_call` steps and `prompt_file` fields in an already parsed
@@ -101,6 +118,7 @@ pub fn resolve_workflow_calls_with_defaults(
         defaults,
         true,
         false,
+        crate::config::ConfigEnv::Process,
     )
 }
 
@@ -130,14 +148,26 @@ pub fn resolve_workflow_calls_without_app_model_defaults(
         defaults,
         false,
         false,
+        crate::config::ConfigEnv::Process,
     )
 }
 
-pub(crate) fn resolve_yaml_with_mode(
+#[cfg(test)]
+pub(crate) fn resolve_yaml_with_env(
+    yaml: &str,
+    base_dir: impl Into<PathBuf>,
+    defaults: &WorkflowDefaults,
+    env: crate::config::ConfigEnv<'_>,
+) -> Result<WorkflowConfig> {
+    resolve_yaml_with_mode_and_env(yaml, base_dir, defaults, false, env)
+}
+
+pub(crate) fn resolve_yaml_with_mode_and_env(
     yaml: &str,
     base_dir: impl Into<PathBuf>,
     defaults: &WorkflowDefaults,
     doctor: bool,
+    env: crate::config::ConfigEnv<'_>,
 ) -> Result<WorkflowConfig> {
     let base_dir = base_dir.into();
     let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
@@ -148,7 +178,7 @@ pub(crate) fn resolve_yaml_with_mode(
     };
     resolution.config =
         resolve_root_workflow_calls_inner(resolution.config, &base_dir, &mut stack)?;
-    finish_resolved_config(resolution, defaults, true, doctor)
+    finish_resolved_config(resolution, defaults, true, doctor, env)
 }
 
 /// Fetch a GitHub-hosted workflow and fully expand its `workflow_call` steps and
@@ -167,11 +197,12 @@ pub fn resolve_github_workflow_for_install(
     Ok(config)
 }
 
-pub(crate) fn resolve_embedded_with_mode(
+pub(crate) fn resolve_embedded_with_mode_and_env(
     yaml: &str,
     resource_key: &str,
     defaults: &WorkflowDefaults,
     doctor: bool,
+    env: crate::config::ConfigEnv<'_>,
 ) -> Result<WorkflowConfig> {
     let mut resolution = WorkflowConfigResolution::from_yaml(yaml)
         .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
@@ -185,7 +216,7 @@ pub(crate) fn resolve_embedded_with_mode(
         &IndexMap::new(),
         "root",
     )?;
-    finish_resolved_config(resolution, defaults, true, doctor)
+    finish_resolved_config(resolution, defaults, true, doctor, env)
 }
 
 /// Produce portable builtin YAML without applying machine defaults or overrides.
@@ -289,6 +320,7 @@ fn finish_resolved_config(
     defaults: &WorkflowDefaults,
     apply_app_model_defaults: bool,
     doctor: bool,
+    env: crate::config::ConfigEnv<'_>,
 ) -> Result<WorkflowConfig> {
     let config = &mut resolution.config;
     validate_no_return_routes(config)?;
@@ -306,7 +338,7 @@ fn finish_resolved_config(
             config.plan_model = app_config.plan_model;
         }
     }
-    config.apply_env_overrides()?;
+    config.apply_env_overrides_with(env)?;
     // `PromptRun` carries no policy field, so the retry policy reaches the
     // executor ambiently. Validated first, so an unusable policy is rejected
     // here instead of becoming the active one.

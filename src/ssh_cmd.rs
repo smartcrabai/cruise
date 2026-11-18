@@ -61,6 +61,9 @@ fn remote_command(args: &SshArgs) -> String {
         let _ = write!(command, "cd {} && ", shell_quote(cwd));
     }
     let _ = write!(command, "exec {}", shell_quote(&args.cruise_bin));
+    if args.args.is_empty() {
+        let _ = write!(command, " {}", shell_quote("list"));
+    }
     for argument in &args.args {
         let _ = write!(command, " {}", shell_quote(argument));
     }
@@ -104,6 +107,19 @@ mod tests {
             remote_command(&args),
             "cd '/srv/project with spaces' && exec '/opt/cruise bin' '--plan' 'task with spaces'"
         );
+    }
+
+    #[test]
+    fn remote_command_defaults_to_list_without_forwarded_args() {
+        let args = SshArgs {
+            destination: "devbox".to_string(),
+            cwd: None,
+            cruise_bin: "cruise".to_string(),
+            tty: SshTtyMode::Auto,
+            args: vec![],
+        };
+
+        assert_eq!(remote_command(&args), "exec 'cruise' 'list'");
     }
 
     #[test]

@@ -605,6 +605,7 @@ async fn run(
         on_step_start: &|_| Ok(()),
         cancel_token: None,
         option_handler: &NoOpOptionHandler,
+        ask_handler: None,
         config_reloader: reloader,
         working_dir: Some(dir),
         skipped_steps: &[],

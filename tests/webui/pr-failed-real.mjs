@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
+import { loginWebUi, waitForWebUiLogin } from './auth.mjs';
 
 const output = resolve(process.env.WEBUI_PR_REPORT_DIR || 'target/formal-reports/pr-failed-browser');
 await mkdir(output, { recursive: true });
@@ -31,10 +32,11 @@ async function scenario(name, changed) {
     await writeFile(join(session, 'state.json'), JSON.stringify({ id, base_dir: repo, phase: { PrFailed: 'original publication failure' }, config: { kind: 'inline_snapshot' }, input: 'Publish fixture', title: 'PR retry fixture', current_step: null, created_at: '2026-11-05T00:00:00Z', completed_at: null, worktree_path: worktree, worktree_branch: 'fixture/pr-failed' }));
     await writeFile(join(session, 'config.yaml'), `command: ["sh", "-c", "printf 'TITLE: fixture PR\\nBODY: fixture body\\n'"]\nsteps:\n  workflow:\n    command: 'touch ${join(root, 'workflow-ran')}'\n`);
     await writeFile(join(session, 'plan.md'), '# Fixture plan\n');
-    server = spawn(process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime'), ['webui', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    server = spawn(process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime'), ['daemon', 'serve', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
     closed = new Promise(ok => server.once('close', ok)); server.stderr.on('data', d => { logs += d; });
-    const base = await new Promise((ok, fail) => { let stdout = ''; const timer = setTimeout(() => fail(new Error(`startup timeout ${logs}`)), 20000); server.once('error', fail); server.once('exit', code => fail(new Error(`server exited ${code}: ${logs}`))); server.stdout.on('data', d => { stdout += d; const m = stdout.match(/http:\/\/127\.0\.0\.1:\d+/); if (m) { clearTimeout(timer); ok(m[0]); } }); });
+    const { base, loginUrl } = await waitForWebUiLogin(server, () => logs);
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, reducedMotion: 'reduce' });
+    await loginWebUi(page, loginUrl);
     try {
       page.setDefaultTimeout(15000); const errors = []; page.on('pageerror', e => errors.push(e.message));
       assert.equal((await page.goto(`${base}/sessions/${id}`)).status(), 200);

@@ -402,7 +402,7 @@ pub(crate) fn config_select_html(
         } else {
             base_dir
         }));
-        let discovered = state.application.discover_tui_config_candidates(&base)?;
+        let discovered = state.application.discover_config_candidates(&base)?;
         let installed = std::collections::HashSet::new();
         let mut ordered = Vec::new();
         let mut seen = std::collections::HashSet::new();

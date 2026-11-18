@@ -8,13 +8,12 @@ mod auto_requeue;
 mod backend;
 mod base_ci;
 mod batch_dashboard;
-#[cfg_attr(not(test), expect(dead_code))]
-mod batch_run;
 mod branch_diff;
 mod builtin_workflows;
 mod cancellation;
 mod clean_cmd;
 mod cli;
+mod cli_events;
 mod commit_guard;
 mod condition;
 mod config;
@@ -22,6 +21,7 @@ mod config_cmd;
 pub mod config_env;
 mod configs;
 mod console_mode;
+pub mod daemon;
 #[expect(
     unused_imports,
     reason = "library compatibility exports are unused in the CLI module copy"
@@ -82,9 +82,11 @@ mod prompt_render;
 pub mod provider_install;
 mod quality_gate;
 mod repo_clone;
+mod request_context;
 mod resolver;
 mod retry;
 mod run_cmd;
+#[cfg(test)]
 mod run_observer;
 mod sdk_tools;
 mod session;
@@ -97,12 +99,9 @@ mod step;
 pub mod telemetry;
 mod tell_cmd;
 #[cfg(test)]
-mod test_binary_support;
-#[cfg(test)]
 mod test_support;
 mod timeout;
 mod tool_policy;
-mod tui;
 mod update_cmd;
 mod usage;
 mod usage_cmd;
@@ -190,6 +189,10 @@ async fn runtime_main(cli: cli::Cli) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "The top-level command router must cover each CLI command variant."
+)]
 async fn run(cli: cli::Cli) -> error::Result<()> {
     let cli::Cli {
         plan,
@@ -202,19 +205,45 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         flags,
     } = cli;
     match command {
-        Some(cli::Commands::PlanWorker(args)) => plan_cmd::run_plan_worker(args).await,
         Some(cli::Commands::Plan(args)) => Box::pin(plan_cmd::run(args)).await,
-        Some(cli::Commands::Draft(args)) => draft_cmd::run(args),
+        Some(cli::Commands::Draft(args)) => draft_cmd::run(args).await,
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
-        Some(cli::Commands::Tell(args)) => tell_cmd::run(args),
+        Some(cli::Commands::Tell(args)) => tell_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
-        Some(cli::Commands::Diff(args)) => diff_cmd::run(&args),
-        Some(cli::Commands::Clean(args)) => clean_cmd::run(args),
+        Some(cli::Commands::Diff(args)) => diff_cmd::run(&args).await,
+        Some(cli::Commands::Clean(args)) => clean_cmd::run(args).await,
         Some(cli::Commands::Usage(args)) => usage_cmd::run(&args),
         Some(cli::Commands::Config(args)) => config_cmd::run(&args),
         Some(cli::Commands::Exec(args)) => exec_cmd::run(args).await,
         Some(cli::Commands::Ssh(args)) => ssh_cmd::run(&args),
-        Some(cli::Commands::Webui(args)) => webui::run(args).await,
+        Some(cli::Commands::Daemon(args)) => match args.command {
+            cli::DaemonCommand::Start(args) => {
+                daemon::lifecycle::start(&daemon_serve_options(args))
+            }
+            cli::DaemonCommand::Stop(args) => {
+                daemon::lifecycle::stop(daemon::StopOptions { force: args.force })
+            }
+            cli::DaemonCommand::Restart(args) => {
+                daemon::lifecycle::restart(daemon_serve_options(args))
+            }
+            cli::DaemonCommand::Status(args) => {
+                daemon::lifecycle::status(daemon::StatusOptions { json: args.json })
+            }
+            cli::DaemonCommand::Serve(args) => {
+                daemon::server::run_foreground(daemon_serve_options(args)).await
+            }
+        },
+        Some(cli::Commands::Webui(args)) => {
+            let client = daemon::client::DaemonClient::connect().await?;
+            let login_url = client.webui_login_url().await?;
+            println!("{login_url}");
+            if args.open
+                && let Err(error) = platform::open_login_redirect(&login_url)
+            {
+                eprintln!("warning: could not open browser: {error}");
+            }
+            Ok(())
+        }
         Some(cli::Commands::Update(args)) => update_cmd::run(&args),
         Some(cli::Commands::Install(args)) => {
             provider_install::run(args.provider, args.status, args.force)
@@ -225,13 +254,14 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         }
         Some(cli::Commands::Internal(cli::InternalArgs {
             command:
-                cli::InternalCommand::WebuiServe {
+                cli::InternalCommand::DaemonServe {
                     instance_id,
                     host,
                     port,
+                    port_implicit,
                     webui_dir,
                 },
-        })) => webui::run_daemon(instance_id, host, port, webui_dir).await,
+        })) => daemon::server::run_daemon(instance_id, host, port, port_implicit, webui_dir).await,
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::SyncBase { pr_number, url },
         })) => match worktree_pr::sync_base(&pr_number, url.as_deref()) {
@@ -265,7 +295,14 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             && images.is_empty()
             && flags.is_empty() =>
         {
-            tui::run().await
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin())
+                || !std::io::IsTerminal::is_terminal(&std::io::stdout())
+            {
+                return Err(error::CruiseError::Other(
+                    "cruise requires an interactive TTY".to_string(),
+                ));
+            }
+            list_cmd::run(cli::ListArgs { json: false }).await
         }
         None => {
             // Backward compat: positional input and planning options use `plan`.
@@ -286,6 +323,16 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
             };
             Box::pin(plan_cmd::run(plan_args)).await
         }
+    }
+}
+
+fn daemon_serve_options(args: cli::ServeArgs) -> daemon::ServeOptions {
+    daemon::ServeOptions {
+        host: args.host,
+        port: args.port,
+        open: args.open,
+        port_explicit: None,
+        webui_dir: args.webui_dir,
     }
 }
 

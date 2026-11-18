@@ -5,7 +5,9 @@
 /// plan is approved, cloned again for execution, and removed after the PR has
 /// been created. The clone directory doubles as the session's `base_dir`, so
 /// the existing worktree + PR machinery works on top of it unchanged.
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::error::{CruiseError, Result};
@@ -81,6 +83,7 @@ pub fn clone_repo(repo: &str, clone_path: &Path) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if the session has no repository or the clone fails.
+#[cfg(test)]
 pub fn ensure_session_clone(
     manager: &SessionManager,
     session: &SessionState,
@@ -102,28 +105,8 @@ pub fn ensure_session_clone(
 }
 
 /// Re-create the temporary clone for a repo-backed session if it is missing
-/// and point `base_dir` at it. No-op for sessions without a repository.
-///
-/// Returns `true` when a fresh clone was created. The caller is responsible
-/// for persisting the session if it cares about the updated `base_dir`.
-///
-/// # Errors
-///
-/// Returns an error if the clone fails.
-pub fn ensure_repo_session_workspace(
-    manager: &SessionManager,
-    session: &mut SessionState,
-) -> Result<bool> {
-    if session.repo.is_none() {
-        return Ok(false);
-    }
-    let (clone_path, reused) = ensure_session_clone(manager, session)?;
-    session.base_dir = clone_path;
-    Ok(!reused)
-}
-/// Cancellation-aware variant used by interactive application runs. Unlike
-/// [`ensure_repo_session_workspace`], the `gh` child is reaped when the token
-/// is cancelled while cloning.
+/// and point `base_dir` at it. The `gh` child is reaped if cancellation is
+/// requested while cloning. No-op for sessions without a repository.
 ///
 /// # Errors
 ///
@@ -231,6 +214,7 @@ pub fn cleanup_after_approval_checked(
 }
 
 /// Best-effort wrapper for CLI callers.
+#[cfg(test)]
 pub fn cleanup_after_approval(
     manager: &SessionManager,
     session: &mut SessionState,

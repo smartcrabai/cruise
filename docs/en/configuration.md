@@ -29,7 +29,7 @@ cruise resolves the workflow config as follows:
 
    The research workflow and security inventory/audit/triage phases require SDK permissions for read-only work. When neither `command:` nor `sdk:` remains set after workflow and applicable user/project defaults are resolved, Cruise uses its default `sdk: jcode`; a `command:` backend cannot be confined to read-only mode and is rejected for restricted-permission steps.
 
-   Interactive selectors (CLI, TUI, WebUI) organize built-ins and other candidates into categories. Non-interactive resolution with no config file uses `tdd`.
+   Interactive selectors (CLI and WebUI) organize built-ins and other candidates into categories. Non-interactive resolution with no config file uses `tdd`.
 
    `create_pr` is a workflow-only boolean that defaults to `true`. Setting it to `false` skips Cruise's automatic commit, push, PR creation, `after-pr`, and PR-based cleanup while retaining the session, artifacts, and worktree. It is rejected in user/project `default.yaml` and is not a CLI option.
 
@@ -184,7 +184,7 @@ steps:
 <a id="prompt-languages"></a>
 ### Prompt Languages
 
-UI display language is independent of prompt languages. Configure it with application `uiLanguage`, `CRUISE_UI_LANGUAGE`, or the TUI language picker; a WebUI browser can override the server default with its own language selector. These settings do not change `languages.pr` or `languages.plan`.
+UI display language is independent of prompt languages. Configure it with application `uiLanguage` or `CRUISE_UI_LANGUAGE`; a WebUI browser can override the server default with its own language selector. These settings do not change `languages.pr` or `languages.plan`.
 
 `languages.pr` controls the language for auto-generated PR titles and bodies, and `languages.plan` controls the language for Cruise's built-in planning prompts. `CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding YAML values; blank environment values are ignored. Otherwise, the first non-empty of `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE` is mapped once (an unsupported value does not fall through), then `English`.
 
@@ -269,7 +269,8 @@ export CRUISE_RETRY='{"base_delay_ms":1000}'
 export CRUISE_RETRY_MAX_DELAY_MS=5000
 ```
 
-`CRUISE_RUN_ALL_PARALLELISM` overrides the app setting for TUI/WebUI run-all operations and effective config display, but is not saved to the config file. It does not change CLI `run --all`, which uses `--parallelism`.
+`CRUISE_RUN_ALL_PARALLELISM` overrides the app setting for WebUI Run All and effective config display, but is not saved to the config file. It does not change CLI `run --all`, which uses `--parallelism`.
+With the resident daemon, the CLI sends its working directory and allowlisted workflow-override variables (such as `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, and `CRUISE_SDK`) with each request; they apply only to that request. Process-level variables such as `PATH`, `GH_TOKEN`, provider credentials, `CRUISE_FORGE`, and notification or auth switches come from the daemon environment. Restart the daemon with `cruise daemon restart` after changing them. Autostart removes workflow-override variables from the daemon environment; explicit `cruise daemon start` or `serve` preserves them. WebUI requests use the daemon environment and its home-directory working directory.
 
 `CRUISE_UI_LANGUAGE` controls the process UI language, not a workflow field or generated prompt language. See [`cruise config`](cli-reference.md#cruise-config) for supported tags and precedence.
 
@@ -302,7 +303,7 @@ Cruise stores application settings separately from workflow YAML in `$XDG_CONFIG
 
 Set `uiLanguage` in application configuration, or use `cruise config --set-language ja`. The alias `ui_language` is accepted on input. Supported explicit tags are `en`, `zh-CN`, `es`, `fr`, `pt-BR`, `ja`, and `ko`, with case and `_`/`-` variations accepted. `auto` means unspecified; `cruise config --set-language auto` clears the saved setting. Invalid values are rejected when setting or validating application configuration.
 
-For CLI and TUI, `CRUISE_UI_LANGUAGE` takes precedence over `uiLanguage`, then system locale, then English. A blank or `auto` environment value defers to the next layer. Invalid environment values produce an English warning and are ignored. System locale detection uses the first nonempty `LC_ALL`, `LC_MESSAGES`, `LANG`, or `LANGUAGE`, without trying later variables when that value is unsupported. Windows also consults the user locale if environment variables do not determine one. macOS and Linux use environment variables only, so a GUI launch without them defaults to English.
+For CLI, `CRUISE_UI_LANGUAGE` takes precedence over `uiLanguage`, then system locale, then English. A blank or `auto` environment value defers to the next layer. Invalid environment values produce an English warning and are ignored. System locale detection uses the first nonempty `LC_ALL`, `LC_MESSAGES`, `LANG`, or `LANGUAGE`, without trying later variables when that value is unsupported. Windows also consults the user locale if environment variables do not determine one. macOS and Linux use environment variables only, so a GUI launch without them defaults to English.
 
 The WebUI uses its browser's `cruise_ui_language` cookie when valid, otherwise the server process default. Selecting a language in the WebUI saves the cookie and reloads the page, without changing application configuration. UI language is independent of workflow `languages.pr` and `languages.plan`, which control generated prompts.
 

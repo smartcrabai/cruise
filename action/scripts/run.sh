@@ -27,7 +27,7 @@ WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POLL_SINCE="${POLL_SINCE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-# shellcheck source=lib/plan.sh
+# shellcheck source=action/scripts/lib/plan.sh
 source "$SCRIPT_DIR/lib/plan.sh"
 
 # git identity for commits cruise/this action creates: an explicit
@@ -96,11 +96,9 @@ init_commit_coauthor() {
 }
 init_commit_coauthor
 
-CRUISE_DIR="${RUNNER_TEMP:-/tmp}/cruise"
-# XDG_* and JCODE_HOME normally arrive from setup-env.sh via $GITHUB_ENV.
-# JCODE_HOME is the credential/config source used for provisioning and for
-# Cruise's isolated SDK session homes. These are standalone fallbacks and
-# must match setup-env.sh or the run may not find the provisioned credentials.
+CRUISE_DIR="${CRUISE_ACTION_DIR:-${RUNNER_TEMP:-/tmp}/cruise}"
+# XDG_* and JCODE_HOME arrive from setup-env.sh via $GITHUB_ENV in the action.
+# Keep these fallbacks aligned for standalone script use and local tests.
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$CRUISE_DIR/data}"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$CRUISE_DIR/xdg-config}"
 export XDG_STATE_HOME="${XDG_STATE_HOME:-$CRUISE_DIR/xdg-state}"
@@ -115,6 +113,8 @@ commit_coauthor_hook_installed=false
 previous_hooks_path_set=false
 previous_hooks_path=""
 
+# Called indirectly from the EXIT trap below.
+# shellcheck disable=SC2329
 restore_commit_coauthor_hook() {
   if [ "$commit_coauthor_hook_installed" != "true" ]; then
     return
@@ -135,7 +135,14 @@ stop_poller() {
     poller_pid=""
   fi
 }
-cleanup() { stop_poller; restore_commit_coauthor_hook; }
+# Called indirectly from cleanup's EXIT trap.
+# shellcheck disable=SC2329
+stop_daemon() {
+  cruise daemon stop --force >>"$LOG_FILE" 2>&1 || true
+}
+# Invoked by the EXIT trap.
+# shellcheck disable=SC2329
+cleanup() { stop_poller; stop_daemon; restore_commit_coauthor_hook; }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM

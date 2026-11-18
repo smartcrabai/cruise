@@ -18,7 +18,8 @@ Commands:
   config       Show or update application-level configuration (`config.json` or `config.yaml`)
   exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
-  webui        Serve or manage the local browser UI (start, stop, restart, status)
+  daemon       Manage the resident daemon lifecycle
+  webui        Ensure the daemon is running and print its browser UI login URL
   install      Install/update a provider CLI to its latest stable version or inspect managed status
   update       Update a managed native installation; `--status` lists recorded transactions read-only
   workflow     Manage workflows: list/eject built-ins, generate, interactively make or check YAML (`doctor`), install GitHub packages (`add`, `remove`, `update`)
@@ -36,6 +37,31 @@ Options:
 ```
 
 `docs` という正確な名前は subcommand として予約されています。位置引数が正確に `docs` となる task を計画するには `cruise plan "docs"` を使ってください。
+<a id="cruise-daemon"></a>
+## `cruise daemon` and `cruise webui`
+
+```sh
+cruise daemon start [--host <ADDR>] [--port <PORT>] [--webui-dir <DIR>] [-o|--open]
+cruise daemon stop [--force]
+cruise daemon restart [--host <ADDR>] [--port <PORT>] [--webui-dir <DIR>] [-o|--open]
+cruise daemon status [--json]
+cruise daemon serve [--host <ADDR>] [--port <PORT>] [--webui-dir <DIR>] [-o|--open]
+cruise webui [-o|--open]
+```
+
+`start` と `restart` は background、`serve` は container や debugging 用の foreground 実行です。host、port、WebUI directory、browser を開く option は `start`、`restart`、`serve` で使えます。`cruise webui` は daemon の起動を確認し、login URL を表示します。daemon の `start`、`restart`、`serve` も login URL を表示します。必要なら browser も開けます。従来の `cruise webui start|stop|restart|status` は削除されました。`cruise daemon ...` を使ってください。
+
+既定 address は `127.0.0.1:8484` です。port を指定せず 8484 が使用中の場合、Cruise は警告を出して ephemeral port を使います。共有 host では `--port` または `CRUISE_DAEMON_PORT` を明示してください。どちらも `0` は ephemeral port を要求します。`cruise webui` の login URL には registry API token ではなく、5 分で期限切れになる一度だけ使える nonce が含まれます。ログインすると、API token とは別のランダムな in-memory session ID が HttpOnly、SameSite=Strict の `cruise_webui` cookie に設定され、daemon 終了時に無効になります。origin だけでは 401 が表示されます。`-o`/`--open` は 0600 の一時 HTML redirect file を開くため、URL は opener の command line に渡されません。loopback bind は `localhost`、`127.0.0.1`、`[::1]` の Host 名だけを任意の port で受け付け、DNS rebinding に使われる外部 Host 名を拒否しつつ SSH tunnel を許可します。non-loopback bind は平文 HTTP で配信されるため、信頼できる network 内、または TLS proxy の背後でのみ使用してください。
+
+registry と log は `$XDG_STATE_HOME/cruise/daemon/`（通常 `~/.local/state/cruise/daemon/`）にあります。`instance.json` は mode `0600` でランダムな API token を含み、`daemon.log` に daemon log が記録されます。起動時 service のインストールも idle 時の自動終了もありません。registry record が削除されると daemon は終了します。
+
+v0.3.0 の分離 WebUI から更新する場合、旧 server が稼働中の間は `daemon start`、`restart`、`serve` と client の自動起動を拒否します。先に `cruise daemon stop` を実行してください。旧 server の停止では実行中の作業を cancel し、session は `Suspended` になります。`cruise run <id>` で再開できます。`cruise daemon status` は稼働中の旧 server を表示し、daemon 起動時には停止済みの旧 registry を削除します。
+
+また、別の cruise process が runner として記録され実行中の session（更新時に進行中だった v0.3.0 の `cruise run` など）に対する run と planning を daemon は拒否します（HTTP 409、CLI は exit 1、state は変更しません）。v0.3.0 の background planning worker は runner を記録しないため検出できません。更新前に開始した background plan は完了を待ってから操作してください。
+
+`plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`list`、`tell`、`clean`、`diff` は daemon client で、必要に応じて自動起動します。`config`、`usage`、`update`、`install`、`workflow *`、`docs`、`ssh`、すべての `--dry-run` はローカル専用です。workflow config は CLI client 側で解決され、working directory と `CRUISE_MODEL`、`CRUISE_PLAN_MODEL`、`CRUISE_SDK` など許可リスト内の workflow override は request ごとに適用されます。`PATH`、`GH_TOKEN`、provider credential、`CRUISE_FORGE`、`CRUISE_SKIP_AGENT_AUTH_CHECK`、通知や commit coauthor の設定など process-level 変数は daemon 環境から取得されます。変更後は `cruise daemon restart` を実行してください。自動起動では workflow override 変数を daemon 環境から除去し、明示的な `daemon start` と `serve` では保持します。WebUI request は daemon の環境と home directory を working directory として使います。
+
+異なる Cruise version の daemon が idle なら、次の client request が自動再起動します。busy の場合は idle になってから `cruise daemon restart` を実行するよう案内されます。`cruise update` の後、次の command は idle daemon を再起動します。foreground command は進捗を stream し、Ctrl+C で操作をキャンセルします（`run` は `Suspended`、planning は元の状態に戻ります）。terminal を閉じても daemon の作業は止まりません。`cruise run <session-id>` または WebUI から再接続できます。Ask と Option prompt は terminal と WebUI に表示され、先に送信された回答が採用されます。非対話 client で回答待ちの場合、session は待機し、WebUI または `cruise run <session-id>` から回答できます。`cruise --plan` の計画も daemon 内で実行します。session mutation は daemon を経由し、claim により同じ session の重複実行を防ぎます。
 
 <a id="cruise-install"></a>
 ## `cruise install`
@@ -129,7 +155,7 @@ target にはパス、`builtin:<name>`、`__builtin__`（既定の組み込み w
 cruise ssh [OPTIONS] <DESTINATION> [-- <CRUISE_ARGS>...]
 ```
 
-`cruise ssh` は OpenSSH 経由でリモートの `cruise` にコマンドを渡して実行します。転送する引数を省略すると、PTY が利用可能な場合はリモート `cruise` の TUI が起動します。接続先には OpenSSH の `[user@]host` または `~/.ssh/config` alias を指定します。port、identity file、agent、ProxyJump にはその config を使ってください。
+`cruise ssh` は OpenSSH 経由でリモートの `cruise` にコマンドを渡して実行します。転送する引数がない場合、PTY が利用可能ならリモートの `cruise` は `cruise list`（対話型 session selector）を実行します。接続先には OpenSSH の `[user@]host` または `~/.ssh/config` alias を指定します。port、identity file、agent、ProxyJump にはその config を使ってください。
 
 Options:
 
@@ -150,7 +176,7 @@ Options:
 cruise
 ```
 
-引数なしで `cruise` を実行すると、キーボード専用 TUI が開きます。macOS/Linux の対話型 TTY が必要です。画面、ワークフロー、キー一覧、responsive layout、log の動作は[TUI（対話型キーボードクライアント）](usage.md#tui-interactive-keyboard-client)を参照してください。自動化、JSON、CI には CLI サブコマンドを使ってください。
+引数なしで `cruise` を実行すると、対話型 terminal では `cruise list` が開きます。pipe 入力では従来どおり位置入力による planning を行います。[`cruise list`](#cruise-list) では selector と JSON output を説明します。
 
 <a id="cruise-plan"></a>
 ## `cruise plan`
@@ -176,7 +202,7 @@ Options:
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable)
 ```
 
-**GitHub issue を入力として使う。** `cruise plan '#12'`、`cruise plan --issue 12 'additional instructions'`、または 1 行目を `#12` だけにして、後続行に追加指示を書く方法があります。1 行目には issue 参照のみを記述してください。root の位置引数、`--plan`、`draft`、TUI／WebUI の New Session task field でも同じ構文が使えます。`--issue` を受け付けるのは `plan` と `draft` のみであり、root コマンドや `exec` では使えません。issue は `gh` と現在の repository origin、または指定された `--repo` を使って検索します。GitLab issue input は未対応です。issue のタイトル、本文、label、コメントを task input に加え、対応する GitHub 画像はユーザー画像より先に session attachment として保存されます。issue 番号は branch 名と PR の close reference に含まれます。issue input は `force_exec` を無効化します。取得した issue 内容は信頼できない入力であり、prompt injection を含む可能性があります。
+**GitHub issue を入力として使う。** `cruise plan '#12'`、`cruise plan --issue 12 'additional instructions'`、または 1 行目を `#12` だけにして、後続行に追加指示を書く方法があります。1 行目には issue 参照のみを記述してください。root の位置引数、`--plan`、`draft`、WebUI の New Session task field でも同じ構文が使えます。`--issue` を受け付けるのは `plan` と `draft` のみであり、root コマンドや `exec` では使えません。issue は `gh` と現在の repository origin、または指定された `--repo` を使って検索します。GitLab issue input は未対応です。issue のタイトル、本文、label、コメントを task input に加え、対応する GitHub 画像はユーザー画像より先に session attachment として保存されます。issue 番号は branch 名と PR の close reference に含まれます。issue input は `force_exec` を無効化します。取得した issue 内容は信頼できない入力であり、prompt injection を含む可能性があります。
 
 Git 管理されていないディレクトリでは警告を出してその場で計画しますが、`cruise run` には引き続き git repository が必要です。
 
@@ -197,7 +223,7 @@ Git 管理されていないディレクトリでは警告を出してその場�
 
 `--repo <owner/repository>` を指定すると、現在の directory ではなく GitHub または GitLab repository を対象にします。repo session は常に Worktree mode で実行され、アクセスには引き続き `gh` / `glab` が必要です。`create_pr: false` の場合、自動 commit、push、PR 作成、`after-pr`、PR ベースの cleanup をスキップします。新しい branch commit がない成功 run では PR 作成を試みず完了しますが、既存の branch commit は PR の対象になります。repo session とローカル worktree session のいずれも公開失敗時は **PR Failed** となり、workflow をやり直さず workspace を保持して **Create PR** による復旧を可能にします。`--repo` はバックグラウンド計画（`cruise --plan "task" --repo owner/repository`）でも使えます。自由入力の `owner/repository` も受け付けます。
 
-**既存 GitHub PR のレビュー修正。** repository 内から `cruise plan --pr 12`、または `cruise plan --repo owner/repo --pr 12 "focus on tests"` を実行し、表示された場合は生成計画を承認してから `cruise run <session-id>` を実行します。任意の位置引数テキストは追加指示になります。このモードは stdin を読まず、LLM に計画を生成させません。TUI と WebUI の New Session form でも GitHub repository の PR 番号を指定できます。認証済み `gh` が必要です。PR は Open で、同じ repository 内に空でない head branch を持つ必要があります。draft PR は対応しますが、fork PR と GitLab merge request は対象外です。`--grill` と `--image` は `--pr` と併用できません。
+**既存 GitHub PR のレビュー修正。** repository 内から `cruise plan --pr 12`、または `cruise plan --repo owner/repo --pr 12 "focus on tests"` を実行し、表示された場合は生成計画を承認してから `cruise run <session-id>` を実行します。任意の位置引数テキストは追加指示になります。このモードは stdin を読まず、LLM に計画を生成させません。WebUI の New Session form でも GitHub repository の PR 番号を指定できます。認証済み `gh` が必要です。PR は Open で、同じ repository 内に空でない head branch を持つ必要があります。draft PR は対応しますが、fork PR と GitLab merge request は対象外です。`--grill` と `--image` は `--pr` と併用できません。
 
 既定 workflow はプロジェクト workflow ではなく `builtin:pr-review-fix` です。カスタム `-c` workflow では PR 処理を有効にし、`reviewers: all` を指定する after-PR `github-review` ステップを含める必要があります。組み込み workflow は flag を宣言せず、PR の作成や merge はせずに review に対応します。review loop は修正を commit／push し、対象 thread に返信または resolve します。失敗した session は再試行可能です。PR session では Publish as Issue と Replan は利用できません。
 
@@ -292,13 +318,13 @@ workflow config に `force_exec: true` がある場合、従来形式の `cruise
 cruise --plan <INPUT|stdin> [--skip-planning] [--no-force-exec] [--repo <OWNER/REPO>] [--image <PATH>]... [--flag <VALUE>]...
 ```
 
-session を直ちに作成し、デタッチ worker で plan 生成を始め、新しい session ID を返します。worker 実行中は `cruise list` に `Planning` と表示されます。生成に失敗すると、`cruise list` では `Plan Failed` と表示され、計画が成功するまで承認できません。
+session を直ちに作成し、daemon 内で plan 生成を始め、新しい session ID を返します。計画中は `cruise list` に `Planning` と表示されます。生成に失敗すると `Plan Failed` と表示され、計画が成功するまで承認できません。
 
-`--skip-planning` を加えるとバックグラウンド worker を省略し、入力を直接 `plan.md` に書き込んで、すでに `Planned` の session を作成します。承認ステップは不要です（`force_exec: true` の場合、issue input または別の opt-out がなければ代わりに workflow を直接実行します。明示的に opt-out するには `--no-force-exec` を指定します）。`--plan` なしでも使えます（例: `cruise --skip-planning "task"`）。この場合は `cruise plan --skip-planning "task"` と同じ動作です。
+`--skip-planning` は plan 生成を行わず、入力を直接 `plan.md` に書き込んで、すでに `Planned` の session を作成します。承認ステップは不要です（`force_exec: true` の場合、issue input または別の opt-out がなければ代わりに workflow を直接実行します。明示的に opt-out するには `--no-force-exec` を指定します）。`--plan` なしでも使えます（例: `cruise --skip-planning "task"`）。この場合は `cruise plan --skip-planning "task"` と同じ動作です。
 
 ここでも `--repo <owner>/<repository>` を受け付け、[`cruise plan`](#cruise-plan) と同じように repository を session の対象にします。この経路では `--grill` は利用できません。バックグラウンド計画には interview を行う対話相手がいないためです。
 
-subcommand、`--plan`、位置入力を指定せずに起動した場合、非 TTY stdin は最後まで読み込まれ、内容が位置入力になります。つまり `echo "task" | cruise` は従来の位置入力経路を通り、`cruise plan "task"` のように計画されます（`--skip-planning`、`--no-force-exec`、`--repo`、`--image` は引き続き使えます）。stdin が対話型なら引数なしの起動で TUI が開きます。pipe 入力をバックグラウンド計画経路で明示的に読むには `--plan stdin` を渡してください。
+subcommand、`--plan`、位置入力を指定せずに起動した場合、非 TTY stdin は最後まで読み込まれ、内容が位置入力になります。つまり `echo "task" | cruise` は従来の位置引数経路で `cruise plan "task"` のように計画します（`--skip-planning`、`--no-force-exec`、`--repo`、`--image` は引き続き使えます）。TTY で引数なしの起動をすると `cruise list` が開きます。pipe 入力を daemon 内のバックグラウンド計画経路で明示的に読むには `--plan stdin` を渡してください。
 
 <a id="cruise-tell"></a>
 ## `cruise tell`
@@ -347,7 +373,7 @@ cruise config [OPTIONS]
 
 Options:
       --set-parallelism <N>
-          Set the maximum number of sessions the WebUI and TUI run concurrently in `run --all` mode.
+          Set the maximum number of sessions the WebUI runs concurrently in `run --all` mode.
 
           Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
       --set-language <LANG|auto>
@@ -356,24 +382,15 @@ Options:
           Set the automatic retry limit for Run All (0 disables it).
 ```
 
-`$XDG_CONFIG_HOME/cruise/`（既定: `~/.config/cruise/`）に保存された `config.json` または `config.yaml` のアプリケーション設定を表示または更新します。workflow ごとの YAML 設定とは別のものです。flag なしでは現在の設定を出力します。`--set-parallelism <N>` は `run_all_parallelism`（既定 `1`）を設定し、**WebUI と TUI** の `run --all` で並行実行する session 数を制御します。CLI はこの保存値を読み込みません。1 回限りの値には `cruise run --all --parallelism <N>` を使ってください。
+`$XDG_CONFIG_HOME/cruise/`（既定: `~/.config/cruise/`）に保存された `config.json` または `config.yaml` のアプリケーション設定を表示または更新します。workflow ごとの YAML 設定とは別のものです。flag なしでは現在の設定を出力します。`--set-parallelism <N>` は `run_all_parallelism`（既定 `1`）を設定し、**WebUI** の `run --all` で並行実行する session 数を制御します。CLI はこの保存値を読み込みません。1 回限りの値には `cruise run --all --parallelism <N>` を使ってください。
 
 `cruise config --set-language ja` はアプリケーション設定 `uiLanguage` を保存します（読み込みでは `ui_language` も受け付けます）。`--set-language auto` は保存済みの言語を消去し、自動選択に戻します。明示的に指定できる tag は `en`、`zh-CN`、`es`、`fr`、`pt-BR`、`ja`、`ko` です。大文字小文字と、hyphen の代わりの underscore は許容されますが、`pt` や `en-US` などは受け付けません。`cruise config` は実効 `ui_language` とその適用元（`env`、`config`、`system`、`default`）を表示します。
 
-CLI と TUI の UI 言語は `CRUISE_UI_LANGUAGE` > アプリケーション `uiLanguage` > system locale > `en` の優先順です。空または `auto` の環境値、未設定または `auto` の config 値は、その優先層を未指定として扱います。無効な環境値は英語で警告して無視します。CLI setter とアプリケーション config の検証では無効値を拒否します。
+CLI の UI 言語は `CRUISE_UI_LANGUAGE` > アプリケーション `uiLanguage` > system locale > `en` の優先順です。空または `auto` の環境値、未設定または `auto` の config 値は、その優先層を未指定として扱います。無効な環境値は英語で警告して無視します。CLI setter とアプリケーション config の検証では無効値を拒否します。
 
-`cruise config --set-language <LANG>` は保存先の UI 言語を設定します。例:
+`cruise config --set-auto-requeue-max-attempts <N>` は CLI と WebUI の Run All 用に `run_all_auto_requeue_max_attempts` を設定します。CLI の `--auto-requeue-max-attempts <N>` flag は 1 batch だけ上書きします。
 
-```sh
-cruise config --set-language ja
-cruise config --set-language auto
-```
-
-TUI でも `L` キーから言語を選択できます。WebUI の選択はアプリケーション設定ではなくブラウザー cookie に保存されます。locale の優先順と UI 言語／prompt 言語の違いは[アプリケーション設定](configuration.md#ui-language)を参照してください。
-
-`cruise config --set-auto-requeue-max-attempts <N>` は CLI、TUI、WebUI の Run All 用に `run_all_auto_requeue_max_attempts` を設定します。CLI の `--auto-requeue-max-attempts <N>` flag は 1 batch だけ上書きします。
-
-macOS で実行中にスリープさせないには、machine-level `config.yaml` に `prevent_sleep: true`（または `config.json` に `"prevent_sleep": true`）を設定します。既定値は `false` です。CLI、TUI、WebUI の run が対象ですが、計画だけの場合は対象外です。その他の OS では何もしません。変更は次の run から有効です。プロジェクト `default.yaml` ではこの設定をサポートしません。
+macOS で実行中にスリープさせないには、machine-level `config.yaml` に `prevent_sleep: true`（または `config.json` に `"prevent_sleep": true`）を設定します。既定値は `false` です。CLI と WebUI の run が対象ですが、計画だけの場合は対象外です。その他の OS では何もしません。変更は次の run から有効です。プロジェクト `default.yaml` ではこの設定をサポートしません。
 
 両方の形式が存在する場合は `config.json` が優先され、それがなければ既存の `config.yaml` が使われます。2 つのファイルは統合されません。更新は選択された形式で書き戻されます。YAML comment は維持されません。
 
@@ -400,7 +417,7 @@ Cruise のプロセス環境に Slack Incoming Webhook URL を `CRUISE_NOTIFY_WE
 
 配信はベストエフォートです。既定以外の通知設定も `cruise config` に表示されますが、webhook URL は表示されません。
 
-WebUI session はサーバー側 desktop banner の代わりにブラウザー通知を使い、sound と webhook はサーバー側から配信します。`desktop` master と event switch はブラウザー通知も制御しますが、ページ内 toast は制御しません。`CRUISE_DISABLE_NOTIFICATIONS=1` は desktop、sound、webhook を無効にしますが、WebUI のブラウザー通知は抑制しません。これ以外の値ではこの全体無効化 switch は有効になりません。
+ワークフローイベント（**Action required**、**Plan ready**、**Completed**、**Failed**）の通知は、CLI と WebUI のどちらが作業を開始しても daemon が送信します。サウンドと webhook は常に daemon から配信されます。WebUI browser tab が接続されている場合、デスクトップ通知は browser notification として表示されます。接続された WebUI browser がない場合、daemon がネイティブのデスクトップ通知を表示します（macOS/Linux のデスクトップセッション）。`desktop` master と event switch は daemon の通知とブラウザー通知の両方を制御しますが、ページ内 toast は制御しません。daemon の環境に `CRUISE_DISABLE_NOTIFICATIONS=1` を設定し、`cruise daemon restart` で再起動すると、daemon のデスクトップ通知、サウンド、webhook 配信が無効になります。WebUI のブラウザー通知は無効になりません。これ以外の値ではこの全体無効化 switch は有効になりません。
 
 両形式の `model` と `plan_model` では、任意のグローバル model 既定値を設定できます。それぞれ文字列または順序付き配列を受け付け、先頭項目が primary、残りは SDK fallback です。2 形式で同じ field 名と alias を使います。`config.yaml` の例:
 
@@ -414,7 +431,7 @@ plan_model:
   - openai/gpt-6-luna:max
 ```
 
-workflow と `default.yaml` の model 設定はこれらの既定値より優先され、環境 override はさらに優先されます。どの層にも `plan_model` がない場合、計画では実効 `model` を使います。SDK 配列は既存の[フォールバック動作](sdk.md#sdk-mode)を使い、command mode では primary だけを使います。`planModel` は `plan_model` の alias として受け付けます。parallelism が未設定なら `1` が既定となるため、model のみの設定も有効です。CLI、WebUI、TUI で parallelism を更新しても両 model 設定は保持されます。
+workflow と `default.yaml` の model 設定はこれらの既定値より優先され、環境 override はさらに優先されます。どの層にも `plan_model` がない場合、計画では実効 `model` を使います。SDK 配列は既存の[フォールバック動作](sdk.md#sdk-mode)を使い、command mode では primary だけを使います。`planModel` は `plan_model` の alias として受け付けます。parallelism が未設定なら `1` が既定となるため、model のみの設定も有効です。CLI と WebUI で parallelism を更新しても両 model 設定は保持されます。
 
 同じアプリケーション設定ファイルで、対話型 workflow selector のカテゴリを構成できます。
 

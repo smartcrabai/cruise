@@ -19,7 +19,8 @@ Commands:
   config       Show or update application-level configuration (`config.json` or `config.yaml`)
   exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
-  webui        Serve or manage the local browser UI (start, stop, restart, status)
+  daemon       Manage the resident daemon lifecycle
+  webui        Ensure the daemon is running and print its browser UI login URL
   install      Install/update a provider CLI to its latest stable version or inspect managed status
   update       Update a managed native installation; `--status` lists recorded transactions read-only
   workflow     Manage workflows: list/eject built-ins, generate, interactively make or check YAML (`doctor`), install GitHub packages (`add`, `remove`, `update`)
@@ -37,6 +38,31 @@ Options:
 ```
 
 The exact subcommand name `docs` takes precedence over legacy positional input. Use `cruise plan "docs"` to plan a task whose exact text is `docs`.
+<a id="cruise-daemon"></a>
+## `cruise daemon` and `cruise webui`
+
+```sh
+cruise daemon start [--host <ADDR>] [--port <PORT>] [--webui-dir <DIR>] [-o|--open]
+cruise daemon stop [--force]
+cruise daemon restart [--host <ADDR>] [--port <PORT>] [--webui-dir <DIR>] [-o|--open]
+cruise daemon status [--json]
+cruise daemon serve [--host <ADDR>] [--port <PORT>] [--webui-dir <DIR>] [-o|--open]
+cruise webui [-o|--open]
+```
+
+`start` and `restart` run in the background; `serve` runs in the foreground for containers or debugging. The host, port, WebUI directory, and browser-open options apply to `start`, `restart`, and `serve`. `cruise webui` ensures the daemon is running, prints its login URL, and optionally opens it; daemon `start`, `restart`, and `serve` also print the login URL. The old `cruise webui start|stop|restart|status` commands are removed; use `cruise daemon ...`.
+
+The default address is `127.0.0.1:8484`. If 8484 is busy and no port was requested, Cruise uses an ephemeral port and warns; set `--port` or `CRUISE_DAEMON_PORT` explicitly on shared hosts. Either option set to `0` requests an ephemeral port. Open the login URL printed by `cruise webui`; it contains a single-use nonce that expires after five minutes, never the registry API token. Successful login sets an HttpOnly, SameSite=Strict `cruise_webui` cookie with a random in-memory session ID, separate from the API token and invalid after the daemon exits. The bare origin returns 401. `-o`/`--open` opens a 0600 temporary HTML redirect file, so the URL is not passed as an opener argument. Loopback binds accept only `localhost`, `127.0.0.1`, and `[::1]` Host names on any port, blocking foreign Host names used in DNS rebinding while allowing SSH tunnels. Non-loopback binds serve plain HTTP; use them only on trusted networks or behind a TLS proxy.
+
+The registry and log live in `$XDG_STATE_HOME/cruise/daemon/` (normally `~/.local/state/cruise/daemon/`). `instance.json` is mode `0600` and contains a random API token; `daemon.log` contains daemon logs. There is no boot-time service installation or idle auto-exit. The daemon exits when its registry record is removed.
+
+When upgrading from the v0.3.0 detached WebUI, daemon start, restart, serve, and client autostart refuse while its server is live. Run `cruise daemon stop` first; it also stops the legacy server, cancelling its active work so sessions become `Suspended` and can be resumed with `cruise run <id>`. `cruise daemon status` reports a live legacy server. Dead or stale legacy records are removed when the daemon starts.
+
+The daemon also refuses (HTTP 409, CLI exit 1, state unchanged) to run or plan a session that another cruise process is still executing as its recorded runner, such as a v0.3.0 `cruise run` that was in progress when you upgraded. v0.3.0 background planning workers record no runner and cannot be detected, so let background plans started before the upgrade finish first.
+
+Session commands (`plan`, `--plan`, `draft`, `run`, `run --all`, `exec`, `list`, `tell`, `clean`, and `diff`) are daemon clients and autostart it when needed. `config`, `usage`, `update`, `install`, `workflow *`, `docs`, `ssh`, and every `--dry-run` are local-only. CLI workflow resolution happens on the client; its working directory and allowlisted workflow-override variables such as `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, and `CRUISE_SDK` apply only to that request. Process-level variables (`PATH`, `GH_TOKEN`, provider credentials, `CRUISE_FORGE`, `CRUISE_SKIP_AGENT_AUTH_CHECK`, `CRUISE_DISABLE_NOTIFICATIONS`, `CRUISE_COMMIT_COAUTHOR_*`, and others) come from the daemon environment; restart with `cruise daemon restart` after changing them. Autostart removes workflow-override variables from the daemon environment, while explicit `daemon start` and `serve` preserve them. WebUI requests use the daemon environment and its home-directory working directory.
+
+When a client finds a daemon from another Cruise version, it restarts it automatically if idle. If the daemon is busy, the client asks you to run `cruise daemon restart` when it is idle. After `cruise update`, the next command restarts an idle daemon. Foreground commands stream progress; Ctrl+C cancels the operation (`run` becomes `Suspended`, planning is restored). Closing the terminal does not stop daemon work; reattach with `cruise run <session-id>` or the WebUI. Ask and Option prompts appear in the terminal and WebUI, and the first answer wins. A pending prompt in a non-interactive client leaves the session waiting for an answer in the WebUI or from `cruise run <session-id>`. `cruise --plan` also runs planning inside the daemon, not a detached worker. Claims prevent duplicate work on a session, so separate CLI processes and the WebUI can safely mutate sessions concurrently.
 
 <a id="cruise-install"></a>
 ## `cruise install`
@@ -130,7 +156,7 @@ Exit status is `0` when checks pass (warnings are allowed), `1` for errors or wa
 cruise ssh [OPTIONS] <DESTINATION> [-- <CRUISE_ARGS>...]
 ```
 
-`cruise ssh` runs a command on the remote `cruise` through OpenSSH. With no forwarded arguments, the remote `cruise` starts its TUI when a PTY is available. The destination is an OpenSSH `[user@]host` or `~/.ssh/config` alias; use that config for ports, identity files, agents, and ProxyJump.
+`cruise ssh` runs a command on the remote `cruise` through OpenSSH. With no forwarded arguments, the remote `cruise` runs `cruise list` (the interactive session selector when a PTY is available). The destination is an OpenSSH `[user@]host` or `~/.ssh/config` alias; use that config for ports, identity files, agents, and ProxyJump.
 
 Options:
 
@@ -152,7 +178,7 @@ The remote host is the execution boundary: its sessions, config, jcode authentic
 cruise
 ```
 
-Running `cruise` with no arguments opens the keyboard-only TUI. It requires a macOS/Linux interactive TTY; see [TUI (Interactive Keyboard Client)](usage.md#tui-interactive-keyboard-client) for its screens, workflows, keymap, responsive layout, and log behavior. Use the CLI subcommands for automation, JSON, and CI.
+Running `cruise` with no arguments opens `cruise list` on an interactive terminal. Piped stdin still follows the positional planning path. See [`cruise list`](#cruise-list) for the selector and JSON output.
 
 <a id="cruise-plan"></a>
 ## `cruise plan`
@@ -178,7 +204,7 @@ Options:
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable)
 ```
 
-**GitHub issue input.** Use `cruise plan '#12'`, `cruise plan --issue 12 'additional instructions'`, or put `#12` on the first line followed by additional instructions on later lines. The first line must contain only the issue reference. Root positional input, `--plan`, `draft`, and the TUI and WebUI New Session task field also accept this syntax. Only `plan` and `draft` accept `--issue`, not the root command or `exec`. Issue lookup uses `gh` and the current repository origin, or `--repo` when supplied. GitLab issue input is not supported. The issue title, body, labels, and comments become task input, and supported GitHub images are saved as session attachments before user-provided images. The issue number is included in the branch and a closing reference in the PR. Issue input opts out of `force_exec`. Retrieved issue content is untrusted and can contain prompt injection.
+**GitHub issue input.** Use `cruise plan '#12'`, `cruise plan --issue 12 'additional instructions'`, or put `#12` on the first line followed by additional instructions on later lines. The first line must contain only the issue reference. Root positional input, `--plan`, `draft`, and the WebUI New Session task field also accept this syntax. Only `plan` and `draft` accept `--issue`, not the root command or `exec`. Issue lookup uses `gh` and the current repository origin, or `--repo` when supplied. GitLab issue input is not supported. The issue title, body, labels, and comments become task input, and supported GitHub images are saved as session attachments before user-provided images. The issue number is included in the branch and a closing reference in the PR. Issue input opts out of `force_exec`. Retrieved issue content is untrusted and can contain prompt injection.
 
 Non-git directories warn and plan in place, but `cruise run` still requires a git repository.
 
@@ -199,7 +225,7 @@ With `--no-interactive-planning`, SDK planning uses the direct-to-file flow even
 
 With `--repo <owner/repository>`, the session targets a GitHub or GitLab repository instead of the current directory. Repo sessions always run in Worktree mode and still require `gh` / `glab` to access the repository. With `create_pr: false`, Cruise skips automatic commit, push, PR creation, `after-pr`, and PR-based cleanup. Successful runs with no new branch commits finish without attempting PR creation, but existing branch commits remain eligible for a PR. A publishing failure in a repo or local worktree session results in **PR Failed** and preserves the workspace for recovery with **Create PR**, without rerunning the workflow. `--repo` also works for background planning (`cruise --plan "task" --repo owner/repository`). Free-form `owner/repository` is accepted.
 
-**Fix reviews on an existing GitHub PR.** Run `cruise plan --pr 12` from the repository, or `cruise plan --repo owner/repo --pr 12 "focus on tests"`, approve the generated plan if prompted, then run `cruise run <session-id>`. The optional positional text is an additional instruction; this mode does not read stdin or use an LLM to generate the plan. TUI and WebUI new-session forms also accept a PR number for a GitHub repository. Authenticated `gh` is required. The PR must be open and have a nonempty head branch in the same repository; draft PRs are supported, but fork PRs and GitLab merge requests are not. `--grill` and `--image` cannot be combined with `--pr`.
+**Fix reviews on an existing GitHub PR.** Run `cruise plan --pr 12` from the repository, or `cruise plan --repo owner/repo --pr 12 "focus on tests"`, approve the generated plan if prompted, then run `cruise run <session-id>`. The optional positional text is an additional instruction; this mode does not read stdin or use an LLM to generate the plan. The WebUI New Session form also accepts a PR number for a GitHub repository. Authenticated `gh` is required. The PR must be open and have a nonempty head branch in the same repository; draft PRs are supported, but fork PRs and GitLab merge requests are not. `--grill` and `--image` cannot be combined with `--pr`.
 
 The default workflow is `builtin:pr-review-fix`, not the project workflow. A custom `-c` workflow must enable PR handling and include an after-PR `github-review` step with `reviewers: all`. The built-in declares no flags and handles reviews without creating or merging a PR. The review loop commits and pushes fixes, replies to or resolves target threads, and can be retried after failure. PR sessions do not offer Publish as Issue or Replan.
 
@@ -293,13 +319,13 @@ When `force_exec: true` is set in the workflow config, the legacy positional for
 cruise --plan <INPUT|stdin> [--skip-planning] [--no-force-exec] [--repo <OWNER/REPO>] [--image <PATH>]... [--flag <VALUE>]...
 ```
 
-Creates the session immediately, starts plan generation in a detached worker, and returns the new session ID. While the worker is running, `cruise list` shows `Planning`. If generation fails, `cruise list` shows `Plan Failed`, and approval stays disabled until planning succeeds.
+Creates the session immediately, starts plan generation inside the daemon, and returns the new session ID. While planning is active, `cruise list` shows `Planning`. If generation fails, `cruise list` shows `Plan Failed`, and approval stays disabled until planning succeeds.
 
-Adding `--skip-planning` skips the background worker, writes the input directly to `plan.md`, and creates a session already in `Planned`. No approval step is needed (with `force_exec: true`, the workflow executes directly instead unless issue input or another opt-out is used; pass `--no-force-exec` to opt out explicitly). The flag also works without `--plan` (for example, `cruise --skip-planning "task"`), in which case it behaves like `cruise plan --skip-planning "task"`.
+Adding `--skip-planning` skips plan generation, writes the input directly to `plan.md`, and creates a session already in `Planned`. No approval step is needed (with `force_exec: true`, the workflow executes directly instead unless issue input or another opt-out is used; pass `--no-force-exec` to opt out explicitly). The flag also works without `--plan` (for example, `cruise --skip-planning "task"`), in which case it behaves like `cruise plan --skip-planning "task"`.
 
 `--repo <owner>/<repository>` is accepted here too and targets the repository as described under [`cruise plan`](#cruise-plan). `--grill` is not available on this path because background planning has no interactive user to interview.
 
-With no subcommand, no `--plan`, and no positional input, non-TTY stdin is read to the end and its contents become positional input. Thus `echo "task" | cruise` takes the legacy positional path and plans like `cruise plan "task"` (`--skip-planning`, `--no-force-exec`, `--repo`, and `--image` still apply). With interactive stdin, the argument-free invocation opens the TUI. Pass `--plan stdin` to read piped input explicitly on the background planning path.
+With no subcommand, no `--plan`, and no positional input, non-TTY stdin is read to the end and its contents become positional input. Thus `echo "task" | cruise` takes the legacy positional path and plans like `cruise plan "task"` (`--skip-planning`, `--no-force-exec`, `--repo`, and `--image` still apply). With interactive stdin, the argument-free invocation opens `cruise list`. Pass `--plan stdin` to read piped input explicitly on the daemon-backed background planning path.
 
 <a id="cruise-tell"></a>
 ## `cruise tell`
@@ -348,7 +374,7 @@ cruise config [OPTIONS]
 
 Options:
       --set-parallelism <N>
-          Set the maximum number of sessions the WebUI and TUI run concurrently in `run --all` mode.
+          Set the maximum number of sessions the WebUI runs concurrently in `run --all` mode.
 
           Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
       --set-language <LANG|auto>
@@ -357,15 +383,15 @@ Options:
           Set the automatic retry limit for Run All (0 disables it).
 ```
 
-Shows or updates application-level settings stored in `config.json` or `config.yaml` under `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI and TUI** execute in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
+Shows or updates application-level settings stored in `config.json` or `config.yaml` under `$XDG_CONFIG_HOME/cruise/` (default: `~/.config/cruise/`) -- this is separate from the per-workflow YAML configs. With no flags, prints the current configuration. `--set-parallelism <N>` sets `run_all_parallelism` (default `1`), which controls how many sessions the **WebUI** executes in parallel during `run --all`. The CLI does not read this persisted value; use the one-shot `cruise run --all --parallelism <N>` flag instead.
 
 `cruise config --set-language ja` saves the application setting `uiLanguage` (`ui_language` is also accepted when reading). Use `--set-language auto` to clear it and resume automatic selection. The supported explicit tags are `en`, `zh-CN`, `es`, `fr`, `pt-BR`, `ja`, and `ko`. Case and underscores in place of hyphens are accepted, but other tags such as `pt` and `en-US` are not. `cruise config` reports the effective `ui_language` and its source: `env`, `config`, `system`, or `default`.
 
-CLI and TUI UI language precedence is `CRUISE_UI_LANGUAGE` > application `uiLanguage` > system locale > `en`. Blank or `auto` environment values, and unset or `auto` config values, leave that layer unspecified. Invalid environment values are warned about in English and ignored; the CLI setter and application-config validation reject invalid values.
+CLI UI language precedence is `CRUISE_UI_LANGUAGE` > application `uiLanguage` > system locale > `en`. Blank or `auto` environment values, and unset or `auto` config values, leave that layer unspecified. Invalid environment values are warned about in English and ignored; the CLI setter and application-config validation reject invalid values.
 
-`cruise config --set-auto-requeue-max-attempts <N>` sets `run_all_auto_requeue_max_attempts` for CLI, TUI, and WebUI Run All. The CLI flag `--auto-requeue-max-attempts <N>` overrides it for one batch.
+`cruise config --set-auto-requeue-max-attempts <N>` sets `run_all_auto_requeue_max_attempts` for CLI and WebUI Run All. The CLI flag `--auto-requeue-max-attempts <N>` overrides it for one batch.
 
-Set `prevent_sleep: true` in the machine-level `config.yaml` (or `"prevent_sleep": true` in `config.json`) to prevent sleep during runs on macOS; the default is `false`. This covers CLI, TUI, and WebUI runs, but not planning alone. Other operating systems do nothing. Changes take effect on the next run. This setting is not supported in project `default.yaml`.
+Set `prevent_sleep: true` in the machine-level `config.yaml` (or `"prevent_sleep": true` in `config.json`) to prevent sleep during runs on macOS; the default is `false`. This covers CLI and WebUI runs, but not planning alone. Other operating systems do nothing. Changes take effect on the next run. This setting is not supported in project `default.yaml`.
 
 If both files exist, `config.json` wins; otherwise an existing `config.yaml` is used. The files are not merged. Updates write back to the selected file in its format; YAML comments are not retained.
 
@@ -376,7 +402,6 @@ cruise config --set-language ja
 cruise config --set-language auto
 ```
 
-The TUI also offers a language picker on `L`. A WebUI selection is saved in a browser cookie rather than application settings. See [application configuration](configuration.md#ui-language) for locale precedence and the distinction between UI and prompt languages.
 
 <a id="notifications"></a>
 ### Notifications
@@ -401,7 +426,7 @@ Set `CRUISE_NOTIFY_WEBHOOK` in the Cruise process environment to a Slack Incomin
 
 Delivery is best effort. Non-default notification settings also appear in `cruise config`, but the webhook URL is never shown.
 
-WebUI sessions use browser notifications instead of server-side desktop banners, plus server-side sound and webhook delivery. The `desktop` master and event switches also control browser notifications, but not in-page toasts. `CRUISE_DISABLE_NOTIFICATIONS=1` disables desktop, sound, and webhook delivery, but does not suppress WebUI browser notifications. Other values do not activate this global switch.
+All workflow-event notifications (**Action required**, **Plan ready**, **Completed**, and **Failed**) are sent by the daemon, regardless of whether the CLI or WebUI started the work. Sound and webhook delivery always come from the daemon. When a WebUI browser tab is connected, it shows the desktop banner as a browser notification; otherwise, the daemon shows a native desktop banner (macOS/Linux desktop session). The `desktop` master and event switches control both the daemon banner and browser notifications, but not in-page toasts. Set `CRUISE_DISABLE_NOTIFICATIONS=1` in the daemon's environment and restart it with `cruise daemon restart` to disable daemon desktop, sound, and webhook delivery; WebUI browser notifications are not disabled. Other values do not activate this global switch.
 
 `model` and `plan_model` in either format provide optional global model defaults. Each accepts a string or an ordered array: the first entry is primary, the rest are SDK fallbacks. Both formats use the same field names and aliases. For example, `config.yaml`:
 
@@ -415,7 +440,7 @@ plan_model:
   - openai/gpt-6-luna:max
 ```
 
-Workflow and `default.yaml` model settings override these defaults; environment overrides still win. If no layer sets `plan_model`, planning uses the effective `model`. SDK arrays use the existing [fallback behavior](sdk.md#sdk-mode); command mode uses only the primary. `planModel` is accepted as an alias for `plan_model`. Missing parallelism defaults to `1`, so model-only settings are valid. Updating parallelism through the CLI, WebUI, or TUI preserves both model settings.
+Workflow and `default.yaml` model settings override these defaults; environment overrides still win. If no layer sets `plan_model`, planning uses the effective `model`. SDK arrays use the existing [fallback behavior](sdk.md#sdk-mode); command mode uses only the primary. `planModel` is accepted as an alias for `plan_model`. Missing parallelism defaults to `1`, so model-only settings are valid. Updating parallelism through the CLI or WebUI preserves both model settings.
 
 The same application settings file can organize interactive workflow selectors:
 

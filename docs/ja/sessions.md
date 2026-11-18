@@ -16,6 +16,7 @@ Cruise は [XDG Base Directory Specification](https://specifications.freedesktop
 | ユーザーのワークフローデフォルト | `$XDG_CONFIG_HOME/cruise/default.yaml`（デフォルト: `~/.config/cruise/default.yaml`） |
 | プロジェクトのワークフローデフォルト | `./.cruise/default.yaml` |
 | 状態ファイル、WebUI インスタンス情報など | `$XDG_STATE_HOME/cruise/`（デフォルト: `~/.local/state/cruise/`） |
+| daemon registry と log（`instance.json`、`daemon.log`） | `$XDG_STATE_HOME/cruise/daemon/`（デフォルト: `~/.local/state/cruise/daemon/`） |
 | セッション、ワークツリー、一時的な `--repo` クローン | `$XDG_DATA_HOME/cruise/`（デフォルト: `~/.local/share/cruise/`） |
 
 Windows では、`XDG_*` 変数が未設定の場合、デフォルトは `%APPDATA%\cruise`（設定）、`%LOCALAPPDATA%\cruise\data`（データ）、`%LOCALAPPDATA%\cruise\state`（状態）です。これらの変数が設定されていない場合は上記の `~/` のデフォルトが適用され、`~\` は `~/` と同様に展開されます。
@@ -38,7 +39,7 @@ Windows では、`XDG_*` 変数が未設定の場合、デフォルトは `%APPD
    - **Execute now** -- 承認を省略し、直ちに実行します。
    - **Publish as Issue** -- `plan.md` を GitHub Issue（または GitLab Issue）として公開し、ローカルセッションを削除します。
 
-   TUI の **Fix Plan**、**Ask About Plan**、**Verify Spec** と、WebUI の **Fix**、**Ask**、**Verify** は、使用可能なプランがあれば利用できます。利用には PATH 上の `quint` と Alloy 用の Java 17 以降が必要です。
+   使用可能なプランがあれば、WebUI の **Fix**、**Ask**、**Verify** を **Awaiting Approval** または **Planned** で利用できます。Verify は menu action であり、Ask 内の `/verify` command ではありません。利用には PATH 上の `quint` と Alloy 用の Java 17 以降が必要です。
 
    **Approve** または **Execute now** を選ぶと、`-f/--flag` が指定されていない場合は、宣言済みワークフローフラグを先に選択します。次に **step skip selector** に、それらの値で有効になっているステップのみが表示されます。この実行でスキップするステップを切り替えて選択してください。選択内容は設定ファイルごとに保存され、同じ設定を使う次のセッションで事前選択されます。どちらかのセレクターをキャンセルすると、フラグの途中変更を保存したり、セッションを承認・実行したりせず、プラン承認メニューに戻ります。Approve 後の `cruise run` では、保存済みフラグと CLI の上書きを使い、フラグセレクターもスキップ選択の再確認も表示しません（[ワークフローフラグ](cli-reference.md#cruise-run)を参照）。
 
@@ -96,12 +97,12 @@ Model: provider/fallback
 - **Approve** -- プランを承認し、セッションを Planned フェーズに遷移させます。
 - **Publish as Issue** -- 変更せずに `plan.md` を、解決済みリポジトリの GitHub Issue（または GitLab Issue）として公開し、その後ローカルセッションを削除します。
 - **Run / Resume** -- セッションを実行または続行します。
-- **Tell** -- 実行中セッションの次のエージェントプロンプトに指示を送信します。TUI と WebUI でも実行中に Tell を使えます。
+- **Tell** -- 実行中セッションの次のエージェントプロンプトに指示を送信します。WebUI でも実行中に Tell を使えます。
 - **Create PR** -- **PR Failed** セッションの公開を、ワークフローを再実行せずに再試行します。まず表示されたエラーと forge の認証を確認してください（GitHub の HTTPS 認証情報については `gh auth setup-git` で Git を設定できます）。セッションは公開の失敗またはキャンセル後も **PR Failed** のまま保持されます。致命的な after-PR エラーが発生すると **Failed** になります。成功するとセッションは完了し、PR が作成または再利用された場合にのみ、設定済み after-PR ステップが実行されます。
 - **View Diff** -- セッションブランチの変更を確認してメニューに戻ります。比較とクリーンアップの制限については [`cruise diff`](cli-reference.md#cruise-diff)を参照してください。
 - **Replan** -- フィードバックを入力してプランを再生成します。セッションは Planned フェーズのままです。
 - **Open PR** -- `gh pr view --web` でセッションのプルリクエストをブラウザーで開きます。
-- **Merge PR** -- セッションのプルリクエストを人が開始してマージします（TUI と WebUI でも利用できます）。最初に PR の状態、マージ可能性、レビュー判定、各 CI チェックが表示されます。次に `Squash`（デフォルト）、`Merge`、`Rebase` から選択して確認します。これは人の確認を必要とする GitHub 専用経路です。組み込みの `-f merge` は別の同期 squash 経路です。
+- **Merge PR** -- セッションのプルリクエストを人が開始してマージします（WebUI でも利用できます）。最初に PR の状態、マージ可能性、レビュー判定、各 CI チェックが表示されます。次に `Squash`（デフォルト）、`Merge`、`Rebase` から選択して確認します。これは人の確認を必要とする GitHub 専用経路です。組み込みの `-f merge` は別の同期 squash 経路です。
 - **Stage local merge** -- セッションを削除したりコミットしたりせずに、セッションブランチをベースチェックアウトのインデックスに squash します。ワークツリーの未コミット変更は、先にセッションブランチへコミットされます。
 - **Merge locally & cleanup** -- 1 つのベースコミットに squash した後、ワークツリー、ブランチ、セッションを削除します。最初の squash では、記録された対象ブランチがローカルでチェックアウトされていること、追跡対象ファイルに変更のないベースであること、upstream より遅れていないことが必要です。Cruise は fetch も pull もしません。
 - **Reset to Planned** -- 現在のステップをクリアしてセッションを Planned フェーズに戻し、最初から再実行できるようにします。
@@ -161,21 +162,21 @@ secrets/config.yaml
 <a id="stale-session-detection"></a>
 ## 古いセッションの検出
 
-`cruise list`、TUI（`cruise`）、または WebUI のセッション詳細画面がセッションを読み込む際、Running フェーズのセッションについて稼働状態を確認します。runner プロセスがすでに稼働していなければ、セッションは自動的に Suspended フェーズへ遷移します。これにより、クラッシュや強制終了の後にセッションが Running のまま永久に残ることを防ぎます。
+`cruise list` または WebUI のセッション詳細画面がセッションを読み込む際、Running フェーズのセッションについて稼働状態を確認します。runner プロセスがすでに稼働していなければ、セッションは自動的に Suspended フェーズへ遷移します。これにより、クラッシュや強制終了の後にセッションが Running のまま永久に残ることを防ぎます。
 
-Suspended セッションは `cruise list` または TUI から再開するか、Planned にリセットできます。`run --all` コマンドも Planned セッションとともに Suspended セッションを実行対象にします。
+Suspended セッションは `cruise list` または WebUI から再開するか、Planned にリセットできます。`run --all` コマンドも Planned セッションとともに Suspended セッションを実行対象にします。
 
 <a id="parallel-session-execution"></a>
 ## セッションの並列実行
 
-Run All は、失敗したステップから同じ worker 内で、対象となる失敗を自動的に再試行できます。WebUI の設定、TUI の Run All 画面で `e` キー、または `cruise config --set-auto-requeue-max-attempts <N>` で 0 以上の上限を設定します。デフォルトは `0` で、再試行は無効です。分類されていないコマンドエラー、対象となるプロバイダーエラー、変更なしエラーは再試行されることがありますが、キャンセル、設定、認証、認可エラーは対象外です。各試行では通常の失敗通知も表示されます。失敗したステップがある完了済みの実行を、失敗として再分類することはありません。
+Run All は、失敗したステップから同じ worker 内で、対象となる失敗を自動的に再試行できます。WebUI の設定または `cruise config --set-auto-requeue-max-attempts <N>` で 0 以上の上限を設定します。デフォルトは `0` で、再試行は無効です。分類されていないコマンドエラー、対象となるプロバイダーエラー、変更なしエラーは再試行されることがありますが、キャンセル、設定、認証、認可エラーは対象外です。各試行では通常の失敗通知も表示されます。失敗したステップがある完了済みの実行を、失敗として再分類することはありません。
 
 セッションごとの保存カウントはバッチをまたいで使われる生涯上限です。手動の Run または Retry ではリセットされませんが、Reset to Planned ではリセットされます。Failed セッションはバッチ開始時の対象にならず、単独セッションの実行と exec セッションも自動再試行されません。上限を下げてもカウントは消去されません。カウントはセッション詳細、CLI の list JSON、バッチ概要に表示されます。
 
-WebUI、TUI、CLI は `run --all` で複数セッションを同時に実行できます。
+WebUI と CLI は `run --all` で複数セッションを同時に実行できます。すべての session mutation は常駐 daemon を経由するため、複数 CLI process と WebUI は同時に操作できます。claim により同一 session の作業重複を防ぎます。
 
-- **WebUI/TUI**: 並列度は、選択されたアプリケーション設定ファイル（`$XDG_CONFIG_HOME/cruise/` 以下の `config.json` または `config.yaml`）にある `run_all_parallelism` で制御されます。`cruise config --set-parallelism <N>` で設定でき、デフォルトは `1` です。
-- **CLI**: 1 回の実行だけに適用する上書きには `cruise run --all --parallelism <N>` を指定します（デフォルトは `1`、つまり逐次実行）。保存済みの WebUI/TUI 設定は読み取られず、変更もされません。対話型端末で `--dry-run` を指定していない場合、CLI はスケジュールされた各セッションのタイトル、現在のステップ、状態、経過時間を示すライブダッシュボードも表示します。詳細なエージェント出力は `sessions/{id}/run.log` に保持されます。非 TTY と dry-run では通常のログ出力と最後の概要が使われます。
+- **WebUI**: 並列度は、選択されたアプリケーション設定ファイル（`$XDG_CONFIG_HOME/cruise/` 以下の `config.json` または `config.yaml`）にある `run_all_parallelism` で制御されます。`cruise config --set-parallelism <N>` で設定でき、デフォルトは `1` です。この設定は WebUI Run All のみに適用されます。
+- **CLI**: 1 回の実行だけに適用する上書きには `cruise run --all --parallelism <N>` を指定します（デフォルトは `1`、つまり逐次実行）。保存済みの WebUI 設定は読み取られず、変更もされません。対話型端末で `--dry-run` を指定していない場合、CLI はスケジュールされた各セッションのタイトル、現在のステップ、状態、経過時間を示すライブダッシュボードも表示します。詳細なエージェント出力は `sessions/{id}/run.log` に保持されます。非 TTY と dry-run では通常のログ出力と最後の概要が使われます。
 
 バッチスケジューラーの動作:
 - Planned と Suspended のセッションを初期候補にします。
@@ -184,7 +185,7 @@ WebUI、TUI、CLI は `run --all` で複数セッションを同時に実行で�
 <a id="new-session-form-persistence"></a>
 ## 新規セッションフォームの永続化
 
-WebUI と TUI は、次の 2 種類の状態をセッションをまたいで保持します。
+WebUI は、次の 2 種類の状態をセッションをまたいで保持します。
 
-- **Draft**: 新規セッションフォームの現在の内容（タスクの説明、設定パス、作業ディレクトリ、リポジトリ、スキップするステップ）。TUI は変更を自動保存します。WebUI は **Save draft** をクリックしたときに保存します。フォームを再度開くとドラフトが復元されます。
+- **Draft**: 新規セッションフォームの現在の内容（タスクの説明、設定パス、作業ディレクトリ、リポジトリ、スキップするステップ）。WebUI は **Save draft** をクリックしたときに保存します。フォームを再度開くとドラフトが復元されます。
 - **History**: 過去の新規セッション選択の記録です。設定ファイルごとに、ステップスキップセレクターで直近の選択を事前入力するため、および以前の作業ディレクトリ／設定の組み合わせを呼び出すために使われます。

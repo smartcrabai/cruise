@@ -1,3 +1,5 @@
+use std::io::Write as _;
+
 /// Re-claims the controlling terminal's foreground process group when it was
 /// left pointing at a dead process group.
 ///
@@ -76,6 +78,74 @@ pub(crate) fn shell_command() -> (&'static str, &'static str) {
 ///
 /// Returns an error when the platform opener cannot be spawned.
 pub fn open_url(url: &str) -> std::io::Result<()> {
+    open_with_opener(std::ffi::OsStr::new(url))
+}
+
+/// Opens a `WebUI` login URL without exposing it as an opener process argument.
+///
+/// # Errors
+///
+/// Returns an error when the redirect file cannot be written or the opener cannot be spawned.
+pub(crate) fn open_login_redirect(url: &str) -> std::io::Result<()> {
+    open_login_redirect_with(url, |path| open_with_opener(path.as_os_str())).map(drop)
+}
+
+fn open_login_redirect_with(
+    url: &str,
+    open: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<std::path::PathBuf> {
+    let path = write_login_redirect(url)?;
+    if let Err(error) = open(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(path)
+}
+
+fn write_login_redirect(url: &str) -> std::io::Result<std::path::PathBuf> {
+    let escaped_url = url
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let html = format!(
+        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url={escaped_url}\">"
+    );
+    loop {
+        let path =
+            std::env::temp_dir().join(format!("cruise-webui-login-{}.html", uuid::Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let result = (|| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            #[cfg(windows)]
+            crate::platform::set_owner_only_acl(&path)?;
+            file.write_all(html.as_bytes())
+        })();
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
+        return Ok(path);
+    }
+}
+
+fn open_with_opener(argument: &std::ffi::OsStr) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     let command = "open";
     #[cfg(windows)]
@@ -83,7 +153,7 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     #[cfg(not(any(target_os = "macos", windows)))]
     let command = "xdg-open";
     std::process::Command::new(command)
-        .arg(url)
+        .arg(argument)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -298,6 +368,37 @@ mod tests {
             .arg("x")
             .spawn();
         assert!(missing.is_err());
+    }
+
+    #[test]
+    fn webui_login_opener_receives_a_private_redirect_file() {
+        let url = "http://127.0.0.1:8484/login?nonce=one-time&part=two";
+        let mut opened_path = None;
+        let path = super::open_login_redirect_with(url, |path| {
+            opened_path = Some(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("open redirect: {error}"));
+        assert_eq!(opened_path.as_deref(), Some(path.as_path()));
+        let html = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read redirect file: {error}"));
+        assert!(html.contains("login?nonce=one-time&amp;part=two"));
+        assert!(!html.contains("token="));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .unwrap_or_else(|error| panic!("redirect metadata: {error}"))
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        #[cfg(windows)]
+        super::assert_owner_only_dacl(&path);
+        std::fs::remove_file(path).unwrap_or_else(|error| panic!("remove redirect file: {error}"));
     }
 
     #[test]

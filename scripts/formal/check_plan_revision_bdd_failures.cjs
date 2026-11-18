@@ -70,13 +70,13 @@ const cases = [
     name: 'replan-feedback',
     marker: 'replan unexpectedly accepted user text',
     mutate() {
-      const from = '        Self::validate_plan_request_text(operation, &request)?;';
+      const from = '        Self::validate_plan_request_text(operation, request)?;';
       if (originals.application.split(from).length !== 2) {
         throw Error('plan request validation mutation target changed');
       }
       fs.writeFileSync(
         path.join(scratch, files.application),
-        originals.application.replace(from, '        let _ = &request;'),
+        originals.application.replace(from, '        let _ = request;'),
       );
     },
   },

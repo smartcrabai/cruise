@@ -43,9 +43,15 @@ fn harness() -> Harness {
     let xdg_config = crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", config_home.as_os_str());
     let manager = SessionManager::new(dir.path().to_path_buf());
     let application = CruiseApplication::new(manager.clone());
-    let Ok(state) = WebState::new(application, &repo_assets()) else {
+    let Ok(mut state) = WebState::new(application, &repo_assets()) else {
         panic!("web state");
     };
+    state.api_token = Some("test-secret".to_owned());
+    state
+        .web_sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert("test-session".to_owned());
     Harness {
         _xdg_config: xdg_config,
         _process_lock: process_lock,
@@ -53,100 +59,6 @@ fn harness() -> Harness {
         dir,
         manager,
     }
-}
-
-#[tokio::test]
-async fn control_stop_is_not_found_without_gate() {
-    let harness = harness();
-    let (status, _, _) = post(&harness, "/webui/control/stop", "").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn control_stop_authenticates_and_signals_shutdown() {
-    let mut harness = harness();
-    let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let (sender, mut receiver) = tokio::sync::oneshot::channel();
-    harness.state.control = Some(std::sync::Arc::new(super::ControlGate {
-        token: token.to_owned(),
-        sender: std::sync::Mutex::new(Some(sender)),
-    }));
-
-    for candidate in [None, Some("wrong"), Some(&token[..63])] {
-        let mut request = Request::builder().method("POST").uri("/webui/control/stop");
-        if let Some(value) = candidate {
-            request = request.header("x-cruise-webui-control", value);
-        }
-        let request = request
-            .body(Body::empty())
-            .unwrap_or_else(|e| panic!("request: {e}"));
-        let response = router(harness.state.clone())
-            .oneshot(request)
-            .await
-            .unwrap_or_else(|e| panic!("response: {e}"));
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response.headers()["cache-control"], "no-store");
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ));
-    }
-
-    let request = Request::builder()
-        .method("POST")
-        .uri("/webui/control/stop")
-        .header("x-cruise-webui-control", token)
-        .body(Body::empty())
-        .unwrap_or_else(|e| panic!("request: {e}"));
-    let response = router(harness.state.clone())
-        .oneshot(request)
-        .await
-        .unwrap_or_else(|e| panic!("response: {e}"));
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert_eq!(response.headers()["connection"], "close");
-    assert_eq!(response.headers()["cache-control"], "no-store");
-    let body = axum::body::to_bytes(response.into_body(), 4096)
-        .await
-        .unwrap_or_else(|e| panic!("body: {e}"));
-    let json: serde_json::Value =
-        serde_json::from_slice(&body).unwrap_or_else(|e| panic!("json: {e}"));
-    assert_eq!(json["active_operations"], 0);
-    assert!(receiver.try_recv().is_ok());
-}
-
-#[tokio::test]
-async fn read_planned_session_then_control_stop_stays_idle()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut harness = harness();
-    let mut session = create_session(&harness);
-    session.phase = crate::session::SessionPhase::Planned;
-    harness.manager.save(&session)?;
-    let (status, _, _) = get(
-        &harness,
-        &format!("/webui/sessions/{}/tab/info", session.id),
-        &[],
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(harness.state.application.runtime().is_idle());
-    let (sender, _receiver) = tokio::sync::oneshot::channel();
-    harness.state.control = Some(std::sync::Arc::new(super::ControlGate {
-        token: "test-token".to_owned(),
-        sender: std::sync::Mutex::new(Some(sender)),
-    }));
-    let request = Request::builder()
-        .method("POST")
-        .uri("/webui/control/stop")
-        .header("x-cruise-webui-control", "test-token")
-        .body(Body::empty())?;
-    let response = router(harness.state.clone()).oneshot(request).await?;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let loaded = harness.manager.load(&session.id)?;
-    assert_eq!(loaded.phase, crate::session::SessionPhase::Planned);
-    assert_eq!(loaded.runner_pid, None);
-    assert_eq!(loaded.runner_started_at, None);
-    assert!(harness.state.application.runtime().is_idle());
-    Ok(())
 }
 
 fn create_session(harness: &Harness) -> SessionState {
@@ -166,6 +78,8 @@ fn create_session(harness: &Harness) -> SessionState {
         attachments: Vec::new(),
         skipped_steps: Vec::new(),
         flags: BTreeMap::default(),
+        context: None,
+        ..NewSessionRequest::default()
     });
     match result {
         Ok(session) => session,
@@ -306,10 +220,20 @@ async fn post(harness: &Harness, uri: &str, body: &'static str) -> (StatusCode, 
 }
 
 async fn send(harness: &Harness, request: Request<Body>) -> (StatusCode, String, String) {
-    let response = match router(harness.state.clone()).oneshot(request).await {
-        Ok(response) => response,
-        Err(error) => match error {},
-    };
+    let mut request = request;
+    if !request.headers().contains_key("host") {
+        request.headers_mut().insert(
+            "host",
+            axum::http::HeaderValue::from_static("localhost:8484"),
+        );
+    }
+    if !request.headers().contains_key("cookie") {
+        request.headers_mut().insert(
+            "cookie",
+            axum::http::HeaderValue::from_static("cruise_webui=test-session"),
+        );
+    }
+    let response = raw_response(harness, request).await;
     let status = response.status();
     let content_type = response
         .headers()
@@ -325,6 +249,328 @@ async fn send(harness: &Harness, request: Request<Body>) -> (StatusCode, String,
         content_type,
         String::from_utf8_lossy(&bytes).into_owned(),
     )
+}
+
+async fn raw_response(harness: &Harness, request: Request<Body>) -> axum::response::Response {
+    match router(harness.state.clone()).oneshot(request).await {
+        Ok(response) => response,
+        Err(error) => match error {},
+    }
+}
+
+#[tokio::test]
+async fn webui_pages_fragments_and_sse_require_a_session_cookie() {
+    let harness = harness();
+    for uri in ["/", "/new", "/webui/sidebar", "/webui/events"] {
+        let request = Request::builder()
+            .uri(uri)
+            .header("host", "localhost:8484")
+            .body(Body::empty())
+            .unwrap_or_else(|error| panic!("request: {error}"));
+        let response = raw_response(&harness, request).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap_or_else(|error| panic!("response body: {error}"));
+        assert!(
+            String::from_utf8_lossy(&body).contains("cruise webui"),
+            "{uri}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    let request = Request::builder()
+        .uri("/")
+        .header("host", "localhost:8484")
+        .header("cookie", "cruise_webui=invalid")
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("request: {error}"));
+    let response = raw_response(&harness, request).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+async fn login_nonce_url(state: &WebState) -> String {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/login-nonce")
+        .header("authorization", "Bearer test-secret")
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("login-nonce request: {error}"));
+    let response = crate::daemon::api::router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap_or_else(|never| match never {});
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap_or_else(|error| panic!("login-nonce response: {error}"));
+    let response: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or_else(|error| panic!("login-nonce JSON: {error}"));
+    response["url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("missing login URL: {response}"))
+        .to_owned()
+}
+
+fn nonce_from_url(url: &str) -> String {
+    url::Url::parse(url)
+        .unwrap_or_else(|error| panic!("invalid login URL: {error}"))
+        .query_pairs()
+        .find_map(|(key, value)| (key == "nonce").then(|| value.into_owned()))
+        .unwrap_or_else(|| panic!("login URL has no nonce: {url}"))
+}
+
+async fn login_response(state: &WebState, nonce: &str) -> axum::response::Response {
+    let request = Request::builder()
+        .uri(format!("/login?nonce={nonce}"))
+        .header("host", "localhost:8484")
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("login request: {error}"));
+    crate::webui::router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap_or_else(|never| match never {})
+}
+
+#[tokio::test]
+async fn webui_login_nonce_rejects_invalid_and_expired_nonces() {
+    let harness = harness();
+    let mut state = harness.state.clone();
+    state.origin = Some("http://localhost:8484/".to_owned());
+    let invalid = login_response(&state, "wrong").await;
+    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+
+    let expired = nonce_from_url(&login_nonce_url(&state).await);
+    state
+        .login_nonces
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            expired.clone(),
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(|| panic!("monotonic clock is less than one second old")),
+        );
+    let expired_response = login_response(&state, &expired).await;
+    assert_eq!(expired_response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn webui_login_nonce_is_single_use_and_cookie_is_not_api_token() {
+    let harness = harness();
+    let mut state = harness.state.clone();
+    state.origin = Some("http://localhost:8484/".to_owned());
+    let login_url = login_nonce_url(&state).await;
+    assert!(login_url.starts_with("http://localhost:8484/login?nonce="));
+    assert!(!login_url.contains("test-secret"));
+    let nonce = nonce_from_url(&login_url);
+    let response = login_response(&state, &nonce).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok()),
+        Some("/")
+    );
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(cookie.starts_with("cruise_webui="), "{cookie}");
+    assert!(
+        cookie.contains("HttpOnly; SameSite=Strict; Path=/"),
+        "{cookie}"
+    );
+    assert!(!cookie.contains("test-secret"));
+    let session_cookie = cookie.split(';').next().unwrap_or_default().to_owned();
+    let session_id = session_cookie
+        .strip_prefix("cruise_webui=")
+        .unwrap_or_else(|| panic!("invalid session cookie: {session_cookie}"));
+    assert_ne!(session_id, "test-secret");
+
+    let reused = login_response(&state, &nonce).await;
+    assert_eq!(reused.status(), StatusCode::UNAUTHORIZED);
+
+    let authenticated = Request::builder()
+        .uri("/")
+        .header("host", "localhost:8484")
+        .header("cookie", session_cookie.clone())
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("authenticated request: {error}"));
+    let authenticated_response = crate::webui::router(state.clone())
+        .oneshot(authenticated)
+        .await
+        .unwrap_or_else(|never| match never {});
+    assert_eq!(authenticated_response.status(), StatusCode::OK);
+
+    let bearer_request = Request::builder()
+        .uri("/status")
+        .header("authorization", format!("Bearer {session_id}"))
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("cookie bearer request: {error}"));
+    let bearer_response = crate::daemon::api::router(state)
+        .oneshot(bearer_request)
+        .await
+        .unwrap_or_else(|never| match never {});
+    assert_eq!(bearer_response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn static_assets_do_not_require_a_session_cookie() {
+    let harness = harness();
+    let request = Request::builder()
+        .uri("/static/htmax.min.js")
+        .header("host", "localhost:8484")
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("request: {error}"));
+    let response = raw_response(&harness, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn security_headers_cover_pages_and_fragments() {
+    let harness = harness();
+    let session_id = "header-test-session";
+    harness
+        .state
+        .web_sessions
+        .lock()
+        .unwrap_or_else(|error| panic!("web session lock: {error}"))
+        .insert(session_id.to_owned());
+    let app = crate::daemon::server::application_router(harness.state.clone(), true);
+
+    for uri in ["/", "/webui/sidebar"] {
+        let request = Request::builder()
+            .uri(uri)
+            .header("host", "localhost:8484")
+            .header("cookie", format!("cruise_webui={session_id}"))
+            .body(Body::empty())
+            .unwrap_or_else(|error| panic!("request: {error}"));
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|never| match never {});
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        assert_eq!(
+            response
+                .headers()
+                .get("x-frame-options")
+                .and_then(|value| value.to_str().ok()),
+            Some("DENY"),
+            "{uri}"
+        );
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        for directive in [
+            "frame-ancestors 'none'",
+            "base-uri 'none'",
+            "object-src 'none'",
+            "connect-src 'self'",
+        ] {
+            assert!(
+                csp.split(';').any(|value| value.trim() == directive),
+                "{uri}: {csp}"
+            );
+        }
+        let script_policy = csp
+            .split(';')
+            .find(|value| value.trim().starts_with("script-src "))
+            .unwrap_or_default();
+        assert!(script_policy.contains("'self'"), "{uri}: {csp}");
+        assert!(!script_policy.contains("unsafe-inline"), "{uri}: {csp}");
+        assert!(!script_policy.contains("unsafe-eval"), "{uri}: {csp}");
+    }
+}
+
+#[tokio::test]
+async fn daemon_router_checks_loopback_hosts_and_mutation_origins() {
+    let harness = harness();
+    let app = crate::daemon::server::application_router(harness.state.clone(), true);
+
+    let evil_host = Request::builder()
+        .uri("/")
+        .header("host", "evil.example:8484")
+        .header("cookie", "cruise_webui=test-session")
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("evil Host request: {error}"));
+    let response = app
+        .clone()
+        .oneshot(evil_host)
+        .await
+        .unwrap_or_else(|never| match never {});
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let tunnel_host = Request::builder()
+        .uri("/")
+        .header("host", "localhost:9999")
+        .header("cookie", "cruise_webui=test-session")
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("tunnel Host request: {error}"));
+    let response = app
+        .clone()
+        .oneshot(tunnel_host)
+        .await
+        .unwrap_or_else(|never| match never {});
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let foreign_origin = Request::builder()
+        .method("POST")
+        .uri("/webui/drafts")
+        .header("host", "localhost:8484")
+        .header("cookie", "cruise_webui=test-session")
+        .header("origin", "http://evil.example:8484")
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("foreign Origin request: {error}"));
+    let response = app
+        .oneshot(foreign_origin)
+        .await
+        .unwrap_or_else(|never| match never {});
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn daemon_api_uses_bearer_auth_not_the_webui_cookie() {
+    let harness = harness();
+    let app = crate::daemon::server::application_router(harness.state.clone(), true);
+    let cookie_only = Request::builder()
+        .uri("/api/v1/sessions")
+        .header("host", "localhost:8484")
+        .header("cookie", "cruise_webui=test-session")
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("cookie-only API request: {error}"));
+    let response = app
+        .clone()
+        .oneshot(cookie_only)
+        .await
+        .unwrap_or_else(|never| match never {});
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json")),
+        "API request should reach its Bearer-authenticated router"
+    );
+
+    let bearer_only = Request::builder()
+        .uri("/api/v1/sessions")
+        .header("host", "localhost:8484")
+        .header("authorization", "Bearer test-secret")
+        .body(Body::empty())
+        .unwrap_or_else(|error| panic!("Bearer API request: {error}"));
+    let response = app
+        .oneshot(bearer_only)
+        .await
+        .unwrap_or_else(|never| match never {});
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 fn config_groups(html: &str) -> Vec<(&str, &str)> {
@@ -629,6 +875,8 @@ async fn webui_flag_rerender_preserves_explicit_skips_and_flag_choices() {
             attachments: Vec::new(),
             skipped_steps: vec!["always".to_string()],
             flags: BTreeMap::default(),
+            context: None,
+            ..NewSessionRequest::default()
         })
         .unwrap_or_else(|error| panic!("seed skip history: {error}"));
     // Normal recording deliberately forgets temporary working directories.
@@ -782,6 +1030,8 @@ async fn webui_dag_tab_tracks_external_flag_changes() {
             attachments: Vec::new(),
             skipped_steps: Vec::new(),
             flags: BTreeMap::default(),
+            context: None,
+            ..NewSessionRequest::default()
         })
         .unwrap_or_else(|error| panic!("create flag session: {error}"));
 
@@ -817,6 +1067,8 @@ async fn webui_settings_filter_skips_but_keep_current_step_options() {
             attachments: Vec::new(),
             skipped_steps: Vec::new(),
             flags: BTreeMap::default(),
+            context: None,
+            ..NewSessionRequest::default()
         })
         .unwrap_or_else(|error| panic!("create flag session: {error}"));
     for enabled in [false, true] {
@@ -1076,6 +1328,8 @@ fn repo_snapshot_preview_and_submitted_skips_follow_clone_resolved_config() {
             attachments: Vec::new(),
             skipped_steps: vec!["write-test-first".to_string()],
             flags: BTreeMap::default(),
+            context: None,
+            ..NewSessionRequest::default()
         })
         .unwrap_or_else(|error| panic!("create repo session: {error}"));
     let persisted = harness
@@ -1155,7 +1409,12 @@ async fn run_all_provider_failure_reaches_connected_sse_client() {
         panic!("write invalid config: {error}");
     }
 
-    let Ok(request) = Request::builder().uri("/webui/events").body(Body::empty()) else {
+    let Ok(request) = Request::builder()
+        .uri("/webui/events")
+        .header("host", "localhost:8484")
+        .header("cookie", "cruise_webui=test-session")
+        .body(Body::empty())
+    else {
         panic!("SSE request");
     };
     let response = match router(harness.state.clone()).oneshot(request).await {
@@ -1755,176 +2014,6 @@ async fn sidebar_reconciles_stale_running_rows() {
     let (status, _, body) = get(&harness, "/webui/sidebar", &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Suspended"), "{body}");
-}
-
-#[tokio::test]
-async fn shutdown_begin_ends_open_sse_stream() {
-    let harness = harness();
-    let Ok(request) = Request::builder().uri("/webui/events").body(Body::empty()) else {
-        panic!("SSE request");
-    };
-    let response = match router(harness.state.clone()).oneshot(request).await {
-        Ok(response) => response,
-        Err(error) => match error {},
-    };
-    assert_eq!(response.status(), StatusCode::OK);
-    let mut stream = response.into_body().into_data_stream();
-
-    super::shutdown::begin(&harness.state);
-
-    loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await {
-            Ok(None) => break,
-            Ok(Some(_)) => {}
-            Err(error) => panic!("SSE stream stayed open after shutdown: {error}"),
-        }
-    }
-}
-
-#[tokio::test]
-async fn serve_control_stop_closes_open_sse_client() -> Result<(), Box<dyn std::error::Error>> {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    let mut harness = harness();
-    let (sender, control_rx) = tokio::sync::oneshot::channel();
-    harness.state.control = Some(std::sync::Arc::new(super::ControlGate {
-        token: "test-token".to_owned(),
-        sender: std::sync::Mutex::new(Some(sender)),
-    }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    let server = tokio::spawn(super::serve(listener, harness.state.clone(), async move {
-        let _ = control_rx.await;
-    }));
-    let mut client = tokio::net::TcpStream::connect(addr).await?;
-    client
-        .write_all(b"GET /webui/events HTTP/1.1\r\nHost: x\r\n\r\n")
-        .await?;
-    let mut received = Vec::new();
-    let mut buf = [0u8; 1024];
-    while !received.windows(4).any(|w| w == b"\r\n\r\n") {
-        let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
-            .await??;
-        assert_ne!(n, 0);
-        received.extend_from_slice(&buf[..n]);
-    }
-    let head = String::from_utf8_lossy(&received).to_ascii_lowercase();
-    assert!(
-        head.starts_with("http/1.1 200") && head.contains("text/event-stream"),
-        "{head}"
-    );
-    let mut control = tokio::net::TcpStream::connect(addr).await?;
-    control.write_all(b"POST /webui/control/stop HTTP/1.1\r\nHost: x\r\nX-Cruise-Webui-Control: test-token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
-    let mut response = Vec::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        control.read_to_end(&mut response),
-    )
-    .await??;
-    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 202"));
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(5), server)
-            .await??
-            .is_ok()
-    );
-    loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await {
-            Ok(Ok(0) | Err(_)) => break,
-            Ok(Ok(_)) => {}
-            Err(error) => panic!("SSE connection stayed open: {error}"),
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn serve_returns_after_signal_even_with_open_sse_client() {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    let harness = harness();
-    let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:0").await else {
-        panic!("bind");
-    };
-    let Ok(addr) = listener.local_addr() else {
-        panic!("local addr");
-    };
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(super::serve(listener, harness.state.clone(), async move {
-        let _ = rx.await;
-    }));
-
-    let Ok(mut client) = tokio::net::TcpStream::connect(addr).await else {
-        panic!("connect");
-    };
-    if let Err(error) = client
-        .write_all(b"GET /webui/events HTTP/1.1\r\nHost: x\r\n\r\n")
-        .await
-    {
-        panic!("write request: {error}");
-    }
-    let mut received = Vec::new();
-    let mut buf = [0u8; 1024];
-    while !String::from_utf8_lossy(&received).contains("\r\n\r\n") {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await {
-            Ok(Ok(0)) => panic!("closed before headers"),
-            Ok(Ok(n)) => received.extend_from_slice(&buf[..n]),
-            Ok(Err(error)) => panic!("read headers: {error}"),
-            Err(error) => panic!("timed out waiting for headers: {error}"),
-        }
-    }
-    let head = String::from_utf8_lossy(&received).to_ascii_lowercase();
-    assert!(head.starts_with("http/1.1 200"), "{head}");
-    assert!(head.contains("text/event-stream"), "{head}");
-
-    let _ = tx.send(());
-
-    match tokio::time::timeout(std::time::Duration::from_secs(5), server).await {
-        Ok(Ok(result)) => assert!(result.is_ok(), "{result:?}"),
-        Ok(Err(error)) => panic!("server task failed: {error}"),
-        Err(error) => panic!("serve did not return after signal: {error}"),
-    }
-    loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await {
-            Ok(Ok(0) | Err(_)) => break,
-            Ok(Ok(_)) => {}
-            Err(error) => panic!("client connection stayed open: {error}"),
-        }
-    }
-}
-
-#[tokio::test]
-async fn serve_waits_for_operations_to_release_after_cancel() {
-    let harness = harness();
-    let runtime = harness.state.application.runtime();
-    let claim = runtime
-        .try_begin("busy", crate::application::OperationKind::Run)
-        .unwrap_or_else(|e| panic!("{e}"));
-    let token = claim.token();
-    let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:0").await else {
-        panic!("bind");
-    };
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let mut server = tokio::spawn(super::serve(listener, harness.state.clone(), async move {
-        let _ = rx.await;
-    }));
-    let _ = tx.send(());
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !token.is_cancelled() {
-        assert!(std::time::Instant::now() < deadline, "claim not cancelled");
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(300), &mut server)
-            .await
-            .is_err(),
-        "serve returned while an operation was still active"
-    );
-    drop(claim);
-    match tokio::time::timeout(std::time::Duration::from_secs(5), server).await {
-        Ok(Ok(result)) => assert!(result.is_ok(), "{result:?}"),
-        Ok(Err(error)) => panic!("server task failed: {error}"),
-        Err(error) => panic!("serve did not return after release: {error}"),
-    }
 }
 
 #[cfg(unix)]

@@ -14,6 +14,7 @@ Cruise 遵循 [XDG 基本目录规范](https://specifications.freedesktop.org/ba
 | 用户工作流默认值 | `$XDG_CONFIG_HOME/cruise/default.yaml`（默认值：`~/.config/cruise/default.yaml`） |
 | 项目工作流默认值 | `./.cruise/default.yaml` |
 | 状态文件、WebUI 实例信息等 | `$XDG_STATE_HOME/cruise/`（默认值：`~/.local/state/cruise/`） |
+| daemon registry 和日志（`instance.json`、`daemon.log`） | `$XDG_STATE_HOME/cruise/daemon/`（默认值：`~/.local/state/cruise/daemon/`） |
 | 会话、工作树和临时 `--repo` 克隆 | `$XDG_DATA_HOME/cruise/`（默认值：`~/.local/share/cruise/`） |
 
 在 Windows 上，如果未设置 `XDG_*` 变量，则默认值为 `%APPDATA%\cruise`（配置）、`%LOCALAPPDATA%\cruise\data`（数据）和 `%LOCALAPPDATA%\cruise\state`（状态）。如果这些变量未设置，则使用上文的 `~/` 默认值，并且 `~\` 会像 `~/` 一样展开。
@@ -36,7 +37,7 @@ Cruise 遵循 [XDG 基本目录规范](https://specifications.freedesktop.org/ba
    - **Execute now** —— 跳过审批并立即运行。
    - **Publish as Issue** —— 将 `plan.md` 发布为 GitHub issue（或 GitLab issue），然后删除本地会话。
 
-   只要计划可用，TUI 中的 **Fix Plan**、**Ask About Plan** 和 **Verify Spec**，以及 WebUI 中的 **Fix**、**Ask** 和 **Verify**，在 **Awaiting Approval** 或 **Planned** 状态下均可使用。Verify 是菜单操作，而不是 Ask 中的 `/verify` 命令。它需要 PATH 中有 `quint`，并且 Alloy 需要 Java 17 或更高版本。
+   只要计划可用，WebUI 的 **Fix**、**Ask** 和 **Verify** 就可在 **Awaiting Approval** 或 **Planned** 阶段使用。Verify 是菜单操作，不是 Ask 中的 `/verify` 命令。它需要 PATH 中有 `quint`，并且 Alloy 需要 Java 17 或更高版本。
 
    选择 **Approve** 或 **Execute now** 后，如果未提供 `-f/--flag`，会先选择已声明的工作流标志。接着，**step skip selector** 只列出由这些值启用的步骤。切换要在本次运行中跳过的步骤。选择会按配置文件保存，并在下次使用同一配置创建会话时预先选中。取消任一选择器都会返回计划审批菜单，不保存未完成的标志更改，也不会批准或执行会话。选择 Approve 后，之后的 `cruise run` 会使用已保存的标志和 CLI 覆盖值，不会显示标志选择器，也不会再次询问要跳过哪些步骤（参见[工作流标志](cli-reference.md#cruise-run)）。
 
@@ -94,12 +95,12 @@ Model: provider/fallback
 - **Approve** —— 批准计划，并将会话转换为 `Planned` 阶段。
 - **Publish as Issue** —— 将未作更改的 `plan.md` 发布为解析后仓库中的 GitHub issue（或 GitLab issue），然后删除本地会话。
 - **Run / Resume** —— 执行（或继续）会话。
-- **Tell** —— 向运行中会话的下一个代理提示提交指令。TUI 和 WebUI 也会在运行期间提供 Tell。
+- **Tell** —— 向运行中会话的下一个代理提示提交指令。WebUI 也会在运行期间提供 Tell。
 - **Create PR** —— 为 **PR Failed** 会话重试发布，而不重新运行工作流。请先检查显示的错误和 forge 身份验证（对于 GitHub HTTPS 凭据，可使用 `gh auth setup-git` 配置 Git）。发布失败或取消后，会话仍保持 **PR Failed**。致命的 after-PR 错误会使其进入 **Failed**。成功后会完成会话；只有创建或复用了 PR 才会运行已配置的 after-PR 步骤。
 - **View Diff** —— 查看会话分支的更改，然后返回菜单。有关比较和清理限制，请参见 [`cruise diff`](cli-reference.md#cruise-diff)。
 - **Replan** —— 提供反馈以重新生成计划；会话仍处于 `Planned` 阶段。
 - **Open PR** —— 通过 `gh pr view --web` 在浏览器中打开会话的 pull request。
-- **Merge PR** —— 由用户发起合并会话的 pull request（TUI 和 WebUI 中也可使用）。Cruise 首先显示 PR 状态、可合并性、审查决定和每项 CI 检查。随后选择 `Squash`（默认值）、`Merge` 或 `Rebase` 并确认。这是需要人工确认的 GitHub 专用方式。内置 `-f merge` 是另一条原生同步 squash 路径。
+- **Merge PR** —— 由用户发起合并会话的 pull request（WebUI 中也可使用）。Cruise 首先显示 PR 状态、可合并性、审查决定和每项 CI 检查。随后选择 `Squash`（默认值）、`Merge` 或 `Rebase` 并确认。这是需要人工确认的 GitHub 专用方式。内置 `-f merge` 是另一条原生同步 squash 路径。
 - **Stage local merge** —— 将会话分支 squash 合并到基础检出目录的索引中，但不提交，也不删除会话。未提交的工作树更改会先提交到会话分支。
 - **Merge locally & cleanup** —— squash 为一个基础提交，然后删除工作树、分支和会话。首次 squash 要求记录的目标分支当前在本地检出、基础工作区已跟踪文件干净且没有落后于上游；Cruise 不会 fetch 或 pull。
 - **Reset to Planned** —— 将会话重置回 `Planned` 阶段，清除当前步骤，以便从头重新运行。
@@ -159,21 +160,21 @@ secrets/config.yaml
 <a id="stale-session-detection"></a>
 ## 过期会话检测
 
-当 `cruise list`、TUI（`cruise`）或 WebUI 会话详情视图加载会话时，会检查处于 `Running` 阶段的会话是否仍然存活。如果 runner 进程已不再运行，会话会自动转换为 `Suspended` 阶段。这样可防止进程崩溃或被强制终止后，会话无限期停留在 `Running` 状态。
+当 `cruise list` 或 WebUI 会话详情视图加载会话时，会检查处于 `Running` 阶段的会话是否仍然存活。如果 runner 进程已不再运行，会话会自动转换为 `Suspended` 阶段。这样可防止进程崩溃或被强制终止后，会话无限期停留在 `Running` 状态。
 
-可从 `cruise list` 或 TUI 恢复 `Suspended` 会话，也可以将其重置为 Planned。`run --all` 命令也会像处理 Planned 会话一样处理 Suspended 会话。
+可从 `cruise list` 或 WebUI 恢复 `Suspended` 会话，也可以将其重置为 Planned。`run --all` 命令也会像处理 Planned 会话一样处理 Suspended 会话。
 
 <a id="parallel-session-execution"></a>
 ## 并行会话执行
 
-Run All 可以在同一工作进程中从失败步骤开始，自动重试符合条件的失败。可在 WebUI 设置中设置非负上限，也可在 TUI Run All 视图中按 `e` 设置，或运行 `cruise config --set-auto-requeue-max-attempts <N>` 设置。默认值为 `0`，即禁用重试。未分类的命令错误、符合条件的提供方错误以及无文件更改错误可能会重试；取消、配置、身份验证和授权错误不会重试。每次尝试仍会正常显示失败通知。包含失败步骤的已完成运行不会被重新归类为失败。
+Run All 可以在同一工作进程中从失败步骤开始，自动重试符合条件的失败。可在 WebUI 设置中设置非负上限，或运行 `cruise config --set-auto-requeue-max-attempts <N>`。默认值为 `0`，即禁用重试。未分类的命令错误、符合条件的提供方错误以及无文件更改错误可能会重试；取消、配置、身份验证和授权错误不会重试。每次尝试仍会正常显示失败通知。包含失败步骤的已完成运行不会被重新归类为失败。
 
 每个会话持久化的计数是跨批次的生命周期预算。手动 Run 或 Retry 不会重置该计数，但 Reset to Planned 会重置。批次开始时不会选取 Failed 会话；单会话运行和 exec 会话不会自动重试；降低上限不会清除计数。会话详情、CLI 列表 JSON 和批次摘要中都会显示计数。
 
-WebUI、TUI 和 CLI 支持在 `run --all` 期间并发运行多个会话。
+WebUI 和 CLI 支持在 `run --all` 期间并发运行多个会话。所有 session 修改都通过常驻 daemon 进行，因此多个 CLI 进程和 WebUI 可以同时操作 session；claim 可防止同一 session 被重复执行。
 
-- **WebUI/TUI**：并行度由所选应用设置文件（`$XDG_CONFIG_HOME/cruise/` 下的 `config.json` 或 `config.yaml`）中的 `run_all_parallelism` 控制，可通过 `cruise config --set-parallelism <N>` 设置，默认值为 `1`。
-- **CLI**：传入 `cruise run --all --parallelism <N>` 可指定本次运行的覆盖值（默认值为 `1`，即顺序运行）。不会读取或修改持久化的 WebUI/TUI 设置。在交互式终端中，如果未设置 `--dry-run`，CLI 还会显示实时仪表板，列出每个已调度会话的标题、当前步骤、状态和耗时；详细代理输出会保存在 `sessions/{id}/run.log` 中。非 TTY 和 dry-run 调用仍使用常规日志输出并在最后显示摘要。
+- **WebUI**：并行度由所选应用设置文件（`$XDG_CONFIG_HOME/cruise/` 下的 `config.json` 或 `config.yaml`）中的 `run_all_parallelism` 控制，可通过 `cruise config --set-parallelism <N>` 设置，默认值为 `1`。此设置仅适用于 WebUI Run All。
+- **CLI**：传入 `cruise run --all --parallelism <N>` 可指定本次运行的覆盖值（默认值为 `1`，即顺序运行）。不会读取或修改持久化的 WebUI 设置。在交互式终端中，如果未设置 `--dry-run`，CLI 还会显示实时仪表板，列出每个已调度会话的标题、当前步骤、状态和耗时；详细代理输出会保存在 `sessions/{id}/run.log` 中。非 TTY 和 dry-run 调用仍使用常规日志输出并在最后显示摘要。
 
 批次调度器：
 - 从 Planned 和 Suspended 会话开始。
@@ -182,7 +183,7 @@ WebUI、TUI 和 CLI 支持在 `run --all` 期间并发运行多个会话。
 <a id="new-session-form-persistence"></a>
 ## 新会话表单持久化
 
-WebUI 和 TUI 会跨会话持久化两项状态：
+WebUI 会跨会话持久化两项状态：
 
-- **Draft**：新建会话表单当前的内容（任务描述、配置路径、工作目录、仓库和跳过的步骤）。TUI 会自动保存更改。WebUI 会在点击 **Save draft** 时保存。重新打开表单时会恢复草稿。
+- **Draft**：新建会话表单当前的内容（任务描述、配置路径、工作目录、仓库和跳过的步骤）。WebUI 会在点击 **Save draft** 时保存。重新打开表单时会恢复草稿。
 - **History**：过去新建会话选择的记录。用于按配置文件将最近的选择预填到步骤跳过选择器中，并回想先前的工作目录/配置组合。

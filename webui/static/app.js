@@ -276,6 +276,61 @@
     input.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
+  function setupTemplateActions() {
+    document.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+
+      const removeAttachment = target.closest("[data-remove-attachment]");
+      if (removeAttachment) {
+        removeAttachment.closest("li")?.remove();
+        return;
+      }
+
+      const directory = target.closest("[data-pick-dir]");
+      if (directory) {
+        pickDir(directory.getAttribute("data-pick-dir"));
+        return;
+      }
+
+      const editor = target.closest("[data-clear-editor]");
+      if (editor) {
+        const id = editor.getAttribute("data-clear-editor");
+        document.getElementById(`editor-${id}`)?.replaceChildren();
+        return;
+      }
+
+      const dialog = target.closest("[data-dismiss-dialog]");
+      if (dialog) {
+        const id = dialog.getAttribute("data-dismiss-dialog");
+        document.getElementById(id)?.remove();
+        return;
+      }
+
+      const settings = target.closest("[data-close-settings]");
+      if (settings) {
+        const id = settings.getAttribute("data-close-settings");
+        document.getElementById(`settings-${id}`)?.replaceChildren();
+        return;
+      }
+
+      if (target.closest("[data-close-dialogs]")) {
+        document.getElementById("dialogs")?.replaceChildren();
+        return;
+      }
+
+      const toastDismiss = target.closest("[data-dismiss-toast]");
+      if (toastDismiss) toastDismiss.closest("[data-toast]")?.remove();
+    });
+    document.addEventListener("change", (event) => {
+      const target = event.target;
+      if (target instanceof HTMLInputElement && target.matches("[data-toggle-source]")) {
+        toggleSource(target.value);
+      }
+    });
+    document.getElementById("webui-events")?.addEventListener("notify", notify);
+  }
+
   function setup() {
     document.addEventListener("change", (event) => {
       const target = event.target;
@@ -287,6 +342,7 @@
     setupSidebarResize();
     setupSidebarDrawer();
     setupToasts();
+    setupTemplateActions();
     setupNotifications();
     document.addEventListener("htmx:before:swap", rememberScrollPositions);
     document.addEventListener("htmx:before:settle", followStuckLogs);
@@ -305,8 +361,8 @@
     scanMermaid();
     syncGrillAvailability();
   }
-
   window.app = { notify, toggleSource, pickDir };
+
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", setup, { once: true });
   } else {

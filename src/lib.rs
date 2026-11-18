@@ -8,7 +8,6 @@ pub mod attachments;
 pub mod auto_requeue;
 pub mod backend;
 mod base_ci;
-pub mod batch_run;
 pub mod branch_diff;
 pub mod builtin_workflows;
 pub mod cancellation;
@@ -53,6 +52,7 @@ pub mod prompt_render;
 pub mod provider_install;
 pub mod quality_gate;
 pub mod repo_clone;
+pub mod request_context;
 pub mod resolver;
 pub mod retry;
 pub mod sdk_tools;
@@ -91,6 +91,10 @@ pub mod console_mode;
 pub mod display;
 pub mod herdr;
 pub(crate) mod multiline_input;
+#[expect(
+    dead_code,
+    reason = "the daemon login opener is used only by the runtime binary"
+)]
 pub mod platform;
 pub mod run_observer;
 pub mod sleep_guard;

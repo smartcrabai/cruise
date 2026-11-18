@@ -1,33 +1,32 @@
 # Plan revision contract
 
-`plan_revision.qnt` and `plan_revision.als` check the modeled planning-action offers for idle sessions. They do not prove client parity, phase preservation, or prompt delivery against production; `tests/plan_revision_bdd.rs` checks those behaviors against the production clients and application, including negative controls. Run the formal and production-connected checks with `bash scripts/check_plan_revision_specs.sh`.
+`plan_revision.qnt` and `plan_revision.als` check the modeled planning-action offers for idle sessions. They do not prove client parity, phase preservation, or prompt delivery against production; `tests/plan_revision_bdd.rs` checks those behaviors against the CLI session list, daemon-served WebUI, and application, including negative controls. Run the formal and production-connected checks with `bash scripts/check_plan_revision_specs.sh`.
 
 ## Modeled action offers
 
-The models cover only the review-action subset `Fix`, `Ask`, and `Verify` in the TUI and WebUI, plus the CLI's `Replan` entry. Other menu actions such as `Generate`, `Approve`, `Run`, and `Publish` are outside this subset. The modeled views are idle: active runs, active fixes, and other in-progress operations are excluded. The CLI assumes no PR target, since `available_session_actions` omits `Replan` when one exists.
+The models cover only the review-action subset `Fix`, `Ask`, and `Verify` in the WebUI, plus the CLI's `Replan` entry. Other menu actions such as `Generate`, `Approve`, `Run`, and `Publish` are outside this subset. The modeled views are idle: active runs, active fixes, and other in-progress operations are excluded. The CLI assumes no PR target, since `available_session_actions` omits `Replan` when one exists.
 
-| Phase and plan state | TUI | WebUI | CLI |
-| --- | --- | --- | --- |
-| Awaiting Approval, usable plan | `Fix`, `Ask`, `Verify` | `Fix`, `Ask`, `Verify`; pending prompt hides `Verify` | none |
-| Awaiting Approval, available plan with `plan_error` | `Fix` | `Fix` | none |
-| Awaiting Approval, no available plan | `Fix` | none | none |
-| Planned, usable plan | `Fix`, `Ask`, `Verify` | `Fix`, `Ask`, `Verify`; pending prompt hides `Verify` | `Replan` |
-| Planned, unusable plan | none | none | `Replan` |
-| Other phases | none | none | none |
+| Phase and plan state | WebUI | CLI |
+| --- | --- | --- |
+| Awaiting Approval, usable plan | `Fix`, `Ask`, `Verify`; pending prompt hides `Verify` | none |
+| Awaiting Approval, available plan with `plan_error` | `Fix` | none |
+| Awaiting Approval, no available plan | none | none |
+| Planned, usable plan | `Fix`, `Ask`, `Verify`; pending prompt hides `Verify` | `Replan` |
+| Planned, unusable plan | none | `Replan` |
+| Other phases | none | none |
 
-The TUI's `usablePlan` is `plan_available && plan_error.is_none()`: `has_usable_plan` and the WebUI's `session_plan_available` use the same markdown-availability helper. The WebUI uses `plan_available` directly for Awaiting Approval, so Fix remains visible when `plan_error` is set; Ask and Verify are hidden. For Planned, it requires an available plan and no error. Its pending-prompt guard suppresses Verify. The CLI exposes Replan in Planned regardless of plan availability or `plan_error`.
+The shared usable-plan condition is `plan_available && plan_error.is_none()`: `has_usable_plan` and the WebUI's `session_plan_available` use the same markdown-availability helper. The WebUI uses `plan_available` directly for Awaiting Approval, so Fix remains visible when `plan_error` is set; Ask and Verify are hidden. For Planned, it requires an available plan and no error. Its pending-prompt guard suppresses Verify. The CLI exposes Replan in Planned regardless of plan availability or `plan_error`.
 
 ## Rust mapping
 
 | Model symbol | Rust behavior represented |
 | --- | --- |
-| `tuiOffer` / `tuiActions` | `CruiseApplication::capabilities` and `add_approval_actions` in `src/application.rs`; the usable-plan value includes the `plan_error` and file-usability checks |
 | `webuiOffer` / `webuiActions` | `show_fix`, `show_ask`, and `show_verify` in `src/webui/actions.rs`, including `plan_available`, `plan_error`, and pending-prompt conditions |
 | `cliOffer` / `cliActions` | `available_session_actions` in `src/list_cmd.rs`; Replan is listed only in Planned when no PR target exists |
 | `PlanningOffersMatchContract` / `safety` | Internal consistency of the finite action-offer model; not a check against Rust |
-| `planning_operation_allowed` | Phase eligibility only, in `src/application.rs`; usable-plan gating for visible actions lives in the client capability/action construction described above |
+| `planning_operation_allowed` | Phase eligibility only, in `src/application.rs`; usable-plan gating for visible actions lives in the client action construction described above |
 
-The BDD in `tests/plan_revision_bdd.rs` checks client parity, phase preservation, and prompt delivery against production, with negative controls that demonstrate those checks can fail. These production-connected checks, not the formal model, are the evidence for those behaviors.
+The BDD checks action-offer parity between the CLI session list and the daemon-served WebUI. Its phase-preservation and prompt-delivery steps call the production application directly; negative controls demonstrate that those checks can fail. These production-connected checks, not the formal model, are the evidence for those behaviors.
 
 ## Limits
 

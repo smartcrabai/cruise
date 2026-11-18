@@ -16,6 +16,7 @@ Cruise follows the [XDG Base Directory Specification](https://specifications.fre
 | User workflow defaults | `$XDG_CONFIG_HOME/cruise/default.yaml` (default: `~/.config/cruise/default.yaml`) |
 | Project workflow defaults | `./.cruise/default.yaml` |
 | State files, WebUI instance data, and more | `$XDG_STATE_HOME/cruise/` (default: `~/.local/state/cruise/`) |
+| Daemon registry and log (`instance.json`, `daemon.log`) | `$XDG_STATE_HOME/cruise/daemon/` (default: `~/.local/state/cruise/daemon/`) |
 | Sessions, worktrees, and temporary `--repo` clones | `$XDG_DATA_HOME/cruise/` (default: `~/.local/share/cruise/`) |
 
 On Windows, when the `XDG_*` variables are unset, the defaults are `%APPDATA%\cruise` (config), `%LOCALAPPDATA%\cruise\data` (data), and `%LOCALAPPDATA%\cruise\state` (state). If those variables are not set, the `~/` defaults above apply, and `~\` is expanded like `~/`.
@@ -38,7 +39,7 @@ On Windows, when the `XDG_*` variables are unset, the defaults are `%APPDATA%\cr
    - **Execute now** -- Skip approval and run immediately.
    - **Publish as Issue** -- Publish `plan.md` as a GitHub issue (or GitLab issue) and delete the local session.
 
-   **Fix Plan**, **Ask About Plan**, and **Verify Spec** in the TUI and **Fix**, **Ask**, and **Verify** in the WebUI are available for a usable plan in either **Awaiting Approval** or **Planned**. Verify is a menu action, not an `/verify` command in Ask. It requires `quint` on PATH and Java 17 or later for Alloy.
+   The WebUI's **Fix**, **Ask**, and **Verify** actions are available for a usable plan in either **Awaiting Approval** or **Planned**. Verify is a menu action, not an `/verify` command in Ask. It requires `quint` on PATH and Java 17 or later for Alloy.
 
    After choosing **Approve** or **Execute now**, declared workflow flags are selected first when no `-f/--flag` was supplied. Then a **step skip selector** lists only steps enabled by those values. Toggle any steps you want to skip for this run. Selections are saved per config file and pre-selected for the next session using the same config. Cancelling either selector returns to the approve-plan menu without saving partial flag changes, approving, or executing the session. After Approve, a later `cruise run` uses saved flags and CLI overrides without a flag selector or another prompt to choose skipped steps (see [Workflow flags](cli-reference.md#cruise-run)).
 
@@ -98,12 +99,12 @@ The interactive session list shows a menu of actions depending on the session's 
 - **Approve** -- Approve the plan and transition the session to the Planned phase.
 - **Publish as Issue** -- Publish `plan.md`, unchanged, as a GitHub issue (or GitLab issue) in the resolved repository, then delete the local session.
 - **Run / Resume** -- Execute (or continue) the session.
-- **Tell** -- Submit an instruction to the running session's next agent prompt. TUI and WebUI also offer Tell during a run.
+- **Tell** -- Submit an instruction to the running session's next agent prompt. The WebUI also offers Tell during a run.
 - **Create PR** -- Retry publication for a **PR Failed** session without rerunning the workflow. First check the displayed error and forge authentication (for GitHub HTTPS credentials, `gh auth setup-git` can configure Git). The session remains **PR Failed** after publication fails or is canceled. A fatal after-PR error moves it to **Failed**. On success, the session completes and configured after-PR steps run only if a PR was created or reused.
 - **View Diff** -- Review the session branch's changes and return to the menu. See [`cruise diff`](cli-reference.md#cruise-diff) for comparison and cleanup limitations.
 - **Replan** -- Provide feedback to regenerate the plan; the session remains in the Planned phase.
 - **Open PR** -- Open the session's pull request in the browser via `gh pr view --web`.
-- **Merge PR** -- Human-initiated merge of the session's pull request (also available in the TUI and WebUI). Cruise first shows the PR's state, mergeability, review decision, and each CI check. Then choose `Squash` (the default), `Merge`, or `Rebase` and confirm. This is a GitHub-only route that requires human confirmation. Built-in `-f merge` is a separate native synchronous squash path.
+- **Merge PR** -- Human-initiated merge of the session's pull request (also available in the WebUI). Cruise first shows the PR's state, mergeability, review decision, and each CI check. Then choose `Squash` (the default), `Merge`, or `Rebase` and confirm. This is a GitHub-only route that requires human confirmation. Built-in `-f merge` is a separate native synchronous squash path.
 - **Stage local merge** -- Squash the session branch into the base checkout's index without committing or removing the session. Uncommitted worktree changes are committed to the session branch first.
 - **Merge locally & cleanup** -- Squash into one base commit, then remove the worktree, branch, and session. An initial squash requires the recorded target branch to be checked out locally, a clean tracked base, and no behind upstream; Cruise does not fetch or pull.
 - **Reset to Planned** -- Reset the session back to the Planned phase, clearing the current step and allowing it to be rerun from the beginning.
@@ -163,21 +164,21 @@ Each line is a relative path (file or directory). Absolute paths and `..` traver
 <a id="stale-session-detection"></a>
 ## Stale Session Detection
 
-When `cruise list`, the TUI (`cruise`), or the WebUI session detail view loads a session, a session in the `Running` phase is checked for liveness. If the runner process is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
+When `cruise list` or the WebUI session detail view loads a session, a session in the `Running` phase is checked for liveness. If the runner process is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
 
-Suspended sessions can be resumed from `cruise list` or the TUI, or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
+Suspended sessions can be resumed from `cruise list` or the WebUI, or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
 
 <a id="parallel-session-execution"></a>
 ## Parallel Session Execution
 
-Run All can automatically retry eligible failures from the failed step within the same worker. Set the non-negative limit in WebUI settings, with `e` in the TUI Run All view, or with `cruise config --set-auto-requeue-max-attempts <N>`. It defaults to `0`, disabling retries. Unclassified command errors, eligible provider errors, and no-file-changes errors may retry, while cancellation, configuration, authentication, and authorization errors do not. An attempt's normal failure notification still appears. Completed runs with failed steps are not reclassified as failures.
+Run All can automatically retry eligible failures from the failed step within the same worker. Set the non-negative limit in WebUI settings or with `cruise config --set-auto-requeue-max-attempts <N>`. It defaults to `0`, disabling retries. Unclassified command errors, eligible provider errors, and no-file-changes errors may retry, while cancellation, configuration, authentication, and authorization errors do not. An attempt's normal failure notification still appears. Completed runs with failed steps are not reclassified as failures.
 
 The persisted per-session count is a lifetime budget across batches. Manual Run or Retry does not reset it, but Reset to Planned does. Failed sessions are not picked up at batch start, single-session runs and exec sessions are not automatically retried, and lowering the limit does not erase the count. Counts appear in session details, CLI list JSON, and batch summaries.
 
-The WebUI, TUI, and CLI support running multiple sessions concurrently during `run --all`.
+The WebUI and CLI support running multiple sessions concurrently during `run --all`. All session mutations go through the resident daemon, so separate CLI processes and the WebUI can act on sessions concurrently; claims prevent duplicate work on one session.
 
-- **WebUI/TUI**: The parallelism level is controlled by `run_all_parallelism` in the selected application settings file (`config.json` or `config.yaml` under `$XDG_CONFIG_HOME/cruise/`), configurable via `cruise config --set-parallelism <N>`, defaulting to `1`.
-- **CLI**: Pass `cruise run --all --parallelism <N>` for a one-run override (default: `1`, i.e. sequential). The persisted WebUI/TUI setting is neither read nor modified. In an interactive terminal, when `--dry-run` is not set, the CLI also shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
+- **WebUI**: The parallelism level is controlled by `run_all_parallelism` in the selected application settings file (`config.json` or `config.yaml` under `$XDG_CONFIG_HOME/cruise/`), configurable via `cruise config --set-parallelism <N>`, defaulting to `1`. This setting applies to WebUI Run All only.
+- **CLI**: Pass `cruise run --all --parallelism <N>` for a one-run override (default: `1`, i.e. sequential). The persisted WebUI setting is neither read nor modified. In an interactive terminal, when `--dry-run` is not set, the CLI also shows a live dashboard with each scheduled session's title, current step, status, and elapsed time; detailed agent output is retained in `sessions/{id}/run.log`. Non-TTY and dry-run invocations keep the normal log output and final summary.
 
 The batch scheduler:
 - Seeds from Planned and Suspended sessions.
@@ -186,7 +187,7 @@ The batch scheduler:
 <a id="new-session-form-persistence"></a>
 ## New Session Form Persistence
 
-The WebUI and TUI persist two pieces of state across sessions:
+The WebUI persists two pieces of state across sessions:
 
-- **Draft**: The current contents of the New Session form (task description, config path, working directory, repository, and skipped steps). The TUI saves changes automatically. The WebUI saves them when **Save draft** is clicked. The draft is restored when the form is reopened.
+- **Draft**: The current contents of the New Session form (task description, config path, working directory, repository, and skipped steps). The WebUI saves them when **Save draft** is clicked. The draft is restored when the form is reopened.
 - **History**: A log of past New Session selections. It is used to pre-populate the step skip selector with the most recent choices for each config file and to recall previous working directory / config combinations.

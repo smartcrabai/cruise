@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
+import { loginWebUi, requestFreshWebUiLoginUrl, waitForWebUiLogin } from './auth.mjs';
 
 const root = await mkdtemp(join(tmpdir(), 'cruise-sse-locale-'));
 const repo = join(root, 'repo');
@@ -35,17 +36,12 @@ try {
     worktree_path: null, worktree_branch: null, workspace_mode: 'CurrentBranch', target_branch: 'main', allow_dirty_working_tree: true }));
   await writeFile(join(session, 'config.yaml'), "steps:\n  first: {command: 'true'}\n");
   await writeFile(join(session, 'plan.md'), '# SSE fixture\n');
-  server = spawn(process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime'),
-    ['webui', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const binary = process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime');
+  server = spawn(binary,
+    ['daemon', 'serve', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   closed = new Promise(ok => server.once('close', ok));
   server.stderr.on('data', data => { logs += data; });
-  const base = await new Promise((ok, fail) => {
-    let stdout = '';
-    const timeout = setTimeout(() => fail(new Error(`server startup timeout: ${logs}`)), 20000);
-    server.once('error', error => { clearTimeout(timeout); fail(error); });
-    server.once('exit', code => { clearTimeout(timeout); fail(new Error(`server exited ${code}: ${logs}`)); });
-    server.stdout.on('data', data => { stdout += data; const match = stdout.match(/http:\/\/127\.0\.0\.1:\d+/); if (match) { clearTimeout(timeout); ok(match[0]); } });
-  });
+  const { base } = await waitForWebUiLogin(server, () => logs);
   const browserEnv = { ...process.env };
   for (const key of ['DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'LD_LIBRARY_PATH']) delete browserEnv[key];
   browser = await chromium.launch({ headless: true, env: browserEnv });
@@ -54,6 +50,7 @@ try {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: 'reduce' });
     await context.addCookies([{ name: 'cruise_ui_language', value: locale, url: base }]);
     const page = await context.newPage();
+    await loginWebUi(page, requestFreshWebUiLoginUrl(binary, repo, env));
     // Observe a clone of the production HTMX SSE response without changing it.
     await page.addInitScript(() => {
       const nativeFetch = window.fetch;
@@ -84,7 +81,7 @@ try {
     pages.push({ context, page, locale, expected });
   }
   // Run the real isolated workflow after both subscriptions are established.
-  const response = await pages[0].page.evaluate(() => fetch('/webui/run-all', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: '' }).then(r => r.status));
+  const response = await pages[0].page.evaluate(() => fetch('/webui/run-all', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: '' }).then(r => r.status));
   assert.equal(response, 200);
   for (const { page, locale, expected } of pages) {
     // Batch completion publishes a real sidebar control partial to both streams.

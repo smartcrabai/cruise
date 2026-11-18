@@ -68,7 +68,24 @@ cruise --version; cruise update; cruise --version
 
 “Managed” is determined by the executable's location: the installer default `~/.local/bin` (on Windows, `%USERPROFILE%\.local\bin`) or canonical `$CARGO_HOME/bin`, not Cargo's install ledger. The updater replaces only the runtime selection: the fixed `cruise` launcher (`cruise.exe` on Windows) remains in place; each update adds a versioned `cruise-runtime-managed-…` runtime and `.json` sidecar and switches `.cruise-runtime-active`. Older runtimes are retained. Native update does not run Cargo or change its install ledger. If you need a custom source-built runtime, rebuild and install it from source instead.
 
-Updating Cruise does not replace the code in an already running WebUI process. After an update, use `cruise webui status` to compare its version with the current runtime and `cruise webui restart` to load the updated runtime. Restart cancels active WebUI operations, so choose a suitable time.
+After `cruise update`, the next client request automatically restarts an idle daemon on the new runtime. A busy daemon keeps running its old version: CLI clients refuse requests with a hint to run `cruise daemon restart` when idle, and the WebUI stays on the old version until restart. Use `cruise daemon status` to inspect the daemon; do not use the removed `cruise webui status` or `restart` commands.
+
+<a id="docker"></a>
+### Docker
+
+Run the image as a long-lived service container and provide credentials and other process-level environment variables to that container, for example with `--env-file`:
+
+```sh
+docker run -d --name cruise -p 127.0.0.1:8484:8484 --env-file .env cruise:latest
+```
+
+The WebUI login URL is printed in `docker logs cruise`. It contains a five-minute, single-use nonce, not the registry API token. Publish the service on loopback (`-p 127.0.0.1:8484:8484`) unless you deliberately want network access; the daemon serves plain HTTP. Run CLI commands inside the same service container:
+
+```sh
+docker exec cruise cruise plan "implement the feature"
+```
+
+A one-shot `docker run --rm --env-file .env cruise:latest plan "implement the feature"` works in the foreground. Do not use a one-shot container for background `--plan` or detached work: when its command ends, the container stops the daemon. Supply credentials and process-level environment to the service container with `--env-file` or `-e`.
 
 <a id="managed-provider-clis"></a>
 ### Managed provider CLIs

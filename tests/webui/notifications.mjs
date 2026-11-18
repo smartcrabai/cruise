@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
+import { loginWebUi, waitForWebUiLogin } from './auth.mjs';
 
 const root = await mkdtemp(join(tmpdir(), 'cruise-notifications-e2e-'));
 const repo = join(root, 'repo');
@@ -50,21 +51,16 @@ try {
   await writeFile(config, JSON.stringify({ notifications: { desktop: true, sound: false, webhook: true,
     events: { completed: { desktop: false, webhook: false } } } }));
   server = spawn(process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime'),
-    ['webui', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    ['daemon', 'serve', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   server.stderr.on('data', data => { logs += data; });
   const closed = new Promise(ok => server.once('close', ok));
-  const base = await new Promise((ok, fail) => {
-    let output = '';
-    const timeout = setTimeout(() => fail(new Error(`server startup timeout: ${logs}`)), 20000);
-    server.once('error', fail);
-    server.once('exit', code => fail(new Error(`server exited ${code}: ${logs}`)));
-    server.stdout.on('data', data => { output += data; const match = output.match(/http:\/\/127\.0\.0\.1:\d+/); if (match) { clearTimeout(timeout); ok(match[0]); } });
-  });
+  const { base, loginUrl } = await waitForWebUiLogin(server, () => logs);
   const browserEnv = { ...process.env };
   for (const key of ['DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'LD_LIBRARY_PATH']) delete browserEnv[key];
   browser = await chromium.launch({ headless: true, env: browserEnv });
   console.log(`Chromium ${browser.version()}`);
   const page = await browser.newPage();
+  await loginWebUi(page, loginUrl);
   page.setDefaultTimeout(15000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));

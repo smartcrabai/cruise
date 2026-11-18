@@ -532,6 +532,10 @@ steps:
         assert!(!text.contains(FLAG_PROMPT), "{text}");
         assert!(success, "{text}");
         assert!(
+            text.contains("build"),
+            "step progress was not streamed: {text}"
+        );
+        assert!(
             f.repo.join("docs.txt").exists(),
             "saved docs should start selected: {text}"
         );

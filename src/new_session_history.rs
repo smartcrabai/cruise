@@ -85,7 +85,8 @@ impl HistoryScope<'_> {
 
 /// Persistent ring-buffer of per-config skip-step selections.
 ///
-/// Stored at `~/.local/state/cruise/history.json`. Missing file is treated as empty history.
+/// Stored at `$XDG_STATE_HOME/cruise/history.json`, falling back to
+/// `$HOME/.local/state/cruise/history.json`. Missing files are empty history.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NewSessionHistory {
     /// Entries in most-recent-first order.
@@ -96,11 +97,11 @@ impl NewSessionHistory {
     /// Maximum number of history entries to retain.
     pub const MAX_ENTRIES: usize = 50;
 
-    /// Return the canonical path to the history file: `~/.local/state/cruise/history.json`.
+    /// Return the canonical user state path to the history file.
     ///
     /// # Errors
     ///
-    /// Returns an error if the home directory cannot be determined.
+    /// Returns an error if the user state directory cannot be determined.
     fn history_path() -> Result<PathBuf> {
         crate::paths::state_dir().map(|h| h.join("history.json"))
     }
@@ -109,7 +110,7 @@ impl NewSessionHistory {
     ///
     /// # Errors
     ///
-    /// Returns an error if the home directory cannot be determined or the file is corrupt.
+    /// Returns an error if the user state directory cannot be determined or the file is corrupt.
     pub fn load() -> Result<Self> {
         let path = Self::history_path()?;
         Self::load_from(&path)

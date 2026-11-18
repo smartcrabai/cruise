@@ -312,6 +312,7 @@ Cruise 根据仓库 workflow config 和适用的检出项目默认值解析后�
 - **无人值守执行。** cruise 不会逐项弹出确认提示。成功的提示词注入（见下文）会产生与工作流自身 GitHub token 和 runner 相同的影响范围。只授予工作流所需的 `permissions:`（`contents: write`、`pull-requests: write`、`issues: write`，以及需要 App token 交换时的 `id-token: write`），并将提供方 API 密钥、`GITHUB_TOKEN` 和此 Action 取得的 App token 视为其他拥有仓库写入权限的 CI 密钥。
 - **提示词注入。** Issue 正文和 fix 反馈是由攻击者控制的文本，会嵌入发送给模型的提示词中。在这些原始 GitHub 文本成为规划输入之前，Action 会移除隐藏指令向量。这只是缓解措施，并不能保证安全；以普通可见文本写入的指令无法过滤。不要授予此 Action 超出“agent 按 Issue 文本所说的一切操作”仍可接受范围的密钥或权限。
 - **运行日志不会发布回 Issue。** 失败评论会链接到 Actions 运行，而不会引用日志输出。Agent 输出可能包含模型被诱导打印的任何内容（包括环境变量值）；GitHub 的密钥遮蔽只对 Actions 日志查看器生效，不适用于通过 API 重新发布的文本，因此复制日志会形成数据外泄通道。日志只保留在运行页面中，并遵循仓库的访问控制。
+- **daemon 和凭据按作业隔离。** Cruise 的 XDG config/data/state 及已配置的 jcode home 均存放在 `$RUNNER_TEMP` 下的作业专属目录中；Action 结束时会强制停止该作业的 daemon。self-hosted runner 上并发运行的作业不会共享这些状态。
 - **安装器通过 TLS 获取，但不会进行校验和验证。** Action 通过发布版安装脚本（`curl | sh`）安装 cruise 和 jcode，但不会校验脚本本身的 checksum。下载端点一旦被攻破，攻击者代码就会在具有作业密钥的权限下运行。若要避免静默跟踪 `latest`，请将 `cruise_version`/`jcode_version` 固定到标签版本。
 - **通过 `GITHUB_TOKEN` 创建的 PR 不会触发其他工作流。** 这是 GitHub Actions 有意设置的防递归规则，只适用于普通的 `GITHUB_TOKEN` 回退路径——通过 cruise-agent App 安装 token 创建的 PR/推送（App 已安装时的默认方式）会正常触发 `on: pull_request` 工作流，因为 GitHub 会将 App 身份验证的 Action 视为来自独立操作者。如果你使用 `GITHUB_TOKEN` 回退并需要在 cruise 的 PR 上运行 CI，可以安装该 App、通过 `github_token` 使用自己的 PAT/GitHub App token，或添加一个关闭后再重新打开 PR 的步骤。
 

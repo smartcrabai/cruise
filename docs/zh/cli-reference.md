@@ -18,7 +18,8 @@ Commands:
   config       Show or update application-level configuration (`config.json` or `config.yaml`)
   exec         Execute a workflow or an instant task in the current directory (no plan, no worktree, no PR)
   ssh          Run a cruise command on a remote host through OpenSSH
-  webui        Serve or manage the local browser UI (start, stop, restart, status)
+  daemon       Manage the resident daemon lifecycle
+  webui        Ensure the daemon is running and print its browser UI login URL
   install      Install/update a provider CLI to its latest stable version or inspect managed status
   update       Update a managed native installation; `--status` lists recorded transactions read-only
   workflow     Manage workflows: list/eject built-ins, generate, interactively make or check YAML (`doctor`), install GitHub packages (`add`, `remove`, `update`)
@@ -36,6 +37,31 @@ Options:
 ```
 
 准确名称 `docs` 现在是保留子命令。若要规划位置参数文本恰好为 `docs` 的任务，请使用 `cruise plan "docs"`。
+<a id="cruise-daemon"></a>
+## `cruise daemon` 和 `cruise webui`
+
+```sh
+cruise daemon start [--host <ADDR>] [--port <PORT>] [--webui-dir <DIR>] [-o|--open]
+cruise daemon stop [--force]
+cruise daemon restart [--host <ADDR>] [--port <PORT>] [--webui-dir <DIR>] [-o|--open]
+cruise daemon status [--json]
+cruise daemon serve [--host <ADDR>] [--port <PORT>] [--webui-dir <DIR>] [-o|--open]
+cruise webui [-o|--open]
+```
+
+`start` 和 `restart` 在后台运行；`serve` 在前台运行，适用于容器或调试。`--host`、`--port`、`--webui-dir` 和打开浏览器的选项适用于 `start`、`restart` 和 `serve`。`cruise webui` 会确保 daemon 正在运行、打印登录 URL，并可选择打开浏览器；daemon 的 `start`、`restart` 和 `serve` 也会打印登录 URL。旧的 `cruise webui start|stop|restart|status` 命令已移除，请改用 `cruise daemon ...`。
+
+默认地址为 `127.0.0.1:8484`。未请求端口且 8484 已被占用时，Cruise 会警告并使用临时端口；共享主机上请显式设置 `--port` 或 `CRUISE_DAEMON_PORT`。任一值设为 `0` 都会请求临时端口。`cruise webui` 打印的登录 URL 包含一个五分钟后过期、只能使用一次的 nonce，而不是 registry API token。登录后会设置 HttpOnly、SameSite=Strict 的 `cruise_webui` cookie，其中是独立于 API token 的随机内存 session ID，并会在 daemon 退出时失效。直接访问 origin 会显示 401。`-o`/`--open` 通过 0600 临时 HTML redirect 文件打开页面，因此 URL 不会作为参数传给 opener。loopback 绑定只接受 `localhost`、`127.0.0.1` 和 `[::1]` Host 名称（任意端口），可阻止 DNS rebinding 使用的外部 Host 名称并允许 SSH 隧道。非 loopback 绑定通过明文 HTTP 提供服务，只能在可信网络中或 TLS proxy 后使用。
+
+registry 和日志位于 `$XDG_STATE_HOME/cruise/daemon/`（通常为 `~/.local/state/cruise/daemon/`）。`instance.json` 的权限为 `0600`，其中包含随机 API token；daemon 日志写入 `daemon.log`。不会安装开机启动服务，也不会在空闲时自动退出。registry 记录被删除时 daemon 才会退出。
+
+从 v0.3.0 分离式 WebUI 升级时，只要旧服务器仍在运行，daemon 的 start、restart、serve 以及客户端自动启动都会被拒绝。请先运行 `cruise daemon stop`；它也会停止旧服务器并取消正在执行的工作，使 session 进入 `Suspended`，之后可用 `cruise run <id>` 恢复。`cruise daemon status` 会报告运行中的旧服务器；启动 daemon 时会清理已停止进程的旧 registry。
+
+此外，若某个 session 仍由另一个被记录为 runner 的 cruise 进程执行（例如升级时仍在进行的 v0.3.0 `cruise run`），daemon 会拒绝对它进行 run 和 planning（HTTP 409，CLI 退出码 1，不修改 state）。v0.3.0 的后台 planning worker 不记录 runner，无法检测，因此请等升级前启动的后台 plan 完成后再操作这些 session。
+
+session 命令（`plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`list`、`tell`、`clean` 和 `diff`）是 daemon 客户端，并会按需自动启动 daemon。`config`、`usage`、`update`、`install`、`workflow *`、`docs`、`ssh` 和所有 `--dry-run` 都是本地命令。CLI 客户端负责解析 workflow 配置；工作目录以及允许列表中的 workflow override 变量（例如 `CRUISE_MODEL`、`CRUISE_PLAN_MODEL` 和 `CRUISE_SDK`）仅对各自请求生效。`PATH`、`GH_TOKEN`、provider 凭据、`CRUISE_FORGE`、`CRUISE_SKIP_AGENT_AUTH_CHECK`、`CRUISE_DISABLE_NOTIFICATIONS`、`CRUISE_COMMIT_COAUTHOR_*` 等进程级变量来自 daemon 环境；更改后请运行 `cruise daemon restart`。自动启动时会从 daemon 环境中移除 workflow override 变量；显式运行 `daemon start` 或 `serve` 会保留这些变量。WebUI 请求使用 daemon 的环境，并以用户 home directory 为工作目录。
+
+客户端发现运行中的 daemon 版本不同时，如果 daemon 空闲会自动重启；如果 daemon 正忙，客户端会提示等其空闲后运行 `cruise daemon restart`。执行 `cruise update` 后，下一个命令会重启空闲的 daemon。前台命令会接收并显示进度；Ctrl+C 会取消操作（`run` 变为 `Suspended`，规划状态会恢复）。关闭终端不会停止 daemon 正在执行的工作；可通过 `cruise run <session-id>` 或 WebUI 重新连接。Ask 和 Option 提示会显示在终端和 WebUI 中，先提交的答案生效。非交互式客户端遇到待回答提示时，会话会保持等待状态；请在 WebUI 中回答，或从终端运行 `cruise run <session-id>`。`cruise --plan` 的规划也在 daemon 内执行，不使用分离的 worker。claim 可防止同一 session 被重复执行，因此多个 CLI 进程和 WebUI 可以安全地同时修改 session。
 
 <a id="cruise-install"></a>
 ## `cruise install`
@@ -129,7 +155,7 @@ Doctor 对 workflow YAML 执行静态检查，不会执行它，也不会创建 
 cruise ssh [OPTIONS] <DESTINATION> [-- <CRUISE_ARGS>...]
 ```
 
-`cruise ssh` 会通过 OpenSSH 在远程 `cruise` 上运行命令。未转发参数时，如果有 PTY，远程 `cruise` 会启动 TUI。目标可以是 OpenSSH 的 `[user@]host`，也可以是 `~/.ssh/config` 别名；端口、身份文件、agent 和 ProxyJump 请通过该配置指定。
+`cruise ssh` 会通过 OpenSSH 在远程 `cruise` 上运行命令。未转发参数时，如果有 PTY，远程 `cruise` 会运行 `cruise list`（有 PTY 时为交互式 session 选择器）。目标可以是 OpenSSH 的 `[user@]host`，也可以是 `~/.ssh/config` 别名；端口、身份文件、agent 和 ProxyJump 请通过该配置指定。
 
 选项：
 
@@ -150,7 +176,7 @@ cruise ssh [OPTIONS] <DESTINATION> [-- <CRUISE_ARGS>...]
 cruise
 ```
 
-不带参数运行 `cruise` 会打开仅支持键盘操作的 TUI。它要求在 macOS/Linux 上使用交互式 TTY；有关屏幕、workflow、按键映射、自适应布局和日志行为，请参阅 [TUI（交互式键盘客户端）](usage.md#tui-interactive-keyboard-client)。自动化、JSON 和 CI 场景请使用 CLI 子命令。
+不带参数运行 `cruise` 会在交互式终端中打开 `cruise list`。pipe 输入仍按位置参数路径规划。请参阅 [`cruise list`](#cruise-list) 了解 selector 和 JSON 输出。
 
 <a id="cruise-plan"></a>
 ## `cruise plan`
@@ -176,7 +202,7 @@ Options:
       -f, --flag <NAME[,NAME...]> Enable named workflow flags; NAME=on|off|true|false also works (repeatable)
 ```
 
-**GitHub issue 输入。** 可使用 `cruise plan '#12'`、`cruise plan --issue 12 'additional instructions'`，或将 `#12` 放在第一行、后续行写附加指令。第一行必须只包含 issue 引用。根命令的位置参数、`--plan`、`draft` 以及 TUI 和 WebUI 的 New Session 任务字段也接受这种语法。只有 `plan` 和 `draft` 接受 `--issue`，根命令和 `exec` 不接受。Issue 查询使用 `gh` 和当前仓库 origin；若提供 `--repo`，则使用其指定仓库。不支持 GitLab issue 输入。Issue 标题、正文、标签和评论会成为任务输入；受支持的 GitHub 图片会作为 session 附件保存，并排在用户提供的图片之前。Issue 编号会写入分支名称和 PR 的关闭引用。Issue 输入会退出 `force_exec` 模式。检索到的 issue 内容是不可信输入，可能包含 prompt injection。
+**GitHub issue 输入。** 可使用 `cruise plan '#12'`、`cruise plan --issue 12 'additional instructions'`，或将 `#12` 放在第一行、后续行写附加指令。第一行必须只包含 issue 引用。根命令的位置参数、`--plan`、`draft` 以及 WebUI 的 New Session 任务字段也接受这种语法。只有 `plan` 和 `draft` 接受 `--issue`，根命令和 `exec` 不接受。Issue 查询使用 `gh` 和当前仓库 origin；若提供 `--repo`，则使用其指定仓库。不支持 GitLab issue 输入。Issue 标题、正文、标签和评论会成为任务输入；受支持的 GitHub 图片会作为 session 附件保存，并排在用户提供的图片之前。Issue 编号会写入分支名称和 PR 的关闭引用。Issue 输入会退出 `force_exec` 模式。检索到的 issue 内容是不可信输入，可能包含 prompt injection。
 
 非 git 目录会发出警告并在原位置规划，但 `cruise run` 仍需要 git 仓库。
 
@@ -197,7 +223,7 @@ Options:
 
 使用 `--repo <owner/repository>` 时，session 的目标会从当前目录切换为 GitHub 或 GitLab 仓库。Repo session 始终以 Worktree 模式运行，并且仍需要 `gh`/`glab` 访问仓库。若 `create_pr: false`，Cruise 会跳过自动提交、推送、PR 创建、`after-pr` 和基于 PR 的清理。成功运行若没有新的分支提交，会在不尝试创建 PR 的情况下完成；现有分支提交仍可用于创建 PR。Repo 或本地 worktree session 的发布失败都会进入 **PR Failed**，并保留 workspace 以便通过 **Create PR** 恢复，而不会重新运行 workflow。`--repo` 也适用于后台规划（`cruise --plan "task" --repo owner/repository`）。自由输入的 `owner/repository` 也受支持。
 
-**修复现有 GitHub PR 的评审。** 在仓库中运行 `cruise plan --pr 12`，或运行 `cruise plan --repo owner/repo --pr 12 "focus on tests"`；如出现提示，先审批生成的计划，再运行 `cruise run <session-id>`。可选的位置文本是附加指令；此模式不会读取 stdin，也不会调用 LLM 生成计划。TUI 和 WebUI 的新建 session 表单也接受 GitHub 仓库的 PR 编号。此功能需要已通过身份验证的 `gh`。PR 必须处于开放状态，并且在同一仓库中具有非空 head 分支；支持 draft PR，但不支持 fork PR 和 GitLab merge request。`--grill` 和 `--image` 不能与 `--pr` 同时使用。
+**修复现有 GitHub PR 的评审。** 在仓库中运行 `cruise plan --pr 12`，或运行 `cruise plan --repo owner/repo --pr 12 "focus on tests"`；如出现提示，先审批生成的计划，再运行 `cruise run <session-id>`。可选的位置文本是附加指令；此模式不会读取 stdin，也不会调用 LLM 生成计划。WebUI 的 New Session 表单也接受 GitHub 仓库的 PR 编号。此功能需要已通过身份验证的 `gh`。PR 必须处于开放状态，并且在同一仓库中具有非空 head 分支；支持 draft PR，但不支持 fork PR 和 GitLab merge request。`--grill` 和 `--image` 不能与 `--pr` 同时使用。
 
 默认 workflow 是 `builtin:pr-review-fix`，而不是项目 workflow。自定义 `-c` workflow 必须启用 PR 处理，并包含一个设置了 `reviewers: all` 的 after-PR `github-review` step。内置 workflow 不声明 flags，不创建或合并 PR，仅处理评审。评审循环会提交并推送修复、回复或解决目标讨论串；失败的 session 可以重试。PR session 不提供“发布为 Issue”和“重新规划”。
 
@@ -292,13 +318,13 @@ Review 会修复已确认的缺陷；当 review 轮次更改了文件时，会�
 cruise --plan <INPUT|stdin> [--skip-planning] [--no-force-exec] [--repo <OWNER/REPO>] [--image <PATH>]... [--flag <VALUE>]...
 ```
 
-立即创建 session，在分离的 worker 中启动计划生成，然后返回新 session ID。Worker 运行期间，`cruise list` 会将该 session 显示为 `Planning`。若生成失败，`cruise list` 会显示 `Plan Failed`；规划成功前审批会保持禁用状态。
+立即创建 session，并在 daemon 内启动计划生成，然后返回新 session ID。规划运行期间，`cruise list` 会显示 `Planning`。若生成失败，`cruise list` 会显示 `Plan Failed`；规划成功前审批会保持禁用状态。
 
-添加 `--skip-planning` 会跳过后台 worker：输入会直接写入 `plan.md`，session 创建时即处于 `Planned` 状态，无需审批（若 `force_exec: true`，除非使用 issue 输入或其他退出方式，否则 workflow 会直接执行；显式传入 `--no-force-exec` 可退出）。不带 `--plan` 时也可使用此 flag（例如 `cruise --skip-planning "task"`），此时行为与 `cruise plan --skip-planning "task"` 相同。
+添加 `--skip-planning` 会跳过计划生成：输入会直接写入 `plan.md`，session 创建时即处于 `Planned` 状态，无需审批（若 `force_exec: true`，除非使用 issue 输入或其他退出方式，否则 workflow 会直接执行；显式传入 `--no-force-exec` 可退出）。不带 `--plan` 时也可使用此 flag（例如 `cruise --skip-planning "task"`），此时行为与 `cruise plan --skip-planning "task"` 相同。
 
 此处也接受 `--repo <owner>/<repository>`，并按 [`cruise plan`](#cruise-plan) 中所述将该仓库作为 session 目标。此路径不支持 `--grill`，因为后台规划期间没有交互用户可接受访谈。
 
-没有子命令、没有 `--plan` 且没有位置输入时，若 stdin 不是 TTY，则会读取到结尾并将内容作为位置输入。因此，`echo "task" | cruise` 会使用传统的位置参数路径，按 `cruise plan "task"` 规划（仍适用 `--skip-planning`、`--no-force-exec`、`--repo` 和 `--image`）。stdin 为交互式时，不带参数的调用仍会打开 TUI。若要在后台规划路径上显式读取管道输入，请传入 `--plan stdin`。
+没有子命令、没有 `--plan` 且没有位置输入时，若 stdin 不是 TTY，则会读取到结尾并将内容作为位置输入。因此，`echo "task" | cruise` 会使用传统的位置参数路径，按 `cruise plan "task"` 规划（仍适用 `--skip-planning`、`--no-force-exec`、`--repo` 和 `--image`）。TTY 中不带参数的调用会打开 `cruise list`。若要在 daemon 内的后台规划路径上显式读取管道输入，请传入 `--plan stdin`。
 
 <a id="cruise-tell"></a>
 ## `cruise tell`
@@ -347,7 +373,7 @@ cruise config [OPTIONS]
 
 Options:
       --set-parallelism <N>
-          Set the maximum number of sessions the WebUI and TUI run concurrently in `run --all` mode.
+          Set the maximum number of sessions the WebUI runs concurrently in `run --all` mode.
 
           Must be >= 1. Omit to show the current configuration. The CLI's one-shot `run --all --parallelism` override is independent.
       --set-language <LANG|auto>
@@ -356,15 +382,15 @@ Options:
           Set the automatic retry limit for Run All (0 disables it).
 ```
 
-显示或更新应用级设置，设置存储在 `$XDG_CONFIG_HOME/cruise/` 下的 `config.json` 或 `config.yaml` 中（默认：`~/.config/cruise/`）；这与每个 workflow 使用的 YAML 配置不同。不带 flags 时会打印当前配置。`--set-parallelism <N>` 设置 `run_all_parallelism`（默认 `1`），控制 **WebUI 和 TUI** 在 `run --all` 期间并行执行多少个 session。CLI 不读取该持久化值；请改用单次运行的 `cruise run --all --parallelism <N>` flag。
+显示或更新应用级设置，设置存储在 `$XDG_CONFIG_HOME/cruise/` 下的 `config.json` 或 `config.yaml` 中（默认：`~/.config/cruise/`）；这与每个 workflow 使用的 YAML 配置不同。不带 flags 时会打印当前配置。`--set-parallelism <N>` 设置 `run_all_parallelism`（默认 `1`），控制 **WebUI** 在 `run --all` 期间并行执行多少个 session。CLI 不读取该持久化值；请改用单次运行的 `cruise run --all --parallelism <N>` flag。
 
 `cruise config --set-language ja` 会保存应用设置 `uiLanguage`（读取时也接受 `ui_language`）。使用 `--set-language auto` 可清除该设置，并恢复自动选择。支持的显式标签为 `en`、`zh-CN`、`es`、`fr`、`pt-BR`、`ja` 和 `ko`。大小写不敏感，且可用下划线替代连字符；但不接受 `pt` 和 `en-US` 等其他标签。`cruise config` 会报告生效的 `ui_language` 及其来源：`env`、`config`、`system` 或 `default`。
 
-CLI 和 TUI 的 UI 语言优先级为 `CRUISE_UI_LANGUAGE` > 应用设置 `uiLanguage` > 系统区域设置 > `en`。环境值为空或为 `auto`，以及配置值未设置或为 `auto`，都会使该层保持未指定。无效的环境值会以英语警告并忽略；CLI setter 和应用配置验证会拒绝无效值。
+CLI 的 UI 语言优先级为 `CRUISE_UI_LANGUAGE` > 应用设置 `uiLanguage` > 系统区域设置 > `en`。环境值为空或为 `auto`，以及配置值未设置或为 `auto`，都会使该层保持未指定。无效的环境值会以英语警告并忽略；CLI setter 和应用配置验证会拒绝无效值。
 
-`cruise config --set-auto-requeue-max-attempts <N>` 会为 CLI、TUI 和 WebUI Run All 设置 `run_all_auto_requeue_max_attempts`。CLI flag `--auto-requeue-max-attempts <N>` 会在单个批次中覆盖该值。
+`cruise config --set-auto-requeue-max-attempts <N>` 会为 CLI 和 WebUI Run All 设置 `run_all_auto_requeue_max_attempts`。CLI flag `--auto-requeue-max-attempts <N>` 会在单个批次中覆盖该值。
 
-在机器级 `config.yaml` 中设置 `prevent_sleep: true`（或在 `config.json` 中设置 `"prevent_sleep": true`），可在 macOS 运行期间防止系统休眠；默认值为 `false`。这适用于 CLI、TUI 和 WebUI 运行，但不适用于单独规划。其他操作系统不执行任何操作。更改会在下一次运行时生效。项目 `default.yaml` 不支持此设置。
+在机器级 `config.yaml` 中设置 `prevent_sleep: true`（或在 `config.json` 中设置 `"prevent_sleep": true`），可在 macOS 运行期间防止系统休眠；默认值为 `false`。这适用于 CLI 和 WebUI 运行，但不适用于单独规划。其他操作系统不执行任何操作。更改会在下一次 run 时生效。项目 `default.yaml` 不支持此设置。
 
 如果两个文件都存在，则 `config.json` 优先；否则使用现有的 `config.yaml`。文件不会合并。更新会按所选文件格式写回；YAML 注释不会保留。
 
@@ -391,7 +417,7 @@ notifications:
 
 投递尽最大努力进行。非默认通知设置也会显示在 `cruise config` 中，但绝不会显示 webhook URL。
 
-WebUI session 使用浏览器通知代替服务器端桌面横幅，并使用服务器端声音和 webhook 投递。`desktop` 主开关及事件开关也会控制浏览器通知，但不会控制页面内 toast。`CRUISE_DISABLE_NOTIFICATIONS=1` 会禁用桌面通知、声音和 webhook 投递，但不会抑制 WebUI 浏览器通知。其他取值不会启用此全局开关。
+无论工作由 CLI 还是 WebUI 启动，所有工作流事件（**Action required**、**Plan ready**、**Completed** 和 **Failed**）通知都由 daemon 发送。声音和 webhook 始终由 daemon 投递。连接着 WebUI 浏览器标签页时，桌面横幅以浏览器通知的形式显示；否则，daemon 会显示原生桌面横幅（macOS/Linux 桌面会话）。`desktop` 主开关及事件开关同时控制 daemon 横幅和浏览器通知，但不控制页面内 toast。要禁用 daemon 的桌面通知、声音和 webhook 投递，请在 daemon 环境中设置 `CRUISE_DISABLE_NOTIFICATIONS=1`，并运行 `cruise daemon restart` 重启；WebUI 浏览器通知不会被禁用。其他取值不会启用此全局开关。
 
 使用 `cruise config --set-language <LANG>` 保存 UI 语言，例如：
 
@@ -400,7 +426,7 @@ cruise config --set-language ja
 cruise config --set-language auto
 ```
 
-TUI 还可按 `L` 打开语言选择器。WebUI 的选择保存在浏览器 cookie 中，而非应用设置中。有关区域设置优先级以及 UI 语言与 prompt 语言的区别，请参阅[应用程序配置](configuration.md#ui-language)。
+WebUI 的语言选择保存在浏览器 cookie 中，而非应用设置中。有关区域设置优先级以及 UI 语言与 prompt 语言的区别，请参阅[应用程序配置](configuration.md#ui-language)。
 
 `model` 和 `plan_model` 可在任一格式中提供可选的全局模型默认值。每项接受字符串或有序数组：第一项是主模型，其余项是 SDK fallback。两种格式使用相同的字段名和别名。`config.yaml` 示例：
 
@@ -414,7 +440,7 @@ plan_model:
   - openai/gpt-6-luna:max
 ```
 
-Workflow 和 `default.yaml` 中的模型设置会覆盖这些默认值；环境变量覆盖的优先级仍然最高。如果没有任何层设置 `plan_model`，规划会使用生效的 `model`。SDK 数组使用现有的 [fallback 行为](sdk.md#sdk-mode)；command 模式只使用主模型。`planModel` 是 `plan_model` 的别名。parallelism 未设置时默认为 `1`，因此只配置模型也是有效的。通过 CLI、WebUI 或 TUI 更新 parallelism 时，会保留这两个模型设置。
+Workflow 和 `default.yaml` 中的模型设置会覆盖这些默认值；环境变量覆盖的优先级仍然最高。如果没有任何层设置 `plan_model`，规划会使用生效的 `model`。SDK 数组使用现有的 [fallback 行为](sdk.md#sdk-mode)；command 模式只使用主模型。`planModel` 是 `plan_model` 的别名。parallelism 未设置时默认为 `1`，因此只配置模型也是有效的。通过 CLI 或 WebUI 更新 parallelism 时，会保留这两个模型设置。
 
 同一应用设置文件还可用于组织交互式 workflow 选择器：
 

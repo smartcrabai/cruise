@@ -73,6 +73,9 @@ pub enum CruiseError {
     #[error("session error: {0}")]
     SessionError(String),
 
+    #[error("session not found: {0}")]
+    SessionNotFound(String),
+
     #[error("session state.json changed externally during run: {0}")]
     SessionStateConflict(String),
 
@@ -140,6 +143,7 @@ impl CruiseError {
             Self::PrPublicationFailed(_) => "pr_publication_failed",
             Self::Busy(_) => "session_busy",
             Self::SessionError(_) => "session_error",
+            Self::SessionNotFound(_) => "session_not_found",
             Self::SessionStateConflict(_) => "session_state_conflict",
             Self::SessionStateConflictAborted(_) => "session_state_conflict_aborted",
             Self::StepMadeNoFileChanges(_) => "step_no_file_changes",
@@ -397,6 +401,10 @@ mod tests {
             ),
             (CruiseError::Busy("secret".into()), "session_busy"),
             (CruiseError::SessionError("secret".into()), "session_error"),
+            (
+                CruiseError::SessionNotFound("secret".into()),
+                "session_not_found",
+            ),
             (
                 CruiseError::SessionStateConflict("secret".into()),
                 "session_state_conflict",

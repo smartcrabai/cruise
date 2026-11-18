@@ -9,6 +9,28 @@ Feature: Environment overrides for resolved configuration
     When I clear the environment override and run cruise config
     Then the command succeeds and reports "run_all_parallelism = 2"
 
+  Scenario: A workflow override affects only its CLI request
+    Given an isolated Cruise project
+    When I create a planned session through the CLI
+    Then the command succeeds
+    When I stop the daemon
+    When I run the planned session with CRUISE_MODEL set to "["
+    Then the command fails and reports "CRUISE_MODEL"
+    When I clear workflow overrides and run the planned session
+    Then the command succeeds
+
+  Scenario: CLI requests ignore workflow overrides present only in the daemon environment
+    Given an isolated Cruise project
+    When I create a planned session through the CLI
+    Then the command succeeds
+    When I stop the daemon
+    Then the command succeeds
+    When I start the daemon with CRUISE_MODEL set to "["
+    Then the command succeeds
+    When I run the planned session
+    Then the command succeeds
+
+
   Scenario Outline: Invalid values identify the environment variable
     Given an isolated Cruise project
     And <variable> is set to "<value>"

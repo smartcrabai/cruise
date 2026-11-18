@@ -2,11 +2,11 @@ use console::style;
 
 use crate::cli::CleanArgs;
 use crate::error::Result;
-use crate::session::SessionManager;
 
-pub fn run(_args: CleanArgs) -> Result<()> {
-    let manager = SessionManager::new(crate::paths::data_dir()?);
-    let report = manager.cleanup_by_pr_status()?;
+pub async fn run(_args: CleanArgs) -> Result<()> {
+    let client = crate::daemon::client::DaemonClient::connect().await?;
+    let context = crate::request_context::RequestContext::capture()?;
+    let report = client.clean(&context).await?;
     let pr_deleted = report.deleted.saturating_sub(report.no_pr_deleted);
     if pr_deleted > 0 {
         eprintln!(

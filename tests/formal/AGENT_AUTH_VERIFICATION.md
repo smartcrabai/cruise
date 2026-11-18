@@ -116,7 +116,7 @@ or complete a dry run. Rejection cases assert absent dispatch/workspace effects,
 file immutability and absence of token values. Nested/after-pr/group candidates,
 SDK-qualified arrays, fallback chains, both OAuth providers, multi-account
 renewable/unknown admission and deduplicated all-target diagnostics are covered.
-The full library run also exercises shared planning and TUI/WebUI setup contracts.
+The full library run also exercises shared planning and WebUI setup contracts.
 
 No new production defect was found, and no production source change was needed
 for this specification task. During grounding, the draft models were made more

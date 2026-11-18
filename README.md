@@ -38,6 +38,7 @@ The default workflow uses `sdk: jcode`: authenticate a provider (`jcode login <p
 cruise plan "Add retry logic to the uploader"
 cruise run
 ```
+Session commands connect to a per-user resident daemon and start it on demand. Use `cruise daemon status` to inspect it and `cruise daemon restart` to restart it; `cruise webui` prints a login URL with a single-use, five-minute nonce (never the API token) and can open it with `--open`.
 
 Browse the [English topic index](docs/en/README.md) for CLI, session, SDK, workflow, GitHub Actions, and telemetry guides.
 

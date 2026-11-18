@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
+import { loginWebUi, waitForWebUiLogin } from './auth.mjs';
 
 const root = await mkdtemp(join(tmpdir(), 'cruise-graph-browser-'));
 const repo = join(root, 'repo');
@@ -30,21 +31,16 @@ try {
   await writeFile(join(session, 'config.yaml'), "flags:\n  browser: {}\nsteps:\n  first: {command: 'true'}\n  gated: {command: 'true', flag: browser}\n  last: {command: 'true'}\n");
   await writeFile(join(session, 'plan.md'), '# Graph flag fixture\n');
   server = spawn(process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime'),
-    ['webui', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    ['daemon', 'serve', '--port', '0', '--webui-dir', resolve('webui')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   closed = new Promise(ok => server.once('close', ok));
   server.stderr.on('data', data => { logs += data; });
-  const base = await new Promise((ok, fail) => {
-    let stdout = '';
-    const timeout = setTimeout(() => fail(new Error(`server startup timeout: ${logs}`)), 20000);
-    server.once('error', error => { clearTimeout(timeout); fail(error); });
-    server.once('exit', code => { clearTimeout(timeout); fail(new Error(`server exited ${code}: ${logs}`)); });
-    server.stdout.on('data', data => { stdout += data; const match = stdout.match(/http:\/\/127\.0\.0\.1:\d+/); if (match) { clearTimeout(timeout); ok(match[0]); } });
-  });
+  const { base, loginUrl } = await waitForWebUiLogin(server, () => logs);
   const browserEnv = { ...process.env };
   for (const key of ['DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'LD_LIBRARY_PATH']) delete browserEnv[key];
   browser = await chromium.launch({ headless: true, env: browserEnv });
   console.log(`Chromium ${browser.version()}`);
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, reducedMotion: 'reduce' });
+  await loginWebUi(page, loginUrl);
   page.setDefaultTimeout(15000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));

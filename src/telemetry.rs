@@ -33,6 +33,8 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static OPERATION_METRICS: OnceLock<OperationMetrics> = OnceLock::new();
 static LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
+static FLUSH_PROVIDERS: OnceLock<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)> =
+    OnceLock::new();
 
 struct OperationMetrics {
     count: Counter<u64>,
@@ -72,6 +74,10 @@ impl Drop for Telemetry {
 }
 
 /// Initializes process-global trace, metric, and log providers when explicitly enabled.
+///
+/// The CLI and daemon are separate processes: the CLI retains its own provider for
+/// client-only failures before dispatch, while the daemon initializes from the
+/// spawning client's process environment and exports operation telemetry.
 ///
 /// Call once before creating [`Operation`]s, and keep the returned handle alive until
 /// all instrumented work is complete. With observability disabled this returns a no-op
@@ -147,6 +153,11 @@ pub fn init() -> Result<Telemetry, InitError> {
         let _ = logger_provider.shutdown();
         return Err(InitError(InitErrorKind::AlreadyInitialized));
     }
+    let _ = FLUSH_PROVIDERS.set((
+        tracer_provider.clone(),
+        meter_provider.clone(),
+        logger_provider.clone(),
+    ));
 
     global::set_tracer_provider(tracer_provider.clone());
     global::set_meter_provider(meter_provider.clone());
@@ -366,6 +377,21 @@ impl Operation {
                 .map_or(0.0, |started_at| started_at.elapsed().as_secs_f64()),
             &attributes,
         );
+        if self.kind == "execution" {
+            force_flush();
+        }
+    }
+}
+
+/// Flushes all signals after a daemon-owned execution root finishes.
+///
+/// Export failures are intentionally ignored so observability cannot change workflow
+/// results. The daemon calls this before releasing a terminal event to its clients.
+pub(crate) fn force_flush() {
+    if let Some((tracer, meter, logger)) = FLUSH_PROVIDERS.get() {
+        let _ = tracer.force_flush();
+        let _ = meter.force_flush();
+        let _ = logger.force_flush();
     }
 }
 fn record_loop_protection(

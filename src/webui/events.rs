@@ -8,22 +8,22 @@ use crate::application::{
     ApplicationEvent, ApplicationEventSink, CruiseApplication, EventStream, LogEvent, LogSink,
 };
 use crate::desktop_notifications::{
-    application_event_notification, build_payload, send_server_side_best_effort,
+    application_event_notification, build_payload, send_daemon_best_effort,
 };
 use crate::error::Result;
 
-/// Buffered events per SSE connection, matching the TUI's `UiEvent` channel.
+/// Buffered events per SSE connection, matching the application's event stream.
 const SUBSCRIBER_CAPACITY: usize = 256;
 
-type NotificationHook = Arc<dyn Fn(&ApplicationEvent) + Send + Sync>;
+/// Receives each broadcast event and whether a `WebUI` browser is connected.
+type NotificationHook = Arc<dyn Fn(&ApplicationEvent, bool) + Send + Sync>;
 
 /// Broadcast hub. Sinks never fail: a browser that navigated away must not
 /// turn a running session into `Failed`
 /// (`CruiseApplication` maps `sink.send` errors to a failed phase).
 ///
-/// Subscriber channels are bounded: an SSE connection that stopped reading
-/// (sleeping laptop, dropped VPN, killed `curl`) drops events instead of
-/// buffering a whole run's output in memory.
+/// Subscribers use bounded channels. `WebUI` connections may drop events when
+/// full; reliable API connections are closed instead so clients can re-sync.
 #[derive(Default)]
 pub(crate) struct EventHub {
     state: Mutex<HubState>,
@@ -39,13 +39,19 @@ impl std::fmt::Debug for EventHub {
 #[derive(Debug, Default)]
 struct HubState {
     closed: bool,
-    subscribers: Vec<mpsc::Sender<ApplicationEvent>>,
+    subscribers: Vec<Subscriber>,
+}
+
+#[derive(Debug)]
+struct Subscriber {
+    sender: mpsc::Sender<ApplicationEvent>,
+    close_on_overflow: bool,
 }
 
 impl EventHub {
     pub(crate) fn with_notifications(application: CruiseApplication) -> Self {
         Self {
-            notification_hook: Some(Arc::new(move |event| {
+            notification_hook: Some(Arc::new(move |event, browser_connected| {
                 if let Some((kind, session_id, detail)) = application_event_notification(event) {
                     let application = application.clone();
                     let session_id = session_id.to_owned();
@@ -57,7 +63,7 @@ impl EventHub {
                         );
                         let payload =
                             build_payload(kind, Some(&subject), detail.as_deref(), &session_id);
-                        send_server_side_best_effort(&payload);
+                        send_daemon_best_effort(&payload, browser_connected);
                     });
                 }
             })),
@@ -66,15 +72,29 @@ impl EventHub {
     }
 
     pub(crate) fn subscribe(&self) -> mpsc::Receiver<ApplicationEvent> {
-        let (tx, rx) = mpsc::channel(SUBSCRIBER_CAPACITY);
+        self.subscribe_with_overflow_policy(false)
+    }
+
+    pub(crate) fn subscribe_reliable(&self) -> mpsc::Receiver<ApplicationEvent> {
+        self.subscribe_with_overflow_policy(true)
+    }
+
+    fn subscribe_with_overflow_policy(
+        &self,
+        close_on_overflow: bool,
+    ) -> mpsc::Receiver<ApplicationEvent> {
+        let (sender, receiver) = mpsc::channel(SUBSCRIBER_CAPACITY);
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !state.closed {
-            state.subscribers.push(tx);
+            state.subscribers.push(Subscriber {
+                sender,
+                close_on_overflow,
+            });
         }
-        rx
+        receiver
     }
 
     pub(crate) fn close(&self) {
@@ -87,16 +107,26 @@ impl EventHub {
     }
 
     pub(crate) fn broadcast(&self, event: &ApplicationEvent) {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .subscribers
-            .retain(|tx| match tx.try_send(event.clone()) {
-                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
-                Err(mpsc::error::TrySendError::Closed(_)) => false,
+        let browser_connected = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.subscribers.retain(|subscriber| {
+                match subscriber.sender.try_send(event.clone()) {
+                    Ok(()) => true,
+                    Err(mpsc::error::TrySendError::Full(_)) => !subscriber.close_on_overflow,
+                    Err(mpsc::error::TrySendError::Closed(_)) => false,
+                }
             });
+            // Reliable subscribers are CLI clients; the rest are browsers.
+            state
+                .subscribers
+                .iter()
+                .any(|subscriber| !subscriber.close_on_overflow)
+        };
         if let Some(hook) = &self.notification_hook {
-            hook(event);
+            hook(event, browser_connected);
         }
     }
 
@@ -188,7 +218,7 @@ pub(crate) fn stream_name(stream: EventStream) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::EventHub;
+    use super::{EventHub, SUBSCRIBER_CAPACITY};
     use crate::application::ApplicationEvent;
     use std::sync::Arc;
 
@@ -229,7 +259,7 @@ mod tests {
             let weak = weak.clone();
             let calls = Arc::clone(&calls);
             EventHub {
-                notification_hook: Some(Arc::new(move |event| {
+                notification_hook: Some(Arc::new(move |event, _browser_connected| {
                     if let Some((kind, _, _)) = application_event_notification(event) {
                         assert_eq!(kind, WorkflowNotificationKind::Completed);
                         calls.fetch_add(1, Ordering::SeqCst);
@@ -280,6 +310,22 @@ mod tests {
         assert!(recv_within(&mut rx).await.is_none());
     }
 
+    #[tokio::test]
+    async fn reliable_subscriber_closes_on_overflow() {
+        let hub = Arc::new(EventHub::default());
+        let mut receiver = hub.subscribe_reliable();
+        let event = ApplicationEvent::RunStarted {
+            session_id: "s1".to_owned(),
+        };
+        for _ in 0..=SUBSCRIBER_CAPACITY {
+            hub.broadcast(&event);
+        }
+        assert_eq!(hub.subscriber_count(), 0);
+        for _ in 0..SUBSCRIBER_CAPACITY {
+            assert!(receiver.recv().await.is_some());
+        }
+        assert!(receiver.recv().await.is_none());
+    }
     #[test]
     fn broadcast_after_close_is_noop_and_sink_still_ok() {
         let hub = Arc::new(EventHub::default());

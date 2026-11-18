@@ -21,7 +21,7 @@ set -euo pipefail
 JCODE_VERSION_INPUT="${JCODE_VERSION:-latest}"
 INSTALL_ROOT="${RUNNER_TEMP:-/tmp}"
 INSTALL_DIR="$INSTALL_ROOT/jcode-bin"
-INSTALL_HOME="$INSTALL_ROOT/jcode-install-home"
+INSTALL_HOME="${CRUISE_ACTION_DIR:-$INSTALL_ROOT}/jcode-install-home"
 mkdir -p "$INSTALL_DIR" "$INSTALL_HOME"
 
 if command -v jcode >/dev/null 2>&1; then

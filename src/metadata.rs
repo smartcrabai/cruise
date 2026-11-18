@@ -1,27 +1,12 @@
 use std::path::Path;
 
 use crate::error::Result;
-use crate::session::{SessionManager, SessionState};
+use crate::session::SessionState;
 
 const MAX_SESSION_TITLE_CHARS: usize = 80;
 
 pub fn refresh_session_title_from_plan(session: &mut SessionState, plan_markdown: &str) {
     session.title = Some(derive_session_title(plan_markdown));
-}
-
-/// Recomputes a session title from the saved session state and plan file.
-///
-/// # Errors
-///
-/// Returns an error if the saved plan file cannot be read as non-empty markdown.
-pub fn refresh_session_title_from_session(
-    manager: &SessionManager,
-    session: &mut SessionState,
-) -> Result<()> {
-    let plan_path = session.plan_path(&manager.sessions_dir());
-    let plan_markdown = read_plan_markdown(&plan_path)?;
-    refresh_session_title_from_plan(session, &plan_markdown);
-    Ok(())
 }
 
 #[must_use]
@@ -105,6 +90,7 @@ pub fn plan_markdown_available(path: &Path) -> bool {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn read_plan_markdown(path: &Path) -> Result<String> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         crate::error::CruiseError::Other(format!(

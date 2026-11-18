@@ -58,7 +58,7 @@ run_check agent-auth-bdd cargo +1.99.1 test --locked --all-features --test agent
 run_check bdd-negative-controls node scripts/formal/check_agent_auth_bdd_failures.cjs "$RUN"
 run_check agent-auth-cli cargo +1.99.1 test --locked --all-features --test agent_auth_cli
 # Covers injected-time boundaries, credential parsing, candidate resolution,
-# shared planning entrypoint, CLI setup and the TUI/WebUI setup_run_blocking path.
+# shared planning entrypoint, CLI setup and the WebUI setup_run_blocking path.
 run_check production-unit-contracts cargo +1.99.1 test --locked --all-features --lib
 printf 'Aggregate exit status: %s\n' "$status" | tee -a "$RUN/results.log"
 echo "Agent authentication reports: $RUN"

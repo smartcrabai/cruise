@@ -296,6 +296,8 @@ mod contracts {
                 attachments: vec![],
                 skipped_steps: vec![],
                 flags: BTreeMap::default(),
+                context: None,
+                ..NewSessionRequest::default()
             })
             .unwrap_or_else(|err| panic!("test fixture failed: {err:?}"));
         state.phase = SessionPhase::Planned;
@@ -315,7 +317,7 @@ mod contracts {
             Ok(())
         });
         let result = app
-            .verify(&state.id, sink)
+            .verify(&state.id, None, sink)
             .await
             .unwrap_or_else(|err| panic!("test fixture failed: {err:?}"));
         let saved = manager

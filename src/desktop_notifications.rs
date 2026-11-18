@@ -1,4 +1,4 @@
-//! Best-effort desktop notifications shared by the CLI and TUI.
+//! Best-effort desktop notifications shared by the CLI and `WebUI`.
 
 const NOTIFICATION_TITLE: &str = "Cruise";
 const MAX_DETAIL_CHARS: usize = 60;
@@ -246,35 +246,17 @@ pub(crate) fn send_best_effort_with_backend(
     backend.send(&payload);
 }
 
-pub(crate) fn send_best_effort(
-    kind: WorkflowNotificationKind,
-    subject: Option<&str>,
-    detail: Option<&str>,
-    session_id: &str,
-) {
-    if notifications_disabled() {
-        return;
-    }
-    let payload = build_payload(kind, subject, detail, session_id);
-    send_payload_best_effort(&payload);
-}
-
-pub(crate) fn send_payload_best_effort(payload: &NotificationPayload) {
-    dispatch(payload, false);
-}
-
-pub(crate) fn send_server_side_best_effort(payload: &NotificationPayload) {
-    dispatch(payload, true);
-}
-
-fn dispatch(payload: &NotificationPayload, server_side: bool) {
+/// Deliver a daemon-side notification. Sound and webhook always come from the
+/// daemon; the desktop banner comes from a connected `WebUI` browser when one
+/// is open, otherwise from the daemon so CLI-only users are still notified.
+pub(crate) fn send_daemon_best_effort(payload: &NotificationPayload, browser_connected: bool) {
     if notifications_disabled() {
         return;
     }
     let settings = load_settings();
     let url = notification_webhook::url_from_env();
     let mut channels = resolve_channels(payload.kind, &settings, false, url.is_some());
-    if server_side {
+    if browser_connected {
         channels.desktop = false;
     }
     deliver(payload, channels, url.as_deref(), &SystemSinks);

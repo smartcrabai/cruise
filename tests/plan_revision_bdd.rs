@@ -15,7 +15,7 @@ mod contracts {
     use cruise::{
         application::{
             ApplicationEvent, ApplicationEventSink, CruiseApplication, NewSessionRequest,
-            PlanRequest, SessionAction,
+            PlanRequest,
         },
         error::CruiseError,
         session::{SessionManager, SessionPhase, WorkspaceMode},
@@ -34,7 +34,7 @@ mod contracts {
         feedback_error: Option<String>,
         question_error: Option<String>,
         replan_phase: Option<SessionPhase>,
-        client_phases: Vec<(SessionPhase, bool, bool)>,
+        client_phases: Vec<(SessionPhase, bool)>,
         fix_phase: Option<SessionPhase>,
         ask_phase: Option<SessionPhase>,
     }
@@ -103,6 +103,8 @@ mod contracts {
                     attachments: vec![],
                     skipped_steps: vec![],
                     flags: Default::default(),
+                    context: None,
+                    ..NewSessionRequest::default()
                 })
                 .unwrap_or_else(|error| panic!("create planning session: {error}"));
             let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_| Ok(()));
@@ -141,7 +143,7 @@ mod contracts {
         world.create_planned_session().await;
     }
 
-    #[when("I replan with feedback and with a question")]
+    #[when("the application replans with feedback and with a question")]
     async fn replan_with_text(world: &mut PlanRevisionWorld) {
         let app = CruiseApplication::new(world.manager());
         let id = world.session_id().to_string();
@@ -185,7 +187,7 @@ mod contracts {
         assert_eq!(world.question_error.as_deref(), Some(USER_TEXT_ERROR));
     }
 
-    #[when("I replan without user text")]
+    #[when("the application replans without user text")]
     async fn replan_without_text(world: &mut PlanRevisionWorld) {
         let app = CruiseApplication::new(world.manager());
         let state = app
@@ -205,41 +207,27 @@ mod contracts {
         assert_eq!(state.phase, SessionPhase::Planned);
     }
 
-    #[when("I inspect planning actions in AwaitingApproval and Planned")]
-    fn inspect_client_actions(world: &mut PlanRevisionWorld) {
+    #[when("I inspect WebUI actions in AwaitingApproval and Planned")]
+    fn inspect_webui_actions(world: &mut PlanRevisionWorld) {
         let root = world.root().to_path_buf();
-        let manager = world.manager();
-        let app = CruiseApplication::new(manager.clone());
         let mut webui = WebUiProcess::start(&root);
         for phase in [SessionPhase::AwaitingApproval, SessionPhase::Planned] {
-            let state = world.set_phase(phase.clone());
-            let tui = app.capabilities(&state);
-            let tui_has_actions = [
-                SessionAction::Fix,
-                SessionAction::Ask,
-                SessionAction::Verify,
-            ]
-            .iter()
-            .all(|action| tui.contains(action))
-                && !format!("{tui:?}").contains("Replan");
+            world.set_phase(phase.clone());
             let response = webui.get(&format!("/sessions/{}", world.session_id()));
             let webui_has_actions = ["/editor/fix", "/editor/ask", "/verify"]
                 .iter()
                 .all(|action| response.contains(action))
                 && !response.contains("Replan")
                 && !response.contains("/replan");
-            world
-                .client_phases
-                .push((phase, tui_has_actions, webui_has_actions));
+            world.client_phases.push((phase, webui_has_actions));
         }
         world.set_phase(SessionPhase::Planned);
     }
 
-    #[then("TUI and WebUI offer Fix, Ask, and Verify in both phases without Replan")]
-    fn clients_offer_review_actions(world: &mut PlanRevisionWorld) {
+    #[then("WebUI offers Fix, Ask, and Verify in both phases without Replan")]
+    fn webui_offers_review_actions(world: &mut PlanRevisionWorld) {
         assert_eq!(world.client_phases.len(), 2);
-        for (phase, tui, webui) in &world.client_phases {
-            assert!(*tui, "TUI planning action parity failed in {phase:?}");
+        for (phase, webui) in &world.client_phases {
             assert!(*webui, "WebUI planning action parity failed in {phase:?}");
         }
     }
@@ -249,13 +237,13 @@ mod contracts {
         cli_replan_menu_visible(world.root());
     }
 
-    #[when("I Fix and Ask the Planned session")]
+    #[when("the application performs Fix and Ask on the Planned session")]
     async fn fix_and_ask_planned(world: &mut PlanRevisionWorld) {
         world.set_phase(SessionPhase::Planned);
         let app = CruiseApplication::new(world.manager());
         let id = world.session_id().to_string();
         let fixed = app
-            .fix(&id, SENTINEL.to_string(), event_sink())
+            .fix(&id, SENTINEL.to_string(), None, event_sink())
             .await
             .unwrap_or_else(|error| panic!("fix planned session: {error}"));
         let plan = app
@@ -276,7 +264,7 @@ mod contracts {
             Ok(())
         });
         let asked = app
-            .ask(&id, SENTINEL.to_string(), ask_sink)
+            .ask(&id, SENTINEL.to_string(), None, ask_sink)
             .await
             .unwrap_or_else(|error| panic!("ask planned session: {error}"));
         assert!(
@@ -300,13 +288,22 @@ mod contracts {
     struct WebUiProcess {
         child: Child,
         address: String,
+        cookie: String,
     }
 
     impl WebUiProcess {
         fn start(root: &Path) -> Self {
             let mut command = Command::new(env!("CARGO_BIN_EXE_cruise-runtime"));
             command
-                .args(["webui", "--host", "127.0.0.1", "--port", "0", "--webui-dir"])
+                .args([
+                    "daemon",
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "0",
+                    "--webui-dir",
+                ])
                 .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/webui"))
                 .current_dir(root)
                 .env("HOME", root.join("home"))
@@ -323,39 +320,88 @@ mod contracts {
             let mut child = command
                 .spawn()
                 .unwrap_or_else(|error| panic!("start production WebUI: {error}"));
-            let mut line = String::new();
-            std::io::BufReader::new(
-                child
-                    .stdout
-                    .take()
-                    .unwrap_or_else(|| panic!("WebUI stdout missing")),
-            )
-            .read_line(&mut line)
-            .unwrap_or_else(|error| panic!("read WebUI endpoint: {error}"));
-            let address = line
+            let stdout = child
+                .stdout
+                .take()
+                .unwrap_or_else(|| panic!("WebUI stdout missing"));
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut address = None;
+            let mut login_path = None;
+            for _ in 0..2 {
+                let mut line = String::new();
+                reader
+                    .read_line(&mut line)
+                    .unwrap_or_else(|error| panic!("read WebUI startup output: {error}"));
+                if let Some(value) = line
+                    .trim()
+                    .strip_prefix("cruise daemon listening on http://")
+                {
+                    address = Some(value.strip_suffix('/').unwrap_or(value).to_string());
+                }
+                if let Some(login_url) = line.trim().strip_prefix("cruise daemon WebUI login: ") {
+                    login_path = Some(
+                        login_url
+                            .split_once("://")
+                            .and_then(|(_, authority_and_path)| {
+                                authority_and_path
+                                    .find('/')
+                                    .map(|index| &authority_and_path[index..])
+                            })
+                            .unwrap_or_else(|| panic!("invalid WebUI login URL: {login_url}"))
+                            .to_string(),
+                    );
+                }
+            }
+            let address = address.unwrap_or_else(|| panic!("WebUI listening line missing"));
+            let login_path = login_path.unwrap_or_else(|| panic!("WebUI login URL missing"));
+            assert!(login_path.starts_with("/login?nonce="), "{login_path}");
+            let login_response = Self::request(&address, &login_path, None);
+            assert!(
+                login_response.starts_with("HTTP/1.1 303"),
+                "WebUI login response: {login_response}"
+            );
+            let set_cookie = login_response
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("set-cookie:"))
+                .unwrap_or_else(|| panic!("WebUI login did not set a cookie: {login_response}"));
+            let cookie = set_cookie
+                .split_once(':')
+                .unwrap_or_else(|| panic!("invalid Set-Cookie header: {set_cookie}"))
+                .1
                 .trim()
-                .strip_prefix("cruise webui listening on http://")
-                .and_then(|value| value.strip_suffix('/'))
-                .unwrap_or_else(|| panic!("unexpected WebUI startup output: {line:?}"))
+                .split(';')
+                .next()
+                .unwrap_or_else(|| panic!("empty Set-Cookie header: {set_cookie}"))
                 .to_string();
-            Self { child, address }
+            assert!(cookie.starts_with("cruise_webui="), "{set_cookie}");
+            Self {
+                child,
+                address,
+                cookie,
+            }
         }
 
-        fn get(&mut self, path: &str) -> String {
-            let mut stream = TcpStream::connect(&self.address)
+        fn request(address: &str, path: &str, cookie: Option<&str>) -> String {
+            let mut stream = TcpStream::connect(address)
                 .unwrap_or_else(|error| panic!("connect production WebUI: {error}"));
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap_or_else(|error| panic!("set WebUI timeout: {error}"));
+            let cookie = cookie.map_or_else(String::new, |cookie| format!("Cookie: {cookie}\r\n"));
             write!(
                 stream,
-                "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\n{cookie}Connection: close\r\n\r\n"
             )
             .unwrap_or_else(|error| panic!("request WebUI page: {error}"));
             let mut response = String::new();
             stream
                 .read_to_string(&mut response)
                 .unwrap_or_else(|error| panic!("read WebUI page: {error}"));
+            response
+        }
+
+        fn get(&mut self, path: &str) -> String {
+            let response = Self::request(&self.address, path, Some(&self.cookie));
             assert!(
                 response.starts_with("HTTP/1.1 200"),
                 "WebUI response: {response}"

@@ -1,22 +1,13 @@
 // Planning-action offers for idle sessions; production behavior is exercised by BDD.
 module plan_revision {
   type State = { phase: str, planAvailable: bool, planError: bool,
-    pendingPrompt: bool, webuiActions: Set[str], tuiActions: Set[str],
-    cliActions: Set[str] }
+    pendingPrompt: bool, webuiActions: Set[str], cliActions: Set[str] }
   var s: State
 
   val phases = Set("Draft", "AwaitingInput", "AwaitingApproval", "Planned", "Running")
 
   pure def usablePlan(planAvailable: bool, planError: bool): bool =
     planAvailable and not(planError)
-
-  pure def tuiOffer(p: str, planAvailable: bool, planError: bool): Set[str] =
-    if (p == "AwaitingApproval") {
-      if (usablePlan(planAvailable, planError)) Set("Fix", "Ask", "Verify")
-      else Set("Fix")
-    } else if (p == "Planned" and usablePlan(planAvailable, planError))
-      Set("Fix", "Ask", "Verify")
-    else Set()
 
   pure def webuiOffer(p: str, planAvailable: bool, planError: bool,
     pendingPrompt: bool): Set[str] =
@@ -36,7 +27,7 @@ module plan_revision {
     s' = { phase: p, planAvailable: available, planError: error,
       pendingPrompt: pending,
       webuiActions: webuiOffer(p, available, error, pending),
-      tuiActions: tuiOffer(p, available, error), cliActions: cliOffer(p) }
+      cliActions: cliOffer(p) }
   }
   action init = {
     nondet p = phases.oneOf()
@@ -49,12 +40,6 @@ module plan_revision {
   action step = idle
 
   val safety = all {
-    s.tuiActions == (if (s.phase == "AwaitingApproval")
-      if (s.planAvailable and not(s.planError)) Set("Fix", "Ask", "Verify")
-      else Set("Fix")
-      else if (s.phase == "Planned" and s.planAvailable and not(s.planError))
-        Set("Fix", "Ask", "Verify")
-      else Set()),
     s.webuiActions == (if (s.phase == "AwaitingApproval" and s.planAvailable)
       Set("Fix")
         .union(if (s.planError) Set() else Set("Ask"))
@@ -66,19 +51,14 @@ module plan_revision {
   }
 
   run awaitingApprovalErrorFix = initAt("AwaitingApproval", true, true, false)
-    .expect(s.tuiActions == Set("Fix") and s.webuiActions == Set("Fix")
-      and s.cliActions == Set() and safety)
+    .expect(s.webuiActions == Set("Fix") and s.cliActions == Set() and safety)
   run awaitingApprovalMissingPlan = initAt("AwaitingApproval", false, false, false)
-    .expect(s.tuiActions == Set("Fix") and s.webuiActions == Set()
-      and s.cliActions == Set() and safety)
+    .expect(s.webuiActions == Set() and s.cliActions == Set() and safety)
   run awaitingApprovalUsablePlan = initAt("AwaitingApproval", true, false, false)
-    .expect(s.tuiActions == Set("Fix", "Ask", "Verify")
-      and s.webuiActions == Set("Fix", "Ask", "Verify") and safety)
+    .expect(s.webuiActions == Set("Fix", "Ask", "Verify") and safety)
   run plannedUsablePlan = initAt("Planned", true, false, false)
-    .expect(s.tuiActions == Set("Fix", "Ask", "Verify")
-      and s.webuiActions == Set("Fix", "Ask", "Verify")
+    .expect(s.webuiActions == Set("Fix", "Ask", "Verify")
       and s.cliActions == Set("Replan") and safety)
   run plannedPendingPrompt = initAt("Planned", true, false, true)
-    .expect(s.tuiActions == Set("Fix", "Ask", "Verify")
-      and s.webuiActions == Set("Fix", "Ask") and safety)
+    .expect(s.webuiActions == Set("Fix", "Ask") and safety)
 }

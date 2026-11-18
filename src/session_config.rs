@@ -78,7 +78,7 @@ impl SessionConfigRef {
         Self::InlineSnapshot
     }
 
-    /// Human-readable label for CLI, TUI, and GUI display boundaries.
+    /// Human-readable label for CLI, `WebUI`, and GUI display boundaries.
     #[must_use]
     pub fn display_label(&self) -> String {
         match self {
@@ -222,6 +222,7 @@ pub fn config_reloader_for_reference(
     reference: &SessionConfigRef,
     defaults_dir: Option<PathBuf>,
     effective_max_retries: usize,
+    config_env: Option<std::collections::BTreeMap<String, String>>,
 ) -> Option<Box<dyn Fn() -> Result<Option<crate::engine::ReloadedWorkflow>> + Send + Sync>> {
     let path = reference.live_path()?.to_path_buf();
     let mut watched_paths = vec![path.clone()];
@@ -251,8 +252,12 @@ pub fn config_reloader_for_reference(
             return Ok(None);
         }
         let defaults = crate::workflow_defaults::WorkflowDefaults::load(defaults_dir.as_deref())?;
-        let config =
-            crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(&path, &defaults)?;
+        let env = config_env
+            .as_ref()
+            .map_or(crate::config::ConfigEnv::Process, |values| {
+                crate::config::ConfigEnv::Snapshot(values)
+            });
+        let config = crate::workflow_call::resolve_path_with_env(&path, &defaults, env)?;
         crate::config::validate_config(&config)?;
         crate::config::validate_group_retry_budget(&config, effective_max_retries)?;
         let retry_policy = crate::retry::policy_for_config(config.retry.clone());

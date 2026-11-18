@@ -1,4 +1,4 @@
-// One mandatory-invariant Quint block and one process-local session claim.
+// One mandatory-invariant Quint block and one daemon-local application claim.
 // Stage verdicts abstract process outcomes; multi-block aggregation is tested
 // separately because a single block stops at its first non-passing stage.
 // Optional temporal targets, cancellation and tool/setup errors are not modeled.

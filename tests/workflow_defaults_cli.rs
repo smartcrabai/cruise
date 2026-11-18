@@ -630,8 +630,19 @@ fn configured_user_model_recovers_a_fresh_request_without_mutating_defaults() {
     .unwrap_or_else(|error| panic!("{error}"));
     cruise::test_support::init_git_repo(project.path());
     let user_file = home.path().join("config/cruise/default.yaml");
-
-    let missing_model = cruise(home.path(), project.path())
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("{error}"));
+    let marker = home.path().join("model-received");
+    cruise::test_support::write_executable_script(
+        &bin.join("model-recorder"),
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$1\" > {}\nexit 0\n",
+            sh_quote(&marker)
+        ),
+    );
+    let mut missing_command = cruise(home.path(), project.path());
+    prepend_command_path(&mut missing_command, &bin);
+    let missing_model = missing_command
         .args(["exec", "--config", "workflow.yaml"])
         .output()
         .unwrap_or_else(|error| panic!("run missing-model request: {error}"));
@@ -647,16 +658,6 @@ fn configured_user_model_recovers_a_fresh_request_without_mutating_defaults() {
     std::fs::write(&user_file, configured.as_bytes()).unwrap_or_else(|error| panic!("{error}"));
     let configured_bytes = std::fs::read(&user_file).unwrap_or_else(|error| panic!("{error}"));
 
-    let bin = home.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("{error}"));
-    let marker = home.path().join("model-received");
-    cruise::test_support::write_executable_script(
-        &bin.join("model-recorder"),
-        &format!(
-            "#!/bin/sh\nprintf '%s' \"$1\" > {}\nexit 0\n",
-            sh_quote(&marker)
-        ),
-    );
     std::fs::write(
         project.path().join("workflow.yaml"),
         "command: [model-recorder, '{model}']\nsteps:\n  main-step:\n    prompt: perform the requested task\n",
