@@ -63,7 +63,7 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | I already wrote the plan myself — skip the LLM planning | `cruise plan --skip-planning "<plan text>"` (or `cruise --plan "…" --skip-planning`) |
 | Interview me one question at a time, then write the plan | `cruise plan --grill "task"` (SDK backend (the default) + TTY) |
 | Add executable Quint, Alloy, and Gherkin specifications with CI | `cruise exec -c builtin:add-formal-specs "task"` |
-| Read the embedded common E2E policy or one framework policy | `cruise docs e2e` / `cruise docs e2e react-native` / `cruise docs e2e tauri` / `cruise docs e2e exact` / `cruise docs e2e slint` / `cruise docs e2e browser-extension` |
+| Read the embedded common E2E policy or one framework policy | `cruise docs e2e` / `cruise docs e2e react-native` / `cruise docs e2e tauri` / `cruise docs e2e slint` / `cruise docs e2e browser-extension` |
 | Verify a plan without changing it | Choose **Verify** in the interactive plan approval menu or WebUI for a usable plan in either **Awaiting Approval** or **Planned**; `cruise list` and Ask text do not provide this action |
 | Run `refactor`, `add-tests`, `add-formal-specs`, or `security` locally by default (`force_exec: true`) | For example, `cruise plan -c builtin:refactor "task"` runs directly without an outer plan/session, worktree, or automatic PR; add `--no-force-exec` for the normal plan/session path |
 | Research with a durable, read-only report | `cruise plan --skip-planning -c builtin:research "question"`; approve if prompted, then `cruise run <session-id>` |

@@ -51,11 +51,6 @@ const FRAMEWORKS: &[FrameworkPolicy] = &[
         label: "Slint desktop and embedded UI",
         text: include_str!("../docs/e2e/slint.md"),
     },
-    FrameworkPolicy {
-        id: "exact",
-        label: "Exact runtime (Contract + TypeScript)",
-        text: include_str!("../docs/e2e/exact.md"),
-    },
 ];
 
 pub fn run(command: &DocsCommand) -> i32 {

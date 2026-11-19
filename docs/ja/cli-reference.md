@@ -75,7 +75,6 @@ v0.3.0 の分離 WebUI から更新する場合、旧 server が稼働中の間�
 cruise docs e2e
 cruise docs e2e react-native
 cruise docs e2e tauri
-cruise docs e2e exact
 cruise docs e2e slint
 cruise docs e2e browser-extension
 ```
@@ -90,7 +89,6 @@ Cruise に組み込まれた UI E2E policy を表示します。framework ID を
 | `react-native` | React Native（Expo を含む） |
 | `electron` | Electron desktop UI |
 | `tauri` | Tauri desktop UI |
-| `exact` | Exact runtime app（Contract + TypeScript） |
 | `slint` | Slint desktop / embedded UI |
 | `browser-extension` | Browser extension |
 

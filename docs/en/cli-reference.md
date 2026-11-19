@@ -76,7 +76,6 @@ When a client finds a daemon from another Cruise version, it restarts it automat
 cruise docs e2e
 cruise docs e2e react-native
 cruise docs e2e tauri
-cruise docs e2e exact
 cruise docs e2e slint
 cruise docs e2e browser-extension
 ```
@@ -91,7 +90,6 @@ Prints Cruise's embedded UI E2E policy. Without a framework ID, it prints the co
 | `react-native` | React Native, including Expo |
 | `electron` | Electron desktop UI |
 | `tauri` | Tauri desktop UI |
-| `exact` | Exact runtime apps (Contract + TypeScript) |
 | `slint` | Slint desktop and embedded UI |
 | `browser-extension` | Browser extensions |
 

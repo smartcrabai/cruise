@@ -25,7 +25,7 @@
 - Check GitHub and GitLab base-branch CI before fresh workflow runs by default; opt out with `check_base_ci: false` in `default.yaml`.
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.
 - Add the `if.head-changed` step condition, which routes to a target when a step completes successfully with a different Git `HEAD` OID; untracked, ignored, and uncommitted changes do not count.
-- Add `cruise docs e2e [<framework>]` to read the common E2E policy and the available framework IDs (including new `exact`, `slint`, and `browser-extension` policies), or one embedded framework policy, offline.
+- Add `cruise docs e2e [<framework>]` to read the common E2E policy and the available framework IDs (including new `slint` and `browser-extension` policies), or one embedded framework policy, offline.
 - Add `cruise daemon start|stop|restart|status|serve` and `CRUISE_DAEMON_PORT` for resident daemon lifecycle and port configuration.
 - Start Docker images as a foreground daemon on port 8484 by default, and document long-lived service-container use.
 - Rotate detached `daemon.log` files above 5 MiB into a single `daemon.log.1` generation.

@@ -75,7 +75,6 @@ session 命令（`plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`l
 cruise docs e2e
 cruise docs e2e react-native
 cruise docs e2e tauri
-cruise docs e2e exact
 cruise docs e2e slint
 cruise docs e2e browser-extension
 ```
@@ -90,7 +89,6 @@ cruise docs e2e browser-extension
 | `react-native` | React Native（包括 Expo） |
 | `electron` | Electron desktop UI |
 | `tauri` | Tauri desktop UI |
-| `exact` | Exact runtime apps（Contract + TypeScript） |
 | `slint` | Slint desktop and embedded UI |
 | `browser-extension` | Browser extensions |
 

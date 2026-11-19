@@ -75,10 +75,13 @@ fn common_policy_and_framework_ids_are_discoverable_without_user_data_changes() 
         "electron",
         "tauri",
         "slint",
-        "exact",
     ] {
         assert!(stdout.contains(id), "missing ID {id}");
     }
+    assert!(
+        !stdout.lines().any(|line| line.starts_with("- `exact`")),
+        "exact must not be listed as a framework ID"
+    );
 
     let docs_help = fixture.run(&["docs", "--help"]);
     assert!(
@@ -111,7 +114,6 @@ fn each_framework_id_returns_its_meaningful_policy() {
         ("electron", "Playwright Electron API"),
         ("tauri", "tauri-webdriver"),
         ("slint", "i-slint-backend-testing"),
-        ("exact", "*.test.contract"),
     ];
     for &(id, marker) in &policies {
         let output = fixture.run(&["docs", "e2e", id]);
@@ -143,10 +145,9 @@ fn unknown_topic_and_framework_are_rejected_with_discovery_guidance() {
     assert!(!topic.status.success());
     assert!(text(&topic.stderr).contains("error:"));
 
-    let framework = fixture.run(&["docs", "e2e", "unknown"]);
-    assert!(!framework.status.success());
+    let framework = fixture.run(&["docs", "e2e", "exact"]);
+    assert_eq!(framework.status.code(), Some(2));
     assert!(text(&framework.stderr).contains("unknown E2E framework"));
     assert!(text(&framework.stderr).contains("cruise docs e2e"));
-
     fixture.assert_no_user_data_changes();
 }
