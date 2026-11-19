@@ -74,8 +74,11 @@ v0.3.0 の分離 WebUI から更新する場合、旧 server が稼働中の間�
 ```sh
 cruise docs e2e
 cruise docs e2e react-native
+cruise docs e2e jetpack-compose
+cruise docs e2e flutter
 cruise docs e2e tauri
 cruise docs e2e slint
+cruise docs e2e fyne
 cruise docs e2e browser-extension
 ```
 
@@ -85,14 +88,16 @@ Cruise に組み込まれた UI E2E policy を表示します。framework ID を
 |---|---|
 | `browser` | Browser ベースの web UI |
 | `swiftui` | SwiftUI と Apple native iOS/macOS UI |
-| `android` | Android native UI |
+| `jetpack-compose` | Android native Jetpack Compose UI |
 | `react-native` | React Native（Expo を含む） |
+| `flutter` | Flutter UI |
 | `electron` | Electron desktop UI |
 | `tauri` | Tauri desktop UI |
 | `slint` | Slint desktop / embedded UI |
+| `fyne` | Fyne native Go UI |
 | `browser-extension` | Browser extension |
 
-一覧にない native target も非対応という意味ではありません。repository に既にある適切な tool のみを使い、capability が不足する場合はその旨を記録してください。未掲載の target に新しい default tool を導入しないでください。
+旧 ID の `android` は `jetpack-compose` に置き換えられました。`android` は alias や fallback ではありません。Jetpack Compose を使わない Android UI は未掲載であり、共通 policy に従います。repository に既にある適切な tool のみを使い、不足する capability を報告してください。新しい default tool は導入しないでください。その他の未掲載 native target も非対応を意味するものではなく、同じ no-new-default rule に従います。
 
 <a id="cruise-workflow-generate"></a>
 ## `cruise workflow generate`

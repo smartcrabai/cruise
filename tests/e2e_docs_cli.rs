@@ -66,23 +66,32 @@ fn common_policy_and_framework_ids_are_discoverable_without_user_data_changes() 
     let stdout = text(&output.stdout);
     assert!(stdout.contains("# UI end-to-end testing policy"));
     assert!(stdout.contains("## Framework policies"));
-    for id in [
-        "browser",
-        "browser-extension",
-        "swiftui",
-        "android",
-        "react-native",
-        "electron",
-        "tauri",
-        "slint",
-    ] {
-        assert!(stdout.contains(id), "missing ID {id}");
+    let expected_entries = [
+        "- `browser` — Browser",
+        "- `browser-extension` — Browser extension",
+        "- `swiftui` — SwiftUI / Apple native iOS and macOS",
+        "- `jetpack-compose` — Android / Jetpack Compose",
+        "- `react-native` — React Native / Expo",
+        "- `flutter` — Flutter",
+        "- `electron` — Electron desktop",
+        "- `tauri` — Tauri native desktop",
+        "- `slint` — Slint desktop and embedded UI",
+        "- `fyne` — Fyne native Go UI",
+    ];
+    for entry in expected_entries {
+        assert!(
+            stdout.lines().any(|line| line == entry),
+            "missing framework entry {entry}"
+        );
     }
     assert!(
-        !stdout.lines().any(|line| line.starts_with("- `exact`")),
+        !stdout.lines().any(|line| line.starts_with("- `android` —")),
+        "the replaced android ID must not be listed"
+    );
+    assert!(
+        !stdout.lines().any(|line| line.starts_with("- `exact` —")),
         "exact must not be listed as a framework ID"
     );
-
     let docs_help = fixture.run(&["docs", "--help"]);
     assert!(
         docs_help.status.success(),
@@ -108,12 +117,14 @@ fn each_framework_id_returns_its_meaningful_policy() {
     let policies = [
         ("browser", "Playwright CLI (`playwright-cli`)"),
         ("browser-extension", "--load-extension"),
-        ("swiftui", "Xcode MCP"),
-        ("android", "Compose UI Test"),
+        ("swiftui", "simless"),
+        ("jetpack-compose", "Robolectric"),
         ("react-native", "Detox + Jest"),
+        ("flutter", "flutter test integration_test"),
         ("electron", "Playwright Electron API"),
         ("tauri", "tauri-webdriver"),
-        ("slint", "i-slint-backend-testing"),
+        ("slint", "headless-skia"),
+        ("fyne", "fyne.io/fyne/v2/test"),
     ];
     for &(id, marker) in &policies {
         let output = fixture.run(&["docs", "e2e", id]);
@@ -145,9 +156,15 @@ fn unknown_topic_and_framework_are_rejected_with_discovery_guidance() {
     assert!(!topic.status.success());
     assert!(text(&topic.stderr).contains("error:"));
 
-    let framework = fixture.run(&["docs", "e2e", "exact"]);
-    assert_eq!(framework.status.code(), Some(2));
-    assert!(text(&framework.stderr).contains("unknown E2E framework"));
-    assert!(text(&framework.stderr).contains("cruise docs e2e"));
+    for id in ["exact", "android"] {
+        let framework = fixture.run(&["docs", "e2e", id]);
+        assert_eq!(framework.status.code(), Some(2), "{id}");
+        assert!(
+            text(&framework.stderr).contains("unknown E2E framework"),
+            "{id}: {}",
+            text(&framework.stderr)
+        );
+        assert!(text(&framework.stderr).contains("cruise docs e2e"));
+    }
     fixture.assert_no_user_data_changes();
 }

@@ -74,8 +74,11 @@ session 命令（`plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`l
 ```sh
 cruise docs e2e
 cruise docs e2e react-native
+cruise docs e2e jetpack-compose
+cruise docs e2e flutter
 cruise docs e2e tauri
 cruise docs e2e slint
+cruise docs e2e fyne
 cruise docs e2e browser-extension
 ```
 
@@ -85,14 +88,16 @@ cruise docs e2e browser-extension
 |---|---|
 | `browser` | 基于 browser 的 web UI |
 | `swiftui` | SwiftUI 和 Apple native iOS/macOS UI |
-| `android` | Android native UI |
+| `jetpack-compose` | Android native Jetpack Compose UI |
 | `react-native` | React Native（包括 Expo） |
+| `flutter` | Flutter UI |
 | `electron` | Electron desktop UI |
 | `tauri` | Tauri desktop UI |
 | `slint` | Slint desktop and embedded UI |
+| `fyne` | Fyne native Go UI |
 | `browser-extension` | Browser extensions |
 
-未列出的 native target 并非不受支持：只能使用仓库中已有的适当工具，并报告缺少的 capability。不要为未列出的 target 引入新的默认工具。
+旧 ID `android` 已由 `jetpack-compose` 取代；`android` 不是 alias 或 fallback。未使用 Jetpack Compose 的 Android UI 未列出，应遵循通用 policy：仅使用仓库中已有的适当工具，报告缺少的 capability，不要引入新的默认工具。其他未列出的 native target 也并非不受支持，但同样遵循不得添加默认工具的规则。
 
 <a id="cruise-workflow-generate"></a>
 ## `cruise workflow generate`

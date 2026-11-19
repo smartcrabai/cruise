@@ -27,14 +27,19 @@ const FRAMEWORKS: &[FrameworkPolicy] = &[
         text: include_str!("../docs/e2e/swiftui.md"),
     },
     FrameworkPolicy {
-        id: "android",
-        label: "Native Android",
-        text: include_str!("../docs/e2e/android.md"),
+        id: "jetpack-compose",
+        label: "Android / Jetpack Compose",
+        text: include_str!("../docs/e2e/jetpack-compose.md"),
     },
     FrameworkPolicy {
         id: "react-native",
         label: "React Native / Expo",
         text: include_str!("../docs/e2e/react-native.md"),
+    },
+    FrameworkPolicy {
+        id: "flutter",
+        label: "Flutter",
+        text: include_str!("../docs/e2e/flutter.md"),
     },
     FrameworkPolicy {
         id: "electron",
@@ -50,6 +55,11 @@ const FRAMEWORKS: &[FrameworkPolicy] = &[
         id: "slint",
         label: "Slint desktop and embedded UI",
         text: include_str!("../docs/e2e/slint.md"),
+    },
+    FrameworkPolicy {
+        id: "fyne",
+        label: "Fyne native Go UI",
+        text: include_str!("../docs/e2e/fyne.md"),
     },
 ];
 

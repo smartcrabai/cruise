@@ -75,8 +75,11 @@ When a client finds a daemon from another Cruise version, it restarts it automat
 ```sh
 cruise docs e2e
 cruise docs e2e react-native
+cruise docs e2e jetpack-compose
+cruise docs e2e flutter
 cruise docs e2e tauri
 cruise docs e2e slint
+cruise docs e2e fyne
 cruise docs e2e browser-extension
 ```
 
@@ -86,14 +89,16 @@ Prints Cruise's embedded UI E2E policy. Without a framework ID, it prints the co
 |---|---|
 | `browser` | Browser-based web UI |
 | `swiftui` | SwiftUI and native Apple iOS/macOS UI |
-| `android` | Native Android UI |
+| `jetpack-compose` | Native Android Jetpack Compose UI |
 | `react-native` | React Native, including Expo |
+| `flutter` | Flutter UI |
 | `electron` | Electron desktop UI |
 | `tauri` | Tauri desktop UI |
 | `slint` | Slint desktop and embedded UI |
+| `fyne` | Fyne native Go UI |
 | `browser-extension` | Browser extensions |
 
-Other native targets are not unsupported: use suitable tools already in the repository and report any missing capability. Do not introduce new default tooling for an unlisted target.
+The former `android` ID is replaced by `jetpack-compose`; `android` is not an alias or fallback. Non-Compose Android UI is unlisted and follows the common policy: use suitable tools already in the repository, report missing capabilities, and do not introduce new default tooling. Other unlisted native targets are not unsupported; follow the same no-new-default rule.
 
 <a id="cruise-workflow-generate"></a>
 ## `cruise workflow generate`

@@ -10,6 +10,7 @@
 - Remove `cruise webui start|stop|restart|status`; use `cruise daemon start|stop|restart|status|serve`.
 - Refuse daemon startup while the v0.3.0 detached WebUI is live; `cruise daemon stop` can stop both servers and cancels legacy work, leaving its sessions `Suspended`.
 - Refuse to run or plan a session while another cruise process recorded as its live runner (for example a v0.3.0 `cruise run` still in progress during an upgrade) is executing it; the daemon answers 409 and the CLI exits 1 without changing session state. v0.3.0 background planning workers record no runner, so let background plans started before the upgrade finish before acting on those sessions.
+- Replace the `android` UI E2E policy ID with `jetpack-compose`. Android Views targets without Compose follow the common policy for unlisted targets.
 
 ### Changed
 
@@ -19,13 +20,14 @@
 - Resolve managed provider installs to each provider's latest stable release, skipping healthy matches and reporting recorded installed versions in offline status.
 - Isolate GitHub Action config, data, state, and provisioned jcode credentials per workflow job under `$RUNNER_TEMP`, and stop the job's daemon when the action finishes.
 - Shorten built-in workflow prompts by about 24% without changing step structure, and stop TDD consolidate/apply and security triage from inlining the previous step output twice.
+- Update SwiftUI and Slint UI E2E policies with faster feedback loops that keep target-runtime verification separate.
 
 ### Added
 
 - Check GitHub and GitLab base-branch CI before fresh workflow runs by default; opt out with `check_base_ci: false` in `default.yaml`.
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.
 - Add the `if.head-changed` step condition, which routes to a target when a step completes successfully with a different Git `HEAD` OID; untracked, ignored, and uncommitted changes do not count.
-- Add `cruise docs e2e [<framework>]` to read the common E2E policy and the available framework IDs (including new `slint` and `browser-extension` policies), or one embedded framework policy, offline.
+- Add `cruise docs e2e [<framework>]` to read the common E2E policy and available framework IDs or one embedded policy offline. New policies include `browser-extension`, `slint`, `flutter`, and `fyne`.
 - Add `cruise daemon start|stop|restart|status|serve` and `CRUISE_DAEMON_PORT` for resident daemon lifecycle and port configuration.
 - Start Docker images as a foreground daemon on port 8484 by default, and document long-lived service-container use.
 - Rotate detached `daemon.log` files above 5 MiB into a single `daemon.log.1` generation.
