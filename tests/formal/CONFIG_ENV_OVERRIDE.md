@@ -26,7 +26,7 @@ command/SDK exclusivity and session snapshot stability. Simulation and bounded
 verification cover only explicitly enumerated transitions and eight steps.
 Use the concrete Rust tests and executable Gherkin for production boundaries.
 
-Run `mise exec node@26.13.0 -- bash scripts/check_config_env_specs.sh` on Darwin
+Run `mise exec node@26.13.1 -- bash scripts/check_config_env_specs.sh` on Darwin
 arm64 or Linux x64. The runner uses `scripts/setup_formal.sh` and the
 repository's pinned Quint 0.33.0 and Apalache 0.62.1, saves commands, logs and
 traces under a fresh `target/formal-reports/config-env.*` directory, and
@@ -49,7 +49,7 @@ The executable Gherkin feature `tests/features/config_env.feature` drives the
 production CLI against an isolated daemon. It verifies that a workflow
 override reaches only its request and that CLI requests ignore a value held
 only in the daemon process environment. The runner uses checksum-pinned
-Temurin JDK 25.0.5+8, Alloy 6.2.0, Node 26.13.0, Quint 0.33.0, Apalache
+Temurin JDK 25.0.5+8, Alloy 6.2.0, Node 26.13.1, Quint 0.33.0, Apalache
 0.62.1 and Rust 1.99.1. `.github/workflows/config-env-specs.yml` runs it
 without secrets and uploads commands, logs and receipts. Principal commands,
 in addition to setup:
@@ -89,7 +89,7 @@ by the macOS receipt. No external service credentials are required.
 
 ## Current local execution receipt, 2026-11-18
 
-On macOS arm64, `mise exec node@26.13.0 -- bash scripts/check_config_env_specs.sh`
+On macOS arm64, `mise exec node@26.13.1 -- bash scripts/check_config_env_specs.sh`
 exited 0. The report is `target/formal-reports/config-env.6vegNP/`. Quint
 typechecking and all nine named tests passed. Seeded simulation used 1000
 samples and eight steps without a violation; Apalache's bounded verification
