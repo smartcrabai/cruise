@@ -5,8 +5,8 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TOOLS="$ROOT/target/formal-tools"
 DOWNLOADS="${RUNNER_TEMP:-${XDG_CACHE_HOME:-$HOME/.cache}}/cruise-formal-tools"
 mkdir -p "$TOOLS" "$DOWNLOADS"
-if [[ $(node --version) != v26.13.0 ]]; then
-  echo 'Node 26.13.0 is required (CI uses actions/setup-node).' >&2
+if [[ $(node --version) != v26.13.1 ]]; then
+  echo 'Node 26.13.1 is required (CI uses actions/setup-node).' >&2
   exit 1
 fi
 sha256() {

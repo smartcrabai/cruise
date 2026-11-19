@@ -14,11 +14,11 @@ For provider installation lifecycle and resolution precedence, see
 The dedicated `provider-install-specs` CI job runs the pinned Quint checks and
 retains reports. The bounded model is not a production refinement proof.
 
-For the fresh-run base-branch CI admission gate, see `BASE_CI.md` and `BASE_CI_ALLOY.md` and run `mise exec node@26.13.0 -- bash scripts/check_base_ci_specs.sh`. The dedicated `base-ci-specs.yml` workflow runs Quint, Alloy and CLI-client Gherkin; the production gate runs in the daemon before workspace creation.
+For the fresh-run base-branch CI admission gate, see `BASE_CI.md` and `BASE_CI_ALLOY.md` and run `mise exec node@26.13.1 -- bash scripts/check_base_ci_specs.sh`. The dedicated `base-ci-specs.yml` workflow runs Quint, Alloy and CLI-client Gherkin; the production gate runs in the daemon before workspace creation.
 
 For workflow environment precedence and daemon request-context selection, see
 `CONFIG_ENV_OVERRIDE.md` and run
-`mise exec node@26.13.0 -- bash scripts/check_config_env_specs.sh`. The bounded
+`mise exec node@26.13.1 -- bash scripts/check_config_env_specs.sh`. The bounded
 Quint and Alloy models cover request snapshot isolation and process-vs-snapshot
 selection; production Gherkin drives real CLI requests against the daemon.
 
@@ -45,7 +45,7 @@ The formal models are not a production refinement proof; the BDD checks those
 production behaviors directly.
 
 
-For bounded plan-verification stage gating and the saved-session application flow, see `PLAN_VERIFY.md` and run `mise exec node@26.13.0 -- bash scripts/check_plan_verify_specs.sh`. The `plan-verify-specs` CI job runs Quint, Alloy and production verification scenarios.
+For bounded plan-verification stage gating and the saved-session application flow, see `PLAN_VERIFY.md` and run `mise exec node@26.13.1 -- bash scripts/check_plan_verify_specs.sh`. The `plan-verify-specs` CI job runs Quint, Alloy and production verification scenarios.
 
 For bounded batch auto-requeue safety, see `AUTO_REQUEUE.md` and run
 `bash scripts/check_auto_requeue_specs.sh`. The dedicated `auto-requeue-specs`
@@ -71,7 +71,7 @@ The dedicated `tool-restrictions-specs` native PR job runs Quint, all Alloy
 assertions and witnesses with receipt validation, production Cucumber scenarios,
 negative controls and affected Rust contracts using the shared pins below.
 
-For UI locale precedence and browser-cookie fallback, see `UI_LOCALE.md` and run `mise exec node@26.13.0 -- bash scripts/check_ui_locale_specs.sh`. The dedicated `ui-locale-specs.yml` workflow runs the same suite.
+For UI locale precedence and browser-cookie fallback, see `UI_LOCALE.md` and run `mise exec node@26.13.1 -- bash scripts/check_ui_locale_specs.sh`. The dedicated `ui-locale-specs.yml` workflow runs the same suite.
 
 For responsive WebUI drawer transitions, width persistence, real browser layout
 and htmx Gherkin, see `RESPONSIVE_WEBUI.md` and run
@@ -101,7 +101,7 @@ For the CLI planning-to-execution workflow-flag boundary, see
 Its dedicated PR CI job runs Quint, Alloy receipt checks, real PTY Gherkin,
 and production regression tests with the shared pins below.
 
-For workflow package install/recovery and collision models, see `WORKFLOW_PACKAGES.md` and run `mise exec node@26.13.0 -- bash scripts/check_workflow_packages_specs.sh`. The suite runs in the existing `workflow-flags-specs` CI job.
+For workflow package install/recovery and collision models, see `WORKFLOW_PACKAGES.md` and run `mise exec node@26.13.1 -- bash scripts/check_workflow_packages_specs.sh`. The suite runs in the existing `workflow-flags-specs` CI job.
 
 For SDK-qualified model arrays, ordered cross-SDK fallback, resume ownership,
 and production-connected configuration/CLI Gherkin, see `SDK_MODELS.md` and run
@@ -156,7 +156,7 @@ The engine checks budget before incrementing counters, uses checked additions, s
 
 ## Pins and real commands
 
-Run from the repository root with Node **26.13.0** on PATH and Rust **1.99.1** installed. Run Cargo-based checks sequentially when they share `CARGO_TARGET_DIR`: concurrent default-feature, all-feature and A/B smoke builds can replace the sibling CLI binaries that integration tests execute. CI jobs have separate runner filesystems, and the existing production job runs tests before the smoke build.
+Run from the repository root with Node **26.13.1** on PATH and Rust **1.99.1** installed. Run Cargo-based checks sequentially when they share `CARGO_TARGET_DIR`: concurrent default-feature, all-feature and A/B smoke builds can replace the sibling CLI binaries that integration tests execute. CI jobs have separate runner filesystems, and the existing production job runs tests before the smoke build.
 
 ```sh
 bash scripts/check_formal.sh
@@ -189,7 +189,7 @@ There is no exactly-once guarantee across an external effect followed by a crash
 
 `.github/workflows/ci.yml` runs the provider-native `formal` job on normal relevant pull requests and pushes to `main`, using pinned Node/Rust and `scripts/check_formal.sh`. A nonzero check accumulates a nonzero aggregate status while independent checks continue. `actions/upload-artifact` runs with `if: always()`, retains `target/formal-reports/` for 14 days, and therefore includes completed logs even after a model/test failure. Cancellation or failures before any report can be created cannot manufacture reports.
 
-Formal jobs cache the checksum-pinned Node 26.13.0 Linux x64 archive and seed setup-node's hosted tool cache; setup-node then retains its lockfile-keyed npm cache. Rust 1.99.1 installed toolchains are cached by OS, architecture, build commit, host and component profile; the setup action validates the rustc build and required component binaries and skips rustup install only for a complete matching toolchain. A cold install still gets rustup's distribution manifest checksum validation. JDK and Alloy archives/JARs are cached under RUNNER_TEMP/cruise-formal-tools, outside Cargo's target directory so rust-cache cleanup cannot remove them before save; their SHA-256 checks remain in setup_formal.sh. It also stages Quint's Apalache 0.62.1 distribution from its cached, checksum-verified release archive (SHA-256 `38202a8c4ebeb3ab73e0fe5a7e4bb948442d46ad5de8a7fb45c9e5cac2beb2a6`) so Quint avoids its checksum-free on-demand fetch.
+Formal jobs cache the checksum-pinned Node 26.13.1 Linux x64 archive and seed setup-node's hosted tool cache; setup-node then retains its lockfile-keyed npm cache. Rust 1.99.1 installed toolchains are cached by OS, architecture, build commit, host and component profile; the setup action validates the rustc build and required component binaries and skips rustup install only for a complete matching toolchain. A cold install still gets rustup's distribution manifest checksum validation. JDK and Alloy archives/JARs are cached under RUNNER_TEMP/cruise-formal-tools, outside Cargo's target directory so rust-cache cleanup cannot remove them before save; their SHA-256 checks remain in setup_formal.sh. It also stages Quint's Apalache 0.62.1 distribution from its cached, checksum-verified release archive (SHA-256 `38202a8c4ebeb3ab73e0fe5a7e4bb948442d46ad5de8a7fb45c9e5cac2beb2a6`) so Quint avoids its checksum-free on-demand fetch.
 Responsive CI caches the Chromium revision selected by the locked Playwright package and runs a real browser launch check; hosted CI avoids Playwright's apt update step, while local Linux runs still use `--with-deps`.
 
 Each runner invocation allocates a fresh `target/formal-reports/run.*` directory. It retains exact command lines, versions, CLI help, individual stdout/stderr logs, status receipts, Quint test/simulation traces, Alloy `receipt.json` and SAT witness JSON. A counterexample ITF is retained when the verifier emits one. Its absence on successful verification is not evidence of a missing failure log. The nested verifier's exact process argv and isolated endpoint are in `quint-verify.log`. Alloy expectations are checked against all named commands: eleven checkpoint assertion checks require UNSAT (`expect 0`), and nine checkpoint witnesses require SAT (`expect 1`), with missing/duplicate/extra command results rejected. The supplementary quality-gate model adds three assertions and three witnesses.
