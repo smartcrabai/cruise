@@ -35,6 +35,7 @@ pub(crate) fn is_eligible_error(error: &CruiseError) -> bool {
         | CruiseError::WorktreeError(_)
         | CruiseError::Busy(_)
         | CruiseError::SessionError(_)
+        | CruiseError::SessionNotFound(_)
         | CruiseError::SessionStateConflict(_)
         | CruiseError::SessionStateConflictAborted(_)
         | CruiseError::StepTimeout { .. }

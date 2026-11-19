@@ -193,6 +193,9 @@ fn list_generate_plan_regenerates_awaiting_input_session() {
         .unwrap_or_else(|| panic!("session id missing: {sessions:?}"))
         .to_owned();
     assert_eq!(sessions[0]["phase"], "Draft");
+    assert_eq!(sessions[0]["phase_error"], serde_json::Value::Null);
+    assert!(sessions[0].get("pending_instructions").is_some());
+    assert!(sessions[0].get("capabilities").is_none());
 
     let state_path = home
         .join("data")

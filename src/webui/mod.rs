@@ -8,20 +8,18 @@
 pub(crate) mod actions;
 pub(crate) mod assets;
 pub(crate) mod css;
-pub(crate) mod daemon;
 pub(crate) mod dag_mermaid;
 pub(crate) mod dto;
 pub(crate) mod events;
 pub(crate) mod handlers;
-pub(crate) mod instance;
 pub(crate) mod markdown;
 pub(crate) mod ops;
 pub(crate) mod pages;
 pub(crate) mod partials;
 pub(crate) mod run_all_state;
-pub(crate) mod shutdown;
 pub(crate) mod templates;
 pub(crate) mod view;
+pub(crate) use crate::daemon::server::WebState;
 
 /// The locale selected for an individual browser request.
 pub(crate) struct UiLocale(pub(crate) crate::i18n::Locale);
@@ -72,261 +70,34 @@ mod tests;
 
 use std::convert::Infallible;
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
+use axum::http::HeaderValue;
 use axum::http::header::CONTENT_TYPE;
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::Stream;
 use tower_http::services::ServeDir;
 
-use crate::application::CruiseApplication;
-use crate::cli::{ServeArgs, WebuiAction, WebuiArgs};
-use crate::error::{CruiseError, Result};
-use crate::session::SessionManager;
-
-use css::GeneratedCss;
-use events::EventHub;
 use partials::SseMessage;
-use run_all_state::RunAllState;
-use templates::Templates;
 
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
-
-/// Everything a request handler needs; cheap to clone.
-#[derive(Clone)]
-pub(crate) struct WebState {
-    pub(crate) application: CruiseApplication,
-    pub(crate) hub: Arc<EventHub>,
-    pub(crate) templates: Arc<Templates>,
-    pub(crate) run_all: Arc<RunAllState>,
-    pub(crate) templates_dir: PathBuf,
-    pub(crate) static_dir: PathBuf,
-    pub(crate) css: Arc<GeneratedCss>,
-    pub(crate) process_locale: crate::i18n::Locale,
-    control: Option<Arc<ControlGate>>,
-}
-
-struct ControlGate {
-    token: String,
-    sender: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-}
-
-impl std::fmt::Debug for WebState {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("WebState").finish_non_exhaustive()
-    }
-}
-
-impl WebState {
-    pub(crate) fn new(application: CruiseApplication, assets: &assets::Assets) -> Result<Self> {
-        let generated = if assets.dev_mode {
-            None
-        } else {
-            Some(css::generate(&assets.templates_dir, &assets.static_dir)?)
-        };
-        let hub = Arc::new(EventHub::with_notifications(application.clone()));
-        Ok(Self {
-            application,
-            hub,
-            templates: Arc::new(Templates::new(assets.templates_dir.clone())),
-            run_all: Arc::new(RunAllState::default()),
-            templates_dir: assets.templates_dir.clone(),
-            static_dir: assets.static_dir.clone(),
-            css: Arc::new(GeneratedCss::new(generated, assets.dev_mode)),
-            process_locale: crate::i18n::process_locale(),
-            control: None,
-        })
-    }
-}
-
-/// Serve the `WebUI` until Ctrl-C, then cancel active operations and drain.
-///
-/// # Errors
-///
-/// Returns an error when assets cannot be prepared or the listener cannot bind.
-pub async fn run(args: WebuiArgs) -> Result<()> {
-    match args.action {
-        Some(WebuiAction::Start(args)) => daemon::start(&args),
-        Some(WebuiAction::Stop(args)) => daemon::stop(&args),
-        Some(WebuiAction::Restart(args)) => daemon::restart(args),
-        Some(WebuiAction::Status(args)) => daemon::status(&args),
-        None => run_foreground(args.serve).await,
-    }
-}
-
-async fn run_foreground(args: ServeArgs) -> Result<()> {
-    let registry = instance::Registry::new()?;
-    let lock = registry.lock()?;
-    if let Some(record) = registry.read_for_start()?
-        && record.verify_identity()?
-    {
-        return Err(CruiseError::Other(format!(
-            "WebUI is already running at {} (PID {}, {}); use cruise webui status / stop",
-            record.origin, record.pid, record.mode
-        )));
-    }
-    run_instance(
-        args,
-        uuid::Uuid::new_v4().to_string(),
-        false,
-        registry,
-        Some(lock),
-    )
-    .await
-}
-
-pub(crate) async fn run_daemon(
-    instance_id: String,
-    host: String,
-    port: u16,
-    webui_dir: Option<PathBuf>,
-) -> Result<()> {
-    let registry = instance::Registry::new()?;
-    run_instance(
-        ServeArgs {
-            host: Some(host),
-            port: Some(port),
-            open: false,
-            webui_dir,
-        },
-        instance_id,
-        true,
-        registry,
-        None,
-    )
-    .await
-}
-
-async fn run_instance(
-    args: ServeArgs,
-    instance_id: String,
-    daemon: bool,
-    registry: instance::Registry,
-    lock: Option<instance::RegistryLock>,
-) -> Result<()> {
-    let data_dir = crate::paths::data_dir()?;
-    let assets = assets::prepare(args.webui_dir, &data_dir)?;
-    let application = CruiseApplication::new(SessionManager::new(data_dir));
-    let mut state = WebState::new(application, &assets)?;
-    let signals = shutdown::ShutdownSignals::new()?;
-
-    let host = args.host.unwrap_or_else(|| "127.0.0.1".to_owned());
-    let port = args.port.unwrap_or(8484);
-    let listener = tokio::net::TcpListener::bind((host.as_str(), port))
-        .await
-        .map_err(|error| CruiseError::Other(format!("failed to bind {host}:{port}: {error}")))?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|error| CruiseError::Other(error.to_string()))?;
-    let url = format!("http://{local_addr}/");
-    if let Some(record) = registry.read_for_start()?
-        && record.verify_identity()?
-    {
-        return Err(CruiseError::Other(format!(
-            "WebUI is already running at {} (PID {})",
-            record.origin, record.pid
-        )));
-    }
-    let token = instance::new_control_token();
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    state.control = Some(Arc::new(ControlGate {
-        token: token.clone(),
-        sender: Mutex::new(Some(sender)),
-    }));
-    let pid = std::process::id();
-    let record = instance::InstanceRecord {
-        schema_version: 1,
-        instance_id: instance_id.clone(),
-        mode: if daemon { "daemon" } else { "foreground" }.to_owned(),
-        pid,
-        process_started_at: instance::process_start_time(pid).ok_or_else(|| {
-            CruiseError::Other("cannot determine WebUI process start time".to_owned())
-        })?,
-        process_identity: Some(instance::precise_identity(pid).ok_or_else(|| {
-            CruiseError::Other("cannot determine precise WebUI process identity".to_owned())
-        })?),
-        host,
-        port: local_addr.port(),
-        origin: url.clone(),
-        control_token: token,
-        version: env!("CARGO_PKG_VERSION").to_owned(),
-        executable: std::env::current_exe()?,
-        working_dir: std::env::current_dir()?,
-        log_path: daemon.then(|| registry.log_path()),
-        started_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| CruiseError::Other(e.to_string()))?
-            .as_secs(),
-    };
-    registry.write(&record)?;
-    drop(lock);
-    println!("cruise webui listening on {url}");
-    if !local_addr.ip().is_loopback() {
-        eprintln!(
-            "warning: the WebUI has no authentication; do not expose it on untrusted networks"
-        );
-    }
-    if args.open
-        && let Err(error) = crate::platform::open_url(&url)
-    {
-        eprintln!("could not open a browser ({error}); open {url} manually");
-    }
-    let result = serve(
-        listener,
-        state,
-        shutdown::production_signal(signals, receiver),
-    )
-    .await;
-    let cleanup = registry.remove_if_owned(&instance_id);
-    result?;
-    cleanup?;
-    Ok(())
-}
-
-/// Serve on `listener` until `signal` resolves, then cancel work and drain.
-///
-/// # Errors
-///
-/// Returns an error when the server fails.
-pub(crate) async fn serve<F>(
-    listener: tokio::net::TcpListener,
-    state: WebState,
-    signal: F,
-) -> Result<()>
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    let shutdown_state = state.clone();
-    axum::serve(listener, router(state.clone()))
-        .with_graceful_shutdown(async move {
-            signal.await;
-            shutdown::begin(&shutdown_state);
-        })
-        .await
-        .map_err(|error| CruiseError::Other(error.to_string()))?;
-    shutdown::wait_for_operations(&state.application).await;
-    Ok(())
-}
 
 /// Build the application router.
 pub(crate) fn router(state: WebState) -> Router {
     let static_dir = state.static_dir.clone();
     Router::new()
+        .route("/login", get(crate::daemon::web_auth::login))
         .route("/", get(pages::root))
         .route("/sessions/{id}", get(pages::session))
         .route("/new", get(pages::new_session))
         .route("/run-all", get(pages::run_all))
         .route("/static/app.css", get(app_css))
         .route("/webui/events", get(sse))
-        .route("/webui/control/stop", post(control_stop))
         .route("/webui/sidebar", get(handlers::sidebar))
         .route("/webui/directories", get(handlers::directories))
         .route("/webui/configs", get(handlers::configs))
@@ -400,33 +171,12 @@ pub(crate) fn router(state: WebState) -> Router {
         .route("/webui/clean", post(handlers::clean))
         .nest_service("/static", ServeDir::new(static_dir))
         .fallback(pages::not_found)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::daemon::web_auth::authenticate,
+        ))
         .layer(axum::middleware::map_response(no_store))
         .with_state(state)
-}
-
-async fn control_stop(State(state): State<WebState>, headers: HeaderMap) -> Response {
-    let Some(gate) = &state.control else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let supplied = headers
-        .get("x-cruise-webui-control")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !instance::tokens_match(&gate.token, supplied) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let active = state.application.runtime().begin_shutdown();
-    if let Ok(mut sender) = gate.sender.lock()
-        && let Some(sender) = sender.take()
-    {
-        let _ = sender.send(());
-    }
-    (
-        StatusCode::ACCEPTED,
-        [(axum::http::header::CONNECTION, "close")],
-        axum::Json(serde_json::json!({"active_operations": active})),
-    )
-        .into_response()
 }
 
 /// Every response is generated from live session state; a cached fragment

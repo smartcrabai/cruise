@@ -17,14 +17,16 @@ historical `WORKFLOW_FLAGS_VERIFICATION.md` is also unchanged.
 | Required observable contract | Production entry points | Model / production evidence |
 | --- | --- | --- |
 | Absent or false flags hide gated candidates, ON restores them, a flag list uses OR | `flags::skip_candidates`, `is_disabled`, workflow node metadata | Quint `eligibility`, off/OR tests, Alloy candidate assertions and witnesses, Gherkin approval tree assertions, shared helper tests |
-| Group parent and expanded children share the call-site gate, after-pr uses the same rule | `workflow::list_skippable_step_map`, CLI `skip_prompt_nodes`, TUI `skip_choices`, WebUI `step_tree_html` | Fixed representative group/after-pr in both models, actual YAML/CLI Gherkin, workflow/plan/TUI/WebUI unit tests |
-| Choose flags before skips, explicit `-f` suppresses approval flag selection | `plan_cmd::run_approve_loop`, TUI `Step::ORDER`, `list_cmd` settings, WebUI flag rows | Quint `promptOrder`, Alloy ordering assertions, real PTY Gherkin and `flags_cli`, `flag_skip_list_cli`, TUI/WebUI tests |
-| Cancelling flag/skip choice does not partially persist flags or skips or skip history | staged locals in `run_approve_loop`, `select_skipped_steps_with_history` | Quint `atomicity`, Alloy cancellation assertions/witnesses, real approval cancellation Gherkin and `flags_cli` |
-| Prune disabled parent/expanded/after-pr IDs, preserve unknown free-text IDs | `flags::drop_disabled_skips`, TUI flag toggling, application creation | Quint `pruning`, API-create tests and Alloy pruning assertions/witnesses, application/TUI/helper tests |
-| Newly saved session and selection history contain the sanitized selection | `application::create_session_inner`, approval skip history | Quint `atomicity`, Alloy history assertions/witnesses, production state/history assertions |
-| All flags off can yield an empty list without enabling free-text fallback | TUI `all_skip_choices`, `step_is_text`, `render_skip_choices` | Quint full/all-gated/unknown catalogs and `allGatedOffStaysListTest`, TUI production tests |
-| Execute now forwards declared keys, including explicit OFF, with no second flag prompt | `PlanDisposition::ExecuteNow`, `RunArgs.flags`, `run_single_loaded` merge | Quint `forwarding`, Alloy forwarding assertions/witnesses, real PTY Gherkin and `flags_cli` |
+| Group parent and expanded children share the call-site gate, after-pr uses the same rule | `workflow::list_skippable_step_map`, CLI `skip_prompt_nodes`, WebUI `step_tree_html` | Fixed representative group/after-pr in both models, actual YAML/CLI Gherkin, workflow/plan/WebUI unit tests |
+| Choose flags before skips, explicit `-f` suppresses approval flag selection | `src/plan_cmd.rs::review_plan`, `src/run_cmd.rs::select_flag_values`, CLI skip chooser; WebUI flag rows | Quint `promptOrder`, Alloy ordering assertions, real PTY Gherkin and `flags_cli`, `flag_skip_list_cli`, WebUI tests |
+| Cancelling flag/skip choice does not partially persist flags, skips or skip history | `src/plan_cmd.rs::review_plan` stages choices; `src/plan_cmd.rs::select_skipped_steps_with_history` reads defaults; `CruiseApplication::approve_with_request` records history only after saving approval | Quint `atomicity`, Alloy cancellation assertions/witnesses, real approval cancellation Gherkin and `flags_cli` |
+| Prune disabled parent/expanded/after-pr IDs, preserve unknown free-text IDs | `flags::drop_disabled_skips`, application creation | Quint `pruning`, API-create tests and Alloy pruning assertions/witnesses, application/helper tests |
+| Newly saved session and selection history contain the sanitized selection | `src/application.rs::create_session_inner`, `src/application/plan.rs::CruiseApplication::approve_with_request`, `new_session_history::record_skip_selection_for_scope` | Quint `atomicity`, Alloy history assertions/witnesses, production state/history assertions |
+| All flags off can yield an empty list without enabling free-text fallback | CLI settings and WebUI step picker | Quint full/all-gated/unknown catalogs and `allGatedOffStaysListTest`, CLI list and WebUI route tests |
+| Execute now forwards declared keys, including explicit OFF, with no second flag prompt | `src/plan_cmd.rs::review_plan` forwards `RunArgs.flags`; `src/run_cmd.rs::client_run_request` builds the request; `src/application.rs::setup_run_blocking` applies it | Quint `forwarding`, Alloy forwarding assertions/witnesses, real PTY Gherkin and `flags_cli` |
 | Resume options remain unfiltered, config changes retain their separate history/flags-off semantics | list `main_ids`, WebUI `settings_html`, `/webui/new/steps` versus `/webui/new/steps/flags` | Quint `eligibility`/resume test, Alloy resume assertion, real list PTY and WebUI route tests |
+
+CLI flag/skip selection is presented before the daemon request. The CLI reads scoped history to seed the skip chooser; daemon session creation preserves prior scoped skips for CLI requests that have not selected skips yet, while WebUI's submitted skip list remains explicit. After successful approval persistence, the daemon records the filtered skips in its state directory. Cancelling either chooser therefore leaves session state and history unchanged.
 
 ## Abstraction and limits
 
@@ -52,7 +54,7 @@ commit/cancellation and execution entry. A successful confirmation abstracts
 successful approval finalization and save, not filesystem crash durability or
 failure after a confirmed skip choice. Cancellation here is cancellation of a
 selection prompt. No claim is made about a later title/workspace/save failure.
-TUI/WebUI flag changes prune staged choices, while CLI stages flag changes in a
+WebUI flag changes prune staged choices, while CLI stages flag changes in a
 local value until skip confirmation. A model's staged skip set is the effective
 selection, not an assertion about when the CLI rewrites its local session struct.
 Unknown IDs are preserved by pruning, not necessarily by a list chooser that

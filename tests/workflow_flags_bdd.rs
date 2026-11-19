@@ -1,4 +1,4 @@
-//! Real launcher/runtime contracts for the planning-to-execution flag boundary.
+//! Real CLI-client/daemon contracts for planning-to-execution flag behavior.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod contracts {
     use std::io::{Read, Write};

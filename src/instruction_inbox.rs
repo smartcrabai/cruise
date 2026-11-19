@@ -17,7 +17,6 @@ pub const MAX_PENDING_BYTES: usize = 65536;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     Cli,
-    Tui,
     WebUi,
     List,
     Github,
@@ -27,7 +26,6 @@ impl Origin {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Cli => "cli",
-            Self::Tui => "tui",
             Self::WebUi => "webui",
             Self::List => "list",
             Self::Github => "github",

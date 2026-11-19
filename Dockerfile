@@ -21,4 +21,6 @@ COPY --chown=bun:bun --chmod=755 bin/${TARGETARCH}/cruise-runtime /usr/local/bin
 
 WORKDIR /work
 USER bun
+EXPOSE 8484
 ENTRYPOINT ["cruise"]
+CMD ["daemon","serve","--host","0.0.0.0","--port","8484"]

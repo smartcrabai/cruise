@@ -1,18 +1,39 @@
 //! Executable environment override contracts against the production CLI.
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use cucumber::{World as _, given, then, when};
+
+fn git(project: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(project)
+        .env("GIT_CONFIG_COUNT", "0")
+        .args(args)
+        .output()
+        .unwrap_or_else(|error| panic!("run git {args:?}: {error}"));
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 #[derive(Debug, Default, cucumber::World)]
 struct ConfigEnvWorld {
     root: Option<tempfile::TempDir>,
     env: BTreeMap<String, String>,
     output: Option<Output>,
+    session_id: Option<String>,
 }
 
 impl ConfigEnvWorld {
     fn run_cli(&mut self, args: &[&str]) {
+        let env = self.env.clone();
+        self.run_cli_with_env(args, &env);
+    }
+
+    fn run_cli_with_env(&mut self, args: &[&str], env: &BTreeMap<String, String>) {
         let root = self
             .root
             .as_ref()
@@ -31,9 +52,10 @@ impl ConfigEnvWorld {
             .env("XDG_DATA_HOME", root.join("data"))
             .env("XDG_STATE_HOME", root.join("state"))
             .env("NO_COLOR", "1")
+            .env("GIT_CONFIG_COUNT", "0")
             .env_remove("JCODE_MODEL")
             .env_remove("HERDR_ENV")
-            .envs(&self.env)
+            .envs(env)
             .stdin(Stdio::null())
             .args(args);
         self.output = Some(
@@ -56,6 +78,31 @@ impl ConfigEnvWorld {
             String::from_utf8_lossy(&out.stderr)
         )
     }
+    fn create_planned_session(&mut self) {
+        self.run_cli(&[
+            "plan",
+            "--skip-planning",
+            "request context test",
+            "--config",
+            "workflow.yaml",
+        ]);
+        assert!(self.output().status.success(), "{}", self.text());
+        let text = self.text();
+        let session_id = text
+            .split_once("Session ")
+            .map(|(_, remainder)| remainder.split_whitespace().next().unwrap_or_default())
+            .filter(|session_id| !session_id.is_empty())
+            .unwrap_or_else(|| panic!("CLI did not report the created session: {text}"));
+        self.session_id = Some(session_id.to_owned());
+    }
+
+    fn run_planned_session(&mut self) {
+        let session_id = self
+            .session_id
+            .clone()
+            .unwrap_or_else(|| panic!("a planned session was created"));
+        self.run_cli(&["run", &session_id]);
+    }
 }
 
 #[given("an isolated Cruise project")]
@@ -68,6 +115,17 @@ fn isolated(world: &mut ConfigEnvWorld) {
         "command: [echo]\nsteps:\n  main:\n    command: echo main\n",
     )
     .unwrap_or_else(|error| panic!("write workflow: {error}"));
+    std::fs::create_dir_all(project.join(".hooks"))
+        .unwrap_or_else(|error| panic!("create git hooks directory: {error}"));
+    git(&project, &["init", "--quiet"]);
+    git(&project, &["config", "user.name", "Config Env Specs"]);
+    git(
+        &project,
+        &["config", "user.email", "config-env-specs@example.invalid"],
+    );
+    git(&project, &["config", "core.hooksPath", ".hooks"]);
+    git(&project, &["add", "workflow.yaml"]);
+    git(&project, &["commit", "--quiet", "-m", "initial workflow"]);
     world.root = Some(root);
 }
 
@@ -88,6 +146,44 @@ fn run_command(world: &mut ConfigEnvWorld, matches: &[String]) {
 #[when(regex = r#"^I run cruise config setting parallelism to "([^"]+)"$"#)]
 fn set_parallelism(world: &mut ConfigEnvWorld, matches: &[String]) {
     world.run_cli(&["config", "--set-parallelism", &matches[0]]);
+}
+#[when("I create a planned session through the CLI")]
+fn create_planned_session(world: &mut ConfigEnvWorld) {
+    world.create_planned_session();
+}
+#[when("I stop the daemon")]
+fn stop_daemon(world: &mut ConfigEnvWorld) {
+    world.run_cli(&["daemon", "stop"]);
+}
+
+#[when(regex = r#"^I run the planned session with CRUISE_MODEL set to "(.*)"$"#)]
+fn run_session_with_model(world: &mut ConfigEnvWorld, matches: &[String]) {
+    world
+        .env
+        .insert("CRUISE_MODEL".to_string(), matches[0].clone());
+    world.run_planned_session();
+}
+
+#[when("I run the planned session")]
+fn run_session(world: &mut ConfigEnvWorld) {
+    world.run_planned_session();
+}
+
+#[when("I clear workflow overrides and run the planned session")]
+fn clear_workflow_overrides_and_run_session(world: &mut ConfigEnvWorld) {
+    world.env.clear();
+    world.run_planned_session();
+}
+#[when(regex = r#"^I start the daemon with CRUISE_MODEL set to "(.*)"$"#)]
+fn start_daemon_with_model(world: &mut ConfigEnvWorld, matches: &[String]) {
+    let env = BTreeMap::from([("CRUISE_MODEL".to_string(), matches[0].clone())]);
+    world.run_cli_with_env(&["daemon", "start"], &env);
+}
+
+#[when("I clear the workflow overrides and run cruise exec")]
+fn clear_workflow_overrides_and_exec(world: &mut ConfigEnvWorld) {
+    world.env.clear();
+    world.run_cli(&["exec", "--config", "workflow.yaml"]);
 }
 
 #[when("I clear the environment override and run cruise config")]

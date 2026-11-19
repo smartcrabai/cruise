@@ -7,6 +7,13 @@ set -uo pipefail
 REPO="${GITHUB_REPOSITORY:-}"
 PROCEED="${PROCEED:-false}"
 GATE_ERROR="${GATE_ERROR:-}"
+stop_daemon() {
+  if [ -n "${CRUISE_ACTION_DIR:-}" ] && command -v cruise >/dev/null 2>&1; then
+    cruise daemon stop --force >/dev/null 2>&1 || true
+  fi
+}
+trap stop_daemon EXIT
+
 
 if [ "$PROCEED" != "true" ]; then
   if [ -n "$GATE_ERROR" ]; then

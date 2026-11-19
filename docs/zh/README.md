@@ -17,7 +17,7 @@ Cruise 依据声明式工作流，半确定性地自动推进规划 → 审批 �
 | 主题 | 说明 |
 |---|---|
 | [installation.md](installation.md) | 按操作系统安装、更新和托管 provider CLI |
-| [usage.md](usage.md) | WebUI、CLI 示例、herdr、TUI 和 workflow 包 |
+| [usage.md](usage.md) | 常驻 daemon、WebUI、CLI 示例、herdr 和 workflow 包 |
 | [cli-reference.md](cli-reference.md) | 命令、参数、选项、语言设置和通知 |
 | [sessions.md](sessions.md) | 生命周期、工作区模式、隔离、恢复和并行执行 |
 | [configuration.md](configuration.md) | 配置解析、默认值、设置和 prompt 语言 |

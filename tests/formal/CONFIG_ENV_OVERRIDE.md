@@ -1,48 +1,58 @@
 # Environment override resolution model
 
-`config_env_override.qnt` is a test-only finite abstraction of the planned
-workflow override contract. It is not connected to production and does not
-prove the Rust implementation conforms to the plan.
+`config_env_override.qnt` and `config_env_override.als` are test-only finite
+abstractions of workflow override precedence and the daemon's per-request
+environment boundary. Each CLI request carries a separate workflow override
+snapshot and cwd-selected base configuration; no-context requests use the
+daemon process environment, and distinct snapshots remain isolated.
+Existing grammar, precedence, failure atomicity, command/SDK exclusion, and
+session freeze/re-resolution guarantees remain part of the models.
 
-The scalar values stand for absent, blank, invalid, and two distinct valid
-values. Resolution models builtin, app model, user defaults, project defaults,
-workflow, environment, and a final CLI override. The session cleanup override
-is combined with the final override, not separately modeled. Command and SDK
-are abstract booleans. Invalid env input and simultaneous command/SDK env
-input fail without changing the modeled configuration. A frozen snapshot does
-not re-resolve when inputs change, whereas a file-backed session can resolve
-again. Named tests provide witnesses for precedence, blank and invalid values,
-mutual exclusion, and both session modes.
+The abstraction is not a refinement proof of the Rust implementation and does
+not model the concrete parsers, cwd path resolution, persistence, or each API
+load site.
+In production, `RequestContext::capture` in `src/request_context.rs`
+captures cwd and `WORKFLOW_ENV_KEYS`; `ConfigEnv::{Process, Snapshot}` and
+`WorkflowConfig::apply_env_overrides_with` in `src/config.rs` select the source.
+CLI request handling applies snapshots across session creation, planning, run,
+per-step hot reload, run-all and create-PR paths. WebUI requests without context
+use the daemon process environment for workflow overrides; `PROCESS_ENV_NAMES`
+are excluded from snapshots and keep their process-level source. Autostart
+removes workflow override variables in `src/daemon/lifecycle.rs`; explicit
+`daemon start` and `serve` preserve them.
 
-The `safety` invariant combines env and CLI precedence, blank no-op, atomic
-failure, command/SDK exclusivity and snapshot stability. Simulation and
-bounded verification cover only the explicitly enumerated transitions and eight
-steps. They are not an unbounded proof or a test of the parsers, actual session
-persistence, locale inference, app configuration, or individual Rust fields.
-Use the concrete Rust tests for those production boundaries.
+The `safety` invariant combines precedence, blank no-op, atomic failure,
+command/SDK exclusivity and session snapshot stability. Simulation and bounded
+verification cover only explicitly enumerated transitions and eight steps.
+Use the concrete Rust tests and executable Gherkin for production boundaries.
 
-Run `bash scripts/check_config_env_specs.sh` on Darwin arm64 or Linux x64. The runner uses
-`scripts/setup_formal.sh` and the repository's pinned Quint 0.33.0 and Apalache
-0.62.1, saves commands, logs and traces under a fresh
-`target/formal-reports/config-env.*` directory, and returns nonzero for any
-failed check. Other platforms report BLOCKED.
+Run `mise exec node@26.13.0 -- bash scripts/check_config_env_specs.sh` on Darwin
+arm64 or Linux x64. The runner uses `scripts/setup_formal.sh` and the
+repository's pinned Quint 0.33.0 and Apalache 0.62.1, saves commands, logs and
+traces under a fresh `target/formal-reports/config-env.*` directory, and
+returns nonzero for any failed check. Other platforms report BLOCKED.
+
 
 ## Alloy, Gherkin and CI
 
 The runner executes `config_env_override.als` with Alloy 6.2.0, SAT4J and
 scope 12. Assertions cover precedence, snapshot and file re-resolution,
-parent-child precedence, atomicity and app persistence. Two witnesses require
-concrete precedence and snapshot outcomes. These are bounded abstractions, not
-a refinement proof of Rust. Alloy 6.2.0's `help exec` does not provide an
-`--expect` option. Expectations are declared on every model command, and the
-runner validates every command in the JSON receipt, failing on mismatches.
+parent-child precedence, atomicity, app persistence, per-request snapshot and
+cwd isolation, and process-vs-snapshot selection. Five witnesses require
+concrete precedence, snapshot, request-isolation, cwd-isolation and
+process-selection outcomes. These are bounded abstractions, not a refinement
+proof of Rust. Alloy 6.2.0's `help exec` does not provide an `--expect` option.
+Expectations are declared on every model command, and the runner validates
+every command in the JSON receipt, failing on mismatches.
 
-The executable Gherkin feature `tests/features/config_env.feature` uses the
-production CLI in isolated temporary directories, complementing existing Rust
-integration tests. The runner uses checksum-pinned Temurin JDK 25.0.5+8 and
-Alloy 6.2.0, Node 26.13.0, Quint 0.33.0, Apalache 0.62.1 and Rust 1.99.1.
-`.github/workflows/config-env-specs.yml` runs it without secrets and uploads
-commands, logs and receipts. Principal commands, in addition to setup:
+The executable Gherkin feature `tests/features/config_env.feature` drives the
+production CLI against an isolated daemon. It verifies that a workflow
+override reaches only its request and that CLI requests ignore a value held
+only in the daemon process environment. The runner uses checksum-pinned
+Temurin JDK 25.0.5+8, Alloy 6.2.0, Node 26.13.0, Quint 0.33.0, Apalache
+0.62.1 and Rust 1.99.1. `.github/workflows/config-env-specs.yml` runs it
+without secrets and uploads commands, logs and receipts. Principal commands,
+in addition to setup:
 
 ```sh
 tests/formal/node_modules/.bin/quint typecheck tests/formal/config_env_override.qnt
@@ -60,7 +70,10 @@ Simulation is sampling, not proof. Apalache verification is bounded to 8
 steps, and Alloy results to scope 12. Actual command lines and results are
 recorded in each fresh report directory.
 
-## Local execution receipt, 2026-11-07
+## Historical local receipt, 2026-11-07 (before request-context modeling)
+
+This run covers the earlier model revision and does not verify the per-request
+environment cases added after it.
 
 On macOS arm64, `bash scripts/check_config_env_specs.sh` exited 0. Report:
 `target/formal-reports/config-env.ufhOaP/`. Quint typechecking and all seven
@@ -73,3 +86,14 @@ Gherkin ran six scenarios and 31 steps successfully with strict skipped-step
 handling. No production defects were fixed in this specification task. Linux
 CI is configured but has not been executed locally; its result is not implied
 by the macOS receipt. No external service credentials are required.
+
+## Current local execution receipt, 2026-11-18
+
+On macOS arm64, `mise exec node@26.13.0 -- bash scripts/check_config_env_specs.sh`
+exited 0. The report is `target/formal-reports/config-env.6vegNP/`. Quint
+typechecking and all nine named tests passed. Seeded simulation used 1000
+samples and eight steps without a violation; Apalache's bounded verification
+of `safety` found no violation through eight transitions. Alloy recorded all
+20 assertions UNSAT and all five witnesses SAT; receipt validation and its
+tests passed. Strict production Gherkin passed eight scenarios and 48 steps,
+including the two daemon request-context cases. Linux CI has not been run.

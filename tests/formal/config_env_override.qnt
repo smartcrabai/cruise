@@ -23,6 +23,24 @@ module config_env_override {
   pure def choose(high: int, low: int): int = if (high >= 3) high else low
   val base = choose(workflow, choose(projectDefault, choose(userDefault, choose(appModel, builtin))))
   val expected = choose(cliOverride, choose(env, base))
+  // CLI requests read only their captured workflow override snapshot; a missing
+  // key stays absent even when the daemon process has that key set.
+  pure def requestEnv(hasContext: bool, snapshotEnv: int, daemonEnv: int): int =
+    if (hasContext) snapshotEnv else daemonEnv
+  pure def requestBase(hasContext: bool, requestCwdBase: int, daemonCwdBase: int): int =
+    if (hasContext) requestCwdBase else daemonCwdBase
+  pure def requestExpected(
+    hasContext: bool,
+    snapshotEnv: int,
+    daemonEnv: int,
+    requestCwdBase: int,
+    daemonCwdBase: int,
+    cliValue: int,
+  ): int = choose(cliValue, choose(requestEnv(hasContext, snapshotEnv, daemonEnv), requestBase(hasContext, requestCwdBase, daemonCwdBase)))
+  // Process-level names (for example CRUISE_FORGE) are never request snapshots.
+  pure def processEnvForRequest(snapshotProcessEnv: int, daemonProcessEnv: int): int =
+    daemonProcessEnv
+
   action init = all {
     builtin' = 3, appModel' = 0, userDefault' = 0, projectDefault' = 0,
     workflow' = 0, env' = 0, cliOverride' = 0, resolved' = 3,
@@ -92,4 +110,16 @@ module config_env_override {
   run fileTest = init.then(inputs(0, 0, 0, 0, 4, 0)).then(resolve(false, false))
     .then(inputs(0, 0, 0, 0, 3, 0)).then(resolve(false, false))
     .expect(resolved == 3 and safety)
+  run requestIsolationTest = init.expect(
+    requestExpected(true, 3, 4, 4, 3, 0) == 3
+      and requestExpected(true, 4, 3, 3, 4, 0) == 4
+      and requestExpected(true, 0, 4, 3, 4, 0) == 3
+      and requestExpected(true, 0, 3, 4, 3, 0) == 4
+  )
+  run processSnapshotSelectionTest = init.expect(
+    requestExpected(true, 0, 4, 3, 4, 0) == 3
+      and requestExpected(false, 0, 4, 3, 4, 0) == 4
+      and requestExpected(false, 0, 0, 3, 4, 0) == 4
+      and processEnvForRequest(4, 3) == 3
+  )
 }

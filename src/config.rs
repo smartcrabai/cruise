@@ -3,6 +3,26 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Source for workflow environment overrides.
+#[derive(Debug, Clone, Copy)]
+pub enum ConfigEnv<'a> {
+    /// Read overrides from the current process environment.
+    Process,
+    /// Read only values captured by a request; missing keys remain unset.
+    Snapshot(&'a std::collections::BTreeMap<String, String>),
+}
+
+impl<'a> ConfigEnv<'a> {
+    fn get(self, var: &str) -> Option<std::borrow::Cow<'a, str>> {
+        match self {
+            Self::Process => std::env::var(var).ok().map(std::borrow::Cow::Owned),
+            Self::Snapshot(values) => values
+                .get(var)
+                .map(|value| std::borrow::Cow::Borrowed(value.as_str())),
+        }
+    }
+}
+
 pub const DEFAULT_PR_LANGUAGE: &str = "English";
 
 fn deserialize_input_names<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
@@ -1076,9 +1096,18 @@ impl WorkflowConfig {
     /// Returns an error if a boolean env var has a value other than
     /// `true`, `false`, `1`, or `0`.
     pub fn apply_env_overrides(&mut self) -> crate::error::Result<()> {
+        self.apply_env_overrides_with(ConfigEnv::Process)
+    }
+
+    /// Apply workflow overrides from the supplied source and locale defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an override has an invalid value.
+    pub fn apply_env_overrides_with(&mut self, env: ConfigEnv<'_>) -> crate::error::Result<()> {
         let mut values = Vec::new();
         for key in crate::config_env::WORKFLOW_ENV_KEYS {
-            if let Ok(raw) = std::env::var(key.var)
+            if let Some(raw) = env.get(key.var)
                 && let Some(value) = crate::config_env::parse_override(key.var, key.kind, &raw)?
             {
                 values.push((key, value));

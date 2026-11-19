@@ -1,14 +1,14 @@
 use std::io::{IsTerminal, Read};
+use std::path::{Path, PathBuf};
 
 use console::style;
 
+use crate::application::{NewSessionImage, NewSessionRequest};
 use crate::cli::DraftArgs;
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
-use crate::session::{SessionManager, SessionPhase, SessionState};
-use crate::session_config::SessionConfigRef;
 
-pub fn run(args: DraftArgs) -> Result<()> {
+pub async fn run(args: DraftArgs) -> Result<()> {
     let (yaml, source) = crate::resolver::resolve_config(args.config.as_deref())?;
     eprintln!("{}", style(source.display_string()).dim());
 
@@ -20,10 +20,8 @@ pub fn run(args: DraftArgs) -> Result<()> {
     };
 
     crate::resolver::load_config_from_source(&yaml, &source)?;
-
-    let manager = SessionManager::new(crate::paths::data_dir()?);
-    let session_id = SessionManager::new_session_id();
-    let base_dir = std::env::current_dir()?;
+    let context = crate::request_context::RequestContext::capture()?;
+    let base_dir = context.cwd.clone();
     let task_input = crate::issue_input::resolve_task_input(
         &input,
         args.issue,
@@ -31,25 +29,27 @@ pub fn run(args: DraftArgs) -> Result<()> {
         &base_dir,
         &crate::issue_input::GhGithub,
     )?;
-    let config = crate::resolver::load_config_from_source(&yaml, &source)?;
-    let config_ref = SessionConfigRef::from_source(&source, None)?;
-    let mut session = SessionState::new(session_id.clone(), base_dir, config_ref, task_input.text);
-    session.phase = SessionPhase::Draft;
-    session.issue_number = task_input.issue_number;
-    manager.create_with_config(&session, &config)?;
-    let result = (|| {
-        session.attachments = crate::attachments::store_downloaded_images(
-            &manager.sessions_dir().join(&session.id),
-            &task_input.images,
-        )?;
-        manager.save(&session)
-    })();
-    if let Err(error) = result {
-        if let Err(cleanup_error) = manager.delete(&session.id) {
-            eprintln!("warning: failed to clean up session: {cleanup_error}");
-        }
-        return Err(error);
-    }
+    let (config_path, config_yaml) = config_request(&source, &yaml, &base_dir);
+    let issue_images = task_input
+        .images
+        .into_iter()
+        .map(|image| NewSessionImage {
+            extension: image.extension.to_string(),
+            bytes: image.bytes,
+        })
+        .collect();
+    let request = NewSessionRequest {
+        input: task_input.text,
+        base_dir,
+        config_path,
+        config_yaml,
+        issue_number: task_input.issue_number,
+        issue_images,
+        context: Some(context),
+        ..NewSessionRequest::default()
+    };
+    let client = crate::daemon::client::DaemonClient::connect().await?;
+    let session = client.create_session(&request).await?;
 
     eprintln!(
         "\n{} Session {} saved as draft.",
@@ -61,6 +61,45 @@ pub fn run(args: DraftArgs) -> Result<()> {
         style("cruise list").cyan()
     );
     Ok(())
+}
+
+fn config_request(
+    source: &crate::resolver::ConfigSource,
+    yaml: &str,
+    cwd: &Path,
+) -> (Option<PathBuf>, Option<String>) {
+    if let Some(path) = source.path() {
+        let path = crate::new_session_history::expand_tilde(&path.to_string_lossy());
+        let path = PathBuf::from(path);
+        return (
+            Some(if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }),
+            None,
+        );
+    }
+    match source {
+        crate::resolver::ConfigSource::Builtin => (
+            Some(PathBuf::from(
+                crate::new_session_history::BUILTIN_CONFIG_KEY,
+            )),
+            None,
+        ),
+        crate::resolver::ConfigSource::NamedBuiltin(name) => (
+            Some(PathBuf::from(format!(
+                "{}{name}",
+                crate::resolver::BUILTIN_SELECTOR_PREFIX
+            ))),
+            None,
+        ),
+        crate::resolver::ConfigSource::Inline => (None, Some(yaml.to_string())),
+        crate::resolver::ConfigSource::Explicit(_)
+        | crate::resolver::ConfigSource::EnvVar(_)
+        | crate::resolver::ConfigSource::Local(_)
+        | crate::resolver::ConfigSource::UserDir(_) => unreachable!(),
+    }
 }
 
 fn read_draft_input(input: Option<String>, noninteractive: bool) -> Result<String> {

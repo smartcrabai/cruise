@@ -17,7 +17,7 @@ Cruise semi-deterministically automates declarative workflows through planning �
 All locale editions use the same topic filenames. Keep guide changes synchronized across English, Japanese, and Simplified Chinese.
 
 - [Installation](installation.md) — OS-specific installation, updates, and managed provider CLIs.
-- [Usage](usage.md) — WebUI, CLI examples, herdr, TUI, and workflow packages.
+- [Usage](usage.md) — resident daemon, WebUI, CLI examples, herdr, and workflow packages.
 - [CLI reference](cli-reference.md) — commands, arguments, options, language settings, and notifications.
 - [Sessions](sessions.md) — lifecycle, workspace modes, isolation, recovery, and parallel execution.
 - [Configuration](configuration.md) — config resolution, defaults, settings, and prompt language.

@@ -57,12 +57,18 @@ pub(crate) fn resolve_with_path(
         .unwrap_or_default();
     let root = crate::paths::data_dir().ok();
     let target = target::detect_target_key(provider).unwrap_or("");
-    match root.as_deref() {
-        Some(root) => resolve_in(provider, value.as_deref(), root, &dirs, target),
-        None => resolve_optional_root(provider, value.as_deref(), None, &dirs, target, true),
-    }
+    resolve_optional_root(
+        provider,
+        value.as_deref(),
+        root.as_deref(),
+        &dirs,
+        target,
+        true,
+        cwd,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_in(
     provider: Provider,
     env_override: Option<&OsStr>,
@@ -95,6 +101,7 @@ pub(crate) fn resolve_in_impl(
         path_dirs,
         target_key,
         warn,
+        None,
     )
 }
 
@@ -105,9 +112,15 @@ fn resolve_optional_root(
     path_dirs: &[PathBuf],
     target_key: &str,
     warn: bool,
+    cwd: Option<&Path>,
 ) -> Result<Resolved> {
     if let Some(value) = env_override.filter(|v| !v.is_empty()) {
         let program = PathBuf::from(value);
+        let program = match (program.is_absolute(), cwd) {
+            (true, _) => program,
+            (false, Some(cwd)) => cwd.join(program),
+            (false, None) => std::env::current_dir()?.join(program),
+        };
         if !program.is_file() {
             return Err(CruiseError::Other(format!(
                 "{} points to '{}', which is not an existing regular file",
@@ -116,11 +129,7 @@ fn resolve_optional_root(
             )));
         }
         return Ok(Resolved {
-            program: if program.is_absolute() {
-                program
-            } else {
-                std::env::current_dir()?.join(program)
-            },
+            program,
             source: Source::Override,
         });
     }
@@ -186,7 +195,7 @@ mod tests {
         let binary = root.path().join(Provider::Jcode.binary_name());
         fs::write(&binary, b"fixture").unwrap();
         let resolve = |value: Option<&OsStr>, dirs: &[PathBuf]| {
-            resolve_optional_root(Provider::Jcode, value, None, dirs, "", false)
+            resolve_optional_root(Provider::Jcode, value, None, dirs, "", false, None)
         };
         assert_eq!(
             resolve(Some(binary.as_os_str()), &[]).unwrap().source,
@@ -221,6 +230,25 @@ mod tests {
             &[],
             "",
             false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolved.program, binary);
+    }
+
+    #[test]
+    fn relative_override_uses_request_working_dir() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let binary = working_dir.path().join("provider");
+        fs::write(&binary, b"fixture").unwrap();
+        let resolved = resolve_optional_root(
+            Provider::Jcode,
+            Some(OsStr::new("provider")),
+            None,
+            &[],
+            "",
+            false,
+            Some(working_dir.path()),
         )
         .unwrap();
         assert_eq!(resolved.program, binary);

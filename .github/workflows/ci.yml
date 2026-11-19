@@ -594,7 +594,11 @@ jobs:
           log="$RUNNER_TEMP/action-suite.log"
           for suite in scripts/test_action_*.sh; do
             echo "== $suite"
-            bash "$suite" > "$log" 2>&1 || status=1
+            if [ "$suite" = scripts/test_action_run.sh ]; then
+              CRUISE_ACTION_E2E=false bash "$suite" > "$log" 2>&1 || status=1
+            else
+              bash "$suite" > "$log" 2>&1 || status=1
+            fi
             cat "$log"
             # A suite that dies mid-run (parse error, unset variable) never
             # reaches its `finish` call, so the tally line is the only proof
@@ -634,6 +638,10 @@ jobs:
 
       - name: Run tests
         run: cargo test --all-features
+
+      - name: Test GitHub Action through the local daemon
+        if: matrix.os == 'ubuntu-latest'
+        run: bash scripts/test_action_run.sh
 
       - name: Smoke native update with real A/B binaries
         run: python3 scripts/test_update_smoke.py --build

@@ -112,11 +112,8 @@ fn render_key(
         .cloned()
         .unwrap_or_else(|| key.to_owned())
 }
-#[must_use]
-pub fn tf(locale: Locale, key: &str, vars: &[(&str, &str)]) -> String {
-    interpolate(&t(locale, key), vars)
-}
 
+#[cfg(test)]
 fn interpolate(template: &str, vars: &[(&str, &str)]) -> String {
     let mut result = String::with_capacity(template.len());
     let mut rest = template;

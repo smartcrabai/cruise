@@ -54,13 +54,14 @@ pub struct ExecutionContext<'a> {
     pub on_step_start: &'a (dyn Fn(&str) -> Result<()> + Send + Sync),
     pub cancel_token: Option<&'a CancellationToken>,
     pub option_handler: &'a dyn OptionHandler,
+    pub ask_handler: Option<&'a Arc<dyn crate::ask_handler::AskHandler>>,
     pub config_reloader: Option<&'a (dyn Fn() -> Result<Option<ReloadedWorkflow>> + Send + Sync)>,
     /// Working directory for child processes spawned by prompt and command steps.
     /// When set, both the LLM subprocess and shell commands run with this as their `cwd`,
     /// ensuring that relative-path file writes land inside the `FileTracker` root.
     pub working_dir: Option<&'a std::path::Path>,
     /// Step names that the user selected to skip before execution.
-    /// Applied in addition to YAML-configured `skip` conditions.
+    /// Applied in addition to YAML-configured skip conditions.
     pub skipped_steps: &'a [String],
     /// Resolved workflow flag values.
     pub flags: &'a crate::flags::FlagValues,
@@ -1292,6 +1293,7 @@ async fn execute_step_kind_inner(
                 lease
                     .as_ref()
                     .map(crate::instruction_inbox::Lease::block_text),
+                ctx.ask_handler,
             ))
             .await;
             finish_instruction_lease(ctx, lease, current_step, &result);
@@ -1669,13 +1671,27 @@ pub(crate) async fn run_prompt_step(
     register_skip_tool: bool,
     allow_commit: bool,
     delivered: Option<&str>,
+    ask_handler: Option<&Arc<dyn crate::ask_handler::AskHandler>>,
 ) -> Result<Option<String>> {
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
         if vars.input_is_empty() {
-            let prompt_text = format!("  {resolved}");
-            let _blocked = crate::herdr::blocked(&resolved);
-            let text = crate::multiline_input::prompt_multiline(&prompt_text)?.into_result()?;
+            let text = if let Some(handler) = ask_handler {
+                let handler = Arc::clone(handler);
+                let question = resolved;
+                let token = cancel_token.cloned();
+                tokio::task::spawn_blocking(move || {
+                    handler.ask_user_with_cancellation(&question, token.as_ref())
+                })
+                .await
+                .map_err(|error| {
+                    CruiseError::Other(format!("instruction prompt worker failed: {error}"))
+                })??
+            } else {
+                let prompt_text = format!("  {resolved}");
+                let _blocked = crate::herdr::blocked(&resolved);
+                crate::multiline_input::prompt_multiline(&prompt_text)?.into_result()?
+            };
             vars.set_input(text);
         } else {
             crate::status_eprintln!("  {}", style(resolved).dim());
@@ -1735,8 +1751,11 @@ pub(crate) async fn run_prompt_step(
         PromptStepOutput::Redirect(log) => (Some(log), false),
     };
     let spinner = console_output.then(|| crate::spinner::Spinner::start("Cruising..."));
+    let output_is_streamed = on_step_log.is_some() && crate::console_mode::has_status_sink();
     let on_stdout: &(dyn Fn(&str) + Send + Sync) = &|line: &str| {
-        if let Some(spinner) = &spinner {
+        if let Some(spinner) = &spinner
+            && !output_is_streamed
+        {
             spinner.suspend(|| crate::status_eprintln!("  {line}"));
         }
         if let Some(cb) = on_step_log {
@@ -1744,7 +1763,9 @@ pub(crate) async fn run_prompt_step(
         }
     };
     let on_stderr: &(dyn Fn(&str) + Send + Sync) = &|line: &str| {
-        if let Some(spinner) = &spinner {
+        if let Some(spinner) = &spinner
+            && !output_is_streamed
+        {
             spinner.suspend(|| crate::status_eprintln!("  {} {}", style("stderr:").dim(), line));
         }
         if let Some(cb) = on_step_log {
@@ -2138,6 +2159,7 @@ mod tests {
             on_step_start: &|_| Ok(()),
             cancel_token,
             option_handler,
+            ask_handler: None,
             config_reloader,
             working_dir: Some(tracker_root.as_path()),
             skipped_steps,
@@ -2182,6 +2204,7 @@ mod tests {
             on_step_start: &on_step_start,
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: Some(working_dir),
             skipped_steps: &[],
@@ -2291,6 +2314,7 @@ mod tests {
             on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: Some(tracker_root.as_path()),
             skipped_steps: &skipped,
@@ -2377,6 +2401,7 @@ mod tests {
             on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: Some(tracker_root.as_path()),
             skipped_steps: &skipped,
@@ -2458,6 +2483,7 @@ mod tests {
             false,
             false,
             None,
+            None,
         )
         .await
         .unwrap_or_else(|error| panic!("guarded prompt failed: {error}"));
@@ -2478,6 +2504,7 @@ mod tests {
             None,
             false,
             true,
+            None,
             None,
         )
         .await
@@ -2542,6 +2569,7 @@ mod tests {
             false,
             true,
             None,
+            None,
         )
         .await
         .unwrap_or_else(|error| panic!("prompt run: {error}"));
@@ -2582,6 +2610,7 @@ steps:
             on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: Some(tmp.path()),
             skipped_steps: &[],
@@ -2670,6 +2699,7 @@ steps:
             on_step_start: &|_| Ok(()),
             cancel_token: Some(&cancel),
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: Some(tmp.path()),
             skipped_steps: &[],
@@ -2723,6 +2753,7 @@ steps:
             on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: Some(tmp.path()),
             skipped_steps: &[],
@@ -3360,6 +3391,7 @@ after-pr:
             on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
@@ -4024,6 +4056,7 @@ steps:
             on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
@@ -5230,6 +5263,7 @@ steps:
             on_step_start: &|_| Ok(()),
             cancel_token: Some(&token),
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
@@ -6158,6 +6192,7 @@ steps:
             on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
@@ -6214,6 +6249,7 @@ steps:
             on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
@@ -6293,6 +6329,7 @@ steps:
             on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
@@ -6356,6 +6393,7 @@ steps:
             on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],
@@ -6415,6 +6453,7 @@ steps:
             on_step_start: &|_| Ok(()),
             cancel_token: None,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: None,
             skipped_steps: &[],

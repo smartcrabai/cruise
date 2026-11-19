@@ -77,7 +77,7 @@ printf 'XDG_CONFIG_HOME=%q\nXDG_DATA_HOME=%q\nXDG_STATE_HOME=%q\n' \
 run_check workflow-flags-bdd cargo +1.99.1 test --locked --all-features --test workflow_flags_bdd
 run_check bdd-negative-controls node scripts/formal/check_workflow_flags_bdd_failures.cjs "$RUN"
 run_check flag-contracts cargo +1.99.1 test --locked --all-features --test flags_contract --test flags_cli --test flag_skip_list_cli
-# Application creation/history, shared pruning/group metadata, TUI navigation and
+# Application creation/history, shared pruning/group metadata, and
 # WebUI real routes plus approval helper tests live in these production targets.
 run_check production-units cargo +1.99.1 test --locked --all-features --lib --bin cruise-runtime
 printf 'Aggregate exit status: %s\n' "$status" | tee -a "$RUN/results.log"

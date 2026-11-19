@@ -4,7 +4,7 @@
 
 This suite models the run and exec workflow-flag execution boundaries.
 Approval-time flag selection is a
-separate UI boundary outside these execution models, as are TUI/WebUI, history,
+separate UI boundary outside these execution models, as are WebUI, history,
 background planning workers and batch selection. Execute now forwards its
 approval-time choices as explicit CLI assignments, using the modeled
 `cliAuthority` suppression path rather than prompting again at execution start.
@@ -12,13 +12,15 @@ Selection is per invocation, not a new persisted confirmation bit.
 
 | Contract from the plan | Production authority | Quint / Alloy | Executed production checks |
 | --- | --- | --- | --- |
-| Run never asks; fresh exec asks on a TTY with declarations, no explicit CLI assignment and no dry run, before creating its session | `exec_cmd::run_resolved`, `run_cmd::select_flag_values`, `run_single_loaded` | `promptGate` / `PromptGate`, saved-run and suppression tests and witnesses | Gherkin terminal run and exec cancellation; `flags_cli` exec and force-exec PTY cases |
-| Run retains saved flags, including sparse keys, unless CLI assignments override them | `run_single_loaded` CLI merge | `savedRunTest` / `SavedRunWitness`, `cliAuthority` / `CliAuthority` | Gherkin terminal run and `flags_cli` saved-flag cases |
+| Run with saved choices does not prompt; fresh exec prompts on a TTY with declarations, no explicit CLI assignment and no dry run, before submitting its request | `src/run_cmd.rs::client_run_request` and `src/exec_cmd.rs::run_resolved` perform client-side selection; exec requests pass through `src/daemon/api/exec.rs::start_exec` to `CruiseApplication::start_exec` | `promptGate` / `PromptGate`, saved-run and suppression tests and witnesses | Gherkin terminal run with saved flags and exec cancellation; `flags_cli` exec and force-exec PTY cases |
+| Run retains saved flags, including sparse keys, unless CLI assignments override them | `src/run_cmd.rs::client_run_request` merges CLI values; `src/application.rs::setup_run_blocking` applies the request override | `savedRunTest` / `SavedRunWitness`, `cliAuthority` / `CliAuthority` | Gherkin terminal run and `flags_cli` saved-flag cases |
 | A selection writes true/false for every declared key, retaining undeclared keys including explicit off | `flags::apply_enabled` | `explicitSelection` / `ExplicitSelection`, empty-selection test/witness, sparse saved input domain | `flags_contract` tests; exec PTY selection cases |
-| Any `-f`, including explicit off, wins and suppresses execution-start selection; Execute now forwards approval-time choices as explicit CLI assignments | `run_single_loaded` CLI merge, `plan_cmd` ExecuteNow forwarding, `exec_cmd::run_resolved` forwarding | `cliAuthority` / `CliAuthority`, `explicitOffTest` / `ExplicitOffWitness` | Gherkin explicit CLI; `flags_cli` PTY cases for exec, ExecuteNow and force_exec plan/root/background paths |
-| Reject invalid exec input before asking; flag-aware validation follows selection and forwarding | `exec_cmd::run_resolved`, `run_single_loaded` | abstract `valid` preflight gate and rejection test/witness | `flags_cli` gated-cycle and unusable-plan cases |
+| Any `-f`, including explicit off, wins and suppresses execution-start selection; Execute now forwards approval-time choices as explicit CLI assignments | `src/run_cmd.rs::client_run_request`, `src/plan_cmd.rs::review_plan`, and `src/exec_cmd.rs::run_resolved` | `cliAuthority` / `CliAuthority`, `explicitOffTest` / `ExplicitOffWitness` | Gherkin explicit CLI; `flags_cli` PTY cases for exec, ExecuteNow and force_exec plan/root/background paths |
+| Reject invalid exec input before asking; flag-aware validation follows selection and forwarding | `src/exec_cmd.rs::run_resolved`, `src/daemon/api/exec.rs::start_exec`, and `src/application/exec.rs::CruiseApplication::start_exec` | abstract `valid` preflight gate and rejection test/witness | `flags_cli` gated-cycle and unusable-plan cases |
 | Cancelling exec selection creates no ephemeral session and performs no execution | `exec_cmd::run_resolved` | `promptGate`, `persistence` / `Persistence`, exec cancellation test and witness | Gherkin and PTY cancellation, diagnostic and directory assertions |
-| Persist selected values through existing workspace save, then pass them to engine | `run_single_loaded` workspace save and engine flag_values | `persistence` / `Persistence`, selection test/witness | Gherkin checks `state.json` and actual shell files; unit integration checks |
+| Persist selected values through run setup, then pass them to the engine | `src/application.rs::setup_run_blocking` and `CruiseApplication::run_with_log_sink` | `persistence` / `Persistence`, selection test/witness | Gherkin checks `state.json` and actual shell files; unit integration checks |
+
+The flag selectors are client-side: `run_cmd::client_run_request`, `exec_cmd::run_resolved`, and `plan_cmd::review_plan` resolve values before sending the daemon request. The daemon validates/applies run overrides and persists run state. The model covers the saved-choice run path; it does not model the additional client prompt used when a fresh terminal run has no saved flag values.
 
 The models describe observable lifecycle stages, displayed prompt count, working
 flag values, explicitly present keys, persisted values, session existence, and

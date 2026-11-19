@@ -219,6 +219,25 @@ mod contracts {
                 .unwrap()
                 .success()
         );
+        assert!(
+            Command::new("git")
+                .current_dir(w.path("repo"))
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "fixture"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
         for name in ["git", "gh", "glab", "cat"] {
             std::fs::copy(
                 std::env::current_exe().unwrap(),
@@ -334,6 +353,12 @@ mod contracts {
         if expected == "rejected" {
             assert!(!w.output.as_ref().unwrap().status.success(), "{text}");
             assert!(text.contains("check_base_ci: false"), "{text}");
+            if w.forge == "GitLab" && w.rollup == "failed" {
+                assert!(
+                    text.contains("CI on base branch `main` (abcdef1) is failing in owner/repo"),
+                    "{text}"
+                );
+            }
             assert_eq!(std::fs::read(w.state()).unwrap(), w.original_state);
             assert!(!w.path(&format!("data/cruise/worktrees/{SESSION}")).exists());
             assert!(!w.path(&format!("data/cruise/clones/{SESSION}")).exists());

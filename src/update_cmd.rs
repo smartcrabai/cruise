@@ -87,7 +87,7 @@ pub(crate) fn run(args: &UpdateArgs) -> Result<()> {
     if let Err(error) = install.apply(&mut transaction, &staging, release) {
         return Err(record_failure(&install, &mut transaction, error));
     }
-    crate::webui::daemon::restart_hint();
+    crate::daemon::lifecycle::restart_hint();
     Ok(())
 }
 

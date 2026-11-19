@@ -27,7 +27,7 @@ cruise 按以下方式解析工作流配置：
 
    research 工作流以及 security 的盘点/审计/分类评估阶段需要使用 SDK 权限进行只读工作。在解析工作流及适用的用户/项目默认设置后，如果 `command:` 和 `sdk:` 均未设置，Cruise 会使用其默认值 `sdk: jcode`；`command:` 后端无法被限制为只读模式，因此会在权限受限的步骤中被拒绝使用。
 
-   交互式选择器（CLI、TUI、WebUI）会将内置工作流和其他候选项按类别组织。没有配置文件时，非交互式解析会使用 `tdd`。
+   交互式选择器（CLI 和 WebUI）会将内置工作流和其他候选项按类别组织。没有配置文件时，非交互式解析会使用 `tdd`。
 
    `create_pr` 是工作流专用的布尔配置项，默认值为 `true`。将其设为 `false` 会跳过 Cruise 的自动提交、推送、PR 创建、`after-pr` 和基于 PR 的清理，同时保留会话、产物及工作树。用户级和项目级 `default.yaml` 均不接受 `create_pr`；它不是 CLI 选项。
 
@@ -180,7 +180,7 @@ steps:
 <a id="prompt-languages"></a>
 ### 提示词语言
 
-UI 显示语言独立于提示词语言。可通过应用的 `uiLanguage`、`CRUISE_UI_LANGUAGE` 或 TUI 语言选择器进行配置；WebUI 浏览器可以使用自己的语言选择器覆盖服务器默认值。这些设置不会更改 `languages.pr` 或 `languages.plan`。
+UI 显示语言独立于提示词语言。可通过应用的 `uiLanguage` 或 `CRUISE_UI_LANGUAGE` 配置；WebUI 浏览器可以使用自己的语言选择器覆盖服务器默认值。这些设置不会更改 `languages.pr` 或 `languages.plan`。
 
 `languages.pr` 控制自动生成的 PR 标题和正文所用语言，`languages.plan` 控制 cruise 内置规划提示词所用语言。`CRUISE_LANGUAGE_PR` 和 `CRUISE_LANGUAGE_PLAN` 会覆盖对应的 YAML 值；空白环境变量值会被忽略。否则，会对 `LC_ALL`、`LC_MESSAGES`、`LANG`、`LANGUAGE` 中第一个非空值进行一次映射（不受支持的值不会继续回退），最后使用 `English`。
 
@@ -265,7 +265,8 @@ export CRUISE_RETRY='{"base_delay_ms":1000}'
 export CRUISE_RETRY_MAX_DELAY_MS=5000
 ```
 
-`CRUISE_RUN_ALL_PARALLELISM` 会覆盖 TUI/WebUI“全部运行”操作和生效配置显示中的应用设置，但不会保存到配置文件中。CLI `run --all` 使用 `--parallelism`，不会受其影响。
+`CRUISE_RUN_ALL_PARALLELISM` 会覆盖 WebUI“全部运行”操作和生效配置显示中的应用设置，但不会保存到配置文件中。CLI `run --all` 使用 `--parallelism`，不会受其影响。
+使用常驻 daemon 时，CLI 会随每个请求发送工作目录和允许列表中的 workflow override 环境变量（例如 `CRUISE_MODEL`、`CRUISE_PLAN_MODEL` 和 `CRUISE_SDK`），这些内容仅对该请求生效。`PATH`、`GH_TOKEN`、provider 凭据、`CRUISE_FORGE` 以及通知或身份验证运行时开关等进程级变量来自 daemon 环境；更改后请运行 `cruise daemon restart`。自动启动 daemon 时会从其环境中移除 workflow override 变量；显式运行 `cruise daemon start` 或 `serve` 会保留这些变量。WebUI 请求使用 daemon 的环境，并以用户 home directory 为工作目录。
 
 `CRUISE_UI_LANGUAGE` 则控制进程的 UI 语言，而不是工作流字段或生成的提示词语言。有关支持的标签和优先级，请参阅 [`cruise config`](cli-reference.md#cruise-config)。
 
@@ -298,7 +299,7 @@ Cruise 将应用设置与工作流 YAML 分开保存在 `$XDG_CONFIG_HOME/cruise
 
 在应用配置中设置 `uiLanguage`，或使用 `cruise config --set-language ja`。输入时也接受别名 `ui_language`。可显式指定的语言标签有 `en`、`zh-CN`、`es`、`fr`、`pt-BR`、`ja` 和 `ko`，支持大小写以及 `_`/`-` 的变体。`auto` 表示未指定；`cruise config --set-language auto` 会清除已保存的设置。设置或验证应用配置时，无效值会被拒绝。
 
-对于 CLI 和 TUI，语言选择的优先级依次为 `CRUISE_UI_LANGUAGE`、`uiLanguage`、系统区域设置，最后回退到英语。环境变量值为空或为 `auto` 时，会使用下一优先级的设置。无效的环境变量值会触发英文警告并被忽略。系统区域设置检测会按顺序使用 `LC_ALL`、`LC_MESSAGES`、`LANG` 或 `LANGUAGE` 中第一个非空的值；如果该值不受支持，也不会尝试后续变量。如果无法通过环境变量确定区域设置，Windows 还会查询用户区域设置。macOS 和 Linux 仅使用环境变量，因此通过 GUI 启动时，如果没有这些环境变量，则默认使用英语。
+对于 CLI，`CRUISE_UI_LANGUAGE` 的优先级高于 `uiLanguage`，其次是系统区域设置，最后回退到英语。环境变量值为空或为 `auto` 时，会使用下一优先级的设置。无效的环境变量值会触发英文警告并被忽略。系统区域设置检测会按顺序使用 `LC_ALL`、`LC_MESSAGES`、`LANG` 或 `LANGUAGE` 中第一个非空的值；如果该值不受支持，也不会尝试后续变量。如果无法通过环境变量确定区域设置，Windows 还会查询用户区域设置。macOS 和 Linux 仅使用环境变量，因此通过 GUI 启动时，如果没有这些环境变量，则默认使用英语。
 
 如果浏览器中的 `cruise_ui_language` Cookie 有效，WebUI 就会使用它，否则使用服务器进程的默认语言。在 WebUI 中选择语言会保存 Cookie 并重新加载页面，不会更改应用配置。界面语言独立于工作流的 `languages.pr` 和 `languages.plan`，这两项设置用于控制生成的提示词。
 

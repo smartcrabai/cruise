@@ -37,6 +37,8 @@ not satisfy these controls. Their raw failure logs are retained with the report.
 Independent black-box `cruise exec -c ...` coverage remains in
 `opencode_sdk_cli` and is included in the specification runner.
 
+Session execution invokes this `Executor` inside the daemon. The Cucumber suite calls it directly and does not test daemon HTTP/client transport; the separate `opencode_sdk_cli` target covers the CLI-client boundary.
+
 ## Model boundaries
 
 `opencode.qnt` and `opencode.als` describe one logical prompt request with at most

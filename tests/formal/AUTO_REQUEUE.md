@@ -1,6 +1,8 @@
 # Batch auto-requeue model
 
 `auto_requeue.qnt` models one session in a batch with a fixed retry limit.
+
+Batch execution uses the CLI as a daemon client: `POST /api/v1/run-all` calls `CruiseApplication::run_all_with_request`, and the daemon owns retries and session writes. The BDD invokes the real CLI path.
 Run `bash scripts/check_auto_requeue_specs.sh` from the repository root. The
 runner uses the shared pinned toolchain, runs Quint typechecking, executable
 tests, seeded simulation and an eight-transition Apalache bounded verification

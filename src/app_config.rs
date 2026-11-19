@@ -20,7 +20,7 @@ pub struct AppConfig {
     /// Optional interface language, independent of prompt languages.
     #[serde(alias = "ui_language", skip_serializing_if = "Option::is_none")]
     pub ui_language: Option<String>,
-    /// Maximum number of sessions the `WebUI` and TUI execute concurrently in `run --all` mode.
+    /// Maximum number of sessions the `WebUI` and CLI execute concurrently in `run --all` mode.
     ///
     /// Must be >= 1. Defaults to `1` (preserves backward-compatible sequential behaviour).
     #[serde(alias = "run_all_parallelism")]

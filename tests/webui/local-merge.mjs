@@ -6,6 +6,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
+import { loginWebUi, waitForWebUiLogin } from './auth.mjs';
 
 const root = await mkdtemp(join(tmpdir(), 'cruise-local-merge-browser-'));
 const env = { PATH: process.env.PATH, HOME: root, XDG_CONFIG_HOME: join(root, 'config'),
@@ -52,21 +53,11 @@ try {
   const dirty = await fixture('3');
   await writeFile(join(dirty.repo, 'base.txt'), 'dirty base\n');
   server = spawn(process.env.WEBUI_BDD_BIN || resolve('target/debug/cruise-runtime'),
-    ['webui', '--port', '0', '--webui-dir', resolve('webui')],
+    ['daemon', 'serve', '--port', '0', '--webui-dir', resolve('webui')],
     { cwd: stage.repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
   closed = new Promise(ok => server.once('close', ok));
   server.stderr.on('data', chunk => { logs += chunk; });
-  const base = await new Promise((ok, fail) => {
-    let output = '';
-    const timeout = setTimeout(() => fail(new Error(`server startup timeout: ${logs}`)), 20000);
-    server.once('error', error => { clearTimeout(timeout); fail(error); });
-    server.once('exit', code => { clearTimeout(timeout); fail(new Error(`server exited ${code}: ${logs}`)); });
-    server.stdout.on('data', chunk => {
-      output += chunk;
-      const match = output.match(/http:\/\/127\.0\.0\.1:\d+/);
-      if (match) { clearTimeout(timeout); ok(match[0]); }
-    });
-  });
+  const { base, loginUrl } = await waitForWebUiLogin(server, () => logs);
   const browserEnv = { ...process.env };
   for (const key of ['DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'LD_LIBRARY_PATH']) delete browserEnv[key];
   browser = await chromium.launch({ headless: true, env: browserEnv });
@@ -74,6 +65,7 @@ try {
   const reports = resolve(process.env.WEBUI_LOCAL_MERGE_REPORT_DIR || 'target/formal-reports/local-merge-browser');
   await mkdir(reports, { recursive: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, reducedMotion: 'reduce' });
+  await loginWebUi(page, loginUrl);
   page.setDefaultTimeout(10000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));

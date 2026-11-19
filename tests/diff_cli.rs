@@ -1,5 +1,5 @@
 //! End-to-end contract for the non-interactive diff command.
-use cruise::session::{SessionManager, SessionState};
+use cruise::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
 use cruise::session_config::SessionConfigRef;
 use std::{fs, path::Path, process::Command};
 use tempfile::TempDir;
@@ -110,5 +110,41 @@ fn diff_command_reports_committed_and_uncommitted_changes_and_stat() -> Result<(
     let warning = String::from_utf8_lossy(&many.stderr);
     assert!(warning.contains("warning: diff truncated"), "{warning}");
     assert!(!warning.contains("bytes"), "{warning}");
+    Ok(())
+}
+#[test]
+fn clean_command_removes_terminal_no_pr_sessions_through_daemon() -> Result<()> {
+    let root = TempDir::new()?;
+    let id = "20260102000000000";
+    let mut session = SessionState::new(
+        id.into(),
+        root.path().join("repo"),
+        SessionConfigRef::File {
+            path: root.path().join("workflow.yaml"),
+        },
+        "clean fixture".into(),
+    );
+    session.phase = SessionPhase::Completed;
+    session.workspace_mode = WorkspaceMode::CurrentBranch;
+    let manager = SessionManager::new(root.path().join("data/cruise"));
+    manager.create(&session)?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cruise"))
+        .env("HOME", root.path())
+        .env("XDG_DATA_HOME", root.path().join("data"))
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env("XDG_STATE_HOME", root.path().join("state"))
+        .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+        .arg("clean")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Removed 1 terminal no-PR session(s).")
+    );
+    assert!(manager.load(id).is_err());
     Ok(())
 }

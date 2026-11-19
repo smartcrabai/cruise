@@ -138,7 +138,7 @@ async fn create(w: &mut World) {
     let app = CruiseApplication::new(w.manager().clone());
     let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_: ApplicationEvent| Ok(()));
     w.error = app
-        .create_pr(&w.id, sink, None)
+        .create_pr(&w.id, None, sink, None)
         .await
         .err()
         .map(|e| e.to_string());

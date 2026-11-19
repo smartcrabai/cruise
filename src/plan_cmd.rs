@@ -1,158 +1,151 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal as _, Read};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use console::style;
 use inquire::InquireError;
-use opentelemetry::trace::FutureExt as OtelFutureExt;
 
-use std::sync::Arc;
-
-use crate::ask_handler::{AskHandler, CliAskHandler, NoninteractiveAskHandler};
-use crate::cancellation::CancellationToken;
-use crate::cli::{DEFAULT_RATE_LIMIT_RETRIES, PLAN_STDIN_SENTINEL, PlanArgs, PlanWorkerArgs};
-use crate::config::{WorkflowConfig, validate_config};
+use crate::application::{
+    ApproveRequest, Interactive, NewSessionImage, NewSessionRequest, PlanRequest,
+};
+use crate::cli::{DEFAULT_RATE_LIMIT_RETRIES, PLAN_STDIN_SENTINEL, PlanArgs};
+use crate::config::WorkflowConfig;
+use crate::daemon::client::{DaemonClient, EventFilter, SessionEventHandler};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
 use crate::new_session_history::{HistoryScope, NewSessionHistory};
-use crate::planning::saved_plan_session as saved_plan_resume;
-use crate::planning::{
-    PlanProgress, PlanPromptCtx, ask_plan_template, fix_plan_template, initial_plan_template,
-    setup_plan_vars,
-};
 use crate::resolver::ConfigSource;
-use crate::session::{SessionManager, SessionPhase, SessionState};
-use crate::session_config::SessionConfigRef;
-use crate::variable::VariableStore;
-use crate::workflow::{SkippableStepNode, list_skippable_after_pr_steps, list_skippable_steps};
+use crate::session::{SessionPhase, SessionState};
+use crate::workflow::SkippableStepNode;
 
-/// Build a CLI planning context (interactive prompts via [`CliAskHandler`]).
 #[expect(
-    clippy::too_many_arguments,
-    reason = "the context keeps backend, interactivity, retry, mode, and cancellation settings together"
+    clippy::large_enum_variant,
+    reason = "local targets carry their resolved config to avoid reparsing"
 )]
-fn cli_plan_ctx<'a>(
-    config: &'a WorkflowConfig,
-    usage_session_id: Option<&'a str>,
-    plan_path: &'a Path,
-    working_dir: Option<&'a Path>,
-    interactive: bool,
-    rate_limit_retries: usize,
-    grill: bool,
-    cancel_token: Option<&'a CancellationToken>,
-    on_session_id: Option<&'a crate::executor::SessionIdCallback<'a>>,
-    on_notice: Option<&'a (dyn Fn(&str) + Send + Sync)>,
-) -> PlanPromptCtx<'a> {
-    // Only the interactive approve loop can prompt the user; non-TTY contexts use
-    // a handler that errors rather than blocking on stdin (ask_user is not
-    // registered there anyway).
-    let ask: Arc<dyn AskHandler> = if interactive {
-        Arc::new(CliAskHandler)
+enum PlanTarget {
+    Local {
+        yaml: String,
+        source: ConfigSource,
+        config: WorkflowConfig,
+    },
+    Repo,
+}
+
+struct PreparedPlan {
+    pr_target: Option<crate::pr_review_fix::PrTarget>,
+    noninteractive: bool,
+    input: String,
+    images: Vec<PathBuf>,
+    has_issue: bool,
+    target: PlanTarget,
+}
+
+fn prepare_plan(args: &mut PlanArgs) -> Result<PreparedPlan> {
+    let pr_target = if let Some(number) = args.pr {
+        let target = crate::pr_review_fix::resolve_pr_target(number, args.repo.as_deref())?;
+        args.config
+            .get_or_insert_with(|| crate::pr_review_fix::BUILTIN_SELECTOR.to_string());
+        args.skip_planning = true;
+        args.no_force_exec = true;
+        Some(target)
     } else {
-        Arc::new(NoninteractiveAskHandler)
+        None
     };
-    PlanPromptCtx {
-        usage_session_id,
-        config,
-        ask,
-        plan_path,
-        interactive,
-        progress: PlanProgress::Console,
-        rate_limit_retries,
-        working_dir,
-        grill,
-        on_session_id,
-        on_notice,
-        cancel_token,
-    }
-}
-
-fn cli_notice_callback(
-    manager: &SessionManager,
-    session_id: &str,
-) -> impl Fn(&str) + Send + Sync + 'static {
-    let logger = crate::session::SessionLogger::new(manager.run_log_path(session_id));
-    move |message: &str| logger.write(&format!("[info] {message}"))
-}
-// Persist retained plan conversations with their backend owner.
-fn cli_plan_session_callback<'a>(
-    manager: &'a SessionManager,
-    session: &SessionState,
-    config: &WorkflowConfig,
-    working_dir: &Path,
-) -> Option<Box<crate::executor::SessionIdCallback<'a>>> {
-    if !crate::planning::sdk_plan_tools_enabled(config) {
-        return None;
+    let noninteractive = !std::io::stdin().is_terminal();
+    if args.grill && noninteractive {
+        return Err(CruiseError::Other(
+            "--grill requires an interactive terminal (it interviews you one \
+             question at a time); it cannot run in a non-TTY context"
+                .to_string(),
+        ));
     }
 
-    let identity = session
-        .config
-        .stable_identity(session.repo.as_deref(), &session.id);
-    let key = crate::planning::plan_conversation_key(config, &identity);
-    let working_dir = working_dir.to_path_buf();
-    let session_id = session.id.clone();
-    let cleanup =
-        crate::backend::conversation::DeferredCleanup::new(manager.clone(), session_id.clone());
-    Some(Box::new(move |conversation| {
-        let backend = conversation.sdk.as_str();
-        let backend_id = conversation.id.as_str();
-        let home = (conversation.sdk == crate::model_selection::Sdk::Jcode)
-            .then(|| crate::backend::jcode::resolve_source_home(Some(&working_dir)));
-        let mut state = manager.load(&session_id)?;
-        if let Some(previous_id) = state.plan_conversation_id.as_deref()
-            && (previous_id != backend_id
-                || state
-                    .plan_conversation_backend
-                    .as_deref()
-                    .unwrap_or("jcode")
-                    != backend
-                || state.plan_conversation_home != home)
-        {
-            cleanup.defer(&state);
-        }
-        state.plan_conversation_id = Some(backend_id.to_string());
-        state.plan_conversation_key = Some(key.clone());
-        state.plan_conversation_backend = Some(backend.to_string());
-        state.plan_conversation_home = home;
-        manager.save(&state)
-    }))
-}
+    let (raw_input, from_interactive) = if let Some(pr) = &pr_target {
+        let extra = match args.input.take() {
+            Some(input) if input != PLAN_STDIN_SENTINEL => input,
+            Some(_) if !noninteractive => {
+                return Err(CruiseError::Other("stdin requires piped input".into()));
+            }
+            _ if noninteractive => {
+                let mut input = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut input)
+                    .map_err(|error| {
+                        CruiseError::Other(format!("failed to read stdin: {error}"))
+                    })?;
+                input
+            }
+            _ => String::new(),
+        };
+        (crate::pr_review_fix::plan_text(pr, &extra), false)
+    } else if args.issue.is_some() && args.input.is_none() {
+        (String::new(), false)
+    } else {
+        read_plan_input(args.input.take(), noninteractive)?
+    };
+    let (input, mut images) = if from_interactive {
+        crate::attachments::extract_image_paths(&raw_input)
+    } else {
+        (raw_input, Vec::new())
+    };
+    images.extend(args.images.iter().map(PathBuf::from));
 
-fn finalize_plan_checkpoint(
-    manager: &SessionManager,
-    previous: &SessionState,
-    retained: bool,
-) -> Result<()> {
-    let mut current = manager.load(&previous.id)?;
-    if retained
-        || current.plan_conversation_id != previous.plan_conversation_id
-        || current.plan_conversation_key != previous.plan_conversation_key
-        || current.plan_conversation_backend != previous.plan_conversation_backend
-        || current.plan_conversation_home != previous.plan_conversation_home
+    let binding = crate::issue_input::parse_binding(&input)?;
+    if args.issue.is_some() && binding.is_some() {
+        return Err(CruiseError::Other(
+            "pass either #N or --issue, not both".to_string(),
+        ));
+    }
+    let has_issue = args.issue.is_some() || binding.is_some();
+    let target = resolve_plan_target(args.repo.as_deref(), args.config.as_deref(), has_issue)?;
+    if pr_target.is_some()
+        && let PlanTarget::Local { config, .. } = &target
     {
-        return Ok(());
+        crate::pr_review_fix::validate_workflow(config)?;
+        crate::flags::validate_names(config, &crate::flags::from_cli(&args.flags)?)?;
     }
-    if let Some(id) = previous.plan_conversation_id.as_deref() {
-        crate::backend::conversation::cleanup(
-            previous.plan_conversation_backend.as_deref(),
-            id,
-            previous.plan_conversation_home.as_deref(),
-            previous
-                .worktree_path
-                .as_deref()
-                .or(Some(&previous.base_dir)),
-        )?;
-    }
-    current.plan_conversation_id = None;
-    current.plan_conversation_key = None;
-    current.plan_conversation_backend = None;
-    current.plan_conversation_home = None;
-    manager.save(&current)
+
+    Ok(PreparedPlan {
+        pr_target,
+        noninteractive,
+        input,
+        images,
+        has_issue,
+        target,
+    })
 }
 
-/// Returns the reason an explicit CLI request overrides `force_exec`, or `None`.
+fn resolve_plan_target(
+    repo: Option<&str>,
+    explicit_config: Option<&str>,
+    has_issue: bool,
+) -> Result<PlanTarget> {
+    match repo.map(str::trim) {
+        Some(spec) if !spec.is_empty() => {
+            crate::repo_clone::validate_repo_spec(spec)?;
+            let ctx = crate::forge::resolve_repo_locator_env(spec)?;
+            if has_issue && ctx.kind != crate::forge::ForgeKind::GitHub {
+                return Err(CruiseError::Other(
+                    "issue input is supported for GitHub repositories only".into(),
+                ));
+            }
+            crate::forge::ensure_forge_available(ctx.kind)?;
+            Ok(PlanTarget::Repo)
+        }
+        _ => {
+            let (yaml, source) = crate::resolver::resolve_config(explicit_config)?;
+            let config = crate::resolver::load_config_from_source(&yaml, &source)?;
+            eprintln!("{}", style(source.display_string()).dim());
+            Ok(PlanTarget::Local {
+                yaml,
+                source,
+                config,
+            })
+        }
+    }
+}
+
 fn force_exec_opt_out(no_force_exec: bool, grill: bool, has_images: bool) -> Option<&'static str> {
     if no_force_exec {
         Some("--no-force-exec")
@@ -163,29 +156,6 @@ fn force_exec_opt_out(no_force_exec: bool, grill: bool, has_images: bool) -> Opt
     } else {
         None
     }
-}
-
-fn notification_kind_for_plan_result(
-    result: &Result<()>,
-) -> Option<crate::desktop_notifications::WorkflowNotificationKind> {
-    match result {
-        Ok(()) => Some(crate::desktop_notifications::WorkflowNotificationKind::PlanReady),
-        Err(CruiseError::Interrupted) => None,
-        Err(_) => Some(crate::desktop_notifications::WorkflowNotificationKind::Failed),
-    }
-}
-
-fn notify_plan_result(session: &SessionState, result: &Result<()>) {
-    let Some(kind) = notification_kind_for_plan_result(result) else {
-        return;
-    };
-    let detail = result.as_ref().err().map(ToString::to_string);
-    crate::desktop_notifications::send_best_effort(
-        kind,
-        Some(session.title_or_input()),
-        detail.as_deref(),
-        &session.id,
-    );
 }
 
 async fn run_force_exec(
@@ -227,100 +197,220 @@ async fn run_force_exec(
     .await
 }
 
-struct PreparedPlan {
-    pr_target: Option<crate::pr_review_fix::PrTarget>,
-    noninteractive: bool,
-    input: String,
-    images: Vec<PathBuf>,
-    has_issue: bool,
+async fn run_force_exec_or_continue(
     target: PlanTarget,
+    args: &PlanArgs,
+    input: &str,
+    images: &[PathBuf],
+    has_issue: bool,
+) -> Result<Option<PlanTarget>> {
+    if let PlanTarget::Local { config, .. } = &target
+        && config.force_exec()
+    {
+        if let Some(reason) = force_exec_opt_out(args.no_force_exec, args.grill, !images.is_empty())
+            .or(if has_issue { Some("issue input") } else { None })
+        {
+            eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim());
+        } else {
+            run_force_exec(
+                target,
+                input.trim().to_string(),
+                args.rate_limit_retries,
+                args.dry_run,
+                false,
+                args.flags.clone(),
+            )
+            .await?;
+            return Ok(None);
+        }
+    }
+    Ok(Some(target))
 }
 
-fn prepare_plan(args: &mut PlanArgs) -> Result<PreparedPlan> {
-    let pr_target = if let Some(number) = args.pr {
-        let target = crate::pr_review_fix::resolve_pr_target(number, args.repo.as_deref())?;
-        args.config
-            .get_or_insert_with(|| crate::pr_review_fix::BUILTIN_SELECTOR.to_string());
-        args.skip_planning = true;
-        args.no_force_exec = true;
-        Some(target)
-    } else {
-        None
-    };
-    // noninteractive is true whenever stdin is not a terminal (pipe, redirect,
-    // or backward-compat path where cli.rs already consumed stdin and placed
-    // the content in args.input). This prevents inquire from attempting to
-    // read interactive input from a non-TTY file descriptor.
-    let noninteractive = !std::io::stdin().is_terminal();
-
-    // Grill mode interviews the user via interactive prompts, so it cannot run in
-    // a non-TTY context. Fail before creating any session.
-    if args.grill && noninteractive {
-        return Err(CruiseError::Other(
-            "--grill requires an interactive terminal (it interviews you one \
-             question at a time); it cannot run in a non-TTY context"
-                .to_string(),
-        ));
-    }
-
-    let (raw_input, from_interactive) = if let Some(pr) = &pr_target {
-        let extra = match args.input.take() {
-            Some(input) if input != "stdin" => input,
-            Some(_) if !noninteractive => {
-                return Err(CruiseError::Other("stdin requires piped input".into()));
-            }
-            _ if noninteractive => {
-                let mut input = String::new();
-                std::io::stdin()
-                    .read_to_string(&mut input)
-                    .map_err(|error| {
-                        CruiseError::Other(format!("failed to read stdin: {error}"))
-                    })?;
-                input
-            }
-            _ => String::new(),
-        };
-        (crate::pr_review_fix::plan_text(pr, &extra), false)
-    } else if args.issue.is_some() && args.input.is_none() {
-        (String::new(), false)
-    } else {
-        read_plan_input(args.input.take(), noninteractive)?
-    };
-    // Auto-detect image paths only from the interactive prompt (Claude-Code-like
-    // drag-and-drop). For arg/stdin input, treat the text as opaque so prose
-    // mentioning a path like "what changed in /tmp/x.png" stays intact.
-    let (input, mut images) = if from_interactive {
-        crate::attachments::extract_image_paths(&raw_input)
-    } else {
-        (raw_input, vec![])
-    };
-    for path in &args.images {
-        images.push(PathBuf::from(path));
-    }
-    let binding = crate::issue_input::parse_binding(&input)?;
-    if args.issue.is_some() && binding.is_some() {
-        return Err(CruiseError::Other(
-            "pass either #N or --issue, not both".to_string(),
-        ));
-    }
-    let has_issue = args.issue.is_some() || binding.is_some();
-    let target = resolve_plan_target(args.repo.as_deref(), args.config.as_deref(), has_issue)?;
-    if pr_target.is_some()
-        && let PlanTarget::Local { config, .. } = &target
-    {
-        validate_config(config)?;
-        crate::pr_review_fix::validate_workflow(config)?;
-        crate::flags::validate_names(config, &crate::flags::from_cli(&args.flags)?)?;
-    }
-
-    Ok(PreparedPlan {
+pub async fn run(mut args: PlanArgs) -> Result<()> {
+    let PreparedPlan {
         pr_target,
         noninteractive,
         input,
         images,
         has_issue,
         target,
+    } = prepare_plan(&mut args)?;
+    let Some(target) =
+        run_force_exec_or_continue(target, &args, &input, &images, has_issue).await?
+    else {
+        return Ok(());
+    };
+    if args.dry_run {
+        print_plan_dry_run(&args, &input, &images);
+        return Ok(());
+    }
+
+    let context = crate::request_context::RequestContext::capture()?;
+    let base_dir = context.cwd.clone();
+    let task_input = crate::issue_input::resolve_task_input(
+        &input,
+        args.issue,
+        args.repo.as_deref(),
+        &base_dir,
+        &crate::issue_input::GhGithub,
+    )?;
+    let request = build_session_request(
+        &target,
+        args.config.as_deref(),
+        task_input,
+        &images,
+        pr_target.clone(),
+        &args.flags,
+        args.repo.clone(),
+        context.clone(),
+    )?;
+    let _herdr = crate::herdr::start();
+    let client = DaemonClient::connect().await?;
+    let mut session = client.create_session(&request).await?;
+
+    if pr_target.is_none() {
+        let plan_request = PlanRequest {
+            grill: args.grill,
+            skip_planning: args.skip_planning,
+            no_interactive_planning: args.no_interactive_planning,
+            interactive: Interactive::new(!noninteractive || args.skip_planning),
+            rate_limit_retries: args.rate_limit_retries,
+            context: Some(context.clone()),
+            ..PlanRequest::default()
+        };
+        let stream = client
+            .events(EventFilter {
+                session: Some(session.id.clone()),
+                batch: false,
+            })
+            .await?;
+        client.start_plan(&session.id, &plan_request).await?;
+        let mut events = PlanningEvents::new(&client, &session.id);
+        let finished = crate::cli_events::drive(&client, &session.id, stream, &mut events).await?;
+        if finished.cancelled_by_user {
+            client.delete_session(&session.id, &context).await?;
+            return Err(CruiseError::Interrupted);
+        }
+        session = match ensure_plan_operation_succeeded(finished) {
+            Ok(session) => session,
+            Err(error) => {
+                crate::status_eprintln!("Plan generation failed: {error}");
+                return Err(error);
+            }
+        };
+    }
+
+    if matches!(session.phase, SessionPhase::Planned) {
+        eprintln!(
+            "\n{} Session {} created (input used as plan).",
+            style("v").green().bold(),
+            session.id
+        );
+        eprintln!(
+            "  Run with: {}",
+            style(format!("cruise run {}", session.id)).cyan()
+        );
+        return Ok(());
+    }
+    if !matches!(session.phase, SessionPhase::AwaitingApproval) {
+        return Ok(());
+    }
+    let config = client.session_config(&session.id).await?;
+    review_plan(&client, session, &config, &args, &context, noninteractive).await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "This request builder maps independent plan CLI inputs into the API DTO."
+)]
+fn build_session_request(
+    target: &PlanTarget,
+    explicit_config: Option<&str>,
+    task_input: crate::issue_input::ResolvedTaskInput,
+    images: &[PathBuf],
+    pr_target: Option<crate::pr_review_fix::PrTarget>,
+    assignments: &[(String, bool)],
+    repo: Option<String>,
+    context: crate::request_context::RequestContext,
+) -> Result<NewSessionRequest> {
+    let (config_path, config_yaml) = match target {
+        PlanTarget::Local { yaml, source, .. } => config_request(source, yaml, &context.cwd),
+        PlanTarget::Repo => (
+            explicit_config.map(|path| request_config_path(path, &context.cwd)),
+            None,
+        ),
+    };
+    let issue_images = task_input
+        .images
+        .into_iter()
+        .map(|image| NewSessionImage {
+            extension: image.extension.to_string(),
+            bytes: image.bytes,
+        })
+        .collect();
+    Ok(NewSessionRequest {
+        input: task_input.text,
+        base_dir: context.cwd.clone(),
+        config_path,
+        config_yaml,
+        repo,
+        pr_number: pr_target.as_ref().map(|target| target.number),
+        pr_target,
+        issue_number: task_input.issue_number,
+        issue_images,
+        attachments: images.to_vec(),
+        flags: crate::flags::from_cli(assignments)?,
+        context: Some(context),
+        ..NewSessionRequest::default()
     })
+}
+
+fn config_request(
+    source: &ConfigSource,
+    yaml: &str,
+    cwd: &Path,
+) -> (Option<PathBuf>, Option<String>) {
+    if let Some(path) = source.path() {
+        let path = request_config_path(&path.to_string_lossy(), cwd);
+        return (Some(path), None);
+    }
+    match source {
+        ConfigSource::Builtin => (
+            Some(PathBuf::from(
+                crate::new_session_history::BUILTIN_CONFIG_KEY,
+            )),
+            None,
+        ),
+        ConfigSource::NamedBuiltin(name) => (
+            Some(PathBuf::from(format!(
+                "{}{name}",
+                crate::resolver::BUILTIN_SELECTOR_PREFIX
+            ))),
+            None,
+        ),
+        ConfigSource::Inline => (None, Some(yaml.to_string())),
+        ConfigSource::Explicit(_)
+        | ConfigSource::EnvVar(_)
+        | ConfigSource::Local(_)
+        | ConfigSource::UserDir(_) => unreachable!(),
+    }
+}
+
+fn request_config_path(value: &str, cwd: &Path) -> PathBuf {
+    let expanded = crate::new_session_history::expand_tilde(value);
+    if expanded == crate::new_session_history::BUILTIN_CONFIG_KEY
+        || expanded.starts_with(crate::resolver::BUILTIN_SELECTOR_PREFIX)
+    {
+        PathBuf::from(expanded)
+    } else {
+        let path = PathBuf::from(expanded);
+        if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        }
+    }
 }
 
 fn print_plan_dry_run(args: &PlanArgs, input: &str, images: &[PathBuf]) {
@@ -339,561 +429,35 @@ fn print_plan_dry_run(args: &PlanArgs, input: &str, images: &[PathBuf]) {
     }
 }
 
-async fn run_force_exec_or_continue(
-    target: PlanTarget,
-    args: &PlanArgs,
-    input: &str,
-    images: &[PathBuf],
-    has_issue: bool,
-) -> Result<Option<PlanTarget>> {
-    if let PlanTarget::Local { config, .. } = &target
-        && config.force_exec()
-    {
-        if let Some(reason) = force_exec_opt_out(args.no_force_exec, args.grill, !images.is_empty())
-            .or(if has_issue { Some("issue input") } else { None })
-        {
-            eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim());
-        } else {
-            Box::pin(run_force_exec(
-                target,
-                input.trim().to_string(),
-                args.rate_limit_retries,
-                args.dry_run,
-                false,
-                args.flags.clone(),
-            ))
-            .await?;
-            return Ok(None);
-        }
-    }
-    Ok(Some(target))
-}
-
-pub async fn run(mut args: PlanArgs) -> Result<()> {
-    let PreparedPlan {
-        pr_target,
-        noninteractive,
-        input,
-        images,
-        has_issue,
-        target,
-    } = prepare_plan(&mut args)?;
-
-    let Some(target) =
-        run_force_exec_or_continue(target, &args, &input, &images, has_issue).await?
-    else {
-        return Ok(());
-    };
-
-    if args.dry_run {
-        print_plan_dry_run(&args, &input, &images);
-        return Ok(());
-    }
-
-    let task_input = crate::issue_input::resolve_task_input(
-        &input,
-        args.issue,
-        args.repo.as_deref(),
-        &std::env::current_dir()?,
-        &crate::issue_input::GhGithub,
-    )?;
-    let _herdr = crate::herdr::start();
-    let manager = SessionManager::new(crate::paths::data_dir()?);
-
-    let session_id = SessionManager::new_session_id();
-    let operation = crate::telemetry::Operation::execution("plan", &session_id, None);
-    let created = create_session_for_target(
-        &manager,
-        target,
-        args.config.as_deref(),
-        &task_input.text,
-        &session_id,
-    );
-    let plan_result = match created {
-        Ok((config, mut session)) => {
-            if let Some(pr) = pr_target {
-                if let Err(error) = crate::pr_review_fix::validate_workflow(&config) {
-                    cleanup_discarded_session_workspace(&manager, &session);
-                    let _ = manager.delete(&session.id);
-                    return Err(error);
-                }
-                session.pr_url = Some(pr.url.clone());
-                session.pr_target = Some(pr);
-                manager.save(&session)?;
-            }
-            operation.set_workflow(&session.config);
-            run_created_plan(
-                &args,
-                &manager,
-                config,
-                session,
-                noninteractive,
-                images,
-                task_input,
-            )
-            .with_context(operation.context())
-            .await
-        }
-        Err(error) => Err(error),
-    };
-    if matches!(&plan_result, Ok(PlanDisposition::Cancelled)) {
-        operation.finish("cancelled");
-        return Ok(());
-    }
-    operation.finish_result(&plan_result);
-    if let PlanDisposition::ExecuteNow { flags } = plan_result? {
-        eprintln!(
-            "\n{} Executing session {}...",
-            style("->").cyan(),
-            session_id
-        );
-        let run_args = crate::cli::RunArgs {
-            session: Some(session_id),
-            all: false,
-            parallelism: None,
-            auto_requeue_max_attempts: None,
-            max_retries: None,
-            rate_limit_retries: args.rate_limit_retries,
-            dry_run: false,
-            cleanup_after_pr: false,
-            no_cleanup_after_pr: false,
-            flags,
-        };
-        return crate::run_cmd::run(run_args).await;
-    }
-    Ok(())
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum PlanDisposition {
-    Completed,
-    Cancelled,
-    ExecuteNow { flags: Vec<(String, bool)> },
-}
-
-async fn run_created_plan(
-    args: &PlanArgs,
-    manager: &SessionManager,
-    mut config: WorkflowConfig,
-    mut session: SessionState,
-    noninteractive: bool,
-    images: Vec<PathBuf>,
-    task_input: crate::issue_input::ResolvedTaskInput,
-) -> Result<PlanDisposition> {
-    let prepare_operation = crate::telemetry::Operation::phase("prepare");
-    let prepared: Result<()> = (|| {
-        apply_cli_flags_or_discard(manager, &config, &mut session, &args.flags)?;
-
-        if let Err(e) = attach_task_inputs_or_discard(manager, &mut session, &task_input, &images) {
-            eprintln!(
-                "\n{} Failed to attach images. Session {} discarded.",
-                style("✗").red().bold(),
-                session.id
-            );
-            return Err(e);
-        }
-
-        if args.no_interactive_planning {
-            config.interactive_planning = false;
-        }
-
-        // Grill mode relies on the SDK `ask_user` tool, which is only registered in
-        // the interactive tool-based planning flow. Reject when no SDK backend is
-        // selected or when `interactive_planning` is disabled, discarding the
-        // session we just created.
-        if args.grill && !crate::planning::sdk_plan_tools_enabled(&config) {
-            if let Err(del_err) = manager.delete(&session.id) {
-                eprintln!("warning: failed to clean up session: {del_err}");
-            }
-            return Err(CruiseError::Other(
-                "--grill requires an SDK backend with interactive planning enabled \
-                 (`command:` must not be set and `interactive_planning` must not be \
-                 disabled); the command backend and tool-less planning have no \
-                 interactive ask_user tool"
-                    .to_string(),
-            ));
-        }
-        Ok(())
-    })();
-    prepare_operation.finish_result(&prepared);
-    prepared?;
-
-    let workspace_operation = crate::telemetry::Operation::phase("workspace");
-    let workspace = setup_planning_worktree_or_discard(manager, &mut session);
-    workspace_operation.finish_result(&workspace);
-    workspace?;
-
-    let (plan_path, mut vars, mut resume) =
-        generate_created_plan(args, manager, &config, &mut session, noninteractive).await?;
-    run_approve_loop(
-        &config,
-        manager,
-        &mut session,
-        &plan_path,
-        &mut vars,
-        args.rate_limit_retries,
-        noninteractive,
-        &mut resume,
-        &args.flags,
-    )
-    .await
-}
-
-async fn generate_created_plan(
-    args: &PlanArgs,
-    manager: &SessionManager,
-    config: &WorkflowConfig,
-    session: &mut SessionState,
-    noninteractive: bool,
-) -> Result<(
-    PathBuf,
-    VariableStore,
-    Option<crate::model_selection::SdkSessionId>,
-)> {
-    let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = setup_plan_vars(session.input_with_attachments(), plan_path.clone(), config);
-
-    // SDK backends return an SDK-owned session id for plan / fix / ask turns so the turns
-    // share one conversation; command mode always leaves this `None`.
-    let mut resume: Option<crate::model_selection::SdkSessionId> = None;
-    let interactive = !noninteractive;
-
-    if args.skip_planning {
-        // Write the augmented input so the saved plan references the attached
-        // images; the LLM running steps will pick those up via plan.md.
-        let plan_content = session.input_with_attachments();
-        let write_result = crate::planning::write_input_as_plan(&plan_path, &plan_content)
-            .and_then(|content| {
-                crate::metadata::refresh_session_title_from_plan(session, &content);
-                session.mark_input_as_plan();
-                manager.save(session)
-            });
-        if let Err(e) = write_result {
-            notify_plan_result(session, &Err(CruiseError::Other(e.to_string())));
-            eprintln!(
-                "\n{} Failed to write input as plan. Session {} discarded.",
-                style("✗").red().bold(),
-                session.id
-            );
-            cleanup_discarded_session_workspace(manager, session);
-            if let Err(del_err) = manager.delete(&session.id) {
-                eprintln!("warning: failed to clean up session: {del_err}");
-            }
-            return Err(e);
-        }
-        notify_plan_result(session, &Ok(()));
-    } else {
-        let work_dir = plan_working_dir(session).to_path_buf();
-        let cancel_token = CancellationToken::new();
-        let on_notice = cli_notice_callback(manager, &session.id);
-        let on_session_id = cli_plan_session_callback(manager, session, config, &work_dir);
-        let ctx = cli_plan_ctx(
-            config,
-            Some(&session.id),
-            &plan_path,
-            Some(&work_dir),
-            interactive,
-            args.rate_limit_retries,
-            args.grill,
-            Some(&cancel_token),
-            on_session_id.as_deref(),
-            Some(&on_notice),
-        );
-        let planning_operation = crate::telemetry::Operation::phase("planning");
-        let plan_result: Result<_> = async {
-            let planning = generate_plan_markdown(&ctx, &mut vars, &mut resume);
-            tokio::pin!(planning);
-            tokio::select! {
-                result = &mut planning => result,
-                _ = tokio::signal::ctrl_c() => {
-                    cancel_token.cancel();
-                    let _ = planning.await;
-                    Err(CruiseError::Interrupted)
-                },
-            }
-        }
-        .with_context(planning_operation.context())
-        .await;
-        planning_operation.finish_result(&plan_result);
-        if let Err(e) = plan_result {
-            if !matches!(&e, &CruiseError::Interrupted) {
-                notify_plan_result(session, &Err(CruiseError::Other(e.to_string())));
-            }
-            eprintln!(
-                "\n{} Plan generation failed. Session {} discarded.",
-                style("✗").red().bold(),
-                session.id
-            );
-            cleanup_discarded_session_workspace(manager, session);
-            if let Err(del_err) = manager.delete(&session.id) {
-                eprintln!("warning: failed to clean up session: {del_err}");
-            }
-            return Err(e);
-        }
-        notify_plan_result(session, &Ok(()));
-        let session_id = session.id.clone();
-        *session = manager.load(&session_id)?;
-    }
-    Ok((plan_path, vars, resume))
-}
-
-pub async fn launch_background_plan(
-    plan_input: &str,
-    skip_planning: bool,
-    repo: Option<&str>,
-    images: &[String],
-    no_force_exec: bool,
-    flags: &[(String, bool)],
-) -> Result<()> {
-    // Background planning input never comes from the interactive prompt, so
-    // skip text-based path extraction (which would shadow legitimate prose
-    // mentions of file paths) and accept image attachments only via `--image`.
-    let input = read_background_plan_input(plan_input)?;
-    let has_issue = crate::issue_input::parse_binding(&input)?.is_some();
-    let target = resolve_plan_target(repo, None, has_issue)?;
-    let detected_images = images.iter().map(PathBuf::from).collect::<Vec<_>>();
-
-    if let PlanTarget::Local { config, .. } = &target
-        && config.force_exec()
-    {
-        match force_exec_opt_out(no_force_exec, false, !detected_images.is_empty())
-            .or(if has_issue { Some("issue input") } else { None })
-        {
-            Some(reason) => {
-                eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim());
-            }
-            None => {
-                return Box::pin(run_force_exec(
-                    target,
-                    input.trim().to_string(),
-                    DEFAULT_RATE_LIMIT_RETRIES,
-                    false,
-                    true,
-                    flags.to_vec(),
-                ))
-                .await;
-            }
-        }
-    }
-
-    let task_input = crate::issue_input::resolve_task_input(
-        &input,
-        None,
-        repo,
-        &std::env::current_dir()?,
-        &crate::issue_input::GhGithub,
-    )?;
-    let manager = SessionManager::new(crate::paths::data_dir()?);
-    let session_id = SessionManager::new_session_id();
-    let operation = crate::telemetry::Operation::execution("plan", &session_id, None);
-    let result: Result<()> =
-        match create_session_for_target(&manager, target, None, &task_input.text, &session_id) {
-            Ok((config, mut session)) => {
-                operation.set_workflow(&session.config);
-                async {
-                    let prepare_operation = crate::telemetry::Operation::phase("prepare");
-                    let prepared: Result<()> = (|| {
-                        apply_cli_flags_or_discard(&manager, &config, &mut session, flags)?;
-                        attach_task_inputs_or_discard(
-                            &manager,
-                            &mut session,
-                            &task_input,
-                            &detected_images,
-                        )
-                    })();
-                    prepare_operation.finish_result(&prepared);
-                    prepared?;
-
-                    let workspace_operation = crate::telemetry::Operation::phase("workspace");
-                    let workspace = setup_planning_worktree_or_discard(&manager, &mut session);
-                    workspace_operation.finish_result(&workspace);
-                    workspace?;
-
-                    if skip_planning {
-                        write_and_finalize_background_plan_input(
-                            &manager,
-                            &mut session,
-                            config.create_pr,
-                        )?;
-                        eprintln!(
-                            "\n{} Session {} created (input used as plan).",
-                            style("✓").green().bold(),
-                            session.id
-                        );
-                        eprintln!("  Check status with: {}", style("cruise list").cyan());
-                        eprintln!(
-                            "  Run with: {}",
-                            style(format!("cruise run {}", session.id)).cyan()
-                        );
-                    } else {
-                        let finalize_operation = crate::telemetry::Operation::phase("finalize");
-                        let launched = spawn_plan_worker(&session.id, DEFAULT_RATE_LIMIT_RETRIES);
-                        finalize_operation.finish_result(&launched);
-                        launched?;
-                        eprintln!(
-                            "\n{} Session {} created. Planning in background.",
-                            style("✓").green().bold(),
-                            session.id
-                        );
-                        eprintln!("  Check status with: {}", style("cruise list").cyan());
-                        eprintln!(
-                            "  Run once ready: {}",
-                            style(format!("cruise run {}", session.id)).cyan()
-                        );
-                    }
-                    Ok(())
-                }
-                .with_context(operation.context())
-                .await
-            }
-            Err(error) => Err(error),
-        };
-    operation.finish_result(&result);
-    result
-}
-
-fn write_and_finalize_background_plan_input(
-    manager: &SessionManager,
-    session: &mut SessionState,
-    create_pr: bool,
-) -> Result<()> {
-    let plan_path = session.plan_path(&manager.sessions_dir());
-    let plan_content = session.input_with_attachments();
-    let plan_result =
-        crate::planning::write_input_as_plan(&plan_path, &plan_content).and_then(|content| {
-            crate::metadata::refresh_session_title_from_plan(session, &content);
-            session.mark_input_as_plan();
-            manager.save(session)
-        });
-
-    let skip_result = if plan_result.is_ok() {
-        let finalize_operation = crate::telemetry::Operation::phase("finalize");
-        let finalized = finalize_skip_planning_session(manager, session, create_pr);
-        finalize_operation.finish_result(&finalized);
-        finalized
-    } else {
-        plan_result
-    };
-    if let Err(error) = skip_result {
-        notify_plan_result(session, &Err(CruiseError::Other(error.to_string())));
-        cleanup_discarded_session_workspace(manager, session);
-        if let Err(del_err) = manager.delete(&session.id) {
-            eprintln!("warning: failed to clean up session: {del_err}");
-        }
-        return Err(error);
-    }
-    notify_plan_result(session, &Ok(()));
-    Ok(())
-}
-
-fn finalize_skip_planning_session(
-    manager: &SessionManager,
-    session: &mut SessionState,
-    create_pr: bool,
-) -> Result<()> {
-    if let Some(conversation_id) = session.plan_conversation_id.as_deref() {
-        crate::backend::conversation::cleanup(
-            session.plan_conversation_backend.as_deref(),
-            conversation_id,
-            session.plan_conversation_home.as_deref(),
-            session.worktree_path.as_deref().or(Some(&session.base_dir)),
-        )?;
-    }
-    session.plan_conversation_id = None;
-    session.plan_conversation_key = None;
-    session.plan_conversation_backend = None;
-    session.plan_conversation_home = None;
-    session.approve(); // AwaitingApproval -> Planned, clears plan_error
-    crate::repo_clone::cleanup_after_approval(manager, session, create_pr);
-    manager.save(session)
-}
-
-pub async fn run_plan_worker(args: PlanWorkerArgs) -> Result<()> {
-    let operation = crate::telemetry::Operation::execution("plan", &args.session, None);
-    let result = run_plan_worker_inner(args, &operation)
-        .with_context(operation.context())
-        .await;
-    operation.finish_result(&result);
-    result
-}
-
-async fn run_plan_worker_inner(
-    args: PlanWorkerArgs,
-    operation: &crate::telemetry::Operation,
-) -> Result<()> {
-    let manager = SessionManager::new(crate::paths::data_dir()?);
-    let mut session = match manager.load(&args.session) {
-        Ok(session) => session,
-        Err(CruiseError::SessionError(_)) => return Ok(()),
-        Err(err) => return Err(err),
-    };
-    operation.set_workflow(&session.config);
-    let prepare_operation = crate::telemetry::Operation::phase("prepare");
-    session.plan_error = None;
-    let prepared = manager.save(&session);
-    prepare_operation.finish_result(&prepared);
-    prepared?;
-
-    let planning_operation = crate::telemetry::Operation::phase("planning");
-    let result = generate_plan_for_session(&manager, &session, args.rate_limit_retries)
-        .with_context(planning_operation.context())
-        .await;
-    planning_operation.finish_result(&result);
-    let finalize_operation = crate::telemetry::Operation::phase("finalize");
-    let finalized: Result<()> = async {
-        let session_id = session.id.clone();
-        session = manager.load(&session_id)?;
-        match result {
-            Ok(plan_markdown) => {
-                crate::metadata::refresh_session_title_from_plan(&mut session, &plan_markdown);
-                session.plan_error = None;
-                manager.save(&session)?;
-                notify_plan_result(&session, &Ok(()));
-                Ok(())
-            }
-            Err(err) => {
-                let plan_error = err.to_string();
-                session.plan_error = Some(plan_error.clone());
-                manager.save(&session)?;
-                if !matches!(&err, &CruiseError::Interrupted) {
-                    notify_plan_result(&session, &Err(CruiseError::Other(plan_error.clone())));
-                }
-                Err(CruiseError::Other(plan_error))
-            }
-        }
-    }
-    .with_context(finalize_operation.context())
-    .await;
-    finalize_operation.finish_result(&finalized);
-    finalized
-}
-
-/// Read task input from CLI arg, piped stdin, or interactive prompt. The
-/// returned `from_interactive` flag is true only when the text came from the
-/// `reedline` prompt — callers use it to decide whether to auto-detect image
-/// paths in the body (a drag-and-drop UX) versus preserving piped/arg text
-/// verbatim.
 fn read_plan_input(input: Option<String>, noninteractive: bool) -> Result<(String, bool)> {
     let stdin_input = if input.is_none() && noninteractive {
-        let mut s = String::new();
+        let mut text = String::new();
         std::io::stdin()
-            .read_to_string(&mut s)
+            .read_to_string(&mut text)
             .map_err(CruiseError::IoError)?;
-        Some(s)
+        Some(text)
     } else {
         None
     };
-    let from_arg_or_stdin = input.is_some() || stdin_input.is_some();
-    let text = resolve_input(input, stdin_input, || {
+    let from_argument_or_stdin = input.is_some() || stdin_input.is_some();
+    let text = if let Some(text) = input {
+        text
+    } else if let Some(text) = stdin_input {
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(CruiseError::Other("no input provided on stdin".to_string()));
+        }
+        trimmed
+    } else {
         if noninteractive {
             return Err(CruiseError::Other(
-                "no input provided: stdin is not a terminal and no --input flag was given"
+                "no input provided: stdin is not a terminal and no input argument was given"
                     .to_string(),
             ));
         }
-        prompt_for_plan_input()
-    })?;
-    Ok((text, !from_arg_or_stdin))
+        prompt_for_plan_input()?
+    };
+    Ok((text, !from_argument_or_stdin))
 }
 
 fn read_background_plan_input(input: &str) -> Result<String> {
@@ -915,7 +479,6 @@ fn read_background_plan_input(input: &str) -> Result<String> {
         }
         return Ok(trimmed);
     }
-
     let trimmed = input.trim().to_string();
     if trimmed.is_empty() {
         return Err(CruiseError::Other(
@@ -925,498 +488,11 @@ fn read_background_plan_input(input: &str) -> Result<String> {
     Ok(trimmed)
 }
 
-async fn approve_with_title(
-    session: &mut SessionState,
-    manager: &SessionManager,
-    config: &WorkflowConfig,
-    plan_content: &str,
-    cancel_token: Option<&CancellationToken>,
-) -> Result<()> {
-    // The `generate_title` tool needs an SDK backend, which includes the default
-    // `jcode` one a config gets by naming neither `sdk:` nor `command:`.
-    if session.pr_target.is_some() {
-        crate::metadata::refresh_session_title_from_plan(session, plan_content);
-    } else if crate::executor::Executor::new(config.sdk.as_deref(), &config.command).is_sdk() {
-        // Title dispatch forwards neither workflow env nor a working directory.
-        // Keep this gate outside the optional title-error warning handler.
-        let mut auth_config = config.clone();
-        auth_config.env.clear();
-        crate::agent_auth::ensure_agents_authenticated(
-            &auth_config,
-            crate::agent_auth::AuthScope::Planning,
-            None,
-        )?;
-        let log_notice = cli_notice_callback(manager, &session.id);
-        let on_notice = |message: &str| {
-            crate::status_eprintln!("{}", style(message).dim());
-            log_notice(message);
-        };
-        match generate_title_via_sdk(
-            config,
-            &session.input,
-            plan_content,
-            cancel_token,
-            Some(&on_notice),
-            Some(&session.id),
-        )
-        .await
-        {
-            Ok(title) => session.title = Some(title),
-            Err(CruiseError::Interrupted) => return Err(CruiseError::Interrupted),
-            Err(e @ CruiseError::MissingJcodeModel(_)) => return Err(e),
-            Err(e) => {
-                eprintln!("warning: SDK title generation failed: {e}");
-                crate::metadata::refresh_session_title_from_plan(session, plan_content);
-            }
-        }
-    } else {
-        crate::metadata::refresh_session_title_from_plan(session, plan_content);
+fn prompt_for_plan_input() -> Result<String> {
+    match prompt_multiline("What would you like to implement?")? {
+        InputResult::Submitted(text) => Ok(text),
+        InputResult::Cancelled => Err(CruiseError::StepPaused),
     }
-    session.approve();
-    if session.pr_target.is_none() {
-        crate::repo_clone::cleanup_after_approval(manager, session, config.create_pr);
-    }
-    manager.save(session)
-}
-
-async fn generate_title_via_sdk(
-    config: &WorkflowConfig,
-    input: &str,
-    plan_content: &str,
-    cancel_token: Option<&CancellationToken>,
-    on_notice: Option<&(dyn Fn(&str) + Send + Sync)>,
-    usage_session_id: Option<&str>,
-) -> Result<String> {
-    let title_store = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-    let tool = crate::sdk_tools::generate_title_tool(std::sync::Arc::clone(&title_store));
-
-    let executor = crate::executor::Executor::new(config.sdk.as_deref(), &config.command);
-    let model =
-        crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref());
-    let prompt = format!(
-        "Generate a concise session title (max 80 chars) for this task and plan. \
-         Call the generate_title tool with your title.\n\n\
-         Task: {input}\n\nPlan:\n{plan_content}"
-    );
-    let env = std::collections::HashMap::new();
-    executor
-        .run(crate::executor::PromptRun {
-            usage: Some(crate::usage::UsageScope {
-                session_id: usage_session_id,
-                step: None,
-                purpose: crate::usage::UsagePurpose::PlanTitle,
-            }),
-            prompt: &prompt,
-            model,
-            subagent_model: None,
-            max_retries: 1,
-            env: &env,
-            mcp_servers: &config.mcp_servers,
-            on_notice,
-            cancel_token,
-            working_dir: None,
-            stream: None,
-            tools: vec![tool],
-            on_session_id: None,
-            resume: None,
-            computer_use: false,
-            permission: crate::config::PermissionMode::Full,
-            tool_policy: crate::tool_policy::ToolPolicy::default(),
-        })
-        .await?;
-
-    title_store
-        .lock()
-        .map_err(|e| CruiseError::Other(format!("title store lock poisoned: {e}")))?
-        .clone()
-        .ok_or_else(|| CruiseError::Other("SDK agent did not call generate_title tool".to_string()))
-}
-
-/// Return the directory where plan-related LLM calls should run.
-///
-/// If a planning worktree was created the LLM executes inside it, keeping the
-/// original working copy clean.  Falls back to `base_dir` for non-git repos.
-fn plan_working_dir(session: &SessionState) -> &Path {
-    session
-        .worktree_path
-        .as_deref()
-        .unwrap_or(session.base_dir.as_path())
-}
-
-/// Create a planning worktree for `session` and record its path/branch.
-///
-/// On success the session is saved with `worktree_path` and `worktree_branch`
-/// set.  If `base_dir` is not a git repository the call succeeds silently and
-/// the session keeps `worktree_path = None` (plan runs in `base_dir`).
-fn setup_planning_worktree(manager: &SessionManager, session: &mut SessionState) -> Result<()> {
-    let worktrees_dir = manager.worktrees_dir();
-    let result = if let Some(pr) = &session.pr_target {
-        crate::pr_review_fix::validate_origin(pr, &session.base_dir)?;
-        crate::worktree::setup_pr_worktree(
-            &session.base_dir,
-            &session.id,
-            &worktrees_dir,
-            &pr.head_branch,
-        )
-    } else {
-        crate::workspace::setup_session_worktree(manager, session)
-    };
-    match result {
-        Ok((ctx, reused)) => {
-            eprintln!(
-                "{} worktree: {} (planning)",
-                style("->").cyan(),
-                ctx.path.display()
-            );
-            session.worktree_path = Some(ctx.path.clone());
-            session.worktree_branch = Some(ctx.branch.clone());
-            if !reused && session.forked_from_branch.is_none() {
-                session.forked_from_branch = crate::worktree::attached_branch(&session.base_dir);
-            }
-            manager.save(session)?;
-        }
-        Err(CruiseError::NotGitRepository) => {
-            eprintln!("warning: not a git repository; planning in base directory");
-        }
-        Err(e) => return Err(e),
-    }
-    Ok(())
-}
-
-/// [`setup_planning_worktree`], discarding the freshly created session (and
-/// its temporary clone, for repo-backed sessions) when worktree setup fails so
-/// nothing leaks on the error path.
-fn setup_planning_worktree_or_discard(
-    manager: &SessionManager,
-    session: &mut SessionState,
-) -> Result<()> {
-    setup_planning_worktree(manager, session).inspect_err(|_| {
-        eprintln!(
-            "\n{} Worktree setup failed. Session {} discarded.",
-            style("✗").red().bold(),
-            session.id
-        );
-        cleanup_discarded_session_workspace(manager, session);
-        if let Err(del_err) = manager.delete(&session.id) {
-            eprintln!("warning: failed to clean up session: {del_err}");
-        }
-    })
-}
-
-/// Clean up the planning worktree if one was created.  Failures are logged as
-/// warnings and do not propagate — cleanup is best-effort.
-fn cleanup_planning_worktree(session: &SessionState) {
-    if let Some(ctx) = session.worktree_context()
-        && let Err(e) = crate::worktree::cleanup_worktree(&ctx)
-    {
-        eprintln!("warning: failed to clean up planning worktree: {e}");
-    }
-}
-
-fn create_planning_session(
-    manager: &SessionManager,
-    yaml: &str,
-    source: &ConfigSource,
-    input: String,
-    session_id: &str,
-) -> Result<SessionState> {
-    let base_dir = std::env::current_dir()?;
-    let config_ref = SessionConfigRef::from_source(source, None)?;
-    let session = SessionState::new(session_id.to_string(), base_dir, config_ref, input);
-    let config = crate::resolver::load_config_from_source(yaml, source)?;
-    manager.create_with_config(&session, &config)?;
-
-    Ok(session)
-}
-
-/// Where a new plan session sources its working copy and config from.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "local targets carry their already-resolved config to avoid duplicate parsing"
-)]
-enum PlanTarget {
-    /// Plan in the current directory using an already-resolved config.
-    Local {
-        yaml: String,
-        source: ConfigSource,
-        config: WorkflowConfig,
-    },
-    /// Clone `owner/repo` into a temporary directory and plan there.
-    Repo(String),
-}
-
-/// Validate `--repo` and resolve the workflow config for the upcoming session.
-///
-/// For local sessions the config is resolved (and displayed) immediately; for
-/// repo sessions only the spec is validated -- the config lives in the
-/// temporary clone, which is created later.
-fn resolve_plan_target(
-    repo: Option<&str>,
-    explicit_config: Option<&str>,
-    has_issue: bool,
-) -> Result<PlanTarget> {
-    match repo.map(str::trim) {
-        Some(spec) if !spec.is_empty() => {
-            crate::repo_clone::validate_repo_spec(spec)?;
-            let ctx = crate::forge::resolve_repo_locator_env(spec)?;
-            if has_issue && ctx.kind != crate::forge::ForgeKind::GitHub {
-                return Err(CruiseError::Other(
-                    "issue input is supported for GitHub repositories only".into(),
-                ));
-            }
-            crate::forge::ensure_forge_available(ctx.kind)?;
-            Ok(PlanTarget::Repo(spec.to_string()))
-        }
-        _ => {
-            let (yaml, source) = crate::resolver::resolve_config(explicit_config)?;
-            let config = crate::resolver::load_config_from_source(&yaml, &source)?;
-            eprintln!("{}", style(source.display_string()).dim());
-            Ok(PlanTarget::Local {
-                yaml,
-                source,
-                config,
-            })
-        }
-    }
-}
-
-/// Validate `--flag` assignments against the config and store them on the
-/// session. An invalid assignment discards the freshly created session.
-fn apply_cli_flags_or_discard(
-    manager: &SessionManager,
-    config: &WorkflowConfig,
-    session: &mut SessionState,
-    assignments: &[(String, bool)],
-) -> Result<()> {
-    if assignments.is_empty() {
-        return Ok(());
-    }
-    let result = crate::flags::from_cli(assignments).and_then(|values| {
-        crate::flags::validate_names(config, &values)?;
-        session.flags = values;
-        manager.save(session)
-    });
-    if let Err(error) = result {
-        cleanup_discarded_session_workspace(manager, session);
-        if let Err(del_err) = manager.delete(&session.id) {
-            eprintln!("warning: failed to clean up session: {del_err}");
-        }
-        return Err(error);
-    }
-    Ok(())
-}
-
-/// Create the planning session (and, for repo targets, the temporary clone)
-/// for `target`, returning the parsed config alongside the session.
-fn create_session_for_target(
-    manager: &SessionManager,
-    target: PlanTarget,
-    explicit_config: Option<&str>,
-    input: &str,
-    session_id: &str,
-) -> Result<(WorkflowConfig, SessionState)> {
-    match target {
-        PlanTarget::Local {
-            yaml,
-            source,
-            config,
-        } => {
-            let session =
-                create_planning_session(manager, &yaml, &source, input.to_string(), session_id)?;
-            Ok((config, session))
-        }
-        PlanTarget::Repo(repo) => create_repo_planning_session(
-            manager,
-            &repo,
-            explicit_config,
-            input.to_string(),
-            session_id,
-        ),
-    }
-}
-
-/// Clone `repo` into the session clone directory and create a session whose
-/// `base_dir` points at the clone. On failure the clone and the session
-/// directory are removed.
-fn create_repo_planning_session(
-    manager: &SessionManager,
-    repo: &str,
-    explicit_config: Option<&str>,
-    input: String,
-    session_id: &str,
-) -> Result<(WorkflowConfig, SessionState)> {
-    let clone_path = manager.clones_dir().join(session_id);
-    eprintln!("{} cloning {} (planning)...", style("->").cyan(), repo);
-    crate::repo_clone::clone_repo(repo, &clone_path)?;
-
-    let result = build_repo_planning_session(
-        manager,
-        repo,
-        explicit_config,
-        input,
-        session_id,
-        &clone_path,
-    );
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&clone_path);
-        if let Err(del_err) = manager.delete(session_id) {
-            eprintln!("warning: failed to clean up session: {del_err}");
-        }
-    }
-    result
-}
-
-fn build_repo_planning_session(
-    manager: &SessionManager,
-    repo: &str,
-    explicit_config: Option<&str>,
-    input: String,
-    session_id: &str,
-    clone_path: &Path,
-) -> Result<(WorkflowConfig, SessionState)> {
-    let (yaml, source) = crate::resolver::resolve_config_in_dir(explicit_config, clone_path)?;
-    eprintln!("{}", style(source.display_string()).dim());
-    let config_ref = SessionConfigRef::from_source(&source, Some(clone_path))?;
-    let project_dir = config_ref.live_path().is_none().then_some(clone_path);
-    let config = crate::resolver::resolve_workflow_config(&yaml, &source, clone_path, project_dir)?;
-    validate_config(&config)?;
-
-    let mut session = SessionState::new(
-        session_id.to_string(),
-        clone_path.to_path_buf(),
-        config_ref,
-        input,
-    );
-    session.repo = Some(repo.to_string());
-    // Configs that live inside the clone (or the builtin default) are serialized
-    // after reference resolution into the session directory so they stay
-    // readable after the clone is removed at approval time.
-    manager.create_with_config(&session, &config)?;
-    Ok((config, session))
-}
-
-/// Copy `images` into the freshly-created `session`'s attachments directory
-/// and persist the stored paths on `session.attachments`. On any failure the
-/// session (and, for repo-backed sessions, its temporary clone) is removed
-/// before propagating the error so nothing leaks behind a half-attached
-/// session. No-op when `images` is empty.
-fn attach_task_inputs_or_discard(
-    manager: &SessionManager,
-    session: &mut SessionState,
-    task_input: &crate::issue_input::ResolvedTaskInput,
-    images: &[PathBuf],
-) -> Result<()> {
-    if images.is_empty() && task_input.images.is_empty() && task_input.issue_number.is_none() {
-        return Ok(());
-    }
-    let session_dir = manager.sessions_dir().join(&session.id);
-    let stored = (|| {
-        let mut stored =
-            crate::attachments::store_downloaded_images(&session_dir, &task_input.images)?;
-        stored.extend(crate::attachments::copy_images_into_session(
-            &session_dir,
-            images,
-        )?);
-        session.attachments = stored;
-        session.issue_number = task_input.issue_number;
-        manager.save(session)
-    })();
-    match stored {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            cleanup_discarded_session_workspace(manager, session);
-            if let Err(del_err) = manager.delete(&session.id) {
-                eprintln!("warning: failed to clean up session: {del_err}");
-            }
-            Err(e)
-        }
-    }
-}
-
-/// Best-effort cleanup when a session is discarded before approval: removes
-/// the planning worktree and, for repo-backed sessions, the temporary clone.
-fn cleanup_discarded_session_workspace(manager: &SessionManager, session: &SessionState) {
-    if session.repo.is_some() {
-        let _ = crate::repo_clone::cleanup_session_workspace(manager, session);
-    } else {
-        cleanup_planning_worktree(session);
-    }
-}
-
-fn spawn_plan_worker(session_id: &str, rate_limit_retries: usize) -> Result<()> {
-    let exe = std::env::current_exe().map_err(CruiseError::IoError)?;
-    std::process::Command::new(exe)
-        .arg("plan-worker")
-        .arg("--session")
-        .arg(session_id)
-        .arg("--rate-limit-retries")
-        .arg(rate_limit_retries.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| CruiseError::ProcessSpawnError(format!("failed to spawn plan worker: {e}")))?;
-    Ok(())
-}
-
-async fn generate_plan_for_session(
-    manager: &SessionManager,
-    session: &SessionState,
-    rate_limit_retries: usize,
-) -> Result<String> {
-    let config = manager.load_config(session)?;
-    let plan_path = session.plan_path(&manager.sessions_dir());
-    let mut vars = setup_plan_vars(
-        session.template_input(&manager.sessions_dir()),
-        plan_path.clone(),
-        &config,
-    );
-    // Resume a retained checkpoint when its configuration and owner still match.
-    let mut resume = saved_plan_resume(session, &config);
-    let on_notice = cli_notice_callback(manager, &session.id);
-    let working_dir = plan_working_dir(session);
-    let on_session_id = cli_plan_session_callback(manager, session, &config, working_dir);
-    let ctx = cli_plan_ctx(
-        &config,
-        Some(&session.id),
-        &plan_path,
-        Some(working_dir),
-        false,
-        rate_limit_retries,
-        false,
-        None,
-        on_session_id.as_deref(),
-        Some(&on_notice),
-    );
-    let markdown = generate_plan_markdown(&ctx, &mut vars, &mut resume).await?;
-    finalize_plan_checkpoint(
-        manager,
-        session,
-        on_session_id.is_some() && resume.is_some(),
-    )?;
-    Ok(markdown)
-}
-
-async fn generate_plan_markdown(
-    ctx: &PlanPromptCtx<'_>,
-    vars: &mut VariableStore,
-    resume: &mut Option<crate::model_selection::SdkSessionId>,
-) -> Result<String> {
-    let prompt_result = crate::planning::run_plan_prompt_template(
-        ctx,
-        vars,
-        initial_plan_template(ctx.config, ctx.grill),
-        "[plan] creating plan...",
-        None,
-        resume,
-        true,
-    )
-    .await?;
-    crate::planning::resolve_generated_plan_content(
-        ctx.plan_path,
-        &prompt_result.output,
-        &prompt_result.stderr,
-    )
 }
 
 #[derive(Clone)]
@@ -1429,16 +505,20 @@ fn skip_prompt_nodes(
     config: &WorkflowConfig,
     flags: &crate::flags::FlagValues,
 ) -> Result<Vec<FlatNode>> {
-    let main = crate::flags::skip_candidates(&list_skippable_steps(config)?, flags);
-    let after_pr = crate::flags::skip_candidates(&list_skippable_after_pr_steps(config)?, flags);
+    let main =
+        crate::flags::skip_candidates(&crate::workflow::list_skippable_steps(config)?, flags);
+    let after_pr = crate::flags::skip_candidates(
+        &crate::workflow::list_skippable_after_pr_steps(config)?,
+        flags,
+    );
     let mut flat = flatten_nodes(&main, "");
     flat.extend(flatten_nodes(&after_pr, "[after-pr] "));
     Ok(flat)
 }
 
 impl fmt::Display for FlatNode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.label)
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.label)
     }
 }
 
@@ -1456,13 +536,9 @@ fn flatten_nodes_into(
 ) {
     for node in nodes {
         let label = if depth == 0 {
-            format!("{}{}", prefix, node.id)
+            format!("{prefix}{}", node.id)
         } else {
-            node.id
-                .rsplit('/')
-                .next()
-                .unwrap_or(node.id.as_str())
-                .to_string()
+            node.id.rsplit('/').next().unwrap_or(&node.id).to_string()
         };
         flat.push(FlatNode {
             label: format!("{}{}", "  ".repeat(depth), label),
@@ -1475,21 +551,19 @@ fn flatten_nodes_into(
 fn collect_expanded_ids(selected_nodes: Vec<FlatNode>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut expanded_ids = Vec::new();
-
-    for expanded_id in selected_nodes
+    for id in selected_nodes
         .into_iter()
         .flat_map(|node| node.expanded_step_ids)
     {
-        if seen.insert(expanded_id.clone()) {
-            expanded_ids.push(expanded_id);
+        if seen.insert(id.clone()) {
+            expanded_ids.push(id);
         }
     }
-
     expanded_ids
 }
 
 fn flat_node_default_indices(flat: &[FlatNode], previously_skipped: &[String]) -> Vec<usize> {
-    let skipped_set: HashSet<&str> = previously_skipped.iter().map(String::as_str).collect();
+    let skipped: HashSet<&str> = previously_skipped.iter().map(String::as_str).collect();
     flat.iter()
         .enumerate()
         .filter(|(_, node)| {
@@ -1497,17 +571,12 @@ fn flat_node_default_indices(flat: &[FlatNode], previously_skipped: &[String]) -
                 && node
                     .expanded_step_ids
                     .iter()
-                    .all(|id| skipped_set.contains(id.as_str()))
+                    .all(|id| skipped.contains(id.as_str()))
         })
-        .map(|(i, _)| i)
+        .map(|(index, _)| index)
         .collect()
 }
 
-/// Present a `MultiSelect` prompt so the user can choose which steps to skip.
-///
-/// Returns `None` when the user cancels or an interruption is received so the
-/// caller can return to the action menu. Steps that were previously skipped
-/// are pre-selected via `previously_skipped`.
 pub(crate) fn select_steps_to_skip(
     config: &WorkflowConfig,
     previously_skipped: &[String],
@@ -1515,25 +584,21 @@ pub(crate) fn select_steps_to_skip(
 ) -> Result<Option<Vec<String>>> {
     let flat = skip_prompt_nodes(config, flags)?;
     if flat.is_empty() {
-        return Ok(Some(vec![]));
+        return Ok(Some(Vec::new()));
     }
     let defaults = flat_node_default_indices(&flat, previously_skipped);
-
     crate::platform::reclaim_terminal_foreground();
     match inquire::MultiSelect::new("Steps to skip (Space to toggle, Enter to confirm):", flat)
         .with_help_message("No selection = no additional steps skipped")
         .with_default(&defaults)
         .prompt()
     {
-        Ok(selected_nodes) => Ok(Some(collect_expanded_ids(selected_nodes))),
+        Ok(selected) => Ok(Some(collect_expanded_ids(selected))),
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
-        Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
+        Err(error) => Err(CruiseError::Other(format!("selection error: {error}"))),
     }
 }
 
-/// Let the user choose steps to skip with history-based defaults, then record
-/// the selection for future sessions. Returns `None` when the prompt is
-/// cancelled or interrupted. History is loaded once.
 fn select_skipped_steps_with_history(
     session: &SessionState,
     config: &WorkflowConfig,
@@ -1542,101 +607,47 @@ fn select_skipped_steps_with_history(
     let key = session
         .config
         .stable_identity(session.repo.as_deref(), &session.id);
-    let mut history = NewSessionHistory::load_best_effort();
-
-    let base_dir_str = session.base_dir.to_string_lossy();
-    let scope = match session.repo.as_deref() {
-        Some(repo) => HistoryScope::Repo(repo),
-        None => HistoryScope::Directory(base_dir_str.as_ref()),
-    };
-
+    let history = NewSessionHistory::load_best_effort();
+    let base_dir = session.base_dir.to_string_lossy();
+    let scope = session.repo.as_deref().map_or(
+        HistoryScope::Directory(base_dir.as_ref()),
+        HistoryScope::Repo,
+    );
     let previously_skipped = history
         .latest_entry_for_scope(scope, &key)
-        .map(|entry| entry.skipped_steps.clone())
-        .unwrap_or_default();
-
-    let skipped_steps = select_steps_to_skip(config, &previously_skipped, flags)?;
-    if let Some(steps) = &skipped_steps {
-        history.record_skip_selection_for_scope(scope, &key, steps.clone());
-        history.save_best_effort();
-    }
-
-    Ok(skipped_steps)
+        .map_or_else(Vec::new, |entry| entry.skipped_steps.clone());
+    select_steps_to_skip(config, &previously_skipped, flags)
 }
 
-/// Interactive approve-plan loop: show plan, let user approve/fix/ask/execute.
-/// When `noninteractive` is true (e.g. stdin was piped), auto-approves the plan
-/// without prompting so that inquire never tries to read from a non-TTY stdin.
 #[expect(
     clippy::too_many_lines,
-    reason = "approve/fix/ask/execute loop with multiple action branches"
+    reason = "The review loop owns the complete interactive plan action flow."
 )]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "approve loop threads session state, config, and the SDK resume id"
-)]
-async fn run_approve_loop(
+async fn review_plan(
+    client: &DaemonClient,
+    mut session: SessionState,
     config: &WorkflowConfig,
-    manager: &SessionManager,
-    session: &mut SessionState,
-    plan_path: &std::path::Path,
-    vars: &mut VariableStore,
-    rate_limit_retries: usize,
+    args: &PlanArgs,
+    context: &crate::request_context::RequestContext,
     noninteractive: bool,
-    resume: &mut Option<crate::model_selection::SdkSessionId>,
-    cli_flags: &[(String, bool)],
-) -> Result<PlanDisposition> {
-    let working_dir = session
-        .worktree_path
-        .clone()
-        .unwrap_or_else(|| session.base_dir.clone());
-    // Fix / Ask turns reuse one planning context. It is only reached on the
-    // interactive path — the noninteractive branch auto-approves below.
-    // Grill affects only the initial plan template; fix/ask turns are standard.
-    let cancel_token = CancellationToken::new();
-    let on_notice = cli_notice_callback(manager, &session.id);
-    let on_session_id = cli_plan_session_callback(manager, session, config, &working_dir);
-    let usage_session_id = session.id.clone();
-    let ctx = cli_plan_ctx(
-        config,
-        Some(&usage_session_id),
-        plan_path,
-        Some(working_dir.as_path()),
-        !noninteractive,
-        rate_limit_retries,
-        false,
-        Some(&cancel_token),
-        on_session_id.as_deref(),
-        Some(&on_notice),
-    );
-
-    // Read the plan once up front; re-read only after Fix modifies it.
-    let mut plan_content = match crate::metadata::read_plan_markdown(plan_path) {
-        Ok(content) => content,
-        Err(err) => {
-            eprintln!(
-                "\n{} Generated plan is missing or empty. Session {} discarded.",
-                style("x").red().bold(),
-                session.id
-            );
-            cleanup_discarded_session_workspace(manager, session);
-            if let Err(del_err) = manager.delete(&session.id) {
-                eprintln!("warning: failed to clean up session: {del_err}");
-            }
-            return Err(err);
-        }
-    };
-
+) -> Result<()> {
     loop {
-        crate::display::print_bordered(&plan_content, Some("plan.md"));
-
+        let plan: String = client
+            .get_json(&format!("sessions/{}/plan", session.id))
+            .await?;
+        crate::display::print_bordered(&plan, Some("plan.md"));
         if noninteractive {
-            let finalize_operation = crate::telemetry::Operation::phase("finalize");
-            let result = approve_with_title(session, manager, config, &plan_content, None)
-                .with_context(finalize_operation.context())
-                .await;
-            finalize_operation.finish_result(&result);
-            result?;
+            approve_with_interrupt(
+                client,
+                &session.id,
+                &ApproveRequest {
+                    generate_title: true,
+                    context: Some(context.clone()),
+                    ..ApproveRequest::default()
+                },
+                context,
+            )
+            .await?;
             eprintln!(
                 "\n{} Session {} created.",
                 style("v").green().bold(),
@@ -1646,31 +657,31 @@ async fn run_approve_loop(
                 "  Run with: {}",
                 style(format!("cruise run {}", session.id)).cyan()
             );
-            return Ok(PlanDisposition::Completed);
+            return Ok(());
         }
 
-        let review = crate::herdr::blocked("Plan ready: approve, fix, or ask");
-
+        let blocked = crate::herdr::blocked("Plan ready: approve, fix, or ask");
         let mut options = vec!["Approve", "Fix", "Ask", "Verify", "Execute now"];
         if session.pr_target.is_none() {
             options.push("Publish as Issue");
         }
         crate::platform::reclaim_terminal_foreground();
         let selected = match inquire::Select::new("Action:", options).prompt() {
-            Ok(s) => s,
+            Ok(value) => value,
             Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                client.discard_plan(&session.id).await?;
                 eprintln!("\nCancelled. Session {} discarded.", session.id);
-                cleanup_discarded_session_workspace(manager, session);
-                manager.delete(&session.id)?;
-                return Ok(PlanDisposition::Cancelled);
+                return Ok(());
             }
-            Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+            Err(error) => return Err(CruiseError::Other(format!("selection error: {error}"))),
         };
+        drop(blocked);
 
         match selected {
             "Approve" | "Execute now" => {
                 let execute_now = selected == "Execute now";
-                let flags = if cli_flags.is_empty() {
+                let flags = if args.flags.is_empty() {
+                    let _blocked = crate::herdr::blocked("Select workflow flags");
                     let Some(values) = crate::run_cmd::select_flag_values(config, &session.flags)?
                     else {
                         continue;
@@ -1679,47 +690,35 @@ async fn run_approve_loop(
                 } else {
                     session.flags.clone()
                 };
-                let Some(skipped_steps) =
-                    select_skipped_steps_with_history(session, config, &flags)?
-                else {
-                    continue;
+                let skipped_steps = {
+                    let _blocked = crate::herdr::blocked("Select steps to skip");
+                    let Some(steps) = select_skipped_steps_with_history(&session, config, &flags)?
+                    else {
+                        continue;
+                    };
+                    steps
                 };
-                session.flags = flags;
-                session.skipped_steps = skipped_steps;
-                drop(review);
-                let mut approval_interrupted = false;
-                let finalize_operation = crate::telemetry::Operation::phase("finalize");
-                let approval_result: Result<()> = async {
-                    let approval = approve_with_title(
-                        session,
-                        manager,
-                        config,
-                        &plan_content,
-                        Some(&cancel_token),
-                    );
-                    tokio::pin!(approval);
-                    tokio::select! {
-                        result = &mut approval => result,
-                        _ = tokio::signal::ctrl_c() => {
-                            cancel_token.cancel();
-                            approval_interrupted = true;
-                            let _ = approval.await;
-                            Err(CruiseError::Interrupted)
-                        },
-                    }
-                }
-                .with_context(finalize_operation.context())
-                .await;
-                finalize_operation.finish_result(&approval_result);
-                if approval_interrupted {
-                    eprintln!("\nCancelled. Session {} discarded.", session.id);
-                    cleanup_discarded_session_workspace(manager, session);
-                    if let Err(del_err) = manager.delete(&session.id) {
-                        eprintln!("warning: failed to clean up session: {del_err}");
-                    }
-                    return Err(CruiseError::Interrupted);
-                }
-                approval_result?;
+                let run_flags = if args.flags.is_empty() {
+                    config
+                        .flags
+                        .keys()
+                        .map(|name| (name.clone(), flags.get(name).copied().unwrap_or(false)))
+                        .collect()
+                } else {
+                    args.flags.clone()
+                };
+                session = approve_with_interrupt(
+                    client,
+                    &session.id,
+                    &ApproveRequest {
+                        flags: Some(flags),
+                        skipped_steps: Some(skipped_steps),
+                        generate_title: true,
+                        context: Some(context.clone()),
+                    },
+                    context,
+                )
+                .await?;
                 if !execute_now {
                     eprintln!(
                         "\n{} Session {} created.",
@@ -1730,121 +729,68 @@ async fn run_approve_loop(
                         "  Run with: {}",
                         style(format!("cruise run {}", session.id)).cyan()
                     );
-                    return Ok(PlanDisposition::Completed);
+                    return Ok(());
                 }
-                let flags = if cli_flags.is_empty() {
-                    config
-                        .flags
-                        .keys()
-                        .map(|name| {
-                            (
-                                name.clone(),
-                                session.flags.get(name).copied().unwrap_or(false),
-                            )
-                        })
-                        .collect()
-                } else {
-                    cli_flags.to_vec()
-                };
-                return Ok(PlanDisposition::ExecuteNow { flags });
+                eprintln!(
+                    "\n{} Executing session {}...",
+                    style("->").cyan(),
+                    session.id
+                );
+                return crate::run_cmd::run(crate::cli::RunArgs {
+                    session: Some(session.id),
+                    all: false,
+                    parallelism: None,
+                    auto_requeue_max_attempts: None,
+                    max_retries: None,
+                    rate_limit_retries: args.rate_limit_retries,
+                    dry_run: false,
+                    cleanup_after_pr: false,
+                    no_cleanup_after_pr: false,
+                    flags: run_flags,
+                })
+                .await;
             }
             "Fix" => {
-                let text = match prompt_multiline("Describe the changes needed:")? {
-                    InputResult::Submitted(t) => t,
-                    InputResult::Cancelled => continue,
+                let Some(feedback) = prompt_action_text("Describe the changes needed:")? else {
+                    continue;
                 };
-                vars.set_prev_input(Some(text));
-                drop(review);
-                let planning_operation = crate::telemetry::Operation::phase("planning");
-                let fix_result: Result<()> = async {
-                    let fixing = run_fix_plan(&ctx, vars, resume);
-                    tokio::pin!(fixing);
-                    tokio::select! {
-                        result = &mut fixing => result,
-                        _ = tokio::signal::ctrl_c() => {
-                            cancel_token.cancel();
-                            let _ = fixing.await;
-                            Err(CruiseError::Interrupted)
-                        },
-                    }
-                }
-                .with_context(planning_operation.context())
-                .await;
-                planning_operation.finish_result(&fix_result);
-                let _ = fix_result
-                    .as_ref()
-                    .inspect_err(|_| notify_plan_result(session, &fix_result));
-                fix_result?;
-                let session_id = session.id.clone();
-                *session = manager.load(&session_id)?;
-                plan_content = match crate::metadata::read_plan_markdown(plan_path) {
-                    Ok(content) => content,
-                    Err(error) => {
-                        notify_plan_result(session, &Err(CruiseError::Other(error.to_string())));
-                        return Err(error);
-                    }
+                let request = PlanRequest {
+                    feedback: Some(feedback),
+                    interactive: Interactive::new(true),
+                    rate_limit_retries: args.rate_limit_retries,
+                    context: Some(context.clone()),
+                    ..PlanRequest::default()
                 };
-                notify_plan_result(session, &Ok(()));
+                session =
+                    drive_plan_operation(client, &session.id, PlanOperation::Fix(request)).await?;
             }
             "Ask" => {
-                let text = match prompt_multiline("Your question:")? {
-                    InputResult::Submitted(t) => t,
-                    InputResult::Cancelled => continue,
+                let Some(question) = prompt_action_text("Your question:")? else {
+                    continue;
                 };
-                vars.set_prev_input(Some(text));
-                drop(review);
-                let planning_operation = crate::telemetry::Operation::phase("planning");
-                let ask_result: Result<()> = async {
-                    let asking = run_ask_plan(&ctx, vars, resume);
-                    tokio::pin!(asking);
-                    tokio::select! {
-                        result = &mut asking => result,
-                        _ = tokio::signal::ctrl_c() => {
-                            cancel_token.cancel();
-                            let _ = asking.await;
-                            Err(CruiseError::Interrupted)
-                        },
-                    }
-                }
-                .with_context(planning_operation.context())
-                .await;
-                planning_operation.finish_result(&ask_result);
-                let _ = ask_result
-                    .as_ref()
-                    .inspect_err(|_| notify_plan_result(session, &ask_result));
-                ask_result?;
-                let session_id = session.id.clone();
-                *session = manager.load(&session_id)?;
+                let request = PlanRequest {
+                    question: Some(question),
+                    interactive: Interactive::new(true),
+                    rate_limit_retries: args.rate_limit_retries,
+                    context: Some(context.clone()),
+                    ..PlanRequest::default()
+                };
+                session =
+                    drive_plan_operation(client, &session.id, PlanOperation::Ask(request)).await?;
             }
-
             "Verify" => {
-                drop(review);
-                let planning_operation = crate::telemetry::Operation::phase("planning");
-                let verify_result: Result<()> = async {
-                    let verifying = run_verify_plan(&ctx, vars, resume);
-                    tokio::pin!(verifying);
-                    tokio::select! {
-                        result = &mut verifying => result,
-                        _ = tokio::signal::ctrl_c() => {
-                            cancel_token.cancel();
-                            let _ = verifying.await;
-                            Err(CruiseError::Interrupted)
-                        },
-                    }
-                }
-                .with_context(planning_operation.context())
-                .await;
-                planning_operation.finish_result(&verify_result);
-                let _ = verify_result
-                    .as_ref()
-                    .inspect_err(|_| notify_plan_result(session, &verify_result));
-                verify_result?;
-                let session_id = session.id.clone();
-                *session = manager.load(&session_id)?;
+                let request = PlanRequest {
+                    interactive: Interactive::new(true),
+                    rate_limit_retries: args.rate_limit_retries,
+                    context: Some(context.clone()),
+                    ..PlanRequest::default()
+                };
+                session = drive_plan_operation(client, &session.id, PlanOperation::Verify(request))
+                    .await?;
             }
-
             "Publish as Issue" => {
-                let trigger_cruise = if crate::issue_publish::supports_trigger_cruise(session) {
+                let trigger_cruise = if crate::issue_publish::supports_trigger_cruise(&session) {
+                    let _blocked = crate::herdr::blocked("Publish plan as issue");
                     let Some(answer) = prompt_trigger_cruise()? else {
                         continue;
                     };
@@ -1852,31 +798,18 @@ async fn run_approve_loop(
                 } else {
                     false
                 };
-                let finalize_operation = crate::telemetry::Operation::phase("finalize");
-                let published = crate::issue_publish::publish_plan_issue_and_delete(
-                    manager,
-                    session.clone(),
-                    trigger_cruise,
-                );
-                finalize_operation.finish_result(&published);
-                match published {
-                    Ok(published) => {
+                match client.publish(&session.id, trigger_cruise).await {
+                    Ok(url) => {
                         eprintln!(
-                            "\n{} Published plan as issue: {}",
-                            style("v").green().bold(),
-                            published.url
+                            "\n{} Published plan as issue: {url}",
+                            style("v").green().bold()
                         );
-                        return Ok(PlanDisposition::Completed);
+                        return Ok(());
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "\n{} Failed to publish plan as issue: {e}",
-                            style("x").red().bold()
-                        );
-                        if let Ok(reloaded) = manager.load(&session.id) {
-                            *session = reloaded;
-                        }
-                    }
+                    Err(error) => eprintln!(
+                        "\n{} Failed to publish plan as issue: {error}",
+                        style("x").red().bold()
+                    ),
                 }
             }
             _ => {}
@@ -1884,9 +817,14 @@ async fn run_approve_loop(
     }
 }
 
-/// Prompt whether to post an `@cruise run` comment after creating the issue.
-///
-/// Returns `Ok(None)` if the user cancels the prompt.
+fn prompt_action_text(prompt: &str) -> Result<Option<String>> {
+    let _blocked = crate::herdr::blocked(prompt);
+    match prompt_multiline(prompt)? {
+        InputResult::Submitted(text) => Ok(Some(text)),
+        InputResult::Cancelled => Ok(None),
+    }
+}
+
 fn prompt_trigger_cruise() -> Result<Option<bool>> {
     crate::platform::reclaim_terminal_foreground();
     match inquire::Confirm::new("Post an @cruise run comment after creating the issue?")
@@ -1895,2133 +833,329 @@ fn prompt_trigger_cruise() -> Result<Option<bool>> {
     {
         Ok(answer) => Ok(Some(answer)),
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
-        Err(e) => Err(CruiseError::Other(format!("selection error: {e}"))),
+        Err(error) => Err(CruiseError::Other(format!("selection error: {error}"))),
     }
 }
 
-/// Replan an existing session using the built-in fix-plan prompt.
-pub async fn replan_session(
-    manager: &SessionManager,
-    session: &mut SessionState,
-    feedback: String,
-    rate_limit_retries: usize,
-) -> Result<()> {
-    let result = async {
-        if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
-            manager.save(session)?;
+async fn approve_with_interrupt(
+    client: &DaemonClient,
+    session_id: &str,
+    request: &ApproveRequest,
+    context: &crate::request_context::RequestContext,
+) -> Result<SessionState> {
+    let approval = client.approve(session_id, request);
+    tokio::pin!(approval);
+    tokio::select! {
+        result = &mut approval => result,
+        signal = tokio::signal::ctrl_c() => {
+            signal.map_err(|error| {
+                CruiseError::Other(format!("failed to listen for Ctrl+C: {error}"))
+            })?;
+            eprintln!("Cancelling session {session_id}...");
+            let cancel_result = client.cancel(session_id).await;
+            let _ = approval.await;
+            cancel_result?;
+            client.delete_session(session_id, context).await?;
+            Err(CruiseError::Interrupted)
         }
-        let config = manager.load_config(session)?;
-        let plan_path = session.plan_path(&manager.sessions_dir());
-        let mut vars = setup_plan_vars(
-            session.template_input(&manager.sessions_dir()),
-            plan_path.clone(),
-            &config,
-        );
-        vars.set_prev_input(Some(feedback));
-        let working_dir = session
-            .worktree_path
-            .clone()
-            .unwrap_or_else(|| session.base_dir.clone());
-        let mut resume = saved_plan_resume(session, &config);
-        let on_notice = cli_notice_callback(manager, &session.id);
-        let on_session_id = cli_plan_session_callback(manager, session, &config, &working_dir);
-        // Fix-plan reuses the standard template regardless of grill.
-        let ctx = cli_plan_ctx(
-            &config,
-            Some(&session.id),
-            &plan_path,
-            Some(working_dir.as_path()),
-            std::io::stdin().is_terminal(),
-            rate_limit_retries,
-            false,
-            None,
-            on_session_id.as_deref(),
-            Some(&on_notice),
-        );
-        run_fix_plan(&ctx, &mut vars, &mut resume).await?;
-        let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
-        finalize_plan_checkpoint(
-            manager,
-            session,
-            on_session_id.is_some() && resume.is_some(),
-        )?;
-        let session_id = session.id.clone();
-        *session = manager.load(&session_id)?;
-
-        crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
-        session.plan_error = None;
-        manager.save(session)?;
-        Ok(())
     }
-    .await;
-    if result.is_err()
-        && let Ok(checkpoint) = manager.load(&session.id)
+}
+
+enum PlanOperation {
+    Generate(PlanRequest),
+    Fix(PlanRequest),
+    Ask(PlanRequest),
+    Verify(PlanRequest),
+    Replan(PlanRequest),
+}
+
+struct PlanningEvents<'a> {
+    terminal: crate::cli_events::TerminalEvents<'a>,
+    session_id: String,
+    spinner: Option<crate::spinner::Spinner>,
+}
+
+impl<'a> PlanningEvents<'a> {
+    fn new(client: &'a DaemonClient, session_id: &str) -> Self {
+        Self {
+            terminal: crate::cli_events::TerminalEvents::new(client, session_id)
+                .with_plan_chunks(true),
+            session_id: session_id.to_owned(),
+            spinner: None,
+        }
+    }
+
+    fn owns(&self, session_id: &str) -> bool {
+        session_id == self.session_id
+    }
+
+    fn dispatch(&mut self, event: &crate::application::ApplicationEvent) -> Result<()> {
+        if let Some(spinner) = &self.spinner {
+            let mut result = Ok(());
+            spinner.suspend(|| result = self.terminal.on_event(event));
+            result
+        } else {
+            self.terminal.on_event(event)
+        }
+    }
+}
+
+impl crate::daemon::client::SessionEventHandler for PlanningEvents<'_> {
+    fn on_event(&mut self, event: &crate::application::ApplicationEvent) -> Result<()> {
+        use crate::application::ApplicationEvent;
+
+        match event {
+            ApplicationEvent::PlanStarted { session_id, .. } if self.owns(session_id) => {
+                if std::io::stderr().is_terminal() {
+                    self.spinner = Some(crate::spinner::Spinner::start("Planning..."));
+                } else {
+                    crate::status_eprintln!("[plan] creating plan...");
+                }
+                Ok(())
+            }
+            ApplicationEvent::PlanFinished { session_id, .. }
+            | ApplicationEvent::PlanFailed { session_id, .. }
+            | ApplicationEvent::PlanCancelled { session_id }
+                if self.owns(session_id) =>
+            {
+                drop(self.spinner.take());
+                self.terminal.on_event(event)
+            }
+            _ => self.dispatch(event),
+        }
+    }
+
+    fn on_pending_prompts(&mut self, prompts: &[crate::application::PendingPrompt]) -> Result<()> {
+        if let Some(spinner) = &self.spinner {
+            let mut result = Ok(());
+            spinner.suspend(|| result = self.terminal.on_pending_prompts(prompts));
+            result
+        } else {
+            self.terminal.on_pending_prompts(prompts)
+        }
+    }
+    fn is_terminal_state(&self, state: &SessionState) -> bool {
+        crate::daemon::client::SessionEventHandler::is_terminal_state(&self.terminal, state)
+    }
+
+    fn terminal_failure(&self) -> Option<&str> {
+        crate::daemon::client::SessionEventHandler::terminal_failure(&self.terminal)
+    }
+}
+
+async fn drive_plan_operation(
+    client: &DaemonClient,
+    session_id: &str,
+    operation: PlanOperation,
+) -> Result<SessionState> {
+    let stream = client
+        .events(EventFilter {
+            session: Some(session_id.to_string()),
+            batch: false,
+        })
+        .await?;
+    match operation {
+        PlanOperation::Generate(request) => client.start_plan(session_id, &request).await?,
+        PlanOperation::Fix(request) => client.fix_plan(session_id, &request).await?,
+        PlanOperation::Ask(request) => client.ask_plan(session_id, &request).await?,
+        PlanOperation::Verify(request) => client.verify_plan(session_id, &request).await?,
+        PlanOperation::Replan(request) => client.replan_plan(session_id, &request).await?,
+    }
+    let mut events = PlanningEvents::new(client, session_id);
+    let finished = crate::cli_events::drive(client, session_id, stream, &mut events).await?;
+    if finished.cancelled_by_user {
+        return Err(CruiseError::Interrupted);
+    }
+    ensure_plan_operation_succeeded(finished)
+}
+
+fn ensure_plan_succeeded(state: SessionState) -> Result<SessionState> {
+    if let Some(message) = &state.plan_error {
+        return Err(CruiseError::Other(message.clone()));
+    }
+    if let SessionPhase::Failed(message) = &state.phase {
+        return Err(CruiseError::Other(message.clone()));
+    }
+    Ok(state)
+}
+fn ensure_plan_operation_succeeded(finished: crate::cli_events::Finished) -> Result<SessionState> {
+    if let Some(error) = finished.failure {
+        return Err(CruiseError::Other(error));
+    }
+    ensure_plan_succeeded(finished.state)
+}
+
+pub async fn launch_background_plan(
+    plan_input: &str,
+    skip_planning: bool,
+    repo: Option<&str>,
+    images: &[String],
+    no_force_exec: bool,
+    flags: &[(String, bool)],
+) -> Result<()> {
+    let input = read_background_plan_input(plan_input)?;
+    let binding = crate::issue_input::parse_binding(&input)?;
+    let target = resolve_plan_target(repo, None, binding.is_some())?;
+    let detected_images = images.iter().map(PathBuf::from).collect::<Vec<_>>();
+
+    if let PlanTarget::Local { config, .. } = &target
+        && config.force_exec()
     {
-        session.plan_conversation_id = checkpoint.plan_conversation_id;
-        session.plan_conversation_key = checkpoint.plan_conversation_key;
-        session.plan_conversation_backend = checkpoint.plan_conversation_backend;
-        session.plan_conversation_home = checkpoint.plan_conversation_home;
+        match force_exec_opt_out(no_force_exec, false, !detected_images.is_empty())
+            .or(binding.as_ref().map(|_| "issue input"))
+        {
+            Some(reason) => {
+                eprintln!("{}", style(format!("force_exec ignored: {reason}")).dim());
+            }
+            None => {
+                return run_force_exec(
+                    target,
+                    input.trim().to_string(),
+                    DEFAULT_RATE_LIMIT_RETRIES,
+                    false,
+                    true,
+                    flags.to_vec(),
+                )
+                .await;
+            }
+        }
     }
-    notify_plan_result(session, &result);
-    result
-}
 
-/// Run the built-in fix-plan prompt.
-async fn run_fix_plan(
-    ctx: &PlanPromptCtx<'_>,
-    vars: &mut VariableStore,
-    resume: &mut Option<crate::model_selection::SdkSessionId>,
-) -> Result<()> {
-    run_plan_prompt(
-        ctx,
-        vars,
-        fix_plan_template(ctx.config),
-        "[fix-plan] applying fixes...",
-        resume,
-        true,
-    )
-    .await
-}
-
-/// Run the built-in ask-plan prompt.
-async fn run_ask_plan(
-    ctx: &PlanPromptCtx<'_>,
-    vars: &mut VariableStore,
-    resume: &mut Option<crate::model_selection::SdkSessionId>,
-) -> Result<()> {
-    run_plan_prompt(
-        ctx,
-        vars,
-        ask_plan_template(ctx.config),
-        "[ask-plan] answering question...",
-        resume,
-        // Read-only: the Ask flow must never overwrite the saved plan, so no
-        // plan-writing tools are registered.
-        false,
-    )
-    .await
-}
-
-async fn run_verify_plan(
-    ctx: &PlanPromptCtx<'_>,
-    vars: &mut VariableStore,
-    resume: &mut Option<crate::model_selection::SdkSessionId>,
-) -> Result<()> {
-    crate::planning::run_verify_flow(ctx, vars, resume, None, &|report| {
-        crate::display::print_bordered(report, Some("Verification report"));
-        Ok(())
-    })
-    .await
-}
-
-/// Shared implementation for fix-plan and ask-plan: resolve the given
-/// `template`, display `label`, and run it as a prompt step.
-async fn run_plan_prompt(
-    ctx: &PlanPromptCtx<'_>,
-    vars: &mut VariableStore,
-    template: &str,
-    label: &str,
-    resume: &mut Option<crate::model_selection::SdkSessionId>,
-    register_plan_tools: bool,
-) -> Result<()> {
-    let result = crate::planning::run_plan_prompt_template(
-        ctx,
-        vars,
-        template,
-        label,
+    let context = crate::request_context::RequestContext::capture()?;
+    let task_input = crate::issue_input::resolve_task_input(
+        &input,
         None,
-        resume,
-        register_plan_tools,
-    )
-    .await?;
-    vars.set_prev_output(Some(result.output));
-    vars.set_prev_stderr(Some(result.stderr));
-    vars.set_prev_input(None);
+        repo,
+        &context.cwd,
+        &crate::issue_input::GhGithub,
+    )?;
+    let request = build_session_request(
+        &target,
+        None,
+        task_input,
+        &detected_images,
+        None,
+        flags,
+        repo.map(ToString::to_string),
+        context.clone(),
+    )?;
+    let client = DaemonClient::connect().await?;
+    let session = client.create_session(&request).await?;
+    let plan_request = PlanRequest {
+        skip_planning,
+        interactive: Interactive::new(false),
+        rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
+        context: Some(context),
+        ..PlanRequest::default()
+    };
+    let stream = client
+        .events(EventFilter {
+            session: Some(session.id.clone()),
+            batch: false,
+        })
+        .await?;
+    client.start_plan(&session.id, &plan_request).await?;
+
+    if skip_planning {
+        // Skip-planning does no model work; wait for it so the session is
+        // already `Planned` when this command returns (scripts run it next).
+        let mut events =
+            crate::cli_events::TerminalEvents::new(&client, &session.id).with_plan_chunks(true);
+        let finished = crate::cli_events::drive(&client, &session.id, stream, &mut events).await?;
+        if finished.cancelled_by_user {
+            return Err(CruiseError::Interrupted);
+        }
+        ensure_plan_operation_succeeded(finished)?;
+        eprintln!(
+            "\n{} Session {} created (input used as plan).",
+            style("✓").green().bold(),
+            session.id
+        );
+        eprintln!("  Check status with: {}", style("cruise list").cyan());
+        eprintln!(
+            "  Run with: {}",
+            style(format!("cruise run {}", session.id)).cyan()
+        );
+    } else {
+        eprintln!(
+            "\n{} Session {} created. Planning in background.",
+            style("✓").green().bold(),
+            session.id
+        );
+        eprintln!("  Check status with: {}", style("cruise list").cyan());
+        eprintln!(
+            "  Run once ready: {}",
+            style(format!("cruise run {}", session.id)).cyan()
+        );
+    }
     Ok(())
 }
 
-fn resolve_input<F>(
-    arg: Option<String>,
-    stdin_input: Option<String>,
-    interactive: F,
-) -> Result<String>
-where
-    F: FnOnce() -> Result<String>,
-{
-    if let Some(input) = arg {
-        return Ok(input);
-    }
-
-    if let Some(input) = stdin_input {
-        let trimmed = input.trim().to_string();
-        if !trimmed.is_empty() {
-            return Ok(trimmed);
-        }
-    }
-
-    interactive()
-}
-
-/// Prompt interactively for the initial plan input.
-fn prompt_for_plan_input() -> Result<String> {
-    prompt_multiline("What would you like to implement?")?.into_result()
-}
-
-/// Generate or regenerate the plan for a session.
-///
-/// Accepts sessions in `Draft | AwaitingInput | AwaitingApproval | Planned`
-/// phases; this is the path behind `cruise list` → Generate Plan / Replan. The
-/// phase transition after successful regeneration matches the `WebUI`'s
-/// regenerate-plan flow:
-///
-/// - `Draft | AwaitingInput` → `AwaitingApproval`
-/// - `AwaitingApproval` → `AwaitingApproval` (no-op)
-/// - `Planned` → `Planned` (preserve approval; do NOT silently un-approve)
 pub async fn regenerate_plan_for_session(
-    manager: &SessionManager,
-    session: &mut SessionState,
+    client: &DaemonClient,
+    session_id: &str,
     rate_limit_retries: usize,
 ) -> Result<()> {
-    let result = async {
-        match &session.phase {
-            SessionPhase::Draft
-            | SessionPhase::AwaitingInput
-            | SessionPhase::AwaitingApproval
-            | SessionPhase::Planned => {}
-            other => {
-                return Err(CruiseError::Other(format!(
-                    "expected Draft, AwaitingInput, AwaitingApproval, or Planned phase, got {}",
-                    other.label()
-                )));
-            }
-        }
+    let session: SessionState = client.get_json(&format!("sessions/{session_id}")).await?;
+    let context = crate::request_context::RequestContext::capture()?;
+    let request = PlanRequest {
+        interactive: Interactive::new(true),
+        rate_limit_retries,
+        context: Some(context),
+        ..PlanRequest::default()
+    };
+    let operation = if matches!(
+        session.phase,
+        SessionPhase::Planned | SessionPhase::AwaitingApproval
+    ) {
+        PlanOperation::Replan(request)
+    } else {
+        PlanOperation::Generate(request)
+    };
+    drive_plan_operation(client, session_id, operation).await?;
+    Ok(())
+}
 
-        let original_phase = session.phase.clone();
-
-        if crate::repo_clone::ensure_repo_session_workspace(manager, session)? {
-            manager.save(session)?;
-        }
-        let config = manager.load_config(session)?;
-        // Save worktree context before planning; a Planned session already has an
-        // approved worktree that must survive a planning failure.
-        let saved_worktree_path = session.worktree_path.clone();
-        let saved_worktree_branch = session.worktree_branch.clone();
-        setup_planning_worktree(manager, session)?;
-        let plan_path = session.plan_path(&manager.sessions_dir());
-        let mut vars = setup_plan_vars(
-            session.template_input(&manager.sessions_dir()),
-            plan_path.clone(),
-            &config,
-        );
-
-        let work_dir = plan_working_dir(session).to_path_buf();
-        let mut resume = saved_plan_resume(session, &config);
-        let on_notice = cli_notice_callback(manager, &session.id);
-        let on_session_id = cli_plan_session_callback(manager, session, &config, &work_dir);
-        let ctx = cli_plan_ctx(
-            &config,
-            Some(&session.id),
-            &plan_path,
-            Some(&work_dir),
-            std::io::stdin().is_terminal(),
-            rate_limit_retries,
-            false,
-            None,
-            on_session_id.as_deref(),
-            Some(&on_notice),
-        );
-        generate_plan_markdown(&ctx, &mut vars, &mut resume)
-            .await
-            .inspect_err(|e| {
-                let session_id = session.id.clone();
-                if let Ok(reloaded) = manager.load(&session_id) {
-                    *session = reloaded;
-                }
-                session.plan_error = Some(e.to_string());
-                if saved_worktree_path.is_none() {
-                    // Worktree was freshly created for this planning attempt; clean it up.
-                    cleanup_planning_worktree(session);
-                    session.worktree_path = None;
-                    session.worktree_branch = None;
-                } else {
-                    // Restore the pre-existing approved worktree; do not delete it.
-                    session.worktree_path = saved_worktree_path;
-                    session.worktree_branch = saved_worktree_branch;
-                }
-                if let Err(save_err) = manager.save(session) {
-                    eprintln!("warning: failed to persist plan error state: {save_err}");
-                }
-            })?;
-        let plan_markdown = crate::metadata::read_plan_markdown(&plan_path)?;
-        finalize_plan_checkpoint(
-            manager,
-            session,
-            on_session_id.is_some() && resume.is_some(),
-        )?;
-        let session_id = session.id.clone();
-        *session = manager.load(&session_id)?;
-
-        crate::metadata::refresh_session_title_from_plan(session, &plan_markdown);
-
-        session.plan_error = None;
-        // Phase transition matching the WebUI's regenerate-plan behavior:
-        // - Draft | AwaitingInput → AwaitingApproval
-        // - AwaitingApproval → AwaitingApproval (no-op)
-        // - Planned → Planned (preserve approval; do NOT silently un-approve)
-        session.phase = match original_phase {
-            SessionPhase::Draft | SessionPhase::AwaitingInput => SessionPhase::AwaitingApproval,
-            _ => original_phase,
-        };
-        manager.save(session)?;
-        Ok(())
-    }
-    .await;
-    notify_plan_result(session, &result);
-    result
+pub async fn replan_session(
+    client: &DaemonClient,
+    session_id: &str,
+    feedback: String,
+    rate_limit_retries: usize,
+) -> Result<()> {
+    let request = PlanRequest {
+        feedback: Some(feedback),
+        interactive: Interactive::new(true),
+        rate_limit_retries,
+        context: Some(crate::request_context::RequestContext::capture()?),
+        ..PlanRequest::default()
+    };
+    drive_plan_operation(client, session_id, PlanOperation::Fix(request)).await?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::session::{SessionManager, SessionPhase, WorkspaceMode};
-    use crate::test_support::{init_git_repo, lock_process, make_session, run_git_ok};
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use tempfile::TempDir;
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn mixed_sdk_title_generation_uses_claude_plan_candidate_under_jcode()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let _lock = lock_process();
-        let tmp = TempDir::new()?;
-        let _home = crate::test_support::set_fake_home(tmp.path());
-        let _path = crate::test_support::install_exiting_jcode_stub(tmp.path());
-        let _jcode_home =
-            crate::test_support::EnvGuard::set("JCODE_HOME", tmp.path().join("jcode-home"));
-        let _sdk = crate::test_support::EnvGuard::remove("CRUISE_SDK");
-        let _model = crate::test_support::EnvGuard::remove("CRUISE_MODEL");
-        let _plan_model = crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL");
-        let script = format!(
-            r#"#!/bin/sh
-case "$1" in --version) echo '2.0.0'; exit 0;; --cruise-exec-probe) exit 0;; esac
-d='{}'
-printf '%s\n' "$@" > "$d/args"
-read -r input
-printf '%s\n' '{{"type":"control_request","request_id":"title-request","request":{{"subtype":"mcp_message","server_name":"cruise","message":{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"generate_title","arguments":{{"title":"Mixed SDK title"}}}}}}}}}}'
-read -r response
-printf '%s\n' "$response" > "$d/response"
-printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_id":"mixed-title"}}'
-"#,
-            tmp.path().display()
-        );
-        crate::test_support::write_executable_script(&tmp.path().join("claude"), &script);
-        // A legacy config verifies the same tool fixture before mixed parsing.
-        let control = WorkflowConfig::from_yaml(
-            "sdk: claude\nplan_model: mixed-title-model\nsteps:\n  build:\n    command: echo hi\n",
-        )?;
-        let control_title = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            generate_title_via_sdk(&control, "task", "# Plan", None, None, None),
-        )
-        .await??;
-        assert_eq!(control_title, "Mixed SDK title");
-        let config = WorkflowConfig::from_yaml(
-            "sdk: jcode\nmodel: unused/execution\nplan_model:\n  - sdk: claude\n    model: mixed-title-model\n  - unused/planning\nsteps:\n  build:\n    command: echo hi\n",
-        )?;
-        let title = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            generate_title_via_sdk(&config, "task", "# Plan", None, None, None),
-        )
-        .await??;
-        assert_eq!(title, "Mixed SDK title");
-        let args = fs::read_to_string(tmp.path().join("args"))?;
-        assert!(args.lines().any(|line| line == "--model"));
-        assert!(args.lines().any(|line| line == "mixed-title-model"));
-        assert!(!args.contains("unused/execution"));
-        let empty_plan = WorkflowConfig::from_yaml(
-            "sdk: jcode\nplan_model: []\nmodel:\n  - sdk: claude\n    model: mixed-title-model\n  - unused/planning\nsteps:\n  build:\n    command: echo hi\n",
-        )?;
-        assert_eq!(
-            generate_title_via_sdk(&empty_plan, "task", "# Plan", None, None, None).await?,
-            "Mixed SDK title"
-        );
-        let mut session = make_session("20261023000005", tmp.path());
-        let identity = session
-            .config
-            .stable_identity(session.repo.as_deref(), &session.id);
-        session.plan_conversation_key = Some(crate::planning::plan_conversation_key(
-            &empty_plan,
-            &identity,
-        ));
-        session.plan_conversation_id = Some("saved-claude".into());
-        session.plan_conversation_backend = Some("claude".into());
-        assert_eq!(
-            saved_plan_resume(&session, &empty_plan)
-                .unwrap_or_else(|| panic!("saved Claude conversation must be resumable"))
-                .sdk,
-            crate::model_selection::Sdk::Claude
-        );
-        Ok(())
-    }
+    use super::{FlatNode, flat_node_default_indices};
 
     #[test]
-    fn mixed_sdk_saved_plan_resume_rejects_ambiguous_legacy_owner()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let _lock = lock_process();
-        let tmp = TempDir::new()?;
-        let _home = crate::test_support::set_fake_home(tmp.path());
-        let config = WorkflowConfig::from_yaml(
-            "sdk: jcode\ninteractive_planning: true\nplan_model:\n  - inherited/jcode\n  - sdk: claude\n    model: legacy-claude\nsteps:\n  plan:\n    prompt: plan\n",
-        )?;
-        let mut session = make_session("20261023000003", tmp.path());
-        let identity = session
-            .config
-            .stable_identity(session.repo.as_deref(), &session.id);
-        session.plan_conversation_id = Some("legacy-ambiguous-id".to_string());
-        session.plan_conversation_key =
-            Some(crate::planning::plan_conversation_key(&config, &identity));
-        session.plan_conversation_backend = None;
-        session.plan_conversation_home = None;
-        assert_eq!(saved_plan_resume(&session, &config), None);
-        Ok(())
-    }
-
-    #[test]
-    fn saved_plan_resume_keeps_sdk_owned_by_explicit_fallback_chain()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let _lock = lock_process();
-        let tmp = TempDir::new()?;
-        let _home = crate::test_support::set_fake_home(tmp.path());
-        for chain_key in [
-            "provider/main:high",
-            "provider/main",
-            "provider/*",
-            "default",
-        ] {
-            let config = WorkflowConfig::from_yaml(&format!(
-                "sdk: claude\nplan_model: [{{sdk: jcode, model: 'provider/main:high'}}]\nretry:\n  fallback_chains:\n    '{chain_key}': [claude-fallback]\nsteps:\n  plan:\n    prompt: plan\n"
-            ))?;
-            let mut session = make_session("20261023000004", tmp.path());
-            let identity = session
-                .config
-                .stable_identity(session.repo.as_deref(), &session.id);
-            session.plan_conversation_id = Some("explicit-claude-id".to_owned());
-            session.plan_conversation_backend = Some("claude".to_owned());
-            session.plan_conversation_key =
-                Some(crate::planning::plan_conversation_key(&config, &identity));
-            assert_eq!(
-                saved_plan_resume(&session, &config),
-                Some(crate::model_selection::SdkSessionId {
-                    sdk: crate::model_selection::Sdk::Claude,
-                    id: "explicit-claude-id".to_owned(),
-                })
-            );
-        }
-        Ok(())
-    }
-
-    struct ProcessStateGuard {
-        prev_dir: PathBuf,
-        env_guards: Vec<crate::test_support::EnvGuard>,
-        lock: crate::test_support::ProcessLock,
-    }
-
-    impl ProcessStateGuard {
-        fn new(home: &Path) -> Self {
-            let lock = lock_process();
-            let env_guards = crate::test_support::set_fake_home(home);
-            let prev_dir = std::env::current_dir().unwrap_or_else(|e| panic!("{e:?}"));
-            Self {
-                prev_dir,
-                env_guards,
-                lock,
-            }
-        }
-
-        fn set_current_dir(&self, dir: &Path) {
-            let _ = &self.lock;
-            std::env::set_current_dir(dir).unwrap_or_else(|e| panic!("{e:?}"));
-        }
-
-        fn prepend_path(&mut self, dir: &Path) {
-            let _ = &self.lock;
-            self.env_guards
-                .push(crate::test_support::prepend_to_path(dir));
-        }
-    }
-
-    impl Drop for ProcessStateGuard {
-        fn drop(&mut self) {
-            if std::env::set_current_dir(&self.prev_dir).is_err() {
-                let _ = std::env::set_current_dir("/");
-            }
-        }
-    }
-
-    fn create_repo_with_origin(tmp: &TempDir) -> PathBuf {
-        let repo = tmp.path().join("repo");
-        fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
-        init_git_repo(&repo);
-
-        let bare = tmp.path().join("origin.git");
-        run_git_ok(tmp.path(), &["init", "--bare", "origin.git"]);
-        run_git_ok(
-            &repo,
-            &[
-                "remote",
-                "add",
-                "origin",
-                bare.to_str().unwrap_or_else(|| panic!("non-utf8 path")),
-            ],
-        );
-        repo
-    }
-
-    fn install_logging_gh(bin_dir: &Path, log_path: &Path) {
-        fs::create_dir_all(bin_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let script_path = bin_dir.join("gh");
-            fs::write(
-                &script_path,
-                format!(
-                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
-                    log_path.display()
-                ),
-            )
-            .unwrap_or_else(|e| panic!("{e:?}"));
-            let mut perms = fs::metadata(&script_path)
-                .unwrap_or_else(|e| panic!("{e:?}"))
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).unwrap_or_else(|e| panic!("{e:?}"));
-        }
-    }
-
-    fn plan_args(config_path: &Path, no_force_exec: bool, skip_planning: bool) -> PlanArgs {
-        PlanArgs {
-            issue: None,
-            input: Some("implement force exec".to_string()),
-            pr: None,
-            config: Some(
-                config_path
-                    .to_str()
-                    .unwrap_or_else(|| panic!("non-utf8 path"))
-                    .to_string(),
-            ),
-            dry_run: false,
-            no_force_exec,
-            skip_planning,
-            grill: false,
-            no_interactive_planning: false,
-            repo: None,
-            rate_limit_retries: 0,
-            images: vec![],
-            flags: vec![],
-        }
-    }
-
-    #[test]
-    fn builtin_snapshot_keeps_yaml_app_models_after_settings_change() {
-        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e:?}"));
-        let process = ProcessStateGuard::new(tmp.path());
-        process.set_current_dir(tmp.path());
-        let _model = crate::test_support::EnvGuard::remove("CRUISE_MODEL");
-        let _plan_model = crate::test_support::EnvGuard::remove("CRUISE_PLAN_MODEL");
-
-        let app_config_dir = tmp.path().join(".config").join("cruise");
-        fs::create_dir_all(&app_config_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        let app_config_path = app_config_dir.join("config.yaml");
-        fs::write(
-            &app_config_path,
-            r"model:
-  - anthropic/original-primary
-  - openai/original-fallback
-plan_model:
-  - anthropic/original-plan
-  - openai/original-plan-fallback
-",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-
-        let manager = SessionManager::new(tmp.path().join("sessions"));
-        let session = create_planning_session(
-            &manager,
-            crate::config::BUILTIN_CONFIG_YAML,
-            &ConfigSource::Builtin,
-            "use builtin".to_string(),
-            &SessionManager::new_session_id(),
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-
-        fs::write(
-            &app_config_path,
-            r"model:
-  - anthropic/updated-primary
-  - openai/updated-fallback
-plan_model:
-  - anthropic/updated-plan
-  - openai/updated-plan-fallback
-",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-
-        let saved_session = manager
-            .load(&session.id)
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(matches!(
-            &saved_session.config,
-            SessionConfigRef::BuiltinSnapshot { .. }
-        ));
-        let config = manager
-            .load_config(&saved_session)
-            .unwrap_or_else(|e| panic!("{e:?}"));
-
-        assert_eq!(
-            config.model,
-            Some(crate::config::ModelSpec::Multiple(vec![
-                "anthropic/original-primary".into(),
-                "openai/original-fallback".into(),
-            ]))
-        );
-        assert_eq!(
-            config.plan_model,
-            Some(crate::config::ModelSpec::Multiple(vec![
-                "anthropic/original-plan".into(),
-                "openai/original-plan-fallback".into(),
-            ]))
-        );
-        let retry = config
-            .retry
-            .as_ref()
-            .unwrap_or_else(|| panic!("model lists should enable fallback policy"));
-        assert!(retry.model_fallback);
-        for (spec, primary, fallback) in [
-            (
-                config.model.as_ref(),
-                "anthropic/original-primary",
-                "openai/original-fallback",
-            ),
-            (
-                config.plan_model.as_ref(),
-                "anthropic/original-plan",
-                "openai/original-plan-fallback",
-            ),
-        ] {
-            let sdk = crate::model_selection::Sdk::Jcode;
-            let candidates = crate::model_selection::resolve_candidates(spec, sdk);
-            let mut engine = crate::retry::FallbackEngine::new_candidates(
-                crate::model_selection::ModelAvailability::default(),
-                crate::retry::policy_for_config(config.retry.clone()),
-                candidates[0].sdk,
-                sdk,
-                candidates[0].model.as_deref(),
-                &candidates[1..],
-                1,
-            );
-            assert_eq!((engine.sdk(), engine.model()), (sdk, Some(primary)));
-            assert!(matches!(
-                engine
-                    .next_with_class(crate::retry::Failure::Failed("HTTP 400 bad request"), false)
-                    .0,
-                crate::retry::RetryAction::Switch { .. }
-            ));
-            assert_eq!((engine.sdk(), engine.model()), (sdk, Some(fallback)));
-        }
-    }
-
-    #[test]
-    fn cli_jcode_plan_callback_persists_and_replaces_owned_home() {
-        let _lock = lock_process();
-        let tmp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error:?}"));
-        let _jcode_home = crate::test_support::EnvGuard::set(
-            "JCODE_HOME",
-            std::ffi::OsStr::new("relative-jcode"),
-        );
-        let manager = SessionManager::new(tmp.path().join("sessions"));
-        let working_dir = tmp.path().join("working");
-        fs::create_dir_all(&working_dir).unwrap_or_else(|error| panic!("{error:?}"));
-        let old_home = crate::backend::jcode::resolve_source_home(Some(&working_dir))
-            .join(".cruise-sdk-sessions")
-            .join("old-home");
-        fs::create_dir_all(&old_home).unwrap_or_else(|error| panic!("{error:?}"));
-        fs::write(old_home.join(".cruise-session-id"), "old-session-id")
-            .unwrap_or_else(|error| panic!("{error:?}"));
-        let mut session = make_session("20260624000000", tmp.path());
-        let source_home = crate::backend::jcode::resolve_source_home(Some(&working_dir));
-        session.plan_conversation_id = Some("old-session-id".to_string());
-        session.plan_conversation_home = Some(source_home.clone());
-        manager
-            .create(&session)
-            .unwrap_or_else(|error| panic!("{error:?}"));
-        let config = WorkflowConfig::from_yaml(
-            "sdk: jcode\ninteractive_planning: true\nsteps:\n  plan:\n    prompt: plan\n",
-        )
-        .unwrap_or_else(|error| panic!("{error:?}"));
-
-        let callback = cli_plan_session_callback(&manager, &session, &config, &working_dir)
-            .unwrap_or_else(|| panic!("expected a jcode plan callback"));
-        callback(&crate::model_selection::SdkSessionId {
-            sdk: crate::model_selection::Sdk::Claude,
-            id: "claude-intermediate".to_owned(),
-        })
-        .unwrap_or_else(|error| panic!("{error:?}"));
-        assert!(
-            old_home.exists(),
-            "fallback must preserve the caller's resume storage"
-        );
-        callback(&crate::model_selection::SdkSessionId {
-            sdk: crate::model_selection::Sdk::Jcode,
-            id: "old-session-id".to_owned(),
-        })
-        .unwrap_or_else(|error| panic!("{error:?}"));
-        assert_eq!(
-            fs::read_to_string(old_home.join(".cruise-session-id"))
-                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}")),
-            "old-session-id"
-        );
-        callback(&crate::model_selection::SdkSessionId {
-            sdk: crate::model_selection::Sdk::Jcode,
-            id: "jcode-session-id".to_owned(),
-        })
-        .unwrap_or_else(|error| panic!("{error:?}"));
-
-        let stored = manager
-            .load(&session.id)
-            .unwrap_or_else(|error| panic!("{error:?}"));
-        let identity = session
-            .config
-            .stable_identity(session.repo.as_deref(), &session.id);
-        let expected_key = crate::planning::plan_conversation_key(&config, &identity);
-        assert_eq!(
-            stored.plan_conversation_id.as_deref(),
-            Some("jcode-session-id")
-        );
-        assert_eq!(
-            stored.plan_conversation_key.as_deref(),
-            Some(expected_key.as_str())
-        );
-        assert_eq!(
-            stored.plan_conversation_home.as_deref(),
-            Some(source_home.as_path())
-        );
-        assert!(old_home.exists(), "cleanup waits for the entire request");
-        drop(callback);
-        assert!(
-            !old_home.exists(),
-            "terminal cleanup removes obsolete storage"
-        );
-    }
-
-    #[test]
-    fn cli_mixed_sdk_checkpoints_keep_caller_storage_until_terminal_outcome() {
-        use crate::model_selection::{Sdk, SdkSessionId};
-        let _lock = lock_process();
-        for outcome in ["success", "failure", "cancel"] {
-            let tmp = TempDir::new()
-                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
-            let source = tmp.path().join("jcode");
-            let _home = crate::test_support::EnvGuard::set("JCODE_HOME", &source);
-            let manager = SessionManager::new(tmp.path().join("data"));
-            let mut session = make_session("20261023000006", tmp.path());
-            let config = WorkflowConfig::from_yaml("sdk: jcode\nmodel: [provider/first, {sdk: claude, model: middle}, provider/last]\nsteps:\n  plan:\n    prompt: plan\n").unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
-            let identity = session
-                .config
-                .stable_identity(session.repo.as_deref(), &session.id);
-            session.plan_conversation_key =
-                Some(crate::planning::plan_conversation_key(&config, &identity));
-            session.plan_conversation_id = Some("original".into());
-            session.plan_conversation_backend = Some("jcode".into());
-            session.plan_conversation_home = Some(source.clone());
-            let home = source.join(".cruise-sdk-sessions/original");
-            fs::create_dir_all(&home)
-                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
-            fs::write(home.join(".cruise-session-id"), "original")
-                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
-            fs::write(home.join("history"), "caller history")
-                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
-            manager
-                .create(&session)
-                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
-            let caller = saved_plan_resume(&session, &config)
-                .unwrap_or_else(|| panic!("original caller conversation must be resumable"));
-            let callback = cli_plan_session_callback(&manager, &session, &config, tmp.path())
-                .unwrap_or_else(|| {
-                    panic!("interactive planning must register a checkpoint callback")
-                });
-            callback(&SdkSessionId {
-                sdk: Sdk::Claude,
-                id: "intermediate".into(),
-            })
-            .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
-            assert_eq!(
-                fs::read_to_string(home.join("history"))
-                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}")),
-                "caller history"
-            );
-            assert_eq!(caller.id, "original");
-            callback(&caller)
-                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
-            if outcome == "success" {
-                callback(&SdkSessionId {
-                    sdk: Sdk::Jcode,
-                    id: "replacement".into(),
-                })
-                .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
-            } else {
-                let mut final_state = manager
-                    .load(&session.id)
-                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
-                final_state.plan_error = (outcome == "failure").then(|| "failure".into());
-                manager
-                    .save(&final_state)
-                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"));
-            }
-            assert!(home.exists());
-            drop(callback);
-            assert_eq!(home.exists(), outcome != "success");
-            assert_eq!(
-                manager
-                    .load(&session.id)
-                    .unwrap_or_else(|error| panic!("planning fixture must succeed: {error}"))
-                    .plan_conversation_id
-                    .as_deref(),
-                Some(if outcome == "success" {
-                    "replacement"
-                } else {
-                    "original"
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn cli_opencode_checkpoint_records_owner_without_jcode_home() {
-        let tmp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let manager = SessionManager::new(tmp.path().join("data"));
-        let session = make_session("20261023000001", tmp.path());
-        manager
-            .create(&session)
-            .unwrap_or_else(|error| panic!("{error}"));
-        let config = WorkflowConfig::from_yaml(
-            "sdk: opencode\ninteractive_planning: true\nsteps:\n  plan:\n    prompt: plan\n",
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-        let callback = cli_plan_session_callback(&manager, &session, &config, tmp.path())
-            .unwrap_or_else(|| panic!("expected OpenCode checkpoint callback"));
-        callback(&crate::model_selection::SdkSessionId {
-            sdk: crate::model_selection::Sdk::OpenCode,
-            id: "ses_checkpoint".to_owned(),
-        })
-        .unwrap_or_else(|error| panic!("{error}"));
-        let saved = manager
-            .load(&session.id)
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(saved.plan_conversation_backend.as_deref(), Some("opencode"));
-        assert_eq!(
-            saved.plan_conversation_id.as_deref(),
-            Some("ses_checkpoint")
-        );
-        assert_eq!(saved.plan_conversation_home, None);
-        assert_eq!(
-            saved_plan_resume(&saved, &config)
-                .as_ref()
-                .map(|session| session.id.as_str()),
-            Some("ses_checkpoint")
-        );
-    }
-
-    #[test]
-    fn saved_plan_resume_requires_matching_key_and_owner() {
-        let tmp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
-        let mut session = make_session("20261023000002", tmp.path());
-        let config = WorkflowConfig::from_yaml(
-            "sdk: opencode\ninteractive_planning: true\nsteps:\n  plan:\n    prompt: plan\n",
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-        let identity = session
-            .config
-            .stable_identity(session.repo.as_deref(), &session.id);
-        session.plan_conversation_id = Some("ses_resume".to_string());
-        session.plan_conversation_key =
-            Some(crate::planning::plan_conversation_key(&config, &identity));
-        for owner in [None, Some("jcode"), Some("unknown")] {
-            session.plan_conversation_backend = owner.map(str::to_string);
-            assert_eq!(saved_plan_resume(&session, &config), None);
-        }
-        session.plan_conversation_backend = Some("opencode".to_string());
-        assert_eq!(
-            saved_plan_resume(&session, &config)
-                .as_ref()
-                .map(|session| session.id.as_str()),
-            Some("ses_resume")
-        );
-        session.plan_conversation_key = Some("different-configuration".to_string());
-        assert_eq!(saved_plan_resume(&session, &config), None);
-        let mut legacy_config = config;
-        legacy_config.sdk = Some("jcode".to_string());
-        session.plan_conversation_backend = None;
-        session.plan_conversation_key = Some(crate::planning::plan_conversation_key(
-            &legacy_config,
-            &identity,
-        ));
-        assert_eq!(
-            saved_plan_resume(&session, &legacy_config)
-                .as_ref()
-                .map(|session| session.id.as_str()),
-            Some("ses_resume")
-        );
-    }
-
-    #[test]
-    fn test_force_exec_opt_out_for_flag() {
-        // Given: explicit opt-out
-        let reason = force_exec_opt_out(true, false, false);
-
-        // Then: force_exec is overridden
-        assert_eq!(reason, Some("--no-force-exec"));
-    }
-
-    #[test]
-    fn test_force_exec_opt_out_for_grill() {
-        // Given: explicit grill planning
-        let reason = force_exec_opt_out(false, true, false);
-
-        // Then: force_exec is overridden
-        assert_eq!(reason, Some("--grill"));
-    }
-
-    #[test]
-    fn test_force_exec_opt_out_for_images() {
-        // Given: an attached image
-        let reason = force_exec_opt_out(false, false, true);
-
-        // Then: force_exec is overridden
-        assert_eq!(reason, Some("image attachment"));
-    }
-
-    #[test]
-    fn test_force_exec_opt_out_is_none_when_eligible() {
-        // Given: no opt-out or incompatible planning request
-        let reason = force_exec_opt_out(false, false, false);
-
-        // Then: force_exec remains eligible
-        assert_eq!(reason, None);
-    }
-
-    #[test]
-    fn test_force_exec_opt_out_preserves_explicit_priority() {
-        assert_eq!(
-            force_exec_opt_out(true, true, true),
-            Some("--no-force-exec")
-        );
-        assert_eq!(force_exec_opt_out(false, true, true), Some("--grill"));
-        assert_eq!(
-            force_exec_opt_out(false, false, true),
-            Some("image attachment")
-        );
-    }
-
-    #[test]
-    fn plan_notification_mapping_distinguishes_success_and_failure() {
-        use crate::desktop_notifications::WorkflowNotificationKind;
-
-        assert_eq!(
-            notification_kind_for_plan_result(&Ok(())),
-            Some(WorkflowNotificationKind::PlanReady)
-        );
-        assert_eq!(
-            notification_kind_for_plan_result(&Err(CruiseError::Other(
-                "planning backend unavailable".to_string(),
-            ))),
-            Some(WorkflowNotificationKind::Failed)
-        );
-        assert_eq!(
-            notification_kind_for_plan_result(&Err(CruiseError::Interrupted)),
-            None
-        );
-    }
-
-    #[test]
-    fn test_setup_plan_vars_sets_configured_plan_language() {
-        // Given: a workflow config with a custom planning language
-        let yaml = r"
-command: [echo]
-plan_language: Japanese
-steps:
-  s1:
-    command: echo hi
-";
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When: planning variables are set up
-        let vars = setup_plan_vars("task".to_string(), PathBuf::from("plan.md"), &config);
-
-        // Then: the plan language variable resolves to the configured value
-        assert_eq!(
-            vars.resolve("{plan.language}")
-                .unwrap_or_else(|e| panic!("{e:?}")),
-            "Japanese"
-        );
-    }
-
-    #[test]
-    fn test_setup_plan_vars_defaults_blank_plan_language_to_english() {
-        // Given: a workflow config with a blank planning language
-        let yaml = r#"
-command: [echo]
-plan_language: "   "
-steps:
-  s1:
-    command: echo hi
-"#;
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When: planning variables are set up
-        let vars = setup_plan_vars("task".to_string(), PathBuf::from("plan.md"), &config);
-
-        // Then: the plan language variable falls back to English
-        assert_eq!(
-            vars.resolve("{plan.language}")
-                .unwrap_or_else(|e| panic!("{e:?}")),
-            crate::config::DEFAULT_PLAN_LANGUAGE
-        );
-    }
-
-    #[test]
-    fn test_setup_planning_worktree_creates_worktree_and_sets_session_fields() {
-        let _lock = lock_process();
-        // Given: a valid git repo and a persisted session
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let repo = tmp.path().join("repo");
-        let cruise_home = tmp.path().join(".cruise");
-        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
-        init_git_repo(&repo);
-        let manager = SessionManager::new(cruise_home);
-        let mut session = make_session("20260522080000", &repo);
-        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When: the planning worktree is set up
-        setup_planning_worktree(&manager, &mut session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: the session has a worktree path and branch recorded
-        assert!(
-            session.worktree_path.is_some(),
-            "worktree_path should be set after setup_planning_worktree"
-        );
-        let wt_path = session
-            .worktree_path
-            .as_ref()
-            .unwrap_or_else(|| panic!("worktree_path should be set"));
-        assert!(wt_path.exists(), "worktree directory should exist on disk");
-        assert!(
-            session.worktree_branch.is_some(),
-            "worktree_branch should be set after setup_planning_worktree"
-        );
-
-        // Cleanup
-        let ctx = session
-            .worktree_context()
-            .unwrap_or_else(|| panic!("expected worktree context"));
-        crate::worktree::cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
-    }
-
-    #[test]
-    fn test_planning_worktree_reuse_ignores_invalid_base_settings()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let _lock = lock_process();
-        let tmp = TempDir::new()?;
-        let _config =
-            crate::test_support::EnvGuard::set("XDG_CONFIG_HOME", tmp.path().join("config"));
-        let repo = tmp.path().join("repo");
-        fs::create_dir_all(repo.join(".cruise"))?;
-        init_git_repo(&repo);
-        fs::write(repo.join(".cruise/default.yaml"), "base_branch: main\n")?;
-        let manager = SessionManager::new(tmp.path().join("data"));
-        let mut session = make_session("20260522080002", &repo);
-        manager.create(&session)?;
-        setup_planning_worktree(&manager, &mut session)?;
-        let path = session.worktree_path.clone();
-        let branch = session.worktree_branch.clone();
-        fs::write(repo.join(".cruise/default.yaml"), "base_branch: '-x'\n")?;
-
-        setup_planning_worktree(&manager, &mut session)?;
-        assert_eq!(session.worktree_path, path);
-        assert_eq!(session.worktree_branch, branch);
-        assert_eq!(session.worktree_base_branch.as_deref(), Some("main"));
-
-        let mut fresh = make_session("20260522080003", &repo);
-        assert!(setup_planning_worktree(&manager, &mut fresh).is_err());
-        assert!(!manager.worktrees_dir().join(&fresh.id).exists());
-        Ok(())
-    }
-
-    #[test]
-    fn test_setup_planning_worktree_noop_for_non_git_repo() {
-        // Given: a directory that is NOT a git repository
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let non_git_dir = tmp.path().join("not-a-repo");
-        let cruise_home = tmp.path().join(".cruise");
-        fs::create_dir_all(&non_git_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        let manager = SessionManager::new(cruise_home);
-        let mut session = make_session("20260522080001", &non_git_dir);
-
-        // When: the planning worktree is set up for a non-git directory
-        let result = setup_planning_worktree(&manager, &mut session);
-
-        // Then: no error is returned and worktree fields remain unset (graceful fallback)
-        assert!(
-            result.is_ok(),
-            "setup_planning_worktree should not fail for non-git repo: {result:?}"
-        );
-        assert!(
-            session.worktree_path.is_none(),
-            "worktree_path should remain None for non-git repo"
-        );
-        assert!(
-            session.worktree_branch.is_none(),
-            "worktree_branch should remain None for non-git repo"
-        );
-    }
-
-    #[test]
-    fn test_resolve_input_from_arg() {
-        // Given: a CLI arg is provided
-        let result = resolve_input(Some("add feature X".to_string()), None, || {
-            panic!("interactive prompt should not run")
-        });
-        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "add feature X");
-    }
-
-    #[test]
-    fn test_resolve_input_from_stdin() {
-        // Given: stdin input is present and no CLI arg is provided
-        let result = resolve_input(None, Some("  add feature from pipe\n".to_string()), || {
-            panic!("interactive prompt should not run")
-        });
-        assert_eq!(
-            result.unwrap_or_else(|e| panic!("{e:?}")),
-            "add feature from pipe"
-        );
-    }
-
-    #[test]
-    fn test_resolve_input_without_arg_or_stdin_uses_interactive_result() {
-        // Given: no CLI arg or stdin input is available
-        let result = resolve_input(None, None, || Ok("resume in place".to_string()));
-        assert_eq!(
-            result.unwrap_or_else(|e| panic!("{e:?}")),
-            "resume in place"
-        );
-    }
-
-    // -- resolve_input with multiline stdin ----------------------------------
-
-    #[test]
-    fn test_resolve_input_multiline_from_stdin_preserves_internal_newlines() {
-        // Given: multi-line stdin input (piped, etc.)
-        let stdin = "line1\nline2\nline3\n".to_string();
-        let result = resolve_input(None, Some(stdin), || {
-            panic!("interactive prompt should not run")
-        });
-        // Then: only leading/trailing whitespace is trimmed, internal newlines are preserved
-        assert_eq!(
-            result.unwrap_or_else(|e| panic!("{e:?}")),
-            "line1\nline2\nline3"
-        );
-    }
-
-    #[test]
-    fn test_resolve_input_multiline_trims_only_leading_trailing_whitespace() {
-        // Given: multi-line stdin input with extra whitespace at start and end
-        let stdin = "  line1\nline2  \n".to_string();
-        let result = resolve_input(None, Some(stdin), || {
-            panic!("interactive prompt should not run")
-        });
-        // Then: only leading/trailing whitespace is removed, internal newlines are preserved
-        assert_eq!(result.unwrap_or_else(|e| panic!("{e:?}")), "line1\nline2");
-    }
-
-    #[test]
-    fn test_collect_expanded_ids_deduplicates_parent_and_child_selection() {
-        let selected = vec![
+    fn skipped_step_defaults_require_every_expanded_leaf() {
+        let nodes = vec![
             FlatNode {
-                label: "review-pass".to_string(),
-                expanded_step_ids: vec![
-                    "review-pass/simplify".to_string(),
-                    "review-pass/coderabbit".to_string(),
-                ],
+                label: "single".to_string(),
+                expanded_step_ids: vec!["single".to_string()],
             },
             FlatNode {
-                label: "  simplify".to_string(),
-                expanded_step_ids: vec!["review-pass/simplify".to_string()],
+                label: "parent".to_string(),
+                expanded_step_ids: vec!["parent/a".to_string(), "parent/b".to_string()],
             },
         ];
-
         assert_eq!(
-            collect_expanded_ids(selected),
-            vec!["review-pass/simplify", "review-pass/coderabbit"]
-        );
-    }
-
-    fn flag_skip_prompt_config() -> WorkflowConfig {
-        WorkflowConfig::from_yaml(
-            r"
-command: [echo]
-flags:
-  e2e: {}
-  docs: {}
-groups:
-  checks:
-    steps:
-      first:
-        command: echo first
-steps:
-  build:
-    command: echo build
-  e2e-test:
-    flag: e2e
-    command: echo e2e
-  review:
-    flag: docs
-    group: checks
-after-pr:
-  notify:
-    flag: docs
-    command: echo notify
-",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"))
-    }
-
-    #[test]
-    fn skip_prompt_only_offers_steps_enabled_by_selected_flags() {
-        let config = flag_skip_prompt_config();
-        let off = skip_prompt_nodes(&config, &crate::flags::FlagValues::new())
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(
-            off.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            ["build"]
-        );
-        let on = skip_prompt_nodes(
-            &config,
-            &crate::flags::FlagValues::from([("e2e".into(), true)]),
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(
-            on.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            ["build", "e2e-test"]
-        );
-    }
-
-    #[test]
-    fn skip_prompt_preserves_enabled_group_expansion_and_after_pr_label() {
-        let flat = skip_prompt_nodes(
-            &flag_skip_prompt_config(),
-            &crate::flags::FlagValues::from([("docs".into(), true)]),
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(
-            flat.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            ["build", "review", "  first", "[after-pr] notify"]
+            flat_node_default_indices(&nodes, &["single".to_string()]),
+            vec![0]
         );
         assert_eq!(
-            collect_expanded_ids(flat),
-            ["build", "review/first", "notify"]
+            flat_node_default_indices(&nodes, &["parent/a".to_string(), "parent/b".to_string()]),
+            vec![1]
         );
-    }
-
-    #[test]
-    fn skip_prompt_has_no_candidates_when_all_steps_are_flag_disabled() {
-        let config = WorkflowConfig::from_yaml(
-            "command: [echo]\nflags:\n  e2e: {}\nsteps:\n  e2e-test:\n    flag: e2e\n    command: echo e2e\n",
-        ).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            skip_prompt_nodes(&config, &crate::flags::FlagValues::new())
-                .unwrap_or_else(|e| panic!("{e:?}"))
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn test_select_skipped_steps_with_history_returns_some_for_empty_config() {
-        // Given: a workflow with no executable steps
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let session = make_session("20260825090000", tmp.path());
-        let config = WorkflowConfig::from_yaml("command: [echo]\nsteps: {}\n")
-            .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When: step skipping is requested
-        let result =
-            select_skipped_steps_with_history(&session, &config, &crate::flags::FlagValues::new());
-
-        // Then: the empty confirmed selection is distinct from cancellation
-        assert_eq!(
-            result.unwrap_or_else(|e| panic!("{e:?}")),
-            Some(Vec::<String>::new())
-        );
-    }
-
-    // -- generate_title_via_sdk cancellation -----------------------------------
-
-    /// Given: a command-backend config, a pre-cancelled token
-    /// When: `generate_title_via_sdk` is called
-    /// Then: returns `CruiseError::Interrupted` before the 5-second timeout
-    ///
-    /// If this test times out, the `cancel_token` is not forwarded to `PromptRun`
-    /// inside `generate_title_via_sdk`.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn generate_title_via_sdk_pre_cancelled_token_returns_interrupted() {
-        use crate::cancellation::CancellationToken;
-        use crate::config::WorkflowConfig;
-        use crate::error::CruiseError;
-
-        let _guard = crate::test_support::lock_process();
-
-        // Given: command backend that blocks indefinitely, pre-cancelled token
-        let yaml = "command: [\"sleep\", \"100\"]\nsteps:\n  s1:\n    prompt: hi\n";
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("bad yaml: {e:?}"));
-        let token = CancellationToken::new();
-        token.cancel();
-
-        // When
-        let timed = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            generate_title_via_sdk(
-                &config,
-                "my task",
-                "# Plan\n- step",
-                Some(&token),
-                None,
-                None,
-            ),
-        )
-        .await;
-
-        // Then: completes before timeout and returns Interrupted
-        assert!(
-            timed.is_ok(),
-            "timed out — cancel_token is not forwarded inside generate_title_via_sdk"
-        );
-        assert!(
-            matches!(
-                timed.unwrap_or_else(|e| panic!("{e:?}")),
-                Err(CruiseError::Interrupted)
-            ),
-            "expected CruiseError::Interrupted"
-        );
-    }
-
-    /// Given: a command-backend config, no cancel token
-    /// When: `generate_title_via_sdk` is called with a fast command (cat)
-    /// Then: returns an error (no title tool called), but does not panic
-    ///       — this is a baseline test to verify no regression in the happy path signature
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn generate_title_via_sdk_no_token_returns_err_without_sdk_tool() {
-        use crate::config::WorkflowConfig;
-
-        let _guard = crate::test_support::lock_process();
-
-        let yaml = "command: [\"cat\"]\nsteps:\n  s1:\n    prompt: hi\n";
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("bad yaml: {e:?}"));
-
-        // cat echoes the prompt; the generate_title tool is never called.
-        // With no token, the function should complete (with an Err: None from the store).
-        let result = generate_title_via_sdk(&config, "task", "# Plan", None, None, None).await;
-
-        // The title store remains empty because cat doesn't call the tool,
-        // so the function returns Err with "title store returned None".
-        assert!(
-            result.is_err(),
-            "expected Err when title tool was not called"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // regenerate_plan_for_session — phase gate
-    // -----------------------------------------------------------------------
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_regenerate_plan_for_session_running_phase_fails() {
-        // Given: a Running session — cannot regenerate while executing
-        let _guard = lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
-        init_git_repo(&repo);
-        fs::write(
-            repo.join("cruise.yaml"),
-            "command: [echo]\nsteps:\n  s:\n    prompt: hi",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-
-        let manager = SessionManager::new(tmp.path().join(".cruise"));
-        let mut session = make_session("20260619200001", &repo);
-        session.phase = SessionPhase::Running;
-        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
-
-        // Then: must return an error (not silently succeed or panic)
-        assert!(
-            result.is_err(),
-            "regenerate_plan_for_session should fail for Running phase"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_regenerate_plan_for_session_completed_phase_fails() {
-        // Given: a Completed session
-        let _guard = lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
-        init_git_repo(&repo);
-        fs::write(
-            repo.join("cruise.yaml"),
-            "command: [echo]\nsteps:\n  s:\n    prompt: hi",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-
-        let manager = SessionManager::new(tmp.path().join(".cruise"));
-        let mut session = make_session("20260619200002", &repo);
-        session.phase = SessionPhase::Completed;
-        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
-
-        // Then
-        assert!(
-            result.is_err(),
-            "regenerate_plan_for_session should fail for Completed phase"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_regenerate_plan_for_session_suspended_phase_fails() {
-        // Given: a Suspended session
-        let _guard = lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
-        init_git_repo(&repo);
-        fs::write(
-            repo.join("cruise.yaml"),
-            "command: [echo]\nsteps:\n  s:\n    prompt: hi",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-
-        let manager = SessionManager::new(tmp.path().join(".cruise"));
-        let mut session = make_session("20260619200003", &repo);
-        session.phase = SessionPhase::Suspended;
-        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
-
-        // Then
-        assert!(
-            result.is_err(),
-            "regenerate_plan_for_session should fail for Suspended phase"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_regenerate_plan_for_session_failed_phase_fails() {
-        // Given: a Failed session
-        let _guard = lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
-        init_git_repo(&repo);
-        fs::write(
-            repo.join("cruise.yaml"),
-            "command: [echo]\nsteps:\n  s:\n    prompt: hi",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-
-        let manager = SessionManager::new(tmp.path().join(".cruise"));
-        let mut session = make_session("20260619200004", &repo);
-        session.phase = SessionPhase::Failed("prior error".to_string());
-        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
-
-        // Then
-        assert!(
-            result.is_err(),
-            "regenerate_plan_for_session should fail for Failed phase"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // regenerate_plan_for_session — success paths
-    // -----------------------------------------------------------------------
-
-    /// Config for a command backend that actually produces a plan: it drains
-    /// stdin (the resolved prompt) and writes a fixed markdown plan --
-    /// `MOCK_PLAN_CONTENT` -- to `{plan}` (resolved via the `PLAN_FILE` env
-    /// var). Mirrors the `sh -c` command-backend pattern already used in
-    /// `planning.rs`'s tests (e.g.
-    /// `run_plan_prompt_template_forwards_default_env_to_command_backend`).
-    fn regenerate_success_config_yaml() -> &'static str {
-        // Uses a two-hash raw string delimiter because the YAML content below
-        // contains a literal `"#` sequence (the mock plan heading), which
-        // would otherwise terminate a single-hash raw string early.
-        r##"command: ["sh", "-c", "cat >/dev/null; printf '%s' \"$MOCK_PLAN_CONTENT\" > \"$PLAN_FILE\""]
-env:
-  PLAN_FILE: "{plan}"
-  MOCK_PLAN_CONTENT: "# Regenerated Plan Title\n\nStep 1: do the thing.\n"
-steps:
-  s:
-    prompt: hi
-"##
-    }
-
-    /// Build a session + manager pair with a real git repo, a command-backend
-    /// config that successfully writes a plan (see
-    /// [`regenerate_success_config_yaml`]), and `session.config_path` pointing
-    /// at it (`load_config` falls back to the session dir otherwise).
-    fn make_regenerate_success_fixture(id: &str, tmp: &TempDir) -> (SessionManager, SessionState) {
-        let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo).unwrap_or_else(|e| panic!("{e:?}"));
-        init_git_repo(&repo);
-        let config_path = repo.join("cruise.yaml");
-        fs::write(&config_path, regenerate_success_config_yaml())
-            .unwrap_or_else(|e| panic!("{e:?}"));
-
-        let manager = SessionManager::new(tmp.path().join(".cruise"));
-        let mut session = make_session(id, &repo);
-        session.config = crate::session_config::SessionConfigRef::File { path: config_path };
-        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
-        (manager, session)
-    }
-
-    fn seed_opencode_checkpoint(manager: &SessionManager, session: &mut SessionState) -> PathBuf {
-        use sha2::{Digest as _, Sha256};
-        use std::fmt::Write as _;
-        let id = "ses_previous_plan";
-        let mut key = String::with_capacity(64);
-        for byte in Sha256::digest(id.as_bytes()) {
-            write!(&mut key, "{byte:02x}").unwrap_or_else(|error| panic!("{error}"));
-        }
-        let root = crate::paths::data_dir()
-            .unwrap_or_else(|error| panic!("{error}"))
-            .join("opencode")
-            .join(key);
-        fs::create_dir_all(&root).unwrap_or_else(|error| panic!("{error}"));
-        fs::write(
-            root.join("manifest.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "owner":"cruise-opencode-v2", "id":id, "cwd":session.base_dir, "clean":true,
-            }))
-            .unwrap_or_else(|error| panic!("{error}")),
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-        fs::write(root.join("lock"), "").unwrap_or_else(|error| panic!("{error}"));
-        session.plan_conversation_id = Some(id.to_owned());
-        session.plan_conversation_key = Some("old-opencode-config".to_owned());
-        session.plan_conversation_backend = Some("opencode".to_owned());
-        session.plan_conversation_home = Some(session.base_dir.join("unrelated-jcode"));
-        manager
-            .save(session)
-            .unwrap_or_else(|error| panic!("{error}"));
-        root
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn replacement_plan_clears_only_previous_owned_checkpoint_after_success() {
-        let _guard = lock_process();
-        for regenerate in [false, true] {
-            for mode in ["command", "claude"] {
-                for success in [false, true] {
-                    let tmp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
-                    let _home = crate::test_support::set_fake_home(tmp.path());
-                    let _data = crate::test_support::EnvGuard::set(
-                        "XDG_DATA_HOME",
-                        tmp.path().join("data"),
-                    );
-                    let (manager, mut session) =
-                        make_regenerate_success_fixture("20261023000200", &tmp);
-                    session.phase = SessionPhase::Planned;
-                    let old_root = seed_opencode_checkpoint(&manager, &mut session);
-                    let unrelated = old_root
-                        .parent()
-                        .unwrap_or_else(|| panic!("storage parent"))
-                        .join("unrelated");
-                    fs::create_dir_all(&unrelated).unwrap_or_else(|error| panic!("{error}"));
-                    let previous = manager
-                        .load(&session.id)
-                        .unwrap_or_else(|error| panic!("{error}"));
-                    let config_path = session.base_dir.join("cruise.yaml");
-                    let _path = crate::test_support::prepend_to_path(tmp.path());
-                    if mode == "command" {
-                        if !success {
-                            fs::write(&config_path, "command: [sh, -c, 'exit 7']\nsteps:\n  check:\n    prompt: check\n")
-                                .unwrap_or_else(|error| panic!("{error}"));
-                        }
-                    } else {
-                        crate::test_support::write_executable_script(
-                            &tmp.path().join("claude"),
-                            if success {
-                                "#!/bin/sh\nread -r _user_frame\nprintf '# Replacement Plan\\n\\nDo the thing.\\n' > \"$PLAN_FILE\"\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"claude-replacement\",\"result\":\"# Replacement Plan\\n\\nDo the thing.\"}'\n"
-                            } else {
-                                "#!/bin/sh\nexit 7\n"
-                            },
-                        );
-                        fs::write(&config_path, "sdk: claude\ninteractive_planning: false\nenv:\n  PLAN_FILE: '{plan}'\nsteps:\n  check:\n    prompt: check\n")
-                            .unwrap_or_else(|error| panic!("{error}"));
-                    }
-                    let result = if regenerate {
-                        regenerate_plan_for_session(&manager, &mut session, 0).await
-                    } else {
-                        replan_session(&manager, &mut session, "replace plan".to_owned(), 0).await
-                    };
-                    assert_eq!(
-                        result.is_ok(),
-                        success,
-                        "{mode} regenerate={regenerate}: {result:?}"
-                    );
-                    let current = manager
-                        .load(&session.id)
-                        .unwrap_or_else(|error| panic!("{error}"));
-                    if success {
-                        assert!(!old_root.exists());
-                        assert!(current.plan_conversation_id.is_none());
-                        assert!(current.plan_conversation_key.is_none());
-                        assert!(current.plan_conversation_backend.is_none());
-                        assert!(current.plan_conversation_home.is_none());
-                    } else {
-                        assert!(old_root.exists());
-                        assert_eq!(current.plan_conversation_id, previous.plan_conversation_id);
-                        assert_eq!(
-                            current.plan_conversation_key,
-                            previous.plan_conversation_key
-                        );
-                        assert_eq!(
-                            current.plan_conversation_backend,
-                            previous.plan_conversation_backend
-                        );
-                        assert_eq!(
-                            current.plan_conversation_home,
-                            previous.plan_conversation_home
-                        );
-                    }
-                    assert!(unrelated.is_dir());
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn checkpoint_finalization_retains_new_checkpoint_and_propagates_cleanup_errors() {
-        let tmp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
-        let manager = SessionManager::new(tmp.path().join("sessions"));
-        let mut previous = make_session("20261023000201", tmp.path());
-        previous.plan_conversation_id = Some("old".to_owned());
-        previous.plan_conversation_backend = Some("unknown-owner".to_owned());
-        manager
-            .create(&previous)
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert!(finalize_plan_checkpoint(&manager, &previous, false).is_err());
-        assert_eq!(
-            manager
-                .load(&previous.id)
-                .unwrap_or_else(|error| panic!("{error}"))
-                .plan_conversation_id,
-            previous.plan_conversation_id
-        );
-        let mut current = previous.clone();
-        current.plan_conversation_id = Some("new-checkpoint".to_owned());
-        manager
-            .save(&current)
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert!(finalize_plan_checkpoint(&manager, &previous, false).is_ok());
-        assert_eq!(
-            manager
-                .load(&previous.id)
-                .unwrap_or_else(|error| panic!("{error}"))
-                .plan_conversation_id,
-            current.plan_conversation_id
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_regenerate_plan_for_session_draft_transitions_to_awaiting_approval() {
-        // Given: a Draft session and a config whose command backend successfully
-        // writes a plan
-        let _guard = lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        // Loading a file-backed workflow also reads user application settings.
-        let _home = crate::test_support::set_fake_home(tmp.path());
-        let (manager, mut session) = make_regenerate_success_fixture("20260701090001", &tmp);
-        session.phase = SessionPhase::Draft;
-        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
-
-        // Then: succeeds and transitions Draft -> AwaitingApproval
-        assert!(result.is_ok(), "expected Ok, got: {result:?}");
-        assert_eq!(session.phase, SessionPhase::AwaitingApproval);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_regenerate_plan_for_session_awaiting_input_transitions_to_awaiting_approval() {
-        // Given: an AwaitingInput session (blocked on an SDK ask_user answer)
-        let _guard = lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        // Loading a file-backed workflow also reads user application settings.
-        let _home = crate::test_support::set_fake_home(tmp.path());
-        let (manager, mut session) = make_regenerate_success_fixture("20260701090002", &tmp);
-        session.phase = SessionPhase::AwaitingInput;
-        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
-
-        // Then: succeeds and transitions AwaitingInput -> AwaitingApproval
-        assert!(result.is_ok(), "expected Ok, got: {result:?}");
-        assert_eq!(session.phase, SessionPhase::AwaitingApproval);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_regenerate_plan_for_session_awaiting_approval_stays_awaiting_approval() {
-        // Given: a session already in AwaitingApproval (regenerating before approval)
-        let _guard = lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        // Loading a file-backed workflow also reads user application settings.
-        let _home = crate::test_support::set_fake_home(tmp.path());
-        let (manager, mut session) = make_regenerate_success_fixture("20260701090003", &tmp);
-        session.phase = SessionPhase::AwaitingApproval;
-        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
-
-        // Then: succeeds and stays in AwaitingApproval (no-op transition)
-        assert!(result.is_ok(), "expected Ok, got: {result:?}");
-        assert_eq!(session.phase, SessionPhase::AwaitingApproval);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_regenerate_plan_for_session_planned_stays_planned() {
-        // Given: an already-approved Planned session. Regenerating its plan must
-        // NOT silently un-approve it back to AwaitingApproval.
-        let _guard = lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        // Loading a file-backed workflow also reads user application settings.
-        let _home = crate::test_support::set_fake_home(tmp.path());
-        let (manager, mut session) = make_regenerate_success_fixture("20260701090004", &tmp);
-        session.phase = SessionPhase::Planned;
-        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
-
-        // Then: succeeds and preserves the Planned (approved) phase
-        assert!(result.is_ok(), "expected Ok, got: {result:?}");
-        assert_eq!(
-            session.phase,
-            SessionPhase::Planned,
-            "Planned session must not be silently un-approved after regeneration"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_regenerate_plan_for_session_clears_plan_error_on_success() {
-        // Given: a session carrying a stale plan_error from a prior failed attempt
-        let _guard = lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        // Loading a file-backed workflow also reads user application settings.
-        let _home = crate::test_support::set_fake_home(tmp.path());
-        let (manager, mut session) = make_regenerate_success_fixture("20260701090005", &tmp);
-        session.phase = SessionPhase::AwaitingApproval;
-        session.plan_error = Some("previous planning attempt failed".to_string());
-        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
-
-        // Then: succeeds and clears the stale plan_error
-        assert!(result.is_ok(), "expected Ok, got: {result:?}");
-        assert_eq!(
-            session.plan_error, None,
-            "plan_error should be cleared after a successful regeneration"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_regenerate_plan_for_session_refreshes_title_from_plan() {
-        // Given: a session with a stale title from a previous plan
-        let _guard = lock_process();
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        // Loading a file-backed workflow also reads user application settings.
-        let _home = crate::test_support::set_fake_home(tmp.path());
-        let (manager, mut session) = make_regenerate_success_fixture("20260701090006", &tmp);
-        session.phase = SessionPhase::AwaitingApproval;
-        session.title = Some("Old stale title".to_string());
-        manager.save(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When
-        let result = regenerate_plan_for_session(&manager, &mut session, 0).await;
-
-        // Then: succeeds and the title is refreshed from the newly generated
-        // plan's heading (see `regenerate_success_config_yaml`'s
-        // `MOCK_PLAN_CONTENT`)
-        assert!(result.is_ok(), "expected Ok, got: {result:?}");
-        assert_eq!(
-            session.title.as_deref(),
-            Some("Regenerated Plan Title"),
-            "session title should be refreshed from the regenerated plan content"
-        );
-    }
-
-    #[test]
-    fn test_finalize_skip_planning_session_lands_in_planned() {
-        // Given: a session manager and a fresh session in AwaitingApproval state
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let base_dir = tmp.path().join("repo");
-        let cruise_home = tmp.path().join(".cruise");
-        fs::create_dir_all(&base_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        let manager = SessionManager::new(cruise_home);
-        let mut session = SessionState::new(
-            "20260621100000".to_string(),
-            base_dir,
-            crate::session_config::SessionConfigRef::File {
-                path: std::path::PathBuf::from("cruise.yaml"),
-            },
-            "implement the feature".to_string(),
-        );
-        // SessionState::new starts in AwaitingApproval — the default
-        assert_eq!(session.phase, SessionPhase::AwaitingApproval);
-        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When: finalize_skip_planning_session is called
-        finalize_skip_planning_session(&manager, &mut session, true)
-            .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: phase transitions to Planned (not stuck at AwaitingApproval)
-        assert_eq!(
-            session.phase,
-            SessionPhase::Planned,
-            "skip-planning session should land in Planned, got {:?}",
-            session.phase
-        );
-    }
-
-    #[test]
-    fn test_finalize_skip_planning_session_clears_worktree_for_repo_session() {
-        // Given: a repo-backed session in AwaitingApproval with a worktree_path set.
-        // The "wt" directory is intentionally absent: worktree_context() returns None so
-        // the git-level worktree removal is skipped, but cleanup_after_approval still
-        // clears worktree_path on the session. Actual filesystem deletion is covered by
-        // repo_clone::tests::test_cleanup_after_approval_removes_clone_and_clears_worktree_path.
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let base_dir = tmp.path().join("repo");
-        let cruise_home = tmp.path().join(".cruise");
-        fs::create_dir_all(&base_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        let manager = SessionManager::new(cruise_home);
-        let mut session = SessionState::new(
-            "20260621100001".to_string(),
-            base_dir.clone(),
-            crate::session_config::SessionConfigRef::File {
-                path: std::path::PathBuf::from("cruise.yaml"),
-            },
-            "implement the feature".to_string(),
-        );
-        session.repo = Some("owner/repo".to_string());
-        session.worktree_path = Some(base_dir.join("wt"));
-        session.worktree_branch = Some("cruise/20260621100001-task".to_string());
-        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When: finalize_skip_planning_session is called
-        finalize_skip_planning_session(&manager, &mut session, true)
-            .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: phase is Planned and the temporary clone worktree_path is cleared
-        assert_eq!(
-            session.phase,
-            SessionPhase::Planned,
-            "repo session should land in Planned after skip-planning, got {:?}",
-            session.phase
-        );
-        assert!(
-            session.worktree_path.is_none(),
-            "worktree_path should be cleared by cleanup_after_approval for repo session"
-        );
-    }
-    #[test]
-    fn test_finalize_skip_planning_session_retains_repo_workspace_when_pr_disabled() {
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let manager = SessionManager::new(tmp.path().join(".cruise"));
-        let id = "20260621100002";
-        let base_dir = manager.clones_dir().join(id);
-        let worktree_path = tmp.path().join("worktree");
-        fs::create_dir_all(&base_dir).unwrap_or_else(|e| panic!("{e:?}"));
-        fs::write(base_dir.join("clone-marker"), "keep").unwrap_or_else(|e| panic!("{e:?}"));
-        fs::create_dir_all(&worktree_path).unwrap_or_else(|e| panic!("{e:?}"));
-        fs::write(worktree_path.join("worktree-marker"), "keep")
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        let mut session = SessionState::new(
-            id.to_string(),
-            base_dir.clone(),
-            crate::session_config::SessionConfigRef::File {
-                path: std::path::PathBuf::from("cruise.yaml"),
-            },
-            "implement the feature".to_string(),
-        );
-        session.repo = Some("owner/repo".to_string());
-        session.worktree_path = Some(worktree_path.clone());
-        session.worktree_branch = Some("cruise/20260621100002-task".to_string());
-        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        finalize_skip_planning_session(&manager, &mut session, false)
-            .unwrap_or_else(|e| panic!("{e:?}"));
-
-        let saved = manager
-            .load(id)
-            .unwrap_or_else(|e| panic!("failed to reload retained session: {e:?}"));
-        assert!(base_dir.join("clone-marker").exists());
-        assert!(worktree_path.join("worktree-marker").exists());
-        assert_eq!(session.phase, SessionPhase::Planned);
-        assert_eq!(saved.base_dir, base_dir);
-        assert_eq!(
-            saved.worktree_path.as_deref(),
-            Some(worktree_path.as_path())
-        );
-    }
-    #[cfg(unix)]
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_force_exec_plan_entrypoint_runs_directly_without_worktree_or_pr() {
-        // Given: a clean git repo and a workflow that enables force_exec
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let mut process = ProcessStateGuard::new(tmp.path());
-        let repo = create_repo_with_origin(&tmp);
-        process.set_current_dir(&repo);
-
-        let config_path = tmp.path().join("cruise.yaml");
-        fs::write(
-            &config_path,
-            r"force_exec: true
-command: [cat]
-steps:
-  write:
-    command: |
-      printf exec-result > exec-out.txt
-",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-
-        let bin_dir = tmp.path().join("bin");
-        let gh_log = tmp.path().join("gh.log");
-        install_logging_gh(&bin_dir, &gh_log);
-        process.prepend_path(&bin_dir);
-
-        // When: the plan entry point is invoked without the opt-out flag
-        let result = Box::pin(run(plan_args(&config_path, false, false))).await;
-
-        // Then: the workflow executes successfully in the current directory
-        assert!(
-            result.is_ok(),
-            "force_exec plan entry point failed: {result:?}"
-        );
-        assert_eq!(
-            fs::read_to_string(repo.join("exec-out.txt")).unwrap_or_else(|e| panic!("{e:?}")),
-            "exec-result"
-        );
-        assert!(!gh_log.exists(), "force_exec must not invoke gh for a PR");
-
-        let manager =
-            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
-        let repo_canonical = repo.canonicalize().unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            manager
-                .list()
-                .unwrap_or_else(|e| panic!("{e:?}"))
-                .into_iter()
-                .all(|session| session
-                    .base_dir
-                    .canonicalize()
-                    .map_or(true, |path| path != repo_canonical)),
-            "terminal force_exec sessions must be removed"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_force_exec_opt_out_keeps_normal_plan_path() {
-        // Given: a force_exec config with the explicit opt-out flag
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let process = ProcessStateGuard::new(tmp.path());
-        let repo = create_repo_with_origin(&tmp);
-        process.set_current_dir(&repo);
-        let config_path = tmp.path().join("cruise.yaml");
-        fs::write(
-            &config_path,
-            r"force_exec: true
-command: [cat]
-steps:
-  write:
-    command: |
-      printf should-not-run > direct-output.txt
-",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When: the plan entry point is invoked with --no-force-exec
-        let result = Box::pin(run(plan_args(&config_path, true, false))).await;
-
-        // Then: a normal plan is created instead of direct execution
-        assert!(result.is_ok(), "normal plan path failed: {result:?}");
-        assert!(
-            !repo.join("direct-output.txt").exists(),
-            "with --no-force-exec, workflow steps must not run in the current directory"
-        );
-
-        let manager =
-            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
-        let repo_canonical = repo.canonicalize().unwrap_or_else(|e| panic!("{e:?}"));
-        let session = manager
-            .list()
-            .unwrap_or_else(|e| panic!("{e:?}"))
-            .into_iter()
-            .find(|session| {
-                session
-                    .base_dir
-                    .canonicalize()
-                    .is_ok_and(|path| path == repo_canonical)
-            })
-            .unwrap_or_else(|| panic!("expected normal plan session to be recorded"));
-        assert_eq!(session.phase, SessionPhase::Planned);
-        assert_eq!(session.workspace_mode, WorkspaceMode::Worktree);
-        assert!(session.worktree_path.is_some());
-        let plan = fs::read_to_string(session.plan_path(&manager.sessions_dir()))
-            .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_ne!(plan.trim(), "");
-    }
-    #[cfg(unix)]
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_force_exec_background_entrypoint_runs_foreground_without_session_worktree_or_pr()
-    {
-        // Given: a local force_exec config and a background plan request
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let mut process = ProcessStateGuard::new(tmp.path());
-        let repo = create_repo_with_origin(&tmp);
-        process.set_current_dir(&repo);
-
-        fs::write(
-            repo.join("cruise.yaml"),
-            r"force_exec: true
-command: [cat]
-steps:
-  write:
-    command: |
-      printf background-result > background-out.txt
-",
-        )
-        .unwrap_or_else(|e| panic!("{e:?}"));
-
-        let bin_dir = tmp.path().join("bin");
-        let gh_log = tmp.path().join("gh.log");
-        install_logging_gh(&bin_dir, &gh_log);
-        process.prepend_path(&bin_dir);
-
-        // When: --plan is used without the opt-out flag
-        let result = Box::pin(launch_background_plan(
-            "background task",
-            false,
-            None,
-            &[],
-            false,
-            &[],
-        ))
-        .await;
-
-        // Then: execution stays foreground and bypasses planning lifecycle
-        assert!(result.is_ok(), "background force_exec failed: {result:?}");
-        assert_eq!(
-            fs::read_to_string(repo.join("background-out.txt")).unwrap_or_else(|e| panic!("{e:?}")),
-            "background-result"
-        );
-        assert!(!gh_log.exists(), "force_exec must not invoke gh for a PR");
-
-        let manager =
-            SessionManager::new(crate::paths::data_dir().unwrap_or_else(|e| panic!("{e:?}")));
-        let repo_canonical = repo.canonicalize().unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            manager
-                .list()
-                .unwrap_or_else(|e| panic!("{e:?}"))
-                .into_iter()
-                .all(|session| session
-                    .base_dir
-                    .canonicalize()
-                    .map_or(true, |path| path != repo_canonical)),
-            "terminal force_exec sessions must be removed"
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_jcode_model_during_title_generation_does_not_approve_session() {
-        let tmp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
-        let mut process = ProcessStateGuard::new(tmp.path());
-        #[cfg(unix)]
-        {
-            let bin = tmp.path().join("bin");
-            process
-                .env_guards
-                .push(crate::test_support::install_exiting_jcode_stub(&bin));
-        }
-        process.env_guards.push(crate::test_support::EnvGuard::set(
-            "JCODE_HOME",
-            tmp.path().join("jcode-home"),
-        ));
-        process
-            .env_guards
-            .push(crate::test_support::EnvGuard::remove("JCODE_MODEL"));
-        process
-            .env_guards
-            .extend(crate::test_support::clear_config_override_envs());
-        let manager = SessionManager::new(tmp.path().join("sessions"));
-        let mut session = SessionState::new(
-            "title-model-required".to_string(),
-            tmp.path().to_path_buf(),
-            crate::session_config::SessionConfigRef::inline_snapshot(),
-            "implement a feature".to_string(),
-        );
-        session.phase = SessionPhase::AwaitingApproval;
-        let config =
-            WorkflowConfig::from_yaml("sdk: jcode\nsteps:\n  work:\n    prompt: implement\n")
-                .unwrap_or_else(|error| panic!("{error}"));
-
-        let result = approve_with_title(&mut session, &manager, &config, "# Plan", None).await;
-
-        assert!(
-            matches!(result, Err(CruiseError::MissingJcodeModel(_))),
-            "title-generation model errors must not become warnings and approval: {result:?}"
-        );
-        assert_eq!(session.phase, SessionPhase::AwaitingApproval);
-        assert_eq!(session.title, None);
-        assert!(!manager.sessions_dir().join(&session.id).exists());
-        assert!(tmp.path().join(".config/cruise/default.yaml").is_file());
     }
 }

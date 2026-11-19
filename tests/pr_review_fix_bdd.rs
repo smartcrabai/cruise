@@ -158,7 +158,7 @@ esac
         world.root = Some(root);
     }
 
-    #[when("the existing PR workflow runs")]
+    #[when("the production after-PR review handler runs")]
     async fn execute(world: &mut ReviewWorld) {
         let root = world
             .root
@@ -211,6 +211,7 @@ esac
                 &FlagValues::new(),
                 None,
                 &NoOpOptionHandler,
+                None,
                 None,
                 None,
                 None,

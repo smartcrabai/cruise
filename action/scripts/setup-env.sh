@@ -29,18 +29,15 @@ export_env() { # $1=name $2=value
 }
 
 # --- cruise XDG dirs and the jcode credential-source home, for EVERY step.
-# XDG_* places cruise's own data. JCODE_HOME points at the source config and
-# credentials; SDK sessions get private homes beneath it. Pin both cruise
-# data and the source home under $RUNNER_TEMP so they stay off the runner's
-# persistent home. $GITHUB_ENV carries the same paths to install, provision,
-# and run steps, so credential provisioning and SDK session creation share a
-# source home.
-CRUISE_DIR="${RUNNER_TEMP:-/tmp}/cruise"
-mkdir -p "$CRUISE_DIR/data" "$CRUISE_DIR/xdg-config" "$CRUISE_DIR/xdg-state" "$CRUISE_DIR/jcode-home"
-export_env XDG_DATA_HOME "$CRUISE_DIR/data"
-export_env XDG_CONFIG_HOME "$CRUISE_DIR/xdg-config"
-export_env XDG_STATE_HOME "$CRUISE_DIR/xdg-state"
-export_env JCODE_HOME "$CRUISE_DIR/jcode-home"
+# Scope these to the workflow job, not the runner user or a shared temp path.
+# GITHUB_ENV carries the same paths to every later action step.
+CRUISE_ACTION_DIR="${RUNNER_TEMP:-/tmp}/cruise-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-local}"
+mkdir -p "$CRUISE_ACTION_DIR/data" "$CRUISE_ACTION_DIR/xdg-config" "$CRUISE_ACTION_DIR/xdg-state" "$CRUISE_ACTION_DIR/jcode-home"
+export_env CRUISE_ACTION_DIR "$CRUISE_ACTION_DIR"
+export_env XDG_DATA_HOME "$CRUISE_ACTION_DIR/data"
+export_env XDG_CONFIG_HOME "$CRUISE_ACTION_DIR/xdg-config"
+export_env XDG_STATE_HOME "$CRUISE_ACTION_DIR/xdg-state"
+export_env JCODE_HOME "$CRUISE_ACTION_DIR/jcode-home"
 
 # --- force_exec is never honored here: action commands decide the mode. ---
 export_env CRUISE_FORCE_EXEC false

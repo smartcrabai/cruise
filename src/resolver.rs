@@ -71,6 +71,34 @@ pub(crate) fn resolve_workflow_config_with_mode(
     project_dir: Option<&std::path::Path>,
     doctor: bool,
 ) -> Result<crate::config::WorkflowConfig> {
+    resolve_workflow_config_with_mode_and_env(
+        yaml,
+        source,
+        base_dir,
+        project_dir,
+        doctor,
+        crate::config::ConfigEnv::Process,
+    )
+}
+
+pub(crate) fn resolve_workflow_config_with_env(
+    yaml: &str,
+    source: &ConfigSource,
+    base_dir: &std::path::Path,
+    project_dir: Option<&std::path::Path>,
+    env: crate::config::ConfigEnv<'_>,
+) -> Result<crate::config::WorkflowConfig> {
+    resolve_workflow_config_with_mode_and_env(yaml, source, base_dir, project_dir, false, env)
+}
+
+fn resolve_workflow_config_with_mode_and_env(
+    yaml: &str,
+    source: &ConfigSource,
+    base_dir: &std::path::Path,
+    project_dir: Option<&std::path::Path>,
+    doctor: bool,
+    env: crate::config::ConfigEnv<'_>,
+) -> Result<crate::config::WorkflowConfig> {
     let defaults = crate::workflow_defaults::WorkflowDefaults::load(project_dir)?;
     match source {
         ConfigSource::Builtin | ConfigSource::NamedBuiltin(_) => {
@@ -78,21 +106,22 @@ pub(crate) fn resolve_workflow_config_with_mode(
                 ConfigSource::NamedBuiltin(name) => name,
                 _ => crate::builtin_workflows::DEFAULT_BUILTIN_NAME,
             };
-            crate::workflow_call::resolve_embedded_with_mode(
+            crate::workflow_call::resolve_embedded_with_mode_and_env(
                 yaml,
                 &format!("{name}.yaml"),
                 &defaults,
                 doctor,
+                env,
             )
         }
-        ConfigSource::Inline => {
-            crate::workflow_call::resolve_yaml_with_mode(yaml, base_dir, &defaults, doctor)
-        }
+        ConfigSource::Inline => crate::workflow_call::resolve_yaml_with_mode_and_env(
+            yaml, base_dir, &defaults, doctor, env,
+        ),
         ConfigSource::Explicit(path)
         | ConfigSource::EnvVar(path)
         | ConfigSource::Local(path)
         | ConfigSource::UserDir(path) => {
-            crate::workflow_call::resolve_path_with_mode(path, &defaults, doctor)
+            crate::workflow_call::resolve_path_with_mode_and_env(path, &defaults, doctor, env)
         }
     }
 }
@@ -168,6 +197,17 @@ pub fn resolve_config_in_dir(
     resolve_config_in_dir_with_interactive(explicit, cwd, false)
 }
 
+/// Resolve a daemon request without consulting daemon-process config selection.
+///
+/// Explicit selectors should be supplied by the client; otherwise local and
+/// user-installed workflows are searched relative to `cwd`.
+pub(crate) fn resolve_config_in_client_context(
+    explicit: Option<&str>,
+    cwd: &std::path::Path,
+) -> Result<(String, ConfigSource)> {
+    resolve_config_in_dir_with_env(explicit, cwd, false, false)
+}
+
 /// A candidate config source for the interactive selector.
 #[derive(Debug, Clone)]
 pub struct ConfigCandidate {
@@ -224,7 +264,7 @@ impl ConfigCandidate {
             description: None,
         }
     }
-    /// The label shown by the CLI selector and the TUI config list.
+    /// The label shown by the CLI selector and the `WebUI` config picker.
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
@@ -464,8 +504,8 @@ pub(crate) fn collect_local_candidates(cwd: &std::path::Path) -> Vec<ConfigCandi
 /// Collect config candidates using the process environment for `CRUISE_CONFIG`.
 ///
 /// This is the shared candidate-discovery entry point for interactive clients.
-/// The CLI resolver and the TUI therefore use the same priority order, labels,
-/// path normalization, and environment-variable error handling.
+/// The CLI resolver and `WebUI` picker therefore use the same priority order,
+/// labels, path normalization, and environment-variable error handling.
 pub(crate) fn collect_config_candidates(cwd: &std::path::Path) -> Result<Vec<ConfigCandidate>> {
     collect_candidates(cwd, std::env::var("CRUISE_CONFIG").ok())
 }
@@ -480,6 +520,15 @@ fn resolve_config_in_dir_with_interactive(
     cwd: &std::path::Path,
     interactive: bool,
 ) -> Result<(String, ConfigSource)> {
+    resolve_config_in_dir_with_env(explicit, cwd, interactive, true)
+}
+
+fn resolve_config_in_dir_with_env(
+    explicit: Option<&str>,
+    cwd: &std::path::Path,
+    interactive: bool,
+    use_process_config_env: bool,
+) -> Result<(String, ConfigSource)> {
     // 1. Explicit path (-c flag) — highest priority, no prompt regardless of interactive.
     if let Some(path) = explicit {
         // Built-in selectors (`__builtin__`, `builtin:<name>`) select an embedded workflow
@@ -489,13 +538,21 @@ fn resolve_config_in_dir_with_interactive(
             return resolved;
         }
         let buf = PathBuf::from(path);
+        let buf = if buf.is_absolute() {
+            buf
+        } else {
+            cwd.join(buf)
+        };
         reject_defaults_file(&buf, cwd)?;
         let yaml = read_config_file(&buf)?;
         return Ok((yaml, ConfigSource::Explicit(to_absolute(buf))));
     }
 
-    // 2. Collect all candidates through the shared environment-aware entry point.
-    let candidates = collect_config_candidates(cwd)?;
+    let candidates = if use_process_config_env {
+        collect_config_candidates(cwd)?
+    } else {
+        collect_candidates(cwd, None)?
+    };
 
     // 3. Pick a candidate.
     let chosen = if !interactive

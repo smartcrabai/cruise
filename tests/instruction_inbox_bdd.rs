@@ -1,4 +1,4 @@
-//! Executable instruction contracts against the real cruise CLI and engine.
+//! Executable instruction contracts through the real CLI client, daemon, and engine.
 #![expect(clippy::unwrap_used, reason = "isolated BDD fixtures")]
 #[cfg(unix)]
 mod contracts {
@@ -156,7 +156,7 @@ mod contracts {
         )
         .unwrap();
     }
-    #[when(expr = "the operator tells the run {string}")]
+    #[when(expr = "the CLI client tells the run {string}")]
     fn tell(w: &mut World, text: String) {
         w.before = fs::read(w.ledger()).ok();
         let result = w.command().args(["tell", ID, &text]).output().unwrap();
@@ -173,6 +173,15 @@ mod contracts {
     fn not_leased(w: &mut World) {
         assert_eq!(w.count("accepted"), 1);
         assert_eq!(w.count("leased"), 0);
+    }
+    #[then("the instruction records the CLI origin")]
+    fn cli_origin(w: &mut World) {
+        let accepted = w
+            .events()
+            .into_iter()
+            .find(|event| event["kind"] == "accepted")
+            .unwrap_or_else(|| panic!("accepted instruction event"));
+        assert_eq!(accepted["origin"], "cli");
     }
     #[when("the agent executable becomes unavailable")]
     fn remove_agent(w: &mut World) {

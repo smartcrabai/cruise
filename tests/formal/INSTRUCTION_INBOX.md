@@ -1,6 +1,8 @@
 # Instruction inbox protocol model
 
-`instruction_inbox.qnt` is the existing Quint model of an instruction inbox. It abstracts the exclusive ledger lock as atomic actions. The finite model permits IDs 0 through 2, deduplication keys 0 and 1, and unkeyed requests represented by -1. It does not establish that the Rust implementation refines the model.
+`instruction_inbox.qnt` and `instruction_inbox.als` model the instruction inbox protocol. They abstract the exclusive ledger lock as atomic actions. The finite model permits IDs 0 through 2, deduplication keys 0 and 1, and unkeyed requests represented by -1. They do not establish that the Rust implementation refines the model.
+
+Neither model tracks request origin: `accept` is source-agnostic. Production records `Cli`, `WebUi`, `List`, and `Github` origins (`cli`, `webui`, `list`, and `github`); the removed TUI has no origin. The executable CLI BDD checks that a real `tell` request records `cli`.
 
 ## State and transitions
 

@@ -6,7 +6,7 @@ export default function Toast(props) {
         <div class="text-xs opacity-75 truncate mt-0.5">{props.sessionInput}</div>
         {props.detail && <div data-testid="toast-detail" class="text-xs opacity-60 truncate mt-0.5">{props.detail}</div>}
       </div>
-      <button type="button" aria-label="Dismiss" onclick="this.closest('[data-toast]').remove()" class="opacity-60 hover:opacity-100 flex-shrink-0 text-xs mt-0.5">x</button>
+      <button type="button" aria-label="Dismiss" data-dismiss-toast class="opacity-60 hover:opacity-100 flex-shrink-0 text-xs mt-0.5">x</button>
     </div>
   );
 }

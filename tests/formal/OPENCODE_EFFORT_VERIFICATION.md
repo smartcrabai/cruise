@@ -182,28 +182,14 @@ env -u CRUISE_MODEL -u CRUISE_PLAN_MODEL -u CRUISE_SDK XDG_CONFIG_HOME="$PWD/tar
 ```
 
 Its log is `target/formal-reports/effort-regressions/cargo-test-all-clean-final.log`.
-The remaining failing tests are:
-
-- `plan_cmd::tests::test_regenerate_plan_for_session_awaiting_approval_stays_awaiting_approval`
-- `plan_cmd::tests::test_regenerate_plan_for_session_awaiting_input_transitions_to_awaiting_approval`
-- `plan_cmd::tests::test_regenerate_plan_for_session_clears_plan_error_on_success`
-- `plan_cmd::tests::test_regenerate_plan_for_session_draft_transitions_to_awaiting_approval`
-- `plan_cmd::tests::test_regenerate_plan_for_session_planned_stays_planned`
-- `plan_cmd::tests::test_regenerate_plan_for_session_refreshes_title_from_plan`
-- `tui::app::tests::valid_config_path_is_resolved_before_leaving_config_step`
-- `tui::ui::tests::config_candidate_list_scrolls_to_the_selected_late_entry`
-- `tui::ui::tests::config_step_shows_auto_and_cli_candidates_at_minimum_and_wide_sizes`
-
-The six planner fixtures fail with `command cannot be combined with
-SDK-qualified model candidates`. The TUI failures are respectively Config
-instead of Task, missing `config-09.yaml`, and missing the CLI candidate at width
-80. Their complete root causes were not established in this task. Those planner
-and TUI paths were not modified, their assertions were not changed or skipped,
-and the broad run's failure is not counted as a pass. Cargo stops at this failing
-binary target, so this is not a claim that later full-suite targets executed.
-All task-specific integration targets were executed independently by the new
-aggregate runner and passed. Investigation of these nine unrelated planner/TUI
-regressions is left outside the effort specification scope.
+The historical run recorded six planner-regeneration fixtures failing with
+`command cannot be combined with SDK-qualified model candidates`. Their
+pre-daemon test identifiers are omitted here because they no longer correspond
+to current test symbols after the daemon rearchitecture. The complete root
+causes were not established in that task; the planner paths and assertions were
+not modified or weakened. The broad run stopped at `cruise-runtime`, so later
+full-suite targets were not verified by that invocation. These historical
+failures are not current test references or current traceability claims.
 
 After the fixture fixes, the entire new specification runner was rerun against
 the final model/source files: `opencode-effort.t71rTa`, all 24 stages passed.

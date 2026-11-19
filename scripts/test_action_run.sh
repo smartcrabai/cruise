@@ -6,6 +6,10 @@
 # resolution and failure paths. Hermetic: a real local git repo + bare
 # "origin" under $TMP stand in for the checkout; gh/cruise are PATH stubs
 # driven entirely by env vars so no network or real gh/cruise ever runs.
+# The existing fixture suite intentionally passes test-condition statuses as
+# numbers to its shared assertion helper and keeps fixture JSON literal.
+# shellcheck disable=SC2016,SC2046,SC2181,SC2209,SC2319
+# shellcheck source=scripts/lib/action_test_harness.sh
 . "$(dirname "$0")/lib/action_test_harness.sh"
 
 REPO_COUNTER=0
@@ -972,4 +976,10 @@ check "XDG: a pre-set XDG_DATA_HOME is honored instead of the RUNNER_TEMP fallba
   $([ "$RUN_STATUS" -eq 0 ] && [ -f "$TMP/preset-xdg-data/cruise/sessions/$CRUISE_STUB_SESSION_ID/plan.md" ]; echo $?) "$RUN_OUT"
 unset XDG_DATA_HOME
 
+# The daemon E2E helper is a separate shell file and is checked independently.
+if [ "${CRUISE_ACTION_E2E:-true}" != false ]; then
+  # shellcheck source=scripts/lib/action_run_e2e.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/lib/action_run_e2e.sh"
+  action_run_e2e
+fi
 finish

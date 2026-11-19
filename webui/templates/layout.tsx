@@ -23,7 +23,7 @@ export default function Layout(props) {
       </div>
       <div id="toasts" class="fixed bottom-4 right-4 z-60 flex flex-col gap-2 max-w-sm w-[calc(100%-2rem)] pointer-events-none"></div>
       <div id="dialogs">{props.dialogs}</div>
-      <div hx-sse:connect="/webui/events" hx-swap="none" hx-on:notify="app.notify(event)"></div>
+      <div id="webui-events" hx-sse:connect="/webui/events" hx-swap="none"></div>
     </>
   );
 }

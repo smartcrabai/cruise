@@ -55,7 +55,7 @@ module flag_skip_selection {
     nondet chosen = (if (cli == Set()) declared else cli).powerset().oneOf()
     beginInput(chosen, cli)
   }
-  // TUI/WebUI can change flags while editing. Hidden skips do not reappear.
+  // WebUI can change flags while editing. Hidden skips do not reappear.
   action changeTo(chosen: Set[int]): bool = all {
     s.phase == 1, s.cliKeys == Set(), chosen.subseteq(declared),
     val on = s.on.exclude(declared).union(chosen)

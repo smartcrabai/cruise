@@ -707,6 +707,7 @@ async fn run_builtin_after_pr(
             on_step_start: &on_step_start,
             cancel_token: None,
             option_handler: &option_handler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: Some(project),
             skipped_steps: &[],

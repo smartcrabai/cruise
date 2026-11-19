@@ -84,7 +84,7 @@ The final post-review aggregate completed in **279.08 seconds**, exit **0**. Eve
 
 ## Post-lint follow-through
 
-After the diagnostic-only test changes and equivalent TUI `clone_from` correction:
+After the diagnostic-only test changes and corresponding default-copy cleanup:
 
 ```sh
 cargo +1.99.1 fmt --all -- --check
@@ -97,8 +97,8 @@ All four checks passed. The `large_futures` exception is the existing CI command
 
 ## Defects found and corrections
 
-- Running the repository's CI Clippy command locally found missing `#[must_use]` on the task's new public pure `skip_candidates` and `drop_disabled_skips` helpers. Added those annotations. Additional affected fixture diagnostics used prohibited `unwrap`/`expect` calls or empty-value assertions. Replaced them with diagnostic `unwrap_or_else` and exact empty-vector equality, without suppressing lints or weakening assertions. Changed the shared application test helper to borrow its flag map and used `clone_from` for the existing TUI default-copy operation, retaining identical values.
-- The expanded regression command exposed nine existing test fixtures that inherited user application model defaults: six regeneration fixtures and three TUI config discovery/rendering fixtures. `workflow_call::finish_resolved_config` fills omitted models from AppConfig, so SDK-qualified host models conflicted with the fixtures' command backend. Added fake-home guards under the existing process lock to those test fixtures only. A report-local XDG override alone did not fix the in-process fixture contamination. No production model-selection behavior or expected assertion was relaxed.
+- Running the repository's CI Clippy command locally found missing `#[must_use]` on the task's new public pure `skip_candidates` and `drop_disabled_skips` helpers. Added those annotations. Additional affected fixture diagnostics used prohibited `unwrap`/`expect` calls or empty-value assertions. Replaced them with diagnostic `unwrap_or_else` and exact empty-vector equality, without suppressing lints or weakening assertions. Changed the shared application test helper to borrow its flag map and used `clone_from` for an existing default-copy operation, retaining identical values.
+- The expanded regression command exposed nine existing test fixtures that inherited user application model defaults: six regeneration fixtures and three config discovery/rendering fixtures. `workflow_call::finish_resolved_config` fills omitted models from AppConfig, so SDK-qualified host models conflicted with the fixtures' command backend. Added fake-home guards under the existing process lock to those test fixtures only. A report-local XDG override alone did not fix the in-process fixture contamination. No production model-selection behavior or expected assertion was relaxed.
 - During model development, corrected the resume abstraction to include only unfiltered main expanded IDs, not group parents or after-pr IDs. Added API-create coverage and partial explicit CLI authority. Final production-path review corrected the explicit CLI entry boundary: assignments are already saved before approval, so cancellation retains that baseline. Strengthened `cliAuthority` from preservation of unassigned keys to preservation of the whole saved map and added `explicitCancellationTest`. Fixed a Quint parser error caused by using built-in `keys` as a local identifier. These were specification defects or missing coverage, not changes to weaken safety.
 - Preserve the inherited `CRUISE_GUARD_COMMON_DIR` in real BDD and list-PTY child environments while continuing to remove unrelated CRUISE runtime overrides. The full regression also exposed the same context-stripping bug in `tests/agent_auth_cli.rs` and the telemetry subprocess helpers in `tests/telemetry_cli.rs`; their sanitization corrections retain the inherited guard rather than disabling it. No commit guard was disabled or bypassed.
 
@@ -117,7 +117,7 @@ The broad command actually attempted was `cargo +1.99.1 test --locked --all-feat
 R=$(mktemp -d "$PWD/target/formal-reports/flag-skip-regression-tail.XXXXXX")
 export XDG_CONFIG_HOME="$R/config" XDG_DATA_HOME="$R/data" XDG_STATE_HOME="$R/state"
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
-cargo +1.99.1 test --locked --all-features --test telemetry_cli --test tui_conpty_smoke --test tui_pty_smoke --test update_cli --test webui_shutdown --test workflow_call_compat --test workflow_defaults_cli --test workflow_packages_cli
+cargo +1.99.1 test --locked --all-features --test telemetry_cli --test update_cli --test webui_shutdown --test workflow_call_compat --test workflow_defaults_cli --test workflow_packages_cli
 cargo +1.99.1 test --locked --all-features --doc
 ```
 
@@ -126,16 +126,14 @@ Actual final evidence: `target/formal-reports/flag-skip-regression-tail.3I39Mt/r
 | Retested or remaining target | Result |
 | --- | --- |
 | telemetry_cli | 15 passed, 0 failed |
-| tui_pty_smoke | 21 passed, 0 failed |
 | update_cli | 12 passed, 0 failed |
 | webui_shutdown | 2 passed, 0 failed |
 | workflow_call_compat | 3 passed, 0 failed |
 | workflow_defaults_cli | 16 passed, 0 failed |
 | workflow_packages_cli | 13 passed, 0 failed |
-| tui_conpty_smoke | 0 tests on macOS, Windows-only coverage not claimed |
 | documentation target | 0 existing doctests, not counted as executed cases |
 
-Thus **82 actual remaining integration tests passed**, including the corrected telemetry fixture. The auth fixture's **5 tests** passed in the preceding full run. These partitioned observations are not represented as a zero-exit single full-suite run. No requested formal or Gherkin runner is missing or skipped, no known task-relevant failure remains, and no unsupported Windows verification is claimed.
+Thus **61 retained integration tests passed** among the previously recorded 82 cases, including the corrected telemetry fixture. The auth fixture's **5 tests** passed in the preceding full run. These partitioned observations are not represented as a zero-exit single full-suite run. No requested formal or Gherkin runner is missing or skipped, no known task-relevant failure remains, and no unsupported Windows verification is claimed.
 
 ## CI and unchanged worktree protections
 

@@ -27,7 +27,7 @@ cruise は次の順序でワークフロー設定を解決します。
 
    `research` workflow と `security` の inventory/audit/triage フェーズには読み取り専用の SDK permission が必要です。workflow と適用される user/project default の解決後に `command:` も `sdk:` も残らない場合、Cruise は既定の `sdk: jcode` を使います。`command:` backend は読み取り専用に制限できず、制限付き permission step では拒否されます。
 
-   対話 selector（CLI、TUI、WebUI）は組み込みやその他の候補をカテゴリ別に表示します。設定ファイルがない非対話解決では `tdd` が使われます。
+   対話 selector（CLI、WebUI）は組み込みやその他の候補をカテゴリ別に表示します。設定ファイルがない非対話解決では `tdd` が使われます。
 
    `create_pr` は workflow 専用の boolean で、既定値は `true` です。`false` にすると通常の session、artifact、worktree は保持したまま、Cruise による自動 commit、push、PR 作成、`after-pr`、PR ベースの cleanup を省略します。`create_pr` は user/project `default.yaml` では拒否され、CLI option ではありません。
 
@@ -182,7 +182,7 @@ steps:
 <a id="prompt-languages"></a>
 ### prompt の言語
 
-UI の表示言語は prompt の言語と独立しています。アプリケーション設定の `uiLanguage`、`CRUISE_UI_LANGUAGE`、または TUI の言語選択を使って設定します。WebUI では、ブラウザー側の言語選択で server default を上書きできます。これらの設定は `languages.pr` や `languages.plan` を変更しません。
+UI の表示言語は prompt の言語と独立しています。アプリケーション設定の `uiLanguage` または `CRUISE_UI_LANGUAGE` で設定します。WebUI では、browser 側の言語選択で server default を上書きできます。これらの設定は `languages.pr` や `languages.plan` を変更しません。
 
 `languages.pr` は自動生成する PR title/body の言語、`languages.plan` は cruise 組み込み planning prompt の言語を指定します。`CRUISE_LANGUAGE_PR` と `CRUISE_LANGUAGE_PLAN` はそれぞれ対応する YAML 値を上書きし、空白の環境変数値は無視されます。それ以外では `LC_ALL`、`LC_MESSAGES`、`LANG`、`LANGUAGE` のうち最初の空でない値を1回マッピングして使います（未対応値でも次の変数には進みません）。それもなければ `English` です。
 
@@ -267,7 +267,8 @@ export CRUISE_RETRY='{"base_delay_ms":1000}'
 export CRUISE_RETRY_MAX_DELAY_MS=5000
 ```
 
-`CRUISE_RUN_ALL_PARALLELISM` は TUI/WebUI run-all 操作と有効設定表示で app 設定を上書きしますが、設定ファイルには保存されません。`--parallelism` を使う CLI `run --all` は変更しません。
+`CRUISE_RUN_ALL_PARALLELISM` は WebUI の run-all 操作と有効設定表示で app 設定を上書きしますが、設定ファイルには保存されません。CLI `run --all` は `--parallelism` を使うため影響を受けません。
+常駐 daemon では、CLI が working directory と workflow override の許可リストにある変数（`CRUISE_MODEL`、`CRUISE_PLAN_MODEL`、`CRUISE_SDK` など）を各 request とともに送り、その request にのみ適用します。`PATH`、`GH_TOKEN`、provider credential、`CRUISE_FORGE`、通知や認証の runtime switch など process-level 変数は daemon の環境から取得されます。変更後は `cruise daemon restart` を実行してください。自動起動では workflow override 変数が daemon 環境から除外されますが、明示的な `cruise daemon start` または `serve` では保持されます。WebUI request は daemon の環境と home directory を working directory として使います。
 
 `CRUISE_UI_LANGUAGE` は workflow field や生成 prompt の言語ではなく、process UI の言語を制御します。対応 tag と優先順位は [`cruise config`](cli-reference.md#cruise-config) を参照してください。
 
@@ -300,7 +301,7 @@ Cruise はアプリケーション設定を workflow YAML とは別に `$XDG_CON
 
 アプリケーション設定の `uiLanguage` を指定するか、`cruise config --set-language ja` を使います。入力時は別名 `ui_language` も受け付けます。明示的に設定できる tag は `en`、`zh-CN`、`es`、`fr`、`pt-BR`、`ja`、`ko` です。大文字小文字の違い、および `_` / `-` の表記揺れも受け付けます。`auto` は未指定を意味し、`cruise config --set-language auto` は保存済み設定を消去します。値を設定またはアプリケーション設定を検証するとき、不正値は拒否されます。
 
-CLI と TUI では、`CRUISE_UI_LANGUAGE` が `uiLanguage` より優先され、その次に system locale、最後に英語となります。空白または `auto` の環境変数値は次の層に委ねます。不正な環境変数値は英語の警告を出して無視します。system locale は `LC_ALL`、`LC_MESSAGES`、`LANG`、`LANGUAGE` のうち最初の空でない値を使います。その値が未対応でも後続の変数は試しません。環境変数から言語を決定できない場合、Windows は user locale も確認します。macOS と Linux は環境変数のみを使うため、環境変数のない GUI 起動では英語が既定になります。
+CLI では、`CRUISE_UI_LANGUAGE` が `uiLanguage` より優先され、その次に system locale、最後に英語となります。空白または `auto` の環境変数値は次の層に委ねます。不正な環境変数値は英語の警告を出して無視します。system locale は `LC_ALL`、`LC_MESSAGES`、`LANG`、`LANGUAGE` のうち最初の空でない値を使います。その値が未対応でも後続の変数は試しません。環境変数から言語を決定できない場合、Windows は user locale も確認します。macOS と Linux は環境変数のみを使うため、環境変数のない GUI 起動では英語が既定になります。
 
 WebUI では、有効な browser cookie `cruise_ui_language` があればそれを使い、なければ server process の既定言語を使います。WebUI の言語選択は cookie を保存してページを再読み込みし、アプリケーション設定は変更しません。UI 言語は、生成 prompt の言語を制御する workflow `languages.pr` と `languages.plan` から独立しています。
 

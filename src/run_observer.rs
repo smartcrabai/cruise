@@ -11,10 +11,3 @@ pub enum RunPhase {
 pub trait RunObserver: Send + Sync {
     fn on_phase(&self, session_id: &str, phase: RunPhase);
 }
-
-/// Observer used by ordinary single-session runs.
-pub struct NoopObserver;
-
-impl RunObserver for NoopObserver {
-    fn on_phase(&self, _session_id: &str, _phase: RunPhase) {}
-}

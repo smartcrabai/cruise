@@ -1,17 +1,12 @@
-use crate::{
-    cli::TellArgs,
-    error::CruiseError,
-    instruction_inbox::{self, AcceptRequest, Origin},
-    session::SessionManager,
-};
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal as _, Read};
 
-pub fn run(args: TellArgs) -> Result<(), CruiseError> {
-    let manager = SessionManager::new(crate::paths::data_dir()?);
-    let sessions = manager.sessions_dir();
+use crate::{cli::TellArgs, error::CruiseError, request_context::RequestContext};
+
+pub async fn run(args: TellArgs) -> Result<(), CruiseError> {
+    let context = RequestContext::capture()?;
     if args.log {
-        manager.load(&args.session_id)?;
-        for item in instruction_inbox::summary(&sessions, &args.session_id)?.history {
+        let client = crate::daemon::client::DaemonClient::connect().await?;
+        for item in client.instructions(&args.session_id, &context).await? {
             let first = item.content.lines().next().unwrap_or("");
             let preview: String = first.chars().take(80).collect();
             println!(
@@ -21,7 +16,7 @@ pub fn run(args: TellArgs) -> Result<(), CruiseError> {
         }
         return Ok(());
     }
-    let content = match args.instruction {
+    let instruction_text = match args.instruction {
         Some(text) if text != "-" => text,
         value => {
             if value.is_none() && std::io::stdin().is_terminal() {
@@ -34,19 +29,18 @@ pub fn run(args: TellArgs) -> Result<(), CruiseError> {
             text
         }
     };
-    let receipt = instruction_inbox::accept(
-        &sessions,
-        &args.session_id,
-        AcceptRequest {
-            content,
-            origin: if args.origin == "github" {
-                Origin::Github
-            } else {
-                Origin::Cli
+    let client = crate::daemon::client::DaemonClient::connect().await?;
+    let receipt = client
+        .tell(
+            &args.session_id,
+            &crate::application::TellRequest {
+                content: instruction_text,
+                origin: args.origin,
+                dedupe_key: args.dedupe_key,
+                context: Some(context),
             },
-            dedupe_key: args.dedupe_key,
-        },
-    )?;
+        )
+        .await?;
     if receipt.duplicate {
         println!(
             "instruction #{} was already accepted for {}.",

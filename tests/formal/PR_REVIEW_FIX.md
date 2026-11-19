@@ -8,6 +8,8 @@ The runner requires the repository's pinned formal toolchain, validates every
 Alloy receipt, runs the production BDD target, and writes fresh logs under
 `target/formal-reports/pr-review-fix.*`. A setup failure is not a pass.
 
+The Gherkin calls `worktree_pr::handle_worktree_pr_with_checkpoint` directly with a compiled workflow and local fixtures. Production session after-PR work runs in the daemon; these component scenarios do not exercise the daemon HTTP/client transport.
+
 Both models bound the universe to three thread IDs and the iteration limit to
 two. Quint checks up to eight transitions, including stuttering. Alloy checks
 five ordered states (four transitions) with four-bit integers. Permissions are

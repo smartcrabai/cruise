@@ -1,4 +1,4 @@
-//! Task-grounded OAuth preflight contracts through real production CLI entrypoints.
+//! Task-grounded OAuth preflight contracts through real CLI clients and daemon APIs.
 #![expect(clippy::unwrap_used, reason = "isolated executable contract fixtures")]
 
 #[cfg(unix)]
@@ -182,7 +182,7 @@ mod contracts {
     fn dry(w: &mut AuthWorld) {
         w.dry = true;
     }
-    #[when(expr = "the production CLI enters {word}")]
+    #[when(expr = "the CLI client invokes {word}")]
     #[expect(
         clippy::needless_pass_by_value,
         reason = "Cucumber captures owned strings"

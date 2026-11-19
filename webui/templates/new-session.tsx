@@ -15,13 +15,13 @@ export default function NewSession(props) {
         <span class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Source</span>
         <div class="flex flex-wrap gap-x-4 gap-y-2" role="radiogroup" aria-label="Workspace source">
           <label class="flex items-center gap-2 cursor-pointer">
-            {props.directorySelected && <input type="radio" name="sourceMode" value="directory" checked hx-on:change="app.toggleSource(this.value)" class="accent-blue-500" />}
-            {!props.directorySelected && <input type="radio" name="sourceMode" value="directory" hx-on:change="app.toggleSource(this.value)" class="accent-blue-500" />}
+            {props.directorySelected && <input type="radio" name="sourceMode" value="directory" checked data-toggle-source class="accent-blue-500" />}
+            {!props.directorySelected && <input type="radio" name="sourceMode" value="directory" data-toggle-source class="accent-blue-500" />}
             <span class="text-sm text-gray-700 dark:text-gray-300">Directory</span>
           </label>
           <label class="flex items-center gap-2 cursor-pointer">
-            {!props.directorySelected && <input type="radio" name="sourceMode" value="repo" checked hx-on:change="app.toggleSource(this.value)" class="accent-blue-500" />}
-            {props.directorySelected && <input type="radio" name="sourceMode" value="repo" hx-on:change="app.toggleSource(this.value)" class="accent-blue-500" />}
+            {!props.directorySelected && <input type="radio" name="sourceMode" value="repo" checked data-toggle-source class="accent-blue-500" />}
+            {props.directorySelected && <input type="radio" name="sourceMode" value="repo" data-toggle-source class="accent-blue-500" />}
             <span class="text-sm text-gray-700 dark:text-gray-300">Repository (GitHub or GitLab)</span>
           </label>
         </div>
@@ -45,7 +45,7 @@ export default function NewSession(props) {
           class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-base md:text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:border-blue-500 outline-none"
         />
         <div id="dir-suggestions" class="relative"></div>
-        {props.recentWorkingDirs && <div class="relative z-[60] flex flex-wrap gap-2 pt-1">{props.recentWorkingDirs.map(dir => <button type="button" class="max-w-full break-all text-left px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800" hx-on:click={`app.pickDir('${dir}')`}>{dir}</button>)}</div>}
+        {props.recentWorkingDirs && <div class="relative z-[60] flex flex-wrap gap-2 pt-1">{props.recentWorkingDirs.map(dir => <button type="button" class="max-w-full break-all text-left px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800" data-pick-dir={dir}>{dir}</button>)}</div>}
       </fieldset>
 
       <fieldset id="source-repo" class={props.directorySelected ? "space-y-2 hidden" : "space-y-2"}>

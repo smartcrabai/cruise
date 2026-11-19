@@ -153,6 +153,8 @@ fn create_application_session(
         attachments: vec![],
         skipped_steps: vec![],
         flags: std::collections::BTreeMap::new(),
+        context: None,
+        ..NewSessionRequest::default()
     })
     .unwrap_or_else(|error| panic!("create application planning session: {error}"))
     .id
@@ -240,6 +242,34 @@ impl Collector {
                     .iter()
                     .map(|request| &request.path)
                     .collect::<Vec<_>>()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_span_count(
+        &self,
+        name: &str,
+        attribute: &str,
+        value: &str,
+        count: usize,
+    ) -> Vec<CapturedRequest> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let requests = self.requests();
+            let found = spans(&requests)
+                .iter()
+                .filter(|span| {
+                    span.name == name
+                        && span.attributes.get(attribute).map(String::as_str) == Some(value)
+                })
+                .count();
+            if found >= count {
+                return requests;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "collector received {found} {name} spans with {attribute}={value:?}, expected {count}"
             );
             thread::sleep(Duration::from_millis(10));
         }
@@ -1401,25 +1431,44 @@ fn assert_successful_trace_spans(exported_spans: &[SpanRecord], execution: &Span
     }
 }
 
-fn assert_exec_run_isolation(fixture: &Fixture, session_id: &str, trace_id: &[u8]) {
-    let collector = Collector::start();
-    let mut env = otlp_env(&collector.endpoint());
-    env.push((
-        "OTEL_SERVICE_NAME".into(),
-        "cruise-telemetry-contract".into(),
-    ));
+fn assert_exec_run_isolation(
+    collector: &Collector,
+    fixture: &Fixture,
+    session_id: &str,
+    trace_id: &[u8],
+) {
+    let env = otlp_env(&collector.endpoint());
     let output = fixture.run(&borrowed_env(&env), "second-workflow-input-secret");
     assert_success(&output);
-    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
-    let (second_session_id, second_trace_id) = assert_parallel_trace(&requests);
+    let requests =
+        collector.wait_for_span_count("cruise.execution", "cruise.execution.kind", "exec", 2);
+    let exported_spans = spans(&requests);
+    let second = exported_spans
+        .iter()
+        .find(|span| {
+            span.name == "cruise.execution"
+                && span
+                    .attributes
+                    .get("cruise.execution.kind")
+                    .map(String::as_str)
+                    == Some("exec")
+                && span.trace_id.as_slice() != trace_id
+        })
+        .unwrap_or_else(|| panic!("second execution trace missing: {exported_spans:#?}"));
+    let second_session_id = second
+        .attributes
+        .get("cruise.session.id")
+        .unwrap_or_else(|| panic!("second execution root omitted session id: {second:#?}"));
     assert_ne!(
         session_id, second_session_id,
         "separate executions reused a session id"
     );
     assert_ne!(
-        trace_id, second_trace_id,
+        trace_id,
+        second.trace_id.as_slice(),
         "separate executions reused a trace"
     );
+    assert_payload_omits(&requests, &["second-workflow-input-secret"]);
 }
 
 fn assert_parallel_trace(requests: &[CapturedRequest]) -> (String, Vec<u8>) {
@@ -1678,6 +1727,8 @@ fn run_application_failed_step_helper() {
             attachments: vec![],
             skipped_steps: vec![],
             flags: std::collections::BTreeMap::new(),
+            context: None,
+            ..NewSessionRequest::default()
         })
         .unwrap_or_else(|error| panic!("create application run session: {error}"));
     let sink: Arc<dyn ApplicationEventSink> = Arc::new(|_event: ApplicationEvent| Ok(()));
@@ -2067,7 +2118,7 @@ steps:
         .collect::<Vec<_>>();
     assert_eq!(successful_step_durations.len(), 1);
     assert_eq!(successful_step_durations[0].count, 3);
-    assert_exec_run_isolation(&fixture, &session_id, &trace_id);
+    assert_exec_run_isolation(&collector, &fixture, &session_id, &trace_id);
 }
 
 #[test]
@@ -2277,7 +2328,10 @@ fn skip_planning_foreground_and_background_omit_planning_telemetry() {
         .unwrap_or_else(|error| panic!("wait for background skip-planning: {error}"));
     assert_success(&background);
 
-    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let _ = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    // The background client returns before the daemon's asynchronous operation ends.
+    let requests =
+        collector.wait_for_span_count("cruise.execution", "cruise.execution.kind", "plan", 2);
     let exported_spans = spans(&requests);
     let roots = exported_spans
         .iter()
@@ -2506,7 +2560,7 @@ fn execute_now_finishes_plan_root_before_separate_run_root() {
 }
 
 #[test]
-fn cancelling_plan_approval_exits_successfully_deletes_session_and_cancels_root() {
+fn cancelling_plan_approval_exits_successfully_deletes_session_after_plan_finishes() {
     let collector = Collector::start();
     let fixture = approval_fixture();
     let env = otlp_env(&collector.endpoint());
@@ -2541,19 +2595,18 @@ fn cancelling_plan_approval_exits_successfully_deletes_session_and_cancels_root(
         "plan",
     );
     assert_eq!(plan.parent_span_id, [0_u8; 0]);
-    assert_eq!(plan.status_code, StatusCode::Error as i32);
+    // The daemon's plan operation is terminal before the CLI displays this approval prompt.
+    // Cancelling the client-side prompt cannot retroactively cancel the completed root.
+    assert_eq!(plan.status_code, StatusCode::Ok as i32);
     assert_eq!(
         plan.attributes.get("cruise.outcome").map(String::as_str),
-        Some("cancelled")
+        Some("success")
     );
-    assert_eq!(
-        plan.attributes.get("error.type").map(String::as_str),
-        Some("cancelled")
-    );
+    assert!(!plan.attributes.contains_key("error.type"));
     let session_id = plan
         .attributes
         .get("cruise.session.id")
-        .unwrap_or_else(|| panic!("cancelled plan root omitted session id: {plan:#?}"));
+        .unwrap_or_else(|| panic!("plan root omitted session id: {plan:#?}"));
     assert!(
         !fixture
             .root

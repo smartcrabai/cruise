@@ -588,7 +588,13 @@ impl SessionState {
     /// Sets `runner_pid` from `std::process::id()` and `runner_started_at`
     /// from `sysinfo`.
     pub fn set_runner_to_current_process(&mut self) {
-        let pid = std::process::id();
+        self.set_runner_to_process(std::process::id());
+    }
+
+    /// Record the process with `pid` as the runner for this session.
+    ///
+    /// Captures its start time when available to protect against PID reuse.
+    pub fn set_runner_to_process(&mut self, pid: u32) {
         self.runner_pid = Some(pid);
         let sys_pid = sysinfo::Pid::from_u32(pid);
         self.runner_started_at = sysinfo::System::new().ok().and_then(|mut system| {
@@ -618,6 +624,12 @@ impl SessionState {
         system
             .process(sys_pid)
             .is_some_and(|p| p.start_time() == ts)
+    }
+    /// Returns the PID of a live runner owned by another process.
+    #[must_use]
+    pub fn live_foreign_runner_pid(&self) -> Option<u32> {
+        let pid = self.runner_pid?;
+        (pid != std::process::id() && self.is_runner_alive()).then_some(pid)
     }
 }
 
@@ -822,8 +834,13 @@ impl SessionManager {
     ) -> Result<(SessionState, SessionStateFingerprint)> {
         validate_session_id(id)?;
         let path = self.state_path(id);
-        let bytes = std::fs::read(&path)
-            .map_err(|e| CruiseError::SessionError(format!("failed to load session {id}: {e}")))?;
+        let bytes = std::fs::read(&path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CruiseError::SessionNotFound(id.to_owned())
+            } else {
+                CruiseError::SessionError(format!("failed to load session {id}: {e}"))
+            }
+        })?;
         let fingerprint = SessionStateFingerprint::from_bytes(&bytes);
         let state = serde_json::from_slice(&bytes)
             .map_err(|e| CruiseError::SessionError(format!("failed to parse session {id}: {e}")))?;
@@ -998,24 +1015,35 @@ impl SessionManager {
     ///
     /// Returns an error if the config file cannot be read or parsed.
     pub fn load_config(&self, state: &SessionState) -> Result<crate::config::WorkflowConfig> {
+        self.load_config_with_env(state, crate::config::ConfigEnv::Process)
+    }
+
+    /// Load a session workflow using the supplied override source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config file cannot be read, parsed, or resolved.
+    pub fn load_config_with_env(
+        &self,
+        state: &SessionState,
+        env: crate::config::ConfigEnv<'_>,
+    ) -> Result<crate::config::WorkflowConfig> {
         match &state.config {
             crate::session_config::SessionConfigRef::File { path } => {
                 let defaults = crate::workflow_defaults::WorkflowDefaults::load(
                     state.workflow_defaults_dir(),
                 )?;
-                crate::workflow_call::resolve_workflow_calls_from_path_with_defaults(
-                    path.clone(),
-                    &defaults,
+                crate::workflow_call::resolve_path_with_env(path.clone(), &defaults, env).map_err(
+                    |error| match error {
+                        CruiseError::ConfigParseError(message) => CruiseError::ConfigParseError(
+                            format!("failed to parse file config {}: {message}", path.display()),
+                        ),
+                        error => CruiseError::Other(format!(
+                            "failed to load file config {}: {error}",
+                            path.display()
+                        )),
+                    },
                 )
-                .map_err(|error| match error {
-                    CruiseError::ConfigParseError(message) => CruiseError::ConfigParseError(
-                        format!("failed to parse file config {}: {message}", path.display()),
-                    ),
-                    error => CruiseError::Other(format!(
-                        "failed to load file config {}: {error}",
-                        path.display()
-                    )),
-                })
             }
             reference => {
                 let path = snapshot_path(&self.sessions_dir(), &state.id);
@@ -1026,13 +1054,18 @@ impl SessionManager {
                         path.display()
                     ))
                 })?;
-                crate::config::WorkflowConfig::from_yaml(&yaml).map_err(|error| {
-                    CruiseError::ConfigParseError(format!(
-                        "failed to parse {} at {}: {error}",
-                        reference.kind_label(),
-                        path.display()
-                    ))
-                })
+                let mut config =
+                    crate::config::WorkflowConfig::from_yaml(&yaml).map_err(|error| {
+                        CruiseError::ConfigParseError(format!(
+                            "failed to parse {} at {}: {error}",
+                            reference.kind_label(),
+                            path.display()
+                        ))
+                    })?;
+                if matches!(env, crate::config::ConfigEnv::Snapshot(_)) {
+                    config.apply_env_overrides_with(env)?;
+                }
+                Ok(config)
             }
         }
     }

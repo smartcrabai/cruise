@@ -1,22 +1,26 @@
 # Checkpoint contract verification
 
-For the WebUI daemon lifecycle, see `WEBUI_DAEMON.md` and run `bash scripts/check_webui_daemon_specs.sh`.
-The `webui_daemon.qnt` model checks single ownership, start eligibility,
-identity-checked signals, session preservation and status at the observation
-point. Its two-PID, two-generation bounded abstraction does not model network
-authentication, timeouts, or prove the implementation correct. The script also
-runs the real CLI and control endpoint integration tests. Reports and command
-logs are written under `target/formal-reports/`; the dedicated CI workflow
-uploads them even on failure.
+For the daemon lifecycle, see `DAEMON.md` and run `bash scripts/check_daemon_specs.sh`.
+The `daemon.qnt` model checks locked autostart, single ownership, identity-checked
+signals, session preservation, registry-removal/takeover exit, bind fallback vs
+strict explicit ports, version mismatch handling and bearer-token authorization.
+These bounded models do not prove the Rust or OS behavior. The script also runs
+the real CLI lifecycle, autostart, port, API authorization and shutdown tests.
+Reports and command logs are written under `target/formal-reports/`; the
+dedicated CI workflow uploads them even on failure.
 
 For provider installation lifecycle and resolution precedence, see
 `PROVIDER_INSTALL.md` and run `bash scripts/check_provider_install_specs.sh`.
 The dedicated `provider-install-specs` CI job runs the pinned Quint checks and
 retains reports. The bounded model is not a production refinement proof.
 
-For the planned workflow environment override precedence and snapshot model,
-see `CONFIG_ENV_OVERRIDE.md` and run `bash scripts/check_config_env_specs.sh`.
-This standalone Quint model is not a production conformance test.
+For the fresh-run base-branch CI admission gate, see `BASE_CI.md` and `BASE_CI_ALLOY.md` and run `mise exec node@26.13.0 -- bash scripts/check_base_ci_specs.sh`. The dedicated `base-ci-specs.yml` workflow runs Quint, Alloy and CLI-client Gherkin; the production gate runs in the daemon before workspace creation.
+
+For workflow environment precedence and daemon request-context selection, see
+`CONFIG_ENV_OVERRIDE.md` and run
+`mise exec node@26.13.0 -- bash scripts/check_config_env_specs.sh`. The bounded
+Quint and Alloy models cover request snapshot isolation and process-vs-snapshot
+selection; production Gherkin drives real CLI requests against the daemon.
 
 For local squash merge lifecycle safety, run `bash scripts/check_local_merge_specs.sh`.
 The dedicated `local-merge-specs` CI job runs the pinned Quint tests, simulation
@@ -41,6 +45,8 @@ The formal models are not a production refinement proof; the BDD checks those
 production behaviors directly.
 
 
+For bounded plan-verification stage gating and the saved-session application flow, see `PLAN_VERIFY.md` and run `mise exec node@26.13.0 -- bash scripts/check_plan_verify_specs.sh`. The `plan-verify-specs` CI job runs Quint, Alloy and production verification scenarios.
+
 For bounded batch auto-requeue safety, see `AUTO_REQUEUE.md` and run
 `bash scripts/check_auto_requeue_specs.sh`. The dedicated `auto-requeue-specs`
 CI job retains verification receipts and traces.
@@ -64,6 +70,8 @@ For per-prompt `disallowed_tools`, implicit git denials and MCP filtering, see
 The dedicated `tool-restrictions-specs` native PR job runs Quint, all Alloy
 assertions and witnesses with receipt validation, production Cucumber scenarios,
 negative controls and affected Rust contracts using the shared pins below.
+
+For UI locale precedence and browser-cookie fallback, see `UI_LOCALE.md` and run `mise exec node@26.13.0 -- bash scripts/check_ui_locale_specs.sh`. The dedicated `ui-locale-specs.yml` workflow runs the same suite.
 
 For responsive WebUI drawer transitions, width persistence, real browser layout
 and htmx Gherkin, see `RESPONSIVE_WEBUI.md` and run
@@ -92,6 +100,8 @@ For the CLI planning-to-execution workflow-flag boundary, see
 `WORKFLOW_FLAGS.md` and run `bash scripts/check_workflow_flags_specs.sh`.
 Its dedicated PR CI job runs Quint, Alloy receipt checks, real PTY Gherkin,
 and production regression tests with the shared pins below.
+
+For workflow package install/recovery and collision models, see `WORKFLOW_PACKAGES.md` and run `mise exec node@26.13.0 -- bash scripts/check_workflow_packages_specs.sh`. The suite runs in the existing `workflow-flags-specs` CI job.
 
 For SDK-qualified model arrays, ordered cross-SDK fallback, resume ownership,
 and production-connected configuration/CLI Gherkin, see `SDK_MODELS.md` and run
@@ -124,6 +134,8 @@ multiple gates, timeouts, and explicit reposition. Resume models only a successf
 saved state. There is no claim of exactly-once shell effects across a crash
 between an external effect and checkpoint persistence. Concrete contract tests
 cover additional behavior separately and are not replaced by the models.
+
+The `quality_gate_cli` scenarios invoke the CLI client with isolated daemon state; the daemon executes the workflow engine, shell gates and checkpoint writes.
 
 ## Scope and traceability
 

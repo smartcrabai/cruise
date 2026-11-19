@@ -1854,29 +1854,22 @@ fn write_session_mcp(
 }
 
 pub(crate) fn resolve_source_home(cwd: Option<&Path>) -> PathBuf {
+    let default_base = home::home_dir()
+        .or_else(|| crate::paths::data_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
     let configured = std::env::var_os(JCODE_HOME_ENV).filter(|value| !value.is_empty());
-    let path = configured.map_or_else(
-        || {
-            home::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".jcode")
-        },
-        PathBuf::from,
-    );
+    let Some(configured) = configured else {
+        return default_base.join(".jcode");
+    };
+    let path = PathBuf::from(configured);
     if path.is_absolute() {
         return path;
     }
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let base = cwd.map_or_else(
-        || current_dir.clone(),
-        |cwd| {
-            if cwd.is_absolute() {
-                cwd.to_path_buf()
-            } else {
-                current_dir.join(cwd)
-            }
-        },
-    );
+    let base = match cwd {
+        Some(cwd) if cwd.is_absolute() => cwd.to_path_buf(),
+        Some(cwd) => default_base.join(cwd),
+        None => default_base,
+    };
     base.join(path)
 }
 

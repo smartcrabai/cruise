@@ -49,6 +49,7 @@ impl Fixture {
             &agent,
             r#"#!/bin/sh
 cat > "$AGENT_LOG.prompt"
+printf '%s\n' 'stub progress'
 if [ -f "$AGENT_LOG" ]; then
   echo review >> "$AGENT_LOG"
   if [ "$CHANGE_REVIEW" = 1 ]; then echo changed >> review-change.txt; fi
@@ -151,6 +152,11 @@ fn instant_exec_runs_once_and_removes_session() -> TestResult {
     let f = Fixture::new()?;
     let output = f.command().args(["--instant", "add greeting"]).output()?;
     assert!(output.status.success(), "{}", terminal(&output));
+    assert!(
+        terminal(&output).contains("stub progress"),
+        "{}",
+        terminal(&output)
+    );
     assert_eq!(f.calls(), ["implement"]);
     f.assert_no_sessions()?;
     Ok(())
@@ -171,6 +177,10 @@ fn dry_run_does_not_spawn_or_create_session() -> TestResult {
     );
     assert_eq!(f.calls(), Vec::<String>::new());
     f.assert_no_sessions()?;
+    assert!(
+        !f.root.path().join("state/cruise/daemon").exists(),
+        "--dry-run should not start the daemon"
+    );
     Ok(())
 }
 

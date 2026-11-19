@@ -66,7 +66,24 @@ cruise --version; cruise update; cruise --version
 
 「管理対象」かどうかは Cargo のインストール台帳ではなく、実行ファイルの場所（既定のインストーラー先 `~/.local/bin`（Windows では `%USERPROFILE%\.local\bin`）または正規の `$CARGO_HOME/bin`）で判定されます。アップデーターが切り替えるのはランタイム選択のみです。固定の `cruise` ランチャー（Windows では `cruise.exe`）はそのまま残り、更新ごとにバージョン付きの `cruise-runtime-managed-…` ランタイムと `.json` サイドカーが追加され、`.cruise-runtime-active` が切り替わります。古いランタイムも保持されます。ネイティブ更新は Cargo を実行せず、Cargo のインストール台帳も変更しません。カスタムのソースビルド版が必要な場合は、ソースから再ビルドしてインストールしてください。
 
-Cruise を更新しても、すでに実行中の WebUI プロセスのコードは置き換わりません。更新後に `cruise webui status` でそのバージョンと現在のランタイムを比較し、`cruise webui restart` で更新済みランタイムを読み込んでください。再起動すると実行中の WebUI 操作がキャンセルされるため、適切なタイミングで行ってください。
+`cruise update` の後、次の client request で idle daemon は新しい runtime に自動再起動します。daemon が busy の場合は古い version のまま稼働し、CLI client は request を拒否して、idle 時に `cruise daemon restart` を実行するよう案内します。WebUI も再起動までは古い version のままです。`cruise daemon status` で daemon を確認してください。削除された `cruise webui status` や `restart` は使わないでください。
+
+<a id="docker"></a>
+### Docker
+
+Docker image は長時間稼働する service container として起動し、credential などの process-level 環境変数は `--env-file` などで container に渡してください。
+
+```sh
+docker run -d --name cruise -p 127.0.0.1:8484:8484 --env-file .env cruise:latest
+```
+
+WebUI の login URL は `docker logs cruise` に表示されます。URL に含まれるのは 5 分で期限切れになる一度だけ使える nonce で、registry API token ではありません。意図して network に公開する場合を除き、service は loopback（`-p 127.0.0.1:8484:8484`）だけに公開してください。daemon は平文 HTTP で配信されます。同じ service container 内で CLI command を実行します。
+
+```sh
+docker exec cruise cruise plan "implement the feature"
+```
+
+`docker run --rm --env-file .env cruise:latest plan "implement the feature"` のような one-shot container は foreground では動作します。終了後に container と daemon も停止するため、background の `--plan` や detached work には one-shot container を使わないでください。credential と process-level 環境変数は `--env-file` または `-e` で service container に渡してください。
 
 <a id="managed-provider-clis"></a>
 ### 管理対象プロバイダー CLI

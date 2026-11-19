@@ -60,6 +60,7 @@ impl Fixture {
             },
             cancel_token: cancel,
             option_handler: &NoOpOptionHandler,
+            ask_handler: None,
             config_reloader: None,
             working_dir: Some(self.root.path()),
             skipped_steps: &[],

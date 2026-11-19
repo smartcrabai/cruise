@@ -32,6 +32,20 @@ fi
 source target/formal-tools/env.sh
 Q="$ROOT/tests/formal/node_modules/.bin/quint"
 MODEL=tests/formal/config_env_override.qnt
+REQUIRED_QUINT_TESTS=(requestIsolationTest processSnapshotSelectionTest)
+
+check_required_quint_tests() {
+  local test
+  for test in "${REQUIRED_QUINT_TESTS[@]}"; do
+    if ! grep -Fq "run $test =" "$MODEL"; then
+      echo "missing required Quint test: $test" >&2
+      return 1
+    fi
+    echo "required Quint test present: $test"
+  done
+}
+
+run_check required-quint-tests check_required_quint_tests
 run_check versions bash -c '[[ $(node --version) == v26.13.0 ]] && node --version && java -version'
 run_check quint-version "$Q" --version
 run_check quint-typecheck "$Q" typecheck "$MODEL"

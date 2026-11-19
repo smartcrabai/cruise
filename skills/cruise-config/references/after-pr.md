@@ -136,7 +136,7 @@ For private GitHub repositories, the plan limitation is recognized only when bra
 
 After the request, Cruise rechecks provider state and reports success only when the expected head is confirmed merged. A failed or unknown native merge outcome, or any fatal after-PR error, keeps the session and worktree and prevents `cleanup_after_pr` cleanup. Run resumes the checkpointed after-PR node and retry counts without rerunning the main workflow or publishing the PR again. Saved flags apply with explicit overrides. Legacy sessions without an after-PR stage marker restart the after-PR phase because their exact node and counters were not saved. A session marked as after-PR fails closed if its checkpoint is missing or incompatible. When `merge` is off, warning-only failures from ordinary after-PR steps do not by themselves prevent configured cleanup.
 
-The existing **Merge PR** action in `cruise list`, the TUI, and the WebUI remains a separate human-confirmed operation with its existing cleanup behavior and GitHub-only limitations. Native workflow merge is not a replacement or global default.
+The existing **Merge PR** action in `cruise list` and the WebUI remains a separate human-confirmed operation with its existing cleanup behavior and GitHub-only limitations. Native workflow merge is not a replacement or global default.
 
 ## Constraints
 

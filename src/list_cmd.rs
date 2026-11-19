@@ -3,283 +3,148 @@ use std::io::Write;
 
 use console::style;
 use inquire::InquireError;
-use serde::Serialize;
 
+use crate::application::{SessionAction as Capability, SessionSettingsRequest};
 use crate::cli::{DEFAULT_RATE_LIMIT_RETRIES, ListArgs};
+use crate::daemon::client::list::SessionListItem;
+use crate::daemon::client::{DaemonClient, EventFilter};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
-use crate::session::{PrSkippedReason, SessionManager, SessionPhase, SessionState, WorkspaceMode};
+use crate::session::{SessionManager, SessionPhase, SessionState};
 use crate::workflow::{list_skippable_after_pr_steps, list_skippable_steps};
-
-/// CLI-only DTO for JSON output. Stable machine-readable form of `SessionState`.
-/// `phase` is always a plain string; `phase_error` carries the failure message for Failed sessions.
-#[derive(Debug, Serialize)]
-struct ListSessionJson {
-    id: String,
-    base_dir: String,
-    phase: &'static str,
-    phase_error: Option<String>,
-    plan_error: Option<String>,
-    config_source: String,
-    input: String,
-    title: Option<String>,
-    current_step: Option<String>,
-    created_at: String,
-    completed_at: Option<String>,
-    worktree_path: Option<String>,
-    worktree_branch: Option<String>,
-    workspace_mode: WorkspaceMode,
-    target_branch: Option<String>,
-    pr_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pr_target: Option<crate::pr_review_fix::PrTarget>,
-    pr_skipped_reason: Option<PrSkippedReason>,
-    config_path: Option<String>,
-    updated_at: Option<String>,
-    awaiting_input: bool,
-    plan_available: bool,
-    pending_instructions: usize,
-    auto_requeue_count: u32,
-}
-
-/// `Failed(msg)` is normalized to `phase = "Failed"` + `phase_error = Some(msg)`.
-#[cfg(test)]
-fn session_to_json(session: SessionState) -> ListSessionJson {
-    session_to_json_with_plan_availability(session, false)
-}
-
-fn session_to_json_with_plan_availability(
-    session: SessionState,
-    plan_available: bool,
-) -> ListSessionJson {
-    let (phase, phase_error): (&'static str, Option<String>) = match session.phase {
-        SessionPhase::Draft => ("Draft", None),
-        SessionPhase::AwaitingInput => ("AwaitingInput", None),
-        SessionPhase::AwaitingApproval => ("AwaitingApproval", None),
-        SessionPhase::Planned => ("Planned", None),
-        SessionPhase::Running => ("Running", None),
-        SessionPhase::Completed => ("Completed", None),
-        SessionPhase::Failed(msg) => ("Failed", Some(msg)),
-        SessionPhase::PrFailed(msg) => ("PrFailed", Some(msg)),
-        SessionPhase::Suspended => ("Suspended", None),
-    };
-    ListSessionJson {
-        auto_requeue_count: session.auto_requeue_count,
-        id: session.id,
-        base_dir: session.base_dir.to_string_lossy().into_owned(),
-        phase,
-        phase_error,
-        plan_error: session.plan_error,
-        config_source: session.config.display_label(),
-        input: session.input,
-        title: session.title,
-        current_step: session.current_step,
-        created_at: session.created_at,
-        completed_at: session.completed_at,
-        worktree_path: session
-            .worktree_path
-            .map(|p| p.to_string_lossy().into_owned()),
-        worktree_branch: session.worktree_branch,
-        workspace_mode: session.workspace_mode,
-        target_branch: session.target_branch,
-        pr_url: session.pr_url,
-        pr_target: session.pr_target,
-        pr_skipped_reason: session.pr_skipped_reason,
-        config_path: session.config.selection_value(),
-        updated_at: session.updated_at,
-        awaiting_input: session.awaiting_input,
-        plan_available,
-        pending_instructions: 0,
-    }
-}
-
-/// Serialize a list of sessions to a JSON array (pretty-printed) followed by a newline.
-#[cfg(test)]
-fn write_sessions_json<W: Write>(mut writer: W, sessions: Vec<SessionState>) -> Result<()> {
-    let dtos: Vec<ListSessionJson> = sessions.into_iter().map(session_to_json).collect();
-    serde_json::to_writer_pretty(&mut writer, &dtos)
-        .map_err(|e| CruiseError::Other(format!("JSON serialization error: {e}")))?;
-    writer
-        .write_all(b"\n")
-        .map_err(|e| CruiseError::Other(format!("write error: {e}")))?;
-    Ok(())
-}
-
-fn write_sessions_json_with_manager<W: Write>(
-    mut writer: W,
-    sessions: Vec<SessionState>,
-    manager: &SessionManager,
-) -> Result<()> {
-    let dtos: Vec<ListSessionJson> = sessions
-        .into_iter()
-        .map(|session| {
-            let plan_available = plan_available_for_session(&session, manager);
-            let pending = crate::instruction_inbox::summary(&manager.sessions_dir(), &session.id)
-                .map_or(0, |summary| summary.pending.len());
-            let mut dto = session_to_json_with_plan_availability(session, plan_available);
-            dto.pending_instructions = pending;
-            dto
-        })
-        .collect();
-    serde_json::to_writer_pretty(&mut writer, &dtos)
-        .map_err(|e| CruiseError::Other(format!("JSON serialization error: {e}")))?;
-    writer
-        .write_all(b"\n")
-        .map_err(|e| CruiseError::Other(format!("write error: {e}")))?;
-    Ok(())
-}
 
 #[expect(
     clippy::too_many_lines,
-    reason = "interactive session picker with multiple action branches"
+    reason = "The interactive list loop coordinates the session selection and action menu."
 )]
 pub async fn run(args: ListArgs) -> Result<()> {
-    let manager = SessionManager::new(crate::paths::data_dir()?);
-
+    let client = DaemonClient::connect().await?;
     if args.json {
-        let mut sessions = manager.list()?;
-        for s in &mut sessions {
-            let _ = manager.reconcile_running_phase(s, false);
-        }
-        write_sessions_json_with_manager(
-            std::io::BufWriter::new(std::io::stdout()),
-            sessions,
-            &manager,
-        )?;
+        let sessions = client.sessions().await?;
+        let mut writer = std::io::BufWriter::new(std::io::stdout().lock());
+        serde_json::to_writer_pretty(&mut writer, &sessions)
+            .map_err(|error| CruiseError::Other(format!("JSON serialization error: {error}")))?;
+        writer
+            .write_all(b"\n")
+            .map_err(|error| CruiseError::Other(format!("write error: {error}")))?;
         return Ok(());
     }
 
+    let context = crate::request_context::RequestContext::capture()?;
     loop {
-        let Some(mut session) = pick_session(&manager)? else {
+        let Some(selected) = pick_session(&client).await? else {
             return Ok(());
         };
-
+        let id = selected.id.clone();
+        let mut details = client.session_details(&id).await?;
         loop {
-            let plan_available = plan_available_for_session(&session, &manager);
-
-            // Show plan.md content.
-            let plan_path = session.plan_path(&manager.sessions_dir());
-            if let Ok(content) = std::fs::read_to_string(&plan_path) {
+            if let Ok(content) = client.session_plan(&id).await {
                 crate::display::print_bordered(&content, Some("plan.md"));
             }
-
-            // Action menu.
-            let actions = available_session_actions(&session, plan_available);
-
-            // Re-shown after Generate Plan / Replan (SDK turns), which may have
-            // left the terminal's foreground process group dead.
+            let actions = available_session_actions(&details.capabilities);
             crate::platform::reclaim_terminal_foreground();
             let prompt = list_text("cli.list.action_prompt", "Action:");
             let action = match inquire::Select::new(&prompt, actions).prompt() {
-                Ok(a) => a,
+                Ok(action) => action,
                 Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                     SessionAction::Back
                 }
-                Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+                Err(error) => {
+                    return Err(CruiseError::Other(format!("selection error: {error}")));
+                }
             };
 
             match action {
                 SessionAction::ViewDiff => {
                     crate::platform::reclaim_terminal_foreground();
-                    if let Err(e) = crate::diff_cmd::print_session_diff(&session, false) {
-                        eprintln!("{e}");
+                    if let Err(error) =
+                        crate::diff_cmd::print_session_diff(&client, &id, false).await
+                    {
+                        eprintln!("{error}");
                     }
                 }
                 SessionAction::GeneratePlan => {
-                    match crate::plan_cmd::regenerate_plan_for_session(
-                        &manager,
-                        &mut session,
+                    if let Err(error) = crate::plan_cmd::regenerate_plan_for_session(
+                        &client,
+                        &id,
                         DEFAULT_RATE_LIMIT_RETRIES,
                     )
                     .await
                     {
-                        Ok(()) => {
-                            session = manager.load(&session.id)?;
-                        }
-                        Err(e) => {
-                            eprintln!("{} Plan generation failed: {e}", style("✗").red());
-                            if let Ok(reloaded) = manager.load(&session.id) {
-                                session = reloaded;
-                            }
-                        }
+                        eprintln!("{} Plan generation failed: {error}", style("✗").red());
+                    }
+                    if let Ok(updated) = client.session_details(&id).await {
+                        details = updated;
                     }
                 }
                 SessionAction::Approve => {
-                    if !plan_available || session.plan_error.is_some() {
-                        eprintln!("{} plan is not ready for approval yet", style("!").yellow());
-                        continue;
+                    let request = crate::application::ApproveRequest {
+                        flags: None,
+                        skipped_steps: None,
+                        generate_title: true,
+                        context: Some(context.clone()),
+                    };
+                    match client.approve(&id, &request).await {
+                        Ok(approved) => {
+                            eprintln!(
+                                "{} Session {} approved. Run with: {}",
+                                style("v").green(),
+                                approved.id,
+                                style(format!("cruise run {}", approved.id)).cyan()
+                            );
+                        }
+                        Err(error) => eprintln!("{error}"),
                     }
-                    if let Err(err) =
-                        crate::metadata::refresh_session_title_from_session(&manager, &mut session)
-                    {
-                        eprintln!("warning: failed to refresh session title: {err}");
+                    if let Ok(updated) = client.session_details(&id).await {
+                        details = updated;
                     }
-                    let create_pr = manager.load_config(&session)?.create_pr;
-                    session.approve();
-                    crate::repo_clone::cleanup_after_approval(&manager, &mut session, create_pr);
-                    manager.save(&session)?;
-                    eprintln!(
-                        "{} Session {} approved. Run with: {}",
-                        style("v").green(),
-                        session.id,
-                        style(format!("cruise run {}", session.id)).cyan()
-                    );
                 }
                 SessionAction::PublishAsIssue => {
-                    if !plan_available || session.plan_error.is_some() {
-                        eprintln!("{} plan is not ready for approval yet", style("!").yellow());
-                        continue;
-                    }
-                    crate::platform::reclaim_terminal_foreground();
-                    let default_trigger_cruise = matches!(session.phase, SessionPhase::Planned);
-                    let trigger_cruise = if crate::issue_publish::supports_trigger_cruise(&session)
-                    {
-                        let prompt = list_text(
-                            "cli.list.prompt.trigger",
-                            "Post an @cruise run comment after creating the issue?",
-                        );
-                        match inquire::Confirm::new(&prompt)
-                            .with_default(default_trigger_cruise)
-                            .prompt()
-                        {
-                            Ok(answer) => answer,
-                            Err(
-                                InquireError::OperationCanceled
-                                | InquireError::OperationInterrupted,
-                            ) => {
-                                continue;
-                            }
-                            Err(e) => {
-                                return Err(CruiseError::Other(format!("selection error: {e}")));
-                            }
-                        }
-                    } else {
-                        false
-                    };
-                    match crate::issue_publish::publish_plan_issue_and_delete(
-                        &manager,
-                        session.clone(),
-                        trigger_cruise,
-                    ) {
-                        Ok(published) => {
-                            eprintln!(
-                                "{} Published plan as issue: {}",
-                                style("v").green(),
-                                published.url
+                    let default_trigger_cruise =
+                        matches!(&details.state.phase, SessionPhase::Planned);
+                    let trigger_cruise =
+                        if crate::issue_publish::supports_trigger_cruise(&details.state) {
+                            let prompt = list_text(
+                                "cli.list.prompt.trigger",
+                                "Post an @cruise run comment after creating the issue?",
                             );
+                            match inquire::Confirm::new(&prompt)
+                                .with_default(default_trigger_cruise)
+                                .prompt()
+                            {
+                                Ok(answer) => answer,
+                                Err(
+                                    InquireError::OperationCanceled
+                                    | InquireError::OperationInterrupted,
+                                ) => continue,
+                                Err(error) => {
+                                    return Err(CruiseError::Other(format!(
+                                        "selection error: {error}"
+                                    )));
+                                }
+                            }
+                        } else {
+                            false
+                        };
+                    match client.publish(&id, trigger_cruise).await {
+                        Ok(url) => {
+                            eprintln!("{} Published plan as issue: {url}", style("v").green());
                             break;
                         }
-                        Err(e) => {
-                            eprintln!("{} Failed to publish plan as issue: {e}", style("x").red());
-                            if let Ok(reloaded) = manager.load(&session.id) {
-                                session = reloaded;
+                        Err(error) => {
+                            eprintln!(
+                                "{} Failed to publish plan as issue: {error}",
+                                style("x").red()
+                            );
+                            if let Ok(updated) = client.session_details(&id).await {
+                                details = updated;
                             }
                         }
                     }
                 }
                 SessionAction::Run | SessionAction::Resume => {
-                    let run_args = crate::cli::RunArgs {
-                        session: Some(session.id.clone()),
+                    return crate::run_cmd::run(crate::cli::RunArgs {
+                        session: Some(id),
                         all: false,
                         parallelism: None,
                         auto_requeue_max_attempts: None,
@@ -289,20 +154,21 @@ pub async fn run(args: ListArgs) -> Result<()> {
                         cleanup_after_pr: false,
                         no_cleanup_after_pr: false,
                         flags: vec![],
-                    };
-                    return crate::run_cmd::run(run_args).await;
+                    })
+                    .await;
                 }
                 SessionAction::Tell => {
-                    let text = match prompt_multiline("Instruction:")? {
-                        InputResult::Submitted(t) => t,
+                    let instruction = match prompt_multiline("Instruction:")? {
+                        InputResult::Submitted(instruction) => instruction,
                         InputResult::Cancelled => continue,
                     };
-                    let application = crate::application::CruiseApplication::new(manager.clone());
-                    match application.tell(
-                        &session.id,
-                        text,
-                        crate::instruction_inbox::Origin::List,
-                    ) {
+                    let request = crate::application::TellRequest {
+                        content: instruction,
+                        origin: "list".to_owned(),
+                        dedupe_key: None,
+                        context: Some(context.clone()),
+                    };
+                    match client.tell(&id, &request).await {
                         Ok(receipt) => eprintln!("Instruction #{} accepted", receipt.id),
                         Err(error) => eprintln!("{error}"),
                     }
@@ -311,62 +177,54 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     let prompt =
                         list_text("cli.list.prompt.replan", "Describe the changes needed:");
                     let text = match prompt_multiline(&prompt)? {
-                        InputResult::Submitted(t) => t,
+                        InputResult::Submitted(text) => text,
                         InputResult::Cancelled => continue,
                     };
-                    crate::plan_cmd::replan_session(
-                        &manager,
-                        &mut session,
-                        text,
-                        DEFAULT_RATE_LIMIT_RETRIES,
-                    )
-                    .await?;
-                    // Re-load so subsequent session_actions(&session) uses fresh state.
-                    session = manager.load(&session.id)?;
+                    crate::plan_cmd::replan_session(&client, &id, text, DEFAULT_RATE_LIMIT_RETRIES)
+                        .await?;
+                    details = client.session_details(&id).await?;
                 }
                 SessionAction::CreatePr => {
-                    let app = crate::application::CruiseApplication::new(manager.clone());
-                    let sink = std::sync::Arc::new(|event| {
-                        match event {
-                            crate::application::ApplicationEvent::RunPhase { phase, .. } => {
-                                eprintln!("{phase}");
-                            }
-                            crate::application::ApplicationEvent::PrCreated { url, .. } => {
-                                eprintln!("PR created: {url}");
-                            }
-                            crate::application::ApplicationEvent::RunFailed { error, .. } => {
-                                eprintln!("PR creation failed: {error}");
-                            }
-                            _ => {}
-                        }
-                        Ok(())
-                    });
-                    if let Err(error) = app.create_pr(&session.id, sink, None).await {
+                    let stream = client
+                        .events(EventFilter {
+                            session: Some(id.clone()),
+                            batch: true,
+                        })
+                        .await?;
+                    if let Err(error) = client.start_create_pr(&id, &context).await {
                         eprintln!("PR creation failed: {error}");
+                    } else {
+                        let mut handler = crate::cli_events::TerminalEvents::new(&client, &id);
+                        match crate::cli_events::drive(&client, &id, stream, &mut handler).await {
+                            Ok(finished) => {
+                                if let SessionPhase::PrFailed(error) | SessionPhase::Failed(error) =
+                                    finished.state.phase
+                                {
+                                    eprintln!("PR creation failed: {error}");
+                                }
+                            }
+                            Err(error) => eprintln!("PR creation failed: {error}"),
+                        }
                     }
-                    if let Ok(reloaded) = manager.load(&session.id) {
-                        session = reloaded;
+                    if let Ok(updated) = client.session_details(&id).await {
+                        details = updated;
                     }
                 }
                 SessionAction::OpenPr => {
-                    let url = session.pr_url.as_deref().ok_or_else(|| {
+                    let url = details.state.pr_url.as_deref().ok_or_else(|| {
                         CruiseError::Other("Open PR action requires pr_url".into())
                     })?;
                     match open_pr_in_browser(url) {
-                        Ok(()) => {
-                            eprintln!("{} Opening PR in browser...", style("v").green());
-                        }
-                        Err(e) => {
-                            eprintln!("{} {e}", style("x").red());
-                        }
+                        Ok(()) => eprintln!("{} Opening PR in browser...", style("v").green()),
+                        Err(error) => eprintln!("{} {error}", style("x").red()),
                     }
                 }
                 SessionAction::MergePr => {
-                    if merge_pr_interactive(&manager, &session.id)? {
+                    if merge_pr_interactive(&client, &id, &context).await? {
                         break;
                     }
-                    if let Ok(reloaded) = manager.load(&session.id) {
-                        session = reloaded;
+                    if let Ok(updated) = client.session_details(&id).await {
+                        details = updated;
                     }
                 }
                 SessionAction::StageLocalMerge | SessionAction::MergeLocal => {
@@ -375,78 +233,46 @@ pub async fn run(args: ListArgs) -> Result<()> {
                     } else {
                         crate::application::LocalMergeMode::MergeAndCleanup
                     };
-                    if local_merge_interactive(&manager, &session, mode)? {
+                    if local_merge_interactive(&client, &details.state, mode, &context).await? {
                         break;
                     }
-                    if let Ok(reloaded) = manager.load(&session.id) {
-                        session = reloaded;
+                    if let Ok(updated) = client.session_details(&id).await {
+                        details = updated;
                     }
                 }
                 SessionAction::EditSettings => {
-                    match edit_session_settings_interactive(
-                        &manager,
-                        &mut session,
-                        DEFAULT_RATE_LIMIT_RETRIES,
-                    )
-                    .await
+                    if let Err(error) =
+                        edit_session_settings_interactive(&client, &details.state, &context).await
                     {
-                        Ok(()) => {
-                            if let Ok(reloaded) = manager.load(&session.id) {
-                                session = reloaded;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("{} Edit settings failed: {e}", style("✗").red());
-                            if let Ok(reloaded) = manager.load(&session.id) {
-                                session = reloaded;
-                            }
-                        }
+                        eprintln!("{} Edit settings failed: {error}", style("✗").red());
+                    }
+                    if let Ok(updated) = client.session_details(&id).await {
+                        details = updated;
                     }
                 }
                 SessionAction::ResetToPlanned => {
-                    crate::instruction_inbox::expire_pending(
-                        &manager.sessions_dir(),
-                        &session.id,
-                        "reset to planned",
-                    )?;
-                    session.reset_to_planned();
-                    manager.save(&session)?;
-                    eprintln!(
-                        "{} Session {} reset to Planned.",
-                        style("v").green(),
-                        session.id
-                    );
+                    client.reset_session(&id, &context).await?;
+                    eprintln!("{} Session {id} reset to Planned.", style("v").green());
+                    details = client.session_details(&id).await?;
+                }
+                SessionAction::Discard => {
+                    client.discard_session(&id, &context).await?;
+                    eprintln!("{} Session {id} discarded.", style("v").green());
+                    break;
                 }
                 SessionAction::Delete => {
-                    if session.repo.is_some() {
-                        let _ = crate::repo_clone::cleanup_session_workspace(&manager, &session);
-                    }
-                    manager.delete(&session.id)?;
-                    eprintln!("{} Session {} deleted.", style("v").green(), session.id);
+                    client.delete_session(&id, &context).await?;
+                    eprintln!("{} Session {id} deleted.", style("v").green());
                     break;
                 }
-                SessionAction::Back => {
-                    // "Back" -- return to the session list.
-                    break;
-                }
+                SessionAction::Back => break,
             }
         }
     }
 }
 
-/// Load sessions for the interactive picker and reconcile stale runners.
-fn load_sessions_for_picker(manager: &crate::session::SessionManager) -> Result<Vec<SessionState>> {
-    let mut sessions = manager.list()?;
-    for session in &mut sessions {
-        let _ = manager.reconcile_running_phase(session, false);
-    }
-    Ok(sessions)
-}
-
-/// Prompts the user to select a session from the list.
-/// Returns `Ok(None)` if the list is empty or the user cancels.
-fn pick_session(manager: &crate::session::SessionManager) -> Result<Option<SessionState>> {
-    let sessions = load_sessions_for_picker(manager)?;
+async fn pick_session(client: &DaemonClient) -> Result<Option<SessionListItem>> {
+    let mut sessions = client.sessions().await?;
     if sessions.is_empty() {
         eprintln!(
             "{}",
@@ -454,44 +280,23 @@ fn pick_session(manager: &crate::session::SessionManager) -> Result<Option<Sessi
         );
         return Ok(None);
     }
-    let labels: Vec<String> = sessions
-        .iter()
-        .map(|session| {
-            format_session_label_with_plan_availability(
-                session,
-                plan_available_for_session(session, manager),
-            )
-        })
-        .collect();
+    let labels: Vec<String> = sessions.iter().map(format_session_label).collect();
     let label_refs: Vec<&str> = labels.iter().map(std::string::String::as_str).collect();
     crate::platform::reclaim_terminal_foreground();
     let prompt = list_text("cli.list.select_session", "Select a session:");
     let selected = match inquire::Select::new(&prompt, label_refs).prompt() {
-        Ok(s) => s,
+        Ok(selected) => selected,
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
             return Ok(None);
         }
-        Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+        Err(error) => return Err(CruiseError::Other(format!("selection error: {error}"))),
     };
-    let Some(idx) = labels.iter().position(|l| l.as_str() == selected) else {
+    let Some(index) = labels.iter().position(|label| label.as_str() == selected) else {
         return Err(CruiseError::Other(format!(
             "selected label not found: {selected}"
         )));
     };
-    Ok(Some(sessions[idx].clone()))
-}
-
-/// Returns the action menu items available for the given session.
-/// "View Diff" appears when the session has a worktree branch; Create PR takes priority.
-/// "Run"/"Resume" appears for runnable phases; "Replan" only for Planned.
-/// "Open PR" appears for Completed sessions that have a PR URL.
-/// "Reset to Planned" appears for Running, Failed, Completed, and Suspended.
-/// "Delete" and "Back" are always present (in that order) at the end.
-#[cfg(test)]
-fn session_actions(session: &SessionState) -> Vec<&'static str> {
-    let plan_available =
-        !matches!(session.phase, SessionPhase::AwaitingApproval) || session.plan_error.is_none();
-    session_actions_with_plan_availability(session, plan_available)
+    Ok(Some(sessions.remove(index)))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -511,6 +316,7 @@ enum SessionAction {
     ResetToPlanned,
     OpenPr,
     MergePr,
+    Discard,
     Delete,
     Back,
 }
@@ -533,6 +339,7 @@ impl SessionAction {
             Self::ResetToPlanned => "cli.list.action.reset_to_planned",
             Self::OpenPr => "cli.list.action.open_pr",
             Self::MergePr => "cli.list.action.merge_pr",
+            Self::Discard => "cli.list.action.discard",
             Self::Delete => "cli.list.action.delete",
             Self::Back => "cli.list.action.back",
         }
@@ -555,6 +362,7 @@ impl SessionAction {
             Self::ResetToPlanned => "Reset to Planned",
             Self::OpenPr => "Open PR",
             Self::MergePr => "Merge PR",
+            Self::Discard => "Discard",
             Self::Delete => "Delete",
             Self::Back => "Back",
         }
@@ -576,103 +384,75 @@ fn list_text(key: &str, fallback: &str) -> String {
     }
 }
 
-#[cfg(test)]
-fn session_actions_with_plan_availability(
-    session: &SessionState,
-    plan_available: bool,
-) -> Vec<&'static str> {
-    available_session_actions(session, plan_available)
-        .into_iter()
-        .map(SessionAction::english_label)
-        .collect()
-}
-
-fn available_session_actions(session: &SessionState, plan_available: bool) -> Vec<SessionAction> {
-    let mut actions = vec![];
-    if session.worktree_branch.is_some() && !matches!(session.phase, SessionPhase::PrFailed(_)) {
-        actions.push(SessionAction::ViewDiff);
-    }
-    match &session.phase {
-        SessionPhase::Draft | SessionPhase::AwaitingInput => {
-            actions.push(SessionAction::GeneratePlan);
-        }
-        SessionPhase::AwaitingApproval => {
-            if plan_available && session.plan_error.is_none() {
-                actions.push(SessionAction::Approve);
-                if session.pr_target.is_none() {
-                    actions.push(SessionAction::PublishAsIssue);
-                }
+fn available_session_actions(capabilities: &[Capability]) -> Vec<SessionAction> {
+    let mut actions = Vec::with_capacity(capabilities.len() + 2);
+    for capability in capabilities {
+        let action = match capability {
+            Capability::ViewDiff => SessionAction::ViewDiff,
+            Capability::Tell => SessionAction::Tell,
+            Capability::CreatePr => SessionAction::CreatePr,
+            Capability::StageLocalMerge => SessionAction::StageLocalMerge,
+            Capability::MergeLocally => SessionAction::MergeLocal,
+            Capability::Generate => SessionAction::GeneratePlan,
+            Capability::Approve => SessionAction::Approve,
+            Capability::Publish => SessionAction::PublishAsIssue,
+            Capability::EditSettings => SessionAction::EditSettings,
+            Capability::RunWorktree | Capability::RunCurrentBranch | Capability::Retry => {
+                SessionAction::Run
             }
-            actions.push(SessionAction::EditSettings);
-        }
-        SessionPhase::Planned => {
-            actions.push(SessionAction::Run);
-            if plan_available && session.plan_error.is_none() && session.pr_target.is_none() {
-                actions.push(SessionAction::PublishAsIssue);
-            }
-            actions.push(SessionAction::EditSettings);
-            if session.pr_target.is_none() {
-                actions.push(SessionAction::Replan);
-            }
-        }
-        SessionPhase::Running => {
-            actions.push(SessionAction::Resume);
-            if session.is_runner_alive() {
-                actions.push(SessionAction::Tell);
-            }
-            actions.push(SessionAction::ResetToPlanned);
-        }
-        SessionPhase::Suspended => {
-            actions.push(SessionAction::Resume);
-            actions.push(SessionAction::EditSettings);
-            actions.push(SessionAction::ResetToPlanned);
-        }
-        SessionPhase::Failed(_) => {
-            actions.push(SessionAction::Run);
-            actions.push(SessionAction::EditSettings);
-            actions.push(SessionAction::ResetToPlanned);
-        }
-        SessionPhase::PrFailed(_) => {
-            actions.push(SessionAction::CreatePr);
-            if session.pr_url.is_some() {
-                actions.push(SessionAction::OpenPr);
-            }
-            if session.worktree_branch.is_some() {
-                actions.push(SessionAction::ViewDiff);
-            }
-            if crate::local_merge::can_stage_locally(session) {
-                actions.push(SessionAction::StageLocalMerge);
-            }
-            if crate::local_merge::can_merge_locally(session) {
-                actions.push(SessionAction::MergeLocal);
-            }
-            actions.push(SessionAction::ResetToPlanned);
-        }
-        SessionPhase::Completed => {
-            if session.pr_url.is_some() {
-                actions.push(SessionAction::OpenPr);
-                actions.push(SessionAction::MergePr);
-            }
-            if crate::local_merge::can_stage_locally(session) {
-                actions.push(SessionAction::StageLocalMerge);
-            }
-            if crate::local_merge::can_merge_locally(session) {
-                actions.push(SessionAction::MergeLocal);
-            }
-            actions.push(SessionAction::ResetToPlanned);
+            Capability::Fix => SessionAction::Replan,
+            Capability::Resume => SessionAction::Resume,
+            Capability::ResetToPlanned => SessionAction::ResetToPlanned,
+            Capability::OpenPr => SessionAction::OpenPr,
+            Capability::MergePr => SessionAction::MergePr,
+            Capability::Discard => SessionAction::Discard,
+            Capability::Delete
+            | Capability::Answer
+            | Capability::Cancel
+            | Capability::Ask
+            | Capability::Verify
+            | Capability::EditCurrentStep => continue,
+        };
+        if !actions.contains(&action) {
+            actions.push(action);
         }
     }
-    actions.push(SessionAction::Delete);
+    if let Some(index) = actions
+        .iter()
+        .position(|action| *action == SessionAction::Replan)
+    {
+        let replan = actions.remove(index);
+        let insertion = actions
+            .iter()
+            .position(|action| *action == SessionAction::EditSettings)
+            .map_or(actions.len(), |index| index + 1);
+        actions.insert(insertion, replan);
+    }
+    if let Some(index) = actions
+        .iter()
+        .position(|action| *action == SessionAction::ResetToPlanned)
+    {
+        let reset = actions.remove(index);
+        let insertion = actions
+            .iter()
+            .position(|action| *action == SessionAction::EditSettings)
+            .map_or(actions.len(), |index| index + 1);
+        actions.insert(insertion, reset);
+    }
+    if capabilities.contains(&Capability::Delete) {
+        actions.push(SessionAction::Delete);
+    }
     actions.push(SessionAction::Back);
     actions
 }
 
-fn local_merge_interactive(
-    manager: &SessionManager,
+async fn local_merge_interactive(
+    client: &DaemonClient,
     session: &SessionState,
     mode: crate::application::LocalMergeMode,
+    context: &crate::request_context::RequestContext,
 ) -> Result<bool> {
-    use crate::application::{CruiseApplication, LocalMergeMode, LocalMergeOutcome};
+    use crate::application::{LocalMergeMode, LocalMergeOutcome};
 
     let branch = session.worktree_branch.as_deref().unwrap_or("unknown");
     let target = crate::local_merge::merge_target_branch(session).unwrap_or("unknown");
@@ -687,9 +467,9 @@ fn local_merge_interactive(
         Ok(false) | Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
             return Ok(false);
         }
-        Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+        Err(error) => return Err(CruiseError::Other(format!("selection error: {error}"))),
     }
-    match CruiseApplication::new(manager.clone()).local_merge(&session.id, mode) {
+    match client.local_merge(&session.id, mode, context).await {
         Ok(LocalMergeOutcome::Staged) => {
             eprintln!(
                 "{} Squash staged in base checkout; session retained.",
@@ -708,16 +488,11 @@ fn local_merge_interactive(
             );
             Ok(false)
         }
-        Err(e) => {
-            eprintln!("{} {e}", style("x").red());
+        Err(error) => {
+            eprintln!("{} {error}", style("x").red());
             Ok(false)
         }
     }
-}
-
-fn plan_available_for_session(session: &SessionState, manager: &SessionManager) -> bool {
-    let plan_path = session.plan_path(&manager.sessions_dir());
-    crate::metadata::plan_markdown_available(&plan_path)
 }
 
 /// Displayable choice for a skip-step multi-select.
@@ -732,15 +507,19 @@ impl fmt::Display for StepChoice {
     }
 }
 
-/// Edit session settings interactively.
-#[expect(clippy::too_many_lines, reason = "interactive UI with many branches")]
+/// Edit session flags, skipped steps, and the current resume step.
+#[expect(
+    clippy::too_many_lines,
+    reason = "interactive UI with multiple branches"
+)]
 async fn edit_session_settings_interactive(
-    manager: &SessionManager,
-    session: &mut crate::session::SessionState,
-    rate_limit_retries: usize,
-) -> crate::error::Result<()> {
-    use crate::session_edit::{CurrentStepUpdate, SessionSettingsUpdate, update_session_settings};
+    client: &DaemonClient,
+    session: &SessionState,
+    context: &crate::request_context::RequestContext,
+) -> Result<()> {
+    use crate::application::CurrentStepUpdateDto;
 
+    let manager = SessionManager::new(crate::paths::data_dir()?);
     let config = manager.load_config(session).ok();
     let declared_flags = config
         .as_ref()
@@ -771,22 +550,19 @@ async fn edit_session_settings_interactive(
                 Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                     return Ok(());
                 }
-                Err(e) => {
-                    return Err(CruiseError::Other(format!("selection error: {e}")));
+                Err(error) => {
+                    return Err(CruiseError::Other(format!("selection error: {error}")));
                 }
             }
         }
         Some(values)
     };
 
-    // Load separate step lists for skip labels and stage-specific resume choices.
-    // Main- and after-PR steps remain distinct in the skip selector.
     let (main_nodes, after_pr_nodes) = match config.as_ref() {
-        Some(config) => {
-            let main = list_skippable_steps(config).unwrap_or_default();
-            let after = list_skippable_after_pr_steps(config).unwrap_or_default();
-            (main, after)
-        }
+        Some(config) => (
+            list_skippable_steps(config).unwrap_or_default(),
+            list_skippable_after_pr_steps(config).unwrap_or_default(),
+        ),
         None => (Vec::new(), Vec::new()),
     };
     let effective_flags = flags.as_ref().unwrap_or(&session.flags);
@@ -794,11 +570,11 @@ async fn edit_session_settings_interactive(
     let skip_after_nodes = crate::flags::skip_candidates(&after_pr_nodes, effective_flags);
     let skip_main_ids: Vec<String> = skip_main_nodes
         .iter()
-        .flat_map(|n| n.expanded_step_ids.clone())
+        .flat_map(|node| node.expanded_step_ids.clone())
         .collect();
     let after_ids: Vec<String> = skip_after_nodes
         .iter()
-        .flat_map(|n| n.expanded_step_ids.clone())
+        .flat_map(|node| node.expanded_step_ids.clone())
         .collect();
     let resume_ids: Vec<&str> =
         if session.execution_stage == crate::session::SessionExecutionStage::AfterPr {
@@ -823,7 +599,6 @@ async fn edit_session_settings_interactive(
             expanded_id: id.clone(),
         }))
         .collect();
-
     let skipped_steps = if choices.is_empty() {
         eprintln!(
             "{}",
@@ -842,25 +617,24 @@ async fn edit_session_settings_interactive(
             .iter()
             .enumerate()
             .filter(|(_, choice)| session.skipped_steps.contains(&choice.expanded_id))
-            .map(|(i, _)| i)
+            .map(|(index, _)| index)
             .collect();
         let prompt = list_text("cli.list.prompt.skip_steps", "Steps to skip:");
         match inquire::MultiSelect::new(&prompt, choices)
             .with_default(&defaults)
             .prompt()
         {
-            Ok(selected) => selected.into_iter().map(|c| c.expanded_id).collect(),
+            Ok(selected) => selected
+                .into_iter()
+                .map(|choice| choice.expanded_id)
+                .collect(),
             Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                 return Ok(());
             }
-            Err(e) => {
-                return Err(CruiseError::Other(format!("selection error: {e}")));
-            }
+            Err(error) => return Err(CruiseError::Other(format!("selection error: {error}"))),
         }
     };
 
-    // For Failed/Suspended sessions, allow changing current_step interactively.
-    // The active stage determines which workflow's steps are valid resume points.
     let current_step_update = if matches!(
         &session.phase,
         SessionPhase::Failed(_) | SessionPhase::Suspended
@@ -875,61 +649,46 @@ async fn edit_session_settings_interactive(
         choices.extend(resume_ids.iter().map(|id| (*id).to_owned()));
         let prompt = list_text("cli.list.prompt.resume_step", "Resume from step:");
         match inquire::Select::new(&prompt, choices).prompt() {
-            Ok(choice) if choice == keep => CurrentStepUpdate::Unchanged,
-            Ok(choice) if choice == clear => CurrentStepUpdate::Clear,
-            Ok(step_name) => CurrentStepUpdate::Set(step_name),
+            Ok(choice) if choice == keep => CurrentStepUpdateDto::Unchanged,
+            Ok(choice) if choice == clear => CurrentStepUpdateDto::Clear,
+            Ok(step_name) => CurrentStepUpdateDto::Set(step_name),
             Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                 return Ok(());
             }
-            Err(e) => {
-                return Err(CruiseError::Other(format!("selection error: {e}")));
-            }
+            Err(error) => return Err(CruiseError::Other(format!("selection error: {error}"))),
         }
     } else {
-        CurrentStepUpdate::Unchanged
+        CurrentStepUpdateDto::Unchanged
     };
 
-    let (updated, config_changed) = update_session_settings(
-        manager,
-        &session.id,
-        SessionSettingsUpdate {
-            config_path: None,
-            skipped_steps,
-            current_step_update,
-            flags,
-        },
-    )?;
-    *session = updated;
-
-    if config_changed {
-        eprintln!("{} Config changed — regenerating plan…", style("->").cyan());
-        crate::platform::reclaim_terminal_foreground();
-        if let Err(e) =
-            crate::plan_cmd::regenerate_plan_for_session(manager, session, rate_limit_retries).await
-        {
-            eprintln!("{} Plan regeneration failed: {e}", style("✗").red());
-            if let Ok(reloaded) = manager.load(&session.id) {
-                *session = reloaded;
-            }
-        } else if let Ok(reloaded) = manager.load(&session.id) {
-            *session = reloaded;
-        }
-    } else {
-        eprintln!("{} Settings updated.", style("v").green());
-    }
-
+    client
+        .update_session_settings(
+            &session.id,
+            &SessionSettingsRequest {
+                config_path: None,
+                skipped_steps,
+                current_step_update,
+                flags,
+            },
+            context,
+        )
+        .await?;
+    eprintln!("{} Settings updated.", style("v").green());
     Ok(())
 }
 
-/// Preview, choose a method, confirm and merge. Returns true when the session was cleaned up.
-fn merge_pr_interactive(manager: &SessionManager, id: &str) -> crate::error::Result<bool> {
-    use crate::application::{CruiseApplication, MergePrOutcome, PrMergeMethod};
+/// Preview, choose a method, confirm and merge. Returns true when cleanup removed the session.
+async fn merge_pr_interactive(
+    client: &DaemonClient,
+    id: &str,
+    context: &crate::request_context::RequestContext,
+) -> Result<bool> {
+    use crate::application::MergePrOutcome;
 
-    let app = CruiseApplication::new(manager.clone());
-    let status = match app.inspect_pr_for_merge(id) {
+    let status = match client.inspect_merge(id).await {
         Ok(status) => status,
-        Err(e) => {
-            eprintln!("{} {e}", style("x").red());
+        Err(error) => {
+            eprintln!("{} {error}", style("x").red());
             return Ok(false);
         }
     };
@@ -953,16 +712,16 @@ fn merge_pr_interactive(manager: &SessionManager, id: &str) -> crate::error::Res
     let methods = vec!["Squash", "Merge", "Rebase"];
     let prompt = list_text("cli.list.prompt.merge_method", "Merge method:");
     let method_label = match inquire::Select::new(&prompt, methods).prompt() {
-        Ok(m) => m,
+        Ok(method) => method,
         Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
             return Ok(false);
         }
-        Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+        Err(error) => return Err(CruiseError::Other(format!("selection error: {error}"))),
     };
     let method = match method_label {
-        "Merge" => PrMergeMethod::Merge,
-        "Rebase" => PrMergeMethod::Rebase,
-        _ => PrMergeMethod::Squash,
+        "Merge" => crate::pr_merge::PrMergeMethod::Merge,
+        "Rebase" => crate::pr_merge::PrMergeMethod::Rebase,
+        _ => crate::pr_merge::PrMergeMethod::Squash,
     };
     let prompt = format!(
         "Merge PR with {method_label} (mergeable: {}, review: {})?",
@@ -973,9 +732,9 @@ fn merge_pr_interactive(manager: &SessionManager, id: &str) -> crate::error::Res
         Ok(false) | Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
             return Ok(false);
         }
-        Err(e) => return Err(CruiseError::Other(format!("selection error: {e}"))),
+        Err(error) => return Err(CruiseError::Other(format!("selection error: {error}"))),
     }
-    match app.merge_pr(id, method) {
+    match client.merge_pr(id, method, context).await {
         Ok(MergePrOutcome::Cleaned) => {
             eprintln!("{} PR merged; session cleaned up.", style("v").green());
             Ok(true)
@@ -987,8 +746,8 @@ fn merge_pr_interactive(manager: &SessionManager, id: &str) -> crate::error::Res
             );
             Ok(false)
         }
-        Err(e) => {
-            eprintln!("{} {e}", style("x").red());
+        Err(error) => {
+            eprintln!("{} {error}", style("x").red());
             Ok(false)
         }
     }
@@ -999,68 +758,92 @@ fn open_pr_in_browser(pr_url: &str) -> crate::error::Result<()> {
         .map_err(|e| CruiseError::Other(format!("failed to open {pr_url}: {e}")))
 }
 
-#[cfg(test)]
-fn format_session_label(s: &SessionState) -> String {
-    let plan_available =
-        !matches!(s.phase, SessionPhase::AwaitingApproval) || s.plan_error.is_none();
-    format_session_label_with_plan_availability(s, plan_available)
-}
-
-fn format_session_label_with_plan_availability(s: &SessionState, plan_available: bool) -> String {
-    let (icon, phase_str) = match &s.phase {
-        SessionPhase::Draft => (
+fn format_session_label(session: &SessionListItem) -> String {
+    let (icon, phase_str) = match session.phase.as_str() {
+        "Draft" => (
             style("○").dim(),
-            style(list_text("cli.list.phase.draft", "Draft")).dim(),
+            style(list_text("cli.list.phase.draft", "Draft"))
+                .dim()
+                .to_string(),
         ),
-        SessionPhase::AwaitingInput => (
+        "AwaitingInput" => (
             style("?").yellow(),
-            style(list_text("cli.list.phase.awaiting_input", "Awaiting Input")).yellow(),
+            style(list_text("cli.list.phase.awaiting_input", "Awaiting Input"))
+                .yellow()
+                .to_string(),
         ),
-        SessionPhase::AwaitingApproval if s.plan_error.is_some() => (
+        "AwaitingApproval" if session.plan_error.is_some() => (
             style("✗").red(),
-            style(list_text("cli.list.phase.plan_failed", "Plan Failed")).red(),
+            style(list_text("cli.list.phase.plan_failed", "Plan Failed"))
+                .red()
+                .to_string(),
         ),
-        SessionPhase::AwaitingApproval if !plan_available => (
+        "AwaitingApproval" if !session.plan_available => (
             style("-").yellow(),
-            style(list_text("cli.list.phase.planning", "Planning")).yellow(),
+            style(list_text("cli.list.phase.planning", "Planning"))
+                .yellow()
+                .to_string(),
         ),
-        SessionPhase::AwaitingApproval => (
+        "AwaitingApproval" => (
             style("o").magenta(),
             style(list_text(
                 "cli.list.phase.awaiting_approval",
                 "Awaiting Approval",
             ))
-            .magenta(),
+            .magenta()
+            .to_string(),
         ),
-        SessionPhase::Planned => (
+        "Planned" => (
             style("o").cyan(),
-            style(list_text("cli.list.phase.planned", "Planned")).cyan(),
+            style(list_text("cli.list.phase.planned", "Planned"))
+                .cyan()
+                .to_string(),
         ),
-        SessionPhase::Running => (
+        "Running" => (
             style(">").yellow(),
-            style(list_text("cli.list.phase.running", "Running")).yellow(),
+            style(list_text("cli.list.phase.running", "Running"))
+                .yellow()
+                .to_string(),
         ),
-        SessionPhase::Completed => (
+        "Completed" => (
             style("v").green(),
-            style(list_text("cli.list.phase.completed", "Completed")).green(),
+            style(list_text("cli.list.phase.completed", "Completed"))
+                .green()
+                .to_string(),
         ),
-        SessionPhase::Failed(_) => (
+        "Failed" => (
             style("x").red(),
-            style(list_text("cli.list.phase.failed", "Failed")).red(),
+            style(list_text("cli.list.phase.failed", "Failed"))
+                .red()
+                .to_string(),
         ),
-        SessionPhase::PrFailed(_) => (
+        "PrFailed" => (
             style("x").red(),
-            style(list_text("cli.list.phase.pr_failed", "PR Failed")).red(),
+            style(list_text("cli.list.phase.pr_failed", "PR Failed"))
+                .red()
+                .to_string(),
         ),
-        SessionPhase::Suspended => (
+        "Suspended" => (
             style("||").yellow(),
-            style(list_text("cli.list.phase.suspended", "Suspended")).yellow(),
+            style(list_text("cli.list.phase.suspended", "Suspended"))
+                .yellow()
+                .to_string(),
+        ),
+        _ => (
+            style("?").dim(),
+            style(session.phase.as_str()).dim().to_string(),
         ),
     };
-    let date = format_session_date(&s.id);
-    let suffix = format_suffix(s);
-    let input_preview = crate::display::truncate(s.title_or_input(), 60);
-    format!("{icon} {date} {phase_str} {input_preview}{suffix}")
+    let date = format_session_date(&session.id);
+    let suffix = format_suffix(session);
+    let title = session
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(&session.input);
+    let preview = crate::display::truncate(title, 60);
+    format!("{icon} {date} {phase_str} {preview}{suffix}")
 }
 
 /// "`YYYYMMDDHHmmss`" -> "MM/DD HH:MM"
@@ -1073,1530 +856,77 @@ fn format_session_date(id: &str) -> String {
     format!("{month}/{day} {hour}:{min}")
 }
 
-/// Returns " \[`step_name`\]" for Running/Suspended, or " PR#N" for Completed with PR URL.
-fn format_suffix(s: &SessionState) -> String {
-    let mut suffix = match &s.phase {
-        SessionPhase::Running | SessionPhase::Suspended => s
+fn format_suffix(session: &SessionListItem) -> String {
+    let mut suffix = match session.phase.as_str() {
+        "Running" | "Suspended" => session
             .current_step
             .as_ref()
             .map(|step| format!(" [{step}]"))
             .unwrap_or_default(),
-        SessionPhase::Completed => s
+        "Completed" => session
             .pr_url
             .as_ref()
             .map(|url| {
-                let num = url.trim_end_matches('/').rsplit('/').next().unwrap_or("");
-                format!(" PR#{num}")
+                let number = url.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+                format!(" PR#{number}")
             })
             .unwrap_or_default(),
         _ => String::new(),
     };
-    if s.auto_requeue_count > 0 {
-        let _ = write!(suffix, " auto-requeued {}", s.auto_requeue_count);
+    if session.auto_requeue_count > 0 {
+        let _ = write!(suffix, " auto-requeued {}", session.auto_requeue_count);
     }
     suffix
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use tempfile::TempDir;
 
     #[test]
-    fn running_live_session_offers_tell_before_reset() {
-        let mut session = make_session("20260306143000", "task", SessionPhase::Running);
-        session.set_runner_to_current_process();
-        assert!(session.is_runner_alive(), "fixture requires a live runner");
-        let actions = session_actions(&session);
-        let tell = actions
-            .iter()
-            .position(|action| *action == "Tell")
-            .unwrap_or_else(|| panic!("live run must offer Tell"));
-        assert_eq!(actions.get(tell + 1), Some(&"Reset to Planned"));
-    }
-
-    #[test]
-    fn tell_is_not_offered_without_a_live_running_session() {
-        let stale = make_session("20260306143000", "task", SessionPhase::Running);
-        assert!(!session_actions(&stale).contains(&"Tell"));
-        let mut planned = make_session("20260306143001", "task", SessionPhase::Planned);
-        planned.set_runner_to_current_process();
-        assert!(!session_actions(&planned).contains(&"Tell"));
-    }
-
-    #[test]
-    fn local_merge_menu_order_and_retry_marker() {
-        let mut session = make_session("20260306143000", "task", SessionPhase::Completed);
-        session.worktree_branch = Some("cruise/task".into());
-        session.forked_from_branch = Some("main".into());
-        assert_eq!(
-            session_actions_with_plan_availability(&session, false),
-            vec![
-                "View Diff",
-                "Stage local merge",
-                "Merge locally & cleanup",
-                "Reset to Planned",
-                "Delete",
-                "Back"
-            ]
-        );
-
-        session.local_merge_commit = Some("abc123".into());
-        assert_eq!(
-            session_actions_with_plan_availability(&session, false),
-            vec![
-                "View Diff",
-                "Merge locally & cleanup",
-                "Reset to Planned",
-                "Delete",
-                "Back"
-            ]
-        );
-
-        session.pr_url = Some("https://example.com/pr/1".into());
-        assert_eq!(
-            session_actions_with_plan_availability(&session, false),
-            vec![
-                "View Diff",
-                "Open PR",
-                "Merge PR",
-                "Reset to Planned",
-                "Delete",
-                "Back"
-            ]
-        );
-    }
-
-    fn pr_failed_session() -> SessionState {
-        let phase = serde_json::from_value(serde_json::json!({"PrFailed": "push failed"}))
-            .unwrap_or_else(|error| panic!("PR failure state must be readable: {error}"));
-        make_session("20260306143000", "task", phase)
-    }
-
-    #[test]
-    fn pr_failed_list_actions_offer_publication_retry_not_workflow_run() {
-        let mut session = pr_failed_session();
-        assert_eq!(
-            session_actions(&session),
-            vec!["Create PR", "Reset to Planned", "Delete", "Back"]
-        );
-        session.pr_url = Some("https://example.com/pr/1".into());
-        assert_eq!(
-            session_actions(&session),
-            vec!["Create PR", "Open PR", "Reset to Planned", "Delete", "Back"]
-        );
-        session.worktree_branch = Some("session-branch".into());
-        assert_eq!(
-            session_actions(&session),
-            vec![
-                "Create PR",
-                "Open PR",
-                "View Diff",
-                "Reset to Planned",
-                "Delete",
-                "Back"
-            ]
-        );
-    }
-
-    #[test]
-    fn pr_failed_list_json_preserves_error() {
-        let dto = session_to_json(pr_failed_session());
-        assert_eq!(dto.phase, "PrFailed");
-        assert_eq!(dto.phase_error.as_deref(), Some("push failed"));
-    }
-
-    #[test]
-    fn pr_failed_label_identifies_publication_failure() {
-        assert!(format_session_label(&pr_failed_session()).contains("PR Failed"));
-    }
-
-    #[test]
-    fn diff_contract_list_action_order_depends_on_phase_and_requires_branch() {
-        for phase in [
-            SessionPhase::Draft,
-            SessionPhase::AwaitingInput,
-            SessionPhase::AwaitingApproval,
-            SessionPhase::Planned,
-            SessionPhase::Running,
-            SessionPhase::Completed,
-            SessionPhase::Failed("x".into()),
-            SessionPhase::PrFailed("x".into()),
-            SessionPhase::Suspended,
-        ] {
-            let mut session = make_session("20260101000000000", "task", phase.clone());
-            let actions = session_actions_with_plan_availability(&session, true);
-            assert!(!actions.contains(&"View Diff"), "{phase:?}: {actions:?}");
-            assert_eq!(actions.last(), Some(&"Back"), "{phase:?}");
-            session.worktree_branch = Some("session-branch".into());
-            let actions = session_actions_with_plan_availability(&session, true);
-            if matches!(phase, SessionPhase::PrFailed(_)) {
-                assert_eq!(&actions[..2], &["Create PR", "View Diff"], "{phase:?}");
-            } else {
-                assert_eq!(
-                    actions.first(),
-                    Some(&"View Diff"),
-                    "{phase:?}: {actions:?}"
-                );
-            }
-            assert_eq!(actions.last(), Some(&"Back"), "{phase:?}");
-        }
-    }
-
-    #[test]
-    fn diff_contract_print_rejects_non_git_base_directory() {
-        let temp =
-            TempDir::new().unwrap_or_else(|error| panic!("temporary non-git directory: {error}"));
-        let mut session = make_session("20260101000000000", "task", SessionPhase::Completed);
-        session.base_dir = temp.path().to_path_buf();
-        session.worktree_branch = Some("session-branch".into());
-        assert!(crate::diff_cmd::print_session_diff(&session, false).is_err());
-    }
-
-    // -----------------------------------------------------------------------
-    // session_actions
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_session_actions_planned_has_run_and_replan() {
-        // Given: Planned phase
-        let session = make_session("20260306143000", "task", SessionPhase::Planned);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: contains "Run" and "Replan"; also contains "Delete" and "Back"
-        assert!(
-            actions.contains(&"Run"),
-            "Planned should have Run: {actions:?}"
-        );
-        assert!(
-            actions.contains(&"Replan"),
-            "Planned should have Replan: {actions:?}"
-        );
-        assert!(
-            actions.contains(&"Delete"),
-            "should always have Delete: {actions:?}"
-        );
-        assert!(
-            actions.contains(&"Back"),
-            "should always have Back: {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_planned_has_no_resume() {
-        // Given: Planned phase
-        let session = make_session("20260306143000", "task", SessionPhase::Planned);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: "Resume" is absent (Run is used for a fresh start, not Resume)
-        assert!(
-            !actions.contains(&"Resume"),
-            "Planned should NOT have Resume: {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_running_has_resume_not_replan() {
-        // Given: Running phase
-        let session = make_session("20260306143000", "task", SessionPhase::Running);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: "Resume" is present but "Replan" is absent
-        assert!(
-            actions.contains(&"Resume"),
-            "Running should have Resume: {actions:?}"
-        );
-        assert!(
-            !actions.contains(&"Replan"),
-            "Running should NOT have Replan: {actions:?}"
-        );
-        assert!(
-            !actions.contains(&"Run"),
-            "Running should NOT have Run (use Resume): {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_failed_has_run_not_replan() {
-        // Given: Failed phase
-        let session = make_session(
-            "20260306143000",
-            "task",
-            SessionPhase::Failed("some error".to_string()),
-        );
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: "Run" is present but "Replan" is absent
-        assert!(
-            actions.contains(&"Run"),
-            "Failed should have Run: {actions:?}"
-        );
-        assert!(
-            !actions.contains(&"Replan"),
-            "Failed should NOT have Replan: {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_completed_has_no_run_no_replan_has_reset() {
-        // Given: Completed phase, no pr_url
-        let session = make_session("20260306143000", "task", SessionPhase::Completed);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: "Run", "Resume", and "Replan" are absent; "Reset to Planned" is present
-        assert!(
-            !actions.contains(&"Run"),
-            "Completed should NOT have Run: {actions:?}"
-        );
-        assert!(
-            !actions.contains(&"Resume"),
-            "Completed should NOT have Resume: {actions:?}"
-        );
-        assert!(
-            !actions.contains(&"Replan"),
-            "Completed should NOT have Replan: {actions:?}"
-        );
-        assert!(
-            actions.contains(&"Reset to Planned"),
-            "Completed should have Reset to Planned: {actions:?}"
-        );
-        assert!(
-            actions.contains(&"Delete"),
-            "should always have Delete: {actions:?}"
-        );
-        assert!(
-            actions.contains(&"Back"),
-            "should always have Back: {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_planned_run_before_replan() {
-        // Given: Planned phase
-        let session = make_session("20260306143000", "task", SessionPhase::Planned);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: "Run" appears before "Replan" (primary action first)
-        let run_pos = actions
-            .iter()
-            .position(|&a| a == "Run")
-            .unwrap_or_else(|| panic!("unexpected None"));
-        let replan_pos = actions
-            .iter()
-            .position(|&a| a == "Replan")
-            .unwrap_or_else(|| panic!("unexpected None"));
-        assert!(
-            run_pos < replan_pos,
-            "Run should come before Replan in actions list"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_delete_and_back_always_at_end() {
-        // Given: Delete and Back are the last two entries across all phases
-        let sessions = [
-            make_session("20260306143000", "task", SessionPhase::AwaitingApproval),
-            make_session("20260306143000", "task", SessionPhase::Planned),
-            make_session("20260306143000", "task", SessionPhase::Running),
-            make_session("20260306143000", "task", SessionPhase::Completed),
-            make_session(
-                "20260306143000",
-                "task",
-                SessionPhase::Failed("err".to_string()),
-            ),
+    fn action_menu_uses_daemon_capabilities() {
+        let capabilities = [
+            Capability::RunWorktree,
+            Capability::Publish,
+            Capability::Fix,
+            Capability::EditSettings,
+            Capability::Delete,
         ];
-
-        for session in &sessions {
-            let phase = &session.phase;
-            // When
-            let actions = session_actions(session);
-            let len = actions.len();
-
-            // Then: Back is last, Delete is second-to-last
-            assert!(
-                len >= 2,
-                "actions must have at least 2 items for {phase:?}: {actions:?}"
-            );
-            assert_eq!(
-                actions[len - 1],
-                "Back",
-                "Back should be last for {phase:?}: {actions:?}"
-            );
-            assert_eq!(
-                actions[len - 2],
-                "Delete",
-                "Delete should be second-to-last for {phase:?}: {actions:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_load_sessions_for_picker_reconciles_stale_running_session() {
-        // Given: a Running session with a PID that is no longer alive
-        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
-        let manager = SessionManager::new(tmp.path().to_path_buf());
-        let id = "20260523119000";
-        let mut session = SessionState::new(
-            id.to_string(),
-            PathBuf::from("/repo"),
-            crate::session_config::SessionConfigRef::File {
-                path: PathBuf::from("/tmp/cruise.yaml"),
-            },
-            "task".to_string(),
-        );
-        session.phase = SessionPhase::Running;
-        session.runner_pid = Some(999_999_999);
-        session.runner_started_at = Some(1);
-        manager.create(&session).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // When: loading sessions for the interactive picker
-        let loaded = load_sessions_for_picker(&manager).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: the stale Running state is made resumable before display
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, id);
-        assert!(matches!(loaded[0].phase, SessionPhase::Suspended));
-        assert!(loaded[0].runner_pid.is_none());
-        assert!(matches!(
-            manager.load(id).unwrap_or_else(|e| panic!("{e:?}")).phase,
-            SessionPhase::Suspended
-        ));
-    }
-
-    fn make_session(id: &str, input: &str, phase: SessionPhase) -> SessionState {
-        let mut s = SessionState::new(
-            id.to_string(),
-            PathBuf::from("/tmp"),
-            crate::session_config::SessionConfigRef::File {
-                path: PathBuf::from("/tmp/cruise.yaml"),
-            },
-            input.to_string(),
-        );
-        s.phase = phase;
-        s
-    }
-
-    // -----------------------------------------------------------------------
-    // format_session_date
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_format_session_date_standard_id_returns_mm_dd_hh_mm() {
-        // Given: standard 14-digit session ID
-        let id = "20260306143000";
-
-        // When
-        let result = format_session_date(id);
-
-        // Then: converted to "MM/DD HH:MM" format
-        assert_eq!(result, "03/06 14:30");
-    }
-
-    #[test]
-    fn test_format_session_date_twelve_digit_id_is_accepted() {
-        // Given: 12-digit (no seconds) ID
-        let id = "202603061430";
-
-        // When
-        let result = format_session_date(id);
-
-        // Then: converted to "03/06 14:30"
-        assert_eq!(result, "03/06 14:30");
-    }
-
-    #[test]
-    fn test_format_session_date_midnight() {
-        // Given: session at midnight (00:00)
-        let id = "20260101000000";
-
-        // When
-        let result = format_session_date(id);
-
-        // Then
-        assert_eq!(result, "01/01 00:00");
-    }
-
-    // -----------------------------------------------------------------------
-    // format_suffix
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_format_suffix_running_with_step_returns_step_bracket() {
-        // Given: Running phase, current_step present
-        let mut s = make_session("20260306143000", "add feature", SessionPhase::Running);
-        s.current_step = Some("implement".to_string());
-
-        // When
-        let result = format_suffix(&s);
-
-        // Then: "[implement]" format
-        assert_eq!(result, " [implement]");
-    }
-
-    #[test]
-    fn test_format_suffix_running_without_step_returns_empty() {
-        // Given: Running phase, no current_step
-        let s = make_session("20260306143000", "add feature", SessionPhase::Running);
-
-        // When
-        let result = format_suffix(&s);
-
-        // Then: empty string
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn test_format_suffix_completed_with_pr_url_returns_pr_number() {
-        // Given: Completed phase, PR URL present
-        let mut s = make_session("20260306143000", "add feature", SessionPhase::Completed);
-        s.pr_url = Some("https://github.com/owner/repo/pull/42".to_string());
-
-        // When
-        let result = format_suffix(&s);
-
-        // Then: "PR#42" format
-        assert_eq!(result, " PR#42");
-    }
-
-    #[test]
-    fn test_format_suffix_completed_without_pr_url_returns_empty() {
-        // Given: Completed phase, no PR URL
-        let s = make_session("20260306143000", "add feature", SessionPhase::Completed);
-
-        // When
-        let result = format_suffix(&s);
-
-        // Then: empty string
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn test_format_suffix_planned_returns_empty() {
-        // Given: Planned phase
-        let s = make_session("20260306143000", "add feature", SessionPhase::Planned);
-
-        // When
-        let result = format_suffix(&s);
-
-        // Then: empty string
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn test_format_suffix_failed_returns_empty() {
-        // Given: Failed phase
-        let s = make_session(
-            "20260306143000",
-            "add feature",
-            SessionPhase::Failed("timeout".to_string()),
-        );
-
-        // When
-        let result = format_suffix(&s);
-
-        // Then: empty string
-        assert_eq!(result, "");
-    }
-
-    // -----------------------------------------------------------------------
-    // format_session_label (expected values for new format)
-    // -----------------------------------------------------------------------
-
-    /// Helper to strip ANSI escapes and verify label content.
-    fn strip(s: &str) -> String {
-        console::strip_ansi_codes(s).to_string()
-    }
-
-    #[test]
-    fn test_format_session_label_planned_contains_icon_date_phase_input() {
-        // Given: Planned session
-        let s = make_session(
-            "20260306143000",
-            "add hello world feature",
-            SessionPhase::Planned,
-        );
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: contains icon, date, phase, and input
-        assert!(label.contains('o'), "should contain o icon: {label}");
-        assert!(
-            label.contains("03/06 14:30"),
-            "should contain date: {label}"
-        );
-        assert!(label.contains("Planned"), "should contain phase: {label}");
-        assert!(
-            label.contains("add hello world feature"),
-            "should contain input: {label}"
-        );
-    }
-
-    #[test]
-    fn test_format_session_label_running_contains_running_icon_and_step() {
-        // Given: Running phase, current_step present
-        let mut s = make_session("20260307150000", "implement auth", SessionPhase::Running);
-        s.current_step = Some("test".to_string());
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: contains > icon and step info
-        assert!(label.contains('>'), "should contain > icon: {label}");
-        assert!(label.contains("Running"), "should contain Running: {label}");
-        assert!(label.contains("[test]"), "should contain step: {label}");
-    }
-
-    #[test]
-    fn test_format_session_label_completed_with_pr_contains_checkmark_and_pr() {
-        // Given: Completed phase, PR URL present
-        let mut s = make_session("20260307090000", "refactor db", SessionPhase::Completed);
-        s.pr_url = Some("https://github.com/owner/repo/pull/42".to_string());
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: contains v icon and PR number
-        assert!(label.contains('v'), "should contain v icon: {label}");
-        assert!(
-            label.contains("Completed"),
-            "should contain Completed: {label}"
-        );
-        assert!(label.contains("PR#42"), "should contain PR#42: {label}");
-    }
-
-    #[test]
-    fn test_format_session_label_failed_contains_cross_icon() {
-        // Given: Failed phase
-        let s = make_session(
-            "20260307103000",
-            "fix login bug",
-            SessionPhase::Failed("exit 1".to_string()),
-        );
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: contains x icon
-        assert!(label.contains('x'), "should contain x icon: {label}");
-        assert!(label.contains("Failed"), "should contain Failed: {label}");
-    }
-
-    #[test]
-    fn test_format_session_label_long_input_is_truncated() {
-        // Given: very long input
-        let long_input = "a".repeat(200);
-        let s = make_session("20260306143000", &long_input, SessionPhase::Planned);
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: contains ellipsis "..." and total label length is 200 chars or less
-        assert!(
-            label.contains("..."),
-            "long input should be truncated: {label}"
-        );
-    }
-
-    #[test]
-    fn test_format_session_label_prefers_title_over_input() {
-        // Given: a session with both raw input and a generated title
-        let mut s = make_session(
-            "20260306143000",
-            "raw task input that should not be the primary label",
-            SessionPhase::Planned,
-        );
-        s.title = Some("Generated session title".to_string());
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: the generated title is shown instead of the raw input
-        assert!(
-            label.contains("Generated session title"),
-            "should contain generated title: {label}"
-        );
-        assert!(
-            !label.contains("raw task input that should not be the primary label"),
-            "should not contain raw input when title is present: {label}"
-        );
-    }
-
-    #[test]
-    fn test_format_session_label_falls_back_to_input_when_title_missing() {
-        // Given: a session without a generated title
-        let s = make_session(
-            "20260306143000",
-            "raw task input remains visible",
-            SessionPhase::Planned,
-        );
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: the raw input remains the visible fallback
-        assert!(
-            label.contains("raw task input remains visible"),
-            "should contain raw input fallback: {label}"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // session_actions -- Reset to Planned coverage
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // session_actions -- Suspended
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_session_actions_suspended_exact() {
-        // Given / When / Then: Suspended action list matches expectations
         assert_eq!(
-            session_actions(&make_session("test", "test", SessionPhase::Suspended)),
+            available_session_actions(&capabilities),
             vec![
-                "Resume",
-                "Edit Settings",
-                "Reset to Planned",
-                "Delete",
-                "Back"
+                SessionAction::Run,
+                SessionAction::PublishAsIssue,
+                SessionAction::EditSettings,
+                SessionAction::Replan,
+                SessionAction::Delete,
+                SessionAction::Back,
             ]
         );
-    }
 
-    // -----------------------------------------------------------------------
-    // format_suffix -- Suspended
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_format_suffix_suspended_with_step_returns_step_bracket() {
-        // Given: Suspended phase, current_step present
-        let mut s = make_session("20260310143000", "add feature", SessionPhase::Suspended);
-        s.current_step = Some("implement".to_string());
-
-        // When
-        let result = format_suffix(&s);
-
-        // Then: "[implement]" format
-        assert_eq!(result, " [implement]");
-    }
-
-    #[test]
-    fn test_format_suffix_suspended_without_step_returns_empty() {
-        // Given: Suspended phase, no current_step
-        let s = make_session("20260310143000", "add feature", SessionPhase::Suspended);
-
-        // When
-        let result = format_suffix(&s);
-
-        // Then: empty string
-        assert_eq!(result, "");
-    }
-
-    // -----------------------------------------------------------------------
-    // format_session_label -- Suspended
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_format_session_label_suspended_contains_phase_and_step() {
-        // Given: Suspended phase, current_step present
-        let mut s = make_session("20260310150000", "fix auth", SessionPhase::Suspended);
-        s.current_step = Some("test".to_string());
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: contains "Suspended" phase and the suspended step name
-        assert!(
-            label.contains("Suspended"),
-            "should contain Suspended: {label}"
-        );
-        assert!(label.contains("[test]"), "should contain step: {label}");
-    }
-
-    // -----------------------------------------------------------------------
-    // session_actions -- Delete/Back tail check (all phases including Suspended)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_session_actions_delete_and_back_always_at_end_including_suspended() {
-        // Given: all phases including Suspended
-        let phases = [
-            SessionPhase::Planned,
-            SessionPhase::Running,
-            SessionPhase::Completed,
-            SessionPhase::Failed("err".to_string()),
-            SessionPhase::Suspended,
-        ];
-
-        for phase in &phases {
-            // When
-            let actions = session_actions(&make_session("test", "test", phase.clone()));
-            let len = actions.len();
-
-            // Then: Back is last, Delete is second-to-last
-            assert!(
-                len >= 2,
-                "actions must have at least 2 items for {phase:?}: {actions:?}"
-            );
-            assert_eq!(
-                actions[len - 1],
-                "Back",
-                "Back should be last for {phase:?}: {actions:?}"
-            );
-            assert_eq!(
-                actions[len - 2],
-                "Delete",
-                "Delete should be second-to-last for {phase:?}: {actions:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_session_actions_planned_exact() {
-        // Given: Planned phase with a plan available
-        let session = make_session("20260306143000", "task", SessionPhase::Planned);
-
-        // When / Then: "Publish as Issue" now appears for Planned too, right after "Run"
+        let running = [Capability::Tell, Capability::ResetToPlanned];
         assert_eq!(
-            session_actions(&session),
+            available_session_actions(&running),
             vec![
-                "Run",
-                "Publish as Issue",
-                "Edit Settings",
-                "Replan",
-                "Delete",
-                "Back"
+                SessionAction::Tell,
+                SessionAction::ResetToPlanned,
+                SessionAction::Back,
             ]
         );
-    }
-
-    #[test]
-    fn test_session_actions_running_has_reset_to_planned() {
-        let session = make_session("20260306143000", "task", SessionPhase::Running);
+        let failed = [
+            Capability::Retry,
+            Capability::ResetToPlanned,
+            Capability::EditSettings,
+            Capability::Delete,
+        ];
         assert_eq!(
-            session_actions(&session),
-            vec!["Resume", "Reset to Planned", "Delete", "Back"]
-        );
-    }
-
-    #[test]
-    fn test_session_actions_completed_has_reset_to_planned() {
-        // Given: Completed + no pr_url
-        let session = make_session("20260306143000", "task", SessionPhase::Completed);
-        assert_eq!(
-            session_actions(&session),
-            vec!["Reset to Planned", "Delete", "Back"]
-        );
-    }
-
-    #[test]
-    fn test_session_actions_failed_has_run_and_reset_to_planned() {
-        let session = make_session(
-            "20260306143000",
-            "task",
-            SessionPhase::Failed("exit 1".to_string()),
-        );
-        assert_eq!(
-            session_actions(&session),
-            vec!["Run", "Edit Settings", "Reset to Planned", "Delete", "Back"]
-        );
-    }
-
-    #[test]
-    fn session_actions_completed_with_pr_offers_merge_pr() {
-        let mut with_pr = make_session("20261009100000", "task", SessionPhase::Completed);
-        with_pr.pr_url = Some("https://github.com/owner/repo/pull/10".to_string());
-        let without_pr = make_session("20261009100001", "task", SessionPhase::Completed);
-        assert!(session_actions(&with_pr).contains(&"Merge PR"));
-        assert!(!session_actions(&without_pr).contains(&"Merge PR"));
-
-        for phase in [
-            SessionPhase::Planned,
-            SessionPhase::AwaitingApproval,
-            SessionPhase::Suspended,
-            SessionPhase::Failed("e".to_string()),
-        ] {
-            let mut session = make_session("20261009100002", "task", phase);
-            session.pr_url = Some("https://github.com/owner/repo/pull/10".to_string());
-            assert!(!session_actions(&session).contains(&"Merge PR"));
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // session_actions -- Open PR coverage
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_session_actions_completed_with_pr_url_exact_order() {
-        // Given: Completed + pr_url present
-        let mut session = make_session("20260306143000", "task", SessionPhase::Completed);
-        session.pr_url = Some("https://github.com/owner/repo/pull/10".to_string());
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: order is ["Open PR", "Merge PR", "Reset to Planned", "Delete", "Back"]
-        assert_eq!(
-            actions,
-            vec!["Open PR", "Merge PR", "Reset to Planned", "Delete", "Back"]
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // open_pr_in_browser
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // AwaitingApproval phase -- actions and labels
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_session_actions_awaiting_approval_has_approve() {
-        // Given: AwaitingApproval phase
-        let session = make_session("20260311100000", "task", SessionPhase::AwaitingApproval);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: contains "Approve" action
-        assert!(
-            actions.contains(&"Approve"),
-            "AwaitingApproval should have Approve: {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_awaiting_approval_has_no_run_no_resume() {
-        // Given: AwaitingApproval phase
-        let session = make_session("20260311100000", "task", SessionPhase::AwaitingApproval);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: neither "Run" nor "Resume" since it is not yet approved
-        assert!(
-            !actions.contains(&"Run"),
-            "AwaitingApproval should NOT have Run: {actions:?}"
-        );
-        assert!(
-            !actions.contains(&"Resume"),
-            "AwaitingApproval should NOT have Resume: {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_awaiting_approval_exact_order() {
-        // Given: AwaitingApproval phase
-        let session = make_session("20260311100000", "task", SessionPhase::AwaitingApproval);
-
-        // When / Then: order is Approve -> Publish as Issue -> Edit Settings -> Delete -> Back
-        assert_eq!(
-            session_actions(&session),
+            available_session_actions(&failed),
             vec![
-                "Approve",
-                "Publish as Issue",
-                "Edit Settings",
-                "Delete",
-                "Back"
+                SessionAction::Run,
+                SessionAction::EditSettings,
+                SessionAction::ResetToPlanned,
+                SessionAction::Delete,
+                SessionAction::Back,
             ]
-        );
-    }
-
-    #[test]
-    fn test_session_actions_awaiting_approval_with_plan_error_hides_approve() {
-        // Given: background planning failed before approval
-        let mut session = make_session("20260311100002", "task", SessionPhase::AwaitingApproval);
-        session.plan_error = Some("model error".to_string());
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: approval stays gated until planning succeeds again; Edit Settings still present
-        assert_eq!(actions, vec!["Edit Settings", "Delete", "Back"]);
-    }
-
-    #[test]
-    fn test_session_actions_awaiting_approval_without_plan_hides_approve() {
-        // Given: background planning is still in progress
-        let session = make_session("20260311100004", "task", SessionPhase::AwaitingApproval);
-
-        // When
-        let actions = session_actions_with_plan_availability(&session, false);
-
-        // Then: approval stays hidden until a real plan exists; Edit Settings still present
-        assert_eq!(actions, vec!["Edit Settings", "Delete", "Back"]);
-    }
-
-    #[test]
-    fn test_format_session_label_awaiting_approval_contains_phase_text() {
-        // Given: AwaitingApproval phase session
-        let s = make_session(
-            "20260311100000",
-            "pending task",
-            SessionPhase::AwaitingApproval,
-        );
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: contains "Awaiting Approval" text and icon
-        assert!(
-            label.contains("Awaiting Approval"),
-            "label should contain 'Awaiting Approval': {label}"
-        );
-        assert!(label.contains('o'), "label should contain o icon: {label}");
-        assert!(
-            label.contains("pending task"),
-            "label should contain input: {label}"
-        );
-    }
-
-    #[test]
-    fn test_format_session_label_awaiting_approval_not_planned_text() {
-        // Given: AwaitingApproval phase session
-        let s = make_session(
-            "20260311100001",
-            "some task",
-            SessionPhase::AwaitingApproval,
-        );
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: "Planned" text is absent (to avoid phase confusion)
-        assert!(
-            !label.contains("Planned"),
-            "AwaitingApproval label should NOT contain 'Planned': {label}"
-        );
-    }
-
-    #[test]
-    fn test_format_session_label_awaiting_approval_with_plan_error_shows_plan_failed() {
-        // Given: background planning failed before approval
-        let mut s = make_session(
-            "20260311100003",
-            "some task",
-            SessionPhase::AwaitingApproval,
-        );
-        s.plan_error = Some("model error".to_string());
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: the list surfaces the failure instead of looking approval-ready
-        assert!(
-            label.contains("Plan Failed"),
-            "label should show Plan Failed: {label}"
-        );
-        assert!(
-            !label.contains("Awaiting Approval"),
-            "label should not look approval-ready: {label}"
-        );
-    }
-
-    #[test]
-    fn test_format_session_label_awaiting_approval_without_plan_shows_planning() {
-        // Given: background planning has started but plan.md is not ready yet
-        let s = make_session(
-            "20260311100005",
-            "some task",
-            SessionPhase::AwaitingApproval,
-        );
-
-        // When
-        let label = strip(&format_session_label_with_plan_availability(&s, false));
-
-        // Then: the list shows an in-progress label instead of approval-ready text
-        assert!(
-            label.contains("Planning"),
-            "label should show Planning: {label}"
-        );
-        assert!(
-            !label.contains("Awaiting Approval"),
-            "label should not show Awaiting Approval: {label}"
-        );
-    }
-
-    // -- format_session_label: multiline input ---------------------------------
-
-    #[test]
-    fn test_format_session_label_multiline_input_shows_first_line_only() {
-        // Given: session.input contains multiple lines (e.g. input with embedded newlines)
-        let s = make_session(
-            "20260306143000",
-            "line1\nline2\nline3",
-            SessionPhase::Planned,
-        );
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: only the first line appears in the label; remaining lines are absent
-        assert!(
-            label.contains("line1"),
-            "label must contain first line: {label}"
-        );
-        assert!(
-            !label.contains("line2"),
-            "label must NOT contain second line: {label}"
-        );
-        assert!(
-            !label.contains("line3"),
-            "label must NOT contain third line: {label}"
-        );
-    }
-
-    #[test]
-    fn test_format_session_label_multiline_input_does_not_contain_newline_char() {
-        // Given: multi-line input
-        let s = make_session(
-            "20260306143000",
-            "implement feature\nwith extra detail",
-            SessionPhase::Planned,
-        );
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: label contains no newline characters (displayable as a single list row)
-        assert!(
-            !label.contains('\n'),
-            "label must not contain newline character: {label:?}"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // session_to_json
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_session_to_json_failed_phase_has_phase_string_and_error() {
-        // Given: a session in Failed phase with an error message
-        let session = make_session(
-            "20260306143000",
-            "task",
-            SessionPhase::Failed("db error".to_string()),
-        );
-
-        // When
-        let dto = session_to_json(session);
-
-        // Then: phase is "Failed" and phase_error contains the message
-        assert_eq!(dto.phase, "Failed");
-        assert_eq!(dto.phase_error, Some("db error".to_string()));
-    }
-
-    #[test]
-    fn test_session_to_json_all_non_failed_phases_have_null_phase_error() {
-        // Given: all non-Failed phases
-        let cases = [
-            (SessionPhase::AwaitingApproval, "AwaitingApproval"),
-            (SessionPhase::Planned, "Planned"),
-            (SessionPhase::Running, "Running"),
-            (SessionPhase::Completed, "Completed"),
-            (SessionPhase::Suspended, "Suspended"),
-        ];
-
-        for (phase, expected_str) in cases {
-            // When
-            let session = make_session("20260306143000", "task", phase);
-            let dto = session_to_json(session);
-
-            // Then: phase string matches and phase_error is None
-            assert_eq!(
-                dto.phase, expected_str,
-                "phase string mismatch for {expected_str}"
-            );
-            assert_eq!(
-                dto.phase_error, None,
-                "phase_error should be None for {expected_str}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_session_to_json_exposes_exact_pr_skipped_reasons() {
-        let mut disabled = make_session("20260306143000", "task", SessionPhase::Completed);
-        disabled.pr_skipped_reason = Some(PrSkippedReason::Disabled);
-        let disabled_json = serde_json::to_value(session_to_json(disabled))
-            .unwrap_or_else(|e| panic!("serialization failed: {e}"));
-        assert_eq!(disabled_json["pr_skipped_reason"], "disabled");
-
-        let mut no_commits = make_session("20260306143001", "task", SessionPhase::Completed);
-        no_commits.pr_skipped_reason = Some(PrSkippedReason::NoCommits);
-        let no_commits_json = serde_json::to_value(session_to_json(no_commits))
-            .unwrap_or_else(|e| panic!("serialization failed: {e}"));
-        assert_eq!(no_commits_json["pr_skipped_reason"], "no-commits");
-    }
-
-    #[test]
-    fn test_session_to_json_awaiting_approval_plan_error_is_preserved() {
-        // Given: a session whose background planning failed before approval
-        let mut session = make_session("20260306143000", "task", SessionPhase::AwaitingApproval);
-        session.plan_error = Some("planner exited 1".to_string());
-
-        // When
-        let dto = session_to_json(session);
-        let value =
-            serde_json::to_value(&dto).unwrap_or_else(|e| panic!("serialization failed: {e}"));
-
-        // Then: the durable planning error is exposed separately from run-phase failures
-        assert_eq!(value["phase"], "AwaitingApproval");
-        assert_eq!(value["phase_error"], serde_json::Value::Null);
-        assert_eq!(value["pr_skipped_reason"], serde_json::Value::Null);
-        assert_eq!(value["plan_error"], "planner exited 1");
-        assert_eq!(value["plan_available"], false);
-    }
-
-    #[test]
-    fn test_session_to_json_with_plan_availability_sets_flag() {
-        // Given: an AwaitingApproval session whose plan.md is ready
-        let session = make_session("20260306143001", "task", SessionPhase::AwaitingApproval);
-
-        // When
-        let dto = session_to_json_with_plan_availability(session, true);
-        let value =
-            serde_json::to_value(&dto).unwrap_or_else(|e| panic!("serialization failed: {e}"));
-
-        // Then
-        assert_eq!(value["plan_available"], true);
-    }
-
-    #[test]
-    fn test_session_to_json_path_fields_are_strings() {
-        // Given: session with base_dir and optional path fields set
-        let mut session = make_session("20260306143000", "task", SessionPhase::Planned);
-        session.worktree_path = Some(PathBuf::from("/tmp/worktree"));
-        session.config = crate::session_config::SessionConfigRef::File {
-            path: PathBuf::from("/home/user/config.yaml"),
-        };
-
-        // When
-        let dto = session_to_json(session);
-
-        // Then: path fields are serialized as strings
-        assert_eq!(dto.base_dir, "/tmp");
-        assert_eq!(dto.worktree_path, Some("/tmp/worktree".to_string()));
-        assert_eq!(dto.config_path, Some("/home/user/config.yaml".to_string()));
-    }
-
-    #[test]
-    fn test_session_to_json_snapshot_path_is_derived_from_the_reference() {
-        let session = make_session("20260306143000", "task", SessionPhase::Planned);
-        let dto = session_to_json(session);
-        assert_eq!(dto.worktree_path, None);
-        assert_eq!(dto.config_path, Some("/tmp/cruise.yaml".to_string()));
-    }
-
-    #[test]
-    fn test_session_to_json_id_and_input_are_preserved() {
-        let session = make_session(
-            "20260306143000",
-            "my task description",
-            SessionPhase::Planned,
-        );
-        let dto = session_to_json(session);
-        assert_eq!(dto.id, "20260306143000");
-        assert_eq!(dto.input, "my task description");
-    }
-
-    // -----------------------------------------------------------------------
-    // write_sessions_json
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_write_sessions_json_empty_list_produces_empty_json_array() {
-        // Given: an empty session list
-        let sessions: Vec<SessionState> = vec![];
-        let mut buf = Vec::new();
-
-        // When
-        write_sessions_json(&mut buf, sessions).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: output parses as a JSON array with 0 entries
-        let output = String::from_utf8(buf).unwrap_or_else(|e| panic!("{e:?}"));
-        let value: serde_json::Value =
-            serde_json::from_str(&output).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(value.is_array(), "output should be a JSON array");
-        assert_eq!(
-            value
-                .as_array()
-                .unwrap_or_else(|| panic!("expected JSON array"))
-                .len(),
-            0,
-            "empty input should produce an empty array"
-        );
-    }
-
-    #[test]
-    fn test_write_sessions_json_multiple_sessions_produces_array_with_correct_ids() {
-        // Given: two sessions with distinct IDs
-        let sessions = vec![
-            make_session("20260306143000", "task A", SessionPhase::Planned),
-            make_session("20260306144500", "task B", SessionPhase::Completed),
-        ];
-        let mut buf = Vec::new();
-
-        // When
-        write_sessions_json(&mut buf, sessions).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: JSON array contains 2 entries with the expected IDs
-        let output = String::from_utf8(buf).unwrap_or_else(|e| panic!("{e:?}"));
-        let value: serde_json::Value =
-            serde_json::from_str(&output).unwrap_or_else(|e| panic!("{e:?}"));
-        let arr = value
-            .as_array()
-            .unwrap_or_else(|| panic!("expected JSON array"));
-        assert_eq!(arr.len(), 2, "should have 2 sessions");
-        assert_eq!(arr[0]["id"], "20260306143000");
-        assert_eq!(arr[1]["id"], "20260306144500");
-    }
-
-    #[test]
-    fn test_write_sessions_json_failed_phase_is_normalized() {
-        // Given: a session in Failed phase
-        let sessions = vec![make_session(
-            "20260306143000",
-            "task",
-            SessionPhase::Failed("some error".to_string()),
-        )];
-        let mut buf = Vec::new();
-
-        // When
-        write_sessions_json(&mut buf, sessions).unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: JSON entry has phase="Failed" and phase_error="some error"
-        let output = String::from_utf8(buf).unwrap_or_else(|e| panic!("{e:?}"));
-        let value: serde_json::Value =
-            serde_json::from_str(&output).unwrap_or_else(|e| panic!("{e:?}"));
-        let entry = &value
-            .as_array()
-            .unwrap_or_else(|| panic!("expected JSON array"))[0];
-        assert_eq!(entry["phase"], "Failed");
-        assert_eq!(entry["phase_error"], "some error");
-    }
-
-    #[test]
-    fn test_write_sessions_json_output_ends_with_newline() {
-        let sessions: Vec<SessionState> = vec![];
-        let mut buf = Vec::new();
-        write_sessions_json(&mut buf, sessions).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(
-            buf.ends_with(b"\n"),
-            "JSON output should end with a newline"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // SessionPhase::Draft -- actions, label, and JSON
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_session_actions_draft_exact() {
-        // Given: Draft phase session
-        let session = make_session("20260523100000", "my draft", SessionPhase::Draft);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: only Generate Plan, Delete, and Back are offered
-        assert_eq!(actions, vec!["Generate Plan", "Delete", "Back"]);
-    }
-
-    #[test]
-    fn test_format_session_label_draft_contains_draft_text() {
-        // Given: Draft phase session
-        let s = make_session("20260523110000", "my draft task", SessionPhase::Draft);
-
-        // When
-        let label = strip(&format_session_label(&s));
-
-        // Then: the label contains "Draft" and the session input
-        assert!(
-            label.contains("Draft"),
-            "Draft label should contain 'Draft': {label}"
-        );
-        assert!(
-            label.contains("my draft task"),
-            "Draft label should contain input: {label}"
-        );
-    }
-
-    #[test]
-    fn test_session_to_json_draft_phase_string() {
-        // Given: a session in Draft phase
-        let session = make_session("20260523120000", "draft task", SessionPhase::Draft);
-
-        // When
-        let dto = session_to_json(session);
-
-        // Then: phase is "Draft" and phase_error is None
-        assert_eq!(dto.phase, "Draft");
-        assert_eq!(dto.phase_error, None);
-    }
-
-    // -----------------------------------------------------------------------
-    // "Edit Settings" action availability
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_session_actions_awaiting_approval_includes_edit_settings() {
-        // Given: AwaitingApproval phase with a plan available
-        let session = make_session("20260619100000", "task", SessionPhase::AwaitingApproval);
-
-        // When
-        let actions = session_actions_with_plan_availability(&session, true);
-
-        // Then: "Edit Settings" is present so the user can change config/skip-steps after planning
-        assert!(
-            actions.contains(&"Edit Settings"),
-            "AwaitingApproval should have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_awaiting_approval_edit_settings_available_even_without_plan() {
-        // Given: AwaitingApproval phase but plan not yet available (still planning)
-        let session = make_session("20260619100001", "task", SessionPhase::AwaitingApproval);
-
-        // When
-        let actions = session_actions_with_plan_availability(&session, false);
-
-        // Then: "Edit Settings" is still present (skip-steps can be edited without a plan)
-        assert!(
-            actions.contains(&"Edit Settings"),
-            "AwaitingApproval without plan should still have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_planned_includes_edit_settings() {
-        // Given: Planned phase
-        let session = make_session("20260619100002", "task", SessionPhase::Planned);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then
-        assert!(
-            actions.contains(&"Edit Settings"),
-            "Planned should have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_planned_edit_settings_does_not_replace_run_or_replan() {
-        // Given: Planned phase
-        let session = make_session("20260619100003", "task", SessionPhase::Planned);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: "Edit Settings" is additive — Run and Replan still exist
-        assert!(
-            actions.contains(&"Run"),
-            "Planned should still have 'Run': {actions:?}"
-        );
-        assert!(
-            actions.contains(&"Replan"),
-            "Planned should still have 'Replan': {actions:?}"
-        );
-        assert!(
-            actions.contains(&"Edit Settings"),
-            "Planned should have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_completed_has_no_edit_settings() {
-        // Given: Completed phase
-        let session = make_session("20260619100007", "task", SessionPhase::Completed);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then
-        assert!(
-            !actions.contains(&"Edit Settings"),
-            "Completed should NOT have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_draft_has_no_edit_settings() {
-        // Given: Draft phase — config editing is not meaningful before planning starts
-        let session = make_session("20260619100008", "task", SessionPhase::Draft);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then
-        assert!(
-            !actions.contains(&"Edit Settings"),
-            "Draft should NOT have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_failed_has_edit_settings() {
-        // Given: Failed phase — user should be able to edit skip/current_step and retry
-        let session = make_session(
-            "20260620100001",
-            "task",
-            SessionPhase::Failed("step s failed".to_string()),
-        );
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: "Edit Settings" is present for Failed phase
-        assert!(
-            actions.contains(&"Edit Settings"),
-            "Failed should have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_suspended_has_edit_settings() {
-        // Given: Suspended phase — user should be able to adjust skip/current_step before resuming
-        let session = make_session("20260620100002", "task", SessionPhase::Suspended);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: "Edit Settings" is present for Suspended phase
-        assert!(
-            actions.contains(&"Edit Settings"),
-            "Suspended should have 'Edit Settings': {actions:?}"
-        );
-    }
-
-    #[test]
-    fn test_session_actions_running_has_no_edit_settings() {
-        // Given: Running phase — editing is prohibited while the runner is active
-        let session = make_session("20260620100003", "task", SessionPhase::Running);
-
-        // When
-        let actions = session_actions(&session);
-
-        // Then: "Edit Settings" must NOT appear (runner would race with the edit)
-        assert!(
-            !actions.contains(&"Edit Settings"),
-            "Running should NOT have 'Edit Settings': {actions:?}"
         );
     }
 }
