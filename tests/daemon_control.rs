@@ -320,6 +320,10 @@ fn mock_outdated_status_server(
                     Err(error) => panic!("accept mock request: {error}"),
                 }
             };
+            // Windows sockets inherit non-blocking mode from the listener.
+            stream
+                .set_nonblocking(false)
+                .unwrap_or_else(|error| panic!("set mock stream blocking: {error}"));
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap_or_else(|error| panic!("mock request timeout: {error}"));
