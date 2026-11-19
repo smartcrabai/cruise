@@ -46,6 +46,9 @@ targets = [
 ]
 # Whether to install an updater program
 install-updater = false
+# Native updater accepts only LICENSE, README.md, and the binaries in archives.
+auto-includes = false
+include = ["LICENSE", "README.md"]
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-apple-darwin = "macos-15"
