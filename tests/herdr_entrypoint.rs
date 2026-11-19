@@ -94,6 +94,8 @@ impl Fixture {
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("XDG_DATA_HOME", self.root.path().join("data"))
             .env("XDG_STATE_HOME", self.root.path().join("state"))
+            .env_remove("HC_TERMINAL_ID")
+            .env("CRUISE_DAEMON_PORT", "0")
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
             .env("CRUISE_UI_LANGUAGE", "en")
             .env("NO_COLOR", "1")
@@ -113,6 +115,20 @@ impl Fixture {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = Command::new(env!("CARGO_BIN_EXE_cruise-runtime"))
+            .args(["daemon", "stop"])
+            .env("XDG_CONFIG_HOME", self.root.path().join("config"))
+            .env("XDG_DATA_HOME", self.root.path().join("data"))
+            .env("XDG_STATE_HOME", self.root.path().join("state"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -169,5 +185,40 @@ steps:
     assert!(
         first_seq < second_seq && second_seq < third_seq,
         "herdr sequence numbers must increase: {first_seq} {second_seq} {third_seq}"
+    );
+}
+
+#[test]
+fn core_status_is_absent_when_output_is_redirected() {
+    let fixture = Fixture::new(
+        r"
+command: [sh, -c, cat]
+create_pr: false
+steps:
+  check:
+    command: 'echo ok'
+",
+    );
+    let output = fixture
+        .command()
+        .env_remove("HERDR_ENV")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_BIN_PATH")
+        .env("HC_TERMINAL_ID", "terminal-redirected-fixture")
+        .output()
+        .unwrap_or_else(|error| panic!("run redirected CLI exec: {error}"));
+    assert!(
+        output.status.success(),
+        "cruise exec failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !transcript.contains("\x1b]7501;"),
+        "redirected Core reporting emitted OSC bytes"
     );
 }

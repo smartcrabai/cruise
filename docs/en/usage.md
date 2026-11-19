@@ -115,7 +115,14 @@ All notifications for workflow events **Action required**, **Plan ready**, **Com
 <a id="herdr-integration"></a>
 ## herdr integration
 
-Inside a [herdr](https://herdr.dev) pane (`HERDR_ENV=1` with `HERDR_PANE_ID` and `HERDR_BIN_PATH` set), `cruise plan`, `cruise run`, and `cruise exec` report their lifecycle state. Reporting is best-effort and does not affect workflow success, failure, or exit status. Set `CRUISE_DISABLE_HERDR=1` to disable it.
+Herdr status reporting happens client-side for CLI `cruise plan`, `cruise run`, and `cruise exec`, including Run/Resume from `cruise list`. Only `cruise list` browsing and action-selection menus are excluded; other CLI prompts, such as `cruise run` workspace selection, report `blocked`. WebUI daemon sessions do not report workflow status.
+
+Herdr Core reports over OSC 7501 when `HC_TERMINAL_ID` is nonempty and a TTY is available; on Unix, Cruise must also be in the foreground process group. It needs no `hc` executable, RPC, or config ([Core details](https://github.com/herdrdev/herdr-core#status-comes-from-the-program)).
+
+Classic Herdr requires `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_BIN_PATH`; when fully configured, it takes precedence over Core.
+
+Both report `working` and `blocked` with a reason. On exit, Core sends `clear`; classic reports `idle` and releases its pane. Reporting is best-effort and does not affect workflow results or exit status. Set `CRUISE_DISABLE_HERDR=1` to disable both.
+
 From a herdr pane, use `cruise tell <session-id> "instruction"` to instruct a running session.
 
 <a id="workflow-packages"></a>

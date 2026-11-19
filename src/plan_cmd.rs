@@ -265,27 +265,36 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
         args.repo.clone(),
         context.clone(),
     )?;
-    let _herdr = crate::herdr::start();
-    let client = DaemonClient::connect().await?;
-    let mut session = client.create_session(&request).await?;
-
-    if pr_target.is_none() {
-        let plan_request = PlanRequest {
-            grill: args.grill,
-            skip_planning: args.skip_planning,
-            no_interactive_planning: args.no_interactive_planning,
-            interactive: Interactive::new(!noninteractive || args.skip_planning),
-            rate_limit_retries: args.rate_limit_retries,
-            context: Some(context.clone()),
-            ..PlanRequest::default()
+    let (_herdr, (client, mut session, stream)) = crate::cli_events::interruptible_startup(async {
+        let herdr = crate::herdr::start();
+        let client = DaemonClient::connect().await?;
+        let session = client.create_session(&request).await?;
+        let stream = if pr_target.is_none() {
+            let plan_request = PlanRequest {
+                grill: args.grill,
+                skip_planning: args.skip_planning,
+                no_interactive_planning: args.no_interactive_planning,
+                interactive: Interactive::new(!noninteractive || args.skip_planning),
+                rate_limit_retries: args.rate_limit_retries,
+                context: Some(context.clone()),
+                ..PlanRequest::default()
+            };
+            let stream = client
+                .events(EventFilter {
+                    session: Some(session.id.clone()),
+                    batch: false,
+                })
+                .await?;
+            client.start_plan(&session.id, &plan_request).await?;
+            Some(stream)
+        } else {
+            None
         };
-        let stream = client
-            .events(EventFilter {
-                session: Some(session.id.clone()),
-                batch: false,
-            })
-            .await?;
-        client.start_plan(&session.id, &plan_request).await?;
+        Ok((herdr, (client, session, stream)))
+    })
+    .await?;
+
+    if let Some(stream) = stream {
         let mut events = PlanningEvents::new(&client, &session.id);
         let finished = crate::cli_events::drive(&client, &session.id, stream, &mut events).await?;
         if finished.cancelled_by_user {
@@ -316,7 +325,8 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
     if !matches!(session.phase, SessionPhase::AwaitingApproval) {
         return Ok(());
     }
-    let config = client.session_config(&session.id).await?;
+    let config =
+        crate::cli_events::interruptible_startup(client.session_config(&session.id)).await?;
     review_plan(&client, session, &config, &args, &context, noninteractive).await
 }
 
@@ -948,19 +958,23 @@ async fn drive_plan_operation(
     session_id: &str,
     operation: PlanOperation,
 ) -> Result<SessionState> {
-    let stream = client
-        .events(EventFilter {
-            session: Some(session_id.to_string()),
-            batch: false,
-        })
-        .await?;
-    match operation {
-        PlanOperation::Generate(request) => client.start_plan(session_id, &request).await?,
-        PlanOperation::Fix(request) => client.fix_plan(session_id, &request).await?,
-        PlanOperation::Ask(request) => client.ask_plan(session_id, &request).await?,
-        PlanOperation::Verify(request) => client.verify_plan(session_id, &request).await?,
-        PlanOperation::Replan(request) => client.replan_plan(session_id, &request).await?,
-    }
+    let stream = crate::cli_events::interruptible_startup(async {
+        let stream = client
+            .events(EventFilter {
+                session: Some(session_id.to_string()),
+                batch: false,
+            })
+            .await?;
+        match operation {
+            PlanOperation::Generate(request) => client.start_plan(session_id, &request).await?,
+            PlanOperation::Fix(request) => client.fix_plan(session_id, &request).await?,
+            PlanOperation::Ask(request) => client.ask_plan(session_id, &request).await?,
+            PlanOperation::Verify(request) => client.verify_plan(session_id, &request).await?,
+            PlanOperation::Replan(request) => client.replan_plan(session_id, &request).await?,
+        }
+        Ok(stream)
+    })
+    .await?;
     let mut events = PlanningEvents::new(client, session_id);
     let finished = crate::cli_events::drive(client, session_id, stream, &mut events).await?;
     if finished.cancelled_by_user {

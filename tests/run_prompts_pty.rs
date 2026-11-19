@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+const PTY_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+static PTY_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(45);
 const SELECTOR_CONFIG: &str = "command: [cat]\ncreate_pr: false\nsteps:\n  choose:\n    option:\n      - selector: Fast path\n        next: fast\n      - selector: Alternate path\n        next: alternate\n  fast:\n    command: %FAST%\n  alternate:\n    command: %ALTERNATE%\n";
 
@@ -104,6 +106,9 @@ impl Fixture {
             .env("CRUISE_UI_LANGUAGE", "en")
             .env("NO_COLOR", "1")
             .env_remove("HERDR_ENV")
+            .env_remove("HC_TERMINAL_ID")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_BIN_PATH")
             .env_remove("CRUISE_CONFIG")
             .current_dir(&self.project)
             .stdin(Stdio::null());
@@ -150,26 +155,22 @@ impl Fixture {
     }
 
     fn start_run_pty(&self, session_id: &str) -> RunPty {
-        self.start_pty(&["run", session_id])
+        self.start_pty(&["run", session_id], &[])
     }
 
     fn start_exec_pty(&self) -> RunPty {
+        self.start_exec_pty_with_env(&[])
+    }
+
+    fn start_exec_pty_with_env(&self, extra_env: &[(&str, &str)]) -> RunPty {
         let config = self
             .config
             .to_str()
             .unwrap_or_else(|| panic!("non-UTF-8 workflow path"));
-        self.start_pty(&["exec", "--config", config])
+        self.start_pty(&["exec", "--config", config], extra_env)
     }
 
-    fn start_pty(&self, args: &[&str]) -> RunPty {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 40,
-                cols: 120,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap_or_else(|error| panic!("open PTY: {error}"));
+    fn start_pty(&self, args: &[&str], extra_env: &[(&str, &str)]) -> RunPty {
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_cruise"));
         command.args(args);
         command.cwd(&self.project);
@@ -186,12 +187,29 @@ impl Fixture {
         command.env("NO_COLOR", "1");
         command.env("TERM", "xterm-256color");
         command.env_remove("HERDR_ENV");
+        command.env_remove("HERDR_PANE_ID");
+        command.env_remove("HERDR_BIN_PATH");
         command.env_remove("CRUISE_CONFIG");
+        for &(key, value) in extra_env {
+            command.env(key, value);
+        }
+        let spawn_lock = PTY_SPAWN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap_or_else(|error| panic!("open PTY: {error}"));
         let child = pair
             .slave
             .spawn_command(command)
             .unwrap_or_else(|error| panic!("spawn cruise {args:?} in PTY: {error}"));
         drop(pair.slave);
+        drop(spawn_lock);
         let mut reader = pair
             .master
             .try_clone_reader()
@@ -202,6 +220,7 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("take PTY writer: {error}"));
         let output = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&output);
+        let (reader_done_tx, reader_done) = mpsc::channel();
         thread::spawn(move || {
             let mut buffer = [0; 4096];
             while let Ok(count) = reader.read(&mut buffer) {
@@ -213,12 +232,14 @@ impl Fixture {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .extend_from_slice(&buffer[..count]);
             }
+            let _ = reader_done_tx.send(());
         });
         RunPty {
-            _master: pair.master,
+            master: Some(pair.master),
             child,
-            writer,
+            writer: Some(writer),
             output,
+            reader_done,
             answered_queries: [0; 3],
         }
     }
@@ -406,11 +427,15 @@ impl Fixture {
 }
 
 fn command_output(mut command: Command, description: &str) -> Output {
+    let spawn_lock = PTY_SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|error| panic!("start {description}: {error}"));
+    drop(spawn_lock);
     let deadline = Instant::now() + WAIT_TIMEOUT;
     loop {
         if child
@@ -444,10 +469,11 @@ impl Drop for Fixture {
 }
 
 struct RunPty {
-    _master: Box<dyn portable_pty::MasterPty + Send>,
+    master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    writer: Box<dyn Write + Send>,
+    writer: Option<Box<dyn Write + Send>>,
     output: Arc<Mutex<Vec<u8>>>,
+    reader_done: mpsc::Receiver<()>,
     answered_queries: [usize; 3],
 }
 
@@ -463,10 +489,14 @@ impl RunPty {
     }
 
     fn send(&mut self, bytes: &[u8]) {
-        self.writer
+        let writer = self
+            .writer
+            .as_mut()
+            .unwrap_or_else(|| panic!("PTY writer missing"));
+        writer
             .write_all(bytes)
             .unwrap_or_else(|error| panic!("write to PTY: {error}"));
-        self.writer
+        writer
             .flush()
             .unwrap_or_else(|error| panic!("flush PTY input: {error}"));
     }
@@ -563,6 +593,13 @@ impl RunPty {
                 .try_wait()
                 .unwrap_or_else(|error| panic!("poll PTY process: {error}"))
             {
+                drop(self.writer.take());
+                drop(self.master.take());
+                self.reader_done
+                    .recv_timeout(PTY_OUTPUT_DRAIN_TIMEOUT)
+                    .unwrap_or_else(|error| {
+                        panic!("timed out draining PTY output after cruise exited: {error}")
+                    });
                 return (status.success(), self.raw());
             }
             assert!(
@@ -808,5 +845,100 @@ fn exec_instruction_uses_existing_input_without_asking() {
     assert!(
         !transcript.contains("waiting for input"),
         "pre-existing input unexpectedly prompted: {transcript}"
+    );
+}
+
+const CORE_OSC_PREFIX: &[u8] = b"\x1b]7501;";
+const CORE_OSC_TERMINATOR: &[u8] = b"\x1b\\";
+
+fn core_osc_frames(output: &[u8]) -> Vec<String> {
+    let mut frames = Vec::new();
+    let mut offset = 0;
+    while let Some(start) = output[offset..]
+        .windows(CORE_OSC_PREFIX.len())
+        .position(|bytes| bytes == CORE_OSC_PREFIX)
+    {
+        let start = offset + start;
+        let payload_start = start + CORE_OSC_PREFIX.len();
+        let Some(end) = output[payload_start..]
+            .windows(CORE_OSC_TERMINATOR.len())
+            .position(|bytes| bytes == CORE_OSC_TERMINATOR)
+        else {
+            break;
+        };
+        let end = payload_start + end + CORE_OSC_TERMINATOR.len();
+        frames.push(String::from_utf8_lossy(&output[start..end]).into_owned());
+        offset = end;
+    }
+    frames
+}
+
+fn has_core_osc_prefix(output: &[u8]) -> bool {
+    output
+        .windows(CORE_OSC_PREFIX.len())
+        .any(|bytes| bytes == CORE_OSC_PREFIX)
+}
+
+#[test]
+fn core_status_reports_working_blocked_working_then_clear_over_tty() {
+    let fixture = Fixture::new(|plan| {
+        let command = yaml_scalar(&format!(
+            "printf 'Choose café ☕\\302\\205\\nnow:\\tplease' > {}",
+            shell_quote(plan)
+        ));
+        let plan = yaml_scalar(&plan.to_string_lossy());
+        format!(
+            "command: [cat]\ncreate_pr: false\nsteps:\n  prepare:\n    command: {command}\n  choose:\n    plan: {plan}\n    option:\n      - selector: Continue\n        next: done\n  done:\n    command: 'true'\n"
+        )
+    });
+    let blocked = "\x1b]7501;state=blocked:app=cruise:kind=question:msg=Q2hvb3NlIGNhZsOpIOKYlSAgbm93OiBwbGVhc2U=\x1b\\";
+    let mut terminal =
+        fixture.start_exec_pty_with_env(&[("HC_TERMINAL_ID", "terminal-core-pty-fixture")]);
+    terminal.wait_for("Continue");
+    terminal.wait_for(blocked);
+    terminal.send(b"\r");
+
+    let (success, transcript) = terminal.finish();
+    assert!(success, "cruise exec failed:\n{transcript}");
+    let mut frames = core_osc_frames(transcript.as_bytes());
+    let clear = frames
+        .pop()
+        .unwrap_or_else(|| panic!("no Core status frames:\n{transcript}"));
+    let fields = clear
+        .trim_start_matches("\x1b]7501;")
+        .trim_end_matches("\x1b\\");
+    assert!(
+        fields.split(':').any(|field| field == "state=clear")
+            && !fields.split(':').any(|field| field.starts_with("id=")),
+        "expected the final Core report to clear root status: {clear:?}"
+    );
+    assert_eq!(
+        frames,
+        vec![
+            "\x1b]7501;state=working:app=cruise\x1b\\".to_owned(),
+            blocked.to_owned(),
+            "\x1b]7501;state=working:app=cruise\x1b\\".to_owned(),
+        ],
+        "unexpected complete Core OSC status frames"
+    );
+}
+
+#[test]
+fn core_status_is_absent_when_disabled_over_tty() {
+    let fixture = Fixture::new(|_| {
+        "command: [cat]\ncreate_pr: false\nsteps:\n  check:\n    command: 'echo ok'\n".to_owned()
+    });
+    let terminal = fixture.start_exec_pty_with_env(&[
+        ("HC_TERMINAL_ID", "terminal-core-disabled-fixture"),
+        ("CRUISE_DISABLE_HERDR", "1"),
+    ]);
+    let (success, transcript) = terminal.finish();
+    assert!(
+        success,
+        "cruise exec failed with reporting disabled:\n{transcript}"
+    );
+    assert!(
+        !has_core_osc_prefix(transcript.as_bytes()),
+        "disabled Core reporting emitted OSC bytes:\n{transcript}"
     );
 }

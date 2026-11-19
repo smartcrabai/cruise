@@ -74,29 +74,33 @@ pub(crate) async fn run_resolved(
         return Ok(());
     }
 
-    let _herdr = crate::herdr::start();
-    let flag_values = if req.flags.is_empty() {
-        crate::run_cmd::select_flag_values(config, &crate::flags::FlagValues::new())?
-            .ok_or_else(|| CruiseError::Other("workflow flag selection cancelled".into()))?
-    } else {
-        flag_values
-    };
-    let context = crate::request_context::RequestContext::capture()?;
-    let request = crate::application::ExecStartRequest {
-        config_yaml: yaml.to_owned(),
-        config_source: SessionConfigRef::from_source(source, None)?,
-        input: req.input,
-        flags: flag_values,
-        max_retries: req.max_retries,
-        rate_limit_retries: req.rate_limit_retries,
-        context,
-    };
+    let (_herdr, (client, session_id, stream)) = crate::cli_events::interruptible_startup(async {
+        let herdr = crate::herdr::start();
+        let flag_values = if req.flags.is_empty() {
+            crate::run_cmd::select_flag_values(config, &crate::flags::FlagValues::new())?
+                .ok_or_else(|| CruiseError::Other("workflow flag selection cancelled".into()))?
+        } else {
+            flag_values
+        };
+        let context = crate::request_context::RequestContext::capture()?;
+        let request = crate::application::ExecStartRequest {
+            config_yaml: yaml.to_owned(),
+            config_source: SessionConfigRef::from_source(source, None)?,
+            input: req.input,
+            flags: flag_values,
+            max_retries: req.max_retries,
+            rate_limit_retries: req.rate_limit_retries,
+            context,
+        };
 
-    let client = crate::daemon::client::DaemonClient::connect().await?;
-    let stream = client
-        .events(crate::daemon::client::EventFilter::default())
-        .await?;
-    let session_id = client.start_exec(&request).await?;
+        let client = crate::daemon::client::DaemonClient::connect().await?;
+        let stream = client
+            .events(crate::daemon::client::EventFilter::default())
+            .await?;
+        let session_id = client.start_exec(&request).await?;
+        Ok((herdr, (client, session_id, stream)))
+    })
+    .await?;
     let mut handler = crate::cli_events::TerminalEvents::new(&client, &session_id);
     let result = crate::cli_events::drive(&client, &session_id, stream, &mut handler)
         .await
