@@ -47,6 +47,9 @@ targets = [
 # Whether to install an updater program
 install-updater = false
 
+[workspace.metadata.dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+
 [[bin]]
 name = "cruise"
 path = "src/launcher.rs"
