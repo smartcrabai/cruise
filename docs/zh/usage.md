@@ -113,7 +113,14 @@ cruise "implement the feature"
 <a id="herdr-integration"></a>
 ## herdr 集成
 
-在 [herdr](https://herdr.dev) 窗格内（已设置 `HERDR_ENV=1`、`HERDR_PANE_ID` 和 `HERDR_BIN_PATH`），`cruise plan`、`cruise run` 和 `cruise exec` 会报告其生命周期状态。状态报告尽力而为，不会影响工作流的成功、失败或退出状态。设置 `CRUISE_DISABLE_HERDR=1` 可将其禁用。
+Herdr 状态报告由 CLI 客户端自动执行，适用于 `cruise plan`、`cruise run`、`cruise exec`，也包括从 `cruise list` 启动的 Run/Resume。只有 `cruise list` 的浏览和操作选择菜单不报告状态；其他 CLI 提示（例如 `cruise run` 的 workspace 选择）会报告 `blocked`。WebUI daemon session 不报告工作流状态。
+
+Herdr Core 在 `HC_TERMINAL_ID` 非空且有可用 TTY 时通过 OSC 7501 报告；在 Unix 上，Cruise 还必须属于前台进程组。无需 `hc` 可执行文件、RPC 或配置（[Core 详情](https://github.com/herdrdev/herdr-core#status-comes-from-the-program)）。
+
+Classic Herdr 需要设置 `HERDR_ENV=1`、`HERDR_PANE_ID` 和 `HERDR_BIN_PATH`；配置完整时优先于 Core。
+
+两者都会报告 `working` 和带原因的 `blocked`。退出时，Core 发送 `clear`；Classic 报告 `idle` 后释放 pane。报告尽力而为，不会影响工作流结果或退出状态。设置 `CRUISE_DISABLE_HERDR=1` 可同时禁用两者。
+
 在 herdr 窗格内，使用 `cruise tell <session-id> "instruction"` 向正在运行的会话下达指令。
 
 <a id="workflow-packages"></a>

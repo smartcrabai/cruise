@@ -10,9 +10,28 @@ use crate::application::{
     ApplicationEvent, EventStream as OutputStream, RunAllRequest, RunRequest,
 };
 use crate::cli::RunArgs;
-use crate::daemon::client::{DaemonClient, EventFilter};
+use crate::daemon::client::{DaemonClient, EventFilter, EventStream};
 use crate::error::{CruiseError, Result};
 use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
+
+enum RunSetup {
+    DryRun,
+    Single {
+        client: DaemonClient,
+        session_id: String,
+        stream: EventStream,
+    },
+    All {
+        client: DaemonClient,
+        setup: RunAllSetup,
+    },
+}
+
+struct RunAllSetup {
+    stream: EventStream,
+    sessions: Vec<crate::daemon::client::RunSessionSummary>,
+    dashboard: Option<crate::batch_dashboard::BatchDashboard>,
+}
 
 const WORKSPACE_WORKTREE_LABEL: &str = "Create worktree (new branch)";
 const WORKSPACE_CURRENT_BRANCH_LABEL: &str = "Use current branch";
@@ -92,7 +111,6 @@ pub(crate) fn select_flag_values(
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
-    let _herdr = crate::herdr::start();
     finish_cli_run(run_inner(args).await)
 }
 
@@ -107,6 +125,25 @@ pub(crate) fn finish_cli_run(result: Result<()>) -> Result<()> {
 }
 
 async fn run_inner(args: RunArgs) -> Result<()> {
+    let (_herdr, setup) = crate::cli_events::interruptible_startup(async {
+        let herdr = crate::herdr::start();
+        let setup = prepare_run(args).await?;
+        Ok((herdr, setup))
+    })
+    .await?;
+
+    match setup {
+        RunSetup::DryRun => Ok(()),
+        RunSetup::Single {
+            client,
+            session_id,
+            stream,
+        } => run_single(&client, &session_id, stream).await,
+        RunSetup::All { client, setup } => run_all(&client, setup).await,
+    }
+}
+
+async fn prepare_run(args: RunArgs) -> Result<RunSetup> {
     if args.auto_requeue_max_attempts.is_some() && !args.all {
         return Err(CruiseError::Other(
             "--auto-requeue-max-attempts requires --all".to_owned(),
@@ -130,18 +167,25 @@ async fn run_inner(args: RunArgs) -> Result<()> {
         ));
     }
     if args.dry_run {
-        return run_dry_run(&args);
+        run_dry_run(&args)?;
+        return Ok(RunSetup::DryRun);
     }
 
     let client = DaemonClient::connect().await?;
     if args.all {
-        run_all(&client, args).await
+        let setup = prepare_run_all(&client, args).await?;
+        Ok(RunSetup::All { client, setup })
     } else {
-        run_single(&client, args).await
+        let (session_id, stream) = prepare_run_single(&client, args).await?;
+        Ok(RunSetup::Single {
+            client,
+            session_id,
+            stream,
+        })
     }
 }
 
-async fn run_single(client: &DaemonClient, args: RunArgs) -> Result<()> {
+async fn prepare_run_single(client: &DaemonClient, args: RunArgs) -> Result<(String, EventStream)> {
     let context = crate::request_context::RequestContext::capture()?;
     let session_id = match args.session.as_deref() {
         Some(id) => id.to_owned(),
@@ -192,8 +236,12 @@ async fn run_single(client: &DaemonClient, args: RunArgs) -> Result<()> {
         })
         .await?;
     client.start_run(&session_id, &request).await?;
-    let mut handler = crate::cli_events::TerminalEvents::new(client, &session_id);
-    let finished = crate::cli_events::drive(client, &session_id, stream, &mut handler).await?;
+    Ok((session_id, stream))
+}
+
+async fn run_single(client: &DaemonClient, session_id: &str, stream: EventStream) -> Result<()> {
+    let mut handler = crate::cli_events::TerminalEvents::new(client, session_id);
+    let finished = crate::cli_events::drive(client, session_id, stream, &mut handler).await?;
     if finished.cancelled_by_user {
         crate::status_eprintln!(
             "\n{} Interrupted -- session saved as Suspended.",
@@ -328,22 +376,20 @@ fn select_from_summaries(sessions: &[crate::daemon::client::RunSessionSummary]) 
     Ok(sessions[index].id.clone())
 }
 
-async fn run_all(client: &DaemonClient, args: RunArgs) -> Result<()> {
+async fn prepare_run_all(client: &DaemonClient, args: RunArgs) -> Result<RunAllSetup> {
     let context = crate::request_context::RequestContext::capture()?;
     let sessions = client.run_sessions().await?;
     let dashboard = std::io::stderr()
         .is_terminal()
         .then(crate::batch_dashboard::BatchDashboard::start);
-    let mut events = BatchEvents::new(client, dashboard.as_ref());
     for session in &sessions {
-        if matches!(session.phase.as_str(), "Planned" | "Suspended") {
-            events.record_session(&session.id);
-            if let Some(dashboard) = &dashboard {
-                dashboard.add_summary(
-                    &session.id,
-                    session.title.as_deref().unwrap_or(&session.input),
-                );
-            }
+        if matches!(session.phase.as_str(), "Planned" | "Suspended")
+            && let Some(dashboard) = &dashboard
+        {
+            dashboard.add_summary(
+                &session.id,
+                session.title.as_deref().unwrap_or(&session.input),
+            );
         }
     }
 
@@ -360,8 +406,26 @@ async fn run_all(client: &DaemonClient, args: RunArgs) -> Result<()> {
             context: Some(context),
         })
         .await?;
-    let cancelled_by_user = drive_batch(client, stream, &mut events).await?;
+    Ok(RunAllSetup {
+        stream,
+        sessions,
+        dashboard,
+    })
+}
 
+async fn run_all(client: &DaemonClient, setup: RunAllSetup) -> Result<()> {
+    let RunAllSetup {
+        stream,
+        sessions,
+        dashboard,
+    } = setup;
+    let mut events = BatchEvents::new(client, dashboard.as_ref());
+    for session in &sessions {
+        if matches!(session.phase.as_str(), "Planned" | "Suspended") {
+            events.record_session(&session.id);
+        }
+    }
+    let cancelled_by_user = drive_batch(client, stream, &mut events).await?;
     let results = load_batch_results(client, &events.session_order).await;
     for state in &results {
         let phase = state.phase.label().to_owned();

@@ -16,6 +16,29 @@ use crate::error::{CruiseError, Result};
 use crate::session::{SessionPhase, SessionState};
 use crate::step::OptionChoice;
 
+/// Run CLI setup with Ctrl+C handling before Core reports the command working.
+pub async fn interruptible_startup<F, T>(future: F) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    if crate::herdr::core_enabled() {
+        tokio::pin!(future);
+        tokio::select! {
+            biased;
+            signal = tokio::signal::ctrl_c() => {
+                if signal.is_ok() {
+                    Err(CruiseError::Interrupted)
+                } else {
+                    future.await
+                }
+            }
+            result = &mut future => result,
+        }
+    } else {
+        future.await
+    }
+}
+
 /// Final state of a driven session operation.
 #[derive(Debug)]
 pub struct Finished {

@@ -60,6 +60,7 @@ test-utils = []
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.23.1"
 clap = { version = "4.5.60", features = ["derive"] }
 command-group = { version = "5.0.1", features = ["with-tokio"] }
 console = "0.16.2"

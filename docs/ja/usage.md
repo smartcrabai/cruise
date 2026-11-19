@@ -113,7 +113,14 @@ cruise "implement the feature"
 <a id="herdr-integration"></a>
 ## herdr 連携
 
-herdr ペイン内（`HERDR_ENV=1` に加え `HERDR_PANE_ID` と `HERDR_BIN_PATH` が設定済み）では、`cruise plan`、`cruise run`、`cruise exec` がライフサイクル状態を報告します。報告はベストエフォートで、ワークフローの成功・失敗・終了ステータスには影響しません。無効にするには `CRUISE_DISABLE_HERDR=1` を設定してください。
+Herdr の状態報告は CLI クライアント側で自動的に行われ、`cruise plan`、`cruise run`、`cruise exec` と `cruise list` からの Run/Resume が対象です。除外されるのは `cruise list` の閲覧・アクション選択メニューのみです。`cruise run` の workspace 選択など、その他の CLI prompt では `blocked` を報告します。WebUI daemon の session は報告しません。
+
+Herdr Core は `HC_TERMINAL_ID` が空でなく TTY が使える場合に、OSC 7501 で報告します。Unix では Cruise が foreground process group に属している必要があります。`hc` 実行ファイル、RPC、設定は不要です（[Core の詳細](https://github.com/herdrdev/herdr-core#status-comes-from-the-program)）。
+
+Classic Herdr は `HERDR_ENV=1`、`HERDR_PANE_ID`、`HERDR_BIN_PATH` が必要で、すべて設定されている場合は Core より優先されます。
+
+どちらも `working` と理由付きの `blocked` を報告します。終了時、Core は `clear` を送り、Classic は `idle` を報告してから pane を解放します。報告はベストエフォートで、ワークフローの結果や終了ステータスには影響しません。`CRUISE_DISABLE_HERDR=1` で両方を無効にできます。
+
 herdr ペインから、実行中のセッションに指示するには `cruise tell <session-id> "instruction"` を使います。
 
 <a id="workflow-packages"></a>
