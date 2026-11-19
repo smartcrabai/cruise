@@ -67,20 +67,20 @@ fn prompt_file_hash_normalizes_checkout_line_endings_only() {
 
 #[test]
 fn write_test_first_known_difference_is_reviewed() -> Result<(), Box<dyn std::error::Error>> {
-    // Baseline updated after replacing the removed browser_e2e/app_e2e flag names with e2e.
+    // Baseline updated after compressing the builtin tdd prompts.
     check_pair(
         "write-test-first",
         "ff7e29d2890fe3c6b5358076d1f1b9ee607dbee6606be65c18a7e412a012c86d",
-        "b993830cc3d39cda6c0e7b88e116b311776be0be2f191d8219903482b8b262bf",
+        "5b410c9382dda71838f8064df7781e3c465e72d1809d55b369bcba26af3cf662",
     )
 }
 
 #[test]
 fn implement_after_tests_known_difference_is_reviewed() -> Result<(), Box<dyn std::error::Error>> {
-    // Baseline updated after escaping literal example braces in the prompt file.
+    // Baseline updated after compressing the builtin tdd prompts.
     check_pair(
         "implement-after-tests",
         "4f4a955923d886a7e96d131edc6ca4b41a41c4276c3339394dfdf2eb9ef8e0f6",
-        "3d9a3e08a0ec2303398c8fc9cbeebd8c8baed1fc13cc972dd404e4c5fddf9e40",
+        "4914c500e1db73745edbaec7b6ad37004246dc8287642564c2a19ad9675d079a",
     )
 }

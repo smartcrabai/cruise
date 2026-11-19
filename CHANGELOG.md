@@ -18,6 +18,7 @@
 - Split the README into English, Japanese, and Simplified Chinese documentation under `docs/en/`, `docs/ja/`, and `docs/zh/`.
 - Resolve managed provider installs to each provider's latest stable release, skipping healthy matches and reporting recorded installed versions in offline status.
 - Isolate GitHub Action config, data, state, and provisioned jcode credentials per workflow job under `$RUNNER_TEMP`, and stop the job's daemon when the action finishes.
+- Shorten built-in workflow prompts by about 24% without changing step structure, and stop TDD consolidate/apply and security triage from inlining the previous step output twice.
 
 ### Added
 

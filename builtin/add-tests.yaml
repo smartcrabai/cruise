@@ -9,109 +9,105 @@ flags:
 steps:
   read-and-plan:
     prompt: |-
-      Audit this repository's test and quality-gate coverage before changing files. Treat {input} as the original request and an optional scope constraint: if it is empty, work across the repository; if it names a narrower change, keep code/test edits within that scope while still checking shared manifests, toolchains, scripts, and CI wiring that the scope depends on. Never ask the user to resolve discoverable details.
+      Audit repository test/quality-gate coverage before editing. {input} is the request and optional scope: empty means repository-wide; otherwise keep code/test edits in scope but inspect dependent shared manifests, toolchains, scripts, and CI. Never ask the user to resolve discoverable details.
 
-      Approved plan reference: {plan}. Read the referenced plan only when it exists, is non-empty, approved, and relevant to this request; use its scope, constraints, and acceptance criteria to refine the original request. If no non-empty approved plan is available, including in exec mode, use the original request as the task scope and requirements; do not infer approval or claim that a plan was approved.
+      Approved plan: {plan}. Read only if existing, non-empty, approved, and relevant; refine {input} with its scope, constraints, and acceptance criteria. Otherwise, including exec mode, use {input}; never infer approval.
 
-      ## Read the real stack
+      ## Repository and CI
 
-      Inspect the repository's manifests, lockfiles, toolchain pins, test helpers and suites, CI workflows, scripts, and entry points. Trace how a consumer reaches the behavior under test. Record concrete commands and versions from the repository; do not assume a familiar framework or introduce one before checking what is already there.
+      Inspect manifests/lockfiles, pinned toolchains, source/entry points, suites/helpers, scripts, and native CI. Derive languages, runtimes, deployables, and packages from repo evidence, not workflow name/host. For each, record consumer paths, conventions, commands/versions; preserve valid coverage and don't assume a stack or framework.
+      Inspect CI provider/job graph, triggers, permissions, credentials, platform matrix, pins, lockfile behavior, and failure propagation. Separate deploy/release from safe tests; check secret-free PR checks, including external contributions where supported.
 
-      Identify every language, runtime, deployable component, and package from the actual repository manifests and lockfiles; do not assume any stack or component from this workflow's name or its host repository. Inspect each discovered component's source entry points, test helpers/suites, scripts, toolchain configuration, and native CI workflows. Record actual conventions and commands, then trace how consumers reach changed behavior. Preserve the repository's existing valid coverage rather than replacing it with an imagined stack.
+      ## Behavior and coverage
 
-      Check the actual CI provider and its job graph, triggers, permissions, credentials, platform matrix, pinned tools, lockfile behavior, and failure propagation. Identify deployment/release jobs separately from safe test jobs and determine whether secret-free validation runs on pull requests, including external contributions where supported.
+      Inventory bounded, evidence-backed in-scope consumer-visible behaviors/journeys supported by repo, request, and relevant approved plan. Trace each real production boundary/entry point to component, source path, and symbol; include only supported/relevant negative, permission, boundary, and recovery variants. No exhaustive claims, quotas, or tests for incidental wording/defaults/implementation details. Record exclusions/unreviewed areas with reasons/limits; distinguish inapplicable layers from missing checks and meaningful gaps from duplicate/incidental coverage.
 
-      ## Behavior and coverage audit
+      Assign stable `COV-###` IDs; record component, path/symbol, boundary, variant, evidence, test path/symbol and proving assertion, `Covered`/`Partial`/`Missing` status and rationale. For partial/missing rows, give priority and smallest actionable test/assertion/infrastructure change. Assign stable `GAP-###` IDs to actionable test, formatter/linter/type-check, reproducibility, or CI gaps; link COVs. Preserve IDs through apply/verify; never renumber or treat disposition as coverage proof.
 
-      Build a bounded, evidence-backed inventory of in-scope, consumer-visible production behaviors and real user journeys supported by the repository, the original request, and relevant approved-plan requirements. Trace each behavior from its actual production boundary (public API, CLI/API event, state transition, validation/error path, or other real entry point) to the owning component, source path and symbol. For each journey, identify the real entry point and applicable negative, permission, boundary, and recovery variants; include only variants the product actually supports and that matter to the scoped behavior.
+      Per applicable component, matrix formatter, linter/static or type-check, unit, integration, and E2E with current command, version/lockfile source, CI trigger/job, meaningful coverage, and evidence-backed gaps. For applicable UI flows, separate real-app visual evidence from reusable assertion-bearing UI E2E; screenshots alone aren't E2E coverage. Record suitable existing runner or why none fits, and official compatibility evidence for fallbacks. Keep UI E2E separate from default CLI/API/service/contract tests. Identify supported success/error/validation/realistic-boundary behavior, source symbols, and consumer-visible assertions.
 
-      Give each behavior/journey a stable `COV-###` ID and record its owning component, source path/symbol, production boundary or entry point, relevant variant, and evidence. Link existing tests by path and test symbol, with the specific assertion that proves the behavior; classify each row `Covered`, `Partial`, or `Missing` with a concrete rationale. For partial or missing coverage, state a priority and the smallest actionable test/assertion or test-infrastructure change. Assign stable `GAP-###` IDs to actionable test, formatter/linter/type-check, reproducibility, or CI gaps in the coverage matrix, linking them to relevant `COV` IDs where applicable. Preserve IDs through apply and verification; do not renumber them or treat an implementation disposition as proof of coverage.
+      E2E crosses an actual product boundary (built CLI, real HTTP/API entry point, or changed browser journey); use only discovered boundaries. Reuse existing runners; use real browser automation only for changed browser journeys with a justified reproducible path. Don't invent mobile/native apps, fake GUIs, or require a browser to relabel component tests. Never use live credentials or external network services.
 
-      Inventory only behavior supported by the requested scope and repository evidence; do not claim exhaustive enumeration, impose numeric coverage quotas, or create tests for incidental wording, defaults, or implementation details. Record exclusions and unreviewed areas with reasons and limits. Distinguish a genuinely inapplicable layer from an applicable but currently absent check, and a meaningful behavior gap from duplicate or incidental test coverage.
+      Follow repo instructions and preserve established tools, versions, commands, setup, and CI. Identify UI targets from manifests/entry points; run `cruise docs e2e`, then `cruise docs e2e <framework>` for each matching policy ID of an actual target. These are canonical UI policies; don't duplicate framework advice here. For non-UI, prefer existing tools and use only relevant recommendations below when capability is absent. Skills/MCP are optional; don't install skills, guess APIs, or change global MCP/config.
 
-      For each applicable package/component, retain the formatter, linter/static or type-check, unit, integration, and end-to-end coverage matrix. Record the current command, version/lockfile source, CI trigger/job, meaningful coverage, and evidence-backed gap, using the stable IDs above. For every applicable in-scope UI flow, record real-app visual evidence and reusable assertion-bearing E2E coverage separately; screenshots alone do not close an E2E gap. Record the suitable existing runner or why none fits, plus official compatibility evidence for any recommended fallback. Inspect success, error, validation, and realistic boundary behavior where supported; identify exact source symbols and consumer-visible assertions needed.
+      ## Non-UI recommendations
 
-      An E2E test must cross a real product boundary: for example, invoke the actual CLI executable, send a request through the actual HTTP/API entry point, or exercise the actual browser journey when browser interaction is the changed behavior. Select only boundaries present in the discovered product. Reuse existing end-to-end runners; use real browser automation only for a changed browser journey when a reproducible real-browser path is justified. If no mobile or native desktop application exists, do not invent one, fake a GUI, or require a browser merely to relabel component tests as E2E. Never use live external credentials or network services in tests.
-      Before choosing tools, follow repository instructions and preserve appropriate established tooling, versions, commands, setup, and CI. Identify actual UI targets from repository manifests and entry points. Run `cruise docs e2e`, then run `cruise docs e2e <framework>` for each matching policy ID listed for an actual target. Apply those outputs as the canonical UI tool policies; do not duplicate framework recommendations here. For non-UI boundaries, preserve the existing-tool-first approach and use only the relevant recommendations below when a capability is absent. Available skills/MCP capabilities are optional; do not install skills, guess APIs, or change global MCP/config.
+      - External DB/service: if required by the real in-scope product (not embedded/in-process or no-DB) and provisioning is absent, recommend Testcontainers with stack-supported library and pinned compatible library/image versions. Wait for readiness; use dynamic mappings, real migrations, isolated seed data, test-owned cleanup. Missing Docker-compatible runtime is blocked; never substitute host/production DB, mocks, or a pass. References: https://testcontainers.com/ and https://rust.testcontainers.org/.
+      - CLI/TUI: if saved process tests are absent, recommend bats-core on the built CLI, asserting meaningful exit status, stdout/stderr, and side effects; explicitly assert target status because Bats `run` succeeds after capture. For actual TUI, use Bats with a real PTY harness (reuse one, e.g. Expect), send keys, assert screen/state transitions, inspect rendered terminal/image evidence when applicable. Pipe/`--help` isn't TUI E2E. Check Bash/host support; don't force unsupported native Windows Bash. Missing PTY/runtime is blocked. Reference: https://github.com/bats-core/bats-core.
+      - Web HTTP API: if suitable saved API tests are absent, recommend Hurl `.hurl` via `hurl --test` against real local endpoints; assert substantive responses/effects using existing setup/isolation/local test auth, never live credentials or production services. Use Testcontainers for needed external DBs where appropriate; static schema/parser checks and mocked HTTP aren't endpoint E2E. Reference: https://hurl.dev/.
+      - Backend contracts: recommend Pact only for evidenced consumer/provider HTTP or message contracts with controllable supported participants and no suitable tooling. Generate via actual consumer client code; verify real provider with explicit states and record both sides. Consumer mocks/pact-file generation alone are incomplete. Pact isn't general backend/DB E2E or a real-path replacement; controlled protocol doubles are valid contract tests, not mock-only E2E. No Broker, PactFlow, cloud infrastructure, or secrets. References: https://docs.pact.io/ and https://docs.pact.io/getting_started/what_is_pact_good_for.
 
-      ## Non-UI boundary recommendations
+      ## CI and reproducibility
 
-      - Disposable external dependencies: when the real in-scope product needs an external database/service (not an embedded or in-process DB, and not a no-DB target) and suitable provisioning is absent, recommend Testcontainers with the stack-supported library and pinned compatible library/image versions. Wait for readiness, use dynamically mapped connection details, run real application migrations and isolated seed data, and clean up only test-owned resources. A missing required Docker-compatible runtime is explicitly blocked, never replaced by a host/production DB, mocks, or a claimed pass. References: https://testcontainers.com/ and https://rust.testcontainers.org/.
-      - CLI/TUI: when saved process tests are absent, recommend bats-core for tests invoking the actual built CLI executable and asserting meaningful exit status, stdout/stderr, and side effects. Bats `run` succeeds after capturing the command, so explicitly assert the captured target status. For an actual interactive TUI, use Bats to orchestrate a real PTY-capable interaction harness (reuse an existing one, e.g. Expect where appropriate), send keys, assert terminal screen/state transitions, and inspect rendered terminal/image evidence when applicable; a pipe or `--help` smoke is not TUI E2E. Check supported Bash/host and do not force unsupported native Windows Bash. Missing suitable PTY/runtime is explicitly blocked. Reference: https://github.com/bats-core/bats-core.
-      - Web HTTP APIs: when suitable saved API tests are absent, recommend Hurl `.hurl` tests run with `hurl --test` against the real local application's HTTP endpoints, with substantive response and relevant state/effect assertions, existing setup/isolation/local test auth, and no live credentials or production services. Provision needed external DB dependencies with Testcontainers when appropriate; static schema/parser checks or mocked HTTP are not endpoint E2E. Reference: https://hurl.dev/.
-      - Backend service integrations: recommend Pact only for an evidenced consumer/provider HTTP or message contract with controllable, supported participants and no suitable existing contract tooling. Generate contracts through actual consumer client code, verify them against the real provider implementation with explicit provider states, and record both consumer and provider verification. Consumer mocks or pact-file generation alone are not complete verification. Pact is not general backend/DB E2E or a replacement for real-path checks; controlled protocol contract doubles are valid contract tests, not mock-only E2E. Do not require a Broker, PactFlow, cloud infrastructure, or secrets. References: https://docs.pact.io/ and https://docs.pact.io/getting_started/what_is_pact_good_for.
-
-
-      ## CI/security audit
-
-      Identify the existing CI provider and retain it. Plan secret-free pull-request checks, including external contributions where the provider permits them; use explicit least-privilege permissions, avoid privileged triggers for untrusted code, and do not attach write-capable credentials or secrets to jobs that execute untrusted changes. Keep deploy/release jobs gated away from untrusted PR execution. Commands must fail on genuine failures: no ignored exit codes, weakened assertions, or `continue-on-error` disguising red checks.
-
-      Reproducibility is required. Respect each component's declared minimum supported versions and committed lockfiles. Use exact tool/runtime versions and locked/frozen installs where the ecosystem supports them; if a tool is floating or missing a pin, plan the smallest compatible pin and align local guidance and CI. Do not add a second test framework when the existing stack can cover the behavior. Pin new external CI actions/plugins to verified immutable versions, and never add a secret-dependent test path.
+      Retain existing CI provider. Plan secret-free PR checks (including external contributions where supported), explicit least-privilege permissions, no privileged triggers or write credentials/secrets for untrusted code, and deploy/release jobs gated from untrusted PRs. Genuine failures fail commands: no ignored exits, weakened assertions, or `continue-on-error`.
+      Respect supported minimum versions and committed lockfiles. Use exact tool/runtime versions and locked/frozen installs where supported; plan smallest compatible pins for floating/unpinned tools and align local guidance/CI. Don't add another framework if existing tools suffice. Pin new CI actions/plugins to verified immutable versions; no secret-dependent test path.
 
       ## Required artifact
 
-      Save a compact but complete, evidence-backed implementation plan in this session artifact. It must include:
-      - The approved task scope, constraints, and acceptance criteria, preserving relevant refinements from a non-empty approved plan. If no non-empty approved plan is available, including in exec mode, state that and derive scope and criteria from the original request; do not infer approval.
-      - Repository/component inventory and current commands/versions.
-      - A coverage matrix with applicable versus inapplicable layers and evidence for each gap.
-      - The exact tests to add or complete, including important error/boundary assertions and real E2E entry points.
-      - The exact formatter/linter/typecheck/test commands and CI jobs/triggers/permissions to add or repair.
-      - The reproducibility/version/lockfile changes required and any genuine prerequisite that cannot be reached without secrets or unavailable hardware.
+      Save a compact, complete, evidence-backed plan in this session artifact:
+      - Scope, constraints, and acceptance criteria from relevant approved plan; otherwise state no non-empty approved plan was available (including exec mode) and derive from {input}, without inferring approval.
+      - Repo/component inventory and current commands/versions.
+      - Coverage matrix, applicability, and evidence for each gap.
+      - Exact tests to add/complete, including error/boundary assertions and real E2E entry points.
+      - Exact formatter/linter/typecheck/test commands and CI jobs/triggers/permissions to add/repair.
+      - Reproducibility/version/lockfile changes and genuine prerequisites unavailable without secrets/hardware.
 
-      Do not change workspace files or run checks in this read-only phase. Do not call an applicable layer inapplicable merely because it is absent today.
+      Read-only: don't change workspace files or run checks. An applicable layer isn't inapplicable merely because its check is absent.
     output_file: test-ci-gap-plan.md
     timeout: 30m
   apply-tests-and-ci:
     prompt: |-
       Original request: {input}
 
-      Implement the complete test and CI work from this evidence-backed plan:
-
+      Implement the complete test/CI work in this evidence-backed plan:
       {file:test-ci-gap-plan.md}
 
       ## Contract authority
 
-      1. The user's request and acceptance criteria.
-      2. Repository-owned requirements and documented consumer behavior.
-      3. Existing tests, after checking they represent those higher-authority contracts.
-      4. Current implementation details.
+      User request/criteria > repository requirements/documented behavior > existing tests (only after validating against higher authority) > current implementation.
 
-      A failing test is evidence, not automatic authority. Never delete, skip, weaken, or rewrite a valid test to make the suite green. Correct a test only when an explicit higher-authority requirement proves it wrong, and cite that evidence.
+      A failing test is evidence, not authority alone. Never delete, skip, weaken, or rewrite a valid test to pass. Correct one only when explicit higher authority proves it wrong; cite that evidence.
 
       ## Implementation
 
-      1. Recheck the plan's file and line evidence against the current workspace. Preserve unrelated user changes; never reset, stash, or revert them.
-      2. Add or complete only missing applicable formatter/linter/static or type gates and meaningful unit, integration, and E2E tests. Cover consumer-observable success, errors, validation, and realistic boundaries. For UI targets in the plan, run `cruise docs e2e`, then the matching `cruise docs e2e <framework>` policies for their actual target frameworks; apply these canonical policies and the evidence-backed plan without choosing a different runner. Implement only missing in-scope capabilities, complete reachable work when policy leaves a capability unavailable, and report missing/incomplete work without claiming it was completed. Isolate/reset state and record repeatable build/run commands. No source-text assertions, mocks-only E2E, live secrets/network, or fake GUI.
-      3. Before selecting, preparing, or using testing tools, inspect/load available relevant installed skills using this agent's provided mechanism when available; skills are optional and must not be installed. Follow repository instructions and preserve established appropriate tooling, versions, commands, setup, and CI. Use the plan's evidence-backed target-specific recommendation only for a capability without suitable existing tooling and only where policy allows new tooling; use connected/available MCP servers as appropriate, without guessed APIs or global MCP/config changes. Run only supported real product boundaries. An established required tool/server/runtime that is unavailable is an exact blocker, never a pass; when the native no-new-tool policy applies, perform reachable work and report the absent capability as incomplete. Do not simulate unsupported runtimes or silently switch runners.
-      For any selected non-UI target-specific recommendation, implement only the absent, in-scope capability after confirming supported host/runtime and compatibility; do not install irrelevant tools or replace established tooling. Exercise and record exact repeatable commands/results at the real boundary: Testcontainers uses the stack-supported library, pinned images, readiness, dynamic mappings, real migrations, isolated data, and test-owned cleanup; Bats invokes the built CLI and explicitly asserts captured status, while TUI checks use a real PTY and assert interactions/state (not pipe-only output); Hurl runs `hurl --test` against real local app endpoints and asserts response plus relevant effects; Pact records actual consumer generation and real-provider verification with provider states on both sides. Report unavailable required runtime/tooling as blocked, not passed; never use live credentials/external production services or classify protocol contract doubles as completed E2E.
-      4. Configure the repository's existing CI provider to run all applicable checks on pull requests without secrets, including external contributions where supported. Keep deploy/release jobs separate and secret-gated. Set least-privilege permissions explicitly; do not run untrusted changes under privileged triggers. Make every relevant command's nonzero exit fail the job. Preserve existing verified platform-matrix and integration-script checks.
-      5. Pin exact compatible tool versions, honor declared minimum supported versions, use committed lockfiles and locked/frozen dependency installs where supported, and make installs reproducible. Pin formatting/lint tools and CI actions/plugins too. Do not claim reproducibility from a floating `stable`, `latest`, or semver range alone. Do not silently raise a supported minimum or replace existing tooling.
-      6. Implement the plan now; do not return a backlog, a scaffold, or a list of proposed tests. If evidence shows an enumerated gap is already fully covered, leave it unchanged and cite the specific existing test and CI job. If an applicable layer has a genuine unreachable prerequisite, complete all reachable work and state the exact blocker rather than substituting a mock or omitting it.
+      1. Recheck plan file/line evidence in the current workspace; preserve unrelated user work (never reset, stash, or revert).
+      2. Add/complete only missing applicable gates and meaningful unit/integration/E2E for consumer-visible success, errors, validation, and realistic boundaries. For planned UI targets, run `cruise docs e2e` then matching `cruise docs e2e <framework>` policies for actual frameworks; follow canonical policies/plan, don't change runners. Keep UI E2E separate from default CLI/API/service/contract tests. Implement missing in-scope capabilities; complete reachable work and report unavailable work incomplete, never complete. Isolate/reset state and record repeatable build/run commands. No source-text assertions, mocks-only E2E, live secrets/network, or fake GUIs.
+      3. Before choosing/preparing/using tools, inspect/load relevant installed skills via available mechanism; optional, never install. Follow repo instructions and preserve established tools, versions, commands, setup, and CI. Use plan recommendations only for absent capabilities without suitable tools and where policy permits; use available MCP without guessed APIs or global MCP/config changes. Use supported real boundaries only. Unavailable required tool/server/runtime is an exact blocker, not a pass; under native no-new-tool policy, do reachable work and report missing capability incomplete. Never simulate unsupported runtimes or silently switch runners.
 
-      Do not run verification checks in this phase; the next phase owns the complete check-and-repair pass.
+      For each selected non-UI recommendation, confirm host/runtime support and compatibility; implement only the absent in-scope capability, without irrelevant installs or replacing tools. Exercise and record exact repeatable real-boundary commands/results:
+      - Testcontainers: stack-supported library, pinned images, readiness, dynamic mappings, real migrations, isolated data, test-owned cleanup.
+      - Bats: built CLI with explicit captured-status assertion; TUI uses real PTY and asserts interaction/state, not pipe-only output.
+      - Hurl: `hurl --test` against real local app endpoints; assert responses and relevant effects.
+      - Pact: actual consumer generation and real-provider verification with provider states on both sides.
+      Unavailable required runtime/tooling is blocked, not passed. Never use live credentials/production services or count protocol contract doubles as completed E2E.
+      4. Configure existing CI for every applicable secret-free PR check, including external contributions where supported. Separate/secret-gate deploy/release; set explicit least-privilege permissions; don't run untrusted changes under privileged triggers. Relevant nonzero commands fail jobs. Preserve verified platform matrices and integration-script checks.
+      5. Pin exact compatible versions; honor minimums; use committed lockfiles and locked/frozen installs where supported. Make installs reproducible; pin format/lint tools and CI actions/plugins. `stable`, `latest`, or semver ranges alone aren't reproducible. Don't silently raise supported minimums or replace tools.
+      6. Implement now, not backlog/scaffold/proposal. If a planned gap is already covered, leave it and cite the exact test and CI job. For an applicable unreachable prerequisite, do reachable work and state the exact blocker; don't substitute mocks or omit it.
+
+      Do not run verification checks; the next phase owns them.
 
       ## Required implementation report
 
-      Save a concise, evidence-backed implementation report in the session artifact `test-ci-implementation.md`. For every `COV` and `GAP` ID in the plan, and every additional ID addressed during implementation, record exactly one disposition: `applied`, `already-covered`, `rejected`, or `blocked`. Give the source/test/CI paths and symbols, specific assertions and relevant command or CI job evidence that support the disposition. For `applied`, identify changed test/CI files and the consumer-visible assertion or gate added/repaired; for `already-covered`, cite the existing adequate evidence; for `rejected`, cite the higher-authority reason; for `blocked`, name the exact unavailable prerequisite and reachable work completed. Do not treat rejection or blockage as successful coverage.
+      Save concise evidence in `test-ci-implementation.md`. For every plan `COV`/`GAP` and additional addressed ID, record exactly one: `applied`, `already-covered`, `rejected`, or `blocked`. Cite source/test/CI paths and symbols, proving assertions, relevant commands/jobs. For `applied`, name changed files and assertion/gate; for `already-covered`, adequate evidence; for `rejected`, higher authority; for `blocked`, exact prerequisite and reachable work. Rejection/blockage isn't successful coverage.
 
       ### Implemented coverage
-      - Each applicable layer and the tests or existing coverage that satisfy it, linked to stable IDs and evidence.
+      - Applicable layers and satisfying tests/existing coverage, linked to IDs/evidence.
 
       ### CI and reproducibility
-      - Provider workflows/jobs/triggers/permissions changed and exact pinned tools/lockfile behavior, linked to relevant IDs and evidence.
+      - Changed workflows/jobs/triggers/permissions and exact pins/lockfile behavior, linked to IDs/evidence.
 
       ### Changed files
-      - File and purpose for every change.
+      - Every file and purpose.
 
       ### Remaining blockers
-      - Exact missing prerequisite and reachable work completed, or `none`.
+      - Exact missing prerequisite and reachable work, or `none`.
     output_file: test-ci-implementation.md
     timeout: 1h
   verify-and-repair:
     prompt: |-
       Original request: {input}
 
-      Independently verify the applied test and CI work against the original request, the plan, the implementation report, and acceptance criteria; repair real defects until all reachable checks pass.
+      Independently verify test/CI work against the request, plan, implementation report, and criteria; repair real defects until all reachable checks pass.
 
       Plan:
       {file:test-ci-gap-plan.md}
@@ -121,27 +117,27 @@ steps:
 
       ## Contract authority
 
-      1. The user's request and acceptance criteria.
-      2. Repository-owned requirements and documented consumer behavior.
-      3. Existing tests, after checking they represent those higher-authority contracts.
-      4. Current implementation details.
+      User request/criteria > repository requirements/documented behavior > existing tests (only after validating against higher authority) > current implementation.
 
-      A failing test is evidence, not automatic authority. Never delete, skip, weaken, or rewrite a valid test to make the suite green. Correct a test only when an explicit higher-authority requirement proves it wrong, and cite that evidence.
+      A failing test is evidence, not authority alone. Never delete, skip, weaken, or rewrite a valid test to pass. Correct one only when explicit higher authority proves it wrong; cite that evidence.
 
       ## Required verification
 
-      1. Re-read the plan, implementation report, changed manifests/configuration/workflows, and current source and test code. Independently recheck every planned `COV` and `GAP` ID and every additional ID in the implementation report against the real scoped behavior, source boundary, test path/symbol, specific assertion, and relevant CI job/command. Do not trust reported dispositions: confirm each `already-covered` row is adequate, each `applied` change exists and proves the behavior, and each `rejected` or `blocked` row has a valid authority-based reason or exact prerequisite. Do not omit unresolved IDs.
-      2. Before using testing tools, inspect/load available relevant installed skills using this agent's provided mechanism when available; skills are optional and must not be installed. For each UI target in the plan, run `cruise docs e2e`, then read the matching `cruise docs e2e <framework>` policy for its actual target framework. Independently verify that the planned UI work follows those policies: run saved E2E independently of prior exploration sessions and LLM decisions using repeatable commands and isolated/reset state, and launch/interact with the actual app, save meaningful screenshots, and inspect image pixels when those capabilities are available. Report any no-new-tool limitation or unavailable prerequisite as missing/incomplete or blocked, never passed. Run the exact formatter, linter/static/type checks, unit, integration, and E2E checks in the plan, including existing checks affected by changes, with committed lockfiles and pinned versions. Execute only supported real product boundaries; do not report a command as passed unless it exited successfully, and include exact commands and results.
-      Independently execute every selected non-UI target-specific command in the plan: native stack-supported Testcontainers tests against pinned disposable services with readiness, dynamic mappings, migrations, isolation, and test-owned cleanup; Bats tests against the built CLI with an explicit captured-status assertion and real PTY/state assertions for any TUI; `hurl --test` against real local HTTP endpoints with response/effect assertions; and both actual Pact consumer-contract generation and provider verification against the real provider with provider states. Preserve existing tools and install no unnecessary tooling; report exact command/results or the precise unavailable runtime/capability as blocked, never as a pass.
-      3. Run the exact component-specific checks recorded in the plan, using each ecosystem's existing reproducible install, type-generation, configuration, and test commands. Use only documented dummy configuration when a local check requires it; never overwrite or expose a developer's existing ignored secrets file, and remove any temporary file created by this verification.
-      4. If any check exposes a real defect, diagnose it against the authority order above, fix the source or test infrastructure without weakening valid assertions, then rerun the failed check and the complete affected verification set. Continue until green or until a precise external prerequisite blocks completion. Do not treat missing prerequisites as success, silently skip a layer, or substitute mocks/no-ops.
-      5. Inspect the final change set for unrelated edits, generated artifacts, leaked credentials, lockfile drift, skipped tests, or CI steps that can mask failures. Preserve all pre-existing user work.
+      1. Re-read plan, report, changed manifests/config/workflows, source, and tests. Independently check every plan/report `COV`/`GAP` against scoped behavior, source boundary, test path/symbol/assertion, and CI job/command. Confirm `already-covered` is adequate, `applied` exists and proves behavior, and `rejected`/`blocked` is valid; omit no unresolved IDs.
+      2. Before test tools, inspect/load relevant installed skills via available mechanism; optional, never install. For each planned UI target, run `cruise docs e2e` then matching `cruise docs e2e <framework>` policy for its actual framework. Independently verify policy: run saved E2E separately from prior exploration/LLM decisions, with repeatable commands and isolated/reset state; launch/interact with actual app, save meaningful screenshots, inspect pixels when available. Keep UI E2E separate from default CLI/API/service/contract checks. No-new-tool limits/unavailable prerequisites are incomplete or blocked, never passed. Run the plan's exact formatter, linter/static/type, unit, integration, and E2E checks (including affected existing checks), with committed lockfiles and pinned versions. Use supported real boundaries; report exact commands/results and never claim pass unless the command succeeded.
+      3. Independently run every selected non-UI plan command:
+      - Testcontainers: stack-supported tests on pinned disposable services; readiness, dynamic mappings, migrations, isolation, test-owned cleanup.
+      - Bats: built CLI with explicit captured-status assertion; real PTY/state assertions for TUI.
+      - Hurl: `hurl --test` on real local HTTP endpoints with response/effect assertions.
+      - Pact: actual consumer generation and real-provider verification with provider states.
+      Preserve existing tools; install no unnecessary tooling. Give exact commands/results or precise unavailable runtime/capability as blocked, never passed.
+      4. Run plan's exact component checks with ecosystem's reproducible install, type-generation, config, and test commands. Use only documented dummy config; never overwrite/expose ignored developer secrets; remove temporary files created.
+      5. Diagnose defects by authority order; fix source/test infrastructure without weakening assertions, then rerun failed check and complete affected set. Continue to green or precise external blocker. Missing prerequisites aren't success; don't skip layers or substitute mocks/no-ops.
+      6. Inspect final changes for unrelated edits, generated artifacts, leaked credentials, lockfile drift, skipped tests, or CI steps masking failures. Preserve pre-existing user work.
 
       ## Required verification artifact
 
-      Save a concise evidence report as the existing session artifact `test-ci-verification.md`. Include every required layer and exact command/status, actual end-to-end surface exercised, test/CI fixes made after failures, final result, and any exact blocked prerequisite with the reachable checks already completed. For each stable `COV` and `GAP` ID, record the independently verified disposition and refreshed `Covered`, `Partial`, or `Missing` status where applicable, evidence and rationale, including any remaining gap; cite the relevant executed check command and result, or state that it was not run and why. Reconcile all plan IDs and implementation-report IDs, and update the coverage inventory, exclusions, unreviewed areas, and limits based on what was actually verified. Clearly mark anything not run; do not claim unexercised verification.
-
-
+      Save evidence in `test-ci-verification.md`: every required layer and exact command/status, actual E2E surface, post-failure fixes, final result, and blockers plus reachable checks. For each stable `COV`/`GAP`, record independently verified disposition, refreshed `Covered`/`Partial`/`Missing` status where applicable, evidence/rationale, remaining gaps, and command/result or why not run. Reconcile all plan/report IDs; update inventory, exclusions, unreviewed areas, and limits to match verification. Mark anything not run; never claim unexercised verification.
 
       ## Final output
 
