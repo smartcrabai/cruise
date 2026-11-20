@@ -268,8 +268,8 @@ pub struct WorkflowConfig {
     pub cleanup_after_pr: bool,
     /// Execute the workflow directly in the current directory for direct plan
     /// entry points: `cruise <input>`, `cruise plan`, `cruise --plan`, and
-    /// WebUI Create & plan for a Directory source. Defaults to `false`;
-    /// `--no-force-exec` opts out for one CLI invocation. In WebUI, use Create draft to plan.
+    /// `WebUI` Create & plan for a Directory source. Defaults to `false`;
+    /// `--no-force-exec` opts out for one CLI invocation. In `WebUI`, use Create draft to plan.
     #[serde(default)]
     pub force_exec: bool,
 

@@ -636,7 +636,7 @@ fn start_exec_response(state: &WebState, fields: &Fields) -> Response {
         let request = ExecStartRequest::for_directory(
             FsPath::new(&fields.text("baseDir")),
             config_path.as_deref(),
-            fields.text("input"),
+            &fields.text("input"),
             flag_values(fields).unwrap_or_default(),
             skipped_steps(fields),
         )?;

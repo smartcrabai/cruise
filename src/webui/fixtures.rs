@@ -170,6 +170,7 @@ fn run_all() -> RunAllVm {
 pub(crate) fn all() -> Vec<(&'static str, Value)> {
     let mut fixtures = shell_fixtures();
     fixtures.extend(tab_fixtures());
+    fixtures.extend(new_session_fixtures());
     fixtures.extend(form_fixtures());
     fixtures.extend(run_all_fixtures());
     fixtures
@@ -343,28 +344,31 @@ fn tab_fixtures() -> Vec<(&'static str, Value)> {
                 open: true,
             }),
         ),
-        (
-            "new-session",
-            value(&NewSessionVm {
-                source_mode: "directory".to_string(),
-                directory_selected: true,
-                force_exec: false,
-                show_exec: true,
-                input: "add a webui".to_string(),
-                base_dir: "/tmp/x".to_string(),
-                repo: String::new(),
-                recent_working_dirs: vec!["/tmp/x".to_string()],
-                skip_planning: false,
-                grill: false,
-                no_interactive_planning: false,
-                workspace_mode: "Worktree".to_string(),
-                config_select: RawHtml::new("<select></select>"),
-                steps: RawHtml::new("<ul></ul>"),
-                attachments: RawHtml::empty(),
-                error: Some("something went wrong".to_string()),
-            }),
-        ),
     ]
+}
+
+fn new_session_fixtures() -> Vec<(&'static str, Value)> {
+    vec![(
+        "new-session",
+        value(&NewSessionVm {
+            source_mode: "directory".to_string(),
+            directory_selected: true,
+            force_exec: false,
+            show_exec: true,
+            input: "add a webui".to_string(),
+            base_dir: "/tmp/x".to_string(),
+            repo: String::new(),
+            recent_working_dirs: vec!["/tmp/x".to_string()],
+            skip_planning: false,
+            grill: false,
+            no_interactive_planning: false,
+            workspace_mode: "Worktree".to_string(),
+            config_select: RawHtml::new("<select></select>"),
+            steps: RawHtml::new("<ul></ul>"),
+            attachments: RawHtml::empty(),
+            error: Some("something went wrong".to_string()),
+        }),
+    )]
 }
 
 fn form_fixtures() -> Vec<(&'static str, Value)> {

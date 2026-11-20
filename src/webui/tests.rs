@@ -42,7 +42,11 @@ fn exec_fixture(harness: &Harness, force: bool) -> (std::path::PathBuf, std::pat
         String::from_utf8_lossy(&output.stderr)
     );
     let config = harness.dir.path().join("exec-workflow.yaml");
-    let marker = if cfg!(windows) { "type nul > marker" } else { "touch marker" };
+    let marker = if cfg!(windows) {
+        "type nul > marker"
+    } else {
+        "touch marker"
+    };
     std::fs::write(
         &config,
         format!(
@@ -186,12 +190,12 @@ async fn exec_rejects_unsafe_form_inputs_without_creating_sessions() {
             .await
             .unwrap_or_else(|error| panic!("response body: {error}"));
         assert!(String::from_utf8_lossy(&body).contains("hx-target=\"#toasts\""));
-        assert!(
+        assert_eq!(
             harness
                 .manager
                 .list()
-                .unwrap_or_else(|error| panic!("list: {error}"))
-                .is_empty()
+                .unwrap_or_else(|error| panic!("list: {error}")),
+            []
         );
     }
 }
@@ -238,7 +242,13 @@ async fn exec_route_runs_in_directory_and_disposes_session() {
 async fn exec_route_applies_unchecked_steps_and_flag_selectors() {
     let harness = harness();
     let (base, config) = exec_fixture(&harness, false);
-    let marker_command = |name| if cfg!(windows) { format!("type nul > {name}") } else { format!("touch {name}") };
+    let marker_command = |name| {
+        if cfg!(windows) {
+            format!("type nul > {name}")
+        } else {
+            format!("touch {name}")
+        }
+    };
     std::fs::write(&config, format!("command: [cat]\nflags:\n  extra: {{}}\nsteps:\n  skipped: {{command: '{}'}}\n  flagged: {{flag: extra, command: '{}'}}\n  marker: {{command: '{}'}}\n", marker_command("skipped"), marker_command("flagged"), marker_command("marker")))
         .unwrap_or_else(|error| panic!("write workflow: {error}"));
     let body = form_body(&[

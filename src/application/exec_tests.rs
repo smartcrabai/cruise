@@ -2,7 +2,13 @@ use super::*;
 use std::path::Path;
 
 fn directory_request(base: &Path, config: Option<&str>, input: &str) -> Result<ExecStartRequest> {
-    ExecStartRequest::for_directory(base, config, input.to_string(), Default::default(), vec![])
+    ExecStartRequest::for_directory(
+        base,
+        config,
+        input,
+        std::collections::BTreeMap::default(),
+        vec![],
+    )
 }
 
 #[test]
@@ -57,7 +63,7 @@ fn for_directory_resolves_file_and_builtin_config() {
         request.config_source,
         SessionConfigRef::BuiltinSnapshot { .. }
     ));
-    assert!(!request.config_yaml.is_empty());
+    assert_ne!(request.config_yaml, "");
 }
 
 #[test]
@@ -71,8 +77,12 @@ fn exec_persists_only_applicable_skips() {
     let mut request = directory_request(temp.path(), Some("workflow.yml"), "task")
         .unwrap_or_else(|e| panic!("request: {e}"));
     request.skipped_steps = vec!["ordinary".into(), "flagged".into()];
-    let created = app.create_exec_session(&request).unwrap_or_else(|e| panic!("create: {e}"));
-    let loaded = manager.load(&created.id).unwrap_or_else(|e| panic!("load: {e}"));
+    let created = app
+        .create_exec_session(&request)
+        .unwrap_or_else(|e| panic!("create: {e}"));
+    let loaded = manager
+        .load(&created.id)
+        .unwrap_or_else(|e| panic!("load: {e}"));
     assert_eq!(loaded.skipped_steps, vec!["ordinary"]);
 }
 

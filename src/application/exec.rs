@@ -27,10 +27,15 @@ pub struct ExecStartRequest {
 }
 
 impl ExecStartRequest {
+    /// Resolve an exec request in an existing local directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input or directory, or if configuration resolution fails.
     pub fn for_directory(
         base_dir: &std::path::Path,
         config_path: Option<&str>,
-        input: String,
+        input: &str,
         flags: crate::flags::FlagValues,
         skipped_steps: Vec<String>,
     ) -> Result<Self> {
