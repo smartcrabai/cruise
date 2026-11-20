@@ -476,7 +476,7 @@ async fn create_pr_attempt(
         crate::forge::session_forge(session),
         session.input_or_title(),
         (&texts.title, pr_body),
-        texts.commit_message.as_deref(),
+        || crate::pr_template::render_commit_message(compiled, session, &ctx.branch, &pr_title),
         (
             session.worktree_base_ref.as_deref(),
             session.worktree_base_branch.as_deref(),
@@ -889,7 +889,7 @@ pub(crate) async fn attempt_pr_creation(
         forge,
         message,
         pr_text,
-        commit_message_override,
+        || Ok(commit_message_override.map(str::to_owned)),
         (None, base_branch),
         cancel_token,
     )
@@ -901,22 +901,28 @@ async fn attempt_pr_creation_with_ref(
     forge: crate::forge::ForgeKind,
     message: &str,
     pr_text: (&str, &str),
-    commit_message_override: Option<&str>,
+    commit_message_builder: impl FnOnce() -> Result<Option<String>>,
     base: (Option<&str>, Option<&str>),
     cancel_token: Option<&CancellationToken>,
 ) -> Result<PrAttemptOutcome> {
     let (title, body) = pr_text;
     let (base_ref, base_branch) = base;
     let trimmed_title = title.trim();
-    let commit_message = if let Some(override_message) = commit_message_override {
-        override_message
-    } else if trimmed_title.is_empty() {
-        message
-    } else {
-        trimmed_title
-    };
-    let commit_message = commit_message_with_coauthor(commit_message);
-    let commit_outcome = commit_changes(&ctx.path, &commit_message, cancel_token).await?;
+    let commit_outcome = commit_changes(
+        &ctx.path,
+        || {
+            let rendered_message = commit_message_builder()?;
+            let fallback_message = if trimmed_title.is_empty() {
+                message
+            } else {
+                trimmed_title
+            };
+            let message = rendered_message.as_deref().unwrap_or(fallback_message);
+            Ok(commit_message_with_coauthor(message))
+        },
+        cancel_token,
+    )
+    .await?;
     if branch_commit_count_with_ref(ctx, base_ref, base_branch, cancel_token).await? == 0 {
         return Ok(PrAttemptOutcome::SkippedNoCommits);
     }
@@ -1121,7 +1127,7 @@ async fn git_stdout(
 /// Stage all changes and commit them.
 async fn commit_changes(
     worktree_path: &Path,
-    message: &str,
+    build_message: impl FnOnce() -> Result<String>,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<CommitOutcome> {
     let add = crate::step::command::run_process_output_cancelled(
@@ -1147,9 +1153,10 @@ async fn commit_changes(
     if diff.status.success() {
         return Ok(CommitOutcome::NoChanges);
     }
+    let message = build_message()?;
     let commit = crate::step::command::run_process_output_cancelled(
         "git",
-        &["commit", "-m", message],
+        &["commit", "-m", message.as_str()],
         Some(worktree_path),
         cancel_token,
     )
@@ -1910,7 +1917,7 @@ mod tests {
                 crate::forge::ForgeKind::GitHub,
                 "task",
                 ("", ""),
-                None,
+                || Ok(None),
                 (selected, Some("develop")),
                 None
             )
@@ -1953,6 +1960,83 @@ mod tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_output_defaults_empty_commit_template_is_deferred_for_clean_worktree() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+        let ctx = base_ahead_fixture(&tmp);
+
+        let remote = tmp.path().join("origin.git");
+        let remote_arg = remote
+            .to_str()
+            .unwrap_or_else(|| panic!("test remote path must be UTF-8"));
+        crate::test_support::run_git_ok(tmp.path(), &["init", "--bare", remote_arg]);
+        crate::test_support::run_git_ok(&ctx.path, &["remote", "add", "origin", remote_arg]);
+
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap_or_else(|error| panic!("create test bin: {error:?}"));
+        crate::test_support::write_executable_script(
+            &bin.join("gh"),
+            "#!/bin/sh\necho https://github.com/o/r/pull/42\n",
+        );
+        let _path = crate::test_support::prepend_to_path(&bin);
+
+        let workflow = crate::workflow::compile(
+            crate::config::WorkflowConfig::from_yaml(
+                "commit_message_template: '{issue}'\nsteps:\n  main:\n    command: echo ok\n",
+            )
+            .unwrap_or_else(|error| panic!("parse test workflow: {error:?}")),
+        )
+        .unwrap_or_else(|error| panic!("compile test workflow: {error:?}"));
+        let session = SessionState::new(
+            "template-test".to_owned(),
+            ctx.path.clone(),
+            crate::session_config::SessionConfigRef::inline_snapshot(),
+            "task".to_owned(),
+        );
+
+        let outcome = attempt_pr_creation_with_ref(
+            &ctx,
+            crate::forge::ForgeKind::GitHub,
+            "task",
+            ("", ""),
+            || crate::pr_template::render_commit_message(&workflow, &session, &ctx.branch, "task"),
+            (None, None),
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("publish clean worktree: {error:?}"));
+        assert_eq!(
+            outcome,
+            PrAttemptOutcome::Created {
+                url: "https://github.com/o/r/pull/42".to_owned(),
+                commit_outcome: CommitOutcome::NoChanges,
+            }
+        );
+
+        std::fs::write(ctx.path.join("new-change"), "change")
+            .unwrap_or_else(|error| panic!("write worktree change: {error:?}"));
+        let result = attempt_pr_creation_with_ref(
+            &ctx,
+            crate::forge::ForgeKind::GitHub,
+            "task",
+            ("", ""),
+            || crate::pr_template::render_commit_message(&workflow, &session, &ctx.branch, "task"),
+            (None, None),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(
+                &result,
+                Err(CruiseError::Other(message))
+                    if message.as_str() == "commit_message_template rendered an empty commit message"
+            ),
+            "empty template should fail only when a new commit is needed: {result:?}"
         );
     }
 

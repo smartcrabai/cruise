@@ -5,7 +5,7 @@ use std::{fs, process::Command};
 use cruise::config::{WorkflowConfig, validate_computer_use, validate_config, validate_sdk};
 use cruise::session_config::serialize_resolved_config;
 use cruise::workflow::compile;
-use cruise::workflow_call::resolve_workflow_calls_without_app_model_defaults;
+use cruise::workflow_call::resolve_workflow_calls_without_app_defaults;
 use cruise::workflow_defaults::{WorkflowConfigResolution, WorkflowDefaults};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -282,7 +282,7 @@ fn called_workflow_keeps_opencode_parent_execution_settings() {
     );
     let expected = serde_json::to_value(&parent)
         .unwrap_or_else(|error| panic!("fixture operation failed: {error}"));
-    let resolved = resolve_workflow_calls_without_app_model_defaults(
+    let resolved = resolve_workflow_calls_without_app_defaults(
         parent,
         dir.path(),
         &WorkflowDefaults::default(),
