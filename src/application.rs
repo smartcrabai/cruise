@@ -7230,7 +7230,8 @@ mod tests {
                 ..NewSessionRequest::default()
             })
         };
-        let assert_outputs = |config: &crate::config::WorkflowConfig, [plan, pr, commit, body]| {
+        let assert_outputs = |config: &crate::config::WorkflowConfig, expected: [&str; 4]| {
+            let [plan, pr, commit, body] = expected;
             assert_eq!(config.effective_plan_language(), plan);
             assert_eq!(config.effective_pr_language(), pr);
             assert_eq!(config.commit_message_template.as_deref(), Some(commit));

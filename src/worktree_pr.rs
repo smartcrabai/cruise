@@ -912,13 +912,12 @@ async fn attempt_pr_creation_with_ref(
         &ctx.path,
         || {
             let rendered_message = commit_message_builder()?;
-            let message = rendered_message.as_deref().unwrap_or_else(|| {
-                if trimmed_title.is_empty() {
-                    message
-                } else {
-                    trimmed_title
-                }
-            });
+            let fallback_message = if trimmed_title.is_empty() {
+                message
+            } else {
+                trimmed_title
+            };
+            let message = rendered_message.as_deref().unwrap_or(fallback_message);
             Ok(commit_message_with_coauthor(message))
         },
         cancel_token,
