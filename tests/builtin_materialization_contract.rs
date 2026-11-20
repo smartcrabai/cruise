@@ -185,6 +185,12 @@ fn assert_pr_review_contract(config: WorkflowConfig) {
 
 fn assert_force_exec_without_after_pr(name: &str, config: WorkflowConfig) {
     assert!(config.force_exec(), "{name} must stay force_exec");
+    if name == "refactor" {
+        assert!(
+            config.flags.contains_key("formal_methods"),
+            "refactor lost formal_methods"
+        );
+    }
     for flag in ["after_pr", "merge"] {
         let values = [(flag.to_owned(), true)]
             .into_iter()
@@ -315,12 +321,6 @@ fn assert_builtin_e2e_contract(project: &Path) {
         .unwrap();
 
         assert!(config.flags.contains_key("e2e"), "{name} must declare e2e");
-        if name == "refactor" {
-            assert!(
-                config.flags.contains_key("formal_methods"),
-                "refactor lost formal_methods"
-            );
-        }
         // Rejection by name validation also proves the legacy flag is no longer declared.
         for legacy in ["browser_e2e", "app_e2e"] {
             let values = [(legacy.to_string(), true)]
