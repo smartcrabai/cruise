@@ -3,8 +3,9 @@ use std::{
     env,
     error::Error,
     fmt,
+    path::Path,
     sync::{
-        OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Instant,
@@ -161,8 +162,8 @@ pub fn init() -> Result<Telemetry, InitError> {
 
     global::set_tracer_provider(tracer_provider.clone());
     global::set_meter_provider(meter_provider.clone());
-    ENABLED.store(true, Ordering::Release);
 
+    ENABLED.store(true, Ordering::Release);
     Ok(Telemetry {
         providers: Some((tracer_provider, meter_provider, logger_provider)),
     })
@@ -209,6 +210,45 @@ impl Operation {
         let span = context.span();
         span.set_attribute(KeyValue::new("cruise.workflow.kind", kind));
         span.set_attribute(KeyValue::new("cruise.workflow.name", name.into_owned()));
+    }
+
+    /// Records UTF-8 session directories on this recording execution span.
+    pub(crate) fn set_session_paths(&self, base_dir: &Path, workspace_dir: Option<&Path>) {
+        if !ENABLED.load(Ordering::Acquire) || self.kind != "execution" {
+            return;
+        }
+        let Some(context) = self.context.as_ref() else {
+            return;
+        };
+        let span = context.span();
+        if !span.is_recording() {
+            return;
+        }
+
+        match (utf8_path(base_dir), workspace_dir.and_then(utf8_path)) {
+            (Some(base_dir), Some(workspace_dir)) if base_dir == workspace_dir => {
+                let shared: Arc<str> = Arc::from(base_dir);
+                span.set_attribute(KeyValue::new(
+                    "cruise.session.base_dir",
+                    Arc::clone(&shared),
+                ));
+                span.set_attribute(KeyValue::new("cruise.session.workspace_dir", shared));
+            }
+            (base_dir, workspace_dir) => {
+                if let Some(base_dir) = base_dir {
+                    span.set_attribute(KeyValue::new(
+                        "cruise.session.base_dir",
+                        Arc::<str>::from(base_dir),
+                    ));
+                }
+                if let Some(workspace_dir) = workspace_dir {
+                    span.set_attribute(KeyValue::new(
+                        "cruise.session.workspace_dir",
+                        Arc::<str>::from(workspace_dir),
+                    ));
+                }
+            }
+        }
     }
 
     /// Starts a phase span with the supplied name.
@@ -1218,6 +1258,10 @@ fn is_enabled(cruise_enabled: Option<&str>, sdk_disabled: Option<&str>) -> bool 
         && cruise_enabled.is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
+fn utf8_path(path: &Path) -> Option<&str> {
+    path.to_str().filter(|path| !path.is_empty())
+}
+
 /// Safe error returned when explicit OpenTelemetry configuration cannot initialize.
 #[derive(Debug)]
 pub struct InitError(InitErrorKind);
@@ -1267,10 +1311,14 @@ mod tests {
     use super::{
         CiCheckState, CiDiagnostic, CiFailedCheck, Context, ErrorTypeState, claim_error_type,
         is_enabled, last_ci_diagnostic, last_sync_base_diagnostic, parse_ci_diagnostic_line,
-        parse_sync_base_diagnostic_line, workflow_identity,
+        parse_sync_base_diagnostic_line, utf8_path, workflow_identity,
     };
     use crate::session_config::SessionConfigRef;
-    use std::{borrow::Cow, path::PathBuf, sync::OnceLock};
+    use std::{
+        borrow::Cow,
+        path::{Path, PathBuf},
+        sync::OnceLock,
+    };
 
     #[test]
     fn ci_diagnostic_parser_accepts_bounded_whitelisted_fields_and_v4_details() {
@@ -1735,6 +1783,17 @@ mod tests {
             workflow_identity(&SessionConfigRef::InlineSnapshot),
             ("inline", Cow::Borrowed("inline"))
         );
+    }
+
+    #[test]
+    fn session_paths_skip_empty_and_non_utf8() {
+        assert_eq!(utf8_path(Path::new("/work/cruise")), Some("/work/cruise"));
+        assert_eq!(utf8_path(Path::new("")), None);
+        #[cfg(unix)]
+        {
+            use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+            assert_eq!(utf8_path(Path::new(OsStr::from_bytes(b"/work/\xff"))), None);
+        }
     }
 
     #[test]

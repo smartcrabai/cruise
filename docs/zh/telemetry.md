@@ -24,7 +24,11 @@ cruise exec --config cruise.yaml
 
 Metrics 包括 `cruise.operation.count` 和 `cruise.operation.duration`（秒），标签仅为 `cruise.operation` 和 `cruise.outcome`；以及 `cruise.retry.count`，标签仅为 `cruise.retry.action` 和 `cruise.retry.reason`。Session/workflow/model 标识只用于 traces，不是 metrics 标签。不会向 OpenTelemetry 导出 token 用量和成本；这些信息会像 `cruise usage` 中所述记录在本地。
 
-Prompt/input 文本、代理输出、命令正文、工作路径和异常消息不会自动附加到 spans 或 metrics。Session ID、workflow 文件名、步骤/模型名称、CI 检查/job 名称和引用，以及显式提供的资源属性会被导出；请勿在这些值中放入秘密信息。
+Prompt/input 文本、代理输出、命令正文和异常消息不会自动附加到 spans 或 metrics。Session ID、workflow 文件名、步骤/模型名称、CI 检查/job 名称和引用，以及显式提供的资源属性会被导出；请勿在这些值中放入秘密信息。
+
+Cruise 只会将完整路径作为字符串属性 `cruise.session.base_dir` 和 `cruise.session.workspace_dir` 导出到 `cruise.execution` trace span，不会添加到 child spans、metrics 或 logs。`base_dir` 是 session 的基础目录，不一定是 Git 根目录；使用 `--repo` 时则是 session 的托管克隆。session 加载并可供执行使用后会包含该属性。`workspace_dir` 是实际 workspace 目录，只有解析完成后才会包含，因此解析后的失败可能同时包含这两个属性。没有 session 可用的错误不会包含其中任何属性。路径未经删改，会原样导出。
+
+这些原样导出的路径可能包含用户名、项目名称及其他可识别身份的信息。仅当 collector 及其存储可信，并且通过 RBAC 将访问限制给经授权的操作人员时，才启用此项。Cruise 不会配置这两者。
 
 已完成但失败的 shell 尝试可能会额外生成一条名为 `cruise.command.stderr` 的 ERROR OTLP 日志。日志正文会删改凭据请求头、已知 token 格式、私钥块和 URL userinfo/query 值，并限制在 8,192 bytes 以内。成功命令的 stderr 不会导出。
 
