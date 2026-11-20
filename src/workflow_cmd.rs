@@ -411,6 +411,15 @@ mod tests {
                 assert!(step.github_review.is_some());
                 continue;
             }
+            let force_exec_builtins = ["refactor", "add-tests", "add-formal-specs", "security"];
+            if force_exec_builtins.contains(&workflow.name) {
+                assert!(
+                    compiled.after_pr.is_empty(),
+                    "{} kept after-pr steps",
+                    workflow.name
+                );
+                continue;
+            }
             assert_eq!(compiled.after_pr.len(), 7);
             assert_eq!(
                 compiled
