@@ -45,6 +45,13 @@ pub fn prepare_execution_workspace(
     session: &mut SessionState,
     workspace_mode: WorkspaceMode,
 ) -> Result<ExecutionWorkspace> {
+    if session.managed_child.is_some()
+        && (workspace_mode != WorkspaceMode::Worktree || session.pr_target.is_some())
+    {
+        return Err(CruiseError::WorktreeError(
+            "Manager children require their own worktree".into(),
+        ));
+    }
     match workspace_mode {
         WorkspaceMode::Worktree => {
             let (ctx, reused) = if let Some(target) = &session.pr_target {
@@ -77,6 +84,22 @@ pub(crate) fn setup_session_worktree(
     session: &mut SessionState,
 ) -> Result<(worktree::WorktreeContext, bool)> {
     let worktrees_dir = manager.worktrees_dir();
+    if let Some(owner) = &session.managed_child {
+        let base_sha = owner.base_sha.clone();
+        let (ctx, reused) = worktree::setup_managed_worktree(
+            &session.base_dir,
+            &session.id,
+            &session.worktree_branch_source(),
+            &worktrees_dir,
+            session.worktree_branch.as_deref(),
+            &base_sha,
+        )?;
+        if !reused {
+            session.worktree_base_branch = None;
+            session.worktree_base_ref = Some(base_sha);
+        }
+        return Ok((ctx, reused));
+    }
     let base = if worktrees_dir.join(&session.id).is_dir() {
         worktree::WorktreeBase::default()
     } else {

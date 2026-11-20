@@ -3,6 +3,12 @@
 
 [English](../en/sessions.md) | [日本語](../ja/sessions.md) | [简体中文](../zh/sessions.md) | [索引](README.md)
 
+## 实验性 Manager 记录
+
+`cruise manager` 需要本地 Git 仓库以及交互式标准输入和输出。记录保存在 `$XDG_DATA_HOME/cruise/manager/`（通常为 `~/.local/share/cruise/manager/`），以规范化的 Git 公共目录为键，因此关联工作树共享同一记录。重新连接时会显示已保存的消息以及任何提案或目标。对话使用从 `builtin:tdd` 默认配置解析出的交互式 SDK 和规划模型，不支持 command 后端。用户输入在调用提供商之前保存，如果调用未完成则保留为中断状态。SDK 被要求在临时目录中使用只读权限，但这不是严格的沙箱。
+
+`/goals` 刷新快照，`/exit` 断开连接。`/make-goal` 请求经过验证的提案预览；目标分支必须能解析为本地 `origin` 跟踪引用，必要时请先 fetch。`/approve` 显示包含可执行检查的提案并要求输入 `approve`；批准会记录一个活动目标，守护进程的协调器可在通过安全检查后调度符合条件的任务。`/pause` 和 `/resume` 记录目标状态，`/answer` 可回答匹配的活动子会话问题；`/retry` 在满足安全等条件时，可为活动目标中之前失败或暂停的子会话，或阻塞目标中已安全确认存在集成冲突的已完成子会话预留新的尝试。此外还需通过依赖关系、所有权、仓库等检查。`/resume GOAL TASK` 在原工作树中继续符合条件的子会话。`/retry GOAL` 可为所有任务均已集成且符合条件的阻塞目标重新运行验证，并保留先前证据；它不会重试结果不确定的发布。`/corrective GOAL TASK` 提示输入人工编写的指令，为符合条件且已确定失败的检查保存修正预览，此时不会授权执行。`/approve-corrective GOAL` 会刷新并显示目标和预览，要求输入 `approve`。批准仅适用于该预览及集成后的 tip，会添加任务并保留先前的验证证据和已批准的检查。预览或 tip 发生变化时需要重新审查。协调器尚未完成且未经验证，目标调度、验证和 PR 发布不能作为完整流程使用。计划中的执行流程需要 Git 2.38 或更高版本，以及经过身份验证的 GitHub 或 GitLab `origin`；最终的 PR 或 MR 由人工合并，而不是由 Manager 合并。
+
 <a id="runtime-file-layout"></a>
 ## 运行时文件布局
 

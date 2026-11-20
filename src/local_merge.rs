@@ -537,10 +537,12 @@ pub fn merge_target_branch(state: &SessionState) -> Option<&str> {
 
 #[must_use]
 pub fn can_merge_locally(state: &SessionState) -> bool {
-    matches!(
-        state.phase,
-        SessionPhase::Completed | SessionPhase::PrFailed(_)
-    ) && state.repo.is_none()
+    state.managed_child.is_none()
+        && matches!(
+            state.phase,
+            SessionPhase::Completed | SessionPhase::PrFailed(_)
+        )
+        && state.repo.is_none()
         && state.pr_url.is_none()
         && state.pr_target.is_none()
         && state.workspace_mode == WorkspaceMode::Worktree

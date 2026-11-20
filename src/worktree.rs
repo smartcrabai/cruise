@@ -151,6 +151,91 @@ pub(crate) fn setup_session_worktree_with_ref(
     ))
 }
 
+/// Create or recover a Manager worktree at the approved immutable base.
+pub(crate) fn setup_managed_worktree(
+    base_dir: &Path,
+    session_id: &str,
+    input: &str,
+    worktrees_dir: &Path,
+    existing_branch: Option<&str>,
+    base_sha: &str,
+) -> Result<(WorktreeContext, bool)> {
+    ensure_git_repo(base_dir)?;
+    if !(base_sha.len() == 40 || base_sha.len() == 64)
+        || !base_sha.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(CruiseError::WorktreeError(
+            "invalid managed base SHA".into(),
+        ));
+    }
+    let path = worktrees_dir.join(session_id);
+    let branch =
+        existing_branch.map_or_else(|| default_branch_name(session_id, input), str::to_owned);
+    let reused = path.is_dir();
+    if !reused {
+        fs::create_dir_all(worktrees_dir)?;
+        let output = Command::new("git")
+            .args(["worktree", "add", "-b", &branch])
+            .arg(&path)
+            .arg(base_sha)
+            .current_dir(base_dir)
+            .stdin(std::process::Stdio::null())
+            .output()?;
+        if !output.status.success() {
+            return Err(CruiseError::WorktreeError(format!(
+                "git worktree add failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+    } else {
+        // Recovery must not adopt an unrelated directory or branch.
+        let common_dir = |dir: &Path| -> Result<PathBuf> {
+            let output = Command::new("git")
+                .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+                .current_dir(dir)
+                .output()?;
+            if !output.status.success() {
+                return Err(CruiseError::WorktreeError(
+                    "cannot identify managed worktree repository".into(),
+                ));
+            }
+            Ok(std::fs::canonicalize(
+                String::from_utf8_lossy(&output.stdout).trim(),
+            )?)
+        };
+        if common_dir(base_dir)? != common_dir(&path)? {
+            return Err(CruiseError::WorktreeError(
+                "managed worktree repository does not match".into(),
+            ));
+        }
+        let output = Command::new("git")
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(&path)
+            .output()?;
+        let ancestor = Command::new("git")
+            .args(["merge-base", "--is-ancestor", base_sha, "HEAD"])
+            .current_dir(&path)
+            .status()?;
+        if !output.status.success()
+            || String::from_utf8_lossy(&output.stdout).trim() != branch
+            || !ancestor.success()
+        {
+            return Err(CruiseError::WorktreeError(
+                "managed worktree identity or base does not match".into(),
+            ));
+        }
+    }
+    Ok((
+        WorktreeContext {
+            path,
+            branch,
+            original_dir: base_dir.to_path_buf(),
+            owns_branch: true,
+        },
+        reused,
+    ))
+}
+
 /// Create or reuse a worktree on an existing PR head without resetting its branch.
 ///
 /// # Errors

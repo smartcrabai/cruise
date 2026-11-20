@@ -1,6 +1,30 @@
 [language]
 native_name = "日本語"
 
+[cli.manager]
+interactive_required = "cruise manager には標準入力と標準出力の対話型端末が必要です"
+utf8_required = "manager には UTF-8 の作業ディレクトリが必要です"
+welcome = "Cruise Manager。目的、除外事項、制約、受け入れ基準について相談してください。\n/goals で状態を更新、/make-goal で提案をプレビュー、/help でコマンド一覧を表示、/exit で切断します。"
+prompt = "Manager"
+help = "/goals | /make-goal | /approve | /pause GOAL | /resume GOAL [TASK] | /retry GOAL TASK | /answer GOAL PROMPT ANSWER | /exit"
+refresh_failed = "Manager を更新できませんでした"
+no_proposal = "承認待ちの提案はありません。先に /make-goal を使用してください。"
+proposal_to_approve = "承認する提案:"
+missing_revision = "ID とリビジョンがない提案は承認できません。"
+confirm = "この提案をそのまま承認するには approve と入力してください。それ以外の入力でキャンセルします:"
+not_approved = "承認されませんでした。"
+empty_answer = "回答を空にすることはできません。/help を使用してください。"
+stale_prompt = "この目標の Manager プロンプトは期限切れか不明です"
+option_answer_usage = "選択式プロンプトには /answer GOAL PROMPT を使用し、メニューから選択してください"
+unknown_command = "不明なコマンドか、ID が不足しています。/help を使用してください。"
+accepted = "受け付けました"
+turn_running = "ターンはデーモンで実行中です。/goals で更新できます。切断してもキャンセルされません。"
+unknown = "不明"
+pending_proposal = "保留中の提案（未承認）:"
+approve_hint = "/approve で内容を確認し、明示的に承認してください。"
+goal = "目標:"
+pending_prompts = "未回答のプロンプト:"
+
 [cli.list]
 empty = "セッションが見つかりません。"
 action_prompt = "操作:"

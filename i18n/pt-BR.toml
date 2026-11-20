@@ -1,6 +1,30 @@
 [language]
 native_name = "Português (Brasil)"
 
+[cli.manager]
+interactive_required = "cruise manager exige um terminal interativo para entrada e saída padrão"
+utf8_required = "manager exige um diretório de trabalho UTF-8"
+welcome = "Cruise Manager. Discuta seu objetivo, exclusões, restrições e critérios de aceitação.\n/goals atualiza o estado, /make-goal visualiza uma proposta, /help lista comandos e /exit desconecta."
+prompt = "Manager"
+help = "/goals | /make-goal | /approve | /pause GOAL | /resume GOAL [TASK] | /retry GOAL TASK | /answer GOAL PROMPT ANSWER | /exit"
+refresh_failed = "Não foi possível atualizar o Manager"
+no_proposal = "Não há proposta pendente de aprovação. Use /make-goal primeiro."
+proposal_to_approve = "Proposta para aprovação:"
+missing_revision = "Não é possível aprovar uma proposta sem ID e revisão."
+confirm = "Digite approve para autorizar exatamente esta proposta, ou qualquer outra coisa para cancelar:"
+not_approved = "Não aprovada."
+empty_answer = "A resposta não pode estar vazia. Use /help."
+stale_prompt = "A solicitação do Manager para este objetivo expirou ou é desconhecida"
+option_answer_usage = "Para uma solicitação de opções, use /answer GOAL PROMPT e selecione no menu"
+unknown_command = "Comando desconhecido ou IDs ausentes. Use /help."
+accepted = "Aceito"
+turn_running = "O turno está em execução no daemon. Use /goals para atualizar. Desconectar não o cancela."
+unknown = "desconhecido"
+pending_proposal = "Proposta pendente (não aprovada):"
+approve_hint = "Use /approve para revisar e autorizar explicitamente."
+goal = "Objetivo:"
+pending_prompts = "Perguntas pendentes:"
+
 [cli.list]
 action_prompt = "Ação:"
 select_session = "Selecione uma sessão:"

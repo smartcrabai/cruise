@@ -3,6 +3,8 @@
 <a id="cli-reference"></a>
 # CLI 命令参考
 
+`cruise manager` 是实验性交互式客户端。使用前请参阅 [Manager 记录及当前限制](sessions.md#实验性-manager-记录)。
+
 ```
 cruise [OPTIONS] [INPUT] [COMMAND]
 
@@ -12,6 +14,7 @@ Commands:
   run          Execute a planned session
   tell         Send an instruction to a running session
   list         List and manage sessions interactively
+  manager      Open the experimental repository-scoped Manager client
   clean        Remove sessions with closed/merged PRs
   usage        Summarize locally recorded token usage
   docs         Print embedded common or framework-specific E2E policy

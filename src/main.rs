@@ -71,6 +71,13 @@ mod issue_publish;
 mod ledger_snapshot;
 mod list_cmd;
 mod local_merge;
+mod manager;
+mod manager_cmd;
+mod manager_coordinator;
+mod manager_forge;
+mod manager_git;
+mod manager_provider;
+mod manager_publication;
 mod metadata;
 mod model_schedule;
 mod model_selection;
@@ -237,6 +244,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::Tell(args)) => tell_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
+        Some(cli::Commands::Manager) => manager_cmd::run().await,
         Some(cli::Commands::Diff(args)) => diff_cmd::run(&args).await,
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args).await,
         Some(cli::Commands::Usage(args)) => usage_cmd::run(&args),

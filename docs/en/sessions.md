@@ -5,6 +5,12 @@
 <!-- sakoku-ignore-next-line -->
 [日本語](../ja/sessions.md) · [简体中文](../zh/sessions.md) · [Index](README.md)
 
+## Experimental Manager records
+
+`cruise manager` requires a local Git repository and interactive stdin and stdout. Records are stored under `$XDG_DATA_HOME/cruise/manager/` (normally `~/.local/share/cruise/manager/`), keyed by the canonical Git common directory, so linked worktrees share a record. Reconnecting displays saved messages and any proposal or goals. Conversation uses the configured interactive SDK and planning model from `builtin:tdd` defaults, not a command backend. A user turn is persisted before the provider call and remains interrupted if it does not complete. The SDK is requested to use read-only permissions in a scratch directory; this is not a hard sandbox.
+
+`/goals` refreshes the snapshot and `/exit` disconnects. `/make-goal` requests a validated proposal preview; its target branch must resolve to a local `origin` tracking ref, so fetch it first if necessary. `/approve` displays the proposal, including its executable checks, and requires typing `approve`. New approval is rejected while Manager execution is unavailable end to end. The proposal is preserved for review and manual execution. `/pause GOAL` and `/resume GOAL` record Goal-scoped state, and `/answer` accepts a matching live child question or option prompt when one exists. `/resume GOAL TASK` requests continuation of the latest eligible failed or suspended child in its existing worktree. `/retry GOAL TASK` instead reserves a new attempt for an eligible previously failed or suspended child of an active Goal, or for a completed child of a blocked Goal when an integration conflict is safely established. Eligibility also depends on dependency, ownership, repository, and other safety checks. `/retry GOAL` requests a fresh verification for an eligible blocked Goal whose tasks are integrated, preserving prior evidence; it does not retry an uncertain publication. `/corrective GOAL TASK` prompts for human-authored instructions and saves a preview for an eligible definite failed check, without authorizing execution. `/approve-corrective GOAL` refreshes and displays the goal and preview, then requires typing `approve`. Approval applies only to that preview and integrated tip, adds the task, and preserves prior verification evidence and approved checks. A changed preview or tip requires fresh review. Coordinator functionality is incomplete and unverified: goal scheduling, verification, and PR publication are not available end to end. The planned execution path requires Git 2.38 or newer and an authenticated GitHub or GitLab `origin`; a human, not Manager, merges the resulting PR or MR.
+
 <a id="runtime-file-layout"></a>
 ## Runtime File Layout
 
@@ -74,6 +80,8 @@ Model: provider/fallback
 ## `cruise list` Actions
 
 The interactive session list shows a menu of actions depending on the session's phase:
+
+Manager-owned child sessions are an exception: their list controls offer only **View Diff** when available and **Back**. Supported child actions are controlled through Manager.
 
 | Phase | Available Actions |
 |-------|-------------------|
@@ -166,7 +174,7 @@ Each line is a relative path (file or directory). Absolute paths and `..` traver
 
 When `cruise list` or the WebUI session detail view loads a session, a session in the `Running` phase is checked for liveness. If the runner process is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
 
-Suspended sessions can be resumed from `cruise list` or the WebUI, or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
+Ordinary suspended sessions can be resumed from `cruise list` or the WebUI, or reset to Planned. The `run --all` command also picks up ordinary Suspended sessions alongside Planned ones. Manager-owned children instead use the Manager controls described above.
 
 <a id="parallel-session-execution"></a>
 ## Parallel Session Execution

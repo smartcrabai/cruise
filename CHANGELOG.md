@@ -26,6 +26,7 @@
 
 ### Added
 
+- Add an experimental `cruise manager` terminal client with repository-scoped durable conversation and SDK-generated proposal previews. New approval is rejected while end-to-end execution is unavailable, preserving the proposal for review and manual execution. Goal pause, resume, and prompt-answer controls are available. Retry can reserve a new attempt for an eligible previously failed or suspended child of an active Goal, or a completed child of a blocked Goal with a safely established integration conflict, subject to safety checks. For an eligible definite failed check, `/corrective GOAL TASK` saves a human-authored corrective preview without authorizing it, and `/approve-corrective GOAL` displays the goal for explicit approval of that preview and integrated tip, preserving prior verification evidence and approved checks. The end-to-end execution lifecycle remains unavailable.
 - Check GitHub and GitLab base-branch CI before fresh workflow runs by default; opt out with `check_base_ci: false` in `default.yaml`.
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.
 - Add the `if.head-changed` step condition, which routes to a target when a step completes successfully with a different Git `HEAD` OID; untracked, ignored, and uncommitted changes do not count.

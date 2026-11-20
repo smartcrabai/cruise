@@ -4,6 +4,8 @@
 <a id="cli-reference"></a>
 # Command-line reference
 
+`cruise manager` is an experimental interactive client. See [Manager records and current limitations](sessions.md#experimental-manager-records) before using it.
+
 ```
 cruise [OPTIONS] [INPUT] [COMMAND]
 
@@ -13,6 +15,7 @@ Commands:
   run          Execute a planned session
   tell         Send an instruction to a running session
   list         List and manage sessions interactively
+  manager      Open the experimental repository-scoped Manager client
   clean        Remove sessions with closed/merged PRs
   usage        Summarize locally recorded token usage
   docs         Print embedded common or framework-specific E2E policy

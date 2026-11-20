@@ -53,6 +53,12 @@ pub mod issue_publish;
 #[cfg(test)]
 mod ledger_snapshot;
 pub mod local_merge;
+pub mod manager;
+pub(crate) mod manager_coordinator;
+pub(crate) mod manager_forge;
+pub mod manager_git;
+mod manager_provider;
+pub mod manager_publication;
 pub mod metadata;
 pub mod model_schedule;
 pub mod model_selection;

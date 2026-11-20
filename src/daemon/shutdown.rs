@@ -12,6 +12,7 @@ pub(crate) const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
 
 /// Begin shutdown: cancel active operations and close every SSE stream.
 pub(crate) fn begin(state: &WebState) {
+    crate::manager_provider::begin_shutdown();
     let signalled = state.application.runtime().begin_shutdown();
     state.hub.close();
     eprintln!(
@@ -21,7 +22,7 @@ pub(crate) fn begin(state: &WebState) {
 
 /// Wait until every cancelled operation has released its claim.
 pub(crate) async fn wait_for_operations(application: &CruiseApplication) {
-    while !application.runtime().is_idle() {
+    while !application.runtime().is_idle() || !crate::manager_provider::is_idle() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

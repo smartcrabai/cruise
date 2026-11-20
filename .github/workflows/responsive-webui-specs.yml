@@ -79,6 +79,8 @@ jobs:
         run: node tests/webui/local-merge.mjs
       - name: Production workflow category browser test
         run: node tests/webui/workflow-categories.mjs
+      - name: Managed-child WebUI browser boundary
+        run: node tests/webui/managed-child.mjs
       - name: Production notification browser test
         run: node tests/webui/notifications.mjs
       - name: Upload specification evidence
