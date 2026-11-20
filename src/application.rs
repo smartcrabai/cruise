@@ -7323,7 +7323,8 @@ mod tests {
             error.to_string().contains("unknown variable `{typo}`"),
             "{error}"
         );
-        assert!(manager.list()?.is_empty());
+        let sessions = manager.list()?;
+        assert_eq!(sessions.first().map(|session| session.id.as_str()), None);
 
         let state = app.create_session(request("pr_body_template: '{title}'\n"))?;
         assert_eq!(
