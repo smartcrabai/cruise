@@ -19,17 +19,17 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap_or_else(|err| panic!("create fixture directory: {err}"));
         let repo = root.path().join("repo");
         let home = root.path().join("home");
-        fs::create_dir_all(&repo).unwrap();
-        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|err| panic!("create repository: {err}"));
+        fs::create_dir_all(&home).unwrap_or_else(|err| panic!("create home: {err}"));
         assert!(
             Command::new("git")
                 .args(["init", "-q"])
                 .current_dir(&repo)
                 .status()
-                .unwrap()
+                .unwrap_or_else(|err| panic!("run git init: {err}"))
                 .success()
         );
         Self {
@@ -47,7 +47,7 @@ impl Fixture {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .unwrap();
+            .unwrap_or_else(|err| panic!("open PTY: {err}"));
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_cruise"));
         for (name, _) in std::env::vars_os() {
             cmd.env_remove(name);
@@ -63,10 +63,19 @@ impl Fixture {
         cmd.env("LANG", "en_US.UTF-8");
         cmd.cwd(&self.repo);
         cmd.arg("manager");
-        let child = pair.slave.spawn_command(cmd).unwrap();
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .unwrap_or_else(|err| panic!("spawn manager: {err}"));
         drop(pair.slave);
-        let mut reader = pair.master.try_clone_reader().unwrap();
-        let writer = pair.master.take_writer().unwrap();
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .unwrap_or_else(|err| panic!("clone PTY reader: {err}"));
+        let writer = pair
+            .master
+            .take_writer()
+            .unwrap_or_else(|err| panic!("take PTY writer: {err}"));
         let output = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&output);
         thread::spawn(move || {
@@ -75,7 +84,10 @@ impl Fixture {
                 if n == 0 {
                     break;
                 }
-                captured.lock().unwrap().extend_from_slice(&buf[..n]);
+                captured
+                    .lock()
+                    .unwrap_or_else(|err| panic!("lock captured output: {err}"))
+                    .extend_from_slice(&buf[..n]);
             }
         });
         Terminal {
@@ -114,7 +126,13 @@ impl Terminal {
     fn wait_for(&mut self, needle: &str, count: usize) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let text = String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned();
+            let text = String::from_utf8_lossy(
+                &self
+                    .output
+                    .lock()
+                    .unwrap_or_else(|err| panic!("lock terminal output: {err}")),
+            )
+            .into_owned();
             if text.matches(needle).count() >= count {
                 return;
             }
@@ -123,20 +141,31 @@ impl Terminal {
                 "timed out waiting for {needle:?}: {text}"
             );
             assert!(
-                self.child.try_wait().unwrap().is_none(),
+                self.child
+                    .try_wait()
+                    .unwrap_or_else(|err| panic!("poll manager: {err}"))
+                    .is_none(),
                 "manager exited before {needle:?}: {text}"
             );
             thread::sleep(Duration::from_millis(25));
         }
     }
     fn send(&mut self, bytes: &[u8]) {
-        self.writer.write_all(bytes).unwrap();
-        self.writer.flush().unwrap();
+        self.writer
+            .write_all(bytes)
+            .unwrap_or_else(|err| panic!("write to manager: {err}"));
+        self.writer
+            .flush()
+            .unwrap_or_else(|err| panic!("flush manager input: {err}"));
     }
     fn finish(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .unwrap_or_else(|err| panic!("poll manager: {err}"))
+            {
                 assert!(status.success(), "manager exit: {status:?}");
                 return;
             }
@@ -171,7 +200,7 @@ fn manager_terminal_disconnect_and_reconnect() {
         .args(["status", "--porcelain"])
         .current_dir(&fixture.repo)
         .output()
-        .unwrap();
+        .unwrap_or_else(|err| panic!("run git status: {err}"));
     assert!(status.status.success());
     assert!(
         status.stdout.is_empty(),
