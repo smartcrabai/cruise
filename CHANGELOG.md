@@ -37,6 +37,7 @@
 - Start Docker images as a foreground daemon on port 8484 by default, and document long-lived service-container use.
 - Rotate detached `daemon.log` files above 5 MiB into a single `daemon.log.1` generation.
 - Add locale selection and translations for English, Simplified Chinese, Spanish, French, Brazilian Portuguese, Japanese, and Korean across the CLI and WebUI.
+- Set application-level `languages.plan` / `languages.pr` fallbacks and global commit-message and PR-body templates in `config.yaml` and `config.json`.
 - Add the bounded `plan_revision` Quint/Alloy specification with production Gherkin and negative controls (`scripts/check_plan_revision_specs.sh`) covering planning-input delivery, client action parity, and phase preservation.
 - Add best-effort client-side Herdr lifecycle reporting over OSC 7501 for CLI `plan`/`run`/`exec` (including Run/Resume from `cruise list`), with fully configured classic Herdr taking precedence. Only `cruise list` browsing/action-selection menus and WebUI daemon sessions are excluded.
 - Export the session base (managed clone with `--repo`) and resolved workspace as raw `cruise.execution`-only trace attributes; telemetry remains opt-in.

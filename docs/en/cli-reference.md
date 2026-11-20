@@ -394,6 +394,10 @@ Shows or updates application-level settings stored in `config.json` or `config.y
 
 CLI UI language precedence is `CRUISE_UI_LANGUAGE` > application `uiLanguage` > system locale > `en`. Blank or `auto` environment values, and unset or `auto` config values, leave that layer unspecified. Invalid environment values are warned about in English and ignored; the CLI setter and application-config validation reject invalid values.
 
+Application configuration also accepts global output preferences; see [Global output preferences](configuration.md#output-preferences) for supported keys and precedence. These preferences do not change the UI language.
+
+`cruise config` displays set preferences as JSON value lines, for example `languages = {"plan":"Japanese","pr":"English"}`, `commit_message_template = "{title} [{session_id}]"`, and `pr_body_template = "## Summary\n{body}"`. Updates to other application settings preserve them. Edits to `default.yaml` or application settings do not change a saved snapshot; supported workflow-override environment variables explicitly sent with a CLI request still apply in memory for that request, without rewriting the snapshot.
+
 `cruise config --set-auto-requeue-max-attempts <N>` sets `run_all_auto_requeue_max_attempts` for CLI and WebUI Run All. The CLI flag `--auto-requeue-max-attempts <N>` overrides it for one batch.
 
 Set `prevent_sleep: true` in the machine-level `config.yaml` (or `"prevent_sleep": true` in `config.json`) to prevent sleep during runs on macOS; the default is `false`. This covers CLI and WebUI runs, but not planning alone. Other operating systems do nothing. Changes take effect on the next run. This setting is not supported in project `default.yaml`.

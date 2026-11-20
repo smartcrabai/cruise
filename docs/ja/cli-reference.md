@@ -393,6 +393,10 @@ Options:
 
 CLI の UI 言語は `CRUISE_UI_LANGUAGE` > アプリケーション `uiLanguage` > system locale > `en` の優先順です。空または `auto` の環境値、未設定または `auto` の config 値は、その優先層を未指定として扱います。無効な環境値は英語で警告して無視します。CLI setter とアプリケーション config の検証では無効値を拒否します。
 
+アプリケーション設定でもグローバル出力設定を指定できます。対応 key と優先順位は[グローバル出力設定](configuration.md#output-preferences)を参照してください。これらの設定は UI 言語を変更しません。
+
+`cruise config` は設定済みの値を JSON value line で表示します（例: `languages = {"plan":"Japanese","pr":"English"}`、`commit_message_template = "{title} [{session_id}]"`、`pr_body_template = "## Summary\n{body}"`）。他のアプリケーション設定を更新しても、これらの値は保持されます。後から `default.yaml` やアプリケーション設定を編集しても、保存済み snapshot は変わりません。対応する workflow override 環境変数を明示的に送った CLI request では、その request の間だけメモリ上で override されますが、snapshot は書き換えません。
+
 `cruise config --set-auto-requeue-max-attempts <N>` は CLI と WebUI の Run All 用に `run_all_auto_requeue_max_attempts` を設定します。CLI の `--auto-requeue-max-attempts <N>` flag は 1 batch だけ上書きします。
 
 macOS で実行中にスリープさせないには、machine-level `config.yaml` に `prevent_sleep: true`（または `config.json` に `"prevent_sleep": true`）を設定します。既定値は `false` です。CLI と WebUI の run が対象ですが、計画だけの場合は対象外です。その他の OS では何もしません。変更は次の run から有効です。プロジェクト `default.yaml` ではこの設定をサポートしません。
