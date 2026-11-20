@@ -353,6 +353,34 @@ async fn run_plan_prompt_template_with_conversation(
     } else {
         (Vec::new(), None)
     };
+    let sandbox_access = {
+        #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+        {
+            let mut access = crate::backend::jcode::SandboxAccess {
+                read_only: true,
+                require_bubblewrap: false,
+                inputs: Vec::with_capacity(2),
+                output_file: None,
+            };
+            let writes_plan_file = register_plan_tools && !plan_tools_enabled;
+            if writes_plan_file {
+                access.output_file = Some(ctx.plan_path.to_path_buf());
+            } else if ctx.plan_path.is_file() {
+                access.inputs.push(ctx.plan_path.to_path_buf());
+            }
+            if let Some(session_dir) = ctx.plan_path.parent() {
+                let attachments = session_dir.join(crate::attachments::ATTACHMENTS_DIRNAME);
+                if attachments.is_dir() {
+                    access.inputs.push(attachments);
+                }
+            }
+            access
+        }
+        #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+        {
+            crate::backend::jcode::SandboxAccess::default()
+        }
+    };
     let on_notice = |msg: &str| {
         if let Some(control) = &spinner_control {
             control.notify_or_defer(msg.to_string(), |notice| {
@@ -366,29 +394,32 @@ async fn run_plan_prompt_template_with_conversation(
         }
     };
     let outcome = executor
-        .run(PromptRun {
-            usage: Some(crate::usage::UsageScope {
-                session_id: ctx.usage_session_id,
-                step: None,
-                purpose: crate::usage::UsagePurpose::Planning,
-            }),
-            prompt: &prompt,
-            model,
-            subagent_model: ctx.config.subagent_model.as_ref(),
-            max_retries: ctx.rate_limit_retries,
-            env: &env,
-            mcp_servers: &ctx.config.mcp_servers,
-            on_notice: Some(&on_notice),
-            cancel_token: ctx.cancel_token,
-            working_dir: ctx.working_dir,
-            stream: stream_callbacks,
-            tools,
-            on_session_id: conversation_enabled.then_some(ctx.on_session_id).flatten(),
-            resume: conversation_enabled.then(|| resume.clone()).flatten(),
-            computer_use: ctx.config.computer_use(),
-            permission: crate::config::PermissionMode::Full,
-            tool_policy: crate::tool_policy::ToolPolicy::default(),
-        })
+        .run_with_jcode_access(
+            PromptRun {
+                usage: Some(crate::usage::UsageScope {
+                    session_id: ctx.usage_session_id,
+                    step: None,
+                    purpose: crate::usage::UsagePurpose::Planning,
+                }),
+                prompt: &prompt,
+                model,
+                subagent_model: ctx.config.subagent_model.as_ref(),
+                max_retries: ctx.rate_limit_retries,
+                env: &env,
+                mcp_servers: &ctx.config.mcp_servers,
+                on_notice: Some(&on_notice),
+                cancel_token: ctx.cancel_token,
+                working_dir: ctx.working_dir,
+                stream: stream_callbacks,
+                tools,
+                on_session_id: conversation_enabled.then_some(ctx.on_session_id).flatten(),
+                resume: conversation_enabled.then(|| resume.clone()).flatten(),
+                computer_use: ctx.config.computer_use(),
+                permission: crate::config::PermissionMode::Full,
+                tool_policy: crate::tool_policy::ToolPolicy::default(),
+            },
+            sandbox_access,
+        )
         .await;
     drop(spinner);
 

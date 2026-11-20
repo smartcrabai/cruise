@@ -118,7 +118,7 @@ fn transition(target: Option<String>, reason: TransitionReason, budgeted: bool) 
 pub(crate) struct StepExecOutcome {
     /// Next step chosen by an option step (if any).
     pub option_next: Option<String>,
-    /// True if the step failed (non-zero exit, prompt error, or timeout).
+    /// True if the step failed (unaccepted non-zero command exit, prompt error, or timeout).
     pub failed: bool,
     /// True only when native squash merge requires base resynchronization.
     pub native_resync_required: bool,
@@ -132,6 +132,8 @@ pub(crate) struct StepExecOutcome {
 }
 
 pub(crate) struct CommandStepOptions<'a> {
+    step_name: &'a str,
+    accepted_exit_codes: Option<&'a [u8]>,
     rate_limit_retries: usize,
     env: &'a HashMap<String, String>,
     working_dir: Option<&'a std::path::Path>,
@@ -1326,6 +1328,15 @@ async fn execute_step_kind_inner(
                     e @ (CruiseError::CommitGuardViolation(_) | CruiseError::MissingJcodeModel(_)),
                 ) => Err(e),
                 Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
+                Err(error @ CruiseError::InvalidStepConfig(_))
+                    if ctx
+                        .compiled
+                        .steps
+                        .get(current_step)
+                        .is_some_and(|config| config.require_bubblewrap) =>
+                {
+                    Err(error)
+                }
                 Err(e) if has_if_fail => {
                     crate::telemetry::record_error_type(e.telemetry_type());
                     crate::status_eprintln!(
@@ -1344,10 +1355,17 @@ async fn execute_step_kind_inner(
             }
         }
         StepKind::Command(step) => {
+            let accepted_exit_codes = ctx
+                .compiled
+                .steps
+                .get(current_step)
+                .and_then(|config| config.accepted_exit_codes.as_deref());
             let result = run_command_step(
                 vars,
                 step,
                 CommandStepOptions {
+                    step_name: current_step,
+                    accepted_exit_codes,
                     rate_limit_retries: ctx.rate_limit_retries,
                     env: merged_env,
                     working_dir: ctx.working_dir,
@@ -1673,6 +1691,10 @@ pub(crate) async fn run_prompt_step(
     delivered: Option<&str>,
     ask_handler: Option<&Arc<dyn crate::ask_handler::AskHandler>>,
 ) -> Result<Option<String>> {
+    let require_bubblewrap = compiled
+        .steps
+        .get(timeout_step_name)
+        .is_some_and(|config| config.require_bubblewrap);
     if let Some(inst) = &step.instruction {
         let resolved = vars.resolve(inst)?;
         if vars.input_is_empty() {
@@ -1776,6 +1798,41 @@ pub(crate) async fn run_prompt_step(
         on_stdout: Some(on_stdout),
         on_stderr: Some(on_stderr),
     };
+    let sandbox_access = {
+        #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+        {
+            let mut access = crate::backend::jcode::SandboxAccess {
+                read_only: permission == crate::config::PermissionMode::ReadOnly,
+                require_bubblewrap,
+                inputs: Vec::with_capacity(3),
+                output_file: None,
+            };
+            if let Some(plan_path) = vars.named_file(crate::session::PLAN_VAR) {
+                if plan_path.is_file() {
+                    access.inputs.push(plan_path.to_path_buf());
+                }
+                if let Some(session_dir) = plan_path.parent() {
+                    let attachments = session_dir.join(crate::attachments::ATTACHMENTS_DIRNAME);
+                    if attachments.is_dir() {
+                        access.inputs.push(attachments);
+                    }
+                }
+            }
+            if let Some(root) = vars.artifacts_root()
+                && root.is_dir()
+            {
+                access.inputs.push(root.to_path_buf());
+            }
+            access
+        }
+        #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+        {
+            crate::backend::jcode::SandboxAccess {
+                require_bubblewrap,
+                ..Default::default()
+            }
+        }
+    };
     let prompt_result = {
         let on_notice = |msg: &str| {
             if let Some(spinner) = &spinner {
@@ -1785,32 +1842,35 @@ pub(crate) async fn run_prompt_step(
                 cb("info", msg);
             }
         };
-        let run_future = executor.run(crate::executor::PromptRun {
-            usage: Some(crate::usage::UsageScope {
-                session_id: usage_session_id,
-                step: Some(timeout_step_name),
-                purpose: crate::usage::UsagePurpose::WorkflowStep,
-            }),
-            prompt: &prompt,
-            model: model_or_mode.as_ref(),
-            subagent_model: step
-                .subagent_model
-                .as_ref()
-                .or(compiled.subagent_model.as_ref()),
-            max_retries: rate_limit_retries,
-            env: prompt_env,
-            mcp_servers: &mcp_servers,
-            on_notice: Some(&on_notice),
-            cancel_token: Some(&prompt_cancel_token),
-            working_dir,
-            stream: Some(&stream_callbacks),
-            tools,
-            on_session_id: None,
-            resume: None,
-            computer_use,
-            permission,
-            tool_policy,
-        });
+        let run_future = executor.run_with_jcode_access(
+            crate::executor::PromptRun {
+                usage: Some(crate::usage::UsageScope {
+                    session_id: usage_session_id,
+                    step: Some(timeout_step_name),
+                    purpose: crate::usage::UsagePurpose::WorkflowStep,
+                }),
+                prompt: &prompt,
+                model: model_or_mode.as_ref(),
+                subagent_model: step
+                    .subagent_model
+                    .as_ref()
+                    .or(compiled.subagent_model.as_ref()),
+                max_retries: rate_limit_retries,
+                env: prompt_env,
+                mcp_servers: &mcp_servers,
+                on_notice: Some(&on_notice),
+                cancel_token: Some(&prompt_cancel_token),
+                working_dir,
+                stream: Some(&stream_callbacks),
+                tools,
+                on_session_id: None,
+                resume: None,
+                computer_use,
+                permission,
+                tool_policy,
+            },
+            sandbox_access,
+        );
 
         if let Some(duration) = timeout {
             tokio::pin!(run_future);
@@ -1855,36 +1915,109 @@ pub(crate) async fn run_prompt_step(
     Ok(skip_step_reason)
 }
 
-/// Execute a command step, updating variable state and returning whether it succeeded.
+/// Execute a command step, updating variable state and returning whether its
+/// terminal status is accepted for graph execution.
 pub(crate) async fn run_command_step(
     vars: &mut VariableStore,
     step: &CommandStep,
     options: CommandStepOptions<'_>,
 ) -> Result<bool> {
-    let cmds: Vec<String> = step
-        .command
-        .iter()
-        .map(|c| vars.resolve(c))
-        .collect::<Result<Vec<_>>>()?;
+    let mut cmds = Vec::with_capacity(step.command.len());
+    for command in &step.command {
+        match vars.resolve(command) {
+            Ok(command) => cmds.push(command),
+            Err(error) if let Some(accepted_exit_codes) = options.accepted_exit_codes => {
+                let detail = error.to_string();
+                vars.set_prev_success(Some(false));
+                vars.set_prev_stderr(Some(detail.clone()));
+                vars.set_prev_output(None);
+                vars.set_prev_input(None);
+                return Err(CruiseError::RequiredCommandFailed {
+                    step: options.step_name.to_string(),
+                    command: command.to_string(),
+                    accepted_exit_codes: accepted_exit_codes.to_vec(),
+                    exit_code: None,
+                    signal: None,
+                    detail,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let mut result = crate::step::command::CommandResult {
+        success: true,
+        stderr: String::new(),
+        exit_code: None,
+        signal: None,
+    };
+    let mut last_command = "";
+    let max_rate_limit_retries = if options.accepted_exit_codes.is_some() {
+        0
+    } else {
+        options.rate_limit_retries
+    };
+    for command in &cmds {
+        result = match crate::step::command::run_commands(
+            std::slice::from_ref(command),
+            max_rate_limit_retries,
+            options.env,
+            options.working_dir,
+            options.timeout,
+            options.on_step_log,
+            options.cancel_token,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(CruiseError::Interrupted) => return Err(CruiseError::Interrupted),
+            Err(error) if let Some(accepted_exit_codes) = options.accepted_exit_codes => {
+                let detail = error.to_string();
+                vars.set_prev_success(Some(false));
+                vars.set_prev_stderr(Some(detail.clone()));
+                vars.set_prev_output(None);
+                vars.set_prev_input(None);
+                return Err(CruiseError::RequiredCommandFailed {
+                    step: options.step_name.to_string(),
+                    command: command.to_string(),
+                    accepted_exit_codes: accepted_exit_codes.to_vec(),
+                    exit_code: None,
+                    signal: None,
+                    detail,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        last_command = command.as_str();
+        if !result.success {
+            break;
+        }
+    }
 
-    let result = crate::step::command::run_commands(
-        &cmds,
-        options.rate_limit_retries,
-        options.env,
-        options.working_dir,
-        options.timeout,
-        options.on_step_log,
-        options.cancel_token,
-    )
-    .await?;
-
-    let success = result.success;
-    vars.set_prev_success(Some(success));
+    let status_success = result.success;
+    let exit_code = result.exit_code;
+    let signal = result.signal;
+    vars.set_prev_success(Some(status_success));
     vars.set_prev_stderr(Some(result.stderr));
     vars.set_prev_output(None);
     vars.set_prev_input(None);
 
-    Ok(success)
+    let Some(accepted_exit_codes) = options.accepted_exit_codes else {
+        return Ok(status_success);
+    };
+    let accepted = exit_code
+        .and_then(|code| u8::try_from(code).ok())
+        .is_some_and(|code| accepted_exit_codes.contains(&code));
+    if !accepted {
+        return Err(CruiseError::RequiredCommandFailed {
+            step: options.step_name.to_string(),
+            command: last_command.to_string(),
+            accepted_exit_codes: accepted_exit_codes.to_vec(),
+            exit_code,
+            signal,
+            detail: "command exit status is missing or not in accepted_exit_codes".to_string(),
+        });
+    }
+    Ok(true)
 }
 
 /// Execute an option step, updating variable state and returning the chosen next step.
@@ -4485,6 +4618,214 @@ steps:
 
         assert!(repo.path().join("jumped.txt").exists());
         assert!(!repo.path().join("continued.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn accepted_conflict_status_preserves_head_changed_resolver_transition() {
+        let repo = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        crate::test_support::init_git_repo(repo.path());
+        std::fs::write(repo.path().join("tracked.txt"), "before")
+            .unwrap_or_else(|error| panic!("{error}"));
+        crate::test_support::run_git_ok(repo.path(), &["add", "tracked.txt"]);
+        crate::test_support::run_git_ok(repo.path(), &["commit", "-m", "status fixture"]);
+
+        let yaml = r#"
+command: [echo]
+steps:
+  seed:
+    command: true
+after-pr:
+  apply:
+    command: |
+      printf 'run\n' >> invocations
+      printf 'rate limit exceeded\n' >&2
+      git commit --allow-empty -m "accepted conflict status"
+      exit 75
+    accepted_exit_codes: [0, 75]
+    next: terminal
+    if:
+      head-changed: resolver
+  continue:
+    command: "printf continued > continued.txt"
+    next: terminal
+  resolver:
+    command: 'test "{prev.success}" = false && printf resolver > resolver.txt'
+    next: terminal
+  terminal:
+    command: "true"
+"#;
+        let _guard = crate::test_support::lock_process();
+        let config = make_config(yaml);
+        let compiled = crate::workflow::compile(config)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let after_compiled = compiled.to_after_pr_compiled();
+        let mut dag = crate::dag::build_dag(&after_compiled, 10)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let start = dag.start.clone();
+        let mut vars = VariableStore::new(String::new());
+        let mut tracker = FileTracker::with_root(repo.path().to_path_buf());
+        let ctx = ExecutionContext {
+            instructions: None,
+            usage_session_id: None,
+            compiled: &after_compiled,
+            max_retries: 10,
+            rate_limit_retries: 2,
+            on_step_start: &|_| Ok(()),
+            cancel_token: None,
+            option_handler: &NoOpOptionHandler,
+            ask_handler: None,
+            config_reloader: None,
+            working_dir: Some(repo.path()),
+            skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
+            on_step_log: None,
+        };
+        let result = execute_steps_with_dag(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut dag,
+            &start,
+            &|_checkpoint, _dag| Ok(()),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error:?}"));
+
+        assert_eq!(result.failed, 0, "accepted status must not count as failure");
+        assert!(repo.path().join("resolver.txt").exists());
+        let invocations = std::fs::read_to_string(repo.path().join("invocations"))
+            .unwrap_or_else(|error| panic!("read invocation count: {error}"));
+        assert_eq!(invocations.lines().count(), 1, "{invocations:?}");
+        assert!(!repo.path().join("continued.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn required_command_failure_stops_before_next_and_if_fail_effects() {
+        let repo = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  required:
+    command: "exit 1"
+    accepted_exit_codes: [0, 75]
+    if:
+      fail: recover
+  next:
+    command: "touch next-effect"
+  recover:
+    command: "touch recover-effect"
+"#;
+        let result = run_config_inner(
+            yaml,
+            "",
+            None,
+            repo.path().to_path_buf(),
+            10,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await;
+
+        let Err(error) = result else {
+            panic!("expected RequiredCommandFailed, got Ok");
+        };
+        let CruiseError::RequiredCommandFailed {
+            step, exit_code, ..
+        } = error
+        else {
+            panic!("expected RequiredCommandFailed, got {error:?}");
+        };
+        assert_eq!(step, "required");
+        assert_eq!(exit_code, Some(1));
+        assert!(!repo.path().join("next-effect").exists());
+        assert!(!repo.path().join("recover-effect").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn required_command_runtime_error_is_typed() {
+        let repo = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let yaml = r#"
+command: [echo]
+steps:
+  required:
+    command: "sleep 5"
+    accepted_exit_codes: [0]
+    timeout: "1"
+  next:
+    command: "touch next-effect"
+"#;
+        let result = run_config_inner(
+            yaml,
+            "",
+            None,
+            repo.path().to_path_buf(),
+            10,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await;
+
+        let Err(error) = result else {
+            panic!("expected RequiredCommandFailed for runtime error, got Ok");
+        };
+        let CruiseError::RequiredCommandFailed { step, detail, .. } = error else {
+            panic!("expected RequiredCommandFailed for runtime error, got {error:?}");
+        };
+        assert_eq!(step, "required");
+        assert!(detail.contains("timed out"), "{detail}");
+        assert!(!repo.path().join("next-effect").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn require_bubblewrap_rejects_command_backend_before_sentinel_spawn() {
+        let repo = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+        let yaml = r#"
+command: [sh, -c, "touch prompt-spawned"]
+steps:
+  protected:
+    prompt: "Write the requested fix."
+    require_bubblewrap: true
+    if:
+      fail: recover
+  next:
+    command: "touch next-effect"
+  recover:
+    command: "touch recover-effect"
+"#;
+        let result = run_config_inner(
+            yaml,
+            "task",
+            None,
+            repo.path().to_path_buf(),
+            10,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await;
+
+        let Err(error) = result else {
+            panic!("expected terminal InvalidStepConfig, got Ok");
+        };
+        let CruiseError::InvalidStepConfig(message) = error else {
+            panic!("expected InvalidStepConfig, got {error:?}");
+        };
+        assert!(message.contains("command backend"), "{message}");
+        assert!(!repo.path().join("prompt-spawned").exists());
+        assert!(!repo.path().join("next-effect").exists());
+        assert!(!repo.path().join("recover-effect").exists());
     }
 
     #[cfg(unix)]

@@ -71,6 +71,8 @@ steps:
       - cargo test
 ```
 
+指定 `accepted_exit_codes` 后，普通命令步骤是必需的（不支持 `parallel:` 的子步骤）。列表必须包含 `0`，且不能重复。允许的非零退出码仍使 `{prev.success}` 为 `false`。未列出的退出码、信号、超时或启动失败会停止工作流，不走 `if.fail`。省略此字段会保留原有的失败路由。
+
 <a id="parallel-steps"></a>
 ### 并行步骤
 
@@ -112,7 +114,7 @@ steps:
 
 超时触发时：
 
-- **命令步骤**：子进程会被终止，步骤被视为失败（非零退出）。`{prev.success}` 为 `false`，工作流按常规失败路径执行（见下文 `if.fail`）。
+- **命令步骤**：终止子进程，并将 `{prev.success}` 设为 `false`。指定 `accepted_exit_codes` 时停止工作流，否则按常规失败路径（`if.fail`）执行。
 - **提示步骤**：LLM 调用会中止，步骤被视为失败。
 
 无效的超时字符串会在配置校验时被拒绝。group 和 `after-pr` 中定义的步骤也遵守超时设置。
@@ -165,6 +167,14 @@ after-pr:
 
 `after-pr` 中的提示步骤也受相同的默认保护。若某个 after-PR 提示需要推进 `HEAD`，请单独设置 `allow_commit: true`。
 
+内置的 PR 后提示禁止提交、推送和调用代码托管服务。宿主提交经过验证的冲突修复，只向对应的 PR/MR 分支推送。CI 修复以当前 HEAD 的证据为准：验证候选树后发布并重查 CI、在会话中对符合条件的同一 HEAD 作业重试一次，或者停止且不合并。原生合并步骤仍会独立检查是否可以合并。
+
+`require_bubblewrap: true` 要求提示或 GitHub 评审步骤使用实际的 Linux jcode 隔离。内置冲突修复、CI 修复和评审提示使用此设置，回退时也不会启动不隔离的后端。
+
+自动提交 CI 修复需要启用 `jcode-bubblewrap` 的 Linux 构建。在守护进程环境中把 `CRUISE_CI_VERIFY_SCRIPT` 设为工作树之外可信 shell 脚本的绝对路径。脚本不能有其他硬链接，组和其他用户不能写入。判定规则不得来自候选树中的脚本。候选树只读挂载于 `/candidate`，`/tmp` 可写，无网络且不继承凭据。脚本未配置、执行失败或树不受支持（例如包含符号链接或子模块）时，不会发布修复。已保存的会话保留原工作流。
+
+在临时合并 SHA 上运行的 GitLab merged-results 流水线不能授权重试或自动修复；必须有源分支 HEAD 的证据。
+
 <a id="review-loop-github-review"></a>
 ### 评审循环（`github-review`）
 
@@ -177,7 +187,7 @@ after-pr:
       bots: ["coderabbitai[bot]"]   # any one of these reviewing the current PR head ends the wait
       max-iterations: 3             # default 3
     prompt: |
-      Fix the review comments and commit the changes.
+      Fix the review comments without staging, committing, or pushing.
       Reply with the requested JSON describing each thread.
     allow_commit: true
     timeout: 30m                    # required; bounds the whole loop
@@ -186,7 +196,7 @@ after-pr:
 
 在机器人模式下，每轮都会等待列出的某个机器人对当前 head commit 提交评审，然后获取该机器人发起的所有未解决线程（包含所有分页）。在全评审者模式下，会立即获取符合条件的未解决线程，不等待新评审。
 
-两种模式都会将线程数据附加给提示后运行，提示必须只返回 JSON：`{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`。Cruise 会通过 `gh api graphql` 发布回复并解决线程（要求 `gh` 已认证）。提示创建的提交会被推送；若仍有未提交的更改，步骤会失败。`github-review` 失败会将运行标记为 `Failed`。该步骤只能直接出现在 `after-pr` 中。
+两种模式都会把线程数据附加到提示中，并只接受 JSON：`{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`。此步骤中的 `allow_commit: true` 授权 Cruise 而非提示提交并推送已验证的修改。发布成功或确认无需修改后，Cruise 才通过已认证的 `gh api graphql` 回复和解决线程。该步骤只能直接出现在 `after-pr` 中，失败会将运行标记为 `Failed`。
 
 默认的 `reviewers: bots` 保留上述行为，并要求 `bots` 列表非空且无重复。若要处理已有的人类和机器人反馈，可使用 `github-review: { reviewers: all, max-iterations: 3 }`，并省略 `bots` 或将其设为空列表。此模式不会等待新评审。将线程文本传给智能体之前，Cruise 会检查每位作者在仓库中的协作者权限：只有 `write`、`maintain` 或 `admin` 作者符合条件。当没有符合条件的未解决线程时循环成功；若达到迭代上限时仍有符合条件的线程，则循环失败。
 

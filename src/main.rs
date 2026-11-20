@@ -11,6 +11,8 @@ mod batch_dashboard;
 mod branch_diff;
 mod builtin_workflows;
 mod cancellation;
+#[path = "worktree_pr/ci_followup.rs"]
+mod ci_followup;
 mod clean_cmd;
 mod cli;
 mod cli_events;
@@ -52,6 +54,8 @@ mod formal_verify;
 mod github_review;
 mod graph;
 mod herdr;
+#[path = "worktree_pr/host_sync.rs"]
+mod host_sync;
 mod http_download;
 mod i18n;
 mod install_identity;
@@ -60,6 +64,7 @@ mod instruction_inbox;
 mod issue_images;
 mod issue_input;
 mod issue_publish;
+mod ledger_snapshot;
 mod list_cmd;
 mod local_merge;
 mod metadata;
@@ -139,6 +144,19 @@ fn main() {
         }))
     ) {
         std::process::exit(tool_policy::run_jcode_pre_tool_gate());
+    }
+    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+    if let Some(cli::Commands::Internal(cli::InternalArgs {
+        command: cli::InternalCommand::JcodeRelay { socket, ready, port },
+    })) = &cli.command
+    {
+        match backend::jcode::relay(socket, ready, *port) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("cruise: jcode namespace relay failed: {error}");
+                std::process::exit(1);
+            }
+        }
     }
     // Removed bridge registrations must fail before runtime initialization.
     if matches!(&cli.command, Some(cli::Commands::McpBridge(_))) {
@@ -264,16 +282,96 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         })) => daemon::server::run_daemon(instance_id, host, port, port_implicit, webui_dir).await,
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::SyncBase { pr_number, url },
-        })) => match worktree_pr::sync_base(&pr_number, url.as_deref()) {
-            Ok(()) => Ok(()),
-            Err((failure, error)) => {
+        })) => {
+            let plan = std::env::var_os("CRUISE_SYNC_PLAN").map(std::path::PathBuf::from);
+            let cwd = std::env::current_dir()?;
+            let result = if let Some(plan) = &plan {
+                let base = host_sync::clear_sync_result(plan, &cwd, &pr_number, url.as_deref())?;
+                worktree_pr::sync_validated_base(&cwd, &base)
+            } else {
+                worktree_pr::sync_base(&pr_number, url.as_deref())
+            };
+            if let Err((failure, _)) = &result {
                 eprintln!("CRUISE_SYNC_BASE_DIAGNOSTIC_V1 {}", failure.marker_value());
-                Err(error)
             }
-        },
+            if let Some(plan) = &plan {
+                let outcome = result.as_ref().map(|_| ()).map_err(|(kind, _)| *kind);
+                host_sync::record_sync_result(plan, &cwd, &pr_number, url.as_deref(), outcome)?;
+            }
+            match result {
+                Ok(()) => Ok(()),
+                Err((failure, error)) => {
+                    if plan.is_some() && failure == worktree_pr::SyncBaseFailure::MergeConflict {
+                        eprintln!("{error}");
+                        std::process::exit(75);
+                    }
+                    Err(error)
+                }
+            }
+        }
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::SyncReviewHead,
+        })) => worktree_pr::sync_review_head(&std::env::current_dir()?),
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::TddLedgerSnapshot,
+        })) => ledger_snapshot::refresh_after_apply(
+            &std::env::current_dir()?,
+            &path_from_env("CRUISE_TDD_LEDGER_PLAN")?,
+        ),
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::FinishConflictCommit,
+        })) => host_sync::finish_conflict_commit(
+            &path_from_env("CRUISE_SYNC_PLAN")?,
+            &std::env::current_dir()?,
+        ),
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::PushAfterSync,
+        })) => host_sync::push_after_sync(
+            &path_from_env("CRUISE_SYNC_PLAN")?,
+            &std::env::current_dir()?,
+        ),
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::ClearCiFollowup,
+        })) => ci_followup::clear(
+            &std::env::current_dir()?,
+            &path_from_env("CRUISE_AFTER_PR_PLAN")?,
+        ),
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::CaptureCiFollowup,
+        })) => {
+            use std::io::Read as _;
+            const MAX_DIAGNOSTIC: usize = 32 * 1024;
+            let mut diagnostic = String::new();
+            std::io::stdin()
+                .take((MAX_DIAGNOSTIC + 1) as u64)
+                .read_to_string(&mut diagnostic)?;
+            if diagnostic.len() > MAX_DIAGNOSTIC {
+                return Err(error::CruiseError::Other("CI diagnostic exceeds the size limit".into()));
+            }
+            ci_followup::evidence(
+                &std::env::current_dir()?,
+                &path_from_env("CRUISE_AFTER_PR_PLAN")?,
+                &text_from_env("CRUISE_AFTER_PR_NUMBER")?,
+                &text_from_env("CRUISE_AFTER_PR_URL")?,
+                &diagnostic,
+            )
+        }
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::FinishCiFollowup,
+        })) => ci_followup::finish(
+            &std::env::current_dir()?,
+            &path_from_env("CRUISE_AFTER_PR_PLAN")?,
+            &text_from_env("CRUISE_AFTER_PR_NUMBER")?,
+            &text_from_env("CRUISE_AFTER_PR_URL")?,
+            run_approved_ci_verifier,
+        ),
         Some(cli::Commands::Internal(cli::InternalArgs {
             command: cli::InternalCommand::JcodePreTool,
         })) => unreachable!("jcode pre-tool gate exits before runtime initialization"),
+        #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+        Some(cli::Commands::Internal(cli::InternalArgs {
+            command: cli::InternalCommand::JcodeRelay { .. },
+        })) => unreachable!("jcode relay exits before runtime initialization"),
         Some(cli::Commands::McpBridge(_)) => {
             unreachable!("removed mcp-bridge exits before runtime initialization")
         }
@@ -350,5 +448,36 @@ async fn run_workflow(command: cli::WorkflowCommand) -> error::Result<()> {
         cli::WorkflowCommand::Add(args) => workflow_cmd::add(&args.spec, args.name, args.yes),
         cli::WorkflowCommand::Update(args) => workflow_cmd::update(&args.name, args.yes),
         cli::WorkflowCommand::Remove(args) => workflow_cmd::remove(&args.name),
+    }
+}
+
+fn path_from_env(name: &str) -> error::Result<std::path::PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| error::CruiseError::Other(format!("missing {name}")))
+}
+
+fn text_from_env(name: &str) -> error::Result<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| error::CruiseError::Other(format!("missing or invalid {name}")))
+}
+
+fn run_approved_ci_verifier(candidate: &std::path::Path) -> error::Result<()> {
+    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+    {
+        let script = path_from_env("CRUISE_CI_VERIFY_SCRIPT")?;
+        let worktree = std::env::current_dir()?.canonicalize()?;
+        backend::jcode::verify_ci_snapshot(candidate, &worktree, &script)
+            .map_err(error::CruiseError::Other)
+    }
+    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+    {
+        let _ = candidate;
+        Err(error::CruiseError::Other(
+            "automatic CI fix commits require the Linux jcode-bubblewrap verifier".into(),
+        ))
     }
 }

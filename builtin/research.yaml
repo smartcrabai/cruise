@@ -65,7 +65,7 @@ after-pr:
           {file:research/review.md}
           {file:research/report.md}
 
-          A conflict occurred while syncing PR/MR #{pr.number} ({pr.url}) with its base. Resolve only conflicts this after-PR lifecycle needs; preserve unrelated work; stage and commit. Do not push (next step does), copy/publish the research report into the repository, or create/merge a PR.
+          A conflict occurred while syncing PR/MR #{pr.number} ({pr.url}) with its base. Resolve only conflicts this after-PR lifecycle needs and preserve unrelated work; do not copy or publish the research report into the repository.
       fix_ci_error_scope: |-
           Use only host-managed artifacts/current PR changes; do not copy/publish research reports into the repository:
           {file:research/plan.md}

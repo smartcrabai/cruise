@@ -303,7 +303,7 @@ after-pr:
 
           Task/report scope: stay within the frozen scope and current task changes. Do not rely on implicit prompt history.
 
-          A conflict occurred while synchronizing PR/MR #{pr.number} ({pr.url}) with its base branch. Use the frozen scope artifact as baseline context, not permission to overwrite other work. Resolve only this conflict within scope, preserve unrelated changes, then stage and commit the resolution. Do not push; the following step handles it. Never weaken tests, scanners, assertions, checks, or policy to get green. Do not create or merge a PR directly.
+          A conflict occurred while synchronizing PR/MR #{pr.number} ({pr.url}) with its base branch. Use the frozen scope artifact as baseline context, not permission to overwrite other work. Resolve only this conflict within scope and preserve unrelated changes. Never weaken tests, scanners, assertions, checks, or policy to get green.
       fix_ci_error_scope: |-
           Use the frozen scope artifact as the baseline, not permission to overwrite other work:
           {file:refactor/baseline.md}

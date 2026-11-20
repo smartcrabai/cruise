@@ -113,6 +113,8 @@ git update-ref             git config core.hooksPath  git -c core.hooksPath=
 
 MCP 制限が filter するのは backend 起動前の workflow 提供 entry のみです。user-level backend MCP 設定と Cruise 独自 session tool は有効なままで影響を受けません。Claude の `shell:<prefix>` 拒否は Git global option を正規化しないため、たとえば `git -C path commit` が拒否されないことがあります。jcode では workflow または process 環境変数 `JCODE_HOOKS_DISABLED` で shell gate を無効化でき、hook の実行失敗時も fail-open になります。これらの制御は多層防御であり sandbox ではありません。prompt warning、reference-transaction hook、CAS rollback も引き続き適用されます。
 
+Linux の opt-in `jcode-bubblewrap` build では試行ごとに daemon を起動し、Git metadata を読み取り専用にします。`GIT_OPTIONAL_LOCKS=0` で `git status` / `git diff` / `git log` は使用可能。stage、commit、push はホストが行います。ホスト側で index を置換した場合、変更が見えるのは次の試行です。共有 `jcode serve` には接続しません。
+
 <a id="sdk-claude--the-claude-cli-in-process"></a>
 ### `sdk: claude` — in-process の claude CLI
 

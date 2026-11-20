@@ -185,7 +185,7 @@ after-pr:
           {file:security/repairs.md}
           {file:security/verification.md}
 
-          Resolve only accepted security-repair-scope conflicts while synchronizing PR/MR #{pr.number} ({pr.url}) with base. Preserve unrelated work; stage and commit the resolution; do not push (the next step does). Never weaken tests, scanners, security controls, checks, or branch policy for green, or independently create/merge a PR.
+          Resolve only accepted security-repair-scope conflicts while synchronizing PR/MR #{pr.number} ({pr.url}) with base. Preserve unrelated work. Never weaken tests, scanners, security controls, checks, or branch policy for green.
       fix_ci_error_scope: |-
           Use the security scope, adjudicated worklist, and current repair/verification reports:
           {file:security/scope.md}

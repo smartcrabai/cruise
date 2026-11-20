@@ -10,9 +10,10 @@
 //! thread, subscribes before sending the prompt, and answers session-tool calls
 //! with the existing in-process handlers.
 
+#[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+use jcode_sdk::LaunchOptions;
 use jcode_sdk::{
-    ApiEvent, JcodeClient, LaunchOptions, ModelRouteInfo, SessionToolDefinition, ToolConfiguration,
-    TurnStopReason,
+    ApiEvent, JcodeClient, ModelRouteInfo, SessionToolDefinition, ToolConfiguration, TurnStopReason,
 };
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
@@ -33,6 +34,19 @@ use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
 use crate::provider_install::release::JCODE_MIN_VERSION;
+
+#[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+mod linux;
+#[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+pub(crate) use linux_sandbox::verify_ci_snapshot;
+#[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+mod linux_git;
+#[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+mod linux_proxy;
+#[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+mod linux_sandbox;
+#[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+pub(crate) use linux_proxy::relay;
 
 fn usage_round_from_token_usage(
     input: u64,
@@ -114,6 +128,21 @@ pub(crate) struct JcodeRunnerConfig {
     pub(crate) cancel: Option<CancellationToken>,
     pub(crate) keep_session_home: bool,
     pub(crate) computer_use: bool,
+    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+    pub(crate) sandbox_access: SandboxAccess,
+}
+
+#[derive(Clone, Default)]
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "jcode-bubblewrap")),
+    expect(dead_code, reason = "only the Bubblewrap backend consumes filesystem grants")
+)]
+pub(crate) struct SandboxAccess {
+    pub(crate) read_only: bool,
+    /// The caller requires a real Linux Bubblewrap attempt and jcode-only SDK candidates.
+    pub(crate) require_bubblewrap: bool,
+    pub(crate) inputs: Vec<PathBuf>,
+    pub(crate) output_file: Option<PathBuf>,
 }
 
 /// Cruise's `provider/model[:effort]` syntax, parsed once for each fallback
@@ -165,6 +194,10 @@ fn run_attempt(
     prompt: &str,
     tx: &SyncSender<StreamChunk>,
 ) -> std::result::Result<StreamChunk, String> {
+    if cfg!(all(feature = "jcode-bubblewrap", not(target_os = "linux"))) {
+        let _ = tx.send(StreamChunk::RetryBarrier);
+        return Err("the jcode-bubblewrap build requires Linux".into());
+    }
     let source_home = resolve_source_home(config.cwd.as_deref());
     let session_key = config.resume_session_id.as_deref().map_or_else(
         || uuid::Uuid::new_v4().simple().to_string(),
@@ -188,12 +221,14 @@ fn run_attempt(
             "session",
             "session_home_prepare_failed",
         );
+        #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+        let _ = tx.send(StreamChunk::RetryBarrier);
     })?;
     let mut session_id = None;
     let run_result = match launch_client(config, &home, &mut failure_recorded) {
-        Ok(client) => {
+        Ok(runtime) => {
             let result = run_client_turn(
-                &client,
+                &runtime.client,
                 config,
                 prompt,
                 tx,
@@ -204,10 +239,11 @@ fn run_attempt(
             if result.is_err() {
                 record_failure(&mut failure_recorded, "session", "session_operation_failed");
             }
-            drop(client);
-            let cleanup_result = clear_private_daemon(&home.storage_home);
+            let cleanup_result = runtime.stop(&home);
             if cleanup_result.is_err() {
                 record_failure(&mut failure_recorded, "cleanup", "runtime_cleanup_failed");
+                #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+                let _ = tx.send(StreamChunk::RetryBarrier);
             }
             match (result, cleanup_result) {
                 (Ok(terminal), Ok(())) => Ok(terminal),
@@ -222,6 +258,8 @@ fn run_attempt(
         }
         Err(error) => {
             record_failure(&mut failure_recorded, "launch", "sdk_launch_failed");
+            #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+            let _ = tx.send(StreamChunk::RetryBarrier);
             Err(error)
         }
     };
@@ -244,26 +282,41 @@ fn run_attempt(
     }
 }
 
+struct Runtime {
+    client: JcodeClient,
+    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+    sandbox: linux::Runtime,
+}
+
+impl Runtime {
+    fn stop(self, home: &SessionHome) -> std::result::Result<(), String> {
+        drop(self.client);
+        #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+        {
+            let _ = home;
+            self.sandbox.stop()
+        }
+        #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+        clear_private_daemon(&home.storage_home).map_err(|error| error.to_string())
+    }
+}
+
 fn launch_client(
     config: &JcodeRunnerConfig,
     home: &SessionHome,
     failure_recorded: &mut bool,
-) -> std::result::Result<JcodeClient, String> {
-    #[cfg(unix)]
-    validate_sdk_socket_paths(&home.sdk_home).inspect_err(|_error| {
-        record_failure(failure_recorded, "launch", "launch_setup_failed");
-    })?;
-    clear_private_daemon(&home.storage_home).map_err(|error| {
-        record_failure(failure_recorded, "cleanup", "stale_runtime_cleanup_failed");
-        format!("could not clean up stale private jcode runtime: {error}")
-    })?;
-    let mut options = LaunchOptions {
-        binary: config.binary.clone(),
-        jcode_home: Some(home.sdk_home.clone()),
-        working_dir: config.cwd.clone(),
-        inherit_logins: false,
-        ..Default::default()
-    };
+) -> std::result::Result<Runtime, String> {
+    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+    {
+        #[cfg(unix)]
+        validate_sdk_socket_paths(&home.sdk_home).inspect_err(|_| {
+            record_failure(failure_recorded, "launch", "launch_setup_failed");
+        })?;
+        clear_private_daemon(&home.storage_home).map_err(|error| {
+            record_failure(failure_recorded, "cleanup", "stale_runtime_cleanup_failed");
+            format!("could not clean up stale private jcode runtime: {error}")
+        })?;
+    }
     let skip_user_lists = config.computer_use
         && config.permission == crate::config::PermissionMode::Full
         && !config.tool_policy.deny_web
@@ -283,7 +336,11 @@ fn launch_client(
     {
         None
     } else {
-        fs::read_to_string(home.storage_home.join(JCODE_CONFIG_FILE)).ok()
+        #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+        let settings_home = &home.source_home;
+        #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+        let settings_home = &home.storage_home;
+        fs::read_to_string(settings_home.join(JCODE_CONFIG_FILE)).ok()
     };
     let gate_command = if needs_gate {
         match std::env::current_exe() {
@@ -307,7 +364,7 @@ fn launch_client(
     {
         eprintln!("cruise: warning: JCODE_HOOKS_DISABLED disables the jcode shell gate");
     }
-    options.env = launch_environment(
+    let env = launch_environment(
         &config.env,
         config.provider.as_deref(),
         config.model.as_deref(),
@@ -323,25 +380,42 @@ fn launch_client(
             gate_command: gate_command.as_deref(),
         },
     );
-    // jcode rejects symlink auth homes; keep the short alias only for SDK sockets.
-    options.env.insert(
-        OsString::from(JCODE_HOME_ENV),
-        home.storage_home.as_os_str().to_os_string(),
-    );
-    JcodeClient::launch(options).map_err(|error| {
-        let hint = if matches!(
-            &error.kind,
-            &jcode_sdk::ErrorKind::JcodeNotFound
-                | &jcode_sdk::ErrorKind::HandshakeFailed
-                | &jcode_sdk::ErrorKind::Harness(jcode_sdk::api::ErrorCode::UnsupportedVersion)
-        ) {
-            format!("; install or upgrade jcode to {JCODE_MIN_VERSION} or newer with `cruise install jcode`")
-        } else {
-            String::new()
+    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+    {
+        let (client, sandbox) = linux::launch(config, home, env).inspect_err(|_| {
+            record_failure(failure_recorded, "launch", "sandbox_setup_failed");
+        })?;
+        Ok(Runtime { client, sandbox })
+    }
+    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+    {
+        let mut options = LaunchOptions {
+            binary: config.binary.clone(),
+            jcode_home: Some(home.sdk_home.clone()),
+            working_dir: config.cwd.clone(),
+            inherit_logins: false,
+            env,
+            ..Default::default()
         };
-        record_sdk_failure(failure_recorded, "launch", &error);
-        format!("could not start the jcode SDK runtime{hint}: {error}")
-    })
+        // The short alias selects sockets, not jcode's real auth directory.
+        options.env.insert(JCODE_HOME_ENV.into(), home.storage_home.as_os_str().into());
+        JcodeClient::launch(options)
+            .map(|client| Runtime { client })
+            .map_err(|error| {
+                let hint = if matches!(
+                    &error.kind,
+                    jcode_sdk::ErrorKind::JcodeNotFound
+                        | jcode_sdk::ErrorKind::HandshakeFailed
+                        | jcode_sdk::ErrorKind::Harness(jcode_sdk::api::ErrorCode::UnsupportedVersion)
+                ) {
+                    format!("; install or upgrade jcode to {JCODE_MIN_VERSION} or newer with `cruise install jcode`")
+                } else {
+                    String::new()
+                };
+                record_sdk_failure(failure_recorded, "launch", &error);
+                format!("could not start the jcode SDK runtime{hint}: {error}")
+            })
+    }
 }
 
 fn sdk_failure_reason(kind: &jcode_sdk::ErrorKind) -> &'static str {
@@ -773,6 +847,9 @@ fn run_client_turn(
 
     // Subscribe before sending so early text and tool events cannot be missed.
     let events = client.events(Some(&session.session_id));
+    if config.cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+        return Err("jcode prompt cancelled before submission".into());
+    }
     client
         .send_message(&session.session_id, prompt, Vec::new(), None)
         .map_err(|error| {
@@ -1127,19 +1204,26 @@ fn prepare_session_home(
     ensure_private_dir(&storage_home).map_err(|error| error.to_string())?;
     let active_lock = lock_session_home(&storage_home).map_err(|error| error.to_string())?;
     drop(root_lock);
-    let linked_credentials = jcode_sdk::inherit_credentials(&source_home, &storage_home)
-        .map_err(|error| error.to_string())?;
-    copy_private_model_catalog_caches(&source_home, &storage_home)
-        .map_err(|error| error.to_string())?;
-    let copied_external_credentials =
-        materialize_external_credentials(&storage_home, &linked_credentials)
+    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+    if !mcp_servers.is_empty() {
+        return Err("workflow MCP servers are not supported by the Bubblewrap jcode backend".into());
+    }
+    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+    {
+        let linked_credentials = jcode_sdk::inherit_credentials(&source_home, &storage_home)
             .map_err(|error| error.to_string())?;
-    copy_external_auth_trust(&storage_home, &copied_external_credentials)
-        .map_err(|error| error.to_string())?;
-    write_session_mcp(&source_home, &storage_home, mcp_servers)
-        .map_err(|error| error.to_string())?;
+        copy_private_model_catalog_caches(&source_home, &storage_home)
+            .map_err(|error| error.to_string())?;
+        let copied_external_credentials =
+            materialize_external_credentials(&storage_home, &linked_credentials)
+                .map_err(|error| error.to_string())?;
+        copy_external_auth_trust(&storage_home, &copied_external_credentials)
+            .map_err(|error| error.to_string())?;
+        write_session_mcp(&source_home, &storage_home, mcp_servers)
+            .map_err(|error| error.to_string())?;
+    }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(all(target_os = "linux", feature = "jcode-bubblewrap"))))]
     let (sdk_home, temporary_alias, stable_alias_root) = {
         let alias_root = short_home_alias_root();
         ensure_private_alias_root(&alias_root).map_err(|error| error.to_string())?;
@@ -1151,7 +1235,7 @@ fn prepare_session_home(
         ensure_home_alias(&alias, &storage_home).map_err(|error| error.to_string())?;
         (alias.clone(), Some(alias), Some(alias_root))
     };
-    #[cfg(not(unix))]
+    #[cfg(any(not(unix), all(target_os = "linux", feature = "jcode-bubblewrap")))]
     let (sdk_home, temporary_alias, stable_alias_root) = { (storage_home.clone(), None, None) };
 
     Ok(SessionHome {

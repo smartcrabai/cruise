@@ -168,6 +168,14 @@ fn spawn_command<S: std::hash::BuildHasher>(
             std::process::Stdio::inherit()
         })
         .stderr(std::process::Stdio::piped());
+    match std::env::var_os("CRUISE_CI_VERIFY_SCRIPT") {
+        Some(value) => {
+            builder.env("CRUISE_CI_VERIFY_SCRIPT", value);
+        }
+        None => {
+            builder.env_remove("CRUISE_CI_VERIFY_SCRIPT");
+        }
+    }
     if let Some(dir) = cwd {
         builder.current_dir(dir);
     }
@@ -985,6 +993,46 @@ mod tests {
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(result.success);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ci_verifier_environment_comes_only_from_daemon() {
+        let _lock = crate::test_support::lock_process();
+        let _daemon_value =
+            crate::test_support::EnvGuard::set("CRUISE_CI_VERIFY_SCRIPT", "daemon-verifier");
+        let mut workflow_env = HashMap::new();
+        workflow_env.insert(
+            "CRUISE_CI_VERIFY_SCRIPT".to_string(),
+            "workflow-verifier".to_string(),
+        );
+        let result = run_command(
+            "test \"$CRUISE_CI_VERIFY_SCRIPT\" = daemon-verifier",
+            0,
+            &workflow_env,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(result.success, "workflow env must not replace daemon value");
+
+        let _removed_daemon_value =
+            crate::test_support::EnvGuard::remove("CRUISE_CI_VERIFY_SCRIPT");
+        let result = run_command(
+            "test -z \"${CRUISE_CI_VERIFY_SCRIPT+x}\"",
+            0,
+            &workflow_env,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(result.success, "workflow env must not restore missing daemon value");
     }
 
     #[cfg(unix)]

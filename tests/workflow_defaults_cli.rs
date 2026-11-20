@@ -893,6 +893,76 @@ fn wait_ci_payload(output: &Output) -> serde_json::Value {
 }
 
 #[cfg(unix)]
+fn install_wait_ci_internal_stub(bin: &Path, root: &Path) -> (PathBuf, PathBuf) {
+    let calls = root.join("wait-ci-internal-calls");
+    let capture = root.join("wait-ci-capture.json");
+    cruise::test_support::write_executable_script(
+        &bin.join("cruise"),
+        r#"#!/bin/sh
+case "$1:$2" in
+  internal:clear-ci-followup)
+    printf 'clear\n' >> "$WAIT_CI_INTERNAL_CALLS"
+    exit 0 ;;
+  internal:capture-ci-followup)
+    printf 'capture\n' >> "$WAIT_CI_INTERNAL_CALLS"
+    cat > "$WAIT_CI_CAPTURE"
+    exit $? ;;
+  *) printf 'unexpected fake cruise command: %s\n' "$*" >&2; exit 97 ;;
+esac
+"#,
+    );
+    (calls, capture)
+}
+
+#[cfg(unix)]
+fn assert_wait_ci_internal_calls(
+    output: &Output,
+    calls: &Path,
+    capture: &Path,
+) {
+    let calls = std::fs::read_to_string(calls)
+        .unwrap_or_else(|error| panic!("read fake cruise calls: {error}"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let marker = stderr
+        .lines()
+        .find(|line| line.starts_with("CRUISE_CI_DIAGNOSTIC_V4 "));
+    let expected_capture =
+        marker.is_some_and(|line| line.split(' ').nth(2) == Some("ci_failed"));
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        if expected_capture {
+            vec!["clear", "capture"]
+        } else {
+            vec!["clear"]
+        },
+        "wait-ci internal command calls: {}",
+        text(output)
+    );
+    if marker.is_some() {
+        let status = if expected_capture { 75 } else { 1 };
+        assert_eq!(output.status.code(), Some(status), "{}", text(output));
+    }
+    if expected_capture {
+        let captured: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(capture)
+                .unwrap_or_else(|error| panic!("read captured CI evidence: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("decode captured CI evidence: {error}"));
+        let marker = marker.unwrap_or_else(|| panic!("expected CI failure diagnostic marker"));
+        assert_eq!(
+            captured["provider"],
+            marker
+                .split(' ')
+                .nth(1)
+                .unwrap_or_else(|| panic!("missing provider: {marker}"))
+        );
+        assert_eq!(captured["payload"], wait_ci_payload(output));
+    } else {
+        assert!(!capture.exists(), "unexpected CI follow-up evidence capture");
+    }
+}
+
+#[cfg(unix)]
 fn run_gitlab_wait_ci_command(
     command: &str,
     status_response: &str,
@@ -922,6 +992,7 @@ fn run_gitlab_wait_ci_command_with_details(
     cruise::test_support::init_git_repo(&repo);
     let bin = root.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("create fake bin: {error}"));
+    let (internal_calls, ci_capture) = install_wait_ci_internal_stub(&bin, root.path());
     let get_count = root.path().join("glab-details-count");
     std::fs::write(&get_count, "0\n")
         .unwrap_or_else(|error| panic!("initialize glab detail count: {error}"));
@@ -960,6 +1031,8 @@ fi
         .env("WAIT_CI_STATUS_STDERR", status_stderr)
         .env("WAIT_CI_STATUS_CALLS", &get_count)
         .env("WAIT_CI_DATE_COUNT", &date_count)
+        .env("WAIT_CI_INTERNAL_CALLS", &internal_calls)
+        .env("WAIT_CI_CAPTURE", &ci_capture)
         .output()
         .unwrap_or_else(|error| panic!("run builtin GitLab wait-ci command: {error}"));
     let calls = std::fs::read_to_string(get_count)
@@ -976,6 +1049,7 @@ fi
         expected_detail_calls,
         "failed-job details should be fetched once"
     );
+    assert_wait_ci_internal_calls(&output, &internal_calls, &ci_capture);
     output
 }
 
@@ -1120,6 +1194,8 @@ struct GithubWaitCiFixture {
     gh_count: PathBuf,
     gh_detail_count: PathBuf,
     date_count: PathBuf,
+    internal_calls: PathBuf,
+    ci_capture: PathBuf,
     head: String,
 }
 
@@ -1146,6 +1222,7 @@ impl GithubWaitCiFixture {
         std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("create fake bin: {error}"));
         std::fs::create_dir_all(&responses)
             .unwrap_or_else(|error| panic!("create fake responses: {error}"));
+        let (internal_calls, ci_capture) = install_wait_ci_internal_stub(&bin, root.path());
         let gh_count = root.path().join("gh-count");
         let gh_detail_count = root.path().join("gh-detail-count");
         let date_count = root.path().join("date-count");
@@ -1176,6 +1253,8 @@ fi
             gh_detail_count,
             responses,
             date_count,
+            internal_calls,
+            ci_capture,
             head,
         }
     }
@@ -1206,6 +1285,8 @@ fi
         let _ = std::fs::remove_file(&self.gh_count);
         let _ = std::fs::remove_file(&self.gh_detail_count);
         let _ = std::fs::remove_file(&self.date_count);
+        let _ = std::fs::remove_file(&self.internal_calls);
+        let _ = std::fs::remove_file(&self.ci_capture);
         for (index, response) in responses.iter().enumerate() {
             let bytes = serde_json::to_vec(response)
                 .unwrap_or_else(|error| panic!("serialize fake GitHub response: {error}"));
@@ -1218,7 +1299,7 @@ fi
         ));
         let path = std::env::join_paths(paths)
             .unwrap_or_else(|error| panic!("join fake command PATH: {error}"));
-        Command::new("sh")
+        let output = Command::new("sh")
             .arg("-c")
             .arg(command)
             .current_dir(&self.repo)
@@ -1229,6 +1310,8 @@ fi
             .env("WAIT_CI_GH_EXPECTED_CURSOR", "page-1")
             .env("WAIT_CI_DATE_COUNT", &self.date_count)
             .env("WAIT_CI_RESPONSES", &self.responses)
+            .env("WAIT_CI_INTERNAL_CALLS", &self.internal_calls)
+            .env("WAIT_CI_CAPTURE", &self.ci_capture)
             .env("WAIT_CI_TIMEOUT", if timeout { "1" } else { "0" })
             .env(
                 "WAIT_CI_GH_API_FAILURE",
@@ -1244,7 +1327,9 @@ fi
             )
             .env("WAIT_CI_GH_API_ERROR_KIND", api_error)
             .output()
-            .unwrap_or_else(|error| panic!("run builtin wait-ci command: {error}"))
+            .unwrap_or_else(|error| panic!("run builtin wait-ci command: {error}"));
+        assert_wait_ci_internal_calls(&output, &self.internal_calls, &self.ci_capture);
+        output
     }
 
     fn gh_calls(&self) -> usize {

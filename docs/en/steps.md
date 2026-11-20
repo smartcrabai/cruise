@@ -74,6 +74,8 @@ steps:
       - cargo test
 ```
 
+`accepted_exit_codes` makes an ordinary command step mandatory (not a `parallel:` child). The list must contain `0`, with no duplicates. An allowed nonzero status leaves `{prev.success}` false; any unlisted status, signal, timeout, or launch failure stops the workflow rather than taking `if.fail`. Omit the field to keep normal failure routing.
+
 <a id="parallel-steps"></a>
 ### Parallel Steps
 
@@ -122,7 +124,7 @@ Prompt, command, and parallel steps may set `timeout:` to abort the step if it r
 
 When a timeout fires:
 
-- **Command steps**: the child process is killed and the step is treated as a failure (non-zero exit). `{prev.success}` is `false` and the workflow follows the normal failure path (see `if.fail` below).
+- **Command steps**: the child process is killed and `{prev.success}` is `false`. Required commands with `accepted_exit_codes` stop the workflow; other commands follow normal failure routing (`if.fail`).
 - **Prompt steps**: the LLM call is aborted and the step is treated as a failure.
 
 Invalid timeout strings are rejected at config validation time. Timeouts are also honoured for steps defined inside groups and `after-pr`.
@@ -175,9 +177,13 @@ after-pr:
 
 Prompt steps in `after-pr` are guarded by the same default. Set `allow_commit: true` individually for an after-PR prompt that needs to advance `HEAD`.
 
-Built-in CI repair handles failures independently. An unavailable local platform does not block other evidence-backed, in-scope fixes; platform-specific repairs require complete CI-log and workflow evidence, all applicable local checks, and successful provider CI before they are considered complete. Repair steps never weaken checks or merge the PR themselves.
+Built-in post-PR prompts are instructed not to commit, push, or call the forge. The host commits validated conflict resolutions and pushes only to the bound PR/MR branch. CI repair uses evidence for the current head. It either publishes an exactly verified repair and checks CI again, requests one eligible retry per head in the session, or stops without merging. The native merge step still checks readiness independently.
 
-A committed repair returns through base synchronization and push before CI is checked again. A repair without a commit returns directly to `wait-ci`; only successful CI skips repair and proceeds toward an opted-in merge. Unresolved repairs stop at the existing graph-transition limit. Existing session snapshots retain their saved workflow and checkpoint until explicitly migrated.
+`require_bubblewrap: true` requires actual Linux jcode confinement for a prompt or GitHub review step. The built-in conflict, CI repair, and review prompts use it; they do not run with an unconfined backend, including fallback.
+
+Automatic CI repair commits require a Linux build with `jcode-bubblewrap`. Set `CRUISE_CI_VERIFY_SCRIPT` in the daemon's environment to an absolute path to a trusted, single-link shell script outside the worktree that group and other users cannot write. Its pass/fail policy must not come from scripts in the candidate. It runs with the candidate read-only at `/candidate`, private `/tmp`, and no network or inherited credentials. A missing or failing verifier or unsupported tree (for example, a symlink or submodule) stops publication. Saved session snapshots retain their original workflows.
+
+A GitLab merged-results pipeline on a temporary merge SHA does not authorize a retry or automatic CI repair; this requires evidence for the source head.
 
 <a id="review-loop-github-review"></a>
 ### Review loop (`github-review`)
@@ -191,7 +197,7 @@ after-pr:
       bots: ["coderabbitai[bot]"]   # any one of these reviewing the current PR head ends the wait
       max-iterations: 3             # default 3
     prompt: |
-      Fix the review comments and commit the changes.
+      Fix the review comments without staging, committing, or pushing.
       Reply with the requested JSON describing each thread.
     allow_commit: true
     timeout: 30m                    # required; bounds the whole loop
@@ -200,7 +206,7 @@ after-pr:
 
 In bot mode, each iteration waits for one of the listed bots to review the current head commit, then fetches all unresolved threads started by that bot (across all pages). In all-reviewer mode, it fetches eligible unresolved threads immediately without waiting for a new review.
 
-Both modes run the prompt with thread data appended, and the prompt must return JSON only: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`. Cruise posts replies and resolves threads through `gh api graphql` (requires an authenticated `gh`). Commits made by the prompt are pushed; if uncommitted changes remain, the step fails. A `github-review` failure marks the run `Failed`. This step is valid only directly under `after-pr`.
+Both modes append thread data to the prompt and require JSON only: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`. Here `allow_commit: true` authorizes Cruise, not the prompt, to commit and push validated edits on the current PR branch. Cruise posts replies and resolves threads through `gh api graphql` only after that publication succeeds, or after confirming no edits are needed. The step requires authenticated `gh`, is valid only directly under `after-pr`, and marks the run `Failed` on error.
 
 The default `reviewers: bots` preserves this behavior and requires a nonempty, unique `bots` list. To process existing human and bot feedback, use `github-review: { reviewers: all, max-iterations: 3 }` and omit `bots` or specify an empty list. This mode does not wait for a new review. Cruise checks each thread author's repository collaborator permission before passing thread text to the agent; only authors with `write`, `maintain`, or `admin` are eligible. The loop succeeds when no eligible unresolved threads remain and fails if eligible threads remain at the iteration limit.
 

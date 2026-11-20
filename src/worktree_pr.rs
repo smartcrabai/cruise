@@ -195,7 +195,6 @@ pub async fn handle_worktree_pr_with_checkpoint(
     }
     if let Some(target) = session.pr_target.clone() {
         prepare_review_fix(ctx, &target, session, vars, on_pr_processing)?;
-        ensure_review_fix_committed_and_push(ctx, &target.head_branch, cancel_token).await?;
         return run_after_pr_steps_with_checkpoint(
             compiled,
             Some(&session.id),
@@ -396,34 +395,6 @@ async fn session_pr_skip_reason(
     }
 }
 
-async fn ensure_review_fix_committed_and_push(
-    ctx: &worktree::WorktreeContext,
-    head_branch: &str,
-    cancel_token: Option<&CancellationToken>,
-) -> Result<()> {
-    if worktree_has_changes(ctx, cancel_token).await? {
-        return Err(CruiseError::Other(
-            "PR review fix worktree has uncommitted changes".to_string(),
-        ));
-    }
-    let range = format!("origin/{head_branch}..HEAD");
-    let count = git_stdout(
-        &ctx.path,
-        &["rev-list", "--count", &range],
-        "git rev-list failed",
-        cancel_token,
-    )
-    .await?;
-    let count: u64 = count
-        .trim()
-        .parse()
-        .map_err(|_| CruiseError::Other("invalid git rev-list count".to_string()))?;
-    if count > 0 {
-        push_branch(&ctx.path, head_branch, cancel_token).await?;
-    }
-    Ok(())
-}
-
 fn record_created_pr(session: &mut SessionState, vars: &mut VariableStore, url: String) {
     if let Some(number) = extract_last_path_segment(&url) {
         vars.set_named_value(PR_NUMBER_VAR, number);
@@ -532,6 +503,17 @@ async fn generate_pr_description(
     let env = std::collections::HashMap::new();
 
     if executor.is_sdk() {
+        let mut access = crate::backend::jcode::SandboxAccess {
+            read_only: true,
+            ..Default::default()
+        };
+        if cfg!(all(target_os = "linux", feature = "jcode-bubblewrap")) {
+            access.inputs.extend(
+                vars.named_file(crate::session::PLAN_VAR)
+                    .filter(|path| path.is_file())
+                    .map(Path::to_path_buf),
+            );
+        }
         let result = generate_pr_via_sdk_tool(
             &executor,
             usage_session_id,
@@ -544,6 +526,7 @@ async fn generate_pr_description(
             &spinner,
             cancel_token,
             on_step_log,
+            access,
         )
         .await;
         drop(spinner);
@@ -614,6 +597,7 @@ async fn generate_pr_via_sdk_tool(
     spinner: &crate::spinner::Spinner,
     cancel_token: Option<&CancellationToken>,
     on_step_log: Option<&crate::step::command::StepLogCallback<'_>>,
+    access: crate::backend::jcode::SandboxAccess,
 ) -> Result<(String, String)> {
     use std::sync::{Arc, Mutex};
 
@@ -630,7 +614,7 @@ async fn generate_pr_via_sdk_tool(
         }
     };
     match executor
-        .run(crate::executor::PromptRun {
+        .run_with_jcode_access(crate::executor::PromptRun {
             usage: Some(crate::usage::UsageScope {
                 session_id: usage_session_id,
                 step: None,
@@ -652,7 +636,7 @@ async fn generate_pr_via_sdk_tool(
             computer_use: false,
             permission: crate::config::PermissionMode::Full,
             tool_policy: crate::tool_policy::ToolPolicy::default(),
-        })
+        }, access)
         .await
     {
         Ok(_) => {
@@ -828,9 +812,12 @@ pub(crate) async fn run_after_pr_steps_with_checkpoint(
     match execute_steps_with_graph(&ctx, vars, tracker, &mut dag, &persist).await {
         Err(e) if checkpoint_failed.load(std::sync::atomic::Ordering::Relaxed) => Err(e),
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
-        Err(e @ (CruiseError::MissingJcodeModel(_) | CruiseError::GitHubReviewFailed { .. })) => {
-            Err(e)
-        }
+        Err(
+            e @ (CruiseError::MissingJcodeModel(_)
+            | CruiseError::InvalidStepConfig(_)
+            | CruiseError::GitHubReviewFailed { .. }
+            | CruiseError::RequiredCommandFailed { .. }),
+        ) => Err(e),
         Err(e) if critical_merge_enabled => Err(e),
         Ok(_) | Err(CruiseError::StepPaused) => Ok(()),
         Err(e) => {
@@ -1510,9 +1497,138 @@ pub fn sync_base(
     pr_number: &str,
     pr_url: Option<&str>,
 ) -> std::result::Result<(), (SyncBaseFailure, CruiseError)> {
-    sync_base_with(pr_number, pr_url, |program, args| {
-        std::process::Command::new(program).args(args).output()
-    })
+    ensure_host_git_safety(Path::new(".")).map_err(|error| (SyncBaseFailure::MergeFailed, error))?;
+    sync_base_with(pr_number, pr_url, sync_command)
+}
+
+pub(crate) fn sync_validated_base(
+    cwd: &Path,
+    base_oid: &str,
+) -> std::result::Result<(), (SyncBaseFailure, CruiseError)> {
+    if !matches!(base_oid.len(), 40 | 64) || !base_oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err((
+            SyncBaseFailure::BaseRefInvalid,
+            CruiseError::Other("verified PR/MR base is not a Git object ID".into()),
+        ));
+    }
+    ensure_host_git_safety(cwd).map_err(|error| (SyncBaseFailure::MergeFailed, error))?;
+    merge_fetched_base(
+        &mut |program, args| {
+            check_sync_output(program, args, host_git_command().current_dir(cwd).args(args).output())
+        },
+        &[
+            "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+            "origin", base_oid,
+        ],
+        base_oid,
+    )
+}
+
+fn sync_command(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let mut command = if program == "git" {
+        host_git_command()
+    } else {
+        std::process::Command::new(program)
+    };
+    command.args(args).output()
+}
+
+pub(crate) fn host_git_command() -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    for (key, _) in std::env::vars_os() {
+        if key.as_encoded_bytes().starts_with(b"GIT_") {
+            command.env_remove(key);
+        }
+    }
+    command.args([
+        "--no-optional-locks",
+        "-c",
+        if cfg!(windows) { "core.hooksPath=NUL" } else { "core.hooksPath=/dev/null" },
+        "-c", "core.fsmonitor=false",
+        "-c", "rerere.enabled=false",
+        "-c", "merge.autoStash=false",
+        "-c", "submodule.recurse=false",
+        "-c", "commit.gpgSign=false",
+        "-c", "http.followRedirects=false",
+        "-c", "protocol.ext.allow=never",
+    ]);
+    command.env("GIT_NO_REPLACE_OBJECTS", "1").env("GIT_NO_LAZY_FETCH", "1");
+    command
+}
+
+pub(crate) fn ensure_host_git_safety(cwd: &Path) -> Result<()> {
+    reject_host_git_config(
+        cwd,
+        r"^(filter\.|merge\..*\.driver$)",
+        "could not rule out external Git filters or merge drivers",
+    )
+}
+
+pub(crate) fn sync_review_head(cwd: &Path) -> Result<()> {
+    ensure_host_git_safety(cwd)?;
+    ensure_host_transport_safety(cwd)?;
+    let args = ["pull", "--ff-only", "--no-recurse-submodules", "--no-tags"];
+    let output = host_git_command().current_dir(cwd).args(args).output();
+    check_sync_output("git", &args, output).map(|_| ())
+}
+
+pub(crate) fn host_push_endpoint(cwd: &Path) -> Result<String> {
+    ensure_host_transport_safety(cwd)?;
+    let args = ["remote", "get-url", "--push", "--all", "origin"];
+    let stdout = host_git_command().current_dir(cwd).args(args).output();
+    let output = check_sync_output("git", &args, stdout)?;
+    let mut destination = String::from_utf8(output.stdout)
+        .map_err(|_| CruiseError::Other("origin push URL is not UTF-8".into()))?;
+    let line = destination.strip_suffix('\n').unwrap_or(&destination);
+    let length = line.strip_suffix('\r').unwrap_or(line).len();
+    destination.truncate(length);
+    if destination.is_empty()
+        || destination.starts_with('-')
+        || destination.chars().any(char::is_control)
+    {
+        return Err(CruiseError::Other("origin needs one unambiguous push URL".into()));
+    }
+    Ok(destination)
+}
+
+fn ensure_host_transport_safety(cwd: &Path) -> Result<()> {
+    reject_host_git_config(
+        cwd,
+        r"^(url\..*\.(insteadof|pushinsteadof)|remote\..*\.vcs)$",
+        "refusing host Git transport with URL rewrites or a custom remote helper",
+    )
+}
+
+fn reject_host_git_config(cwd: &Path, pattern: &str, error: &'static str) -> Result<()> {
+    let output = host_git_command()
+        .current_dir(cwd)
+        .args(["config", "--includes", "--name-only", "--get-regexp", pattern])
+        .output()?;
+    if output.status.code() != Some(1) || !output.stdout.is_empty() || !output.stderr.is_empty() {
+        return Err(CruiseError::Other(error.into()));
+    }
+    Ok(())
+}
+
+fn check_sync_output(
+    program: &str,
+    args: &[&str],
+    output: std::io::Result<std::process::Output>,
+) -> Result<std::process::Output> {
+    let output = output.map_err(|error| {
+        CruiseError::Other(format!("failed to run `{program} {}`: {error}", args.join(" ")))
+    })?;
+    if output.status.success() {
+        return Ok(output);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = [stderr.trim(), stdout.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(CruiseError::Other(format!("`{program} {}` failed: {detail}", args.join(" "))))
 }
 
 /// Same as [`sync_base`] with an injectable command runner `(program, args)`.
@@ -1524,25 +1640,8 @@ pub(crate) fn sync_base_with<F>(
 where
     F: FnMut(&str, &[&str]) -> std::io::Result<std::process::Output>,
 {
-    let mut run = |program: &str, args: &[&str]| -> Result<std::process::Output> {
-        let output = runner(program, args).map_err(|e| {
-            CruiseError::Other(format!("failed to run `{program} {}`: {e}", args.join(" ")))
-        })?;
-        if output.status.success() {
-            Ok(output)
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let detail = [stderr.trim(), stdout.trim()]
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n");
-            Err(CruiseError::Other(format!(
-                "`{program} {}` failed: {detail}",
-                args.join(" ")
-            )))
-        }
+    let mut run = |program: &str, args: &[&str]| {
+        check_sync_output(program, args, runner(program, args))
     };
 
     let is_gitlab_mr = pr_url.is_some_and(|url| url.contains("/-/merge_requests/"));
@@ -1599,10 +1698,21 @@ where
         };
         (SyncBaseFailure::BaseRefInvalid, CruiseError::Other(message))
     })?;
-    run("git", &["fetch", "origin", &base])
-        .map_err(|error| (SyncBaseFailure::FetchFailed, error))?;
+    let base_ref = format!("refs/heads/{base}");
+    merge_fetched_base(
+        &mut run,
+        &["fetch", "--no-recurse-submodules", "origin", &base_ref],
+        "FETCH_HEAD",
+    )
+}
 
-    let merge = run("git", &["merge", &format!("origin/{base}"), "--no-edit"]);
+fn merge_fetched_base(
+    run: &mut impl FnMut(&str, &[&str]) -> Result<std::process::Output>,
+    fetch_args: &[&str],
+    merge_target: &str,
+) -> std::result::Result<(), (SyncBaseFailure, CruiseError)> {
+    run("git", fetch_args).map_err(|error| (SyncBaseFailure::FetchFailed, error))?;
+    let merge = run("git", &["merge", "--no-edit", merge_target]);
     if let Err(error) = merge {
         let has_unmerged_paths = run("git", &["diff", "--name-only", "--diff-filter=U"])
             .is_ok_and(|output| !output.stdout.is_empty());
@@ -2317,8 +2427,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
                     ]
                 ),
                 call("git", &["check-ref-format", "--branch", "main"]),
-                call("git", &["fetch", "origin", "main"]),
-                call("git", &["merge", "origin/main", "--no-edit"]),
+                call("git", &["fetch", "--no-recurse-submodules", "origin", "refs/heads/main"]),
+                call("git", &["merge", "--no-edit", "FETCH_HEAD"]),
             ]
         );
     }
@@ -2340,8 +2450,8 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             vec![
                 call("glab", &["mr", "view", "42", "--output", "json"]),
                 call("git", &["check-ref-format", "--branch", "develop"]),
-                call("git", &["fetch", "origin", "develop"]),
-                call("git", &["merge", "origin/develop", "--no-edit"]),
+                call("git", &["fetch", "--no-recurse-submodules", "origin", "refs/heads/develop"]),
+                call("git", &["merge", "--no-edit", "FETCH_HEAD"]),
             ]
         );
     }
@@ -2759,6 +2869,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             &spinner,
             None,
             None,
+            crate::backend::jcode::SandboxAccess::default(),
         )
         .await;
         drop(spinner);

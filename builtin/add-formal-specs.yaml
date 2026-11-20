@@ -78,7 +78,7 @@ after-pr:
           Scope: formal audit/model reports and current task changes:
           {file:formal-specs/audit.md}
           {file:formal-specs/model.md}
-          Resolve PR/MR #{pr.number} ({pr.url}) conflicts with the base only within this audited scope; preserve unrelated work, then stage and commit. Do not push (the next step does), weaken any requirement, assertion, bound, Gherkin check, scanner, or CI gate, or create/merge a PR.
+          Resolve PR/MR #{pr.number} ({pr.url}) conflicts with the base only within this audited scope; preserve unrelated work. Never weaken any requirement, assertion, bound, Gherkin check, scanner, or CI gate.
       fix_ci_error_scope: |-
           Use the formal audit/model reports and current PR changes:
           {file:formal-specs/audit.md}

@@ -258,6 +258,11 @@
           "type": "boolean",
           "description": "Override the workflow-level computer_use setting for this prompt step."
         },
+        "require_bubblewrap": {
+          "type": "boolean",
+          "default": false,
+          "description": "Require an ordinary prompt or github-review step to use Linux jcode Bubblewrap. Fails closed for command, unsupported, or non-jcode fallback backends."
+        },
         "instruction": {
           "type": "string",
           "description": "Instruction text for the step"
@@ -286,6 +291,14 @@
             }
           ],
           "description": "Shell command to execute (string or array of strings)"
+        },
+        "accepted_exit_codes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "contains": { "const": 0 },
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+          "description": "Required terminal statuses for an ordinary command step. Must include 0. Accepted nonzero statuses still set {prev.success} to false; missing or disallowed status stops the workflow."
         },
         "next": {
           "type": "string",
@@ -416,6 +429,52 @@
         }
       },
       "allOf": [
+        {
+          "if": {
+            "required": ["require_bubblewrap"],
+            "properties": { "require_bubblewrap": { "const": true } }
+          },
+          "then": {
+            "anyOf": [
+              { "required": ["prompt"] },
+              {
+                "required": ["prompt_file"],
+                "properties": { "prompt_file": { "type": "string" } }
+              },
+              {
+                "required": ["github-review"],
+                "properties": { "github-review": { "type": "object" } }
+              }
+            ],
+            "not": {
+              "anyOf": [
+                { "required": ["command"] },
+                { "required": ["option"] },
+                { "required": ["parallel"] },
+                { "required": ["group"] },
+                { "required": ["workflow_call"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": { "required": ["accepted_exit_codes"] },
+          "then": {
+            "required": ["command"],
+            "not": {
+              "anyOf": [
+                { "required": ["prompt"] },
+                { "required": ["prompt_file"] },
+                { "required": ["option"] },
+                { "required": ["parallel"] },
+                { "required": ["group"] },
+                { "required": ["workflow_call"] },
+                { "required": ["github-review"] },
+                { "required": ["squash-merge"] }
+              ]
+            }
+          }
+        },
         {
           "if": { "required": ["quality_gates"] },
           "then": {
@@ -785,7 +844,7 @@
               "description": "Retry the step on failure"
             }
           ],
-          "description": "Action to take when the step fails (including timeout, non-zero exit, prompt error)."
+          "description": "Action on recoverable failures (timeout, unaccepted non-zero command exit, prompt error). Required-command failures stop execution even when if.fail is configured."
         }
       },
       "not": {

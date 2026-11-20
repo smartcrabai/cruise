@@ -148,7 +148,8 @@ Not every no-change is a failure to route around -- sometimes the plan explicitl
 <a id="failure-handling-iffail"></a>
 ### Failure handling (`if.fail`)
 
-`if.fail` decides what happens when a recoverable step failure occurs: a non-zero exit code from a command step, a recoverable prompt error (including LLM transport errors), a `timeout`, or a `no-file-changes: failed` trigger.
+`if.fail` decides what happens when a recoverable step failure occurs: a non-zero exit code from a command step without `accepted_exit_codes`, a recoverable prompt error (including LLM transport errors), a `timeout`, or a `no-file-changes: failed` trigger.
+With `accepted_exit_codes`, listed statuses continue normally; a missing or unlisted status or command runtime failure is fatal and bypasses `if.fail`.
 
 - **`fail: <step-name>`** -- Jump to the named step.
 - **`fail: { retry: true }`** -- Re-execute the current step.

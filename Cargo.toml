@@ -62,6 +62,7 @@ name = "cruise-runtime"
 path = "src/main.rs"
 
 [features]
+jcode-bubblewrap = []
 test-utils = []
 
 [dependencies]
