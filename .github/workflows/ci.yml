@@ -46,12 +46,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: provider-install-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Provider installation Quint, Alloy and production Gherkin specifications
         run: bash scripts/check_provider_install_specs.sh
@@ -81,12 +75,6 @@ jobs:
           node-version: '26.13.1'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: instruction-inbox-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
       - name: Quint instruction inbox protocol
         run: bash scripts/check_instruction_inbox_specs.sh
       - name: Alloy instruction inbox protocol
@@ -122,12 +110,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: local-merge-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Local merge Quint, Alloy and production Gherkin
         run: bash scripts/check_local_merge_specs.sh
@@ -159,12 +141,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: plan-revision-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Plan revision Quint, Alloy and production Gherkin
         run: bash scripts/check_plan_revision_specs.sh
@@ -196,12 +172,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: subagent-model-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Subagent Quint, Alloy receipts and production Gherkin
         run: bash scripts/check_subagent_model_specs.sh
@@ -235,12 +205,6 @@ jobs:
             tests/formal/package-lock.json
             tests/formal/opencode-cli/package-lock.json
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: tool-restrictions-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Tool restrictions Quint, Alloy receipts and production Gherkin
         run: bash scripts/check_tool_restrictions_specs.sh
@@ -274,12 +238,6 @@ jobs:
             tests/formal/package-lock.json
             tests/formal/opencode-cli/package-lock.json
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: opencode-effort-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Effort formal models, production Gherkin and real CLI
         run: bash scripts/check_opencode_effort_specs.sh
@@ -311,12 +269,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: agent-auth-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Auth preflight Quint, Alloy receipts and production Gherkin
         run: bash scripts/check_agent_auth_specs.sh
@@ -354,12 +306,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: auto-requeue-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Auto-requeue formal models and production behavior
         run: bash scripts/check_auto_requeue_specs.sh
@@ -391,12 +337,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: workflow-flags-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Execution and skip-selection Quint, Alloy receipts and production Gherkin
         run: bash scripts/check_workflow_flags_specs.sh
@@ -441,12 +381,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: plan-verify-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: Quint, Alloy and executable plan verification scenarios
         run: bash scripts/check_plan_verify_specs.sh
@@ -476,12 +410,6 @@ jobs:
           node-version: '26.13.1'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: pr-review-fix-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
       - name: PR review fix Quint, Alloy and production Gherkin
         run: bash scripts/check_pr_review_fix_specs.sh
       - name: Upload specification evidence
@@ -511,12 +439,6 @@ jobs:
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: sdk-model-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
 
       - name: SDK-qualified models, Alloy receipts and production Gherkin
         run: bash scripts/check_sdk_model_specs.sh
@@ -650,6 +572,11 @@ jobs:
         run: python3 scripts/test_update_smoke.py --build --next-runtime target/debug/cruise-runtime
 
   test-windows:
+    name: ${{ matrix.check }}
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [test-windows, native-update-smoke-windows]
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -665,18 +592,23 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
+          shared-key: ${{ matrix.check }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Run tests
+        if: matrix.check == 'test-windows'
         run: cargo test --all-features --all-targets
 
       - name: Run doctests
+        if: matrix.check == 'test-windows'
         run: cargo test --all-features --doc
 
       - name: Smoke native update with real A/B binaries
-        run: python scripts/test_update_smoke.py --build --next-runtime target/debug/cruise-runtime.exe
+        if: matrix.check == 'native-update-smoke-windows'
+        run: python scripts/test_update_smoke.py --build
 
       - name: Test action config install script
+        if: matrix.check == 'test-windows'
         shell: bash
         run: bash scripts/test_action_config_install.sh
