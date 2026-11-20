@@ -320,7 +320,7 @@ esac
                 path.display(),
                 origin.display()
             ),
-            "permission-revoked" => format!(
+            "permission-revoked" | "ineligible-response" => format!(
                 "#!/bin/sh\necho run >> '{0}/prompt'\nprintf 'edit\\n' > tracked.txt\necho '{{\"actions\":[{{\"thread_id\":\"t1\",\"reply\":\"fixed\",\"resolve\":false}}]}}'\n",
                 path.display()
             ),
@@ -330,10 +330,6 @@ esac
             ),
             "commit-cas-race" => format!(
                 "#!/bin/sh\necho run >> '{0}/prompt'\nprintf 'host edit\\n' > tracked.txt\necho '{{\"actions\":[]}}'\n",
-                path.display()
-            ),
-            "ineligible-response" => format!(
-                "#!/bin/sh\necho run >> '{0}/prompt'\nprintf 'edit\\n' > tracked.txt\necho '{{\"actions\":[{{\"thread_id\":\"t1\",\"reply\":\"fixed\",\"resolve\":false}}]}}'\n",
                 path.display()
             ),
             "invalid-response" | "custom-edit" => format!(
