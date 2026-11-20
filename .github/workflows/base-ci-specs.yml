@@ -17,6 +17,10 @@ jobs:
   base-ci-specs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -28,10 +32,6 @@ jobs:
           node-version: '26.13.1'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: base-ci-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run executable specifications
         run: bash scripts/check_base_ci_specs.sh
       - name: Upload specification evidence
