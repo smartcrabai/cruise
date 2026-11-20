@@ -154,6 +154,15 @@ impl VariableStore {
             .insert(name.to_string(), NamedVariable::FilePath(path));
     }
 
+    /// Return a named file path without rendering its variable value.
+    #[must_use]
+    pub(crate) fn named_file(&self, name: &str) -> Option<&std::path::Path> {
+        match self.named.get(name) {
+            Some(NamedVariable::FilePath(path)) => Some(path),
+            Some(NamedVariable::Value(_)) | None => None,
+        }
+    }
+
     /// Register a named variable with a plain string value.
     pub fn set_named_value(&mut self, name: &str, value: String) {
         self.named

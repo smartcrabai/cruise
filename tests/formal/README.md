@@ -9,6 +9,61 @@ the real CLI lifecycle, autostart, port, API authorization and shutdown tests.
 Reports and command logs are written under `target/formal-reports/`; the
 dedicated CI workflow uploads them even on failure.
 
+`jcode_bubblewrap.qnt` models an owned Linux jcode attempt, from host setup
+through socket admission, submission, cancellation, and teardown. Quint 0.33.0
+passes eight witnesses and 1,000 seeded traces; Apalache 0.62.1 found no
+violation through ten transitions. This is a bounded model of the controller,
+not proof of the Rust code, kernel mounts, or daemon reuse.
+
+Run the bounded check with the pinned toolchain below:
+
+```sh
+mkdir -p target/formal-reports/jcode-bubblewrap
+node scripts/formal/verify_quint.cjs tests/formal/node_modules/.bin/quint \
+  tests/formal/jcode_bubblewrap.qnt jcode_bubblewrap 10 \
+  target/formal-reports/jcode-bubblewrap/counterexample.itf.json
+```
+
+The `jcode-bubblewrap` feature makes Bubblewrap available in Linux builds.
+Ordinary jcode attempts remain unchanged unless the daemon starts with
+`CRUISE_JCODE_BUBBLEWRAP=1`; workflow `require_bubblewrap: true` always requires
+isolation, regardless of that environment variable. An isolation request fails
+when unsupported or when launch fails; it never falls back to an unsandboxed
+attempt. With Bubblewrap 0.11.1 and jcode v1.0.1, run the real CLI regression
+with a synthetic model (no provider credentials):
+
+```sh
+JCODE_REAL_CLI=/absolute/path/to/jcode \
+  cargo test --locked --features jcode-bubblewrap --test jcode_bwrap_real -- --ignored
+```
+
+The `jcode_bwrap_real` env-cleared CLI fixture explicitly sets the opt-in.
+
+The [jcode Bubblewrap smoke workflow](../../.github/workflows/jcode-bubblewrap-smoke.yml)
+runs this test on `ubuntu-26.04` when `jcode-bubblewrap` is pushed. Manual
+dispatch is available once the workflow is on the default branch.
+
+The test checks linked and nested Git worktrees, private loopback, read-only
+metadata and config substitution, a refused launch, read-only planning, and
+the built-in TDD ledger handoff. Git metadata binds are per launch; an atomic
+replacement of the host index is not visible through an existing file bind.
+The stock SDK's `TurnDone` also does not report
+runtime-wide quiescence. Neither is a basis for daemon reuse or idle shutdown.
+Workflows that require agent-side commits cannot use this sandbox.
+
+`after_pr_host_git.qnt` models required-command failures, validated conflict
+publication, exact CI repair checks, one retry per head, and read-only native
+merge admission. Quint 0.33.0 passes 16 witnesses and 1,000 seeded executions
+of up to 13 transitions; Apalache 0.62.1 found no violation through 11
+transitions. The finite model does not prove the Rust implementation or provider APIs.
+
+```sh
+mkdir -p target/formal-reports/after-pr-host-git
+node scripts/formal/verify_quint.cjs tests/formal/node_modules/.bin/quint \
+  tests/formal/after_pr_host_git.qnt after_pr_host_git 11 \
+  target/formal-reports/after-pr-host-git/counterexample.itf.json
+```
+
 For provider installation lifecycle and resolution precedence, see
 `PROVIDER_INSTALL.md` and run `bash scripts/check_provider_install_specs.sh`.
 The dedicated `provider-install-specs` CI job runs the pinned Quint checks and

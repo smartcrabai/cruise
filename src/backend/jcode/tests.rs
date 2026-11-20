@@ -712,8 +712,8 @@ fn provider_error_text_is_classified_for_fallback() {
 
 #[test]
 fn cancellation_requests_session_cancel_before_returning() {
-    let saw_cancel = Arc::new(AtomicBool::new(false));
-    let cancel_in_harness = Arc::clone(&saw_cancel);
+    let (message_accepted_tx, message_accepted_rx) = sync_channel(1);
+    let (cancelled_session_tx, cancelled_session_rx) = sync_channel(1);
     let client = fake_harness(move |frame, writer| match &frame.request {
         ApiRequest::CreateSession { .. } => {
             send_reply(
@@ -724,9 +724,12 @@ fn cancellation_requests_session_cancel_before_returning() {
                 writer,
             );
         }
-        ApiRequest::SendMessage { session_id, .. } => send_message_accepted(writer, session_id),
+        ApiRequest::SendMessage { session_id, .. } => {
+            send_message_accepted(writer, session_id);
+            let _ = message_accepted_tx.send(());
+        }
         ApiRequest::Cancel { session_id } => {
-            cancel_in_harness.store(true, Ordering::SeqCst);
+            let _ = cancelled_session_tx.send(session_id.clone());
             send_reply(frame, jcode_sdk::ApiEvent::Ok, writer);
             send_event(
                 jcode_sdk::ApiEvent::TurnStopped {
@@ -758,11 +761,24 @@ fn cancellation_requests_session_cancel_before_returning() {
     assert!(
         matches!(chunks.recv().unwrap_or_else(|error| panic!("{error}")), StreamChunk::Session(id) if id == "cancel-me")
     );
+    if let Err(error) = message_accepted_rx.recv_timeout(Duration::from_secs(5)) {
+        token.cancel();
+        drop(
+            worker
+                .join()
+                .unwrap_or_else(|_| panic!("turn worker panicked")),
+        );
+        panic!("jcode did not accept the session message before cancellation: {error:?}");
+    }
     token.cancel();
     let (result, _, _home) = worker
         .join()
         .unwrap_or_else(|_| panic!("turn worker panicked"));
-    assert!(saw_cancel.load(Ordering::SeqCst));
+    assert_eq!(
+        cancelled_session_rx.try_recv().ok().as_deref(),
+        Some("cancel-me"),
+        "cancellation must target the active session"
+    );
     assert!(matches!(result, Ok(StreamChunk::Error(message)) if message.contains("Interrupted")));
 }
 #[test]
@@ -1213,8 +1229,9 @@ fn private_home_copies_catalogs_and_external_auth_idempotently() {
     let session_id = "external-auth-copy-test";
     let session_key = session_storage_key(session_id);
     let mcp_servers = crate::config::McpServers::default();
-    let mut home = prepare_session_home(source_home.clone(), &session_key, None, &mcp_servers)
-        .unwrap_or_else(|error| panic!("{error}"));
+    let mut home =
+        prepare_session_home(source_home.clone(), &session_key, None, &mcp_servers, false)
+            .unwrap_or_else(|error| panic!("{error}"));
     let storage_home = home.storage_home.clone();
     let private_hosts = storage_home.join("external/.config/github-copilot/hosts.json");
     let private_apps = storage_home.join("external/.config/github-copilot/apps.json");
@@ -1243,9 +1260,14 @@ fn private_home_copies_catalogs_and_external_auth_idempotently() {
         .unwrap_or_else(|error| panic!("{error}"));
     drop(home);
 
-    let mut resumed =
-        prepare_session_home(source_home, &session_key, Some(session_id), &mcp_servers)
-            .unwrap_or_else(|error| panic!("{error}"));
+    let mut resumed = prepare_session_home(
+        source_home,
+        &session_key,
+        Some(session_id),
+        &mcp_servers,
+        false,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
     drop(inherited_lock);
     let updated_catalog_fixtures = [
         (
@@ -1296,8 +1318,9 @@ fn fresh_and_resumed_session_alias_socket_paths_are_valid() {
         );
     };
     let fresh_key = uuid::Uuid::new_v4().simple().to_string();
-    let mut fresh = prepare_session_home(source_home.clone(), &fresh_key, None, &mcp_servers)
-        .unwrap_or_else(|error| panic!("{error}"));
+    let mut fresh =
+        prepare_session_home(source_home.clone(), &fresh_key, None, &mcp_servers, false)
+            .unwrap_or_else(|error| panic!("{error}"));
     assert_alias(&fresh.sdk_home);
     finish_session_home(&mut fresh, None, false).unwrap_or_else(|error| panic!("{error}"));
 
@@ -1313,6 +1336,7 @@ fn fresh_and_resumed_session_alias_socket_paths_are_valid() {
         &session_storage_key(session_id),
         Some(session_id),
         &mcp_servers,
+        false,
     )
     .unwrap_or_else(|error| panic!("{error}"));
     assert!(resumed.resume_session_found);
@@ -2236,7 +2260,7 @@ fn launch_client_captured_environment_probe() {
     }
     let mut failure_recorded = false;
     assert!(
-        launch_client(&config, &home, &mut failure_recorded).is_err(),
+        launch_client(&config, &home, &mut failure_recorded, false).is_err(),
         "capture-only stub must not connect a runtime"
     );
     assert_captured_launch_environment(&case, &root, no_shell);

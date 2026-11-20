@@ -313,6 +313,8 @@ async fn run_child_inner(
                     &mut vars,
                     &step,
                     CommandStepOptions {
+                        step_name: name,
+                        accepted_exit_codes: None,
                         rate_limit_retries: ctx.rate_limit_retries,
                         env: &env,
                         working_dir: ctx.working_dir,

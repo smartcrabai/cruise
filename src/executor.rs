@@ -242,6 +242,17 @@ impl Executor {
     /// cruise does not implement. A jcode request with no effective Cruise model
     /// returns [`CruiseError::MissingJcodeModel`] before starting the backend.
     pub fn run(&self, req: PromptRun<'_>) -> impl Future<Output = Result<PromptOutcome>> + Send {
+        self.run_with_jcode_access(req, crate::backend::jcode::SandboxAccess::default())
+    }
+
+    /// Execute one prompt with host-trusted file access for the jcode sandbox.
+    ///
+    /// Non-jcode backends do not receive filesystem grants; required Bubblewrap rejects them.
+    pub(crate) fn run_with_jcode_access(
+        &self,
+        req: PromptRun<'_>,
+        sandbox_access: crate::backend::jcode::SandboxAccess,
+    ) -> impl Future<Output = Result<PromptOutcome>> + Send {
         let operation = match self {
             Executor::Command { .. } => {
                 crate::telemetry::Operation::start("agent", &[("cruise.agent.backend", "command")])
@@ -254,7 +265,7 @@ impl Executor {
                 crate::telemetry::Operation::start("agent", &[])
             }
         };
-        self.run_inner(req)
+        self.run_inner(req, sandbox_access)
             .with_context(operation.context())
             .map(move |result| {
                 operation.finish_result(&result);
@@ -262,8 +273,32 @@ impl Executor {
             })
     }
 
-    async fn run_inner(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
+    async fn run_inner(
+        &self,
+        req: PromptRun<'_>,
+        sandbox_access: crate::backend::jcode::SandboxAccess,
+    ) -> Result<PromptOutcome> {
         const GUARD: &str = "read-only";
+
+        if sandbox_access.require_bubblewrap {
+            if req
+                .cancel_token
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(CruiseError::Interrupted);
+            }
+            if !self.is_sdk() {
+                return Err(CruiseError::InvalidStepConfig(
+                    "require_bubblewrap cannot use the command backend".to_owned(),
+                ));
+            }
+            if !cfg!(all(target_os = "linux", feature = "jcode-bubblewrap")) {
+                return Err(CruiseError::InvalidStepConfig(
+                    "require_bubblewrap requires a Linux build with the jcode-bubblewrap feature"
+                        .to_owned(),
+                ));
+            }
+        }
 
         if let Some(model) = req.model {
             model.validate("model")?;
@@ -307,7 +342,7 @@ impl Executor {
         }
 
         if req.permission != crate::config::PermissionMode::ReadOnly {
-            return self.dispatch(req).await;
+            return self.dispatch(req, sandbox_access).await;
         }
         // Detection only (not a sandbox or rollback): any change inside the
         // FileTracker scope fails the step, whatever the backend returned.
@@ -316,14 +351,18 @@ impl Executor {
             .map_or_else(|| std::path::PathBuf::from("."), Path::to_path_buf);
         let mut tracker = crate::file_tracker::FileTracker::with_root(root);
         tracker.take_snapshot(GUARD)?;
-        let result = self.dispatch(req).await;
+        let result = self.dispatch(req, sandbox_access).await;
         if tracker.has_files_changed(GUARD)? {
             return Err(CruiseError::ReadOnlyWorkspaceChanged);
         }
         result
     }
 
-    async fn dispatch(&self, req: PromptRun<'_>) -> Result<PromptOutcome> {
+    async fn dispatch(
+        &self,
+        req: PromptRun<'_>,
+        sandbox_access: crate::backend::jcode::SandboxAccess,
+    ) -> Result<PromptOutcome> {
         match self {
             Executor::Command { .. } if req.computer_use => {
                 Err(CruiseError::InvalidStepConfig(
@@ -338,7 +377,9 @@ impl Executor {
                 ))
             }
             Executor::Command { command } => run_command(command, req).await,
-            Executor::Jcode | Executor::Claude | Executor::OpenCode => run_sdk(req, self.sdk()).await,
+            Executor::Jcode | Executor::Claude | Executor::OpenCode => {
+                run_sdk(req, self.sdk(), sandbox_access).await
+            }
             Executor::Unsupported { sdk } => Err(crate::error::CruiseError::InvalidStepConfig(
                 format!("unsupported `sdk` value '{sdk}'"),
             )),
@@ -669,6 +710,7 @@ async fn run_with_fallback(
         req,
         Sdk::from_name(label).unwrap_or(Sdk::Jcode),
         policy,
+        false,
         |_, model| start(model),
     )
     .await
@@ -682,6 +724,7 @@ async fn run_sdk_with_fallback(
     req: &PromptRun<'_>,
     base_sdk: Sdk,
     policy: Option<Arc<RetryPolicy>>,
+    isolated_jcode: bool,
     mut start: impl FnMut(Sdk, Option<&str>) -> Result<std::sync::mpsc::Receiver<StreamChunk>>,
 ) -> Result<PromptOutcome> {
     let availability = crate::model_selection::availability(req.model, base_sdk)?;
@@ -693,6 +736,26 @@ async fn run_sdk_with_fallback(
         &candidates,
         base_sdk,
     );
+    let has_jcode = effective
+        .iter()
+        .any(|candidate| candidate.sdk == Sdk::Jcode);
+    if isolated_jcode && has_jcode {
+        if !cfg!(all(target_os = "linux", feature = "jcode-bubblewrap")) {
+            return Err(CruiseError::InvalidStepConfig(
+                "Bubblewrap isolation requires a Linux build with the jcode-bubblewrap feature"
+                    .to_owned(),
+            ));
+        }
+        if effective
+            .iter()
+            .any(|candidate| candidate.sdk != Sdk::Jcode)
+        {
+            return Err(CruiseError::InvalidStepConfig(
+                "Bubblewrap isolation cannot run mixed SDK fallback candidates: Claude and OpenCode are unconfined"
+                    .to_owned(),
+            ));
+        }
+    }
     for candidate in &effective {
         validate_candidate(req, candidate.sdk)?;
     }
@@ -953,7 +1016,21 @@ impl Drop for SdkAttemptGuard {
     }
 }
 
-async fn run_sdk(req: PromptRun<'_>, sdk: Sdk) -> Result<PromptOutcome> {
+fn validate_bubblewrap_sdk_candidate(candidate_sdk: Sdk) -> Result<()> {
+    if candidate_sdk != Sdk::Jcode {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "require_bubblewrap forbids the unconfined {} SDK candidate",
+            candidate_sdk.as_str()
+        )));
+    }
+    Ok(())
+}
+
+async fn run_sdk(
+    req: PromptRun<'_>,
+    sdk: Sdk,
+    sandbox_access: crate::backend::jcode::SandboxAccess,
+) -> Result<PromptOutcome> {
     use crate::backend::opencode::{OpenCodeRunnerConfig, stream_agent};
 
     let cancel = req
@@ -968,18 +1045,36 @@ async fn run_sdk(req: PromptRun<'_>, sdk: Sdk) -> Result<PromptOutcome> {
         ..req
     };
     let subagent = req.subagent_model.map(|entry| resolve_entry(entry, sdk));
+    let isolated_jcode =
+        sandbox_access.require_bubblewrap || crate::backend::jcode::bubblewrap_requested();
     run_sdk_with_fallback(
         &req,
         sdk,
         retry::active_policy(),
+        isolated_jcode,
         |candidate_sdk, model_ref| {
+            if sandbox_access.require_bubblewrap {
+                if req
+                    .cancel_token
+                    .is_some_and(CancellationToken::is_cancelled)
+                {
+                    return Err(CruiseError::Interrupted);
+                }
+                validate_bubblewrap_sdk_candidate(candidate_sdk)?;
+            }
             let subagent_model = subagent
                 .as_ref()
                 .filter(|candidate| candidate.sdk == candidate_sdk)
                 .and_then(|candidate| candidate.model.as_deref());
             match candidate_sdk {
                 Sdk::Jcode => Ok(stream_jcode_agent(
-                    build_jcode_config(&req, model_ref, subagent_model)?,
+                    build_jcode_config_with_access(
+                        &req,
+                        model_ref,
+                        subagent_model,
+                        &sandbox_access,
+                        resolve_for_request,
+                    )?,
                     req.prompt.to_string(),
                 )),
                 Sdk::Claude => Ok(stream_claude_agent(
@@ -1028,18 +1123,30 @@ async fn run_sdk(req: PromptRun<'_>, sdk: Sdk) -> Result<PromptOutcome> {
     .await
 }
 
-fn build_jcode_config(
-    req: &PromptRun<'_>,
-    model_ref: Option<&str>,
-    subagent_model: Option<&str>,
-) -> Result<JcodeRunnerConfig> {
-    build_jcode_config_with(req, model_ref, subagent_model, resolve_for_request)
-}
-
+#[cfg(test)]
 fn build_jcode_config_with(
     req: &PromptRun<'_>,
     model_ref: Option<&str>,
     subagent_model: Option<&str>,
+    resolver: impl FnOnce(
+        crate::provider_install::Provider,
+        &PromptRun<'_>,
+    ) -> Result<crate::provider_install::Resolved>,
+) -> Result<JcodeRunnerConfig> {
+    build_jcode_config_with_access(
+        req,
+        model_ref,
+        subagent_model,
+        &crate::backend::jcode::SandboxAccess::default(),
+        resolver,
+    )
+}
+
+fn build_jcode_config_with_access(
+    req: &PromptRun<'_>,
+    model_ref: Option<&str>,
+    subagent_model: Option<&str>,
+    sandbox_access: &crate::backend::jcode::SandboxAccess,
     resolver: impl FnOnce(
         crate::provider_install::Provider,
         &PromptRun<'_>,
@@ -1055,20 +1162,26 @@ fn build_jcode_config_with(
     let has_subagent_model = subagent_model.is_some();
     let has_subagent_effort =
         subagent_model.is_some_and(|model| split_thinking_suffix(model.trim()).1.is_some());
-    let (subagent_provider, subagent_model, _) = jcode::parse_model_ref(subagent_model)?;
-    if has_subagent_effort || (has_subagent_model && subagent_model.is_none()) {
+    let (subagent_provider, worker_model, _) = jcode::parse_model_ref(subagent_model)?;
+    if has_subagent_effort || (has_subagent_model && worker_model.is_none()) {
         return Err(CruiseError::InvalidStepConfig(
             "subagent_model for `sdk: jcode` must identify a model without an effort suffix"
                 .to_owned(),
         ));
     }
+    let provider_installation = resolver(crate::provider_install::Provider::Jcode, req)?;
+    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+    let binary = Some(provider_installation.program);
+    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+    let binary = provider_installation.explicit_path();
     Ok(JcodeRunnerConfig {
-        binary: resolver(crate::provider_install::Provider::Jcode, req)?.explicit_path(),
+        binary,
+        sandbox_access: sandbox_access.clone(),
         model,
         provider,
         effort,
         subagent_provider,
-        subagent_model,
+        subagent_model: worker_model,
         cwd: req.working_dir.map(Path::to_path_buf),
         resume_session_id: resume_for(req, Sdk::Jcode),
         tools: req.tools.clone(),
@@ -1134,6 +1247,110 @@ mod tests {
         model.map(|model| &*Box::leak(Box::new(ModelSpec::Single(model.to_owned()))))
     }
 
+    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+    #[tokio::test]
+    async fn bubblewrap_rejects_mixed_sdk_fallbacks_before_start() {
+        let model: ModelSpec =
+            serde_yaml::from_str("[runtime/main, {sdk: claude, model: runtime/claude-fallback}]")
+                .unwrap_or_else(|error| panic!("{error}"));
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model = Some(&model);
+        let mut started = false;
+        let result =
+            run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), true, |_, _| {
+                started = true;
+                Ok(canned(vec![StreamChunk::Done(String::new())]))
+            })
+            .await;
+        assert!(!started);
+        assert!(matches!(result, Err(CruiseError::InvalidStepConfig(_))));
+    }
+
+    #[tokio::test]
+    async fn bubblewrap_request_leaves_non_jcode_only_chain_unaffected() {
+        let model = ModelSpec::Single("runtime/claude-main".to_owned());
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model = Some(&model);
+        let mut started = false;
+        let outcome =
+            run_sdk_with_fallback(&req, Sdk::Claude, Some(fast_policy(&[])), true, |sdk, _| {
+                assert_eq!(sdk, Sdk::Claude);
+                started = true;
+                Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
+            })
+            .await
+            .unwrap_or_else(|error| panic!("non-jcode request must remain unaffected: {error}"));
+        assert!(started);
+        assert_eq!(outcome.result.output, "ok");
+    }
+
+    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+    #[tokio::test]
+    async fn require_bubblewrap_rejects_claude_candidate_before_launcher() {
+        let model = ModelSpec::Single("runtime/claude-main".to_owned());
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model = Some(&model);
+        let mut checked = false;
+        let mut started = false;
+        let result =
+            run_sdk_with_fallback(&req, Sdk::Claude, Some(fast_policy(&[])), true, |sdk, _| {
+                checked = true;
+                validate_bubblewrap_sdk_candidate(sdk)?;
+                started = true;
+                Ok(canned(vec![StreamChunk::Done(String::new())]))
+            })
+            .await;
+        assert!(
+            checked && !started,
+            "the selected Claude candidate must be rejected before launch"
+        );
+        assert!(matches!(result, Err(CruiseError::InvalidStepConfig(_))));
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+    #[tokio::test]
+    async fn require_bubblewrap_rejects_jcode_on_an_unconfined_build() {
+        let env = HashMap::new();
+        let result = Executor::Jcode
+            .run_with_jcode_access(
+                base_req(&env),
+                crate::backend::jcode::SandboxAccess {
+                    require_bubblewrap: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(CruiseError::InvalidStepConfig(message))
+                if message.contains("requires a Linux build with the jcode-bubblewrap feature"))
+        );
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+    #[tokio::test]
+    async fn bubblewrap_request_rejects_jcode_on_an_unconfined_build() {
+        let model = ModelSpec::Single("runtime/jcode-main".to_owned());
+        let env = HashMap::new();
+        let mut req = base_req(&env);
+        req.model = Some(&model);
+        let mut started = false;
+        let result =
+            run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), true, |_, _| {
+                started = true;
+                Ok(canned(vec![StreamChunk::Done("unexpected".to_owned())]))
+            })
+            .await;
+        assert!(!started);
+        assert!(matches!(
+            result,
+            Err(CruiseError::InvalidStepConfig(message))
+                if message.contains("requires a Linux build with the jcode-bubblewrap feature")
+        ));
+    }
+
     #[tokio::test]
     async fn mixed_sdk_attempts_preserve_order_resume_and_checkpoint_owner() {
         let model: ModelSpec = serde_yaml::from_str("[runtime/order-first:high, {sdk: claude, model: runtime/order-middle:medium}, runtime/order-last:low]").unwrap_or_else(|error| panic!("{error}"));
@@ -1155,8 +1372,12 @@ mod tests {
         });
         req.on_session_id = Some(&callback);
         let mut attempts = Vec::new();
-        let outcome =
-            run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |sdk, model| {
+        let outcome = run_sdk_with_fallback(
+            &req,
+            Sdk::Jcode,
+            Some(fast_policy(&[])),
+            false,
+            |sdk, model| {
                 attempts.push((sdk, model.map(str::to_owned), resume_for(&req, sdk)));
                 let id = format!("attempt-{}", attempts.len());
                 let (ready, _rx) = std::sync::mpsc::channel();
@@ -1169,9 +1390,10 @@ mod tests {
                     StreamChunk::SessionReady { id, ready },
                     terminal,
                 ]))
-            })
-            .await
-            .unwrap_or_else(|error| panic!("{error}"));
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             attempts,
             vec![
@@ -1248,6 +1470,7 @@ mod tests {
                     &req,
                     sdk,
                     Some(fast_policy(&[("default", entries)])),
+                    false,
                     |owner, _| {
                         assert_eq!(owner, sdk);
                         Ok(canned(vec![StreamChunk::Done("ok".into())]))
@@ -1273,11 +1496,12 @@ mod tests {
         req.model = Some(&model);
         req.computer_use = true;
         let mut started = false;
-        let result = run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |_, _| {
-            started = true;
-            Ok(canned(vec![StreamChunk::Done(String::new())]))
-        })
-        .await;
+        let result =
+            run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), false, |_, _| {
+                started = true;
+                Ok(canned(vec![StreamChunk::Done(String::new())]))
+            })
+            .await;
         assert!(!started);
         assert!(result.is_err_and(|error| error.to_string().to_lowercase().contains("claude")));
     }
@@ -1834,6 +2058,36 @@ mod tests {
     }
 
     #[test]
+    fn jcode_config_receives_host_trusted_sandbox_access() {
+        let env = HashMap::new();
+        let req = base_req(&env);
+        let access = crate::backend::jcode::SandboxAccess {
+            read_only: true,
+            require_bubblewrap: true,
+            inputs: vec![Path::new("/trusted/input").to_path_buf()],
+            output_file: Some(Path::new("/trusted/output").to_path_buf()),
+        };
+        let config = super::build_jcode_config_with_access(
+            &req,
+            Some("openai/model"),
+            None,
+            &access,
+            |provider, _| Ok(fixture_resolver(provider)),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(config.sandbox_access.read_only);
+        assert!(config.sandbox_access.require_bubblewrap);
+        assert_eq!(
+            config.sandbox_access.inputs,
+            vec![Path::new("/trusted/input").to_path_buf()]
+        );
+        assert_eq!(
+            config.sandbox_access.output_file.as_deref(),
+            Some(Path::new("/trusted/output"))
+        );
+    }
+
+    #[test]
     fn jcode_resolved_source_wires_binary() {
         use crate::provider_install::{Provider, Resolved, Source};
         let env = HashMap::new();
@@ -1848,6 +2102,9 @@ mod tests {
                     })
                 })
                 .unwrap_or_else(|error| panic!("{error}"));
+            #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+            let expected = Some(Path::new("/fixture/jcode"));
+            #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
             let expected = if source == Source::Path {
                 None
             } else {
@@ -3308,10 +3565,16 @@ mod tests {
         req.model = Some(&spec);
         req.on_notice = Some(&on_notice);
         let mut attempts = Vec::new();
-        run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |sdk, model| {
-            attempts.push((sdk, model.map(str::to_owned)));
-            Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
-        })
+        run_sdk_with_fallback(
+            &req,
+            Sdk::Jcode,
+            Some(fast_policy(&[])),
+            false,
+            |sdk, model| {
+                attempts.push((sdk, model.map(str::to_owned)));
+                Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
+            },
+        )
         .await
         .unwrap_or_else(|error| panic!("startup skip failed: {error}"));
         assert_eq!(attempts, [(Sdk::Jcode, Some(spare.to_owned()))]);
@@ -3335,10 +3598,16 @@ mod tests {
         let unrestricted = ModelSpec::Single(primary.to_owned());
         req.model = Some(&unrestricted);
         attempts.clear();
-        run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |sdk, model| {
-            attempts.push((sdk, model.map(str::to_owned)));
-            Ok(canned(vec![StreamChunk::Done("restored".to_owned())]))
-        })
+        run_sdk_with_fallback(
+            &req,
+            Sdk::Jcode,
+            Some(fast_policy(&[])),
+            false,
+            |sdk, model| {
+                attempts.push((sdk, model.map(str::to_owned)));
+                Ok(canned(vec![StreamChunk::Done("restored".to_owned())]))
+            },
+        )
         .await
         .unwrap_or_else(|error| panic!("window must not register cooldown: {error}"));
         assert_eq!(attempts, [(Sdk::Jcode, Some(primary.to_owned()))]);
@@ -3365,10 +3634,11 @@ mod tests {
         let mut req = base_req(&env);
         req.model = Some(&spec);
         req.on_notice = Some(&on_notice);
-        let result = run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |_, _| {
-            panic!("mixed unavailable candidates must never launch a backend")
-        })
-        .await;
+        let result =
+            run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), false, |_, _| {
+                panic!("mixed unavailable candidates must never launch a backend")
+            })
+            .await;
         let error = match result {
             Err(error) => error.to_string(),
             Ok(_) => panic!("mixed unavailable candidates must fail"),
@@ -3410,7 +3680,7 @@ mod tests {
             let mut req = base_req(&env);
             req.model = Some(&spec);
             req.on_notice = Some(&on_notice);
-            let result = run_sdk_with_fallback(&req, Sdk::Jcode, policy, |_, _| {
+            let result = run_sdk_with_fallback(&req, Sdk::Jcode, policy, false, |_, _| {
                 panic!("disabled candidates must never launch a backend")
             })
             .await;
@@ -3455,6 +3725,7 @@ mod tests {
                     spare,
                 ],
             )])),
+            false,
             |_, model| {
                 let model = model.unwrap_or_default().to_owned();
                 attempts.push(model.clone());
@@ -3473,10 +3744,16 @@ mod tests {
         assert_eq!(attempts, [primary, spare, spare]);
         let unrestricted = ModelSpec::Single(blocked.to_owned());
         req.model = Some(&unrestricted);
-        run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |_, model| {
-            assert_eq!(model, Some(blocked));
-            Ok(canned(vec![StreamChunk::Done("available".to_owned())]))
-        })
+        run_sdk_with_fallback(
+            &req,
+            Sdk::Jcode,
+            Some(fast_policy(&[])),
+            false,
+            |_, model| {
+                assert_eq!(model, Some(blocked));
+                Ok(canned(vec![StreamChunk::Done("available".to_owned())]))
+            },
+        )
         .await
         .unwrap_or_else(|error| panic!("skipped chain identity was poisoned: {error}"));
     }
@@ -3502,6 +3779,7 @@ mod tests {
                 primary,
                 &["provider/test-window-native-blocked:free#fast", spare],
             )])),
+            false,
             |_, model| {
                 attempts.push(model.unwrap_or_default().to_owned());
                 if model == Some(primary) {
@@ -3529,12 +3807,18 @@ mod tests {
         let mut req = base_req(&env);
         req.model = Some(&spec);
         let mut attempts = Vec::new();
-        run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |sdk, selected| {
-            attempts.push((sdk, selected.map(str::to_owned)));
-            Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
-        })
-        .await
-        .unwrap_or_else(|error| panic!("another SDK must remain available: {error}"));
+        let result = run_sdk_with_fallback(
+            &req,
+            Sdk::Jcode,
+            Some(fast_policy(&[])),
+            false,
+            |sdk, selected| {
+                attempts.push((sdk, selected.map(str::to_owned)));
+                Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
+            },
+        )
+        .await;
+        result.unwrap_or_else(|error| panic!("another SDK must remain available: {error}"));
         assert_eq!(attempts, [(Sdk::Claude, Some(model.to_owned()))]);
     }
 
@@ -3557,10 +3841,16 @@ mod tests {
         let mut req = base_req(&env);
         req.model = Some(&selected);
         let mut attempts = Vec::new();
-        run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |_, model| {
-            attempts.push(model.unwrap_or_default().to_owned());
-            Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
-        })
+        run_sdk_with_fallback(
+            &req,
+            Sdk::Jcode,
+            Some(fast_policy(&[])),
+            false,
+            |_, model| {
+                attempts.push(model.unwrap_or_default().to_owned());
+                Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
+            },
+        )
         .await
         .unwrap_or_else(|error| panic!("effort override lost availability: {error}"));
         assert_eq!(attempts, ["test-window-step-runtime/spare"]);

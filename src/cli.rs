@@ -305,6 +305,15 @@ pub struct InternalArgs {
 pub enum InternalCommand {
     /// Enforce this prompt's jcode pre-tool shell policy.
     JcodePreTool,
+    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+    JcodeRelay {
+        #[arg(long)]
+        socket: std::path::PathBuf,
+        #[arg(long)]
+        ready: std::path::PathBuf,
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Serve a detached daemon instance.
     DaemonServe {
         #[arg(long)]
@@ -326,6 +335,13 @@ pub enum InternalCommand {
         #[arg(long)]
         url: Option<String>,
     },
+    SyncReviewHead,
+    TddLedgerSnapshot,
+    FinishConflictCommit,
+    PushAfterSync,
+    ClearCiFollowup,
+    CaptureCiFollowup,
+    FinishCiFollowup,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

@@ -242,30 +242,48 @@ async fn generate_title_via_sdk(
          Task: {input}\n\nPlan:\n{plan_content}"
     );
     let env = HashMap::new();
+    let sandbox_access = {
+        #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+        {
+            crate::backend::jcode::SandboxAccess {
+                read_only: true,
+                require_bubblewrap: false,
+                inputs: Vec::new(),
+                output_file: None,
+            }
+        }
+        #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+        {
+            crate::backend::jcode::SandboxAccess::default()
+        }
+    };
     executor
-        .run(crate::executor::PromptRun {
-            usage: Some(crate::usage::UsageScope {
-                session_id: usage_session_id,
-                step: None,
-                purpose: crate::usage::UsagePurpose::PlanTitle,
-            }),
-            prompt: &prompt,
-            model,
-            subagent_model: None,
-            max_retries: 1,
-            env: &env,
-            mcp_servers: &config.mcp_servers,
-            on_notice,
-            cancel_token: Some(cancel_token),
-            working_dir: Some(working_dir),
-            stream: None,
-            tools: vec![tool],
-            on_session_id: None,
-            resume: None,
-            computer_use: false,
-            permission: crate::config::PermissionMode::Full,
-            tool_policy: crate::tool_policy::ToolPolicy::default(),
-        })
+        .run_with_jcode_access(
+            crate::executor::PromptRun {
+                usage: Some(crate::usage::UsageScope {
+                    session_id: usage_session_id,
+                    step: None,
+                    purpose: crate::usage::UsagePurpose::PlanTitle,
+                }),
+                prompt: &prompt,
+                model,
+                subagent_model: None,
+                max_retries: 1,
+                env: &env,
+                mcp_servers: &config.mcp_servers,
+                on_notice,
+                cancel_token: Some(cancel_token),
+                working_dir: Some(working_dir),
+                stream: None,
+                tools: vec![tool],
+                on_session_id: None,
+                resume: None,
+                computer_use: false,
+                permission: crate::config::PermissionMode::Full,
+                tool_policy: crate::tool_policy::ToolPolicy::default(),
+            },
+            sandbox_access,
+        )
         .await?;
     title_store
         .lock()

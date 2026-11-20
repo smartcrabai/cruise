@@ -92,6 +92,17 @@ pub enum CruiseError {
         attempts: usize,
     },
 
+    #[error(
+        "required command failed for step '{step}' (command: {command}; exit code: {exit_code:?}; signal: {signal:?}; accepted exit codes: {accepted_exit_codes:?}): {detail}"
+    )]
+    RequiredCommandFailed {
+        step: String,
+        command: String,
+        accepted_exit_codes: Vec<u8>,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+        detail: String,
+    },
     #[error("step '{step}' timed out after {after_secs}s")]
     StepTimeout { step: String, after_secs: u64 },
 
@@ -148,6 +159,7 @@ impl CruiseError {
             Self::SessionStateConflictAborted(_) => "session_state_conflict_aborted",
             Self::StepMadeNoFileChanges(_) => "step_no_file_changes",
             Self::QualityGateExhausted { .. } => "quality_gate_exhausted",
+            Self::RequiredCommandFailed { .. } => "required_command_failed",
             Self::StepTimeout { .. } => "timeout",
             Self::GitHubReviewFailed { .. } => "github_review_failed",
             Self::Interrupted => "cancelled",
@@ -416,6 +428,17 @@ mod tests {
             (
                 CruiseError::StepMadeNoFileChanges("secret".into()),
                 "step_no_file_changes",
+            ),
+            (
+                CruiseError::RequiredCommandFailed {
+                    step: "secret".into(),
+                    command: "secret".into(),
+                    accepted_exit_codes: vec![0, 75],
+                    exit_code: Some(1),
+                    signal: None,
+                    detail: "secret".into(),
+                },
+                "required_command_failed",
             ),
             (
                 CruiseError::StepTimeout {

@@ -73,6 +73,8 @@ steps:
       - cargo test
 ```
 
+`accepted_exit_codes` を指定すると通常の command step が必須になります（`parallel:` 内の child は対象外）。リストには `0` が必要で、重複は不可。許可された非ゼロ終了では `{prev.success}` は `false` のままです。未許可の終了コード、シグナル、タイムアウト、起動失敗では `if.fail` に進まず workflow を止めます。省略すると通常の失敗経路を維持します。
+
 <a id="parallel-steps"></a>
 ### Parallel step
 
@@ -114,7 +116,7 @@ prompt、command、parallel step には、実行時間が長すぎる場合に�
 
 timeout が発生した場合:
 
-- **Command step:** child process を kill し、step を失敗（non-zero exit）として扱います。`{prev.success}` は `false` となり、workflow は通常の failure 経路（下記 `if.fail`）に進みます。
+- **Command step:** child process を終了し、`{prev.success}` を `false` にします。`accepted_exit_codes` を指定した command は workflow を止め、それ以外は通常の失敗経路（`if.fail`）に進みます。
 - **Prompt step:** LLM 呼び出しを中断し、step を失敗として扱います。
 
 不正な timeout 文字列は設定検証時に拒否されます。group と `after-pr` 内で定義された step にも timeout は適用されます。
@@ -167,6 +169,14 @@ after-pr:
 
 `after-pr` の prompt step にも同じ既定の commit guard が適用されます。HEAD を進める必要がある after-PR prompt には個別に `allow_commit: true` を設定してください。
 
+組み込みの PR 後 prompt には commit、push、forge 操作を禁止します。ホストが検証した競合解消を commit し、対象 PR/MR の branch にだけ push します。CI 修復は現在の HEAD の証拠に基づき、修復ツリーを検証して公開・再確認するか、session 内で同じ HEAD の対象ジョブを一度だけ再試行するか、マージせず停止します。native merge は準備状態を独立に確認します。
+
+`require_bubblewrap: true` は prompt / GitHub review step に Linux jcode の実際の隔離を要求します。組み込みの競合解消・CI 修復・レビューに適用し、fallback でも隔離されない backend は起動しません。
+
+CI 修復の自動 commit には Linux の `jcode-bubblewrap` build が必要です。daemon 環境の `CRUISE_CI_VERIFY_SCRIPT` に worktree 外の信頼済み shell script の絶対パスを指定します。ハードリンク不可、group/other 書き込み不可。合否判定は候補ツリー内の script に任せません。読み取り専用の `/candidate` と書き込み可能な専用 `/tmp` を使い、ネットワークも継承資格情報も使えません。script 未設定・失敗、非対応ツリー（symlink や submodule など）では公開しません。保存済み session は元の workflow を保持します。
+
+GitLab の merged-results pipeline が一時マージ SHA 上で動く場合は、再試行・自動修復を許可しません。source HEAD の証拠が必要です。
+
 <a id="review-loop-github-review"></a>
 ### Review loop (`github-review`)
 
@@ -179,7 +189,7 @@ after-pr:
       bots: ["coderabbitai[bot]"]   # any one of these reviewing the current PR head ends the wait
       max-iterations: 3             # default 3
     prompt: |
-      Fix the review comments and commit the changes.
+      Fix the review comments without staging, committing, or pushing.
       Reply with the requested JSON describing each thread.
     allow_commit: true
     timeout: 30m                    # required; bounds the whole loop
@@ -187,7 +197,7 @@ after-pr:
 ```
 
 bot mode では各 iteration で、列挙した bot が現在の head commit を review するまで待ってから、その bot が開始した未解決 thread をすべての page から取得します。all-reviewer mode では新しい review を待たず、対象となる未解決 thread を直ちに取得します。
-どちらの mode も thread data を prompt に追加して実行し、prompt は JSON のみで回答しなければなりません: `{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}`。reply の投稿と thread の解決は Cruise が `gh api graphql` で行います（認証済み `gh` が必要）。prompt が作った commit は push され、未 commit 変更が残ると step は失敗します。`github-review` の失敗は run を `Failed` にします。この step は `after-pr` の直下でのみ有効です。
+どちらの mode でも thread data を prompt に追加し、`{"actions":[{"thread_id":"...","reply":"optional","resolve":true}]}` の JSON のみを受け取ります。この step の `allow_commit: true` は、prompt ではなく Cruise に検証済みの変更の commit / push を許可します。公開に成功した後、または変更不要と確認した後に、認証済み `gh api graphql` で返信・解決します。失敗すると run は `Failed` になります。`after-pr` 直下でのみ有効です。
 
 既定の `reviewers: bots` はこの動作を維持し、空でない一意な `bots` list が必要です。既存の human と bot の feedback を処理するには `github-review: { reviewers: all, max-iterations: 3 }` を使い、`bots` を省略するか空 list にします。この mode は新しい review を待ちません。Cruise は author の repository collaborator permission を確認し、`write`、`maintain`、`admin` の author の thread のみを対象にします。対象となる未解決 thread がなくなると loop は成功し、iteration limit 到達時に対象 thread が残る場合は失敗します。
 

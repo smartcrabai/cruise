@@ -533,6 +533,10 @@ pub struct StepConfig {
     /// Per-prompt override for the workflow-level computer-use setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer_use: Option<bool>,
+    /// Require Linux jcode Bubblewrap for this prompt or github-review step.
+    /// False values are omitted when serialized.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub require_bubblewrap: bool,
 
     /// Per-prompt override for the workflow-level permission mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -552,6 +556,17 @@ pub struct StepConfig {
 
     /// Shell command(s) to run (command steps only).
     pub command: Option<StringOrVec>,
+
+    /// Accepted terminal exit codes for a command step.
+    ///
+    /// When present, the list must be non-empty, unique, and include `0`.
+    /// Accepted nonzero codes still set `{prev.success}` to `false`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub accepted_exit_codes: Option<Vec<u8>>,
 
     /// Named prompt/command steps executed concurrently, joined as one step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -718,7 +733,8 @@ pub enum NoFileChangesAction {
     Failed,
 }
 
-/// Action to take when the step fails (including timeout, non-zero exit, prompt error).
+/// Action for recoverable step failures (timeout, unaccepted non-zero exit, prompt error).
+/// Required-command failures are fatal and do not follow `if.fail`.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(untagged)]
 pub enum FailAction {
@@ -1356,6 +1372,105 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
     Ok(())
 }
 
+/// Validate accepted terminal statuses on ordinary command steps.
+///
+/// Parallel children deliberately do not support this field: their
+/// `prev.success` represents the joined block result, not an individual
+/// command's exit status.
+pub(crate) fn validate_accepted_exit_codes(config: &WorkflowConfig) -> crate::error::Result<()> {
+    fn check_step(name: &str, step: &StepConfig, parallel_child: bool) -> crate::error::Result<()> {
+        if let Some(codes) = &step.accepted_exit_codes {
+            let is_command = step.command.is_some()
+                && step.prompt.is_none()
+                && step.prompt_file.is_none()
+                && step.option.is_none()
+                && step.parallel.is_none()
+                && step.group.is_none()
+                && step.workflow_call.is_none()
+                && step.github_review.is_none()
+                && step.squash_merge.is_none();
+            if parallel_child || !is_command {
+                return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' uses accepted_exit_codes, which is only supported on ordinary command steps"
+                )));
+            }
+            let mut seen = [false; 256];
+            for code in codes {
+                let slot = &mut seen[usize::from(*code)];
+                if *slot {
+                    return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                        "step '{name}' accepted_exit_codes must not contain duplicates"
+                    )));
+                }
+                *slot = true;
+            }
+            if codes.is_empty() || !seen[0] {
+                return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' accepted_exit_codes must be non-empty and include 0"
+                )));
+            }
+        }
+        if let Some(children) = &step.parallel {
+            for (child_name, child) in children {
+                check_step(&format!("{name}/{child_name}"), child, true)?;
+            }
+        }
+        Ok(())
+    }
+
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        check_step(name, step, false)?;
+    }
+    Ok(())
+}
+/// Validate placement of the Bubblewrap requirement.
+///
+/// It is meaningful only on ordinary prompt steps and github-review steps.
+/// Parallel children are excluded because the joined block does not carry
+/// their per-child sandbox settings.
+pub(crate) fn validate_require_bubblewrap(config: &WorkflowConfig) -> crate::error::Result<()> {
+    fn check_step(name: &str, step: &StepConfig, parallel_child: bool) -> crate::error::Result<()> {
+        if step.require_bubblewrap {
+            let is_prompt = !parallel_child
+                && step.command.is_none()
+                && step.option.is_none()
+                && step.parallel.is_none()
+                && step.group.is_none()
+                && step.workflow_call.is_none()
+                && step.squash_merge.is_none()
+                && (step.prompt.is_some()
+                    || step.prompt_file.is_some()
+                    || step.github_review.is_some());
+            if !is_prompt {
+                return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                    "step '{name}' uses require_bubblewrap, which is only supported on ordinary prompt and github-review steps"
+                )));
+            }
+        }
+        if let Some(children) = &step.parallel {
+            for (child_name, child) in children {
+                check_step(&format!("{name}/{child_name}"), child, true)?;
+            }
+        }
+        Ok(())
+    }
+
+    for (name, step) in config
+        .steps
+        .iter()
+        .chain(&config.after_pr)
+        .chain(config.groups.values().flat_map(|group| &group.steps))
+    {
+        check_step(name, step, false)?;
+    }
+    Ok(())
+}
+
 /// Validate quality gate placement and command settings before expansion.
 pub(crate) fn validate_quality_gates(config: &WorkflowConfig) -> crate::error::Result<()> {
     fn check(name: &str, step: &StepConfig, allowed: bool) -> crate::error::Result<()> {
@@ -1412,6 +1527,8 @@ pub(crate) fn validate_quality_gates(config: &WorkflowConfig) -> crate::error::R
 }
 
 const CONFIG_CHECKS: &[fn(&WorkflowConfig) -> crate::error::Result<()>] = &[
+    validate_accepted_exit_codes,
+    validate_require_bubblewrap,
     validate_sdk,
     validate_mcp_servers,
     validate_flags,
@@ -3023,6 +3140,95 @@ steps:
         assert!(config.steps["s1"].allow_commit);
         let serialized = serde_yaml::to_string(&config).unwrap_or_else(|e| panic!("{e:?}"));
         assert!(serialized.contains("allow_commit: true"));
+    }
+
+    #[test]
+    fn accepted_exit_codes_validate_command_only_codes() {
+        let valid = WorkflowConfig::from_yaml(
+            "command: [echo]\nsteps:\n  run:\n    command: exit 75\n    accepted_exit_codes: [0, 75]\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        validate_config(&valid).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(valid.steps["run"].accepted_exit_codes, Some(vec![0, 75]));
+
+        for (codes, expected) in [
+            ("[]", "non-empty"),
+            ("[75]", "include 0"),
+            ("[0, 75, 75]", "duplicates"),
+        ] {
+            let yaml = format!(
+                "command: [echo]\nsteps:\n  run:\n    command: exit 75\n    accepted_exit_codes: {codes}\n"
+            );
+            let config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|error| panic!("{error}"));
+            let error = validate_config(&config)
+                .err()
+                .unwrap_or_else(|| panic!("accepted_exit_codes {codes} should be invalid"));
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected validation error for {codes}: {error}"
+            );
+        }
+
+        for yaml in [
+            "command: [echo]\nsteps:\n  run:\n    prompt: hi\n    accepted_exit_codes: [0]\n",
+            "command: [echo]\nsteps:\n  run:\n    option: []\n    accepted_exit_codes: [0]\n",
+            "command: [echo]\nsteps:\n  run:\n    group: g\n    accepted_exit_codes: [0]\n",
+            "command: [echo]\nsteps:\n  run:\n    workflow_call: ./other.yaml\n    accepted_exit_codes: [0]\n",
+            "command: [echo]\nsteps:\n  run:\n    parallel:\n      child:\n        command: 'true'\n    accepted_exit_codes: [0]\n",
+            "command: [echo]\nsteps:\n  run:\n    parallel:\n      child:\n        command: 'true'\n        accepted_exit_codes: [0]\n",
+        ] {
+            let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
+            assert_invalid_step_config(validate_accepted_exit_codes(&config), yaml);
+        }
+
+        assert!(
+            WorkflowConfig::from_yaml(
+                "command: [echo]\nsteps:\n  run:\n    command: 'true'\n    accepted_exit_codes: [0, 256]\n"
+            )
+            .is_err(),
+            "exit codes above 255 must be rejected during deserialization"
+        );
+    }
+
+    #[test]
+    fn require_bubblewrap_is_prompt_only_and_defaults_off() {
+        let default =
+            WorkflowConfig::from_yaml("command: [echo]\nsteps:\n  run:\n    command: 'true'\n")
+                .unwrap_or_else(|error| panic!("{error}"));
+        assert!(!default.steps["run"].require_bubblewrap);
+        assert!(
+            !serde_yaml::to_string(&default)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .contains("require_bubblewrap")
+        );
+
+        for yaml in [
+            "command: [echo]\nsteps:\n  run:\n    prompt: hi\n    require_bubblewrap: true\n",
+            "command: [echo]\nsteps:\n  run:\n    prompt_file: prompt.md\n    require_bubblewrap: true\n",
+            "command: [echo]\ngroups:\n  prompts:\n    steps:\n      run:\n        prompt: hi\n        require_bubblewrap: true\nsteps:\n  call:\n    group: prompts\n",
+            "command: [echo]\nsteps:\n  seed:\n    command: 'true'\nafter-pr:\n  review:\n    github-review:\n      bots: [\"ci[bot]\"]\n    prompt: review\n    timeout: 30m\n    require_bubblewrap: true\n",
+        ] {
+            let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
+            validate_require_bubblewrap(&config).unwrap_or_else(|error| panic!("{error}"));
+        }
+
+        for yaml in [
+            "command: [echo]\nsteps:\n  run:\n    command: 'true'\n    require_bubblewrap: true\n",
+            "command: [echo]\nsteps:\n  run:\n    option: []\n    require_bubblewrap: true\n",
+            "command: [echo]\nsteps:\n  run:\n    group: prompts\n    require_bubblewrap: true\n",
+            "command: [echo]\nsteps:\n  run:\n    workflow_call: ./other.yaml\n    require_bubblewrap: true\n",
+            "command: [echo]\nsteps:\n  run:\n    parallel:\n      child:\n        prompt: hi\n    require_bubblewrap: true\n",
+            "command: [echo]\nsteps:\n  run:\n    parallel:\n      child:\n        prompt: hi\n        require_bubblewrap: true\n",
+        ] {
+            let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
+            assert_invalid_step_config(validate_require_bubblewrap(&config), yaml);
+        }
+
+        let config = WorkflowConfig::from_yaml(
+            "command: [echo]\nsteps:\n  run:\n    command: 'true'\n    require_bubblewrap: true\n",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_invalid_step_config(crate::workflow::compile(config).map(|_| ()), "compile");
     }
 
     fn github_review_validation(yaml: &str) -> crate::error::Result<()> {

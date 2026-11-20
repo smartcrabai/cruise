@@ -1,0 +1,45 @@
+name: jcode Bubblewrap smoke
+
+on:
+  push:
+    branches: [jcode-bubblewrap]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+      - name: Check Bubblewrap namespaces
+        run: |
+          /usr/bin/bwrap --version
+          /usr/bin/bwrap --unshare-user --unshare-pid --unshare-net --unshare-ipc --disable-userns \
+            --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 -- /usr/bin/true
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.100.0 --profile minimal
+      - name: Run real jcode smoke with a synthetic provider
+        run: |
+          runtime=$(mktemp -d "$RUNNER_TEMP/jcode.XXXXXX")
+          trap 'rm -rf -- "$runtime"' EXIT
+          archive="$runtime/jcode-linux-x86_64.tar.gz"
+          curl -fsSL 'https://github.com/1jehuang/jcode/releases/download/v1.0.1/jcode-linux-x86_64.tar.gz' -o "$archive"
+          printf '%s  %s\n' 'f44a54978b503e5dd27fa8781c43ec4916ebe9c4a94d42aab50fc868bf4fbe86' "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$runtime"
+          JCODE_REAL_CLI="$runtime/jcode-linux-x86_64" \
+            cargo +1.100.0 test --locked --features jcode-bubblewrap --test jcode_bwrap_real -- --ignored --nocapture

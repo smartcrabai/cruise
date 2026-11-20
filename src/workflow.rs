@@ -250,6 +250,8 @@ impl CompiledWorkflow {
 /// membership style, contains empty groups, nested group calls, or
 /// individual `if` conditions inside group steps.
 pub fn compile(config: WorkflowConfig) -> Result<CompiledWorkflow> {
+    crate::config::validate_require_bubblewrap(&config)?;
+    crate::config::validate_accepted_exit_codes(&config)?;
     crate::config::validate_quality_gates(&config)?;
     crate::config::validate_squash_merge(&config)?;
     crate::pr_template::validate_config(&config)?;

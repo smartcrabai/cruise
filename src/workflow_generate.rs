@@ -71,26 +71,44 @@ async fn run_prompt_with_usage(
 ) -> Result<String> {
     let executor = Executor::new(config.sdk.as_deref(), &config.command);
     let model = Executor::plan_model(config.plan_model.as_ref(), config.model.as_ref());
+    let sandbox_access = {
+        #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+        {
+            crate::backend::jcode::SandboxAccess {
+                read_only: true,
+                require_bubblewrap: false,
+                inputs: Vec::new(),
+                output_file: None,
+            }
+        }
+        #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+        {
+            crate::backend::jcode::SandboxAccess::default()
+        }
+    };
     let outcome = executor
-        .run(PromptRun {
-            usage,
-            prompt,
-            model: model.as_ref(),
-            subagent_model: None,
-            max_retries: DEFAULT_RATE_LIMIT_RETRIES,
-            env: &config.env,
-            mcp_servers: &config.mcp_servers,
-            on_notice: None,
-            cancel_token,
-            working_dir,
-            stream: None,
-            tools: Vec::new(),
-            on_session_id: None,
-            resume: None,
-            permission,
-            tool_policy: crate::tool_policy::ToolPolicy::default(),
-            computer_use: false,
-        })
+        .run_with_jcode_access(
+            PromptRun {
+                usage,
+                prompt,
+                model: model.as_ref(),
+                subagent_model: None,
+                max_retries: DEFAULT_RATE_LIMIT_RETRIES,
+                env: &config.env,
+                mcp_servers: &config.mcp_servers,
+                on_notice: None,
+                cancel_token,
+                working_dir,
+                stream: None,
+                tools: Vec::new(),
+                on_session_id: None,
+                resume: None,
+                permission,
+                tool_policy: crate::tool_policy::ToolPolicy::default(),
+                computer_use: false,
+            },
+            sandbox_access,
+        )
         .await?;
     Ok(outcome.result.output)
 }
@@ -101,10 +119,20 @@ async fn run_prompt_with_usage(
 ///
 /// Returns the backend error, or the last validation error once the initial
 /// attempt and three repairs all failed.
+#[cfg(test)]
 pub(crate) async fn generate_yaml(
     config: &WorkflowConfig,
     description: &str,
     destination_parent: &Path,
+) -> Result<String> {
+    generate_yaml_with_working_dir(config, description, destination_parent, None).await
+}
+
+async fn generate_yaml_with_working_dir(
+    config: &WorkflowConfig,
+    description: &str,
+    destination_parent: &Path,
+    working_dir: Option<&Path>,
 ) -> Result<String> {
     let base_prompt =
         crate::prompt_render::render_generate_prompt(PROMPT_TEMPLATE, SCHEMA, description);
@@ -116,7 +144,7 @@ pub(crate) async fn generate_yaml(
                 config,
                 &prompt,
                 crate::config::PermissionMode::Full,
-                None,
+                working_dir,
                 None,
                 Some(crate::usage::UsageScope {
                     session_id: None,
@@ -222,7 +250,8 @@ pub(crate) async fn run(args: WorkflowGenerateArgs) -> Result<()> {
     let (yaml, source) = resolve_config(args.config.as_deref())?;
     let config = load_config_from_source(&yaml, &source)?;
     let parent = dest.parent().unwrap_or(&cwd);
-    let generated = generate_yaml(&config, &args.description, parent).await?;
+    let generated =
+        generate_yaml_with_working_dir(&config, &args.description, parent, Some(&cwd)).await?;
     write_new_workflow(&dest, &generated)?;
     println!("Created {}", dest.display());
     println!(

@@ -1117,7 +1117,7 @@ fn builtin_wait_ci_command(name: &str) -> String {
 fn builtin_wait_ci_fixture(
     collector: &Collector,
     fake_gh_script: &str,
-) -> (Fixture, Vec<(String, String)>) {
+) -> (Fixture, Vec<(String, String)>, PathBuf, PathBuf) {
     let command = builtin_wait_ci_command("tdd")
         .replace('{', "{{")
         .replace('}', "}}");
@@ -1135,6 +1135,23 @@ fn builtin_wait_ci_fixture(
     let fake_bin = fixture.root.path().join("fake-gh/bin");
     std::fs::create_dir_all(&fake_bin)
         .unwrap_or_else(|error| panic!("create fake gh directory: {error}"));
+    let internal_calls = fixture.root.path().join("wait-ci-internal-calls");
+    let ci_capture = fixture.root.path().join("wait-ci-capture.json");
+    cruise::test_support::write_executable_script(
+        &fake_bin.join("cruise"),
+        r#"#!/bin/sh
+case "$1:$2" in
+  internal:clear-ci-followup)
+    printf 'clear\n' >> "$WAIT_CI_INTERNAL_CALLS"
+    exit 0 ;;
+  internal:capture-ci-followup)
+    printf 'capture\n' >> "$WAIT_CI_INTERNAL_CALLS"
+    cat > "$WAIT_CI_CAPTURE"
+    exit $? ;;
+  *) printf 'unexpected fake cruise command: %s\n' "$*" >&2; exit 97 ;;
+esac
+"#,
+    );
     cruise::test_support::write_executable_script(&fake_bin.join("gh"), fake_gh_script);
     let mut paths = vec![fake_bin];
     paths.extend(std::env::split_paths(
@@ -1148,7 +1165,64 @@ fn builtin_wait_ci_fixture(
             .to_string_lossy()
             .into_owned(),
     ));
-    (fixture, env)
+    env.push((
+        "WAIT_CI_INTERNAL_CALLS".into(),
+        internal_calls.to_string_lossy().into_owned(),
+    ));
+    env.push((
+        "WAIT_CI_CAPTURE".into(),
+        ci_capture.to_string_lossy().into_owned(),
+    ));
+    (fixture, env, internal_calls, ci_capture)
+}
+
+fn assert_wait_ci_followup_capture(
+    output: &Output,
+    calls: &std::path::Path,
+    capture: &std::path::Path,
+    expected_reason: &str,
+) {
+    let calls = std::fs::read_to_string(calls)
+        .unwrap_or_else(|error| panic!("read fake cruise calls: {error}"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let marker = stderr
+        .lines()
+        .map(str::trim_start)
+        .map(|line| line.strip_prefix("stderr: ").unwrap_or(line))
+        .find(|line| line.starts_with("CRUISE_CI_DIAGNOSTIC_V4 "))
+        .unwrap_or_else(|| panic!("missing wait-ci V4 marker: {}", output_text(output)));
+    let fields = marker.splitn(8, ' ').collect::<Vec<_>>();
+    assert_eq!(fields.get(2), Some(&expected_reason));
+    let should_capture = expected_reason == "ci_failed";
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        if should_capture {
+            vec!["clear", "capture"]
+        } else {
+            vec!["clear"]
+        },
+        "wait-ci internal command calls: {}",
+        output_text(output)
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", output_text(output));
+    if should_capture {
+        let captured: Value = serde_json::from_slice(
+            &std::fs::read(capture)
+                .unwrap_or_else(|error| panic!("read captured CI evidence: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("decode captured CI evidence: {error}"));
+        assert_eq!(captured["provider"], fields[1]);
+        assert_eq!(
+            captured["payload"],
+            serde_json::from_str::<Value>(fields[7])
+                .unwrap_or_else(|error| panic!("decode V4 payload: {error}"))
+        );
+    } else {
+        assert!(
+            !capture.exists(),
+            "unexpected CI follow-up evidence capture"
+        );
+    }
 }
 
 fn named_span<'a>(
@@ -3513,7 +3587,7 @@ fn command_failure_diagnostic_status_covers_missing_and_unsupported_markers() {
 #[test]
 fn builtin_wait_ci_exports_graphql_failure_reason_without_raw_response() {
     let collector = Collector::start();
-    let (fixture, env) = builtin_wait_ci_fixture(
+    let (fixture, env, internal_calls, ci_capture) = builtin_wait_ci_fixture(
         &collector,
         r#"#!/bin/sh
 if [ "$1" = repo ]; then
@@ -3529,6 +3603,7 @@ exit 97
 "#,
     );
     let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-input-secret");
+    assert_wait_ci_followup_capture(&output, &internal_calls, &ci_capture, "graphql_error");
     assert!(
         !output.status.success(),
         "GraphQL failure fixture unexpectedly succeeded"
@@ -3629,8 +3704,10 @@ exit 97
 #[test]
 fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
     let collector = Collector::start();
-    let (fixture, env) = builtin_wait_ci_fixture(&collector, failed_check_details_fake_gh_script());
+    let (fixture, env, internal_calls, ci_capture) =
+        builtin_wait_ci_fixture(&collector, failed_check_details_fake_gh_script());
     let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-prompt-secret");
+    assert_wait_ci_followup_capture(&output, &internal_calls, &ci_capture, "ci_failed");
     assert!(
         !output.status.success(),
         "failed CI fixture unexpectedly succeeded"
@@ -3640,6 +3717,11 @@ fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
     let exported_spans = spans(&requests);
     let (step, attempt) =
         assert_command_failure_diagnostic(&exported_spans, "wait-ci", "valid", true);
+    assert_eq!(
+        attempt.int_attributes.get("cruise.command.exit_code"),
+        Some(&75),
+        "{attempt:#?}"
+    );
     let expected_checks = json!([
         {
             "name": "unit-tests",

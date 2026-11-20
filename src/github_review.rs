@@ -15,6 +15,7 @@ use crate::step::GitHubReviewStep;
 use crate::variable::VariableStore;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
+const HOST_REVIEW_COMMIT_MESSAGE: &str = "fix: address pull request review feedback";
 const STEP_PLACEHOLDER: &str = "github-review";
 
 const REVIEWS_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!,$after:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviews(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{author{login}commit{oid}}}}}}";
@@ -221,6 +222,68 @@ pub async fn head_oid(pr: &PullRequestRef, cancel: Option<&CancellationToken>) -
     }
     crate::worktree_pr::gh_output_line(&output.stdout)
         .ok_or_else(|| failed("gh pr view returned an empty head commit"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PullRequestHead {
+    target: crate::pr_review_fix::PrTarget,
+    oid: String,
+}
+
+async fn pull_request_head(
+    pr: &PullRequestRef,
+    cancel: Option<&CancellationToken>,
+) -> Result<PullRequestHead> {
+    let args = vec![
+        "pr".into(),
+        "view".into(),
+        pr.number.to_string(),
+        "--json".into(),
+        "state,isCrossRepository,number,title,url,headRefName,baseRefName,headRefOid".into(),
+    ];
+    let output = run_process("gh", &args, pr, cancel).await?;
+    if !output.status.success() {
+        return Err(failed(format!(
+            "gh pr view failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| failed(format!("invalid GitHub pull request head: {error}")))?;
+    let target = crate::pr_review_fix::parse_pr_view(&output.stdout, pr.number)
+        .map_err(|error| failed(error.to_string()))?;
+    let oid = value
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .filter(|oid| !oid.trim().is_empty())
+        .ok_or_else(|| failed("gh pr view returned an empty head commit"))?
+        .to_string();
+    Ok(PullRequestHead { target, oid })
+}
+
+fn same_pr_identity(
+    left: &crate::pr_review_fix::PrTarget,
+    right: &crate::pr_review_fix::PrTarget,
+) -> bool {
+    left.number == right.number
+        && left.url == right.url
+        && left.head_branch == right.head_branch
+        && left.base_branch == right.base_branch
+}
+
+async fn ensure_current_pull_request(
+    pr: &PullRequestRef,
+    expected_target: &crate::pr_review_fix::PrTarget,
+    expected_head: &str,
+    cancel: Option<&CancellationToken>,
+) -> Result<()> {
+    let current = pull_request_head(pr, cancel).await?;
+    if current.oid != expected_head || !same_pr_identity(&current.target, expected_target) {
+        return Err(failed(
+            "the pull request identity or head changed during the review",
+        ));
+    }
+    Ok(())
 }
 
 async fn has_review_of_head(
@@ -522,14 +585,7 @@ fn reply_marker(thread_id: &str, reply: &str) -> String {
     format!("<!-- cruise-github-review:{digest} -->")
 }
 
-/// # Errors
-/// `GitHubReviewFailed` on permission/API failure, `Interrupted` on cancel.
-pub async fn apply_actions(
-    pr: &PullRequestRef,
-    threads: &[ReviewThread],
-    actions: &[ReviewAction],
-    cancel: Option<&CancellationToken>,
-) -> Result<()> {
+fn validate_action_permissions(threads: &[ReviewThread], actions: &[ReviewAction]) -> Result<()> {
     for action in actions {
         let thread = threads
             .iter()
@@ -551,10 +607,67 @@ pub async fn apply_actions(
             )));
         }
     }
+    Ok(())
+}
+
+fn validate_live_action_permissions(
+    actions: &[ReviewAction],
+    current: &[ReviewThread],
+) -> Result<()> {
+    for action in actions {
+        let thread = current
+            .iter()
+            .find(|thread| thread.id == action.thread_id)
+            .ok_or_else(|| failed(format!("thread '{}' no longer exists", action.thread_id)))?;
+        if action.reply.is_some() && !thread.viewer_can_reply {
+            return Err(failed(format!(
+                "no permission to reply to thread '{}'",
+                action.thread_id
+            )));
+        }
+        if action.resolve && !thread.viewer_can_resolve {
+            return Err(failed(format!(
+                "no permission to resolve thread '{}'",
+                action.thread_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_live_actions(
+    pr: &PullRequestRef,
+    threads: &[ReviewThread],
+    actions: &[ReviewAction],
+    cancel: Option<&CancellationToken>,
+) -> Result<()> {
+    validate_action_permissions(threads, actions)?;
     if actions.is_empty() {
         return Ok(());
     }
     let current = fetch_threads(pr, cancel).await?;
+    validate_live_action_permissions(actions, &current)
+}
+
+async fn apply_actions_internal(
+    pr: &PullRequestRef,
+    expected_pr: Option<(&crate::pr_review_fix::PrTarget, &str)>,
+    threads: &[ReviewThread],
+    actions: &[ReviewAction],
+    cancel: Option<&CancellationToken>,
+) -> Result<()> {
+    validate_action_permissions(threads, actions)?;
+    if actions.is_empty() {
+        return Ok(());
+    }
+    if let Some((target, head)) = expected_pr {
+        ensure_current_pull_request(pr, target, head, cancel).await?;
+    }
+    let current = fetch_threads(pr, cancel).await?;
+    validate_live_action_permissions(actions, &current)?;
+    if let Some((target, head)) = expected_pr {
+        ensure_current_pull_request(pr, target, head, cancel).await?;
+    }
     for action in actions {
         let state = current
             .iter()
@@ -588,6 +701,17 @@ pub async fn apply_actions(
     Ok(())
 }
 
+/// # Errors
+/// `GitHubReviewFailed` on permission/API failure, `Interrupted` on cancel.
+pub async fn apply_actions(
+    pr: &PullRequestRef,
+    threads: &[ReviewThread],
+    actions: &[ReviewAction],
+    cancel: Option<&CancellationToken>,
+) -> Result<()> {
+    apply_actions_internal(pr, None, threads, actions, cancel).await
+}
+
 fn thread_json(thread: &ReviewThread) -> Value {
     json!({
         "id": thread.id,
@@ -604,9 +728,116 @@ fn build_prompt(base: &str, head_oid: &str, threads: &[ReviewThread]) -> String 
         serde_json::to_string_pretty(&threads.iter().map(thread_json).collect::<Vec<_>>())
             .unwrap_or_else(|_| "[]".to_string());
     let context = format!(
-        "\n\n## GitHub review context\n\nPR head commit: {head_oid}\n\nUnresolved review threads from allowlisted bots (JSON):\n{threads_json}\n\nAfter making and committing any needed fixes, respond with ONLY a JSON object of the form {{\"actions\":[{{\"thread_id\":\"<id>\",\"reply\":\"<optional text>\",\"resolve\":true}}]}}. Use only thread ids listed above, at most once each. Each action needs a non-empty reply or resolve:true. An empty actions list is allowed.\n"
+        "\n\n## GitHub review context\n\nPR head commit: {head_oid}\n\nUnresolved review threads selected for this step (JSON):\n{threads_json}\n\nAssess the threads and make only necessary edits. Do not commit or push; Cruise will validate and publish changes when explicitly allowed. Respond with ONLY a JSON object of the form {{\"actions\":[{{\"thread_id\":\"<id>\",\"reply\":\"<optional text>\",\"resolve\":true}}]}}. Use only thread ids listed above, at most once each. Each action needs a non-empty reply or resolve:true. An empty actions list is allowed.\n"
     );
     format!("{base}{}", context.replace('{', "{{").replace('}', "}}"))
+}
+
+async fn read_host_git_output<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Vec<u8> {
+    const MAX_CAPTURED_OUTPUT: usize = 4 * 1024 * 1024;
+    const MARKER: &[u8] = b"\n[... output omitted ...]\n";
+    const HEAD: usize = (MAX_CAPTURED_OUTPUT - MARKER.len()) / 2;
+    const TAIL: usize = MAX_CAPTURED_OUTPUT - MARKER.len() - HEAD;
+    use tokio::io::AsyncReadExt as _;
+
+    let mut head = Vec::new();
+    let mut tail = std::collections::VecDeque::new();
+    let mut total = 0usize;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                total = total.saturating_add(read);
+                let count = read.min(HEAD.saturating_sub(head.len()));
+                head.extend_from_slice(&buffer[..count]);
+                for &byte in &buffer[count..read] {
+                    if tail.len() == TAIL {
+                        tail.pop_front();
+                    }
+                    tail.push_back(byte);
+                }
+            }
+        }
+    }
+    if total > HEAD + TAIL {
+        head.extend_from_slice(MARKER);
+    }
+    head.extend(tail);
+    head
+}
+
+async fn wait_for_cancellation(cancel: Option<&CancellationToken>) {
+    if let Some(cancel) = cancel {
+        cancel.cancelled().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn run_host_git(
+    pr: &PullRequestRef,
+    args: &[String],
+    cancel: Option<&CancellationToken>,
+) -> Result<std::process::Output> {
+    check_cancel(cancel)?;
+    let mut command = tokio::process::Command::from(crate::worktree_pr::host_git_command());
+    command
+        .args(args)
+        .current_dir(&pr.working_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|error| failed(format!("failed to run git: {error}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .map(|mut pipe| tokio::spawn(async move { read_host_git_output(&mut pipe).await }));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|mut pipe| tokio::spawn(async move { read_host_git_output(&mut pipe).await }));
+    let status = tokio::select! {
+        result = child.wait() => result.map_err(|error| failed(format!("git process failed: {error}")))?,
+        () = wait_for_cancellation(cancel) => {
+            let _ = child.kill().await;
+            if let Some(task) = &stdout {
+                task.abort();
+            }
+            if let Some(task) = &stderr {
+                task.abort();
+            }
+            return Err(CruiseError::Interrupted);
+        }
+    };
+    let stdout = match stdout {
+        Some(task) => task
+            .await
+            .map_err(|error| failed(format!("failed to collect git stdout: {error}")))?,
+        None => Vec::new(),
+    };
+    let stderr = match stderr {
+        Some(task) => task
+            .await
+            .map_err(|error| failed(format!("failed to collect git stderr: {error}")))?,
+        None => Vec::new(),
+    };
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+async fn git_output_args(
+    pr: &PullRequestRef,
+    args: Vec<String>,
+    cancel: Option<&CancellationToken>,
+) -> Result<std::process::Output> {
+    run_host_git(pr, &args, cancel).await
 }
 
 async fn git_output(
@@ -614,8 +845,7 @@ async fn git_output(
     args: &[&str],
     cancel: Option<&CancellationToken>,
 ) -> Result<std::process::Output> {
-    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
-    run_process("git", &args, pr, cancel).await
+    git_output_args(pr, args.iter().map(ToString::to_string).collect(), cancel).await
 }
 
 async fn git_head(
@@ -630,32 +860,569 @@ async fn git_head(
         .flatten())
 }
 
-/// Reject a dirty worktree and push HEAD when the prompt committed.
-async fn publish_prompt_commits(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OriginSnapshot {
+    fetch_url: String,
+    push_url: String,
+}
+
+struct HostCommitBaseline {
+    head_oid: String,
+    branch_ref: String,
+    tracking_ref: String,
+    target: crate::pr_review_fix::PrTarget,
+    origin: OriginSnapshot,
+    committer_name: String,
+    committer_email: String,
+}
+
+fn git_output_lines(output: &std::process::Output, context: &str) -> Result<Vec<String>> {
+    if !output.status.success() {
+        return Err(failed(format!(
+            "{context}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let output = std::str::from_utf8(&output.stdout)
+        .map_err(|_| failed(format!("{context} is not valid UTF-8")))?;
+    Ok(output.lines().map(ToString::to_string).collect())
+}
+
+fn validate_origin_endpoint(
+    target: &crate::pr_review_fix::PrTarget,
+    remote: &str,
+    direction: &str,
+) -> Result<()> {
+    let url =
+        url::Url::parse(&target.url).map_err(|_| failed("invalid resolved pull request URL"))?;
+    let segments: Vec<_> = url.path_segments().into_iter().flatten().collect();
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || segments.len() != 4
+        || segments[2] != "pull"
+        || segments[3].parse::<u64>().ok() != Some(target.number)
+    {
+        return Err(failed("invalid resolved pull request URL"));
+    }
+    if remote.contains("://")
+        && url::Url::parse(remote).map_or(true, |remote| remote.port().is_some())
+    {
+        return Err(failed(
+            "cannot verify origin repository against resolved pull request",
+        ));
+    }
+    let identity = crate::forge::resolve_remote(remote, Some(crate::forge::ForgeKind::GitHub))
+        .map_err(|_| failed("cannot verify origin repository against resolved pull request"))?;
+    let expected_repo = format!("{}/{}", segments[0], segments[1]);
+    if !identity
+        .host
+        .eq_ignore_ascii_case(url.host_str().unwrap_or_default())
+        || !identity.repository.eq_ignore_ascii_case(&expected_repo)
+    {
+        return Err(failed(format!(
+            "origin {direction} repository does not match resolved pull request repository"
+        )));
+    }
+    Ok(())
+}
+
+async fn capture_origin(
+    pr: &PullRequestRef,
+    target: &crate::pr_review_fix::PrTarget,
+    cancel: Option<&CancellationToken>,
+) -> Result<OriginSnapshot> {
+    let fetch_output = git_output(pr, &["remote", "get-url", "--all", "origin"], cancel).await?;
+    if fetch_output
+        .stdout
+        .iter()
+        .any(|byte| byte.is_ascii_control() && *byte != b'\n')
+    {
+        return Err(failed("origin fetch URL contains a control character"));
+    }
+    let fetch_urls = git_output_lines(&fetch_output, "failed to inspect origin fetch URL")?;
+    if fetch_urls.len() != 1 || fetch_urls[0].is_empty() {
+        return Err(failed("origin must have exactly one fetch URL"));
+    }
+    let push_url = crate::worktree_pr::host_push_endpoint(&pr.working_dir)
+        .map_err(|error| failed(format!("failed to validate origin push URL: {error}")))?;
+    validate_origin_endpoint(target, &fetch_urls[0], "fetch")?;
+    validate_origin_endpoint(target, &push_url, "push")?;
+    Ok(OriginSnapshot {
+        fetch_url: fetch_urls[0].clone(),
+        push_url,
+    })
+}
+
+async fn ensure_no_in_progress_git_operation(
+    pr: &PullRequestRef,
+    cancel: Option<&CancellationToken>,
+) -> Result<()> {
+    for marker in [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "REBASE_HEAD",
+        "BISECT_START",
+        "rebase-merge",
+        "rebase-apply",
+        "sequencer",
+    ] {
+        let output = git_output_args(
+            pr,
+            vec!["rev-parse".into(), "--git-path".into(), marker.to_string()],
+            cancel,
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(failed("failed to inspect Git operation state"));
+        }
+        let Some(path) = crate::worktree_pr::gh_output_line(&output.stdout) else {
+            return Err(failed("Git returned an empty operation-state path"));
+        };
+        let path = std::path::PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            pr.working_dir.join(path)
+        };
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                return Err(failed("the worktree has an in-progress Git operation"));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(failed(format!(
+                    "failed to inspect Git operation state: {error}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_git_ident(ident: &str) -> Result<(String, String)> {
+    let close = ident
+        .rfind('>')
+        .ok_or_else(|| failed("Git committer identity is malformed"))?;
+    let open = ident[..close]
+        .rfind('<')
+        .ok_or_else(|| failed("Git committer identity is malformed"))?;
+    let name = ident[..open].trim_end();
+    let email = &ident[open + 1..close];
+    if name.is_empty() || email.is_empty() {
+        return Err(failed("Git committer identity is incomplete"));
+    }
+    Ok((name.to_string(), email.to_string()))
+}
+
+async fn git_committer_identity(
+    pr: &PullRequestRef,
+    cancel: Option<&CancellationToken>,
+) -> Result<(String, String)> {
+    let output = git_output(pr, &["var", "GIT_COMMITTER_IDENT"], cancel).await?;
+    if !output.status.success() {
+        return Err(failed(format!(
+            "Git committer identity is unavailable: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let ident = crate::worktree_pr::gh_output_line(&output.stdout)
+        .ok_or_else(|| failed("Git committer identity is empty"))?;
+    parse_git_ident(&ident)
+}
+
+async fn ensure_checkout_binding(
+    pr: &PullRequestRef,
+    branch_ref: &str,
+    tracking_ref: &str,
+    cancel: Option<&CancellationToken>,
+) -> Result<()> {
+    let branch = git_output(pr, &["symbolic-ref", "--quiet", "HEAD"], cancel).await?;
+    if !branch.status.success() {
+        return Err(failed("HEAD must be attached to the pull request head ref"));
+    }
+    if crate::worktree_pr::gh_output_line(&branch.stdout).as_deref() != Some(branch_ref) {
+        return Err(failed(
+            "the checked-out branch does not match the pull request head ref",
+        ));
+    }
+    let upstream = git_output(
+        pr,
+        &["rev-parse", "--symbolic-full-name", "@{upstream}"],
+        cancel,
+    )
+    .await?;
+    if !upstream.status.success()
+        || crate::worktree_pr::gh_output_line(&upstream.stdout).as_deref() != Some(tracking_ref)
+    {
+        return Err(failed(
+            "the checked-out branch does not track the pull request head ref on origin",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_review_git_safety(pr: &PullRequestRef) -> Result<()> {
+    crate::worktree_pr::ensure_host_git_safety(&pr.working_dir)
+        .map_err(|error| failed(format!("unsafe Git configuration: {error}")))
+}
+
+/// Bind the edit turn to a clean checkout at the live PR head and its literal origin.
+async fn prepare_host_commit(
+    pr: &PullRequestRef,
+    expected: &PullRequestHead,
+    cancel: Option<&CancellationToken>,
+) -> Result<HostCommitBaseline> {
+    ensure_review_git_safety(pr)?;
+    ensure_no_in_progress_git_operation(pr, cancel).await?;
+    let status = git_output(
+        pr,
+        &["status", "--porcelain", "--untracked-files=all"],
+        cancel,
+    )
+    .await?;
+    if !status.status.success() {
+        return Err(failed("git status failed before the review prompt"));
+    }
+    if !status.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Err(failed(
+            "the worktree must be clean before a host-managed review edit",
+        ));
+    }
+    let current = pull_request_head(pr, cancel).await?;
+    if current.oid != expected.oid || !same_pr_identity(&current.target, &expected.target) {
+        return Err(failed(
+            "the pull request head changed while collecting review threads",
+        ));
+    }
+    let origin = capture_origin(pr, &current.target, cancel).await?;
+    let branch_ref = format!("refs/heads/{}", current.target.head_branch);
+    let tracking_ref = format!("refs/remotes/origin/{}", current.target.head_branch);
+    let valid_ref = git_output_args(
+        pr,
+        vec!["check-ref-format".into(), branch_ref.clone()],
+        cancel,
+    )
+    .await?;
+    if !valid_ref.status.success() {
+        return Err(failed("GitHub returned an invalid pull request head ref"));
+    }
+    ensure_checkout_binding(pr, &branch_ref, &tracking_ref, cancel).await?;
+    if git_head(pr, cancel).await?.as_deref() != Some(current.oid.as_str()) {
+        return Err(failed(
+            "the checked-out HEAD does not match the pull request's current head",
+        ));
+    }
+    let tracking = git_output_args(
+        pr,
+        vec!["rev-parse".into(), "--verify".into(), tracking_ref.clone()],
+        cancel,
+    )
+    .await?;
+    if !tracking.status.success()
+        || crate::worktree_pr::gh_output_line(&tracking.stdout).as_deref()
+            != Some(current.oid.as_str())
+    {
+        return Err(failed(
+            "the origin tracking ref does not match the pull request's current head",
+        ));
+    }
+    let (committer_name, committer_email) = git_committer_identity(pr, cancel).await?;
+    Ok(HostCommitBaseline {
+        head_oid: current.oid,
+        branch_ref,
+        tracking_ref,
+        target: current.target,
+        origin,
+        committer_name,
+        committer_email,
+    })
+}
+
+fn is_direct_child(output: &std::process::Output, commit_oid: &str, parent_oid: &str) -> bool {
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut fields = stdout.split_ascii_whitespace();
+    fields.next() == Some(commit_oid)
+        && fields.next() == Some(parent_oid)
+        && fields.next().is_none()
+}
+/// Stage edits and create a commit-tree object without updating a ref.
+async fn create_host_review_commit(
+    pr: &PullRequestRef,
+    baseline: &HostCommitBaseline,
+    cancel: Option<&CancellationToken>,
+) -> Result<String> {
+    let add = git_output(pr, &["add", "--all", "--", "."], cancel).await?;
+    if !add.status.success() {
+        return Err(failed(format!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        )));
+    }
+    let tree = git_output(pr, &["write-tree"], cancel).await?;
+    if !tree.status.success() {
+        return Err(failed(format!(
+            "git write-tree failed: {}",
+            String::from_utf8_lossy(&tree.stderr).trim()
+        )));
+    }
+    let tree = crate::worktree_pr::gh_output_line(&tree.stdout)
+        .ok_or_else(|| failed("git write-tree returned an empty tree"))?;
+    let commit = git_output_args(
+        pr,
+        vec![
+            "-c".into(),
+            format!("user.name={}", baseline.committer_name),
+            "-c".into(),
+            format!("user.email={}", baseline.committer_email),
+            "commit-tree".into(),
+            tree,
+            "-p".into(),
+            baseline.head_oid.clone(),
+            "-m".into(),
+            HOST_REVIEW_COMMIT_MESSAGE.into(),
+        ],
+        cancel,
+    )
+    .await?;
+    if !commit.status.success() {
+        return Err(failed(format!(
+            "git commit-tree failed: {}",
+            String::from_utf8_lossy(&commit.stderr).trim()
+        )));
+    }
+    crate::worktree_pr::gh_output_line(&commit.stdout)
+        .filter(|oid| {
+            (oid.len() == 40 || oid.len() == 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .ok_or_else(|| failed("git commit-tree returned an invalid object id"))
+}
+
+/// Create and attach one commit-tree object by compare-and-swap.
+async fn commit_prompt_changes(
+    pr: &PullRequestRef,
+    baseline: &HostCommitBaseline,
+    cancel: Option<&CancellationToken>,
+) -> Result<Option<String>> {
+    if git_head(pr, cancel).await?.as_deref() != Some(baseline.head_oid.as_str()) {
+        return Err(failed(
+            "HEAD changed during the review prompt; host commit refused",
+        ));
+    }
+    ensure_checkout_binding(pr, &baseline.branch_ref, &baseline.tracking_ref, cancel).await?;
+    ensure_no_in_progress_git_operation(pr, cancel).await?;
+    ensure_review_git_safety(pr)?;
+    let origin = capture_origin(pr, &baseline.target, cancel).await?;
+    if origin != baseline.origin {
+        return Err(failed("origin changed during the review prompt"));
+    }
+    let status = git_output(
+        pr,
+        &["status", "--porcelain", "--untracked-files=all"],
+        cancel,
+    )
+    .await?;
+    if !status.status.success() {
+        return Err(failed("git status failed after the review prompt"));
+    }
+    if status.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let commit_oid = create_host_review_commit(pr, baseline, cancel).await?;
+    let update = git_output_args(
+        pr,
+        vec![
+            "update-ref".into(),
+            "--no-deref".into(),
+            "-m".into(),
+            "Cruise: publish validated PR review edits".into(),
+            baseline.branch_ref.clone(),
+            commit_oid.clone(),
+            baseline.head_oid.clone(),
+        ],
+        cancel,
+    )
+    .await?;
+    if !update.status.success() {
+        return Err(failed(
+            "the pull request branch moved before the host commit could be attached",
+        ));
+    }
+    if git_head(pr, cancel).await?.as_deref() != Some(commit_oid.as_str()) {
+        return Err(failed(
+            "HEAD changed while attaching the host review commit",
+        ));
+    }
+    let status = git_output(
+        pr,
+        &["status", "--porcelain", "--untracked-files=all"],
+        cancel,
+    )
+    .await?;
+    if !status.status.success() || !status.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Err(failed("the host commit left uncommitted changes"));
+    }
+    Ok(Some(commit_oid))
+}
+
+async fn validate_host_commit_for_publish(
+    pr: &PullRequestRef,
+    baseline: &HostCommitBaseline,
+    commit_oid: &str,
+    cancel: Option<&CancellationToken>,
+) -> Result<()> {
+    if git_head(pr, cancel).await?.as_deref() != Some(commit_oid) {
+        return Err(failed(
+            "HEAD changed before the host commit could be published",
+        ));
+    }
+    ensure_checkout_binding(pr, &baseline.branch_ref, &baseline.tracking_ref, cancel).await?;
+    ensure_current_pull_request(pr, &baseline.target, &baseline.head_oid, cancel).await?;
+    ensure_no_in_progress_git_operation(pr, cancel).await?;
+    let origin = capture_origin(pr, &baseline.target, cancel).await?;
+    if origin != baseline.origin {
+        return Err(failed(
+            "origin changed before the host commit could be published",
+        ));
+    }
+    let parents = git_output_args(
+        pr,
+        vec![
+            "rev-list".into(),
+            "--parents".into(),
+            "-n".into(),
+            "1".into(),
+            commit_oid.to_string(),
+        ],
+        cancel,
+    )
+    .await?;
+    if !is_direct_child(&parents, commit_oid, &baseline.head_oid) {
+        return Err(failed(
+            "refusing to publish a rewrite of the validated pull request head",
+        ));
+    }
+    ensure_review_git_safety(pr)?;
+    let status = git_output(
+        pr,
+        &["status", "--porcelain", "--untracked-files=all"],
+        cancel,
+    )
+    .await?;
+    if !status.status.success() || !status.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Err(failed("the host commit left uncommitted changes"));
+    }
+    Ok(())
+}
+
+/// Push only the captured commit object to the validated PR ref.
+async fn publish_host_commit(
+    pr: &PullRequestRef,
+    baseline: &HostCommitBaseline,
+    commit_oid: Option<&str>,
+    cancel: Option<&CancellationToken>,
+) -> Result<()> {
+    let Some(commit_oid) = commit_oid else {
+        return Ok(());
+    };
+    validate_host_commit_for_publish(pr, baseline, commit_oid, cancel).await?;
+    let lease = format!(
+        "--force-with-lease={}:{}",
+        baseline.branch_ref, baseline.head_oid
+    );
+    let refspec = format!("{commit_oid}:{}", baseline.branch_ref);
+    let push = git_output_args(
+        pr,
+        vec![
+            "-c".into(),
+            "push.pushOption=".into(),
+            "push".into(),
+            "--no-follow-tags".into(),
+            "--recurse-submodules=no".into(),
+            "--no-verify".into(),
+            lease,
+            "--".into(),
+            baseline.origin.push_url.clone(),
+            refspec,
+        ],
+        cancel,
+    )
+    .await?;
+    if !push.status.success() {
+        return Err(failed(format!(
+            "git push to the pull-request head failed: {}",
+            String::from_utf8_lossy(&push.stderr).trim()
+        )));
+    }
+    let update_tracking = git_output_args(
+        pr,
+        vec![
+            "update-ref".into(),
+            "--no-deref".into(),
+            baseline.tracking_ref.clone(),
+            commit_oid.to_string(),
+            baseline.head_oid.clone(),
+        ],
+        cancel,
+    )
+    .await?;
+    if !update_tracking.status.success() {
+        let tracking = git_output_args(
+            pr,
+            vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                baseline.tracking_ref.clone(),
+            ],
+            cancel,
+        )
+        .await?;
+        if !tracking.status.success()
+            || crate::worktree_pr::gh_output_line(&tracking.stdout).as_deref() != Some(commit_oid)
+        {
+            return Err(failed(
+                "published the PR head but could not update its local origin tracking ref",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_prompt_clean(
     pr: &PullRequestRef,
     head_before: Option<&str>,
     cancel: Option<&CancellationToken>,
 ) -> Result<()> {
-    let Some(before) = head_before else {
+    let Some(head_before) = head_before else {
         return Ok(());
     };
-    let status = git_output(pr, &["status", "--porcelain"], cancel).await?;
+    if git_head(pr, cancel).await?.as_deref() != Some(head_before) {
+        return Err(failed(
+            "the prompt moved HEAD while host commits were not allowed",
+        ));
+    }
+    ensure_review_git_safety(pr)?;
+    let status = git_output(
+        pr,
+        &["status", "--porcelain", "--untracked-files=all"],
+        cancel,
+    )
+    .await?;
     if !status.status.success() {
-        return Err(failed("git status failed"));
+        return Err(failed("git status failed after the review prompt"));
     }
     if !status.stdout.iter().all(u8::is_ascii_whitespace) {
         return Err(failed(
-            "the prompt left uncommitted changes; commit them or leave the worktree clean",
+            "the prompt left uncommitted changes; host commit requires allow_commit: true",
         ));
-    }
-    if git_head(pr, cancel).await?.as_deref() != Some(before) {
-        let push = git_output(pr, &["push"], cancel).await?;
-        if !push.status.success() {
-            return Err(failed(format!(
-                "git push failed: {}",
-                String::from_utf8_lossy(&push.stderr).trim()
-            )));
-        }
     }
     Ok(())
 }
@@ -747,6 +1514,10 @@ pub(crate) async fn run_step(
 }
 
 #[expect(clippy::too_many_arguments, reason = "loop state is passed explicitly")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the review loop keeps GitHub and host-commit lifecycle ordering together"
+)]
 async fn run_loop(
     ctx: &ExecutionContext<'_>,
     step: &GitHubReviewStep,
@@ -790,9 +1561,37 @@ async fn run_loop(
             .checked_duration_since(Instant::now())
             .filter(|d| !d.is_zero())
             .ok_or_else(|| failed("timed out before running the prompt"))?;
+        let pr_head = pull_request_head(pr, cancel).await?;
+        if pr_head.oid != head {
+            return Err(failed(
+                "the pull request head changed while collecting review threads",
+            ));
+        }
+        let (baseline, head_before) = if allow_commit {
+            (Some(prepare_host_commit(pr, &pr_head, cancel).await?), None)
+        } else {
+            let head_before = git_head(pr, cancel).await?;
+            if head_before.is_some() {
+                ensure_review_git_safety(pr)?;
+                let status = git_output(
+                    pr,
+                    &["status", "--porcelain", "--untracked-files=all"],
+                    cancel,
+                )
+                .await?;
+                if !status.status.success() {
+                    return Err(failed("git status failed before the review prompt"));
+                }
+                if !status.stdout.iter().all(u8::is_ascii_whitespace) {
+                    return Err(failed(
+                        "the worktree must be clean before the review prompt",
+                    ));
+                }
+            }
+            (None, head_before)
+        };
         let mut prompt = step.prompt.clone();
         prompt.prompt = build_prompt(&prompt.prompt, &head, &threads);
-        let head_before = git_head(pr, cancel).await?;
         let lease = ctx.instructions.and_then(|inbox| {
             inbox.lease(
                 step_name,
@@ -813,7 +1612,8 @@ async fn run_loop(
             step_name,
             ctx.usage_session_id,
             false,
-            allow_commit,
+            // `github-review` allow_commit is consent for the host loop only.
+            false,
             lease
                 .as_ref()
                 .map(crate::instruction_inbox::Lease::block_text),
@@ -830,8 +1630,26 @@ async fn run_loop(
         }
         let output = vars.prev_output().unwrap_or_default().to_string();
         let actions = parse_review_actions(&output, &threads)?;
-        publish_prompt_commits(pr, head_before.as_deref(), cancel).await?;
-        apply_actions(pr, &threads, &actions, cancel).await?;
+        validate_action_permissions(&threads, &actions)?;
+        ensure_current_pull_request(pr, &pr_head.target, &pr_head.oid, cancel).await?;
+        validate_live_actions(pr, &threads, &actions, cancel).await?;
+        let published_head = if let Some(baseline) = baseline.as_ref() {
+            let committed = commit_prompt_changes(pr, baseline, cancel).await?;
+            publish_host_commit(pr, baseline, committed.as_deref(), cancel).await?;
+            committed.unwrap_or_else(|| pr_head.oid.clone())
+        } else {
+            ensure_prompt_clean(pr, head_before.as_deref(), cancel).await?;
+            pr_head.oid.clone()
+        };
+        ensure_current_pull_request(pr, &pr_head.target, &published_head, cancel).await?;
+        apply_actions_internal(
+            pr,
+            Some((&pr_head.target, &published_head)),
+            &threads,
+            &actions,
+            cancel,
+        )
+        .await?;
         let (left, ignored) =
             unresolved_review_threads(pr, scope, bots, &mut permissions, cancel).await?;
         excluded.extend(ignored);
@@ -875,7 +1693,28 @@ mod tests {
         tmp: TempDir,
         _path: crate::test_support::EnvGuard,
         _dir: crate::test_support::EnvGuard,
+        _git_config: [crate::test_support::EnvGuard; 2],
         _lock: crate::test_support::ProcessLock,
+    }
+
+    fn fixture_git(cwd: &Path, args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap_or_else(|error| panic!("run fixture git {args:?}: {error}"))
+    }
+
+    fn fixture_git_ok(cwd: &Path, args: &[&str]) -> String {
+        let output = fixture_git(cwd, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     impl Fixture {
@@ -884,10 +1723,49 @@ mod tests {
             let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
             let bin = tmp.path().join("bin");
             std::fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("{e:?}"));
+            let repo = tmp.path().join("repo");
+            std::fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+            let origin = tmp.path().join("origin.git");
+            fixture_git_ok(
+                tmp.path(),
+                &["init", "--bare", "-q", origin.to_str().unwrap_or("")],
+            );
+            std::fs::write(repo.join("tracked.txt"), "fixture\n")
+                .unwrap_or_else(|e| panic!("write fixture file: {e}"));
+            fixture_git_ok(&repo, &["init", "-q", "-b", "feature"]);
+            fixture_git_ok(&repo, &["add", "--all"]);
+            fixture_git_ok(&repo, &["config", "user.name", "Review fixture"]);
+            fixture_git_ok(&repo, &["config", "user.email", "review@example.invalid"]);
+            fixture_git_ok(
+                &repo,
+                &[
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "fixture",
+                ],
+            );
+            let origin_url = origin.to_string_lossy().into_owned();
+            fixture_git_ok(&repo, &["remote", "add", "origin", origin_url.as_str()]);
+            fixture_git_ok(&repo, &["push", "-q", "-u", "origin", "feature"]);
+            fixture_git_ok(
+                &repo,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://github.com/acme/repo.git",
+                ],
+            );
             let script = r#"#!/bin/sh
 D="$GH_FIXTURE_DIR"
 all=$(printf '%s ' "$@" | tr '\n' ' ')
 echo "$all" >> "$D/calls.log"
+if [ -f "$D/fail" ]; then echo "boom: not authenticated" >&2; exit 1; fi
 case "$all" in
   *collaborators/*/permission*)
     case "$all" in
@@ -908,8 +1786,10 @@ case "$all" in
       *) cat "$D/threads.json" ;;
     esac ;;
   *reviews*) cat "$D/reviews.json" ;;
+  *headRefName*)
+    oid=$(git --git-dir "$D/origin.git" rev-parse refs/heads/feature) || exit
+    printf '{"state":"OPEN","number":42,"title":"fixture","url":"https://github.com/acme/repo/pull/42","headRefName":"feature","baseRefName":"main","headRefOid":"%s","isCrossRepository":false}' "$oid" ;;
   *)
-    if [ -f "$D/fail" ]; then echo "boom: not authenticated" >&2; exit 1; fi
     case "$all" in
       *--jq*) cat "$D/head.txt" ;;
       *) printf '{"headRefOid":"%s","data":{"repository":{"pullRequest":{"headRefOid":"%s"}}}}' "$(cat "$D/head.txt")" "$(cat "$D/head.txt")" ;;
@@ -923,6 +1803,10 @@ esac
                 tmp,
                 _path: path,
                 _dir: dir,
+                _git_config: [
+                    crate::test_support::EnvGuard::set("GIT_CONFIG_NOSYSTEM", "1"),
+                    crate::test_support::EnvGuard::set("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ],
                 _lock: lock,
             };
             f.write("head.txt", OID);
@@ -954,6 +1838,24 @@ esac
         fn path(&self) -> &Path {
             self.tmp.path()
         }
+        fn repo_path(&self) -> std::path::PathBuf {
+            self.tmp.path().join("repo")
+        }
+        fn sync_reviews_to_head(&self) {
+            let head = fixture_git_ok(&self.repo_path(), &["rev-parse", "HEAD"]);
+            self.write("head.txt", &head);
+            let mut reviews: Value = serde_json::from_str(&self.read("reviews.json"))
+                .unwrap_or_else(|error| panic!("parse fixture reviews: {error}"));
+            let pull_request = &mut reviews["data"]["repository"]["pullRequest"];
+            pull_request["headRefOid"] = json!(head.clone());
+            for review in pull_request["reviews"]["nodes"]
+                .as_array_mut()
+                .unwrap_or_else(|| panic!("fixture review nodes"))
+            {
+                review["commit"]["oid"] = json!(head.clone());
+            }
+            self.write("reviews.json", &reviews.to_string());
+        }
     }
 
     fn threads_json(nodes: &[Value], next: Option<&str>) -> String {
@@ -977,7 +1879,7 @@ esac
     fn pr(f: &Fixture) -> PullRequestRef {
         PullRequestRef {
             number: 42,
-            working_dir: f.path().to_path_buf(),
+            working_dir: f.repo_path(),
         }
     }
 
@@ -1359,12 +2261,14 @@ esac
         let mut vars = VariableStore::new("input".to_string());
         vars.set_named_value("pr.number", "42".to_string());
         vars.set_artifacts_root(f.path().join("artifacts"));
-        let mut tracker = FileTracker::with_root(f.path().to_path_buf());
+        f.sync_reviews_to_head();
+        let repo = f.repo_path();
+        let mut tracker = FileTracker::with_root(repo.clone());
         crate::worktree_pr::run_after_pr_steps_for_test(
             &compiled,
             &mut vars,
             &mut tracker,
-            f.path(),
+            &repo,
             &NoOpOptionHandler,
         )
         .await
@@ -1431,12 +2335,14 @@ JSON
         let mut vars = VariableStore::new("input".to_string());
         vars.set_named_value("pr.number", "42".to_string());
         vars.set_artifacts_root(f.path().join("artifacts"));
-        let mut tracker = FileTracker::with_root(f.path().to_path_buf());
+        f.sync_reviews_to_head();
+        let repo = f.repo_path();
+        let mut tracker = FileTracker::with_root(repo.clone());
         let result = crate::worktree_pr::run_after_pr_steps_for_test(
             &compiled,
             &mut vars,
             &mut tracker,
-            f.path(),
+            &repo,
             &NoOpOptionHandler,
         )
         .await;

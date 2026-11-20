@@ -22,12 +22,14 @@
 - Isolate GitHub Action config, data, state, and provisioned jcode credentials per workflow job under `$RUNNER_TEMP`, and stop the job's daemon when the action finishes.
 - Shorten built-in workflow prompts by about 24% without changing step structure, and stop TDD consolidate/apply and security triage from inlining the previous step output twice.
 - Update SwiftUI and Slint UI E2E policies with faster feedback loops that keep target-runtime verification separate.
+- Move the built-in TDD ledger snapshot and post-PR Git operations to the host. Keep Git metadata read-only in isolated jcode turns; stop on an unexpected command status rather than advancing to publication.
 
 ### Added
 
 - Check GitHub and GitLab base-branch CI before fresh workflow runs by default; opt out with `check_base_ci: false` in `default.yaml`.
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.
 - Add the `if.head-changed` step condition, which routes to a target when a step completes successfully with a different Git `HEAD` OID; untracked, ignored, and uncommitted changes do not count.
+- Configure a trusted `CRUISE_CI_VERIFY_SCRIPT` outside the worktree on Linux `jcode-bubblewrap` builds to verify the exact staged repair before an automatic CI fix commit and scoped push.
 - Add `cruise docs e2e [<framework>]` to read the common E2E policy and available framework IDs or one embedded policy offline. New policies include `browser-extension`, `slint`, `flutter`, and `fyne`.
 - Add `cruise daemon start|stop|restart|status|serve` and `CRUISE_DAEMON_PORT` for resident daemon lifecycle and port configuration.
 - Start Docker images as a foreground daemon on port 8484 by default, and document long-lived service-container use.
@@ -39,7 +41,7 @@
 
 ### Fixed
 
-- Recheck CI after no-commit built-in after-PR repairs instead of proceeding to merge, within the existing retry budget. Unavailable local platforms no longer block independent evidence-backed fixes; platform-specific repairs remain incomplete until their actual CI jobs pass.
+- Stop unverified or stale built-in CI repairs before publication. Only a verified repair or eligible one-time same-head retry returns to the CI wait.
 - Resume fatal after-PR failures from their separate graph checkpoint, preserving retry counts and avoiding repeated main-workflow and PR-publication effects. Legacy sessions without the stage marker retain their previous after-PR restart behavior.
 - Prevent stack overflow while reporting early CLI workflow failures, including missing-model diagnostics, when after-PR steps are configured.
 - Native GitHub squash merges check current-base ancestry and route confirmed behind/diverged or conflicting pull requests through bounded base-sync recovery. Only native `ResyncRequired` routing starts a fresh after-PR pass budget: reset `budgeted_traversals` for every edge except `squash-merge` → `if.fail` target and clear group retry counts, preserving edge traversal history. The resync edge remains capped at `max_retries`, while generic `if.fail` retains shared budgets. Worst case: up to `max_retries` resyncs, each pass allowing up to `max_retries - 1` CI-fix iterations; zero retry budget permits no resync. Other readiness failures and GitLab behavior are unchanged.

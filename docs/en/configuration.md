@@ -154,6 +154,20 @@ after-pr:                # optional: steps that run automatically after PR creat
 
 Unknown-key handling differs by level: individual step maps (in `steps`, `after-pr`, a group's `steps`, and parallel children) and the `retry` block reject unknown fields with a parse error, which is what turns a typo or a removed field such as `fail-if-no-file-changes` into an immediate config error. Unknown **top-level** keys are ignored silently, so a misspelled `plan_model` or `max_retries` at the top of the file is accepted and simply has no effect.
 
+<a id="accepted-command-exit-codes"></a>
+### Command exit statuses
+
+By default, command exit status remains workflow data: a nonzero status sets `{prev.success}` to `false` and the workflow continues. An ordinary command step may declare `accepted_exit_codes` to make only listed terminal statuses acceptable:
+
+```yaml
+steps:
+  apply:
+    command: git apply --3way change.patch
+    accepted_exit_codes: [0, 75]
+```
+
+The list must be non-empty, unique, contain `0`, and contain only integers from `0` through `255`. An accepted nonzero status still sets `{prev.success}` to `false`, but continues through normal workflow transitions such as `if.head-changed`. A missing or unlisted status, timeout, or other command runtime error raises `CruiseError::RequiredCommandFailed` and stops the graph immediately, even when `if.fail` is configured. Required commands do not use automatic rate-limit retries; their first process status is authoritative. The field is supported on ordinary command steps (including command steps inside groups), not prompts, options, call sites, wrappers, or parallel children.
+
 <a id="dynamic-model-selection"></a>
 ### Dynamic Model Selection
 
