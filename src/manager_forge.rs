@@ -188,7 +188,10 @@ fn api(
         if values.len() != 1 {
             return Err("ambiguous forge response".into());
         }
-        Ok(values.into_iter().next().unwrap())
+        values
+            .into_iter()
+            .next()
+            .ok_or_else(|| "ambiguous forge response".into())
     }
 }
 

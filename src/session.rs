@@ -1757,9 +1757,9 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn managed_reservation_publication_never_replaces_existing_directory() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().unwrap_or_else(|e| panic!("create temporary directory: {e}"));
         let sessions = temp.path().join("sessions");
-        std::fs::create_dir(&sessions).unwrap();
+        std::fs::create_dir(&sessions).unwrap_or_else(|e| panic!("create sessions directory: {e}"));
         let destination = sessions.join("child");
         let owner = ManagedChildOwner {
             goal_id: "goal".into(),
@@ -1768,18 +1768,25 @@ mod tests {
             revision: 1,
             base_sha: "base".into(),
         };
-        publish_managed_reservation(&sessions, &destination, &owner).unwrap();
-        let original = std::fs::read(destination.join("manager-owner.json")).unwrap();
-        let error = publish_managed_reservation(&sessions, &destination, &owner).unwrap_err();
+        publish_managed_reservation(&sessions, &destination, &owner)
+            .unwrap_or_else(|e| panic!("publish reservation: {e}"));
+        let original = std::fs::read(destination.join("manager-owner.json"))
+            .unwrap_or_else(|e| panic!("read owner: {e}"));
+        let error = publish_managed_reservation(&sessions, &destination, &owner)
+            .err()
+            .unwrap_or_else(|| panic!("duplicate reservation must fail"));
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(
-            std::fs::read(destination.join("manager-owner.json")).unwrap(),
+            std::fs::read(destination.join("manager-owner.json"))
+                .unwrap_or_else(|e| panic!("read original owner: {e}")),
             original
         );
 
         let foreign = sessions.join("foreign");
-        std::fs::create_dir(&foreign).unwrap();
-        let error = publish_managed_reservation(&sessions, &foreign, &owner).unwrap_err();
+        std::fs::create_dir(&foreign).unwrap_or_else(|e| panic!("create foreign directory: {e}"));
+        let error = publish_managed_reservation(&sessions, &foreign, &owner)
+            .err()
+            .unwrap_or_else(|| panic!("foreign reservation must fail"));
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert!(!foreign.join("manager-owner.json").exists());
     }
