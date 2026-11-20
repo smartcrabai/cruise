@@ -211,7 +211,11 @@ async fn eventually(mut f: impl FnMut() -> bool) {
     }
 }
 
-fn install_integration_intent(fixture: &Fixture, applied: bool, foreign_ref: bool) -> (String, String) {
+fn install_integration_intent(
+    fixture: &Fixture,
+    applied: bool,
+    foreign_ref: bool,
+) -> (String, String) {
     let mut child = fixture.sessions.load("child").unwrap();
     let worktree = child.worktree_path.as_ref().unwrap();
     let base = git(worktree, &["rev-parse", "HEAD"]);
@@ -220,8 +224,24 @@ fn install_integration_intent(fixture: &Fixture, applied: bool, foreign_ref: boo
     git(worktree, &["commit", "-qm", "child result"]);
     let result = git(worktree, &["rev-parse", "HEAD"]);
     let tree = git(worktree, &["rev-parse", "HEAD^{tree}"]);
-    let prepared = git(&fixture.repo, &["commit-tree", &tree, "-p", &base, "-p", &result, "-m", "Integrate Goal task"]);
-    let reference = if foreign_ref { "refs/heads/cruise/goal/other" } else { "refs/heads/cruise/goal/g" };
+    let prepared = git(
+        &fixture.repo,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &base,
+            "-p",
+            &result,
+            "-m",
+            "Integrate Goal task",
+        ],
+    );
+    let reference = if foreign_ref {
+        "refs/heads/cruise/goal/other"
+    } else {
+        "refs/heads/cruise/goal/g"
+    };
     if applied {
         git(&fixture.repo, &["update-ref", reference, &prepared]);
     }
@@ -247,7 +267,10 @@ async fn startup_recovers_applied_integration_for_paused_goal() {
     assert_eq!(goal["execution"]["integrated_tip"], prepared);
     fixture.stop();
     fixture.start();
-    assert_eq!(fixture.goal()["execution"]["attempts"][0]["integrated"], true);
+    assert_eq!(
+        fixture.goal()["execution"]["attempts"][0]["integrated"],
+        true
+    );
 }
 
 #[tokio::test]
@@ -260,7 +283,10 @@ async fn startup_leaves_unapplied_paused_integration_pending_across_restart() {
         assert_eq!(goal["status"], "paused");
         assert_eq!(goal["execution"]["paused_from"], "active");
         assert_eq!(goal["execution"]["attempts"][0]["integrated"], false);
-        assert_eq!(git(&fixture.repo, &["rev-parse", "refs/heads/cruise/goal/g"]), base);
+        assert_eq!(
+            git(&fixture.repo, &["rev-parse", "refs/heads/cruise/goal/g"]),
+            base
+        );
         fixture.stop();
     }
 }
@@ -272,7 +298,10 @@ async fn startup_resumes_pending_active_integration() {
     fixture.start();
     eventually(|| fixture.goal()["execution"]["attempts"][0]["integrated"] == true).await;
     assert_eq!(fixture.goal()["execution"]["integrated_tip"], prepared);
-    assert_eq!(git(&fixture.repo, &["rev-parse", "refs/heads/cruise/goal/g"]), prepared);
+    assert_eq!(
+        git(&fixture.repo, &["rev-parse", "refs/heads/cruise/goal/g"]),
+        prepared
+    );
 }
 
 #[tokio::test]
@@ -280,9 +309,15 @@ async fn startup_rejects_intent_for_another_goal_ref() {
     let fixture = Fixture::new("paused", false, false);
     let (base, _) = install_integration_intent(&fixture, true, true);
     fixture.start();
-    assert_eq!(fixture.goal()["execution"]["attempts"][0]["integrated"], false);
+    assert_eq!(
+        fixture.goal()["execution"]["attempts"][0]["integrated"],
+        false
+    );
     assert_eq!(fixture.goal()["execution"]["paused_from"], "blocked");
-    assert_eq!(git(&fixture.repo, &["rev-parse", "refs/heads/cruise/goal/g"]), base);
+    assert_eq!(
+        git(&fixture.repo, &["rev-parse", "refs/heads/cruise/goal/g"]),
+        base
+    );
 }
 
 #[tokio::test]
@@ -290,13 +325,19 @@ async fn startup_blocks_drifted_goal_ref_without_moving_it() {
     let fixture = Fixture::new("paused", false, false);
     install_integration_intent(&fixture, false, false);
     let drift = git(&fixture.repo, &["rev-parse", "cruise/test-child"]);
-    git(&fixture.repo, &["update-ref", "refs/heads/cruise/goal/g", &drift]);
+    git(
+        &fixture.repo,
+        &["update-ref", "refs/heads/cruise/goal/g", &drift],
+    );
     fixture.start();
     let goal = fixture.goal();
     assert_eq!(goal["status"], "paused");
     assert_eq!(goal["execution"]["paused_from"], "blocked");
     assert_eq!(goal["execution"]["attempts"][0]["integrated"], false);
-    assert_eq!(git(&fixture.repo, &["rev-parse", "refs/heads/cruise/goal/g"]), drift);
+    assert_eq!(
+        git(&fixture.repo, &["rev-parse", "refs/heads/cruise/goal/g"]),
+        drift
+    );
 }
 
 #[tokio::test]

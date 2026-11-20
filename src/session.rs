@@ -678,6 +678,8 @@ fn publish_managed_reservation(
             .open(staging.join("manager-owner.json"))?;
         file.write_all(&bytes)?;
         file.sync_all()?;
+        // Windows may reject moving a directory while a file inside it is open.
+        drop(file);
         sync_reservation_directory(&staging)?;
         rename_reservation_noreplace(&staging, destination)?;
         sync_reservation_directory(sessions)?;

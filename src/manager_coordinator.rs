@@ -1348,34 +1348,34 @@ fn integrate_inner(
         .as_deref()
         .ok_or_else(|| CruiseError::Other("child result is not pinned".into()))?;
     if !observed_only {
-    let child = application.read_session(&attempt.session_id)?;
-    if child.managed_child.as_ref() != Some(&owner(goal, attempt))
-        || child.phase != crate::session::SessionPhase::Completed
-    {
-        return Err(CruiseError::Other(
-            "child owner or completion state does not match Goal attempt".into(),
-        ));
-    }
-    let worktree = child
-        .worktree_path
-        .as_deref()
-        .ok_or_else(|| CruiseError::Other("completed child has no worktree".into()))?;
-    if manager::snapshot(worktree)?.repository != snapshot.repository {
-        return Err(CruiseError::Other(
-            "child worktree belongs to a different repository".into(),
-        ));
-    }
-    if git_output(worktree, &["rev-parse", "HEAD"])? != result
-        || !git_output(
-            worktree,
-            &["status", "--porcelain", "--untracked-files=all"],
-        )?
-        .is_empty()
-    {
-        return Err(CruiseError::Other(
-            "child worktree changed after result was pinned".into(),
-        ));
-    }
+        let child = application.read_session(&attempt.session_id)?;
+        if child.managed_child.as_ref() != Some(&owner(goal, attempt))
+            || child.phase != crate::session::SessionPhase::Completed
+        {
+            return Err(CruiseError::Other(
+                "child owner or completion state does not match Goal attempt".into(),
+            ));
+        }
+        let worktree = child
+            .worktree_path
+            .as_deref()
+            .ok_or_else(|| CruiseError::Other("completed child has no worktree".into()))?;
+        if manager::snapshot(worktree)?.repository != snapshot.repository {
+            return Err(CruiseError::Other(
+                "child worktree belongs to a different repository".into(),
+            ));
+        }
+        if git_output(worktree, &["rev-parse", "HEAD"])? != result
+            || !git_output(
+                worktree,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )?
+            .is_empty()
+        {
+            return Err(CruiseError::Other(
+                "child worktree changed after result was pinned".into(),
+            ));
+        }
     }
     let tip = goal
         .execution
@@ -1438,8 +1438,10 @@ fn integrate_inner(
         crate::manager_git::apply_integration(anchor, &intent).map_err(CruiseError::Other)?;
     }
     manager::update_goal(cwd, goal_id, |goal| {
-        if !matches!(goal.status, manager::GoalStatus::Active | manager::GoalStatus::Paused)
-            || goal.execution.integrated_tip.as_deref() != Some(intent.expected_tip.as_str())
+        if !matches!(
+            goal.status,
+            manager::GoalStatus::Active | manager::GoalStatus::Paused
+        ) || goal.execution.integrated_tip.as_deref() != Some(intent.expected_tip.as_str())
         {
             return Err(CruiseError::Other(
                 "Goal state changed during integration reconciliation".into(),
@@ -1956,8 +1958,17 @@ pub(crate) async fn reconcile_applied(application: &CruiseApplication) -> Result
                 continue;
             }
             let Some(anchor) = goal.execution.anchor.as_deref() else {
-                if goal.execution.attempts.iter().any(|attempt| !attempt.integrated && attempt.integration_intent.is_some()) {
-                    if let Err(error) = manager::block_startup_goal(&snapshot.repository, &goal.id, "Goal has no approved repository anchor") {
+                if goal
+                    .execution
+                    .attempts
+                    .iter()
+                    .any(|attempt| !attempt.integrated && attempt.integration_intent.is_some())
+                {
+                    if let Err(error) = manager::block_startup_goal(
+                        &snapshot.repository,
+                        &goal.id,
+                        "Goal has no approved repository anchor",
+                    ) {
                         errors.push(format!("{}: {error}", goal.id));
                     }
                 }
@@ -2010,7 +2021,8 @@ pub(crate) async fn reconcile_applied(application: &CruiseApplication) -> Result
                             &goal.id,
                             &format!("task {} integration recovery: {error}", attempt.task_id),
                         ) {
-                            errors.push(format!("{} / {}: {block_error}", goal.id, attempt.task_id));
+                            errors
+                                .push(format!("{} / {}: {block_error}", goal.id, attempt.task_id));
                         }
                         break;
                     }

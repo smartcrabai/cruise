@@ -206,7 +206,10 @@ async fn approval_rejects_new_goal_and_preserves_preview() {
         .send()
         .await
         .unwrap();
-    assert!(!response.status().is_success(), "new approval unexpectedly succeeded");
+    assert!(
+        !response.status().is_success(),
+        "new approval unexpectedly succeeded"
+    );
     let error = response.text().await.unwrap();
     assert!(error.contains("unavailable end to end"), "{error}");
     let mut snapshot_url = reqwest::Url::parse(&format!(
@@ -214,9 +217,20 @@ async fn approval_rejects_new_goal_and_preserves_preview() {
         instance["origin"].as_str().unwrap()
     ))
     .unwrap();
-    snapshot_url.query_pairs_mut().append_pair("cwd", repo.to_str().unwrap());
-    let snapshot: Value = client.get(snapshot_url).bearer_auth(token).send().await.unwrap()
-        .error_for_status().unwrap().json().await.unwrap();
+    snapshot_url
+        .query_pairs_mut()
+        .append_pair("cwd", repo.to_str().unwrap());
+    let snapshot: Value = client
+        .get(snapshot_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(snapshot["proposal"]["id"], preview["id"]);
     assert_eq!(snapshot["proposal"]["revision"], preview["revision"]);
     assert!(snapshot["goals"].as_array().unwrap().is_empty());

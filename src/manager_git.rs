@@ -269,7 +269,10 @@ pub enum IntegrationObservation {
 
 /// Validate an intent and distinguish a pending ref from an applied one.
 /// Any missing or unrelated ref is drift, not evidence of a pending update.
-pub fn observe_integration(repo: &Path, intent: &IntegrationIntent) -> Result<IntegrationObservation, String> {
+pub fn observe_integration(
+    repo: &Path,
+    intent: &IntegrationIntent,
+) -> Result<IntegrationObservation, String> {
     let (expected, prepared) = validate_intent(repo, intent)?;
     let actual = read_ref(repo, &intent.goal_ref)?;
     if actual.as_deref() == Some(prepared.as_str()) {
@@ -277,7 +280,9 @@ pub fn observe_integration(repo: &Path, intent: &IntegrationIntent) -> Result<In
     } else if actual.as_deref() == Some(expected.as_str()) {
         Ok(IntegrationObservation::Pending)
     } else {
-        Err(format!("Goal ref drift: expected {expected} or {prepared}, found {actual:?}"))
+        Err(format!(
+            "Goal ref drift: expected {expected} or {prepared}, found {actual:?}"
+        ))
     }
 }
 

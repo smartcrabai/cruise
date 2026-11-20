@@ -587,7 +587,10 @@ pub(crate) fn block_startup_goal(repository: &Path, goal_id: &str, problem: &str
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut snapshot = load(repository.to_path_buf())?;
-    let goal = snapshot.goals.iter_mut().find(|goal| goal.id == goal_id)
+    let goal = snapshot
+        .goals
+        .iter_mut()
+        .find(|goal| goal.id == goal_id)
         .ok_or_else(|| CruiseError::Other("Manager goal disappeared during startup".into()))?;
     let reason = format!("Manager startup requires review: {problem}");
     if goal.status == GoalStatus::Paused {

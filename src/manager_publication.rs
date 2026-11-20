@@ -698,6 +698,11 @@ fn reconcile_inner(
     match state {
         PullRequestState::Open => save(cwd, id, p, GoalStatus::AwaitingMerge, None),
         PullRequestState::Merged => save(cwd, id, p, GoalStatus::Completed, None),
-        PullRequestState::Closed => block(cwd, id, p, "PR closed without merge. Human resolution required".into()),
+        PullRequestState::Closed => block(
+            cwd,
+            id,
+            p,
+            "PR closed without merge. Human resolution required".into(),
+        ),
     }
 }
