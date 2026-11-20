@@ -19,7 +19,7 @@ cruise 按以下方式解析工作流配置：
    | `security` | 限定范围内的安全盘点与并行审计、问题分诊、对已确认缺陷的安全修复，以及独立验证 |
    | `pr-review-fix` | 在现有 GitHub PR 的头分支上处理符合条件的审查讨论串 |
 
-   `refactor`、`add-tests`、`add-formal-specs` 和 `security` 默认设置 `force_exec: true`：本地规划直接在当前目录中运行，不使用外层计划/会话或工作树，也不会自动创建 PR。传入 `--no-force-exec` 可改用常规的计划/会话流程。
+   `refactor`、`add-tests`、`add-formal-specs` 和 `security` 默认设置 `force_exec: true`：本地规划直接在当前目录中运行，不使用外层计划/会话或工作树，也不会自动创建 PR。传入 `--no-force-exec` 可改用常规的计划/会话流程。这四个内置工作流不声明 after-PR 标志，也没有 after-PR 步骤；即使传入 `--no-force-exec`，情况也相同，常规的工作树流程在有符合条件的提交时仍会创建 PR。
 
    `cruise workflow list` 会输出工作流目录。要自定义内置工作流，请使用 `cruise workflow eject <name> [--to user|project]`，例如 `cruise workflow eject tdd --to project`。导出操作仅接受目录中的名称，并且绝不会覆盖已有文件。
 

@@ -4,12 +4,8 @@ max_retries: 20
 flags:
   e2e:
     description: Add and run real UI end-to-end coverage for applicable in-scope targets
-  after_pr:
-    description: Run pull-request or merge-request readiness, sync, push, and CI handling
   formal_methods:
     description: Add and run useful executable Quint, Alloy, and Gherkin specifications when applicable
-  merge:
-    description: Run after-PR follow-up and perform a host-managed squash merge
 
 groups:
   verify-refactor:
@@ -287,29 +283,3 @@ steps:
       </test-audit>
 
       Report changed files, exact core commands/results, task-caused fixes, blockers, and unverified scope. Never report optional checks as run without flag-step evidence.
-after-pr:
-  follow-up:
-    workflow_call: ./_shared/after-pr.yaml
-    flag: [after_pr, merge]
-    with:
-      resolve_conflict_prompt: |-
-          Original request: {input}
-
-          Approved plan: {plan}. Read it only when non-empty and relevant; otherwise use the original request.
-
-          <frozen-scope>
-          {file:refactor/baseline.md}
-          </frozen-scope>
-
-          Task/report scope: stay within the frozen scope and current task changes. Do not rely on implicit prompt history.
-
-          A conflict occurred while synchronizing PR/MR #{pr.number} ({pr.url}) with its base branch. Use the frozen scope artifact as baseline context, not permission to overwrite other work. Resolve only this conflict within scope, preserve unrelated changes, then stage and commit the resolution. Do not push; the following step handles it. Never weaken tests, scanners, assertions, checks, or policy to get green. Do not create or merge a PR directly.
-      fix_ci_error_scope: |-
-          Use the frozen scope artifact as the baseline, not permission to overwrite other work:
-          {file:refactor/baseline.md}
-  squash-merge:
-    flag: merge
-    squash-merge: true
-    timeout: 10m
-    if:
-      fail: follow-up/sync-base

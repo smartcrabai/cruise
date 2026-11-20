@@ -44,6 +44,13 @@ const AFTER_PR_IDS: [&str; 7] = [
 ];
 const MAX_RETRIES: usize = 3;
 
+/// Built-ins with `force_exec: true` run only through exec and expose no after-PR graph.
+const FORCE_EXEC_BUILTINS: [&str; 4] = ["refactor", "add-tests", "add-formal-specs", "security"];
+
+fn is_force_exec_builtin(name: &str) -> bool {
+    FORCE_EXEC_BUILTINS.contains(&name)
+}
+
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
@@ -176,6 +183,32 @@ fn assert_pr_review_contract(config: WorkflowConfig) {
     assert!(step.squash_merge.is_none());
 }
 
+fn assert_force_exec_without_after_pr(name: &str, config: WorkflowConfig) {
+    assert!(config.force_exec(), "{name} must stay force_exec");
+    if name == "refactor" {
+        assert!(
+            config.flags.contains_key("formal_methods"),
+            "refactor lost formal_methods"
+        );
+    }
+    for flag in ["after_pr", "merge"] {
+        let values = [(flag.to_owned(), true)]
+            .into_iter()
+            .collect::<FlagValues>();
+        let error = flags::validate_names(&config, &values).unwrap_err();
+        assert!(
+            error.to_string().contains(flag),
+            "{name} rejected {flag} with an unexpected error: {error}"
+        );
+    }
+    validate_config(&config).unwrap();
+    let compiled = compile(config).unwrap();
+    assert!(
+        compiled.after_pr.is_empty(),
+        "{name} still declares after-PR steps"
+    );
+}
+
 fn eject_with_host_settings(root: &Path, project: &Path, config_dir: &Path) {
     // These settings must not become part of a portable workflow artifact.
     write(&config_dir.join("config.yaml"), "model: app/host-model\n");
@@ -213,6 +246,9 @@ fn verify_local_builtin_resources(root: &Path) {
                 .unwrap();
         if builtin.name == "pr-review-fix" {
             assert_pr_review_contract(config);
+        } else if is_force_exec_builtin(builtin.name) {
+            // The local after-PR resource must not reach a built-in without an after-PR root.
+            assert_force_exec_without_after_pr(builtin.name, config);
         } else {
             validate_config(&config).unwrap();
             assert!(config.after_pr.contains_key("follow-up/local-only"));
@@ -234,6 +270,14 @@ fn verify_builtin_repair_policy(project: &Path) {
         assert_eq!(config.create_pr, builtin.name != "research");
         if builtin.name == "pr-review-fix" {
             assert_pr_review_contract(config);
+            continue;
+        }
+        if is_force_exec_builtin(builtin.name) {
+            assert!(
+                config.after_pr.is_empty(),
+                "{} kept repair steps",
+                builtin.name
+            );
             continue;
         }
         for id in ["follow-up/resolve-conflict", "follow-up/fix-ci-error"] {
@@ -503,6 +547,8 @@ fn worker(root: &Path, phase: &str) {
                 .unwrap();
                 if builtin.name == "pr-review-fix" {
                     assert_pr_review_contract(config);
+                } else if is_force_exec_builtin(builtin.name) {
+                    assert_force_exec_without_after_pr(builtin.name, config);
                 } else {
                     assert_after_pr_contract(config);
                 }

@@ -1,11 +1,5 @@
 description: Add executable, production-grounded Quint, Alloy, and Gherkin specifications with CI
 force_exec: true
-flags:
-  after_pr:
-    description: Run pull-request or merge-request readiness, synchronization, and CI follow-up
-  merge:
-    description: Run after-PR follow-up and perform a host-managed squash merge
-
 steps:
   audit:
     output_file: formal-specs/audit.md
@@ -67,26 +61,3 @@ steps:
       Run Alloy with explicit selection of every intended command (confirm `--command '*'` in that version); verify the receipt lists all commands and each matches `expect` (witness SAT=1; assertion/no-counterexample or UNSAT=0). Default-only runs, unchecked expectations, or omitted commands fail. Run Gherkin through the strict production test runner; confirm all steps are defined, non-pending, production-connected, and assertions execute. Run relevant existing production build/typecheck/tests and CI validation with repo tooling. PR/push CI must fail on any check and retain reports/counterexample logs on failure. Run local equivalents; do not claim remote CI ran unless observed.
       Diagnose failures against concrete traces, code paths, and audited evidence. Fix contract violations in production with a production-connected regression; correct inaccurate models only to match requirements/source semantics. Justify bound/assumption changes; never hide counterexamples by weakening invariants, removing assertions/witnesses, disabling strict mode, shrinking meaningful bounds, or skipping checks. After any source/model/runner/dependency/CI change, rerun and inspect the entire affected check set until green. If an external prerequisite blocks a check, finish reachable checks and state exactly what/why; do not claim full verification.
       Finish with concise evidence: changed spec/test/CI files, covered IDs and production paths, bounds/assumptions, exact commands and observed results, defects fixed, CI artifact behavior, and exact blockers. Report no check passed unless run.
-after-pr:
-  follow-up:
-    workflow_call: ./_shared/after-pr.yaml
-    flag: [after_pr, merge]
-    with:
-      resolve_conflict_prompt: |-
-          Request: {input}
-          Plan: {plan}. Use only if non-empty, approved, and relevant; otherwise use the request.
-          Scope: formal audit/model reports and current task changes:
-          {file:formal-specs/audit.md}
-          {file:formal-specs/model.md}
-          Resolve PR/MR #{pr.number} ({pr.url}) conflicts with the base only within this audited scope; preserve unrelated work, then stage and commit. Do not push (the next step does), weaken any requirement, assertion, bound, Gherkin check, scanner, or CI gate, or create/merge a PR.
-      fix_ci_error_scope: |-
-          Use the formal audit/model reports and current PR changes:
-          {file:formal-specs/audit.md}
-          {file:formal-specs/model.md}
-  squash-merge:
-    flag: merge
-    squash-merge: true
-    timeout: 10m
-    if:
-      fail: follow-up/sync-base
-

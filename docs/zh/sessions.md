@@ -41,7 +41,7 @@ Cruise 遵循 [XDG 基本目录规范](https://specifications.freedesktop.org/ba
 
    选择 **Approve** 或 **Execute now** 后，如果未提供 `-f/--flag`，会先选择已声明的工作流标志。接着，**step skip selector** 只列出由这些值启用的步骤。切换要在本次运行中跳过的步骤。选择会按配置文件保存，并在下次使用同一配置创建会话时预先选中。取消任一选择器都会返回计划审批菜单，不保存未完成的标志更改，也不会批准或执行会话。选择 Approve 后，之后的 `cruise run` 会使用已保存的标志和 CLI 覆盖值，不会显示标志选择器，也不会再次询问要跳过哪些步骤（参见[工作流标志](cli-reference.md#cruise-run)）。
 
-5. **`cruise run`** —— 未提供 ID 时，会选择待处理会话（`Planned`、`Running`、`Failed` 或 `Suspended`；符合条件的会话有多个时会提示选择），复用（或在 `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` 下创建）git 工作树，并执行工作流。默认情况下，如果运行后分支上仍有提交，就会创建 PR，随后运行已配置的 `after-pr` 步骤。在内置工作流中，`-f after_pr` 会启用该 after-PR 流程但不合并；`-f merge` 会运行一次相同流程，然后执行原生同步 squash 合并。工作流级别的 `create_pr: false` 会跳过自动提交、推送、PR 创建、`after-pr` 和基于 PR 的清理，同时保留普通会话、工件和工作树。如果发布失败，仓库会话和本地工作树会话都会进入 **PR Failed**。使用 **Create PR** 可在不重新运行工作流的情况下重试发布。
+5. **`cruise run`** —— 未提供 ID 时，会选择待处理会话（`Planned`、`Running`、`Failed` 或 `Suspended`；符合条件的会话有多个时会提示选择），复用（或在 `$XDG_DATA_HOME/cruise/worktrees/<session-id>/` 下创建）git 工作树，并执行工作流。默认情况下，如果运行后分支上仍有提交，就会创建 PR，随后运行已配置的 `after-pr` 步骤。在内置工作流中，只有 `tdd` 会创建 PR：`-f after_pr` 会启用该 after-PR 流程但不合并；`-f merge` 会运行一次相同流程，然后执行原生同步 squash 合并。`research` 也声明了这些标志，但不会创建 PR；`refactor`、`add-tests`、`add-formal-specs` 和 `security` 两者都不声明。工作流级别的 `create_pr: false` 会跳过自动提交、推送、PR 创建、`after-pr` 和基于 PR 的清理，同时保留普通会话、工件和工作树。如果发布失败，仓库会话和本地工作树会话都会进入 **PR Failed**。使用 **Create PR** 可在不重新运行工作流的情况下重试发布。
 
    有 PR 的会话会保留到 PR 关闭或合并，之后可由 `cruise clean` 删除。配置了 `create_pr: false` 的普通会话会保留其会话、工件和工作树，不必等待 PR。
 
