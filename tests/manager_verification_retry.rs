@@ -8,8 +8,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-fn command(home: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_cruise"))
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+fn command(home: &Path, args: &[&str]) -> Result<std::process::Output> {
+    Ok(Command::new(env!("CARGO_BIN_EXE_cruise"))
         .current_dir(home)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))
@@ -19,8 +21,7 @@ fn command(home: &Path, args: &[&str]) -> std::process::Output {
         .env_remove("CRUISE_DAEMON_PORT")
         .stdin(Stdio::null())
         .args(args)
-        .output()
-        .unwrap()
+        .output()?)
 }
 struct Stop<'a>(&'a Path);
 impl Drop for Stop<'_> {
@@ -28,42 +29,40 @@ impl Drop for Stop<'_> {
         let _ = command(self.0, &["daemon", "stop", "--force"]);
     }
 }
-fn git(repo: &Path, args: &[&str]) -> String {
+fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(repo)
         .args(args)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
+        .output()?;
     assert!(
         out.status.success(),
         "git {args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    Ok(String::from_utf8(out.stdout)?.trim().to_owned())
 }
 
 // These are persisted recovery fixtures, exercised through the authenticated production API.
 #[tokio::test]
-async fn retry_refuses_unsafe_recovery_states_without_mutating_them() {
-    let root = TempDir::new().unwrap();
+async fn retry_refuses_unsafe_recovery_states_without_mutating_them() -> Result<()> {
+    let root = TempDir::new()?;
     let home = root.path();
     let repo = home.join("repo");
-    fs::create_dir(&repo).unwrap();
-    git(&repo, &["init", "-q"]);
-    git(&repo, &["config", "user.name", "Test"]);
-    git(&repo, &["config", "user.email", "test@example.test"]);
-    fs::write(repo.join("file"), "base\n").unwrap();
-    git(&repo, &["add", "file"]);
-    git(&repo, &["commit", "-qm", "base"]);
-    let sha = git(&repo, &["rev-parse", "HEAD"]);
-    let common = repo.join(".git").canonicalize().unwrap();
-    let anchor = repo.canonicalize().unwrap();
+    fs::create_dir(&repo)?;
+    git(&repo, &["init", "-q"])?;
+    git(&repo, &["config", "user.name", "Test"])?;
+    git(&repo, &["config", "user.email", "test@example.test"])?;
+    fs::write(repo.join("file"), "base\n")?;
+    git(&repo, &["add", "file"])?;
+    git(&repo, &["commit", "-qm", "base"])?;
+    let sha = git(&repo, &["rev-parse", "HEAD"])?;
+    let common = repo.join(".git").canonicalize()?;
+    let anchor = repo.canonicalize()?;
     let origin = "https://github.com/example/project.git";
-    let workflow: cruise::config::WorkflowConfig =
-        serde_json::from_value(json!({"steps":{}})).unwrap();
-    let workflow = serde_json::to_value(workflow).unwrap();
+    let workflow: cruise::config::WorkflowConfig = serde_json::from_value(json!({"steps":{}}))?;
+    let workflow = serde_json::to_value(workflow)?;
     let proposal = json!({"id":"p", "revision":1, "objective":"goal", "target_branch":"main", "target_sha":sha,
         "exclusions":[], "criteria":[{"id":"c","description":"works"}],
         "checks":[{"id":"check","criterion_ids":["c"],"argv":["true"]}],
@@ -105,16 +104,14 @@ async fn retry_refuses_unsafe_recovery_states_without_mutating_them() {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     let record = home.join("data/cruise/manager").join(format!("{key}.json"));
-    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::create_dir_all(record.parent().ok_or("record has no parent")?)?;
     fs::write(
         &record,
         serde_json::to_vec_pretty(
             &json!({"repository":common,"transcript":[],"proposal":null,"goals":goals}),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let started = command(home, &["daemon", "start", "--port", "0"]);
+        )?,
+    )?;
+    let started = command(home, &["daemon", "start", "--port", "0"])?;
     assert!(
         started.status.success(),
         "{}",
@@ -122,14 +119,12 @@ async fn retry_refuses_unsafe_recovery_states_without_mutating_them() {
     );
     let _stop = Stop(home);
     let instance: Value =
-        serde_json::from_slice(&fs::read(home.join("state/cruise/daemon/instance.json")).unwrap())
-            .unwrap();
+        serde_json::from_slice(&fs::read(home.join("state/cruise/daemon/instance.json"))?)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
-        .build()
-        .unwrap();
-    let before: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
-    for goal in before["goals"].as_array().unwrap() {
+        .build()?;
+    let before: Value = serde_json::from_slice(&fs::read(&record)?)?;
+    for goal in before["goals"].as_array().ok_or("goals is not an array")? {
         if goal["id"] == "eligible" {
             continue;
         }
@@ -137,13 +132,18 @@ async fn retry_refuses_unsafe_recovery_states_without_mutating_them() {
             let response = client
                 .post(format!(
                     "{}api/manager/action",
-                    instance["origin"].as_str().unwrap()
+                    instance["origin"]
+                        .as_str()
+                        .ok_or("missing daemon credential")?
                 ))
-                .bearer_auth(instance["token"].as_str().unwrap())
+                .bearer_auth(
+                    instance["token"]
+                        .as_str()
+                        .ok_or("missing daemon credential")?,
+                )
                 .json(&json!({"cwd":repo,"action":{"type":"retry","goal_id":goal["id"]}}))
                 .send()
-                .await
-                .unwrap();
+                .await?;
             assert!(
                 !response.status().is_success(),
                 "unsafe retry accepted for {}",
@@ -151,25 +151,31 @@ async fn retry_refuses_unsafe_recovery_states_without_mutating_them() {
             );
         }
     }
-    let after: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    let after: Value = serde_json::from_slice(&fs::read(&record)?)?;
     assert_eq!(after, before);
-    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), sha);
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"])?, sha);
     let response = client
         .post(format!(
             "{}api/manager/action",
-            instance["origin"].as_str().unwrap()
+            instance["origin"]
+                .as_str()
+                .ok_or("missing daemon credential")?
         ))
-        .bearer_auth(instance["token"].as_str().unwrap())
+        .bearer_auth(
+            instance["token"]
+                .as_str()
+                .ok_or("missing daemon credential")?,
+        )
         .json(&json!({"cwd":repo,"action":{"type":"retry","goal_id":"eligible"}}))
         .send()
-        .await
-        .unwrap();
+        .await?;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let goal: Value = response.json().await.unwrap();
+    let goal: Value = response.json().await?;
     assert_eq!(goal["status"], "active");
     assert!(goal["execution"]["publication"].is_null());
     assert_eq!(
         goal["execution"]["publication_history"],
         json!([publication])
     );
+    Ok(())
 }
