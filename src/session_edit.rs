@@ -761,7 +761,14 @@ mod tests {
             .create_with_config(&session, &builtin_config)
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // When: the CLI edits only skipped steps (it omits config_path)
+        let saved_config_before = fs::read(
+            manager
+                .sessions_dir()
+                .join("20260619000012")
+                .join("config.yaml"),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+
         let (_, config_changed) = update_session_settings(
             &manager,
             "20260619000012",
@@ -783,22 +790,14 @@ mod tests {
             crate::session_config::SessionConfigRef::BuiltinSnapshot { name: None }
         );
         assert!(!config_changed);
-        let saved_config = fs::read_to_string(
+        let saved_config_after = fs::read(
             manager
                 .sessions_dir()
                 .join("20260619000012")
                 .join("config.yaml"),
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
-        let expected_config = crate::resolver::resolve_workflow_config(
-            crate::config::BUILTIN_CONFIG_YAML,
-            &crate::resolver::ConfigSource::Builtin,
-            &repo,
-            None,
-        )
-        .and_then(|config| crate::session_config::serialize_resolved_config(&config))
-        .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(saved_config, expected_config);
+        assert_eq!(saved_config_after, saved_config_before);
     }
 
     #[test]

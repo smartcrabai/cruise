@@ -75,15 +75,12 @@ pub(crate) fn refresh_after_apply(cwd: &Path, plan_path: &Path) -> Result<()> {
 
     ensure_no_repository_filters(cwd)?;
     let temporary_index = temporary_index_copy(cwd)?;
-    let snapshot_output = git_output_with_index(
-        cwd,
-        &["stash", "create"],
-        Some(&temporary_index.path),
-    )?;
+    let snapshot_output =
+        git_output_with_index(cwd, &["stash", "create"], Some(&temporary_index.path))?;
     let snapshot = if snapshot_output.stdout.is_empty() {
-        head.clone()
+        None
     } else {
-        parse_oid("git stash create", &snapshot_output.stdout)?
+        Some(parse_oid("git stash create", &snapshot_output.stdout)?)
     };
     let head_after = git_oid(cwd, &["rev-parse", "--verify", "HEAD"])?;
     if head != head_after {
@@ -91,7 +88,8 @@ pub(crate) fn refresh_after_apply(cwd: &Path, plan_path: &Path) -> Result<()> {
             "HEAD changed while creating the TDD ledger snapshot",
         ));
     }
-    verify_commit(cwd, &snapshot)?;
+    let snapshot = snapshot.as_deref().unwrap_or(&head);
+    verify_commit(cwd, snapshot)?;
 
     let contents = format!("head: {head}\nsnapshot: {snapshot}\n{}\n", records.body);
     crate::artifacts::write(&artifacts_root, LEDGER_NAME, &contents)
@@ -107,8 +105,8 @@ fn session_artifacts_root(plan_path: &Path) -> Result<PathBuf> {
         && session_dir
             .file_name()
             .is_some_and(|name| name != "." && name != "..");
-    let plan_is_file = std::fs::symlink_metadata(plan_path)
-        .is_ok_and(|metadata| metadata.file_type().is_file());
+    let plan_is_file =
+        std::fs::symlink_metadata(plan_path).is_ok_and(|metadata| metadata.file_type().is_file());
     if !valid_plan || !valid_session || !plan_is_file {
         return Err(snapshot_error(
             "TDD ledger paths must identify a regular session plan under the Cruise sessions directory",
@@ -146,7 +144,9 @@ fn ledger_records(output: &str) -> Result<LedgerRecords<'_>> {
         .split_once('\n')
         .ok_or_else(|| snapshot_error("ledger records must be in a text code block"))?;
     if fence.strip_suffix('\r').unwrap_or(fence) != "```text" {
-        return Err(snapshot_error("ledger records must be in a text code block"));
+        return Err(snapshot_error(
+            "ledger records must be in a text code block",
+        ));
     }
     let close_start = remainder
         .find("\n```")
@@ -191,7 +191,9 @@ fn validate_ledger_entries(entries: &str) -> Result<()> {
     for record in entries.split("\n\n") {
         let mut lines = record.lines();
         let Some(header) = lines.next().and_then(|line| line.strip_prefix("### ")) else {
-            return Err(snapshot_error("ledger record must start with a finding heading"));
+            return Err(snapshot_error(
+                "ledger record must start with a finding heading",
+            ));
         };
         let mut fields = header.split(" | ");
         let (Some(id), Some(state), Some(severity), Some(location)) =
@@ -208,10 +210,16 @@ fn validate_ledger_entries(entries: &str) -> Result<()> {
         {
             return Err(snapshot_error("ledger finding heading is malformed"));
         }
-        let Some(summary) = lines.next().and_then(|line| line.strip_prefix("- summary: ")) else {
+        let Some(summary) = lines
+            .next()
+            .and_then(|line| line.strip_prefix("- summary: "))
+        else {
             return Err(snapshot_error("ledger finding summary is missing"));
         };
-        let Some(evidence) = lines.next().and_then(|line| line.strip_prefix("- evidence: ")) else {
+        let Some(evidence) = lines
+            .next()
+            .and_then(|line| line.strip_prefix("- evidence: "))
+        else {
             return Err(snapshot_error("ledger finding evidence is missing"));
         };
         if summary.trim().is_empty() || evidence.trim().is_empty() {
@@ -362,7 +370,7 @@ fn create_private_tempdir() -> Result<PathBuf> {
         }
         match builder.create(&directory) {
             Ok(()) => return Ok(directory),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(snapshot_error(&format!(
                     "cannot create private temporary index directory: {error}"
@@ -379,11 +387,7 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<Output> {
     git_output_with_index(cwd, args, None)
 }
 
-fn git_output_with_index(
-    cwd: &Path,
-    args: &[&str],
-    index_file: Option<&Path>,
-) -> Result<Output> {
+fn git_output_with_index(cwd: &Path, args: &[&str], index_file: Option<&Path>) -> Result<Output> {
     let output = git_command(cwd, args, index_file)?;
     if !output.status.success() {
         return Err(git_failure(args, &output));
@@ -448,7 +452,9 @@ fn parse_oid(command: &str, stdout: &[u8]) -> Result<String> {
     let value = text.strip_suffix('\n').unwrap_or(text);
     let value = value.strip_suffix('\r').unwrap_or(value);
     if !valid_oid(value) {
-        return Err(snapshot_error(&format!("{command} returned a malformed object id")));
+        return Err(snapshot_error(&format!(
+            "{command} returned a malformed object id"
+        )));
     }
     Ok(value.to_string())
 }
@@ -472,10 +478,8 @@ mod tests {
     fn with_session(test: impl FnOnce(&Path, &Path, &Path)) {
         let _lock = crate::test_support::lock_process();
         let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
-        let _data_home = crate::test_support::EnvGuard::set(
-            "XDG_DATA_HOME",
-            temp.path().join("data"),
-        );
+        let _data_home =
+            crate::test_support::EnvGuard::set("XDG_DATA_HOME", temp.path().join("data"));
         let workspace = temp.path().join("repo");
         fs::create_dir_all(&workspace)
             .unwrap_or_else(|error| panic!("failed to create test repository: {error}"));
@@ -602,9 +606,19 @@ mod tests {
 
             let snapshot = ledger_snapshot(artifacts);
             assert_ne!(snapshot, head);
-            assert_eq!(git(repo, &["show", &format!("{snapshot}:tracked.txt")]), b"after\n");
-            assert_eq!(git(repo, &["show", &format!("{snapshot}:staged.txt")]), b"staged\n");
-            assert_eq!(fs::read(index_path).unwrap(), index_before);
+            assert_eq!(
+                git(repo, &["show", &format!("{snapshot}:tracked.txt")]),
+                b"after\n"
+            );
+            assert_eq!(
+                git(repo, &["show", &format!("{snapshot}:staged.txt")]),
+                b"staged\n"
+            );
+            assert_eq!(
+                fs::read(&index_path)
+                    .unwrap_or_else(|error| panic!("failed to read index after snapshot: {error}")),
+                index_before
+            );
             assert_eq!(
                 git(repo, &["for-each-ref", "--format=%(refname) %(objectname)"]),
                 refs_before
@@ -677,7 +691,7 @@ mod tests {
             let ledger = ledger_content(artifacts);
             assert!(ledger.contains("iteration: 8\n"));
             assert!(ledger.contains("prior evidence"));
-            assert!(git(repo, &["cat-file", "-e", &head]).is_empty());
+            assert_eq!(git(repo, &["cat-file", "-e", &head]), b"");
         });
     }
 
@@ -753,9 +767,17 @@ mod tests {
     #[test]
     fn rejects_malformed_records_and_nonfinal_ledger_blocks() {
         assert!(ledger_records("## Ledger Records\n```text\niteration: 1\n\n```\n").is_ok());
-        assert!(ledger_records("## Ledger Records\n```text\nhead: model\nsnapshot: model\n```\n").is_err());
+        assert!(
+            ledger_records("## Ledger Records\n```text\nhead: model\nsnapshot: model\n```\n")
+                .is_err()
+        );
         assert!(ledger_records("## Ledger Records\n```text\niteration: zero\n\n```\n").is_err());
-        assert!(ledger_records("## Ledger Records\n```text\niteration: 1\n\nnot a record\n```\n").is_err());
-        assert!(ledger_records("## Ledger Records\n```text\niteration: 1\n\n```\nafter\n").is_err());
+        assert!(
+            ledger_records("## Ledger Records\n```text\niteration: 1\n\nnot a record\n```\n")
+                .is_err()
+        );
+        assert!(
+            ledger_records("## Ledger Records\n```text\niteration: 1\n\n```\nafter\n").is_err()
+        );
     }
 }

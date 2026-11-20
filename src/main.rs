@@ -51,6 +51,10 @@ mod file_tracker;
 mod flags;
 mod forge;
 mod formal_verify;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "apply_actions is part of the library API")
+)]
 mod github_review;
 mod graph;
 mod herdr;
@@ -147,7 +151,12 @@ fn main() {
     }
     #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
     if let Some(cli::Commands::Internal(cli::InternalArgs {
-        command: cli::InternalCommand::JcodeRelay { socket, ready, port },
+        command:
+            cli::InternalCommand::JcodeRelay {
+                socket,
+                ready,
+                port,
+            },
     })) = &cli.command
     {
         match backend::jcode::relay(socket, ready, *port) {
@@ -346,7 +355,9 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
                 .take((MAX_DIAGNOSTIC + 1) as u64)
                 .read_to_string(&mut diagnostic)?;
             if diagnostic.len() > MAX_DIAGNOSTIC {
-                return Err(error::CruiseError::Other("CI diagnostic exceeds the size limit".into()));
+                return Err(error::CruiseError::Other(
+                    "CI diagnostic exceeds the size limit".into(),
+                ));
             }
             ci_followup::evidence(
                 &std::env::current_dir()?,

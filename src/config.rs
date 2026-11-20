@@ -1378,11 +1378,7 @@ pub fn validate_config(config: &WorkflowConfig) -> crate::error::Result<()> {
 /// `prev.success` represents the joined block result, not an individual
 /// command's exit status.
 pub(crate) fn validate_accepted_exit_codes(config: &WorkflowConfig) -> crate::error::Result<()> {
-    fn check_step(
-        name: &str,
-        step: &StepConfig,
-        parallel_child: bool,
-    ) -> crate::error::Result<()> {
+    fn check_step(name: &str, step: &StepConfig, parallel_child: bool) -> crate::error::Result<()> {
         if let Some(codes) = &step.accepted_exit_codes {
             let is_command = step.command.is_some()
                 && step.prompt.is_none()
@@ -1438,11 +1434,7 @@ pub(crate) fn validate_accepted_exit_codes(config: &WorkflowConfig) -> crate::er
 /// Parallel children are excluded because the joined block does not carry
 /// their per-child sandbox settings.
 pub(crate) fn validate_require_bubblewrap(config: &WorkflowConfig) -> crate::error::Result<()> {
-    fn check_step(
-        name: &str,
-        step: &StepConfig,
-        parallel_child: bool,
-    ) -> crate::error::Result<()> {
+    fn check_step(name: &str, step: &StepConfig, parallel_child: bool) -> crate::error::Result<()> {
         if step.require_bubblewrap {
             let is_prompt = !parallel_child
                 && step.command.is_none()
@@ -3167,8 +3159,7 @@ steps:
             let yaml = format!(
                 "command: [echo]\nsteps:\n  run:\n    command: exit 75\n    accepted_exit_codes: {codes}\n"
             );
-            let config =
-                WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|error| panic!("{error}"));
+            let config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|error| panic!("{error}"));
             let error = validate_config(&config)
                 .err()
                 .unwrap_or_else(|| panic!("accepted_exit_codes {codes} should be invalid"));
@@ -3186,8 +3177,7 @@ steps:
             "command: [echo]\nsteps:\n  run:\n    parallel:\n      child:\n        command: 'true'\n    accepted_exit_codes: [0]\n",
             "command: [echo]\nsteps:\n  run:\n    parallel:\n      child:\n        command: 'true'\n        accepted_exit_codes: [0]\n",
         ] {
-            let config =
-                WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
+            let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
             assert_invalid_step_config(validate_accepted_exit_codes(&config), yaml);
         }
 
@@ -3202,10 +3192,9 @@ steps:
 
     #[test]
     fn require_bubblewrap_is_prompt_only_and_defaults_off() {
-        let default = WorkflowConfig::from_yaml(
-            "command: [echo]\nsteps:\n  run:\n    command: 'true'\n",
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
+        let default =
+            WorkflowConfig::from_yaml("command: [echo]\nsteps:\n  run:\n    command: 'true'\n")
+                .unwrap_or_else(|error| panic!("{error}"));
         assert!(!default.steps["run"].require_bubblewrap);
         assert!(
             !serde_yaml::to_string(&default)
@@ -3219,8 +3208,7 @@ steps:
             "command: [echo]\ngroups:\n  prompts:\n    steps:\n      run:\n        prompt: hi\n        require_bubblewrap: true\nsteps:\n  call:\n    group: prompts\n",
             "command: [echo]\nsteps:\n  seed:\n    command: 'true'\nafter-pr:\n  review:\n    github-review:\n      bots: [\"ci[bot]\"]\n    prompt: review\n    timeout: 30m\n    require_bubblewrap: true\n",
         ] {
-            let config =
-                WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
+            let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
             validate_require_bubblewrap(&config).unwrap_or_else(|error| panic!("{error}"));
         }
 
@@ -3232,8 +3220,7 @@ steps:
             "command: [echo]\nsteps:\n  run:\n    parallel:\n      child:\n        prompt: hi\n    require_bubblewrap: true\n",
             "command: [echo]\nsteps:\n  run:\n    parallel:\n      child:\n        prompt: hi\n        require_bubblewrap: true\n",
         ] {
-            let config =
-                WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
+            let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error}"));
             assert_invalid_step_config(validate_require_bubblewrap(&config), yaml);
         }
 

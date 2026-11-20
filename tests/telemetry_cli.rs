@@ -1218,7 +1218,10 @@ fn assert_wait_ci_followup_capture(
                 .unwrap_or_else(|error| panic!("decode V4 payload: {error}"))
         );
     } else {
-        assert!(!capture.exists(), "unexpected CI follow-up evidence capture");
+        assert!(
+            !capture.exists(),
+            "unexpected CI follow-up evidence capture"
+        );
     }
 }
 
@@ -3600,12 +3603,7 @@ exit 97
 "#,
     );
     let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-input-secret");
-    assert_wait_ci_followup_capture(
-        &output,
-        &internal_calls,
-        &ci_capture,
-        "graphql_error",
-    );
+    assert_wait_ci_followup_capture(&output, &internal_calls, &ci_capture, "graphql_error");
     assert!(
         !output.status.success(),
         "GraphQL failure fixture unexpectedly succeeded"
@@ -3709,12 +3707,7 @@ fn builtin_wait_ci_exports_failed_check_details_without_raw_provider_data() {
     let (fixture, env, internal_calls, ci_capture) =
         builtin_wait_ci_fixture(&collector, failed_check_details_fake_gh_script());
     let output = fixture.run(&borrowed_env(&env), "builtin-wait-ci-prompt-secret");
-    assert_wait_ci_followup_capture(
-        &output,
-        &internal_calls,
-        &ci_capture,
-        "ci_failed",
-    );
+    assert_wait_ci_followup_capture(&output, &internal_calls, &ci_capture, "ci_failed");
     assert!(
         !output.status.success(),
         "failed CI fixture unexpectedly succeeded"

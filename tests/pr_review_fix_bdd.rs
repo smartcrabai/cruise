@@ -41,7 +41,6 @@ mod contracts {
             .unwrap_or_else(|error| panic!("write fake executable: {error}"));
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
             .unwrap_or_else(|error| panic!("chmod fake executable: {error}"));
-
     }
     static HOST_GIT: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
@@ -70,13 +69,73 @@ mod contracts {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    fn configure_repository_controls(
+        path: &std::path::Path,
+        repo: &std::path::Path,
+        origin: &std::path::Path,
+        mode: &str,
+        initial: &str,
+    ) {
+        git_ok(
+            repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/acme/repo.git",
+            ],
+        );
+        git_ok(origin, &["config", "receive.advertisePushOptions", "true"]);
+        git_ok(repo, &["config", "push.followTags", "true"]);
+        git_ok(repo, &["config", "push.pushOption", "fixture-option"]);
+        git_ok(
+            repo,
+            &["tag", "-a", "review-only-tag", "-m", "fixture tag", "HEAD"],
+        );
+        executable(
+            &origin.join("hooks/pre-receive"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"${{GIT_PUSH_OPTION_COUNT-unset}}\" > '{}'\n",
+                path.join("push-options.txt").display()
+            ),
+        );
+        if mode == "external-filter" {
+            let clean = format!(
+                "echo invoked > '{}'; cat",
+                path.join("filter-ran").display()
+            );
+            git_ok(repo, &["config", "filter.fixture.clean", clean.as_str()]);
+        }
+        if mode == "in-progress-merge" {
+            std::fs::write(repo.join(".git/MERGE_HEAD"), initial)
+                .unwrap_or_else(|error| panic!("write merge marker: {error}"));
+        }
+        executable(
+            &repo.join(".git/hooks/pre-commit"),
+            &format!(
+                "#!/bin/sh\necho called > '{}'\n",
+                path.join("hook-ran").display()
+            ),
+        );
+        executable(
+            &repo.join(".git/hooks/pre-push"),
+            &format!(
+                "#!/bin/sh\necho called > '{}'\n",
+                path.join("hook-ran").display()
+            ),
+        );
+    }
+
     fn initialize_repository(
         path: &std::path::Path,
         repo: &std::path::Path,
         mode: &str,
     ) -> (std::path::PathBuf, String) {
         let origin = path.join("origin.git");
-        git_ok(path, &["init", "--bare", "-q", origin.to_str().unwrap_or("")]);
+        git_ok(
+            path,
+            &["init", "--bare", "-q", origin.to_str().unwrap_or("")],
+        );
         std::fs::write(repo.join("tracked.txt"), "baseline\n")
             .unwrap_or_else(|error| panic!("write tracked baseline: {error}"));
         if mode == "external-filter" {
@@ -101,10 +160,7 @@ mod contracts {
             ],
         );
         let origin_text = origin.to_string_lossy().into_owned();
-        git_ok(
-            repo,
-            &["remote", "add", "origin", origin_text.as_str()],
-        );
+        git_ok(repo, &["remote", "add", "origin", origin_text.as_str()]);
         git_ok(repo, &["push", "-q", "-u", "origin", "feature"]);
         let initial = git_ok(repo, &["rev-parse", "HEAD"]);
         std::fs::write(path.join("initial-head.txt"), &initial)
@@ -128,45 +184,7 @@ mod contracts {
                 );
             }
         }
-        git_ok(
-            repo,
-            &[
-                "remote",
-                "set-url",
-                "origin",
-                "https://github.com/acme/repo.git",
-            ],
-        );
-        git_ok(&origin, &["config", "receive.advertisePushOptions", "true"]);
-        git_ok(repo, &["config", "push.followTags", "true"]);
-        git_ok(repo, &["config", "push.pushOption", "fixture-option"]);
-        git_ok(repo, &["tag", "-a", "review-only-tag", "-m", "fixture tag", "HEAD"]);
-        executable(
-            &origin.join("hooks/pre-receive"),
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"${{GIT_PUSH_OPTION_COUNT-unset}}\" > '{}'\n",
-                path.join("push-options.txt").display()
-            ),
-        );
-        if mode == "external-filter" {
-            let clean = format!(
-                "echo invoked > '{}'; cat",
-                path.join("filter-ran").display()
-            );
-            git_ok(repo, &["config", "filter.fixture.clean", clean.as_str()]);
-        }
-        if mode == "in-progress-merge" {
-            std::fs::write(repo.join(".git/MERGE_HEAD"), &initial)
-                .unwrap_or_else(|error| panic!("write merge marker: {error}"));
-        }
-        executable(
-            &repo.join(".git/hooks/pre-commit"),
-            &format!("#!/bin/sh\necho called > '{}'\n", path.join("hook-ran").display()),
-        );
-        executable(
-            &repo.join(".git/hooks/pre-push"),
-            &format!("#!/bin/sh\necho called > '{}'\n", path.join("hook-ran").display()),
-        );
+        configure_repository_controls(path, repo, &origin, mode, &initial);
         if mode == "dirty-baseline" {
             std::fs::write(repo.join("dirty.txt"), "already dirty\n")
                 .unwrap_or_else(|error| panic!("make baseline dirty: {error}"));
@@ -181,11 +199,7 @@ mod contracts {
         } else if mode == "wrong-tracking" {
             git_ok(
                 repo,
-                &[
-                    "update-ref",
-                    "refs/remotes/origin/other",
-                    initial.as_str(),
-                ],
+                &["update-ref", "refs/remotes/origin/other", initial.as_str()],
             );
             git_ok(
                 repo,
@@ -207,10 +221,6 @@ mod contracts {
     }
 
     #[given(expr = "the all-reviewer fixture has {string} threads and a limit of {int}")]
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "Cucumber captures owned strings"
-    )]
     fn fixture(world: &mut ReviewWorld, mode: String, limit: usize) {
         let root = tempfile::tempdir().unwrap_or_else(|error| panic!("fixture: {error}"));
         let path = root.path();
@@ -233,10 +243,23 @@ mod contracts {
             vec![thread("t1"), thread("t2")]
         };
         let after = match mode.as_str() {
-            "empty" | "complete" | "excluded" | "host-commit" | "host-no-changes"
-            | "dirty-baseline" | "detached-head" | "wrong-branch" | "wrong-tracking"
-            | "wrong-head" | "remote-advanced" | "reply-race" | "invalid-response"
-            | "ineligible-response" | "custom-edit" | "external-filter" | "in-progress-merge"
+            "empty"
+            | "complete"
+            | "excluded"
+            | "host-commit"
+            | "host-no-changes"
+            | "dirty-baseline"
+            | "detached-head"
+            | "wrong-branch"
+            | "wrong-tracking"
+            | "wrong-head"
+            | "remote-advanced"
+            | "reply-race"
+            | "invalid-response"
+            | "ineligible-response"
+            | "custom-edit"
+            | "external-filter"
+            | "in-progress-merge"
             | "commit-cas-race" => vec![],
             "permission-revoked" => {
                 let mut revoked = thread("t1");
@@ -307,10 +330,6 @@ esac
             ),
             "commit-cas-race" => format!(
                 "#!/bin/sh\necho run >> '{0}/prompt'\nprintf 'host edit\\n' > tracked.txt\necho '{{\"actions\":[]}}'\n",
-                path.display()
-            ),
-            "host-no-changes" => format!(
-                "#!/bin/sh\ngit status --porcelain --untracked-files=all >> '{0}/prompt-status'\necho run >> '{0}/prompt'\necho '{{\"actions\":[]}}'\n",
                 path.display()
             ),
             "ineligible-response" => format!(
@@ -623,9 +642,15 @@ exec "$real_git" "${git_prefix[@]}" "$subcommand" "$@"
             "fix: address pull request review feedback"
         );
         assert_eq!(git_ok(&repo, &["rev-list", "--count", "HEAD"]), "2");
-        assert!(git_ok(&repo, &["status", "--porcelain", "--untracked-files=all"]).is_empty());
         assert_eq!(
-            git_ok(&root.join("origin.git"), &["rev-parse", "refs/heads/feature"]),
+            git_ok(&repo, &["status", "--porcelain", "--untracked-files=all"]),
+            ""
+        );
+        assert_eq!(
+            git_ok(
+                &root.join("origin.git"),
+                &["rev-parse", "refs/heads/feature"]
+            ),
             head
         );
         assert!(!root.join("hook-ran").exists());
@@ -689,10 +714,16 @@ exec "$real_git" "${git_prefix[@]}" "$subcommand" "$@"
         let initial = initial.trim();
         assert_eq!(git_ok(&root.join("repo"), &["rev-parse", "HEAD"]), initial);
         assert_eq!(
-            git_ok(&root.join("origin.git"), &["rev-parse", "refs/heads/feature"]),
+            git_ok(
+                &root.join("origin.git"),
+                &["rev-parse", "refs/heads/feature"]
+            ),
             initial
         );
-        assert_eq!(git_ok(&root.join("repo"), &["rev-list", "--count", "HEAD"]), "1");
+        assert_eq!(
+            git_ok(&root.join("repo"), &["rev-list", "--count", "HEAD"]),
+            "1"
+        );
     }
 
     #[then("the host did not overwrite the advanced PR head")]
@@ -710,14 +741,20 @@ exec "$real_git" "${git_prefix[@]}" "$subcommand" "$@"
         let head = git_ok(&repo, &["rev-parse", "HEAD"]);
         assert_ne!(head, initial.trim());
         assert_eq!(
-            git_ok(&root.join("origin.git"), &["rev-parse", "refs/heads/feature"]),
+            git_ok(
+                &root.join("origin.git"),
+                &["rev-parse", "refs/heads/feature"]
+            ),
             advanced.trim()
         );
         assert_eq!(
             git_ok(&repo, &["log", "-1", "--format=%s"]),
             "fix: address pull request review feedback"
         );
-        assert!(git_ok(&repo, &["status", "--porcelain", "--untracked-files=all"]).is_empty());
+        assert_eq!(
+            git_ok(&repo, &["status", "--porcelain", "--untracked-files=all"]),
+            ""
+        );
         assert!(!root.join("api-writes.log").exists());
         assert!(!root.join("hook-ran").exists());
     }
@@ -751,7 +788,10 @@ exec "$real_git" "${git_prefix[@]}" "$subcommand" "$@"
             initial
         };
         assert_eq!(
-            git_ok(&root.join("origin.git"), &["rev-parse", "refs/heads/feature"]),
+            git_ok(
+                &root.join("origin.git"),
+                &["rev-parse", "refs/heads/feature"]
+            ),
             expected_remote.trim()
         );
         if world.mode == "dirty-baseline" {
@@ -778,14 +818,20 @@ exec "$real_git" "${git_prefix[@]}" "$subcommand" "$@"
                 .trim()
         );
         assert_eq!(
-            git_ok(&root.join("origin.git"), &["rev-parse", "refs/heads/feature"]),
+            git_ok(
+                &root.join("origin.git"),
+                &["rev-parse", "refs/heads/feature"]
+            ),
             head
         );
         assert_eq!(
             git_ok(&repo, &["log", "-1", "--format=%s"]),
             "fix: address pull request review feedback"
         );
-        assert!(git_ok(&repo, &["status", "--porcelain", "--untracked-files=all"]).is_empty());
+        assert_eq!(
+            git_ok(&repo, &["status", "--porcelain", "--untracked-files=all"]),
+            ""
+        );
         assert!(!root.join("api-writes.log").exists());
     }
 
@@ -806,7 +852,10 @@ exec "$real_git" "${git_prefix[@]}" "$subcommand" "$@"
             initial.trim()
         );
         assert_eq!(
-            git_ok(&root.join("origin.git"), &["rev-parse", "refs/heads/feature"]),
+            git_ok(
+                &root.join("origin.git"),
+                &["rev-parse", "refs/heads/feature"]
+            ),
             advanced.trim()
         );
         assert!(!root.join("api-writes.log").exists());
@@ -829,7 +878,10 @@ exec "$real_git" "${git_prefix[@]}" "$subcommand" "$@"
             "concurrent sibling"
         );
         assert_eq!(
-            git_ok(&root.join("origin.git"), &["rev-parse", "refs/heads/feature"]),
+            git_ok(
+                &root.join("origin.git"),
+                &["rev-parse", "refs/heads/feature"]
+            ),
             initial.trim()
         );
         assert!(!root.join("api-writes.log").exists());
@@ -846,7 +898,6 @@ exec "$real_git" "${git_prefix[@]}" "$subcommand" "$@"
         assert!(!root.join("filter-ran").exists());
     }
 
-
     #[then("the prompt edits remain uncommitted")]
     fn edits_remain_uncommitted(world: &mut ReviewWorld) {
         let root = world
@@ -858,18 +909,20 @@ exec "$real_git" "${git_prefix[@]}" "$subcommand" "$@"
             .unwrap_or_else(|error| panic!("read initial HEAD: {error}"));
         let repo = root.join("repo");
         assert!(root.join("prompt").exists());
-        assert_eq!(
-            git_ok(&repo, &["rev-parse", "HEAD"]),
-            initial.trim()
+        assert_eq!(git_ok(&repo, &["rev-parse", "HEAD"]), initial.trim());
+        assert_ne!(
+            git_ok(&repo, &["status", "--porcelain", "--untracked-files=all"]),
+            ""
         );
-        assert!(!git_ok(&repo, &["status", "--porcelain", "--untracked-files=all"]).is_empty());
         assert_eq!(
-            git_ok(&root.join("origin.git"), &["rev-parse", "refs/heads/feature"]),
+            git_ok(
+                &root.join("origin.git"),
+                &["rev-parse", "refs/heads/feature"]
+            ),
             initial.trim()
         );
         assert!(!root.join("api-writes.log").exists());
     }
-
 
     #[then(expr = "the prompt ran {int} times in a clean git repository")]
     fn invoked_times(world: &mut ReviewWorld, count: usize) {

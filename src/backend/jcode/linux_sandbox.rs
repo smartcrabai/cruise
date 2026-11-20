@@ -5,6 +5,7 @@ use crate::cancellation::CancellationToken;
 use jcode_sdk::{ConnectOptions, JcodeClient};
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{ErrorKind, Read};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -99,18 +100,18 @@ pub(super) struct Sandbox {
 
 impl Sandbox {
     pub(super) fn launch(
-        spec: SandboxSpec<'_>,
+        spec: &SandboxSpec<'_>,
         cancel: Option<&CancellationToken>,
     ) -> Result<Self, String> {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err("Bubblewrap launch cancelled".to_owned());
         }
-        validate_spec(&spec)?;
+        validate_spec(spec)?;
         let api_socket = spec.runtime.join(API_SOCKET_NAME);
         ensure_absent(&api_socket, "private jcode API socket")?;
 
         let (bwrap, disable_nested_userns) = find_bwrap()?;
-        let mut command = make_bwrap_command(&bwrap, disable_nested_userns, &spec)?;
+        let mut command = make_bwrap_command(&bwrap, disable_nested_userns, spec)?;
         let mut child = command
             .stderr(Stdio::piped())
             .spawn()
@@ -124,7 +125,7 @@ impl Sandbox {
         let reader_diagnostics = Arc::clone(&diagnostics);
         let diagnostic_reader = thread::Builder::new()
             .name("jcode-bwrap-diagnostics".to_owned())
-            .spawn(move || drain_diagnostics(stderr, reader_diagnostics))
+            .spawn(move || drain_diagnostics(stderr, &reader_diagnostics))
             .map_err(|error| {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -145,9 +146,10 @@ impl Sandbox {
                 cleanup,
             ));
         }
-        if let Some(status) = sandbox.try_wait().map_err(|error| {
-            format!("could not inspect Bubblewrap process: {error}")
-        })? {
+        if let Some(status) = sandbox
+            .try_wait()
+            .map_err(|error| format!("could not inspect Bubblewrap process: {error}"))?
+        {
             let message = sandbox.process_exit_message(status);
             let cleanup = sandbox.stop_inner();
             return Err(append_cleanup(message, cleanup));
@@ -171,37 +173,29 @@ impl Sandbox {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    return self.fail_connect(format!(
-                        "could not inspect Bubblewrap process: {error}"
-                    ));
+                    return self
+                        .fail_connect(format!("could not inspect Bubblewrap process: {error}"));
                 }
             }
             match fs::symlink_metadata(&self.api_socket) {
                 Ok(metadata) if metadata.file_type().is_socket() => {
-                    let client = JcodeClient::connect(ConnectOptions {
+                    if let Ok(client) = JcodeClient::connect(ConnectOptions {
                         socket_path: Some(self.api_socket.clone()),
                         client_name: "cruise-jcode-bubblewrap".to_owned(),
                         request_timeout: Some(CONNECT_REQUEST_TIMEOUT),
                         ensure_runtime: false,
                         supports_user_response: false,
-                    });
-                    match client {
-                        Ok(client) => {
-                            if cancel.is_some_and(CancellationToken::is_cancelled) {
-                                drop(client);
-                                return self.fail_connect(
-                                    "Bubblewrap connection cancelled".to_owned(),
-                                );
-                            }
-                            return Ok(client);
+                    }) {
+                        if cancel.is_some_and(CancellationToken::is_cancelled) {
+                            drop(client);
+                            return self.fail_connect("Bubblewrap connection cancelled".to_owned());
                         }
-                        Err(_) => {}
+                        return Ok(client);
                     }
                 }
                 Ok(_) => {
-                    return self.fail_connect(
-                        "private jcode API path is not a Unix socket".to_owned(),
-                    );
+                    return self
+                        .fail_connect("private jcode API path is not a Unix socket".to_owned());
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(error) => {
@@ -211,9 +205,8 @@ impl Sandbox {
                 }
             }
             if Instant::now() >= deadline {
-                return self.fail_connect(
-                    "timed out waiting for the private jcode API bridge".to_owned(),
-                );
+                return self
+                    .fail_connect("timed out waiting for the private jcode API bridge".to_owned());
             }
             thread::sleep(CONNECT_POLL_INTERVAL);
         }
@@ -233,10 +226,13 @@ impl Sandbox {
     }
 
     fn process_exit_message(&self, status: ExitStatus) -> String {
-        let status_text = status
-            .code()
-            .map_or_else(|| "terminated by signal".to_owned(), |code| format!("exit status {code}"));
-        self.with_diagnostics(format!("Bubblewrap sandbox exited during startup ({status_text})"))
+        let status_text = status.code().map_or_else(
+            || "terminated by signal".to_owned(),
+            |code| format!("exit status {code}"),
+        );
+        self.with_diagnostics(format!(
+            "Bubblewrap sandbox exited during startup ({status_text})"
+        ))
     }
 
     fn with_diagnostics(&self, message: String) -> String {
@@ -266,9 +262,10 @@ impl Sandbox {
             Ok(Some(status)) if !status.success() => {
                 failure = Some(self.with_diagnostics(format!(
                     "Bubblewrap sandbox exited unexpectedly ({})",
-                    status
-                        .code()
-                        .map_or_else(|| "terminated by signal".to_owned(), |code| format!("exit status {code}"))
+                    status.code().map_or_else(
+                        || "terminated by signal".to_owned(),
+                        |code| format!("exit status {code}")
+                    )
                 )));
             }
             Ok(Some(_)) => {}
@@ -279,16 +276,18 @@ impl Sandbox {
                     failure = Some(format!("could not stop Bubblewrap process: {error}"));
                 }
                 if let Err(error) = self.child.wait() {
-                    failure.get_or_insert_with(|| format!("could not reap Bubblewrap process: {error}"));
+                    failure.get_or_insert_with(|| {
+                        format!("could not reap Bubblewrap process: {error}")
+                    });
                 }
             }
             Err(error) => {
                 let mut detail = format!("could not inspect Bubblewrap process: {error}");
                 if let Err(error) = self.child.kill() {
-                    detail.push_str(&format!("; could not stop Bubblewrap process: {error}"));
+                    let _ = write!(detail, "; could not stop Bubblewrap process: {error}");
                 }
                 if let Err(error) = self.child.wait() {
-                    detail.push_str(&format!("; could not reap Bubblewrap process: {error}"));
+                    let _ = write!(detail, "; could not reap Bubblewrap process: {error}");
                 }
                 failure = Some(detail);
             }
@@ -405,8 +404,8 @@ fn validate_dir(path: &Path, description: &str) -> Result<(), String> {
 
 fn validate_executable(path: &Path, description: &str) -> Result<(), String> {
     validate_regular_file(path, description)?;
-    let metadata = fs::metadata(path)
-        .map_err(|error| format!("could not inspect {description}: {error}"))?;
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("could not inspect {description}: {error}"))?;
     if metadata.permissions().mode() & 0o111 == 0 {
         return Err(format!("{description} is not executable"));
     }
@@ -526,8 +525,11 @@ fn make_bwrap_command(
     disable_nested_userns: bool,
     spec: &SandboxSpec<'_>,
 ) -> Result<Command, String> {
-    let binary_guest = Path::new("/opt/jcode")
-        .join(spec.binary.file_name().ok_or_else(|| "jcode binary has no file name".to_owned())?);
+    let binary_guest = Path::new("/opt/jcode").join(
+        spec.binary
+            .file_name()
+            .ok_or_else(|| "jcode binary has no file name".to_owned())?,
+    );
     let api_socket_guest = Path::new("/run/cruise/runtime").join(API_SOCKET_NAME);
     let mut args = base_bwrap_args(disable_nested_userns)?;
     for path in [
@@ -555,12 +557,7 @@ fn make_bwrap_command(
         Path::new("/run/cruise/egress"),
         true,
     )?;
-    append_mount(
-        &mut args,
-        spec.workspace,
-        spec.workspace,
-        spec.read_only,
-    )?;
+    append_mount(&mut args, spec.workspace, spec.workspace, spec.read_only)?;
     for input in spec.inputs {
         if let Ok(relative) = input.strip_prefix(spec.state) {
             append_mount(&mut args, input, &Path::new("/state").join(relative), true)?;
@@ -591,7 +588,11 @@ fn make_bwrap_command(
     }
 
     let mut command = Command::new(bwrap);
-    command.args(args).env_clear().stdin(Stdio::null()).stdout(Stdio::null());
+    command
+        .args(args)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
     for (key, value) in spec.env {
         if !is_internal_env(key) && !is_git_env(key) {
             command.env(key, value);
@@ -630,10 +631,13 @@ pub(crate) fn verify_ci_snapshot(
     if !metadata.file_type().is_file() || metadata.nlink() != 1 || metadata.mode() & 0o022 != 0 {
         return Err("trusted CI verifier must be a single-link regular file not writable by group or others".into());
     }
-    let script = script.canonicalize()
+    let script = script
+        .canonicalize()
         .map_err(|error| format!("could not resolve the trusted CI verifier script: {error}"))?;
     if script.starts_with(worktree) || script.starts_with(snapshot) {
-        return Err("trusted CI verifier must be outside the worktree and candidate snapshot".into());
+        return Err(
+            "trusted CI verifier must be outside the worktree and candidate snapshot".into(),
+        );
     }
     let (bwrap, disable_nested_userns) = find_bwrap()?;
     let mut args = base_bwrap_args(disable_nested_userns)?;
@@ -659,13 +663,20 @@ pub(crate) fn verify_ci_snapshot(
     if status.success() {
         Ok(())
     } else {
-        Err(format!("configured CI verifier failed inside Bubblewrap ({status})"))
+        Err(format!(
+            "configured CI verifier failed inside Bubblewrap ({status})"
+        ))
     }
 }
 
 fn base_bwrap_args(disable_nested_userns: bool) -> Result<Vec<OsString>, String> {
     let mut args = Vec::new();
-    for flag in ["--unshare-user", "--unshare-pid", "--unshare-net", "--unshare-ipc"] {
+    for flag in [
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
+    ] {
         args.push(flag.into());
     }
     if disable_nested_userns {
@@ -742,18 +753,29 @@ fn append_jcode_release(
     binary_guest: &Path,
 ) -> Result<(), String> {
     append_mount(args, binary, binary_guest, true)?;
-    let file_name = binary.file_name().ok_or_else(|| "jcode binary has no file name".to_owned())?;
+    let file_name = binary
+        .file_name()
+        .ok_or_else(|| "jcode binary has no file name".to_owned())?;
     let mut bin_name = file_name.to_os_string();
     bin_name.push(".bin");
-    let bin_source = binary.parent().unwrap_or_else(|| Path::new("/")).join(&bin_name);
+    let bin_source = binary
+        .parent()
+        .unwrap_or_else(|| Path::new("/"))
+        .join(&bin_name);
     if fs::metadata(&bin_source).is_ok_and(|metadata| metadata.is_file()) {
-        append_mount(args, &bin_source, &Path::new("/opt/jcode").join(&bin_name), true)?;
+        append_mount(
+            args,
+            &bin_source,
+            &Path::new("/opt/jcode").join(&bin_name),
+            true,
+        )?;
     }
     let parent = binary.parent().unwrap_or_else(|| Path::new("/"));
     for entry in fs::read_dir(parent)
         .map_err(|error| format!("could not inspect trusted jcode release directory: {error}"))?
     {
-        let entry = entry.map_err(|error| format!("could not inspect jcode release file: {error}"))?;
+        let entry =
+            entry.map_err(|error| format!("could not inspect jcode release file: {error}"))?;
         let name = entry.file_name();
         let name_text = name.to_string_lossy();
         if !(name_text.starts_with("libssl.so.") || name_text.starts_with("libcrypto.so.")) {
@@ -832,7 +854,7 @@ fn is_internal_env(key: &OsStr) -> bool {
     key.to_str().is_some_and(|key| KEYS.contains(&key))
 }
 
-fn drain_diagnostics(mut stderr: impl Read, diagnostics: Arc<Mutex<Vec<u8>>>) {
+fn drain_diagnostics(mut stderr: impl Read, diagnostics: &Mutex<Vec<u8>>) {
     let mut chunk = [0_u8; 512];
     loop {
         match stderr.read(&mut chunk) {
@@ -871,14 +893,26 @@ mod tests {
 
     #[test]
     fn nested_userns_detection_requires_the_exact_option_token() {
-        assert!(contains_option(b"--disable-userns  Disable nested user namespaces", b"--disable-userns"));
-        assert!(!contains_option(b"--disable-userns-try", b"--disable-userns"));
+        assert!(contains_option(
+            b"--disable-userns  Disable nested user namespaces",
+            b"--disable-userns"
+        ));
+        assert!(!contains_option(
+            b"--disable-userns-try",
+            b"--disable-userns"
+        ));
     }
 
     #[test]
     fn mount_overlap_is_component_aware() {
-        assert!(paths_overlap(Path::new("/work/.git/config"), Path::new("/work/.git")));
-        assert!(!paths_overlap(Path::new("/work/.git2/config"), Path::new("/work/.git")));
+        assert!(paths_overlap(
+            Path::new("/work/.git/config"),
+            Path::new("/work/.git")
+        ));
+        assert!(!paths_overlap(
+            Path::new("/work/.git2/config"),
+            Path::new("/work/.git")
+        ));
     }
 
     #[test]
@@ -896,7 +930,8 @@ mod tests {
         let worktree = temp.path().join("worktree");
         fs::create_dir(&worktree).unwrap();
         let verifier = temp.path().join("verifier.sh");
-        let script = format!(r#"
+        let script = format!(
+            r#"
 test "$(pwd)" = /candidate
 test "$(cat code.txt)" = "candidate content"
 test ! -e .git
@@ -905,18 +940,32 @@ test -z "${{GH_TOKEN-}}${{ANTHROPIC_API_KEY-}}${{SSH_AUTH_SOCK-}}"
 if (printf wrong >code.txt) 2>/dev/null; then exit 1; fi
 printf allowed >/tmp/proof
 python3 -c 'import socket; assert socket.socket().connect_ex(("127.0.0.1",{port})) != 0'
-"#, private.display());
+"#,
+            private.display()
+        );
         fs::write(&verifier, script).unwrap();
         fs::set_permissions(&verifier, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(verify_ci_snapshot(&candidate, &worktree, &verifier), Ok(()));
         fs::write(&verifier, "exit 23").unwrap();
-        assert!(verify_ci_snapshot(&candidate, &worktree, &verifier).unwrap_err().contains("23"));
+        assert!(
+            verify_ci_snapshot(&candidate, &worktree, &verifier)
+                .unwrap_err()
+                .contains("23")
+        );
         let in_worktree = worktree.join("approve.sh");
         fs::write(&in_worktree, "exit 0").unwrap();
         fs::set_permissions(&in_worktree, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(verify_ci_snapshot(&candidate, &worktree, &in_worktree).unwrap_err().contains("outside the worktree"));
+        assert!(
+            verify_ci_snapshot(&candidate, &worktree, &in_worktree)
+                .unwrap_err()
+                .contains("outside the worktree")
+        );
         fs::hard_link(&verifier, worktree.join("linked.sh")).unwrap();
-        assert!(verify_ci_snapshot(&candidate, &worktree, &verifier).unwrap_err().contains("single-link"));
+        assert!(
+            verify_ci_snapshot(&candidate, &worktree, &verifier)
+                .unwrap_err()
+                .contains("single-link")
+        );
         assert_eq!(
             fs::read_to_string(candidate.join("code.txt")).unwrap(),
             "candidate content"

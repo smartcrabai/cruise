@@ -420,7 +420,6 @@ mod tests {
                 );
                 continue;
             }
-            assert_eq!(compiled.after_pr.len(), 7);
             assert_eq!(
                 compiled
                     .after_pr

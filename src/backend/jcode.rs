@@ -10,7 +10,6 @@
 //! thread, subscribes before sending the prompt, and answers session-tool calls
 //! with the existing in-process handlers.
 
-#[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
 use jcode_sdk::LaunchOptions;
 use jcode_sdk::{
     ApiEvent, JcodeClient, ModelRouteInfo, SessionToolDefinition, ToolConfiguration, TurnStopReason,
@@ -87,6 +86,7 @@ const JCODE_CONFIG_FILE: &str = "config.toml";
 const OPENAI_SERVICE_TIER_DEFAULT: &str = "off";
 const SESSION_HOME_DIR: &str = ".cruise-sdk-sessions";
 const SESSION_ID_FILE: &str = ".cruise-session-id";
+const SANDBOX_SESSION_MARKER: &str = ".cruise-bubblewrap";
 const LEGACY_CRUISE_MCP_NAME: &str = "cruise";
 const CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 const STALE_SESSION_HOME_AGE: Duration = Duration::from_hours(24);
@@ -100,6 +100,12 @@ const MODEL_CATALOG_CACHE_FILES: &[&str] = &[
     "antigravity_models_cache.json",
     "bedrock_models_cache.json",
 ];
+
+const JCODE_BUBBLEWRAP_ENV: &str = "CRUISE_JCODE_BUBBLEWRAP";
+
+pub(crate) fn bubblewrap_requested() -> bool {
+    std::env::var(JCODE_BUBBLEWRAP_ENV).is_ok_and(|value| value == "1")
+}
 
 struct MaterializedExternalCredential {
     original_canonical_path: String,
@@ -128,14 +134,16 @@ pub(crate) struct JcodeRunnerConfig {
     pub(crate) cancel: Option<CancellationToken>,
     pub(crate) keep_session_home: bool,
     pub(crate) computer_use: bool,
-    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
     pub(crate) sandbox_access: SandboxAccess,
 }
 
 #[derive(Clone, Default)]
 #[cfg_attr(
     not(all(target_os = "linux", feature = "jcode-bubblewrap")),
-    expect(dead_code, reason = "only the Bubblewrap backend consumes filesystem grants")
+    expect(
+        dead_code,
+        reason = "only the Bubblewrap backend consumes filesystem grants"
+    )
 )]
 pub(crate) struct SandboxAccess {
     pub(crate) read_only: bool,
@@ -194,9 +202,14 @@ fn run_attempt(
     prompt: &str,
     tx: &SyncSender<StreamChunk>,
 ) -> std::result::Result<StreamChunk, String> {
-    if cfg!(all(feature = "jcode-bubblewrap", not(target_os = "linux"))) {
-        let _ = tx.send(StreamChunk::RetryBarrier);
-        return Err("the jcode-bubblewrap build requires Linux".into());
+    let sandbox_attempt = config.sandbox_access.require_bubblewrap || bubblewrap_requested();
+    if sandbox_attempt && !cfg!(all(target_os = "linux", feature = "jcode-bubblewrap")) {
+        return Err(if cfg!(target_os = "linux") {
+            "Bubblewrap jcode isolation is not available in this build"
+        } else {
+            "Bubblewrap jcode isolation is only available on Linux"
+        }
+        .into());
     }
     let source_home = resolve_source_home(config.cwd.as_deref());
     let session_key = config.resume_session_id.as_deref().map_or_else(
@@ -214,6 +227,7 @@ fn run_attempt(
         &session_key,
         config.resume_session_id.as_deref(),
         &config.mcp_servers,
+        sandbox_attempt,
     )
     .inspect_err(|_error| {
         record_failure(
@@ -221,11 +235,12 @@ fn run_attempt(
             "session",
             "session_home_prepare_failed",
         );
-        #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
-        let _ = tx.send(StreamChunk::RetryBarrier);
+        if sandbox_attempt {
+            let _ = tx.send(StreamChunk::RetryBarrier);
+        }
     })?;
     let mut session_id = None;
-    let run_result = match launch_client(config, &home, &mut failure_recorded) {
+    let run_result = match launch_client(config, &home, &mut failure_recorded, sandbox_attempt) {
         Ok(runtime) => {
             let result = run_client_turn(
                 &runtime.client,
@@ -242,8 +257,9 @@ fn run_attempt(
             let cleanup_result = runtime.stop(&home);
             if cleanup_result.is_err() {
                 record_failure(&mut failure_recorded, "cleanup", "runtime_cleanup_failed");
-                #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
-                let _ = tx.send(StreamChunk::RetryBarrier);
+                if sandbox_attempt {
+                    let _ = tx.send(StreamChunk::RetryBarrier);
+                }
             }
             match (result, cleanup_result) {
                 (Ok(terminal), Ok(())) => Ok(terminal),
@@ -258,8 +274,9 @@ fn run_attempt(
         }
         Err(error) => {
             record_failure(&mut failure_recorded, "launch", "sdk_launch_failed");
-            #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
-            let _ = tx.send(StreamChunk::RetryBarrier);
+            if sandbox_attempt {
+                let _ = tx.send(StreamChunk::RetryBarrier);
+            }
             Err(error)
         }
     };
@@ -285,38 +302,25 @@ fn run_attempt(
 struct Runtime {
     client: JcodeClient,
     #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
-    sandbox: linux::Runtime,
+    sandbox: Option<linux::Runtime>,
 }
 
 impl Runtime {
     fn stop(self, home: &SessionHome) -> std::result::Result<(), String> {
         drop(self.client);
         #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
-        {
-            let _ = home;
-            self.sandbox.stop()
+        if let Some(sandbox) = self.sandbox {
+            return sandbox.stop();
         }
-        #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
         clear_private_daemon(&home.storage_home).map_err(|error| error.to_string())
     }
 }
 
-fn launch_client(
+fn client_environment(
     config: &JcodeRunnerConfig,
     home: &SessionHome,
-    failure_recorded: &mut bool,
-) -> std::result::Result<Runtime, String> {
-    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
-    {
-        #[cfg(unix)]
-        validate_sdk_socket_paths(&home.sdk_home).inspect_err(|_| {
-            record_failure(failure_recorded, "launch", "launch_setup_failed");
-        })?;
-        clear_private_daemon(&home.storage_home).map_err(|error| {
-            record_failure(failure_recorded, "cleanup", "stale_runtime_cleanup_failed");
-            format!("could not clean up stale private jcode runtime: {error}")
-        })?;
-    }
+    isolated: bool,
+) -> HashMap<OsString, OsString> {
     let skip_user_lists = config.computer_use
         && config.permission == crate::config::PermissionMode::Full
         && !config.tool_policy.deny_web
@@ -336,10 +340,11 @@ fn launch_client(
     {
         None
     } else {
-        #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
-        let settings_home = &home.source_home;
-        #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
-        let settings_home = &home.storage_home;
+        let settings_home = if isolated {
+            &home.source_home
+        } else {
+            &home.storage_home
+        };
         fs::read_to_string(settings_home.join(JCODE_CONFIG_FILE)).ok()
     };
     let gate_command = if needs_gate {
@@ -364,7 +369,7 @@ fn launch_client(
     {
         eprintln!("cruise: warning: JCODE_HOOKS_DISABLED disables the jcode shell gate");
     }
-    let env = launch_environment(
+    launch_environment(
         &config.env,
         config.provider.as_deref(),
         config.model.as_deref(),
@@ -379,43 +384,68 @@ fn launch_client(
             policy: &config.tool_policy,
             gate_command: gate_command.as_deref(),
         },
-    );
+    )
+}
+
+fn launch_client(
+    config: &JcodeRunnerConfig,
+    home: &SessionHome,
+    failure_recorded: &mut bool,
+    isolated: bool,
+) -> std::result::Result<Runtime, String> {
+    if !isolated {
+        #[cfg(unix)]
+        validate_sdk_socket_paths(&home.sdk_home).inspect_err(|_| {
+            record_failure(failure_recorded, "launch", "launch_setup_failed");
+        })?;
+        clear_private_daemon(&home.storage_home).map_err(|error| {
+            record_failure(failure_recorded, "cleanup", "stale_runtime_cleanup_failed");
+            format!("could not clean up stale private jcode runtime: {error}")
+        })?;
+    }
+    let env = client_environment(config, home, isolated);
     #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
-    {
+    if isolated {
         let (client, sandbox) = linux::launch(config, home, env).inspect_err(|_| {
             record_failure(failure_recorded, "launch", "sandbox_setup_failed");
         })?;
-        Ok(Runtime { client, sandbox })
+        return Ok(Runtime {
+            client,
+            sandbox: Some(sandbox),
+        });
     }
-    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
-    {
-        let mut options = LaunchOptions {
-            binary: config.binary.clone(),
-            jcode_home: Some(home.sdk_home.clone()),
-            working_dir: config.cwd.clone(),
-            inherit_logins: false,
-            env,
-            ..Default::default()
-        };
-        // The short alias selects sockets, not jcode's real auth directory.
-        options.env.insert(JCODE_HOME_ENV.into(), home.storage_home.as_os_str().into());
-        JcodeClient::launch(options)
-            .map(|client| Runtime { client })
-            .map_err(|error| {
-                let hint = if matches!(
-                    &error.kind,
-                    jcode_sdk::ErrorKind::JcodeNotFound
-                        | jcode_sdk::ErrorKind::HandshakeFailed
-                        | jcode_sdk::ErrorKind::Harness(jcode_sdk::api::ErrorCode::UnsupportedVersion)
-                ) {
-                    format!("; install or upgrade jcode to {JCODE_MIN_VERSION} or newer with `cruise install jcode`")
-                } else {
-                    String::new()
-                };
-                record_sdk_failure(failure_recorded, "launch", &error);
-                format!("could not start the jcode SDK runtime{hint}: {error}")
-            })
-    }
+    let mut options = LaunchOptions {
+        binary: config.binary.clone(),
+        jcode_home: Some(home.sdk_home.clone()),
+        working_dir: config.cwd.clone(),
+        inherit_logins: false,
+        env,
+        ..Default::default()
+    };
+    // The short alias selects sockets, not jcode's real auth directory.
+    options
+        .env
+        .insert(JCODE_HOME_ENV.into(), home.storage_home.as_os_str().into());
+    JcodeClient::launch(options)
+        .map(|client| Runtime {
+            client,
+            #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+            sandbox: None,
+        })
+        .map_err(|error| {
+            let hint = if matches!(
+                &error.kind,
+                jcode_sdk::ErrorKind::JcodeNotFound
+                    | jcode_sdk::ErrorKind::HandshakeFailed
+                    | jcode_sdk::ErrorKind::Harness(jcode_sdk::api::ErrorCode::UnsupportedVersion)
+            ) {
+                format!("; install or upgrade jcode to {JCODE_MIN_VERSION} or newer with `cruise install jcode`")
+            } else {
+                String::new()
+            };
+            record_sdk_failure(failure_recorded, "launch", &error);
+            format!("could not start the jcode SDK runtime{hint}: {error}")
+        })
 }
 
 fn sdk_failure_reason(kind: &jcode_sdk::ErrorKind) -> &'static str {
@@ -847,7 +877,11 @@ fn run_client_turn(
 
     // Subscribe before sending so early text and tool events cannot be missed.
     let events = client.events(Some(&session.session_id));
-    if config.cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+    if config
+        .cancel
+        .as_ref()
+        .is_some_and(CancellationToken::is_cancelled)
+    {
         return Err("jcode prompt cancelled before submission".into());
     }
     client
@@ -1178,11 +1212,24 @@ impl Drop for SessionHome {
     }
 }
 
+fn session_is_bubblewrapped(storage_home: &Path) -> std::io::Result<bool> {
+    match fs::read(storage_home.join(SANDBOX_SESSION_MARKER)) {
+        Ok(marker) if marker == b"bubblewrap" => Ok(true),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid jcode isolation marker",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn prepare_session_home(
     source_home: PathBuf,
     session_key: &str,
     resume_session_id: Option<&str>,
     mcp_servers: &crate::config::McpServers,
+    isolated: bool,
 ) -> std::result::Result<SessionHome, String> {
     let storage_root = source_home.join(SESSION_HOME_DIR);
     ensure_private_dir(&storage_root).map_err(|error| error.to_string())?;
@@ -1204,12 +1251,23 @@ fn prepare_session_home(
     ensure_private_dir(&storage_home).map_err(|error| error.to_string())?;
     let active_lock = lock_session_home(&storage_home).map_err(|error| error.to_string())?;
     drop(root_lock);
-    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
-    if !mcp_servers.is_empty() {
-        return Err("workflow MCP servers are not supported by the Bubblewrap jcode backend".into());
+    if isolated && !mcp_servers.is_empty() {
+        return Err(
+            "workflow MCP servers are not supported by the Bubblewrap jcode backend".into(),
+        );
     }
-    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
-    {
+    let has_isolation_marker =
+        session_is_bubblewrapped(&storage_home).map_err(|error| error.to_string())?;
+    if !fresh && has_isolation_marker != isolated {
+        return Err("a saved jcode conversation cannot be resumed in a different isolation mode; start a new conversation".into());
+    }
+    if isolated && !has_isolation_marker {
+        let marker = storage_home.join(SANDBOX_SESSION_MARKER);
+        fs::write(&marker, "bubblewrap").map_err(|error| error.to_string())?;
+        set_private_file(&marker).map_err(|error| error.to_string())?;
+    }
+
+    if !isolated {
         let linked_credentials = jcode_sdk::inherit_credentials(&source_home, &storage_home)
             .map_err(|error| error.to_string())?;
         copy_private_model_catalog_caches(&source_home, &storage_home)
@@ -1223,8 +1281,10 @@ fn prepare_session_home(
             .map_err(|error| error.to_string())?;
     }
 
-    #[cfg(all(unix, not(all(target_os = "linux", feature = "jcode-bubblewrap"))))]
-    let (sdk_home, temporary_alias, stable_alias_root) = {
+    #[cfg(unix)]
+    let (sdk_home, temporary_alias, stable_alias_root) = if isolated {
+        (storage_home.clone(), None, None)
+    } else {
         let alias_root = short_home_alias_root();
         ensure_private_alias_root(&alias_root).map_err(|error| error.to_string())?;
         let alias_key = resume_session_id.map_or_else(
@@ -1235,8 +1295,8 @@ fn prepare_session_home(
         ensure_home_alias(&alias, &storage_home).map_err(|error| error.to_string())?;
         (alias.clone(), Some(alias), Some(alias_root))
     };
-    #[cfg(any(not(unix), all(target_os = "linux", feature = "jcode-bubblewrap")))]
-    let (sdk_home, temporary_alias, stable_alias_root) = { (storage_home.clone(), None, None) };
+    #[cfg(not(unix))]
+    let (sdk_home, temporary_alias, stable_alias_root) = (storage_home.clone(), None, None);
 
     Ok(SessionHome {
         source_home,

@@ -1213,8 +1213,9 @@ fn private_home_copies_catalogs_and_external_auth_idempotently() {
     let session_id = "external-auth-copy-test";
     let session_key = session_storage_key(session_id);
     let mcp_servers = crate::config::McpServers::default();
-    let mut home = prepare_session_home(source_home.clone(), &session_key, None, &mcp_servers)
-        .unwrap_or_else(|error| panic!("{error}"));
+    let mut home =
+        prepare_session_home(source_home.clone(), &session_key, None, &mcp_servers, false)
+            .unwrap_or_else(|error| panic!("{error}"));
     let storage_home = home.storage_home.clone();
     let private_hosts = storage_home.join("external/.config/github-copilot/hosts.json");
     let private_apps = storage_home.join("external/.config/github-copilot/apps.json");
@@ -1243,9 +1244,14 @@ fn private_home_copies_catalogs_and_external_auth_idempotently() {
         .unwrap_or_else(|error| panic!("{error}"));
     drop(home);
 
-    let mut resumed =
-        prepare_session_home(source_home, &session_key, Some(session_id), &mcp_servers)
-            .unwrap_or_else(|error| panic!("{error}"));
+    let mut resumed = prepare_session_home(
+        source_home,
+        &session_key,
+        Some(session_id),
+        &mcp_servers,
+        false,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
     drop(inherited_lock);
     let updated_catalog_fixtures = [
         (
@@ -1296,8 +1302,9 @@ fn fresh_and_resumed_session_alias_socket_paths_are_valid() {
         );
     };
     let fresh_key = uuid::Uuid::new_v4().simple().to_string();
-    let mut fresh = prepare_session_home(source_home.clone(), &fresh_key, None, &mcp_servers)
-        .unwrap_or_else(|error| panic!("{error}"));
+    let mut fresh =
+        prepare_session_home(source_home.clone(), &fresh_key, None, &mcp_servers, false)
+            .unwrap_or_else(|error| panic!("{error}"));
     assert_alias(&fresh.sdk_home);
     finish_session_home(&mut fresh, None, false).unwrap_or_else(|error| panic!("{error}"));
 
@@ -1313,6 +1320,7 @@ fn fresh_and_resumed_session_alias_socket_paths_are_valid() {
         &session_storage_key(session_id),
         Some(session_id),
         &mcp_servers,
+        false,
     )
     .unwrap_or_else(|error| panic!("{error}"));
     assert!(resumed.resume_session_found);
@@ -2236,7 +2244,7 @@ fn launch_client_captured_environment_probe() {
     }
     let mut failure_recorded = false;
     assert!(
-        launch_client(&config, &home, &mut failure_recorded).is_err(),
+        launch_client(&config, &home, &mut failure_recorded, false).is_err(),
         "capture-only stub must not connect a runtime"
     );
     assert_captured_launch_environment(&case, &root, no_shell);

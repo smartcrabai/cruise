@@ -50,7 +50,7 @@ except OSError as error:
 else:
     raise SystemExit("READ_ONLY_WRITE_ALLOWED")
 PY"#;
-const TDD_APPLY_OUTPUT: &str = r#"## Applied work items
+const TDD_APPLY_OUTPUT: &str = r"## Applied work items
 - none - EMPTY WORKLIST; no workspace files changed
 
 ## Reverted work items
@@ -69,7 +69,7 @@ iteration: 1
 ### REV-1 | persists | major | src/main.rs:1
 - summary: reproduced issue remains
 - evidence: current behavior still demonstrates it
-```"#;
+```";
 
 #[derive(Clone, Copy)]
 enum TddStage {
@@ -87,7 +87,9 @@ fn tdd_stage(context: &str) -> Option<TddStage> {
         Some(TddStage::Implement)
     } else if context.contains("## Ledger Records") {
         Some(TddStage::Apply)
-    } else if context.contains("Consolidate the joined reports above into one ordered worklist for apply.") {
+    } else if context
+        .contains("Consolidate the joined reports above into one ordered worklist for apply.")
+    {
         Some(TddStage::Consolidate)
     } else if [
         "Verify every item in",
@@ -119,10 +121,16 @@ fn tdd_stage_command(stage: TddStage) -> Option<String> {
 
 fn tdd_stage_output(stage: TddStage) -> &'static str {
     match stage {
-        TddStage::WriteTests => "## Test Contract Map\n- Fixture task -> bwrap-tdd-test-first.txt\n\n## Changes\n- Wrote the test-first fixture output\n\n## Build Result\n- Not applicable to the fixture response\n\n## Expected Red Result\n- Fixture output recorded",
-        TddStage::Implement => "## Summary\n- Fixture implementation output recorded\n\n## Changes\n- Wrote bwrap-tdd-implementation.txt\n\n## Build Result\n- Not applicable to the fixture response\n\n## Test Result\n- Fixture output recorded",
+        TddStage::WriteTests => {
+            "## Test Contract Map\n- Fixture task -> bwrap-tdd-test-first.txt\n\n## Changes\n- Wrote the test-first fixture output\n\n## Build Result\n- Not applicable to the fixture response\n\n## Expected Red Result\n- Fixture output recorded"
+        }
+        TddStage::Implement => {
+            "## Summary\n- Fixture implementation output recorded\n\n## Changes\n- Wrote bwrap-tdd-implementation.txt\n\n## Build Result\n- Not applicable to the fixture response\n\n## Test Result\n- Fixture output recorded"
+        }
         TddStage::Analyze => "NO FINDINGS",
-        TddStage::Consolidate => "# Consolidated Findings\n\n## Worklist\n\nEMPTY WORKLIST\n\n## Dropped\n- none\n\n## Unavailable sources\n- none",
+        TddStage::Consolidate => {
+            "# Consolidated Findings\n\n## Worklist\n\nEMPTY WORKLIST\n\n## Dropped\n- none\n\n## Unavailable sources\n- none"
+        }
         TddStage::Apply => TDD_APPLY_OUTPUT,
     }
 }
@@ -139,9 +147,16 @@ fn request_tool_name(request: &Value, expected: &str) -> Option<String> {
 fn current_prompt_context(request: &Value) -> String {
     request["messages"]
         .as_array()
-        .and_then(|messages| messages.iter().rev().find(|message| message["role"] == "user"))
-        .map(|message| message["content"].to_string())
-        .unwrap_or_else(|| request["messages"].to_string())
+        .and_then(|messages| {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "user")
+        })
+        .map_or_else(
+            || request["messages"].to_string(),
+            |message| message["content"].to_string(),
+        )
 }
 
 fn current_turn_tool_results(request: &Value) -> usize {
@@ -177,7 +192,11 @@ fn new_session_dir(fixture: &Fixture, before: &[PathBuf]) -> PathBuf {
         .into_iter()
         .filter(|path| !before.contains(path))
         .collect::<Vec<_>>();
-    assert_eq!(created.len(), 1, "expected one new session directory, got {created:?}");
+    assert_eq!(
+        created.len(),
+        1,
+        "expected one new session directory, got {created:?}"
+    );
     created
         .pop()
         .unwrap_or_else(|| panic!("new session directory disappeared"))
@@ -188,15 +207,14 @@ type MetadataSnapshot = BTreeMap<String, Vec<u8>>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires installed jcode v1.0.1 and /usr/bin/bwrap v0.11.1"]
-#[expect(
-    clippy::too_many_lines,
-    reason = "keeps the real CLI, isolated daemon, provider fixture, and OS-boundary assertions in one acceptance scenario"
-)]
 async fn installed_jcode_runs_in_real_bubblewrap_with_only_model_network_access() {
     let jcode = real_jcode_binary();
     assert_version(&jcode, "1.0.1");
     let bwrap = PathBuf::from("/usr/bin/bwrap");
-    assert!(bwrap.is_file(), "the launcher selects /usr/bin/bwrap on Linux");
+    assert!(
+        bwrap.is_file(),
+        "the launcher selects /usr/bin/bwrap on Linux"
+    );
     assert_version(&bwrap, "0.11.1");
 
     let fixture = Fixture::new(&jcode);
@@ -232,7 +250,7 @@ async fn installed_jcode_runs_in_real_bubblewrap_with_only_model_network_access(
 
     let address = model_address.to_string();
     let result = tokio::task::spawn_blocking(move || {
-        run_acceptance(fixture, sentinel, model, before, address)
+        run_acceptance(&fixture, &sentinel, &model, &before, &address);
     })
     .await;
     model_server.abort();
@@ -240,7 +258,7 @@ async fn installed_jcode_runs_in_real_bubblewrap_with_only_model_network_access(
 }
 
 struct Fixture {
-    _root: TempDir,
+    root: TempDir,
     home: PathBuf,
     xdg_config: PathBuf,
     xdg_data: PathBuf,
@@ -288,7 +306,7 @@ impl Fixture {
                 .unwrap_or_else(|error| panic!("create fixture directory {directory:?}: {error}"));
         }
         Self {
-            _root: root,
+            root,
             home,
             xdg_config,
             host_bin,
@@ -324,6 +342,7 @@ impl Fixture {
             .env("JCODE_HOOKS_DISABLED", "1")
             .env("JCODE_NO_TELEMETRY", "1")
             .env("JCODE_CHECK_UPDATES", "0")
+            .env("CRUISE_JCODE_BUBBLEWRAP", "1")
             .env("CRUISE_JCODE_CLI_PATH", &self.jcode)
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -337,13 +356,12 @@ impl Fixture {
         let inherited_path = std::env::var_os("PATH").unwrap_or_default();
         let mut paths = vec![self.host_bin.clone()];
         paths.extend(std::env::split_paths(&inherited_path));
-        std::env::join_paths(paths)
-            .unwrap_or_else(|error| panic!("build host-tool PATH: {error}"))
+        std::env::join_paths(paths).unwrap_or_else(|error| panic!("build host-tool PATH: {error}"))
     }
 
     fn install_cruise_capture_shim(&self) {
         let shim = self.host_bin.join("cruise");
-        let capture = self._root.path().join("tdd-capture");
+        let capture = self.root.path().join("tdd-capture");
         let real_cruise = shell_quote(Path::new(env!("CARGO_BIN_EXE_cruise")));
         let capture_analysis = shell_quote(&capture.join("analysis"));
         let capture_invocation = shell_quote(&capture.join("invocation.txt"));
@@ -377,11 +395,7 @@ exit "$status"
     fn create_linked_repositories(&self) {
         git_ok(
             &self.main_source,
-            &[
-                "init",
-                "--quiet",
-                "--initial-branch=main",
-            ],
+            &["init", "--quiet", "--initial-branch=main"],
             &self.home,
         );
         fs::write(self.main_source.join("tracked.txt"), "original\n")
@@ -403,15 +417,14 @@ exit "$status"
 
         git_ok(
             &self.nested_source,
-            &[
-                "init",
-                "--quiet",
-                "--initial-branch=nested-main",
-            ],
+            &["init", "--quiet", "--initial-branch=nested-main"],
             &self.home,
         );
-        fs::write(self.nested_source.join("nested-tracked.txt"), "nested-original\n")
-            .unwrap_or_else(|error| panic!("write nested fixture file: {error}"));
+        fs::write(
+            self.nested_source.join("nested-tracked.txt"),
+            "nested-original\n",
+        )
+        .unwrap_or_else(|error| panic!("write nested fixture file: {error}"));
         commit_fixture(&self.nested_source, "nested fixture", &self.home);
         git_ok(
             &self.nested_source,
@@ -425,13 +438,16 @@ exit "$status"
             ],
             &self.home,
         );
-        assert!(self.repo.join(".git").is_file(), "main repo must be a linked worktree");
+        assert!(
+            self.repo.join(".git").is_file(),
+            "main repo must be a linked worktree"
+        );
         assert!(
             self.nested_repo.join(".git").is_file(),
             "nested repo must be a linked worktree"
         );
-        assert!(git_output(&self.repo, &["remote"], &self.home).is_empty());
-        assert!(git_output(&self.nested_repo, &["remote"], &self.home).is_empty());
+        assert_eq!(git_output(&self.repo, &["remote"], &self.home), "");
+        assert_eq!(git_output(&self.nested_repo, &["remote"], &self.home), "");
         fs::write(self.repo.join("tracked.txt"), "staged\n")
             .unwrap_or_else(|error| panic!("seed staged main change: {error}"));
         git_ok(&self.repo, &["add", "--", "tracked.txt"], &self.home);
@@ -473,7 +489,12 @@ exit "$status"
         }
         let metadata = GitMetadata { files };
         for entry in &metadata.files {
-            assert!(entry.path.is_file(), "missing Git metadata target {} at {:?}", entry.name, entry.path);
+            assert!(
+                entry.path.is_file(),
+                "missing Git metadata target {} at {:?}",
+                entry.name,
+                entry.path
+            );
         }
         metadata
     }
@@ -532,7 +553,9 @@ impl ModelFixture {
             .map(|entry| {
                 fs::read(&entry.path)
                     .map(|contents| (entry.name.clone(), contents))
-                    .map_err(|error| format!("snapshot {} at {:?}: {error}", entry.name, entry.path))
+                    .map_err(|error| {
+                        format!("snapshot {} at {:?}: {error}", entry.name, entry.path)
+                    })
             })
             .collect()
     }
@@ -577,10 +600,7 @@ fn model_response(
         )
     } else if context.contains(PLAN_MARKER) && tool_results == 1 {
         if let Some(name) = request_tool_name(request, "submit_plan") {
-            (
-                tool_call(name, json!({"content": PLAN_BODY})),
-                "tool_calls",
-            )
+            (tool_call(name, json!({"content": PLAN_BODY})), "tool_calls")
         } else {
             (json!({"role": "assistant", "content": MODEL_DONE}), "stop")
         }
@@ -600,10 +620,11 @@ fn model_response(
             "tool_calls",
         )
     } else if let Some(stage) = tdd_stage(context) {
-        (json!({"role": "assistant", "content": tdd_stage_output(stage)}), "stop")
-    } else if context.contains(TASK_MARKER)
-        && tool_results < model.commands.len()
-        && bash_available
+        (
+            json!({"role": "assistant", "content": tdd_stage_output(stage)}),
+            "stop",
+        )
+    } else if context.contains(TASK_MARKER) && tool_results < model.commands.len() && bash_available
     {
         let input = json!({
             "command": model.commands[tool_results],
@@ -619,9 +640,12 @@ async fn chat_completions(
     State(model): State<Arc<ModelFixture>>,
     Json(request): Json<Value>,
 ) -> Response {
-    let tool_results = request["messages"]
-        .as_array()
-        .map_or(0, |messages| messages.iter().filter(|message| message["role"] == "tool").count());
+    let tool_results = request["messages"].as_array().map_or(0, |messages| {
+        messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .count()
+    });
     let context = current_prompt_context(&request);
     model
         .requests
@@ -637,7 +661,9 @@ async fn chat_completions(
         if snapshot.is_none() {
             match model.snapshot_metadata() {
                 Ok(metadata) => *snapshot = Some(metadata),
-                Err(message) => return (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
+                Err(message) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, message).into_response();
+                }
             }
         }
     }
@@ -693,19 +719,21 @@ impl HostSentinel {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_accepted = Arc::clone(&accepted);
         let worker_stop = Arc::clone(&stop);
-        let worker = thread::spawn(move || loop {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    worker_accepted.fetch_add(1, Ordering::SeqCst);
-                    drop(stream);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if worker_stop.load(Ordering::SeqCst) {
-                        break;
+        let worker = thread::spawn(move || {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        worker_accepted.fetch_add(1, Ordering::SeqCst);
+                        drop(stream);
                     }
-                    thread::sleep(Duration::from_millis(10));
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if worker_stop.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept host sentinel connection: {error}"),
                 }
-                Err(error) => panic!("accept host sentinel connection: {error}"),
             }
         });
         Self {
@@ -743,16 +771,19 @@ impl<'a> CruiseDaemon<'a> {
             .env("JCODE_HOME", jcode_home)
             .env("PATH", fixture.path_with_host_tools())
             .args(["daemon", "start", "--host", "127.0.0.1", "--port", "0"]);
-        let output = run_command(&mut command, "start isolated Cruise daemon", Duration::from_secs(30));
+        let output = run_command(
+            &mut command,
+            "start isolated Cruise daemon",
+            Duration::from_secs(30),
+        );
         assert_output_success("start isolated Cruise daemon", &output);
         let identity: serde_json::Value = serde_json::from_slice(
-            &fs::read(fixture.record_path()).unwrap_or_else(|error| {
-                panic!("read isolated daemon identity record: {error}")
-            }),
+            &fs::read(fixture.record_path())
+                .unwrap_or_else(|error| panic!("read isolated daemon identity record: {error}")),
         )
         .unwrap_or_else(|error| panic!("parse isolated daemon identity: {error}"));
         assert_eq!(identity["host"], "127.0.0.1");
-        assert!(identity["port_explicit"].as_bool() == Some(true));
+        assert_eq!(identity["port_explicit"].as_bool(), Some(true));
         Self {
             fixture,
             identity,
@@ -774,23 +805,36 @@ impl<'a> CruiseDaemon<'a> {
             return;
         };
         let Ok(current) = serde_json::from_slice::<Value>(&contents) else {
-            if report_errors {
-                panic!("refusing to stop an unrecognized daemon record");
-            }
+            assert!(
+                !report_errors,
+                "refusing to stop an unrecognized daemon record"
+            );
             return;
         };
-        for field in ["instance_id", "pid", "process_started_at", "origin", "port", "token"] {
+        for field in [
+            "instance_id",
+            "pid",
+            "process_started_at",
+            "origin",
+            "port",
+            "token",
+        ] {
             if current[field] != self.identity[field] {
-                if report_errors {
-                    panic!("refusing to stop daemon: fixture identity changed at {field}");
-                }
+                assert!(
+                    !report_errors,
+                    "refusing to stop daemon: fixture identity changed at {field}"
+                );
                 return;
             }
         }
         let mut command = self.fixture.command(&self.fixture.repo);
         command.args(["daemon", "stop", "--force"]);
         if report_errors {
-            let output = run_command(&mut command, "stop owned Cruise daemon", Duration::from_secs(30));
+            let output = run_command(
+                &mut command,
+                "stop owned Cruise daemon",
+                Duration::from_secs(30),
+            );
             assert_output_success("stop owned Cruise daemon", &output);
         } else {
             let _ = command.output();
@@ -806,14 +850,18 @@ impl Drop for CruiseDaemon<'_> {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps the linked-worktree, loopback, read-only planning, TDD, and rejected-home boundary proofs together"
+)]
 fn run_acceptance(
-    fixture: Fixture,
-    sentinel: HostSentinel,
-    model: Arc<ModelFixture>,
-    initial_metadata: MetadataSnapshot,
-    model_address: String,
+    fixture: &Fixture,
+    sentinel: &HostSentinel,
+    model: &Arc<ModelFixture>,
+    initial_metadata: &MetadataSnapshot,
+    model_address: &str,
 ) {
-    configure_provider(&fixture, &model_address);
+    configure_provider(fixture, model_address);
     assert!(
         model
             .requests
@@ -823,7 +871,7 @@ fn run_acceptance(
         "provider setup unexpectedly contacted the model fixture"
     );
 
-    let mut daemon = CruiseDaemon::start(&fixture);
+    let mut daemon = CruiseDaemon::start(fixture);
     let start_status = daemon_status(&daemon.identity);
     assert_eq!(start_status["pid"], daemon.identity["pid"]);
     assert_eq!(start_status["activeOperations"], 0);
@@ -842,32 +890,45 @@ fn run_acceptance(
         model_ref.as_str(),
         prompt.as_str(),
     ]);
-    let output = run_command(&mut command, "run real Cruise instant execution", COMMAND_TIMEOUT);
+    let output = run_command(
+        &mut command,
+        "run real Cruise instant execution",
+        COMMAND_TIMEOUT,
+    );
     assert_output_success("real Cruise instant execution", &output);
     let terminal = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(terminal.contains(MODEL_DONE), "model turn did not complete successfully: {terminal}");
+    assert!(
+        terminal.contains(MODEL_DONE),
+        "model turn did not complete successfully: {terminal}"
+    );
 
     let requests = model
         .requests
         .lock()
         .unwrap_or_else(|error| panic!("requests lock: {error}"));
-    assert!(requests.len() >= 3, "expected two real tool turns and a final model turn: {requests:?}");
-    let first = &requests[0];
-    assert!(first["stream"].as_bool() == Some(true), "jcode did not use the fixture's streaming model API: {first}");
     assert!(
-        first["model"].as_str().is_some_and(|value| value.ends_with(MODEL)),
+        requests.len() >= 3,
+        "expected two real tool turns and a final model turn: {requests:?}"
+    );
+    let first = &requests[0];
+    assert!(
+        first["stream"].as_bool() == Some(true),
+        "jcode did not use the fixture's streaming model API: {first}"
+    );
+    assert!(
+        first["model"]
+            .as_str()
+            .is_some_and(|value| value.ends_with(MODEL)),
         "unexpected provider model route: {first}"
     );
     assert!(
-        first["tools"].as_array().is_some_and(|tools| {
-            tools
-                .iter()
-                .any(|tool| tool["function"]["name"] == "bash")
-        }),
+        first["tools"]
+            .as_array()
+            .is_some_and(|tools| { tools.iter().any(|tool| tool["function"]["name"] == "bash") }),
         "real jcode request did not expose the bash tool"
     );
     assert!(
@@ -881,10 +942,18 @@ fn run_acceptance(
     let tool_result_count = requests
         .iter()
         .filter_map(|request| request["messages"].as_array())
-        .map(|messages| messages.iter().filter(|message| message["role"] == "tool").count())
+        .map(|messages| {
+            messages
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .count()
+        })
         .max()
         .unwrap_or(0);
-    assert_eq!(tool_result_count, 2, "the model did not receive both real bash tool results");
+    assert_eq!(
+        tool_result_count, 2,
+        "the model did not receive both real bash tool results"
+    );
     let tool_outputs = requests
         .iter()
         .filter_map(|request| request["messages"].as_array())
@@ -893,11 +962,15 @@ fn run_acceptance(
         .filter_map(|message| message["content"].as_str())
         .collect::<Vec<_>>();
     assert!(
-        tool_outputs.iter().any(|output| output.contains("INDEX_ADD_DENIED")),
+        tool_outputs
+            .iter()
+            .any(|output| output.contains("INDEX_ADD_DENIED")),
         "the guest did not report the forbidden Git index update as denied: {tool_outputs:?}"
     );
     assert!(
-        !tool_outputs.iter().any(|output| output.contains("INDEX_ADD_ALLOWED")),
+        !tool_outputs
+            .iter()
+            .any(|output| output.contains("INDEX_ADD_ALLOWED")),
         "the guest unexpectedly modified the Git index"
     );
     let evidence = fs::read_to_string(fixture.repo.join("bwrap-probe.json"))
@@ -905,15 +978,30 @@ fn run_acceptance(
     let evidence: Value = serde_json::from_str(&evidence)
         .unwrap_or_else(|error| panic!("parse in-sandbox boundary evidence: {error}"));
     assert!(
-        evidence["metadata_writes"].as_object().is_some_and(|writes| {
-            writes.values().all(|result| result["blocked"] == true)
-        }),
+        evidence["metadata_writes"]
+            .as_object()
+            .is_some_and(|writes| { writes.values().all(|result| result["blocked"] == true) }),
         "direct Git metadata write was not blocked: {evidence}"
     );
-    assert!(!evidence["secret_readable"].as_bool().unwrap_or(false), "dummy secret was readable: {evidence}");
-    assert!(!evidence["host_loopback_connected"].as_bool().unwrap_or(false), "host loopback was reachable: {evidence}");
-    assert!(evidence["sandbox_loopback_ok"].as_bool().unwrap_or(false), "sandbox could not use its own loopback: {evidence}");
-    assert_eq!(sentinel.accepted.load(Ordering::SeqCst), 0, "host sentinel accepted a sandbox connection");
+    assert!(
+        !evidence["secret_readable"].as_bool().unwrap_or(false),
+        "dummy secret was readable: {evidence}"
+    );
+    assert!(
+        !evidence["host_loopback_connected"]
+            .as_bool()
+            .unwrap_or(false),
+        "host loopback was reachable: {evidence}"
+    );
+    assert!(
+        evidence["sandbox_loopback_ok"].as_bool().unwrap_or(false),
+        "sandbox could not use its own loopback: {evidence}"
+    );
+    assert_eq!(
+        sentinel.accepted.load(Ordering::SeqCst),
+        0,
+        "host sentinel accepted a sandbox connection"
+    );
     drop(requests);
 
     assert_eq!(
@@ -943,7 +1031,11 @@ fn run_acceptance(
         " M nested-tracked.txt\n?? nested-untracked.txt"
     );
     assert_eq!(
-        git_output(&fixture.repo, &["diff", "--cached", "--numstat"], &fixture.home),
+        git_output(
+            &fixture.repo,
+            &["diff", "--cached", "--numstat"],
+            &fixture.home
+        ),
         "1\t1\ttracked.txt"
     );
     assert_eq!(
@@ -965,14 +1057,22 @@ fn run_acceptance(
         let actual = fs::read(&entry.path)
             .unwrap_or_else(|error| panic!("read Git metadata {}: {error}", entry.name));
         if entry.name.ends_with("_index") {
-            assert_eq!(actual, after_edit[&entry.name], "direct write changed {}", entry.name);
+            assert_eq!(
+                actual, after_edit[&entry.name],
+                "direct write changed {}",
+                entry.name
+            );
         } else {
-            assert_eq!(actual, initial_metadata[&entry.name], "protected metadata changed: {}", entry.name);
+            assert_eq!(
+                actual, initial_metadata[&entry.name],
+                "protected metadata changed: {}",
+                entry.name
+            );
         }
     }
 
-    run_read_only_plan(&fixture, &model);
-    run_builtin_tdd(&fixture, &model);
+    run_read_only_plan(fixture, model);
+    run_builtin_tdd(fixture, model);
 
     let final_status = daemon_status(&daemon.identity);
     assert_eq!(final_status["pid"], daemon.identity["pid"]);
@@ -987,33 +1087,35 @@ fn run_acceptance(
         .lock()
         .unwrap_or_else(|error| panic!("requests lock: {error}"))
         .len();
-    let mut rejected_daemon = CruiseDaemon::start_with_jcode_home(&fixture, &rejected_home);
+    let mut rejected_daemon = CruiseDaemon::start_with_jcode_home(fixture, &rejected_home);
     let model_ref = format!("{PROFILE}/{MODEL}");
     let mut rejected_command = fixture.command(&fixture.repo);
-    rejected_command
-        .env("JCODE_HOME", &rejected_home)
-        .args([
-            "exec",
-            "--instant",
-            "--sdk",
-            "jcode",
-            "--model",
-            model_ref.as_str(),
-            "JCODE_BWRAP_REJECT_SOURCE_HOME",
-        ]);
+    rejected_command.env("JCODE_HOME", &rejected_home).args([
+        "exec",
+        "--instant",
+        "--sdk",
+        "jcode",
+        "--model",
+        model_ref.as_str(),
+        "JCODE_BWRAP_REJECT_SOURCE_HOME",
+    ]);
     let rejected = run_command(
         &mut rejected_command,
         "run rejected Bubblewrap setup",
         Duration::from_secs(60),
     );
-    assert!(!rejected.status.success(), "unsafe jcode home unexpectedly succeeded");
+    assert!(
+        !rejected.status.success(),
+        "unsafe jcode home unexpectedly succeeded"
+    );
     let rejected_output = format!(
         "{}\n{}",
         String::from_utf8_lossy(&rejected.stdout),
         String::from_utf8_lossy(&rejected.stderr)
     );
     assert!(
-        rejected_output.contains("jcode workspace must not contain the operator or source jcode home"),
+        rejected_output
+            .contains("jcode workspace must not contain the operator or source jcode home"),
         "the real CLI did not surface the sandbox refusal: {rejected_output}"
     );
     assert_eq!(
@@ -1029,7 +1131,7 @@ fn run_acceptance(
 }
 
 fn run_read_only_plan(fixture: &Fixture, model: &Arc<ModelFixture>) {
-    let config_path = fixture._root.path().join("readonly-plan.yaml");
+    let config_path = fixture.root.path().join("readonly-plan.yaml");
     let model_ref = format!("{PROFILE}/{MODEL}");
     fs::write(
         &config_path,
@@ -1047,7 +1149,11 @@ fn run_read_only_plan(fixture: &Fixture, model: &Arc<ModelFixture>) {
         .len();
     let mut command = fixture.command(&fixture.repo);
     command.args(["plan", "--config", path_arg(&config_path), PLAN_MARKER]);
-    let output = run_command(&mut command, "run real read-only Jcode planning", COMMAND_TIMEOUT);
+    let output = run_command(
+        &mut command,
+        "run real read-only Jcode planning",
+        COMMAND_TIMEOUT,
+    );
     assert_output_success("real read-only Jcode planning", &output);
 
     let session_dir = new_session_dir(fixture, &before);
@@ -1081,8 +1187,14 @@ fn run_read_only_plan(fixture: &Fixture, model: &Arc<ModelFixture>) {
         .map(Value::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(context.contains(PLAN_MARKER), "plan prompt lacked its unique task marker");
-    assert!(context.contains("READ_ONLY_WORKSPACE_READ_OK"), "Bash did not read the workspace");
+    assert!(
+        context.contains(PLAN_MARKER),
+        "plan prompt lacked its unique task marker"
+    );
+    assert!(
+        context.contains("READ_ONLY_WORKSPACE_READ_OK"),
+        "Bash did not read the workspace"
+    );
     assert!(
         context.contains("READ_ONLY_WRITE_DENIED errno="),
         "Bash did not observe the kernel's read-only denial"
@@ -1110,7 +1222,7 @@ fn run_builtin_tdd(fixture: &Fixture, model: &Arc<ModelFixture>) {
     )
     .unwrap_or_else(|error| panic!("write isolated Cruise model config: {error}"));
 
-    let capture_dir = fixture._root.path().join("tdd-capture");
+    let capture_dir = fixture.root.path().join("tdd-capture");
     let head_before = git_output(&fixture.repo, &["rev-parse", "HEAD"], &fixture.home);
     let request_offset = model
         .requests
@@ -1132,7 +1244,11 @@ fn run_builtin_tdd(fixture: &Fixture, model: &Arc<ModelFixture>) {
         "merge=off",
         TDD_MARKER,
     ]);
-    let output = run_command(&mut command, "run complete builtin:tdd graph", COMMAND_TIMEOUT);
+    let output = run_command(
+        &mut command,
+        "run complete builtin:tdd graph",
+        COMMAND_TIMEOUT,
+    );
     assert_output_success("complete builtin:tdd graph", &output);
 
     assert_eq!(
@@ -1181,7 +1297,10 @@ fn assert_tdd_full_graph(requests: &[Value]) {
         "Apply only the consolidated worklist",
         "## Ledger Records",
     ] {
-        assert!(context.contains(prompt), "builtin:tdd did not reach prompt context {prompt:?}");
+        assert!(
+            context.contains(prompt),
+            "builtin:tdd did not reach prompt context {prompt:?}"
+        );
     }
 }
 
@@ -1211,7 +1330,10 @@ fn assert_tdd_host_artifacts(fixture: &Fixture, capture_dir: &Path, head_before:
     let ledger = fs::read_to_string(&ledger_path)
         .unwrap_or_else(|error| panic!("read host TDD ledger {ledger_path:?}: {error}"));
     let head_after = git_output(&fixture.repo, &["rev-parse", "HEAD"], &fixture.home);
-    assert_eq!(head_after, head_before, "builtin:tdd unexpectedly moved HEAD");
+    assert_eq!(
+        head_after, head_before,
+        "builtin:tdd unexpectedly moved HEAD"
+    );
     let head_line = format!("head: {head_before}");
     assert!(
         ledger.lines().any(|line| line == head_line.as_str()),
@@ -1237,28 +1359,33 @@ fn configure_provider(fixture: &Fixture, model_address: &str) {
     let base_url = format!("http://{model_address}/v1");
     let mut command = Command::new(&fixture.jcode);
     fixture.isolated_environment(&mut command);
-    command
-        .current_dir(&fixture.repo)
-        .args([
-            "--no-update",
-            "--no-selfdev",
-            "provider",
-            "add",
-            PROFILE,
-            "--base-url",
-            &base_url,
-            "--model",
-            MODEL,
-            "--no-api-key",
-            "--set-default",
-        ]);
-    let output = run_command(&mut command, "configure fixture jcode provider", Duration::from_secs(30));
+    command.current_dir(&fixture.repo).args([
+        "--no-update",
+        "--no-selfdev",
+        "provider",
+        "add",
+        PROFILE,
+        "--base-url",
+        &base_url,
+        "--model",
+        MODEL,
+        "--no-api-key",
+        "--set-default",
+    ]);
+    let output = run_command(
+        &mut command,
+        "configure fixture jcode provider",
+        Duration::from_secs(30),
+    );
     assert_output_success("configure fixture jcode provider", &output);
     let config = fixture.jcode_home.join("config.toml");
     let text = fs::read_to_string(&config)
         .unwrap_or_else(|error| panic!("read fixture jcode config {config:?}: {error}"));
     for expected in [PROFILE, MODEL, model_address] {
-        assert!(text.contains(expected), "fixture jcode config missing {expected}: {text}");
+        assert!(
+            text.contains(expected),
+            "fixture jcode config missing {expected}: {text}"
+        );
     }
 }
 
@@ -1370,9 +1497,9 @@ fn run_command(command: &mut Command, what: &str, timeout: Duration) -> Output {
             Ok(None) => {
                 timed_out = true;
                 let _ = child.kill();
-                break child
-                    .wait()
-                    .unwrap_or_else(|error| panic!("{what}: collect timed-out child status: {error}"));
+                break child.wait().unwrap_or_else(|error| {
+                    panic!("{what}: collect timed-out child status: {error}")
+                });
             }
             Err(error) => panic!("{what}: wait for child: {error}"),
         }
@@ -1430,12 +1557,20 @@ fn assert_version(binary: &Path, expected: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     let exact = version
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '.' && character != '-' && character != '+')
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric()
+                && character != '.'
+                && character != '-'
+                && character != '+'
+        })
         .any(|token| {
             semver::Version::parse(token.strip_prefix('v').unwrap_or(token))
                 .is_ok_and(|parsed| parsed.to_string() == expected)
         });
-    assert!(exact, "expected {binary:?} version {expected}, got {version:?}");
+    assert!(
+        exact,
+        "expected {binary:?} version {expected}, got {version:?}"
+    );
 }
 
 fn daemon_status(identity: &Value) -> Value {
@@ -1468,8 +1603,12 @@ fn daemon_status(identity: &Value) -> Value {
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or_else(|| panic!("invalid daemon health status: {headers:?}"));
-    assert_eq!(status, "200", "daemon health endpoint returned {response:?}");
-    serde_json::from_str(body).unwrap_or_else(|error| panic!("parse daemon health response: {error}"))
+    assert_eq!(
+        status, "200",
+        "daemon health endpoint returned {response:?}"
+    );
+    serde_json::from_str(body)
+        .unwrap_or_else(|error| panic!("parse daemon health response: {error}"))
 }
 
 fn commit_fixture(repo: &Path, message: &str, home: &Path) {
@@ -1519,7 +1658,9 @@ fn git_ok(cwd: &Path, args: &[&str], home: &Path) {
 fn git_output(cwd: &Path, args: &[&str], home: &Path) -> String {
     let output = git_command(cwd, args, home);
     assert_output_success("Git fixture inspection", &output);
-    String::from_utf8_lossy(&output.stdout).trim_end().to_owned()
+    String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_owned()
 }
 
 fn git_path(repo: &Path, path: &str, home: &Path) -> PathBuf {

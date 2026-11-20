@@ -915,19 +915,14 @@ esac
 }
 
 #[cfg(unix)]
-fn assert_wait_ci_internal_calls(
-    output: &Output,
-    calls: &Path,
-    capture: &Path,
-) {
+fn assert_wait_ci_internal_calls(output: &Output, calls: &Path, capture: &Path) {
     let calls = std::fs::read_to_string(calls)
         .unwrap_or_else(|error| panic!("read fake cruise calls: {error}"));
     let stderr = String::from_utf8_lossy(&output.stderr);
     let marker = stderr
         .lines()
         .find(|line| line.starts_with("CRUISE_CI_DIAGNOSTIC_V4 "));
-    let expected_capture =
-        marker.is_some_and(|line| line.split(' ').nth(2) == Some("ci_failed"));
+    let expected_capture = marker.is_some_and(|line| line.split(' ').nth(2) == Some("ci_failed"));
     assert_eq!(
         calls.lines().collect::<Vec<_>>(),
         if expected_capture {
@@ -958,7 +953,10 @@ fn assert_wait_ci_internal_calls(
         );
         assert_eq!(captured["payload"], wait_ci_payload(output));
     } else {
-        assert!(!capture.exists(), "unexpected CI follow-up evidence capture");
+        assert!(
+            !capture.exists(),
+            "unexpected CI follow-up evidence capture"
+        );
     }
 }
 

@@ -781,8 +781,7 @@ async fn run_host_git(
     cancel: Option<&CancellationToken>,
 ) -> Result<std::process::Output> {
     check_cancel(cancel)?;
-    let mut command =
-        tokio::process::Command::from(crate::worktree_pr::host_git_command());
+    let mut command = tokio::process::Command::from(crate::worktree_pr::host_git_command());
     command
         .args(args)
         .current_dir(&pr.working_dir)
@@ -793,12 +792,14 @@ async fn run_host_git(
     let mut child = command
         .spawn()
         .map_err(|error| failed(format!("failed to run git: {error}")))?;
-    let stdout = child.stdout.take().map(|mut pipe| {
-        tokio::spawn(async move { read_host_git_output(&mut pipe).await })
-    });
-    let stderr = child.stderr.take().map(|mut pipe| {
-        tokio::spawn(async move { read_host_git_output(&mut pipe).await })
-    });
+    let stdout = child
+        .stdout
+        .take()
+        .map(|mut pipe| tokio::spawn(async move { read_host_git_output(&mut pipe).await }));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|mut pipe| tokio::spawn(async move { read_host_git_output(&mut pipe).await }));
     let status = tokio::select! {
         result = child.wait() => result.map_err(|error| failed(format!("git process failed: {error}")))?,
         () = wait_for_cancellation(cancel) => {
@@ -844,12 +845,7 @@ async fn git_output(
     args: &[&str],
     cancel: Option<&CancellationToken>,
 ) -> Result<std::process::Output> {
-    git_output_args(
-        pr,
-        args.iter().map(ToString::to_string).collect(),
-        cancel,
-    )
-    .await
+    git_output_args(pr, args.iter().map(ToString::to_string).collect(), cancel).await
 }
 
 async fn git_head(
@@ -897,8 +893,8 @@ fn validate_origin_endpoint(
     remote: &str,
     direction: &str,
 ) -> Result<()> {
-    let url = url::Url::parse(&target.url)
-        .map_err(|_| failed("invalid resolved pull request URL"))?;
+    let url =
+        url::Url::parse(&target.url).map_err(|_| failed("invalid resolved pull request URL"))?;
     let segments: Vec<_> = url.path_segments().into_iter().flatten().collect();
     if url.scheme() != "https"
         || url.host_str().is_none()
@@ -920,13 +916,12 @@ fn validate_origin_endpoint(
             "cannot verify origin repository against resolved pull request",
         ));
     }
-    let identity = crate::forge::resolve_remote(
-        remote,
-        Some(crate::forge::ForgeKind::GitHub),
-    )
-    .map_err(|_| failed("cannot verify origin repository against resolved pull request"))?;
+    let identity = crate::forge::resolve_remote(remote, Some(crate::forge::ForgeKind::GitHub))
+        .map_err(|_| failed("cannot verify origin repository against resolved pull request"))?;
     let expected_repo = format!("{}/{}", segments[0], segments[1]);
-    if !identity.host.eq_ignore_ascii_case(url.host_str().unwrap_or_default())
+    if !identity
+        .host
+        .eq_ignore_ascii_case(url.host_str().unwrap_or_default())
         || !identity.repository.eq_ignore_ascii_case(&expected_repo)
     {
         return Err(failed(format!(
@@ -979,11 +974,7 @@ async fn ensure_no_in_progress_git_operation(
     ] {
         let output = git_output_args(
             pr,
-            vec![
-                "rev-parse".into(),
-                "--git-path".into(),
-                marker.to_string(),
-            ],
+            vec!["rev-parse".into(), "--git-path".into(), marker.to_string()],
             cancel,
         )
         .await?;
@@ -1001,9 +992,7 @@ async fn ensure_no_in_progress_git_operation(
         };
         match std::fs::symlink_metadata(path) {
             Ok(_) => {
-                return Err(failed(
-                    "the worktree has an in-progress Git operation",
-                ));
+                return Err(failed("the worktree has an in-progress Git operation"));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -1055,9 +1044,7 @@ async fn ensure_checkout_binding(
 ) -> Result<()> {
     let branch = git_output(pr, &["symbolic-ref", "--quiet", "HEAD"], cancel).await?;
     if !branch.status.success() {
-        return Err(failed(
-            "HEAD must be attached to the pull request head ref",
-        ));
+        return Err(failed("HEAD must be attached to the pull request head ref"));
     }
     if crate::worktree_pr::gh_output_line(&branch.stdout).as_deref() != Some(branch_ref) {
         return Err(failed(
@@ -1093,8 +1080,12 @@ async fn prepare_host_commit(
 ) -> Result<HostCommitBaseline> {
     ensure_review_git_safety(pr)?;
     ensure_no_in_progress_git_operation(pr, cancel).await?;
-    let status = git_output(pr, &["status", "--porcelain", "--untracked-files=all"], cancel)
-        .await?;
+    let status = git_output(
+        pr,
+        &["status", "--porcelain", "--untracked-files=all"],
+        cancel,
+    )
+    .await?;
     if !status.status.success() {
         return Err(failed("git status failed before the review prompt"));
     }
@@ -1129,11 +1120,7 @@ async fn prepare_host_commit(
     }
     let tracking = git_output_args(
         pr,
-        vec![
-            "rev-parse".into(),
-            "--verify".into(),
-            tracking_ref.clone(),
-        ],
+        vec!["rev-parse".into(), "--verify".into(), tracking_ref.clone()],
         cancel,
     )
     .await?;
@@ -1157,11 +1144,7 @@ async fn prepare_host_commit(
     })
 }
 
-fn is_direct_child(
-    output: &std::process::Output,
-    commit_oid: &str,
-    parent_oid: &str,
-) -> bool {
+fn is_direct_child(output: &std::process::Output, commit_oid: &str, parent_oid: &str) -> bool {
     if !output.status.success() {
         return false;
     }
@@ -1179,7 +1162,9 @@ async fn commit_prompt_changes(
     cancel: Option<&CancellationToken>,
 ) -> Result<Option<String>> {
     if git_head(pr, cancel).await?.as_deref() != Some(baseline.head_oid.as_str()) {
-        return Err(failed("HEAD changed during the review prompt; host commit refused"));
+        return Err(failed(
+            "HEAD changed during the review prompt; host commit refused",
+        ));
     }
     ensure_checkout_binding(pr, &baseline.branch_ref, &baseline.tracking_ref, cancel).await?;
     ensure_no_in_progress_git_operation(pr, cancel).await?;
@@ -1188,8 +1173,12 @@ async fn commit_prompt_changes(
     if origin != baseline.origin {
         return Err(failed("origin changed during the review prompt"));
     }
-    let status = git_output(pr, &["status", "--porcelain", "--untracked-files=all"], cancel)
-        .await?;
+    let status = git_output(
+        pr,
+        &["status", "--porcelain", "--untracked-files=all"],
+        cancel,
+    )
+    .await?;
     if !status.status.success() {
         return Err(failed("git status failed after the review prompt"));
     }
@@ -1237,8 +1226,7 @@ async fn commit_prompt_changes(
     }
     let commit_oid = crate::worktree_pr::gh_output_line(&commit.stdout)
         .filter(|oid| {
-            (oid.len() == 40 || oid.len() == 64)
-                && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+            (oid.len() == 40 || oid.len() == 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
         .ok_or_else(|| failed("git commit-tree returned an invalid object id"))?;
     let update = git_output_args(
@@ -1261,10 +1249,16 @@ async fn commit_prompt_changes(
         ));
     }
     if git_head(pr, cancel).await?.as_deref() != Some(commit_oid.as_str()) {
-        return Err(failed("HEAD changed while attaching the host review commit"));
+        return Err(failed(
+            "HEAD changed while attaching the host review commit",
+        ));
     }
-    let status = git_output(pr, &["status", "--porcelain", "--untracked-files=all"], cancel)
-        .await?;
+    let status = git_output(
+        pr,
+        &["status", "--porcelain", "--untracked-files=all"],
+        cancel,
+    )
+    .await?;
     if !status.status.success() || !status.stdout.iter().all(u8::is_ascii_whitespace) {
         return Err(failed("the host commit left uncommitted changes"));
     }
@@ -1282,14 +1276,18 @@ async fn publish_host_commit(
         return Ok(());
     };
     if git_head(pr, cancel).await?.as_deref() != Some(commit_oid) {
-        return Err(failed("HEAD changed before the host commit could be published"));
+        return Err(failed(
+            "HEAD changed before the host commit could be published",
+        ));
     }
     ensure_checkout_binding(pr, &baseline.branch_ref, &baseline.tracking_ref, cancel).await?;
     ensure_current_pull_request(pr, &baseline.target, &baseline.head_oid, cancel).await?;
     ensure_no_in_progress_git_operation(pr, cancel).await?;
     let origin = capture_origin(pr, &baseline.target, cancel).await?;
     if origin != baseline.origin {
-        return Err(failed("origin changed before the host commit could be published"));
+        return Err(failed(
+            "origin changed before the host commit could be published",
+        ));
     }
     let parents = git_output_args(
         pr,
@@ -1309,8 +1307,12 @@ async fn publish_host_commit(
         ));
     }
     ensure_review_git_safety(pr)?;
-    let status = git_output(pr, &["status", "--porcelain", "--untracked-files=all"], cancel)
-        .await?;
+    let status = git_output(
+        pr,
+        &["status", "--porcelain", "--untracked-files=all"],
+        cancel,
+    )
+    .await?;
     if !status.status.success() || !status.stdout.iter().all(u8::is_ascii_whitespace) {
         return Err(failed("the host commit left uncommitted changes"));
     }
@@ -1376,7 +1378,6 @@ async fn publish_host_commit(
     Ok(())
 }
 
-
 async fn ensure_prompt_clean(
     pr: &PullRequestRef,
     head_before: Option<&str>,
@@ -1386,11 +1387,17 @@ async fn ensure_prompt_clean(
         return Ok(());
     };
     if git_head(pr, cancel).await?.as_deref() != Some(head_before) {
-        return Err(failed("the prompt moved HEAD while host commits were not allowed"));
+        return Err(failed(
+            "the prompt moved HEAD while host commits were not allowed",
+        ));
     }
     ensure_review_git_safety(pr)?;
-    let status = git_output(pr, &["status", "--porcelain", "--untracked-files=all"], cancel)
-        .await?;
+    let status = git_output(
+        pr,
+        &["status", "--porcelain", "--untracked-files=all"],
+        cancel,
+    )
+    .await?;
     if !status.status.success() {
         return Err(failed("git status failed after the review prompt"));
     }
@@ -1489,6 +1496,10 @@ pub(crate) async fn run_step(
 }
 
 #[expect(clippy::too_many_arguments, reason = "loop state is passed explicitly")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the review loop keeps GitHub and host-commit lifecycle ordering together"
+)]
 async fn run_loop(
     ctx: &ExecutionContext<'_>,
     step: &GitHubReviewStep,
@@ -1544,14 +1555,19 @@ async fn run_loop(
             let head_before = git_head(pr, cancel).await?;
             if head_before.is_some() {
                 ensure_review_git_safety(pr)?;
-                let status =
-                    git_output(pr, &["status", "--porcelain", "--untracked-files=all"], cancel)
-                        .await?;
+                let status = git_output(
+                    pr,
+                    &["status", "--porcelain", "--untracked-files=all"],
+                    cancel,
+                )
+                .await?;
                 if !status.status.success() {
                     return Err(failed("git status failed before the review prompt"));
                 }
                 if !status.stdout.iter().all(u8::is_ascii_whitespace) {
-                    return Err(failed("the worktree must be clean before the review prompt"));
+                    return Err(failed(
+                        "the worktree must be clean before the review prompt",
+                    ));
                 }
             }
             (None, head_before)
@@ -1715,10 +1731,7 @@ mod tests {
                 ],
             );
             let origin_url = origin.to_string_lossy().into_owned();
-            fixture_git_ok(
-                &repo,
-                &["remote", "add", "origin", origin_url.as_str()],
-            );
+            fixture_git_ok(&repo, &["remote", "add", "origin", origin_url.as_str()]);
             fixture_git_ok(&repo, &["push", "-q", "-u", "origin", "feature"]);
             fixture_git_ok(
                 &repo,

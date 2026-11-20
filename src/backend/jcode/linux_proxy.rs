@@ -23,7 +23,7 @@ const MAX_CONNECT_HEADER: usize = 8 * 1024;
 const CONNECT_READ_CHUNK: usize = 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const READ_IDLE_TIMEOUT: Duration = Duration::from_mins(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKER_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const SOCKET_CHECK_INTERVAL: Duration = Duration::from_millis(100);
@@ -114,7 +114,9 @@ pub(super) fn start(path: &Path, route: Route) -> io::Result<ProviderProxy> {
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             let _ = shutdown.send(true);
             let _ = worker.join();
-            Err(io::Error::other("provider proxy worker exited during startup"))
+            Err(io::Error::other(
+                "provider proxy worker exited during startup",
+            ))
         }
     }
 }
@@ -129,13 +131,14 @@ pub(crate) fn relay(socket: &Path, ready: &Path, port: Option<u16>) -> io::Resul
         ));
     }
 
-    let listener = std::net::TcpListener::bind(SocketAddrV4::new(
-        Ipv4Addr::LOCALHOST,
-        port.unwrap_or(0),
-    ))?;
+    let listener =
+        std::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port.unwrap_or(0)))?;
     listener.set_nonblocking(true)?;
     let bound_port = listener.local_addr()?.port();
-    let mut ready_file = OpenOptions::new().write(true).create_new(true).open(ready)?;
+    let mut ready_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(ready)?;
     let _ready_path = OwnedPath::new(ready)?;
     ready_file.set_permissions(fs::Permissions::from_mode(0o600))?;
     write!(ready_file, "{bound_port}")?;
@@ -196,7 +199,9 @@ fn validate_private_directory(socket: &Path) -> io::Result<()> {
         .unwrap_or_else(|| Path::new("."));
     let metadata = fs::metadata(parent)?;
     let owner = effective_uid()?;
-    if !metadata.is_dir() || metadata.uid() != owner || metadata.permissions().mode() & 0o777 != 0o700
+    if !metadata.is_dir()
+        || metadata.uid() != owner
+        || metadata.permissions().mode() & 0o777 != 0o700
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -219,17 +224,13 @@ fn effective_uid() -> io::Result<u32> {
         .ok_or_else(|| io::Error::other("effective uid is unavailable"))
 }
 
-async fn host_loop(
-    listener: UnixListener,
-    route: Arc<Route>,
-    mut shutdown: watch::Receiver<bool>,
-) {
+async fn host_loop(listener: UnixListener, route: Arc<Route>, mut shutdown: watch::Receiver<bool>) {
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut workers = JoinSet::new();
     loop {
         tokio::select! {
             biased;
-            _ = wait_for_shutdown(&mut shutdown) => break,
+            () = wait_for_shutdown(&mut shutdown) => break,
             Some(_) = workers.join_next(), if !workers.is_empty() => {},
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
@@ -258,7 +259,7 @@ async fn host_connection(
         Route::Loopback(port) => {
             let address = SocketAddr::from((Ipv4Addr::LOCALHOST, *port));
             let upstream = tokio::select! {
-                _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+                () = wait_for_shutdown(&mut shutdown) => return Ok(()),
                 result = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address)) => {
                     result.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "loopback connect timed out"))??
                 }
@@ -286,16 +287,14 @@ async fn host_connection(
                     return Ok(());
                 }
             };
-            write_response(
-                &mut client,
-                b"HTTP/1.1 200 Connection Established\r\n\r\n",
-            )
-            .await?;
+            write_response(&mut client, b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
             let mut upstream = upstream;
             if !request.buffered.is_empty() {
                 tokio::time::timeout(WRITE_TIMEOUT, upstream.write_all(&request.buffered))
                     .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "CONNECT preface write timed out"))??;
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::TimedOut, "CONNECT preface write timed out")
+                    })??;
             }
             bridge(client, upstream, shutdown).await
         }
@@ -341,7 +340,7 @@ async fn read_connect_request(
         }
         let read_length = CONNECT_READ_CHUNK.min(bytes.len() - length);
         let read = tokio::select! {
-            _ = wait_for_shutdown(shutdown) => return Err(ConnectRejection::Stopped),
+            () = wait_for_shutdown(shutdown) => return Err(ConnectRejection::Stopped),
             result = tokio::time::timeout(remaining, client.read(&mut bytes[length..length + read_length])) => {
                 match result {
                     Ok(Ok(read)) => read,
@@ -357,7 +356,10 @@ async fn read_connect_request(
 }
 
 fn header_end(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(4).position(|window| window == b"\r\n\r\n").map(|index| index + 4)
+    bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
 }
 
 fn parse_connect_header(header: &[u8]) -> Option<&str> {
@@ -419,7 +421,7 @@ async fn connect_public(
     shutdown: &mut watch::Receiver<bool>,
 ) -> io::Result<TcpStream> {
     tokio::select! {
-        _ = wait_for_shutdown(shutdown) => Err(io::Error::new(io::ErrorKind::Interrupted, "proxy is shutting down")),
+        () = wait_for_shutdown(shutdown) => Err(io::Error::new(io::ErrorKind::Interrupted, "proxy is shutting down")),
         result = tokio::time::timeout(CONNECT_TIMEOUT, async {
             let mut addresses = tokio::net::lookup_host((hostname, 443)).await?;
             let mut verified = Vec::with_capacity(4);
@@ -510,7 +512,7 @@ where
     let mut buffer = [0_u8; 8192];
     loop {
         let read = tokio::select! {
-            _ = wait_for_shutdown(&mut shutdown) => return Ok(copied),
+            () = wait_for_shutdown(&mut shutdown) => return Ok(copied),
             result = tokio::time::timeout(READ_IDLE_TIMEOUT, reader.read(&mut buffer)) => {
                 result.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "proxy read idle timeout"))??
             }
@@ -518,11 +520,13 @@ where
         if read == 0 {
             tokio::time::timeout(WRITE_TIMEOUT, writer.shutdown())
                 .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "proxy half-close timed out"))??;
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "proxy half-close timed out")
+                })??;
             return Ok(copied);
         }
         tokio::select! {
-            _ = wait_for_shutdown(&mut shutdown) => return Ok(copied),
+            () = wait_for_shutdown(&mut shutdown) => return Ok(copied),
             result = tokio::time::timeout(WRITE_TIMEOUT, writer.write_all(&buffer[..read])) => {
                 result.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "proxy write timed out"))??;
             }
@@ -538,7 +542,11 @@ async fn write_response(client: &mut UnixStream, response: &[u8]) -> io::Result<
     Ok(())
 }
 
-async fn relay_loop(listener: TcpListener, socket: PathBuf, identity: PathIdentity) -> io::Result<()> {
+async fn relay_loop(
+    listener: TcpListener,
+    socket: PathBuf,
+    identity: PathIdentity,
+) -> io::Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut workers = JoinSet::new();
@@ -582,7 +590,7 @@ async fn relay_connection(
     mut shutdown: watch::Receiver<bool>,
 ) -> io::Result<()> {
     let host = tokio::select! {
-        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        () = wait_for_shutdown(&mut shutdown) => return Ok(()),
         result = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(socket)) => {
             result.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "host proxy connect timed out"))??
         }
@@ -605,7 +613,11 @@ async fn shutdown_workers(workers: &mut JoinSet<()>) {
     let deadline = tokio::time::Instant::now() + WORKER_DRAIN_TIMEOUT;
     while !workers.is_empty() {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() || tokio::time::timeout(remaining, workers.join_next()).await.is_err() {
+        if remaining.is_zero()
+            || tokio::time::timeout(remaining, workers.join_next())
+                .await
+                .is_err()
+        {
             break;
         }
     }
@@ -736,11 +748,17 @@ mod tests {
     fn connect_parser_preserves_tunnel_bytes_and_authorization_is_exact() {
         let header = b"CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n";
         assert_eq!(parse_connect_header(header), Some("api.example.com"));
-        assert!(is_authorized(&["api.example.com".to_owned()], "api.example.com"));
-        assert!(!is_authorized(&["api.example.com".to_owned()], "other.example"));
+        assert!(is_authorized(
+            &["api.example.com".to_owned()],
+            "api.example.com"
+        ));
+        assert!(!is_authorized(
+            &["api.example.com".to_owned()],
+            "other.example"
+        ));
 
-        let (mut client, server) = StdUnixStream::pair()
-            .unwrap_or_else(|error| panic!("create Unix pair: {error}"));
+        let (mut client, server) =
+            StdUnixStream::pair().unwrap_or_else(|error| panic!("create Unix pair: {error}"));
         server
             .set_nonblocking(true)
             .unwrap_or_else(|error| panic!("set test socket nonblocking: {error}"));
@@ -764,7 +782,9 @@ mod tests {
             .write_all(&request)
             .unwrap_or_else(|error| panic!("write CONNECT request: {error}"));
         drop(client);
-        proxy.join().unwrap_or_else(|_| panic!("parser worker panicked"));
+        proxy
+            .join()
+            .unwrap_or_else(|_| panic!("parser worker panicked"));
     }
 
     async fn read_connect_request_for_test(client: &mut UnixStream) -> ConnectRequest {
@@ -786,7 +806,8 @@ mod tests {
 
         for (request, expected) in [
             (
-                b"CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\n\r\n".as_slice(),
+                b"CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\n\r\n"
+                    .as_slice(),
                 b"HTTP/1.1 403 Forbidden\r\n\r\n".as_slice(),
             ),
             (
@@ -881,17 +902,18 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let port = loop {
-            if let Ok(value) = fs::read_to_string(&ready) {
-                if let Ok(port) = value.parse::<u16>() {
-                    break port;
-                }
+            if let Ok(value) = fs::read_to_string(&ready)
+                && let Ok(port) = value.parse::<u16>()
+            {
+                break port;
             }
             assert!(Instant::now() < deadline, "relay did not publish its port");
             thread::sleep(Duration::from_millis(5));
         };
         assert_ne!(port, 0);
-        let mut client = std::net::TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
-            .unwrap_or_else(|error| panic!("connect relay loopback: {error}"));
+        let mut client =
+            std::net::TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+                .unwrap_or_else(|error| panic!("connect relay loopback: {error}"));
         client
             .write_all(b"guest-bytes!")
             .unwrap_or_else(|error| panic!("write relay request: {error}"));

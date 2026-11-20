@@ -290,6 +290,10 @@ pub async fn run_plan_prompt_template(
     clippy::too_many_arguments,
     reason = "verification retains the SDK conversation across its two read-only turns"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the prompt, tools, sandbox, and conversation share one execution lifecycle"
+)]
 async fn run_plan_prompt_template_with_conversation(
     ctx: &PlanPromptCtx<'_>,
     vars: &mut VariableStore,

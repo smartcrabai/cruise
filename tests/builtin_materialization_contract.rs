@@ -148,7 +148,9 @@ fn assert_after_pr_contract(config: WorkflowConfig) {
         Some(&[0, 75][..])
     );
     assert_eq!(
-        compiled.after_pr["follow-up/push-after-sync"].next.as_deref(),
+        compiled.after_pr["follow-up/push-after-sync"]
+            .next
+            .as_deref(),
         Some("follow-up/wait-ci")
     );
     let enabled_ids = |values: FlagValues| {
@@ -311,7 +313,9 @@ fn verify_builtin_repair_policy(project: &Path) {
             );
         }
         assert_eq!(
-            config.after_pr["follow-up/fix-ci-error"].output_file.as_deref(),
+            config.after_pr["follow-up/fix-ci-error"]
+                .output_file
+                .as_deref(),
             Some("ci-followup/result.json")
         );
         assert!(
@@ -341,7 +345,9 @@ fn verify_builtin_repair_policy(project: &Path) {
         assert_eq!(finish_command, "cruise internal finish-ci-followup");
         assert!(config.after_pr.contains_key("follow-up/finish-ci-fix"));
         assert_eq!(
-            config.after_pr["follow-up/wait-ci"].accepted_exit_codes.as_deref(),
+            config.after_pr["follow-up/wait-ci"]
+                .accepted_exit_codes
+                .as_deref(),
             Some(&[0, 75][..])
         );
         assert_eq!(
@@ -761,7 +767,10 @@ fn builtin_after_pr_fixture(
         }
         step.require_bubblewrap = false;
         let prompt_repair = name == "follow-up/fix-ci-error" && repair_command.is_none();
-        if !prompt_repair {
+        if prompt_repair {
+            step.prompt_file = None;
+            step.command = None;
+        } else {
             let command = match name.as_str() {
                 "follow-up/wait-ci" => wait_command,
                 "follow-up/fix-ci-error" => repair_command.unwrap(),
@@ -774,9 +783,6 @@ fn builtin_after_pr_fixture(
             step.allow_commit = false;
             step.command = Some(StringOrVec::Single(command.to_owned()));
             step.output_file = None;
-        } else {
-            step.prompt_file = None;
-            step.command = None;
         }
         step.quality_gates = None;
         step.option = None;
@@ -815,12 +821,12 @@ async fn run_builtin_after_pr(
     let mut vars = VariableStore::new(String::new());
     vars.set_artifacts_root(project.to_path_buf());
     vars.set_named_value("plan", String::new());
-    vars.set_named_value("inputs.fix_ci_error_scope", "in-scope test changes".to_owned());
-    vars.set_named_value("pr.number", "42".to_owned());
     vars.set_named_value(
-        "pr.url",
-        "https://github.com/owner/repo/pull/42".to_owned(),
+        "inputs.fix_ci_error_scope",
+        "in-scope test changes".to_owned(),
     );
+    vars.set_named_value("pr.number", "42".to_owned());
+    vars.set_named_value("pr.url", "https://github.com/owner/repo/pull/42".to_owned());
     let mut tracker = FileTracker::with_root(project.to_path_buf());
     let result = {
         let context = ExecutionContext {

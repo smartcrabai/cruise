@@ -8,7 +8,11 @@ pub mod attachments;
 pub mod auto_requeue;
 #[cfg_attr(
     all(target_os = "linux", feature = "jcode-bubblewrap"),
-    expect(dead_code, unused_imports, reason = "CLI-only Bubblewrap relay and verifier")
+    expect(
+        dead_code,
+        unused_imports,
+        reason = "CLI-only Bubblewrap relay and verifier"
+    )
 )]
 pub mod backend;
 mod base_ci;
@@ -32,10 +36,10 @@ pub mod flags;
 pub(crate) mod forge;
 pub mod formal_verify;
 pub mod github_review;
+pub mod graph;
 #[cfg(test)]
 #[path = "worktree_pr/host_sync.rs"]
 mod host_sync;
-pub mod graph;
 #[expect(
     dead_code,
     reason = "the binary-only updater also uses these shared download helpers"
@@ -94,7 +98,10 @@ pub mod workflow_defaults;
 pub(crate) mod workflow_packages;
 pub mod workspace;
 pub mod worktree;
-#[cfg_attr(not(test), expect(dead_code, reason = "the CLI uses the pinned base-sync entry point"))]
+#[expect(
+    dead_code,
+    reason = "the CLI uses the pinned review and base-sync entry points"
+)]
 pub mod worktree_pr;
 pub mod yaml_metadata;
 

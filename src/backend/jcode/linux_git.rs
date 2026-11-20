@@ -36,21 +36,34 @@ pub(super) fn prepare(workspace: &Path, scratch: &Path) -> Result<GitMounts, Str
         }
         let repo_mounts = prepare_one(root, marker, &scratch, index)?;
         for (_, common) in &repo_mounts.hidden_directories {
-            if mounts.hidden_directories.iter().any(|(_, existing)| {
-                common.starts_with(existing) || existing.starts_with(common)
-            }) {
-                return Err("overlapping or repeated Git common directories are unsupported".into());
+            if mounts
+                .hidden_directories
+                .iter()
+                .any(|(_, existing)| common.starts_with(existing) || existing.starts_with(common))
+            {
+                return Err(
+                    "overlapping or repeated Git common directories are unsupported".into(),
+                );
             }
         }
         mounts.read_only.extend(repo_mounts.read_only);
-        mounts.hidden_directories.extend(repo_mounts.hidden_directories);
-        mounts.read_only_after_masks.extend(repo_mounts.read_only_after_masks);
+        mounts
+            .hidden_directories
+            .extend(repo_mounts.hidden_directories);
+        mounts
+            .read_only_after_masks
+            .extend(repo_mounts.read_only_after_masks);
         mounts.config_overlays.extend(repo_mounts.config_overlays);
     }
     Ok(mounts)
 }
 
-fn prepare_one(root: &Path, marker: &Path, scratch: &Path, index: usize) -> Result<GitMounts, String> {
+fn prepare_one(
+    root: &Path,
+    marker: &Path,
+    scratch: &Path,
+    index: usize,
+) -> Result<GitMounts, String> {
     // Validate a linked worktree backlink before Git can follow its .git pointer.
     let (git_dir, common_dir, linked) = marker_paths(root, marker)?;
     validate_layout(root, &git_dir, &common_dir, linked)?;
@@ -67,8 +80,11 @@ fn prepare_one(root: &Path, marker: &Path, scratch: &Path, index: usize) -> Resu
     };
     if rev_path(root, scratch, &["--show-toplevel"])? != root
         || rev_path(root, scratch, &["--absolute-git-dir"])? != git_dir
-        || rev_path(root, scratch, &["--path-format=absolute", "--git-common-dir"])?
-            != common_dir
+        || rev_path(
+            root,
+            scratch,
+            &["--path-format=absolute", "--git-common-dir"],
+        )? != common_dir
         || rev_value(root, scratch, "--is-inside-work-tree")? != b"true"
         || rev_value(root, scratch, "--is-bare-repository")? != b"false"
     {
@@ -115,7 +131,11 @@ fn prepare_one(root: &Path, marker: &Path, scratch: &Path, index: usize) -> Resu
         ));
     }
     Ok(GitMounts {
-        read_only: if linked { vec![marker.to_path_buf()] } else { Vec::new() },
+        read_only: if linked {
+            vec![marker.to_path_buf()]
+        } else {
+            Vec::new()
+        },
         hidden_directories: vec![(skeleton, common_dir)],
         read_only_after_masks,
         config_overlays,
@@ -130,7 +150,9 @@ fn find_repo_markers(workspace: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String
             break;
         }
     }
-    let mut entries = walkdir::WalkDir::new(workspace).follow_links(false).into_iter();
+    let mut entries = walkdir::WalkDir::new(workspace)
+        .follow_links(false)
+        .into_iter();
     while let Some(entry) = entries.next() {
         let entry = entry.map_err(|_| "cannot inspect nested workspace directories")?;
         if entry.file_name() == std::ffi::OsStr::new(".git") {
@@ -164,7 +186,8 @@ fn add_marker(markers: &mut Vec<(PathBuf, PathBuf)>, root: &Path) -> Result<(), 
 }
 
 fn marker_paths(root: &Path, marker: &Path) -> Result<(PathBuf, PathBuf, bool), String> {
-    let metadata = fs::symlink_metadata(marker).map_err(|_| "cannot inspect Git worktree marker")?;
+    let metadata =
+        fs::symlink_metadata(marker).map_err(|_| "cannot inspect Git worktree marker")?;
     if metadata.file_type().is_dir() {
         return Ok((marker.to_path_buf(), marker.to_path_buf(), false));
     }
@@ -338,11 +361,17 @@ fn read_settings(path: &Path, scratch: &Path, worktree: bool) -> Result<ConfigSe
                 .map_err(|_| "invalid Git object format".to_string())
         })
         .transpose()?;
-    if settings.object_format.as_deref().is_some_and(|format| format != "sha256") {
+    if settings
+        .object_format
+        .as_deref()
+        .is_some_and(|format| format != "sha256")
+    {
         return Err("unsupported Git object format".into());
     }
     settings.worktree_config = config_bool(path, "extensions.worktreeconfig", scratch)?;
-    if format_version == 0 && (settings.object_format.is_some() || settings.worktree_config == Some(true)) {
+    if format_version == 0
+        && (settings.object_format.is_some() || settings.worktree_config == Some(true))
+    {
         return Err("Git extension requires repository format version 1".into());
     }
     if format_version > 1 {
@@ -368,16 +397,33 @@ fn parse_integer(value: &[u8]) -> Result<u32, String> {
         .ok_or_else(|| "invalid typed Git integer".into())
 }
 
-fn git_config(path: &Path, scratch: &Path, args: &[&str], kind: Option<&str>) -> Result<Output, String> {
+fn git_config(
+    path: &Path,
+    scratch: &Path,
+    args: &[&str],
+    kind: Option<&str>,
+) -> Result<Output, String> {
     let mut command = clean_git(scratch);
-    command.arg("config").arg("--no-includes").arg("--file").arg(path);
+    command
+        .arg("config")
+        .arg("--no-includes")
+        .arg("--file")
+        .arg(path);
     if let Some(kind) = kind {
         command.arg(format!("--type={kind}"));
     }
-    command.args(args).output().map_err(|_| "cannot run Git config".into())
+    command
+        .args(args)
+        .output()
+        .map_err(|_| "cannot run Git config".into())
 }
 
-fn config_value(path: &Path, key: &str, kind: Option<&str>, scratch: &Path) -> Result<Option<Vec<u8>>, String> {
+fn config_value(
+    path: &Path,
+    key: &str,
+    kind: Option<&str>,
+    scratch: &Path,
+) -> Result<Option<Vec<u8>>, String> {
     let output = git_config(path, scratch, &["--get", key], kind)?;
     if output.status.code() == Some(1) {
         return Ok(None);
@@ -385,7 +431,10 @@ fn config_value(path: &Path, key: &str, kind: Option<&str>, scratch: &Path) -> R
     if !output.status.success() {
         return Err("cannot parse repository configuration".into());
     }
-    let value = output.stdout.strip_suffix(b"\n").ok_or("invalid Git config output")?;
+    let value = output
+        .stdout
+        .strip_suffix(b"\n")
+        .ok_or("invalid Git config output")?;
     if value.contains(&b'\n') {
         return Err("invalid Git config output".into());
     }
@@ -393,21 +442,34 @@ fn config_value(path: &Path, key: &str, kind: Option<&str>, scratch: &Path) -> R
 }
 
 fn config_keys(path: &Path, pattern: &str, scratch: &Path) -> Result<Vec<String>, String> {
-    let output = git_config(path, scratch, &["--name-only", "--get-regexp", pattern], None)?;
+    let output = git_config(
+        path,
+        scratch,
+        &["--name-only", "--get-regexp", pattern],
+        None,
+    )?;
     if output.status.code() == Some(1) {
         return Ok(Vec::new());
     }
     if !output.status.success() {
         return Err("cannot parse repository configuration".into());
     }
-    output.stdout.split(|byte| *byte == b'\n').filter(|key| !key.is_empty())
+    output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|key| !key.is_empty())
         .map(|key| String::from_utf8(key.to_vec()).map_err(|_| "invalid Git config key".into()))
         .collect()
 }
 
 fn rev_parse(workspace: &Path, scratch: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = clean_git(scratch).arg("-C").arg(workspace).arg("rev-parse")
-        .args(args).output().map_err(|_| "cannot run Git discovery".to_string())?;
+    let output = clean_git(scratch)
+        .arg("-C")
+        .arg(workspace)
+        .arg("rev-parse")
+        .args(args)
+        .output()
+        .map_err(|_| "cannot run Git discovery".to_string())?;
     if !output.status.success() {
         return Err("Git worktree discovery failed".into());
     }
@@ -423,9 +485,11 @@ fn git_has_gitlinks(workspace: &Path, scratch: &Path) -> Result<bool, String> {
     if !output.status.success() {
         return Err("cannot inspect Git index".into());
     }
-    Ok(output.stdout.split(|byte| *byte == 0).any(|entry| entry.starts_with(b"160000 ")))
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .any(|entry| entry.starts_with(b"160000 ")))
 }
-
 
 fn rev_value(workspace: &Path, scratch: &Path, arg: &str) -> Result<Vec<u8>, String> {
     let output = rev_parse(workspace, scratch, &[arg])?;
@@ -448,7 +512,8 @@ fn rev_path(workspace: &Path, scratch: &Path, args: &[&str]) -> Result<PathBuf, 
 
 fn clean_git(scratch: &Path) -> Command {
     let mut command = Command::new("git");
-    command.env_clear()
+    command
+        .env_clear()
         .env("HOME", scratch)
         .env("XDG_CONFIG_HOME", scratch)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -497,8 +562,15 @@ fn validate_layout(root: &Path, git_dir: &Path, common: &Path, linked: bool) -> 
     }
     for entry in fs::read_dir(objects.join("pack")).map_err(|_| "cannot inspect Git packs")? {
         let entry = entry.map_err(|_| "cannot inspect Git packs")?;
-        let kind = entry.file_type().map_err(|_| "cannot inspect Git pack entry")?;
-        if kind.is_symlink() || entry.path().extension().is_some_and(|ext| ext == "promisor") {
+        let kind = entry
+            .file_type()
+            .map_err(|_| "cannot inspect Git pack entry")?;
+        if kind.is_symlink()
+            || entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "promisor")
+        {
             return Err("unsupported symlinked or partial Git object storage".into());
         }
     }
@@ -506,14 +578,22 @@ fn validate_layout(root: &Path, git_dir: &Path, common: &Path, linked: bool) -> 
 }
 
 fn require_dir(path: &Path, description: &str) -> Result<(), String> {
-    if !fs::symlink_metadata(path).map_err(|_| format!("cannot inspect {description}"))?.file_type().is_dir() {
+    if !fs::symlink_metadata(path)
+        .map_err(|_| format!("cannot inspect {description}"))?
+        .file_type()
+        .is_dir()
+    {
         return Err(format!("{description} is not a regular directory"));
     }
     Ok(())
 }
 
 fn require_file(path: &Path, description: &str) -> Result<(), String> {
-    if !fs::symlink_metadata(path).map_err(|_| format!("cannot inspect {description}"))?.file_type().is_file() {
+    if !fs::symlink_metadata(path)
+        .map_err(|_| format!("cannot inspect {description}"))?
+        .file_type()
+        .is_file()
+    {
         return Err(format!("{description} is not a regular file"));
     }
     Ok(())
@@ -522,18 +602,37 @@ fn require_file(path: &Path, description: &str) -> Result<(), String> {
 fn render_config(settings: &ConfigSettings) -> Vec<u8> {
     let mut config = String::new();
     if let Some(version) = settings.repository_format_version {
-        push_setting(&mut config, "core", "repositoryformatversion", &version.to_string());
+        push_setting(
+            &mut config,
+            "core",
+            "repositoryformatversion",
+            &version.to_string(),
+        );
     }
-    for (key, value) in [("filemode", settings.filemode), ("symlinks", settings.symlinks), ("ignorecase", settings.ignorecase)] {
+    for (key, value) in [
+        ("filemode", settings.filemode),
+        ("symlinks", settings.symlinks),
+        ("ignorecase", settings.ignorecase),
+    ] {
         if let Some(value) = value {
-            push_setting(&mut config, "core", key, if value { "true" } else { "false" });
+            push_setting(
+                &mut config,
+                "core",
+                key,
+                if value { "true" } else { "false" },
+            );
         }
     }
     if let Some(format) = &settings.object_format {
         push_setting(&mut config, "extensions", "objectformat", format);
     }
     if let Some(value) = settings.worktree_config {
-        push_setting(&mut config, "extensions", "worktreeconfig", if value { "true" } else { "false" });
+        push_setting(
+            &mut config,
+            "extensions",
+            "worktreeconfig",
+            if value { "true" } else { "false" },
+        );
     }
     config.into_bytes()
 }
@@ -544,18 +643,36 @@ fn push_setting(config: &mut String, section: &str, key: &str, value: &str) {
     let _ = writeln!(config, "\t{key} = {value}");
 }
 
-fn write_overlay(scratch: &Path, label: &str, original: &Path, mut content: Vec<u8>) -> Result<PathBuf, String> {
-    if content.is_empty() && fs::metadata(original).map_err(|_| "cannot inspect repository config")?.len() != 0 {
+fn write_overlay(
+    scratch: &Path,
+    label: &str,
+    original: &Path,
+    mut content: Vec<u8>,
+) -> Result<PathBuf, String> {
+    if content.is_empty()
+        && fs::metadata(original)
+            .map_err(|_| "cannot inspect repository config")?
+            .len()
+            != 0
+    {
         content.extend_from_slice(b"# non-allowlisted repository settings omitted\n");
     }
     let path = scratch.join(format!("git-config-{label}"));
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&path)
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
         .map_err(|_| "cannot create sanitized Git config")?;
-    file.write_all(&content).map_err(|_| "cannot write sanitized Git config")?;
+    file.write_all(&content)
+        .map_err(|_| "cannot write sanitized Git config")?;
     Ok(path)
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "fixture setup failures should stop the test at their source"
+)]
 mod tests {
     use super::*;
     use std::{
@@ -640,15 +757,31 @@ mod tests {
         let scratch = temp.0.join("scratch");
         fs::create_dir(&scratch).unwrap();
         let mounts = prepare(&nested, &scratch).unwrap();
-        assert!(mounts.read_only.is_empty());
+        assert_eq!(mounts.read_only, Vec::<PathBuf>::new());
         let (skeleton, destination) = &mounts.hidden_directories[0];
         assert_eq!(destination, &repo.join(".git"));
         assert!(!skeleton.join("worktrees").exists());
         assert!(!skeleton.join("modules").exists());
-        assert!(mounts.read_only_after_masks.contains(&repo.join(".git/objects")));
-        assert!(mounts.read_only_after_masks.contains(&repo.join(".git/refs")));
-        assert!(mounts.read_only_after_masks.contains(&repo.join(".git/HEAD")));
-        assert!(mounts.read_only_after_masks.contains(&repo.join(".git/index")));
+        assert!(
+            mounts
+                .read_only_after_masks
+                .contains(&repo.join(".git/objects"))
+        );
+        assert!(
+            mounts
+                .read_only_after_masks
+                .contains(&repo.join(".git/refs"))
+        );
+        assert!(
+            mounts
+                .read_only_after_masks
+                .contains(&repo.join(".git/HEAD"))
+        );
+        assert!(
+            mounts
+                .read_only_after_masks
+                .contains(&repo.join(".git/index"))
+        );
         assert_eq!(mounts.config_overlays.len(), 1);
         let (source, destination) = &mounts.config_overlays[0];
         assert_eq!(destination, &repo.join(".git/config"));
@@ -680,7 +813,10 @@ mod tests {
 
         let independent = workspace.join("independent");
         init_repo(&independent);
-        git(&independent, &["config", "credential.helper", "independent-secret"]);
+        git(
+            &independent,
+            &["config", "credential.helper", "independent-secret"],
+        );
 
         let shared = temp.0.join("shared");
         init_repo(&shared);
@@ -689,7 +825,13 @@ mod tests {
         let linked = workspace.join("linked");
         git(
             &shared,
-            &["worktree", "add", "--detach", linked.to_str().unwrap(), "HEAD"],
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().unwrap(),
+                "HEAD",
+            ],
         );
         git(
             &linked,
@@ -732,7 +874,13 @@ mod tests {
         let linked = repo.join("linked");
         git(
             &repo,
-            &["worktree", "add", "--detach", linked.to_str().unwrap(), "HEAD"],
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().unwrap(),
+                "HEAD",
+            ],
         );
         let scratch = temp.0.join("scratch");
         fs::create_dir(&scratch).unwrap();
@@ -749,13 +897,30 @@ mod tests {
         let repo = temp.0.join("repo");
         init_repo(&repo);
         let linked = temp.0.join("linked");
-        git(&repo, &["worktree", "add", "--detach", linked.to_str().unwrap(), "HEAD"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
         git(&repo, &["config", "core.repositoryformatversion", "1"]);
         git(&repo, &["config", "extensions.worktreeConfig", "true"]);
-        git(&linked, &["config", "--worktree", "core.ignorecase", "false"]);
         git(
             &linked,
-            &["config", "--worktree", "credential.helper", "worktree-secret"],
+            &["config", "--worktree", "core.ignorecase", "false"],
+        );
+        git(
+            &linked,
+            &[
+                "config",
+                "--worktree",
+                "credential.helper",
+                "worktree-secret",
+            ],
         );
         let nested = linked.join("nested");
         fs::create_dir(&nested).unwrap();
@@ -782,11 +947,31 @@ mod tests {
         let admin = git_dir.strip_prefix(&common_dir).unwrap();
         assert!(skeleton.join(admin).is_dir());
         assert!(mounts.read_only_after_masks.contains(&git_dir.join("HEAD")));
-        assert!(mounts.read_only_after_masks.contains(&git_dir.join("index")));
-        assert!(mounts.read_only_after_masks.contains(&git_dir.join("gitdir")));
-        assert!(mounts.read_only_after_masks.contains(&git_dir.join("commondir")));
-        assert!(mounts.read_only_after_masks.contains(&common_dir.join("objects")));
-        assert!(mounts.read_only_after_masks.contains(&common_dir.join("refs")));
+        assert!(
+            mounts
+                .read_only_after_masks
+                .contains(&git_dir.join("index"))
+        );
+        assert!(
+            mounts
+                .read_only_after_masks
+                .contains(&git_dir.join("gitdir"))
+        );
+        assert!(
+            mounts
+                .read_only_after_masks
+                .contains(&git_dir.join("commondir"))
+        );
+        assert!(
+            mounts
+                .read_only_after_masks
+                .contains(&common_dir.join("objects"))
+        );
+        assert!(
+            mounts
+                .read_only_after_masks
+                .contains(&common_dir.join("refs"))
+        );
         assert!(!mounts.read_only_after_masks.contains(&git_dir));
         assert!(!skeleton.join("modules").exists());
         assert_eq!(mounts.config_overlays.len(), 2);
@@ -799,11 +984,22 @@ mod tests {
         let sibling = temp.0.join("sibling");
         git(
             &repo,
-            &["worktree", "add", "--detach", sibling.to_str().unwrap(), "HEAD"],
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                sibling.to_str().unwrap(),
+                "HEAD",
+            ],
         );
         git(
             &sibling,
-            &["config", "--worktree", "credential.helper", "sibling-secret"],
+            &[
+                "config",
+                "--worktree",
+                "credential.helper",
+                "sibling-secret",
+            ],
         );
         let sibling_dir = PathBuf::from(
             String::from_utf8(git(&sibling, &["rev-parse", "--absolute-git-dir"]).stdout)
@@ -815,9 +1011,11 @@ mod tests {
                 .unwrap()
                 .contains("sibling-secret")
         );
-        assert!(!skeleton
-            .join(sibling_dir.strip_prefix(&common_dir).unwrap())
-            .exists());
+        assert!(
+            !skeleton
+                .join(sibling_dir.strip_prefix(&common_dir).unwrap())
+                .exists()
+        );
         assert_eq!(fs::read_dir(skeleton.join("worktrees")).unwrap().count(), 1);
     }
 
@@ -826,7 +1024,10 @@ mod tests {
         let temp = TempDir::new();
         let unrelated = temp.0.join("unrelated");
         init_repo(&unrelated);
-        git(&unrelated, &["config", "credential.helper", "external-secret"]);
+        git(
+            &unrelated,
+            &["config", "credential.helper", "external-secret"],
+        );
         let workspace = temp.0.join("workspace");
         fs::create_dir(&workspace).unwrap();
         fs::write(
@@ -851,6 +1052,9 @@ mod tests {
         let scratch = temp.0.join("scratch");
         fs::create_dir(&workspace).unwrap();
         fs::create_dir(&scratch).unwrap();
-        assert!(prepare(&workspace, &scratch).unwrap().read_only.is_empty());
+        assert_eq!(
+            prepare(&workspace, &scratch).unwrap().read_only,
+            Vec::<PathBuf>::new()
+        );
     }
 }

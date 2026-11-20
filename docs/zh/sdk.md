@@ -119,7 +119,7 @@ git update-ref             git config core.hooksPath  git -c core.hooksPath=
 
 MCP 限制仅在后端启动前筛选由工作流提供的条目。后端的用户级 MCP 配置和 Cruise 自身的会话工具仍保持启用。Claude 的 shell 前缀禁止规则不会规范化 Git 全局选项，因此 `git -C path commit` 可能无法匹配 `git commit`。在 jcode 中，工作流或进程环境中的 `JCODE_HOOKS_DISABLED` 会禁用 shell 检查关卡，钩子执行失败时也会放行。这些控制属于纵深防御，并非沙箱；提示警告、reference-transaction 钩子和 CAS 回滚仍然保留。
 
-启用 `jcode-bubblewrap` 的 Linux 构建为每次尝试启动独立守护进程，并以只读方式挂载 Git 元数据。`GIT_OPTIONAL_LOCKS=0` 允许 `git status`、`git diff` 和 `git log`；暂存、提交和推送由宿主执行。宿主替换索引后，下次尝试才能看到新索引。此模式不连接共享的 `jcode serve`。
+只有使用 `jcode-bubblewrap` feature 编译的 Linux 构建才提供 Bubblewrap。普通 jcode 尝试仅在 daemon 启动时设置 `CRUISE_JCODE_BUBBLEWRAP=1` 才会启用隔离；未设置时保持原有行为。工作流中的 `require_bubblewrap: true` 始终请求隔离，不受该环境变量影响。如果请求的隔离不可用或启动失败，该尝试会报错，而不会回退到未隔离运行。每次隔离尝试都会启动独立 daemon，并以只读方式挂载 Git 元数据。`GIT_OPTIONAL_LOCKS=0` 允许 `git status`、`git diff` 和 `git log`；暂存、提交和推送由宿主执行。宿主替换索引后，下次尝试才能看到新索引。此模式不连接共享的 `jcode serve`。
 
 <a id="sdk-claude--the-claude-cli-in-process"></a>
 ### `sdk: claude` — 在进程内运行的 claude CLI

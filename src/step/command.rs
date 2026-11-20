@@ -1032,7 +1032,10 @@ mod tests {
         )
         .await
         .unwrap_or_else(|error| panic!("{error:?}"));
-        assert!(result.success, "workflow env must not restore missing daemon value");
+        assert!(
+            result.success,
+            "workflow env must not restore missing daemon value"
+        );
     }
 
     #[cfg(unix)]

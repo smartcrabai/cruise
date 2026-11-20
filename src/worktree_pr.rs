@@ -614,29 +614,32 @@ async fn generate_pr_via_sdk_tool(
         }
     };
     match executor
-        .run_with_jcode_access(crate::executor::PromptRun {
-            usage: Some(crate::usage::UsageScope {
-                session_id: usage_session_id,
-                step: None,
-                purpose: crate::usage::UsagePurpose::PrMetadata,
-            }),
-            prompt: &prompt,
-            model,
-            subagent_model: None,
-            max_retries: rate_limit_retries,
-            env,
-            mcp_servers,
-            on_notice: Some(&on_notice),
-            cancel_token,
-            working_dir: Some(worktree_path),
-            stream: None,
-            tools: vec![tool],
-            on_session_id: None,
-            resume: None,
-            computer_use: false,
-            permission: crate::config::PermissionMode::Full,
-            tool_policy: crate::tool_policy::ToolPolicy::default(),
-        }, access)
+        .run_with_jcode_access(
+            crate::executor::PromptRun {
+                usage: Some(crate::usage::UsageScope {
+                    session_id: usage_session_id,
+                    step: None,
+                    purpose: crate::usage::UsagePurpose::PrMetadata,
+                }),
+                prompt: &prompt,
+                model,
+                subagent_model: None,
+                max_retries: rate_limit_retries,
+                env,
+                mcp_servers,
+                on_notice: Some(&on_notice),
+                cancel_token,
+                working_dir: Some(worktree_path),
+                stream: None,
+                tools: vec![tool],
+                on_session_id: None,
+                resume: None,
+                computer_use: false,
+                permission: crate::config::PermissionMode::Full,
+                tool_policy: crate::tool_policy::ToolPolicy::default(),
+            },
+            access,
+        )
         .await
     {
         Ok(_) => {
@@ -812,9 +815,19 @@ pub(crate) async fn run_after_pr_steps_with_checkpoint(
     match execute_steps_with_graph(&ctx, vars, tracker, &mut dag, &persist).await {
         Err(e) if checkpoint_failed.load(std::sync::atomic::Ordering::Relaxed) => Err(e),
         Err(CruiseError::Interrupted) => Err(CruiseError::Interrupted),
+        Err(e @ CruiseError::InvalidStepConfig(_))
+            if dag
+                .state
+                .current
+                .as_deref()
+                .and_then(|id| dag.nodes.get(id))
+                .and_then(|node| after_compiled.steps.get(&node.step_name))
+                .is_some_and(|step| step.require_bubblewrap) =>
+        {
+            Err(e)
+        }
         Err(
             e @ (CruiseError::MissingJcodeModel(_)
-            | CruiseError::InvalidStepConfig(_)
             | CruiseError::GitHubReviewFailed { .. }
             | CruiseError::RequiredCommandFailed { .. }),
         ) => Err(e),
@@ -1497,7 +1510,8 @@ pub fn sync_base(
     pr_number: &str,
     pr_url: Option<&str>,
 ) -> std::result::Result<(), (SyncBaseFailure, CruiseError)> {
-    ensure_host_git_safety(Path::new(".")).map_err(|error| (SyncBaseFailure::MergeFailed, error))?;
+    ensure_host_git_safety(Path::new("."))
+        .map_err(|error| (SyncBaseFailure::MergeFailed, error))?;
     sync_base_with(pr_number, pr_url, sync_command)
 }
 
@@ -1505,7 +1519,8 @@ pub(crate) fn sync_validated_base(
     cwd: &Path,
     base_oid: &str,
 ) -> std::result::Result<(), (SyncBaseFailure, CruiseError)> {
-    if !matches!(base_oid.len(), 40 | 64) || !base_oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !matches!(base_oid.len(), 40 | 64) || !base_oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return Err((
             SyncBaseFailure::BaseRefInvalid,
             CruiseError::Other("verified PR/MR base is not a Git object ID".into()),
@@ -1514,11 +1529,19 @@ pub(crate) fn sync_validated_base(
     ensure_host_git_safety(cwd).map_err(|error| (SyncBaseFailure::MergeFailed, error))?;
     merge_fetched_base(
         &mut |program, args| {
-            check_sync_output(program, args, host_git_command().current_dir(cwd).args(args).output())
+            check_sync_output(
+                program,
+                args,
+                host_git_command().current_dir(cwd).args(args).output(),
+            )
         },
         &[
-            "fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
-            "origin", base_oid,
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "origin",
+            base_oid,
         ],
         base_oid,
     )
@@ -1535,24 +1558,47 @@ fn sync_command(program: &str, args: &[&str]) -> std::io::Result<std::process::O
 
 pub(crate) fn host_git_command() -> std::process::Command {
     let mut command = std::process::Command::new("git");
-    for (key, _) in std::env::vars_os() {
-        if key.as_encoded_bytes().starts_with(b"GIT_") {
-            command.env_remove(key);
+    let disabled_global_config = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    for (key, value) in std::env::vars_os() {
+        let key_os = key.as_os_str();
+        let value_os = value.as_os_str();
+        if key_os.as_encoded_bytes().starts_with(b"GIT_") {
+            let preserve_disabling_override = (key_os
+                == std::ffi::OsStr::new("GIT_CONFIG_NOSYSTEM")
+                && value_os == std::ffi::OsStr::new("1"))
+                || (key_os == std::ffi::OsStr::new("GIT_CONFIG_GLOBAL")
+                    && value_os == std::ffi::OsStr::new(disabled_global_config));
+            if !preserve_disabling_override {
+                command.env_remove(key);
+            }
         }
     }
     command.args([
         "--no-optional-locks",
         "-c",
-        if cfg!(windows) { "core.hooksPath=NUL" } else { "core.hooksPath=/dev/null" },
-        "-c", "core.fsmonitor=false",
-        "-c", "rerere.enabled=false",
-        "-c", "merge.autoStash=false",
-        "-c", "submodule.recurse=false",
-        "-c", "commit.gpgSign=false",
-        "-c", "http.followRedirects=false",
-        "-c", "protocol.ext.allow=never",
+        if cfg!(windows) {
+            "core.hooksPath=NUL"
+        } else {
+            "core.hooksPath=/dev/null"
+        },
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "rerere.enabled=false",
+        "-c",
+        "merge.autoStash=false",
+        "-c",
+        "submodule.recurse=false",
+        "-c",
+        "commit.gpgSign=false",
+        "-c",
+        "http.followRedirects=false",
+        "-c",
+        "protocol.ext.allow=never",
     ]);
-    command.env("GIT_NO_REPLACE_OBJECTS", "1").env("GIT_NO_LAZY_FETCH", "1");
+    command
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_NO_LAZY_FETCH", "1");
     command
 }
 
@@ -1586,7 +1632,9 @@ pub(crate) fn host_push_endpoint(cwd: &Path) -> Result<String> {
         || destination.starts_with('-')
         || destination.chars().any(char::is_control)
     {
-        return Err(CruiseError::Other("origin needs one unambiguous push URL".into()));
+        return Err(CruiseError::Other(
+            "origin needs one unambiguous push URL".into(),
+        ));
     }
     Ok(destination)
 }
@@ -1602,7 +1650,13 @@ fn ensure_host_transport_safety(cwd: &Path) -> Result<()> {
 fn reject_host_git_config(cwd: &Path, pattern: &str, error: &'static str) -> Result<()> {
     let output = host_git_command()
         .current_dir(cwd)
-        .args(["config", "--includes", "--name-only", "--get-regexp", pattern])
+        .args([
+            "config",
+            "--includes",
+            "--name-only",
+            "--get-regexp",
+            pattern,
+        ])
         .output()?;
     if output.status.code() != Some(1) || !output.stdout.is_empty() || !output.stderr.is_empty() {
         return Err(CruiseError::Other(error.into()));
@@ -1616,7 +1670,10 @@ fn check_sync_output(
     output: std::io::Result<std::process::Output>,
 ) -> Result<std::process::Output> {
     let output = output.map_err(|error| {
-        CruiseError::Other(format!("failed to run `{program} {}`: {error}", args.join(" ")))
+        CruiseError::Other(format!(
+            "failed to run `{program} {}`: {error}",
+            args.join(" ")
+        ))
     })?;
     if output.status.success() {
         return Ok(output);
@@ -1628,7 +1685,10 @@ fn check_sync_output(
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-    Err(CruiseError::Other(format!("`{program} {}` failed: {detail}", args.join(" "))))
+    Err(CruiseError::Other(format!(
+        "`{program} {}` failed: {detail}",
+        args.join(" ")
+    )))
 }
 
 /// Same as [`sync_base`] with an injectable command runner `(program, args)`.
@@ -1640,9 +1700,8 @@ pub(crate) fn sync_base_with<F>(
 where
     F: FnMut(&str, &[&str]) -> std::io::Result<std::process::Output>,
 {
-    let mut run = |program: &str, args: &[&str]| {
-        check_sync_output(program, args, runner(program, args))
-    };
+    let mut run =
+        |program: &str, args: &[&str]| check_sync_output(program, args, runner(program, args));
 
     let is_gitlab_mr = pr_url.is_some_and(|url| url.contains("/-/merge_requests/"));
     let base = if is_gitlab_mr {
@@ -1951,6 +2010,45 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
+
+    #[test]
+    fn host_git_safety_respects_disabled_global_config() {
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("create temp dir: {error}"));
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let _inherited_nosystem = crate::test_support::EnvGuard::remove("GIT_CONFIG_NOSYSTEM");
+        let _inherited_global = crate::test_support::EnvGuard::remove("GIT_CONFIG_GLOBAL");
+        std::fs::write(
+            tmp.path().join(".gitconfig"),
+            "[filter \"external\"]\n\tclean = cat\n",
+        )
+        .unwrap_or_else(|error| panic!("write global Git config: {error}"));
+
+        assert!(
+            ensure_host_git_safety(tmp.path()).is_err(),
+            "the configured global filter must be rejected"
+        );
+
+        let empty_config = tmp.path().join("empty.gitconfig");
+        std::fs::write(&empty_config, "")
+            .unwrap_or_else(|error| panic!("write empty global config: {error}"));
+        {
+            let _global = crate::test_support::EnvGuard::set("GIT_CONFIG_GLOBAL", &empty_config);
+            assert!(
+                ensure_host_git_safety(tmp.path()).is_err(),
+                "arbitrary global config paths must not bypass host Git checks"
+            );
+        }
+
+        let _nosystem = crate::test_support::EnvGuard::set("GIT_CONFIG_NOSYSTEM", "1");
+        let disabled_global_config = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        let _global =
+            crate::test_support::EnvGuard::set("GIT_CONFIG_GLOBAL", disabled_global_config);
+        assert!(
+            ensure_host_git_safety(tmp.path()).is_ok(),
+            "the same config must pass when global and system config are disabled"
+        );
+    }
 
     #[cfg(unix)]
     fn install_failing_gh_stub(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -2427,7 +2525,15 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
                     ]
                 ),
                 call("git", &["check-ref-format", "--branch", "main"]),
-                call("git", &["fetch", "--no-recurse-submodules", "origin", "refs/heads/main"]),
+                call(
+                    "git",
+                    &[
+                        "fetch",
+                        "--no-recurse-submodules",
+                        "origin",
+                        "refs/heads/main"
+                    ]
+                ),
                 call("git", &["merge", "--no-edit", "FETCH_HEAD"]),
             ]
         );
@@ -2450,7 +2556,15 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             vec![
                 call("glab", &["mr", "view", "42", "--output", "json"]),
                 call("git", &["check-ref-format", "--branch", "develop"]),
-                call("git", &["fetch", "--no-recurse-submodules", "origin", "refs/heads/develop"]),
+                call(
+                    "git",
+                    &[
+                        "fetch",
+                        "--no-recurse-submodules",
+                        "origin",
+                        "refs/heads/develop"
+                    ]
+                ),
                 call("git", &["merge", "--no-edit", "FETCH_HEAD"]),
             ]
         );
@@ -3045,6 +3159,44 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         assert!(
             matches!(fatal, Err(CruiseError::InvalidStepConfig(_))),
             "native merge opt-in must propagate preceding after-pr errors: {fatal:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn required_bubblewrap_after_pr_config_error_is_fatal() {
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("{error:?}"));
+        let mut compiled = minimal_compiled_workflow(vec!["echo".to_string()]);
+        compiled.after_pr.insert(
+            "required".to_string(),
+            crate::config::StepConfig {
+                prompt: Some("unused".to_string()),
+                timeout: Some("invalid-timeout".to_string()),
+                require_bubblewrap: true,
+                ..Default::default()
+            },
+        );
+        let mut vars = VariableStore::new("test".to_string());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let flags = crate::flags::FlagValues::new();
+        let result = run_after_pr_steps(
+            &compiled,
+            None,
+            &mut vars,
+            &mut tracker,
+            10,
+            0,
+            tmp.path(),
+            &[],
+            &flags,
+            None,
+            &crate::option_handler::NoOpOptionHandler,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CruiseError::InvalidStepConfig(_))),
+            "required Bubblewrap errors must be fatal: {result:?}"
         );
     }
 

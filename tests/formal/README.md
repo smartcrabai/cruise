@@ -24,14 +24,20 @@ node scripts/formal/verify_quint.cjs tests/formal/node_modules/.bin/quint \
   target/formal-reports/jcode-bubblewrap/counterexample.itf.json
 ```
 
-The opt-in `jcode-bubblewrap` build uses one sandbox per attempt. On Linux
-with Bubblewrap 0.11.1 and jcode v1.0.1, run the real CLI regression with a
-synthetic model (no provider credentials):
+The `jcode-bubblewrap` feature makes Bubblewrap available in Linux builds.
+Ordinary jcode attempts remain unchanged unless the daemon starts with
+`CRUISE_JCODE_BUBBLEWRAP=1`; workflow `require_bubblewrap: true` always requires
+isolation, regardless of that environment variable. An isolation request fails
+when unsupported or when launch fails; it never falls back to an unsandboxed
+attempt. With Bubblewrap 0.11.1 and jcode v1.0.1, run the real CLI regression
+with a synthetic model (no provider credentials):
 
 ```sh
 JCODE_REAL_CLI=/absolute/path/to/jcode \
   cargo test --locked --features jcode-bubblewrap --test jcode_bwrap_real -- --ignored
 ```
+
+The `jcode_bwrap_real` env-cleared CLI fixture explicitly sets the opt-in.
 
 The [jcode Bubblewrap smoke workflow](../../.github/workflows/jcode-bubblewrap-smoke.yml)
 runs this test on `ubuntu-26.04` when `jcode-bubblewrap` is pushed. Manual

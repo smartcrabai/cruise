@@ -26,7 +26,9 @@ const MERGE_COMMIT_MESSAGE: &str = "Merge PR base after conflict resolution";
 #[serde(tag = "state", rename_all = "snake_case")]
 enum SyncResult {
     Cleared,
-    Pending { context: SyncContext },
+    Pending {
+        context: SyncContext,
+    },
     MergeConflict {
         context: SyncContext,
         merge_head: String,
@@ -83,11 +85,15 @@ pub(crate) fn clear_sync_result(
     let target = resolve_target(&root, pr_number, pr_url)?;
     let local_branch = current_branch(&root)?;
     if local_branch != target.head_branch {
-        return Err(other("current branch does not match the pull request head branch"));
+        return Err(other(
+            "current branch does not match the pull request head branch",
+        ));
     }
     let local_base_head = head(&root)?;
     if !is_ancestor(&root, &target.expected_remote_head, &local_base_head)? {
-        return Err(other("local HEAD does not descend from the validated PR head"));
+        return Err(other(
+            "local HEAD does not descend from the validated PR head",
+        ));
     }
     let expected_base_head = target.expected_base_head.clone();
 
@@ -118,16 +124,21 @@ pub(crate) fn record_sync_result(
     let SyncResult::Pending { context } = previous else {
         return Err(other("no pending host-owned base sync is recorded"));
     };
-    if let Err(failure) = result {
-        if failure != SyncBaseFailure::MergeConflict {
-            return Ok(());
-        }
+    if result
+        .as_ref()
+        .is_err_and(|failure| *failure != SyncBaseFailure::MergeConflict)
+    {
+        return Ok(());
     }
 
     let root = Path::new(&context.repo_root);
     crate::worktree_pr::ensure_host_git_safety(cwd)?;
     verify_call_identity(&context, cwd, pr_number, pr_url)?;
-    let fresh_target = resolve_target(root, &context.target.number.to_string(), Some(&context.target.url))?;
+    let fresh_target = resolve_target(
+        root,
+        &context.target.number.to_string(),
+        Some(&context.target.url),
+    )?;
     if fresh_target != context.target {
         return Err(other("pull request identity or base changed during sync"));
     }
@@ -147,7 +158,9 @@ pub(crate) fn record_sync_result(
                 return Err(other("classified merge conflict has no active MERGE_HEAD"));
             };
             if merge_head.as_str() != context.target.expected_base_head {
-                return Err(other("MERGE_HEAD does not match the authenticated PR base OID"));
+                return Err(other(
+                    "MERGE_HEAD does not match the authenticated PR base OID",
+                ));
             }
             let entries = unmerged_entries(root)?;
             let paths = unmerged_paths(&entries)?;
@@ -155,7 +168,8 @@ pub(crate) fn record_sync_result(
                 return Err(other("classified merge conflict has no unmerged paths"));
             }
             let index_digest = digest(&git(root, &["ls-files", "--stage", "-z"])?.stdout);
-            let untracked_paths_digest = digest(&git(root, &["ls-files", "--others", "-z"])?.stdout);
+            let untracked_paths_digest =
+                digest(&git(root, &["ls-files", "--others", "-z"])?.stdout);
             write_sync_result(
                 plan,
                 &SyncResult::MergeConflict {
@@ -171,14 +185,19 @@ pub(crate) fn record_sync_result(
             if merge_head(root)?.is_some() || !unmerged_entries(root)?.is_empty() {
                 return Err(other("successful base sync left a merge or unmerged paths"));
             }
-            ensure_clean_worktree(root, "successful base sync left unexpected worktree changes")?;
+            ensure_clean_worktree(
+                root,
+                "successful base sync left unexpected worktree changes",
+            )?;
             let sync_head = head(root)?;
             if !is_ancestor(root, &context.local_base_head, &sync_head)? {
                 return Err(other("successful base sync rewrote the local branch"));
             }
             let base_head = context.target.expected_base_head.clone();
             if !is_ancestor(root, &base_head, &sync_head)? {
-                return Err(other("successful base sync did not include the authenticated PR base"));
+                return Err(other(
+                    "successful base sync did not include the authenticated PR base",
+                ));
             }
             write_sync_result(
                 plan,
@@ -254,10 +273,14 @@ pub(crate) fn push_after_sync(plan: &Path, cwd: &Path) -> Result<()> {
         pending_index_digest,
     } = read_sync_result(plan)?
     else {
-        return Err(other("no verified successful base sync is available to push"));
+        return Err(other(
+            "no verified successful base sync is available to push",
+        ));
     };
     if pending_index_digest.is_some() {
-        return Err(other("host conflict commit index installation is not complete"));
+        return Err(other(
+            "host conflict commit index installation is not complete",
+        ));
     }
     verify_ready_state(
         &context,
@@ -269,16 +292,24 @@ pub(crate) fn push_after_sync(plan: &Path, cwd: &Path) -> Result<()> {
     let root = Path::new(&context.repo_root);
     verify_origin(&context.target, root)?;
     if !is_ancestor(root, &context.target.expected_remote_head, &recorded_head)? {
-        return Err(other("push would not be a fast-forward from the validated PR head"));
+        return Err(other(
+            "push would not be a fast-forward from the validated PR head",
+        ));
     }
     let remote = remote_head(&context.target, root)?;
     if remote == recorded_head {
         return Ok(());
     }
     if remote != context.target.expected_remote_head {
-        return Err(other("PR branch moved since the validated base sync; refusing to push"));
+        return Err(other(
+            "PR branch moved since the validated base sync; refusing to push",
+        ));
     }
-    let fresh_target = resolve_target(root, &context.target.number.to_string(), Some(&context.target.url))?;
+    let fresh_target = resolve_target(
+        root,
+        &context.target.number.to_string(),
+        Some(&context.target.url),
+    )?;
     if fresh_target != context.target {
         return Err(other("pull request identity or base changed before push"));
     }
@@ -303,7 +334,9 @@ pub(crate) fn push_after_sync(plan: &Path, cwd: &Path) -> Result<()> {
         ],
     )?;
     if remote_head(&context.target, root)? != recorded_head {
-        return Err(other("push completed but the PR branch does not match the validated local HEAD"));
+        return Err(other(
+            "push completed but the PR branch does not match the validated local HEAD",
+        ));
     }
     Ok(())
 }
@@ -321,10 +354,14 @@ fn finish_merge(
     crate::worktree_pr::ensure_host_git_safety(cwd)?;
     verify_context_checkout(&context, cwd)?;
     if head(root)? != context.local_base_head {
-        return Err(other("HEAD changed after the recorded conflicting base sync"));
+        return Err(other(
+            "HEAD changed after the recorded conflicting base sync",
+        ));
     }
     if merge_head(root)?.as_deref() != Some(recorded_merge_head) {
-        return Err(other("active MERGE_HEAD does not match the recorded base sync"));
+        return Err(other(
+            "active MERGE_HEAD does not match the recorded base sync",
+        ));
     }
 
     let entries = unmerged_entries(root)?;
@@ -333,25 +370,111 @@ fn finish_merge(
         .iter()
         .map(|path| decode_hex(path))
         .collect::<Result<_>>()?;
-    if actual_paths.iter().cloned().collect::<BTreeSet<_>>() != expected_paths {
-        return Err(other("unmerged paths do not match the recorded conflict paths"));
+    if actual_paths.iter().ne(expected_paths.iter()) {
+        return Err(other(
+            "unmerged paths do not match the recorded conflict paths",
+        ));
     }
     if actual_paths.is_empty() {
         return Err(other("the recorded merge has no unmerged conflict paths"));
     }
     let index = git(root, &["ls-files", "--stage", "-z"])?.stdout;
     if digest(&index) != index_digest {
-        return Err(other("the resolver changed the Git index; edit conflicted files only"));
+        return Err(other(
+            "the resolver changed the Git index; edit conflicted files only",
+        ));
     }
-    let output = crate::artifacts::read(&artifact_root(plan)?, RESOLVER_OUTPUT_ARTIFACT)
-        .map_err(|error| other(format!("no fresh host-written conflict-resolution output is recorded: {error}")))?;
+    let output = crate::artifacts::read(&artifact_root(plan)?, RESOLVER_OUTPUT_ARTIFACT).map_err(
+        |error| {
+            other(format!(
+                "no fresh host-written conflict-resolution output is recorded: {error}"
+            ))
+        },
+    )?;
     if output.trim().is_empty() {
         return Err(other("host-written conflict-resolution output is empty"));
     }
     ensure_resolution_scope(root, &expected_paths, untracked_paths_digest)?;
 
+    let (temporary_index, candidate_tree) = stage_resolution(
+        cwd,
+        &context,
+        recorded_merge_head,
+        &actual_paths,
+        &expected_paths,
+        index_digest,
+        untracked_paths_digest,
+    )?;
+    git_with_index(
+        root,
+        &["commit", "-m", MERGE_COMMIT_MESSAGE],
+        &temporary_index.path,
+    )?;
+
+    let completed_head = head(root)?;
+    verify_merge_commit(
+        root,
+        &completed_head,
+        &context.local_base_head,
+        recorded_merge_head,
+    )?;
+    let completed_tree =
+        rev_parse(root, "HEAD^{tree}")?.ok_or_else(|| other("host merge commit has no tree"))?;
+    if completed_tree != candidate_tree {
+        return Err(other(
+            "host merge commit tree differs from the validated candidate index",
+        ));
+    }
+    let base_head = recorded_merge_head.to_string();
+    let mut ready = SyncResult::Ready {
+        context,
+        head: completed_head,
+        base_head,
+        finalized_merge_head: Some(recorded_merge_head.to_string()),
+        pending_index_digest: Some(index_digest.to_owned()),
+    };
+    write_sync_result(plan, &ready)?;
+    if let SyncResult::Ready {
+        context,
+        pending_index_digest,
+        ..
+    } = &mut ready
+    {
+        temporary_index.install(Path::new(&context.repo_root), index_digest)?;
+        *pending_index_digest = None;
+    }
+    write_sync_result(plan, &ready)?;
+    let SyncResult::Ready {
+        context,
+        head,
+        base_head,
+        finalized_merge_head,
+        ..
+    } = ready
+    else {
+        return Err(other("completed host merge has no ready state"));
+    };
+    verify_ready_state(
+        &context,
+        cwd,
+        &head,
+        &base_head,
+        finalized_merge_head.as_deref(),
+    )
+}
+
+fn stage_resolution(
+    cwd: &Path,
+    context: &SyncContext,
+    recorded_merge_head: &str,
+    actual_paths: &[Vec<u8>],
+    expected_paths: &BTreeSet<Vec<u8>>,
+    index_digest: &str,
+    untracked_paths_digest: &str,
+) -> Result<(TemporaryIndex, String)> {
+    let root = Path::new(&context.repo_root);
     crate::worktree_pr::ensure_host_git_safety(cwd)?;
-    let pathspecs = literal_pathspecs(&actual_paths);
+    let pathspecs = literal_pathspecs(actual_paths);
     let temporary_index = TemporaryIndex::new(root)?;
     git_with_input_at_index(
         root,
@@ -364,72 +487,41 @@ fn finish_merge(
         &pathspecs,
         &temporary_index.path,
     )?;
-    if !git_with_index(root, &["ls-files", "--unmerged", "-z"], &temporary_index.path)?
-        .stdout
-        .is_empty()
+    if !git_with_index(
+        root,
+        &["ls-files", "--unmerged", "-z"],
+        &temporary_index.path,
+    )?
+    .stdout
+    .is_empty()
     {
-        return Err(other("Git still reports unresolved merge paths after staging"));
+        return Err(other(
+            "Git still reports unresolved merge paths after staging",
+        ));
     }
     git_with_index(
         root,
         &["diff", "--no-ext-diff", "--cached", "--check"],
         &temporary_index.path,
     )?;
-    ensure_resolution_scope(root, &expected_paths, untracked_paths_digest)?;
+    ensure_resolution_scope(root, expected_paths, untracked_paths_digest)?;
     let candidate_tree = parse_oid(
         &git_with_index(root, &["write-tree"], &temporary_index.path)?.stdout,
         "resolution tree",
     )?;
     if digest(&git(root, &["ls-files", "--stage", "-z"])?.stdout) != index_digest {
-        return Err(other("Git index changed while validating conflict resolutions"));
+        return Err(other(
+            "Git index changed while validating conflict resolutions",
+        ));
     }
     if head(root)? != context.local_base_head
         || merge_head(root)?.as_deref() != Some(recorded_merge_head)
     {
-        return Err(other("merge identity changed while validating conflict resolutions"));
+        return Err(other(
+            "merge identity changed while validating conflict resolutions",
+        ));
     }
-    git_with_index(
-        root,
-        &["commit", "-m", MERGE_COMMIT_MESSAGE],
-        &temporary_index.path,
-    )?;
-
-    let completed_head = head(root)?;
-    verify_merge_commit(root, &completed_head, &context.local_base_head, recorded_merge_head)?;
-    let completed_tree = rev_parse(root, "HEAD^{tree}")?
-        .ok_or_else(|| other("host merge commit has no tree"))?;
-    if completed_tree != candidate_tree {
-        return Err(other("host merge commit tree differs from the validated candidate index"));
-    }
-    let base_head = recorded_merge_head.to_string();
-    write_sync_result(
-        plan,
-        &SyncResult::Ready {
-            context: context.clone(),
-            head: completed_head.clone(),
-            base_head: base_head.clone(),
-            finalized_merge_head: Some(recorded_merge_head.to_string()),
-            pending_index_digest: Some(index_digest.to_string()),
-        },
-    )?;
-    temporary_index.install(root, index_digest)?;
-    write_sync_result(
-        plan,
-        &SyncResult::Ready {
-            context: context.clone(),
-            head: completed_head.clone(),
-            base_head: base_head.clone(),
-            finalized_merge_head: Some(recorded_merge_head.to_string()),
-            pending_index_digest: None,
-        },
-    )?;
-    verify_ready_state(
-        &context,
-        cwd,
-        &completed_head,
-        &base_head,
-        Some(recorded_merge_head),
-    )
+    Ok((temporary_index, candidate_tree))
 }
 
 fn complete_pending_index_install(
@@ -447,16 +539,27 @@ fn complete_pending_index_install(
     verify_context_checkout(context, cwd)?;
     let root = Path::new(&context.repo_root);
     if head(root)? != recorded_head || merge_head(root)?.is_some() {
-        return Err(other("finalized merge identity changed before index recovery"));
+        return Err(other(
+            "finalized merge identity changed before index recovery",
+        ));
     }
-    verify_merge_commit(root, recorded_head, &context.local_base_head, recorded_merge_head)?;
+    verify_merge_commit(
+        root,
+        recorded_head,
+        &context.local_base_head,
+        recorded_merge_head,
+    )?;
 
     let live_index = digest(&git(root, &["ls-files", "--stage", "-z"])?.stdout);
     let temporary_index = TemporaryIndex::new(root)?;
     git_with_index(root, &["read-tree", recorded_head], &temporary_index.path)?;
-    if !git_with_index(root, &["ls-files", "--unmerged", "-z"], &temporary_index.path)?
-        .stdout
-        .is_empty()
+    if !git_with_index(
+        root,
+        &["ls-files", "--unmerged", "-z"],
+        &temporary_index.path,
+    )?
+    .stdout
+    .is_empty()
     {
         return Err(other("finalized commit tree contains unresolved paths"));
     }
@@ -467,7 +570,9 @@ fn complete_pending_index_install(
     let committed_tree = rev_parse(root, "HEAD^{tree}")?
         .ok_or_else(|| other("finalized host merge commit has no tree"))?;
     if candidate_tree != committed_tree {
-        return Err(other("recovered index does not match the finalized merge commit"));
+        return Err(other(
+            "recovered index does not match the finalized merge commit",
+        ));
     }
     let candidate_index = digest(
         &git_with_index(root, &["ls-files", "--stage", "-z"], &temporary_index.path)?.stdout,
@@ -475,7 +580,9 @@ fn complete_pending_index_install(
     if live_index == expected_index_digest {
         temporary_index.install(root, expected_index_digest)?;
     } else if live_index != candidate_index {
-        return Err(other("Git index changed after host commit; refusing to replace unrelated staged work"));
+        return Err(other(
+            "Git index changed after host commit; refusing to replace unrelated staged work",
+        ));
     }
     write_sync_result(
         plan,
@@ -505,12 +612,17 @@ fn verify_ready_state(
     if merge_head(root)?.is_some() || !unmerged_entries(root)?.is_empty() {
         return Err(other("a merge or unresolved paths remain after base sync"));
     }
-    ensure_clean_worktree(root, "unexpected staged or worktree changes exist after base sync")?;
+    ensure_clean_worktree(
+        root,
+        "unexpected staged or worktree changes exist after base sync",
+    )?;
     if !is_ancestor(root, &context.local_base_head, recorded_head)?
         || !is_ancestor(root, base_head, recorded_head)?
         || !is_ancestor(root, &context.target.expected_remote_head, recorded_head)?
     {
-        return Err(other("verified local HEAD is not a fast-forward of the recorded base and PR heads"));
+        return Err(other(
+            "verified local HEAD is not a fast-forward of the recorded base and PR heads",
+        ));
     }
     if let Some(merge_head) = finalized_merge_head {
         verify_merge_commit(root, recorded_head, &context.local_base_head, merge_head)?;
@@ -518,17 +630,35 @@ fn verify_ready_state(
     Ok(())
 }
 
-fn verify_merge_commit(root: &Path, commit: &str, first_parent: &str, second_parent: &str) -> Result<()> {
+fn verify_merge_commit(
+    root: &Path,
+    commit: &str,
+    first_parent: &str,
+    second_parent: &str,
+) -> Result<()> {
     let output = git(root, &["rev-list", "--parents", "-n", "1", commit])?;
     let value = std::str::from_utf8(&output.stdout)
         .map_err(|error| other(format!("Git returned invalid commit parents: {error}")))?;
     let actual: Vec<&str> = value.split_whitespace().collect();
-    if actual.len() != 3 || actual[0] != commit || actual[1] != first_parent || actual[2] != second_parent {
-        return Err(other("host commit is not the expected two-parent merge commit"));
+    if actual.len() != 3
+        || actual[0] != commit
+        || actual[1] != first_parent
+        || actual[2] != second_parent
+    {
+        return Err(other(
+            "host commit is not the expected two-parent merge commit",
+        ));
     }
     let subject = git(root, &["show", "-s", "--format=%s", commit])?;
-    if subject.stdout.strip_suffix(b"\n").unwrap_or(&subject.stdout) != MERGE_COMMIT_MESSAGE.as_bytes() {
-        return Err(other("host merge commit does not have the expected fixed message"));
+    if subject
+        .stdout
+        .strip_suffix(b"\n")
+        .unwrap_or(&subject.stdout)
+        != MERGE_COMMIT_MESSAGE.as_bytes()
+    {
+        return Err(other(
+            "host merge commit does not have the expected fixed message",
+        ));
     }
     Ok(())
 }
@@ -540,12 +670,16 @@ fn ensure_resolution_scope(
 ) -> Result<()> {
     for path in nul_paths(&git(root, &["diff", "--no-ext-diff", "--name-only", "-z"])?.stdout)? {
         if !conflict_paths.contains(&path) {
-            return Err(other("resolver changed a non-conflict path; only conflicted files may be edited"));
+            return Err(other(
+                "resolver changed a non-conflict path; only conflicted files may be edited",
+            ));
         }
     }
     let current_untracked = git(root, &["ls-files", "--others", "-z"])?.stdout;
     if digest(&current_untracked) != untracked_paths_digest {
-        return Err(other("resolver added or removed untracked or ignored paths outside the conflict"));
+        return Err(other(
+            "resolver added or removed untracked or ignored paths outside the conflict",
+        ));
     }
     Ok(())
 }
@@ -563,7 +697,9 @@ fn verify_call_identity(
         .filter(|number| *number > 0)
         .ok_or_else(|| other("PR number must be positive"))?;
     if requested != context.target.number {
-        return Err(other("base-sync PR number does not match the recorded target"));
+        return Err(other(
+            "base-sync PR number does not match the recorded target",
+        ));
     }
     if let Some(url) = pr_url {
         let (forge, host, repository, number) = parse_pr_url(url)?;
@@ -581,12 +717,16 @@ fn verify_call_identity(
 fn verify_context_checkout(context: &SyncContext, cwd: &Path) -> Result<()> {
     let root = repository_root(cwd)?;
     if root.to_string_lossy() != context.repo_root {
-        return Err(other("repository does not match the host-owned base-sync record"));
+        return Err(other(
+            "repository does not match the host-owned base-sync record",
+        ));
     }
     if current_branch(&root)? != context.local_branch
         || context.local_branch != context.target.head_branch
     {
-        return Err(other("current branch does not match the recorded PR branch"));
+        return Err(other(
+            "current branch does not match the recorded PR branch",
+        ));
     }
     Ok(())
 }
@@ -622,14 +762,20 @@ fn resolve_target(root: &Path, pr_number: &str, pr_url: Option<&str>) -> Result<
         return Err(other("forge returned a mismatched pull request URL"));
     }
     ensure_same_repository(&origin, url_forge, &url_host, &url_repository)?;
-    if url_forge != forge || !host.eq_ignore_ascii_case(&url_host) || !repository.eq_ignore_ascii_case(&url_repository) {
+    if url_forge != forge
+        || !host.eq_ignore_ascii_case(&url_host)
+        || !repository.eq_ignore_ascii_case(&url_repository)
+    {
         return Err(other("forge PR identity does not match origin"));
     }
     validate_branch(root, &head_branch)?;
     validate_branch(root, &base_branch)?;
     let head_ref = format!("refs/heads/{head_branch}");
     let expected_remote_head = ls_remote(root, &head_ref)?;
-    if api_head.as_deref().is_some_and(|head| head != expected_remote_head) {
+    if api_head
+        .as_deref()
+        .is_some_and(|head| head != expected_remote_head)
+    {
         return Err(other("PR API head does not match the origin branch head"));
     }
     let base_ref = format!("refs/heads/{base_branch}");
@@ -648,7 +794,10 @@ fn resolve_target(root: &Path, pr_number: &str, pr_url: Option<&str>) -> Result<
     })
 }
 
-fn query_github_pr(root: &Path, number: u64) -> Result<(String, String, String, Option<String>, u64)> {
+fn query_github_pr(
+    root: &Path,
+    number: u64,
+) -> Result<(String, String, String, Option<String>, u64)> {
     let output = external(
         "gh",
         &[
@@ -668,42 +817,66 @@ fn query_github_pr(root: &Path, number: u64) -> Result<(String, String, String, 
         .and_then(serde_json::Value::as_str)
         .map(|oid| parse_oid(oid.as_bytes(), "PR head"))
         .transpose()?;
-    Ok((parsed.url, parsed.head_branch, parsed.base_branch, head, parsed.number))
+    Ok((
+        parsed.url,
+        parsed.head_branch,
+        parsed.base_branch,
+        head,
+        parsed.number,
+    ))
 }
 
-fn query_gitlab_mr(root: &Path, number: u64) -> Result<(String, String, String, Option<String>, u64)> {
+fn query_gitlab_mr(
+    root: &Path,
+    number: u64,
+) -> Result<(String, String, String, Option<String>, u64)> {
     let output = external(
         "glab",
-        &["mr".into(), "view".into(), number.to_string(), "--output".into(), "json".into()],
+        &[
+            "mr".into(),
+            "view".into(),
+            number.to_string(),
+            "--output".into(),
+            "json".into(),
+        ],
         root,
     )?;
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| other(format!("invalid glab mr view JSON: {error}")))?;
-    let text = |key: &str| json.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
+    let text = |key: &str| {
+        json.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+    };
     let iid = json
         .get("iid")
         .and_then(serde_json::Value::as_u64)
         .or_else(|| json.get("number").and_then(serde_json::Value::as_u64))
         .unwrap_or(0);
     if iid != number || !text("state").eq_ignore_ascii_case("opened") {
-        return Err(other("only the matching open GitLab merge request is supported"));
+        return Err(other(
+            "only the matching open GitLab merge request is supported",
+        ));
     }
-    let same_project = match (json.get("source_project_id"), json.get("target_project_id")) {
-        (Some(source), Some(target)) => source == target,
-        _ => {
-            let source = json
-                .pointer("/source_project/path_with_namespace")
-                .or_else(|| json.get("source_project_path"))
-                .and_then(serde_json::Value::as_str);
-            let target = json
-                .pointer("/target_project/path_with_namespace")
-                .or_else(|| json.get("target_project_path"))
-                .and_then(serde_json::Value::as_str);
-            matches!((source, target), (Some(source), Some(target)) if source.eq_ignore_ascii_case(target))
-        }
+    let same_project = if let (Some(source), Some(target)) =
+        (json.get("source_project_id"), json.get("target_project_id"))
+    {
+        source == target
+    } else {
+        let source = json
+            .pointer("/source_project/path_with_namespace")
+            .or_else(|| json.get("source_project_path"))
+            .and_then(serde_json::Value::as_str);
+        let target = json
+            .pointer("/target_project/path_with_namespace")
+            .or_else(|| json.get("target_project_path"))
+            .and_then(serde_json::Value::as_str);
+        matches!((source, target), (Some(source), Some(target)) if source.eq_ignore_ascii_case(target))
     };
     if !same_project {
-        return Err(other("fork or mismatched-project merge requests are not supported"));
+        return Err(other(
+            "fork or mismatched-project merge requests are not supported",
+        ));
     }
     let head_branch = text("source_branch").to_string();
     let base_branch = text("target_branch").to_string();
@@ -714,7 +887,10 @@ fn query_gitlab_mr(root: &Path, number: u64) -> Result<(String, String, String, 
     let api_head = json
         .get("sha")
         .and_then(serde_json::Value::as_str)
-        .or_else(|| json.pointer("/diff_refs/head_sha").and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            json.pointer("/diff_refs/head_sha")
+                .and_then(serde_json::Value::as_str)
+        })
         .map(|oid| parse_oid(oid.as_bytes(), "MR head"))
         .transpose()?;
     Ok((url, head_branch, base_branch, api_head, iid))
@@ -730,10 +906,15 @@ fn parse_pr_url(url: &str) -> Result<(ForgeKind, String, String, u64)> {
         || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
-        return Err(other("pull request URL must be a credential-free HTTPS URL without a port"));
+        return Err(other(
+            "pull request URL must be a credential-free HTTPS URL without a port",
+        ));
     }
     let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
-    let mut segments: Vec<&str> = parsed.path_segments().ok_or_else(|| other("invalid pull request URL path"))?.collect();
+    let mut segments: Vec<&str> = parsed
+        .path_segments()
+        .ok_or_else(|| other("invalid pull request URL path"))?
+        .collect();
     if segments.last() == Some(&"") {
         segments.pop();
     }
@@ -749,12 +930,12 @@ fn parse_pr_url(url: &str) -> Result<(ForgeKind, String, String, u64)> {
     } else {
         return Err(other("unsupported pull request URL"));
     };
-    let number = number.parse::<u64>().ok().filter(|number| *number > 0)
+    let number = number
+        .parse::<u64>()
+        .ok()
+        .filter(|number| *number > 0)
         .ok_or_else(|| other("invalid pull request number in URL"))?;
-    crate::forge::resolve_remote(
-        &format!("https://{host}/{repository}.git"),
-        Some(forge),
-    )?;
+    crate::forge::resolve_remote(&format!("https://{host}/{repository}.git"), Some(forge))?;
     Ok((forge, host, repository, number))
 }
 
@@ -785,7 +966,9 @@ fn verify_origin_context(root: &Path, expected: &ForgeContext) -> Result<()> {
                 .map_err(|_| other("cannot verify origin repository against pull request"))?;
             if identity.kind != expected.kind
                 || !identity.host.eq_ignore_ascii_case(&expected.host)
-                || !identity.repository.eq_ignore_ascii_case(&expected.repository)
+                || !identity
+                    .repository
+                    .eq_ignore_ascii_case(&expected.repository)
             {
                 return Err(other(format!(
                     "origin {} repository does not match pull request",
@@ -807,12 +990,19 @@ fn verify_push_endpoint(target: &PullRequestTarget, endpoint: &str) -> Result<()
         || !identity.host.eq_ignore_ascii_case(&target.host)
         || !identity.repository.eq_ignore_ascii_case(&target.repository)
     {
-        return Err(other("effective origin push endpoint does not match the validated PR repository"));
+        return Err(other(
+            "effective origin push endpoint does not match the validated PR repository",
+        ));
     }
     Ok(())
 }
 
-fn ensure_same_repository(origin: &ForgeContext, forge: ForgeKind, host: &str, repository: &str) -> Result<()> {
+fn ensure_same_repository(
+    origin: &ForgeContext,
+    forge: ForgeKind,
+    host: &str,
+    repository: &str,
+) -> Result<()> {
     if origin.kind != forge
         || !origin.host.eq_ignore_ascii_case(host)
         || !origin.repository.eq_ignore_ascii_case(repository)
@@ -839,20 +1029,26 @@ fn ls_remote(root: &Path, reference: &str) -> Result<String> {
     let text = std::str::from_utf8(&output.stdout)
         .map_err(|_| other("git ls-remote returned invalid UTF-8"))?;
     let mut lines = text.lines();
-    let line = lines.next().ok_or_else(|| other("origin did not advertise the validated ref"))?;
+    let line = lines
+        .next()
+        .ok_or_else(|| other("origin did not advertise the validated ref"))?;
     if lines.next().is_some() {
-        return Err(other("origin returned multiple matches for the validated ref"));
+        return Err(other(
+            "origin returned multiple matches for the validated ref",
+        ));
     }
     let mut fields = line.split_whitespace();
-    let oid = fields.next().ok_or_else(|| other("origin returned an invalid ref"))?;
-    let returned_ref = fields.next().ok_or_else(|| other("origin returned an invalid ref"))?;
+    let oid = fields
+        .next()
+        .ok_or_else(|| other("origin returned an invalid ref"))?;
+    let returned_ref = fields
+        .next()
+        .ok_or_else(|| other("origin returned an invalid ref"))?;
     if fields.next().is_some() || returned_ref != reference {
         return Err(other("origin returned a mismatched ref"));
     }
     parse_oid(oid.as_bytes(), "remote ref")
 }
-
-
 
 fn verify_origin(target: &PullRequestTarget, root: &Path) -> Result<()> {
     let expected = ForgeContext {
@@ -865,7 +1061,9 @@ fn verify_origin(target: &PullRequestTarget, root: &Path) -> Result<()> {
 
 fn ensure_no_merge(root: &Path) -> Result<()> {
     if merge_head(root)?.is_some() {
-        return Err(other("refusing to sync while another merge is already in progress"));
+        return Err(other(
+            "refusing to sync while another merge is already in progress",
+        ));
     }
     if !unmerged_entries(root)?.is_empty() {
         return Err(other("refusing to sync with pre-existing unmerged paths"));
@@ -874,7 +1072,11 @@ fn ensure_no_merge(root: &Path) -> Result<()> {
 }
 
 fn ensure_clean_worktree(root: &Path, message: &str) -> Result<()> {
-    let status = git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"])?.stdout;
+    let status = git(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?
+    .stdout;
     if status.is_empty() {
         Ok(())
     } else {
@@ -957,9 +1159,14 @@ fn unmerged_entries(root: &Path) -> Result<Vec<u8>> {
 
 fn unmerged_paths(entries: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut paths = BTreeSet::new();
-    for entry in entries.split(|byte| *byte == 0).filter(|entry| !entry.is_empty()) {
+    for entry in entries
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
         let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
-            return Err(other("Git returned a malformed NUL-delimited unmerged entry"));
+            return Err(other(
+                "Git returned a malformed NUL-delimited unmerged entry",
+            ));
         };
         let path = &entry[tab + 1..];
         if path.is_empty() {
@@ -1002,12 +1209,12 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>> {
-    if value.len() % 2 != 0 {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
         return Err(other("invalid encoded conflict path in trusted sync state"));
     }
-    value
-        .as_bytes()
-        .chunks_exact(2)
+    pairs
+        .iter()
         .map(|digits| {
             let high = hex_digit(digits[0])?;
             let low = hex_digit(digits[1])?;
@@ -1029,8 +1236,11 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 fn write_sync_result(plan: &Path, result: &SyncResult) -> Result<()> {
-    let serialized = serde_json::to_string(result)
-        .map_err(|error| other(format!("failed to serialize host-owned sync state: {error}")))?;
+    let serialized = serde_json::to_string(result).map_err(|error| {
+        other(format!(
+            "failed to serialize host-owned sync state: {error}"
+        ))
+    })?;
     crate::artifacts::write(&artifact_root(plan)?, SYNC_RESULT_ARTIFACT, &serialized)
 }
 
@@ -1047,7 +1257,9 @@ fn clear_session_artifact(plan: &Path, name: &str) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err(other("session artifact directory is not a regular directory"));
+            return Err(other(
+                "session artifact directory is not a regular directory",
+            ));
         }
         Ok(_) => {}
     }
@@ -1101,7 +1313,11 @@ impl TemporaryIndex {
             .map_err(|error| other(format!("Git returned an invalid index path: {error}")))?
             .trim_end_matches(['\r', '\n']);
         let git_index = PathBuf::from(path);
-        let git_index = if git_index.is_absolute() { git_index } else { root.join(git_index) };
+        let git_index = if git_index.is_absolute() {
+            git_index
+        } else {
+            root.join(git_index)
+        };
         let metadata = fs::symlink_metadata(&git_index)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(other("Git index is not a regular file"));
@@ -1110,20 +1326,34 @@ impl TemporaryIndex {
             "cruise-conflict-index-{}.tmp",
             uuid::Uuid::new_v4().simple()
         ));
-        OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
         fs::copy(&git_index, &temporary)?;
-        Ok(Self { path: temporary, git_index })
+        Ok(Self {
+            path: temporary,
+            git_index,
+        })
     }
 
     fn install(&self, root: &Path, expected_digest: &str) -> Result<()> {
         let mut lock_name = self.git_index.as_os_str().to_os_string();
         lock_name.push(".lock");
         let lock_path = PathBuf::from(lock_name);
-        let mut lock = OpenOptions::new().write(true).create_new(true).open(&lock_path)?;
-        let mut guard = IndexLock { path: lock_path, armed: true };
+        let mut lock = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)?;
+        let mut guard = IndexLock {
+            path: lock_path,
+            armed: true,
+        };
         let current = git(root, &["ls-files", "--stage", "-z"])?.stdout;
         if digest(&current) != expected_digest {
-            return Err(other("Git index changed while validating conflict resolutions"));
+            return Err(other(
+                "Git index changed while validating conflict resolutions",
+            ));
         }
         let mut candidate = fs::File::open(&self.path)?;
         std::io::copy(&mut candidate, &mut lock)?;
@@ -1155,12 +1385,14 @@ impl Drop for IndexLock {
     }
 }
 
-
 fn git(root: &Path, args: &[&str]) -> Result<Output> {
     let output = raw_git(root, args)?;
-    if output.status.success() { Ok(output) } else { Err(git_error(args, &output)) }
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(git_error(args, &output))
+    }
 }
-
 
 fn raw_git(root: &Path, args: &[&str]) -> Result<Output> {
     git_command(root)
@@ -1175,10 +1407,19 @@ fn git_with_index(root: &Path, args: &[&str], index: &Path) -> Result<Output> {
         .env("GIT_INDEX_FILE", index)
         .output()
         .map_err(|error| other(format!("failed to run git: {error}")))?;
-    if output.status.success() { Ok(output) } else { Err(git_error(args, &output)) }
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(git_error(args, &output))
+    }
 }
 
-fn git_with_input_at_index(root: &Path, args: &[&str], input: &[u8], index: &Path) -> Result<Output> {
+fn git_with_input_at_index(
+    root: &Path,
+    args: &[&str],
+    input: &[u8],
+    index: &Path,
+) -> Result<Output> {
     let mut child = git_command(root)
         .args(args)
         .env("GIT_INDEX_FILE", index)
@@ -1187,9 +1428,17 @@ fn git_with_input_at_index(root: &Path, args: &[&str], input: &[u8], index: &Pat
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| other(format!("failed to run git: {error}")))?;
-    child.stdin.take().ok_or_else(|| other("failed to open git stdin"))?.write_all(input)?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| other("failed to open git stdin"))?
+        .write_all(input)?;
     let output = child.wait_with_output()?;
-    if output.status.success() { Ok(output) } else { Err(git_error(args, &output)) }
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(git_error(args, &output))
+    }
 }
 
 fn git_command(root: &Path) -> Command {
@@ -1208,7 +1457,9 @@ fn external(program: &str, args: &[String], cwd: &Path) -> Result<Output> {
     if output.status.success() {
         Ok(output)
     } else {
-        Err(other(format!("{program} did not return valid pull request metadata")))
+        Err(other(format!(
+            "{program} did not return valid pull request metadata"
+        )))
     }
 }
 
@@ -1217,7 +1468,11 @@ fn git_error(args: &[&str], output: &Output) -> CruiseError {
         || "terminated without an exit status".to_string(),
         |code| format!("exited with status {code}"),
     );
-    let command = if args.contains(&"push") { "push".to_string() } else { args.join(" ") };
+    let command = if args.contains(&"push") {
+        "push".to_string()
+    } else {
+        args.join(" ")
+    };
     other(format!("git {command} {detail}"))
 }
 
@@ -1234,7 +1489,30 @@ mod tests {
 
     use super::*;
 
+    #[cfg(windows)]
+    const DISABLED_GLOBAL_CONFIG: &str = "NUL";
+    #[cfg(not(windows))]
+    const DISABLED_GLOBAL_CONFIG: &str = "/dev/null";
+
+    struct HostSyncGitEnvironment {
+        _guards: Vec<crate::test_support::EnvGuard>,
+        _lock: crate::test_support::ProcessLock,
+    }
+
+    fn isolated_host_git_environment() -> HostSyncGitEnvironment {
+        let lock = crate::test_support::lock_process();
+        let guards = vec![
+            crate::test_support::EnvGuard::set("GIT_CONFIG_NOSYSTEM", "1"),
+            crate::test_support::EnvGuard::set("GIT_CONFIG_GLOBAL", DISABLED_GLOBAL_CONFIG),
+        ];
+        HostSyncGitEnvironment {
+            _guards: guards,
+            _lock: lock,
+        }
+    }
+
     struct ConflictFixture {
+        _git_environment: HostSyncGitEnvironment,
         _temp: TempDir,
         repo: PathBuf,
         plan: PathBuf,
@@ -1243,12 +1521,16 @@ mod tests {
     }
 
     fn conflict_fixture() -> ConflictFixture {
+        let git_environment = isolated_host_git_environment();
         let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("create fixture: {error}"));
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create repo: {error}"));
         git_ok(&repo, &["init", "-q"]);
         git_ok(&repo, &["config", "user.name", "Host Sync Test"]);
-        git_ok(&repo, &["config", "user.email", "host-sync@example.invalid"]);
+        git_ok(
+            &repo,
+            &["config", "user.email", "host-sync@example.invalid"],
+        );
         fs::write(repo.join("conflict.txt"), "base\n")
             .unwrap_or_else(|error| panic!("write conflict file: {error}"));
         fs::write(repo.join("unrelated.txt"), "original\n")
@@ -1258,13 +1540,17 @@ mod tests {
         git_ok(&repo, &["branch", "-M", "main"]);
         fs::write(repo.join(".git/info/exclude"), "existing-ignored.txt\n")
             .unwrap_or_else(|error| panic!("write ignore rule: {error}"));
-        fs::write(repo.join("existing-ignored.txt"), "preexisting ignored file\n")
-            .unwrap_or_else(|error| panic!("write ignored file: {error}"));
+        fs::write(
+            repo.join("existing-ignored.txt"),
+            "preexisting ignored file\n",
+        )
+        .unwrap_or_else(|error| panic!("write ignored file: {error}"));
         git_ok(&repo, &["checkout", "-b", "feature"]);
         fs::write(repo.join("conflict.txt"), "feature\n")
             .unwrap_or_else(|error| panic!("write feature file: {error}"));
         git_ok(&repo, &["commit", "-am", "feature change"]);
-        let local_base_head = head(&repo).unwrap_or_else(|error| panic!("read feature HEAD: {error}"));
+        let local_base_head =
+            head(&repo).unwrap_or_else(|error| panic!("read feature HEAD: {error}"));
         git_ok(&repo, &["checkout", "main"]);
         fs::write(repo.join("conflict.txt"), "base update\n")
             .unwrap_or_else(|error| panic!("write base conflict: {error}"));
@@ -1280,7 +1566,8 @@ mod tests {
         fs::create_dir_all(plan.parent().unwrap_or_else(|| panic!("plan parent")))
             .unwrap_or_else(|error| panic!("create session: {error}"));
         fs::write(&plan, "approved plan\n").unwrap_or_else(|error| panic!("write plan: {error}"));
-        let root = repository_root(&repo).unwrap_or_else(|error| panic!("repository root: {error}"));
+        let root =
+            repository_root(&repo).unwrap_or_else(|error| panic!("repository root: {error}"));
         let context = SyncContext {
             repo_root: root.to_string_lossy().into_owned(),
             local_branch: "feature".into(),
@@ -1309,11 +1596,14 @@ mod tests {
                 merge_head: merge_head.clone(),
                 conflict_paths: paths.iter().map(|path| encode_hex(path)).collect(),
                 index_digest: digest(&git_ok(&repo, &["ls-files", "--stage", "-z"]).stdout),
-                untracked_paths_digest: digest(&git_ok(&repo, &["ls-files", "--others", "-z"]).stdout),
+                untracked_paths_digest: digest(
+                    &git_ok(&repo, &["ls-files", "--others", "-z"]).stdout,
+                ),
             },
         )
         .unwrap_or_else(|error| panic!("record fixture conflict: {error}"));
         ConflictFixture {
+            _git_environment: git_environment,
             _temp: temp,
             repo,
             plan,
@@ -1365,19 +1655,26 @@ mod tests {
             let hooks = fixture.repo.join(".git/hooks");
             let sentinel = fixture.repo.join("hook-ran");
             let hook = hooks.join("pre-commit");
-            fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", sentinel.display()))
-                .unwrap_or_else(|error| panic!("write hook: {error}"));
+            fs::write(
+                &hook,
+                format!("#!/bin/sh\ntouch '{}'\nexit 1\n", sentinel.display()),
+            )
+            .unwrap_or_else(|error| panic!("write hook: {error}"));
             let mut permissions = fs::metadata(&hook)
                 .unwrap_or_else(|error| panic!("hook metadata: {error}"))
                 .permissions();
             permissions.set_mode(0o755);
-            fs::set_permissions(&hook, permissions).unwrap_or_else(|error| panic!("chmod hook: {error}"));
+            fs::set_permissions(&hook, permissions)
+                .unwrap_or_else(|error| panic!("chmod hook: {error}"));
             resolver_output(&fixture.plan);
 
             finish_conflict_commit(&fixture.plan, &fixture.repo)
                 .unwrap_or_else(|error| panic!("finish conflict commit: {error}"));
 
-            assert!(!sentinel.exists(), "repository pre-commit hook must not run");
+            assert!(
+                !sentinel.exists(),
+                "repository pre-commit hook must not run"
+            );
         }
         #[cfg(not(unix))]
         {
@@ -1402,22 +1699,33 @@ mod tests {
             &fixture.merge_head,
         )
         .unwrap_or_else(|error| panic!("verify host merge commit: {error}"));
-        assert!(merge_head(&fixture.repo).unwrap_or_else(|error| panic!("read MERGE_HEAD: {error}")).is_none());
         assert!(
-            git_ok(&fixture.repo, &["status", "--porcelain=v1", "-z"]).stdout.is_empty(),
+            merge_head(&fixture.repo)
+                .unwrap_or_else(|error| panic!("read MERGE_HEAD: {error}"))
+                .is_none()
+        );
+        assert!(
+            git_ok(&fixture.repo, &["status", "--porcelain=v1", "-z"])
+                .stdout
+                .is_empty(),
             "successful host merge should leave a clean worktree"
         );
 
         let SyncResult::Ready {
             finalized_merge_head,
             ..
-        } = read_sync_result(&fixture.plan).unwrap_or_else(|error| panic!("read final state: {error}"))
+        } = read_sync_result(&fixture.plan)
+            .unwrap_or_else(|error| panic!("read final state: {error}"))
         else {
             panic!("conflict completion must persist a ready state");
         };
-        assert_eq!(finalized_merge_head.as_deref(), Some(fixture.merge_head.as_str()));
-        finish_conflict_commit(&fixture.plan, &fixture.repo)
-            .unwrap_or_else(|error| panic!("finalized conflict should resume idempotently: {error}"));
+        assert_eq!(
+            finalized_merge_head.as_deref(),
+            Some(fixture.merge_head.as_str())
+        );
+        finish_conflict_commit(&fixture.plan, &fixture.repo).unwrap_or_else(|error| {
+            panic!("finalized conflict should resume idempotently: {error}")
+        });
     }
 
     #[test]
@@ -1427,11 +1735,17 @@ mod tests {
         let before = digest(&git_ok(&fixture.repo, &["ls-files", "--stage", "-z"]).stdout);
 
         let error = finish_conflict_commit(&fixture.plan, &fixture.repo)
-            .expect_err("missing output artifact must block commit");
+            .err()
+            .unwrap_or_else(|| panic!("missing output artifact must block commit"));
         assert!(error.to_string().contains("fresh host-written"));
-        assert_eq!(digest(&git_ok(&fixture.repo, &["ls-files", "--stage", "-z"]).stdout), before);
         assert_eq!(
-            merge_head(&fixture.repo).unwrap_or_else(|error| panic!("read MERGE_HEAD: {error}")).as_deref(),
+            digest(&git_ok(&fixture.repo, &["ls-files", "--stage", "-z"]).stdout),
+            before
+        );
+        assert_eq!(
+            merge_head(&fixture.repo)
+                .unwrap_or_else(|error| panic!("read MERGE_HEAD: {error}"))
+                .as_deref(),
             Some(fixture.merge_head.as_str())
         );
 
@@ -1445,15 +1759,26 @@ mod tests {
         let fixture = conflict_fixture();
         resolver_output(&fixture.plan);
         resolve_conflict(&fixture.repo);
-        fs::write(fixture.repo.join("unrelated.txt"), "resolver changed unrelated path\n")
-            .unwrap_or_else(|error| panic!("write unrelated edit: {error}"));
+        fs::write(
+            fixture.repo.join("unrelated.txt"),
+            "resolver changed unrelated path\n",
+        )
+        .unwrap_or_else(|error| panic!("write unrelated edit: {error}"));
         let before = head(&fixture.repo).unwrap_or_else(|error| panic!("read HEAD: {error}"));
 
         let error = finish_conflict_commit(&fixture.plan, &fixture.repo)
-            .expect_err("non-conflict resolver edits must be refused");
+            .err()
+            .unwrap_or_else(|| panic!("non-conflict resolver edits must be refused"));
         assert!(error.to_string().contains("non-conflict path"));
-        assert_eq!(head(&fixture.repo).unwrap_or_else(|error| panic!("read HEAD: {error}")), before);
-        assert!(merge_head(&fixture.repo).unwrap_or_else(|error| panic!("read MERGE_HEAD: {error}")).is_some());
+        assert_eq!(
+            head(&fixture.repo).unwrap_or_else(|error| panic!("read HEAD: {error}")),
+            before
+        );
+        assert!(
+            merge_head(&fixture.repo)
+                .unwrap_or_else(|error| panic!("read MERGE_HEAD: {error}"))
+                .is_some()
+        );
 
         git_ok(&fixture.repo, &["checkout", "--", "unrelated.txt"]);
         finish_conflict_commit(&fixture.plan, &fixture.repo)
@@ -1468,9 +1793,14 @@ mod tests {
         git_ok(&fixture.repo, &["add", "conflict.txt"]);
 
         let error = finish_conflict_commit(&fixture.plan, &fixture.repo)
-            .expect_err("prompt changes to the index must be refused");
+            .err()
+            .unwrap_or_else(|| panic!("prompt changes to the index must be refused"));
         assert!(error.to_string().contains("unmerged paths do not match"));
-        assert!(merge_head(&fixture.repo).unwrap_or_else(|error| panic!("read MERGE_HEAD: {error}")).is_some());
+        assert!(
+            merge_head(&fixture.repo)
+                .unwrap_or_else(|error| panic!("read MERGE_HEAD: {error}"))
+                .is_some()
+        );
     }
 
     #[test]
@@ -1488,7 +1818,8 @@ mod tests {
         fs::write(fixture.repo.join("ignored-after-prompt.txt"), "unrelated\n")
             .unwrap_or_else(|error| panic!("create ignored file: {error}"));
         let error = finish_conflict_commit(&fixture.plan, &fixture.repo)
-            .expect_err("new ignored paths must block conflict commit");
+            .err()
+            .unwrap_or_else(|| panic!("new ignored paths must block conflict commit"));
         assert!(error.to_string().contains("untracked or ignored"));
         fs::remove_file(fixture.repo.join("ignored-after-prompt.txt"))
             .unwrap_or_else(|error| panic!("remove ignored file: {error}"));
@@ -1508,33 +1839,46 @@ mod tests {
             original_index,
             "commit failure must not replace the real unmerged index"
         );
-        assert!(!unmerged_entries(&fixture.repo)
-            .unwrap_or_else(|error| panic!("read unresolved entries: {error}"))
-            .is_empty());
-        assert!(merge_head(&fixture.repo)
-            .unwrap_or_else(|error| panic!("read MERGE_HEAD: {error}"))
-            .is_some());
+        assert_ne!(
+            unmerged_entries(&fixture.repo)
+                .unwrap_or_else(|error| panic!("read unresolved entries: {error}"))
+                .len(),
+            0
+        );
+        assert!(
+            merge_head(&fixture.repo)
+                .unwrap_or_else(|error| panic!("read MERGE_HEAD: {error}"))
+                .is_some()
+        );
 
         git_ok(&fixture.repo, &["config", "user.name", "Host Sync Test"]);
-        git_ok(&fixture.repo, &["config", "user.email", "host-sync@example.invalid"]);
+        git_ok(
+            &fixture.repo,
+            &["config", "user.email", "host-sync@example.invalid"],
+        );
         finish_conflict_commit(&fixture.plan, &fixture.repo)
             .unwrap_or_else(|error| panic!("valid retry should finish merge: {error}"));
     }
 
     #[test]
     fn successful_fast_forward_sync_is_an_unchanged_head_only_noop() {
+        let _git_environment = isolated_host_git_environment();
         let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("create fixture: {error}"));
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create repo: {error}"));
         git_ok(&repo, &["init", "-q"]);
         git_ok(&repo, &["config", "user.name", "Host Sync Test"]);
-        git_ok(&repo, &["config", "user.email", "host-sync@example.invalid"]);
+        git_ok(
+            &repo,
+            &["config", "user.email", "host-sync@example.invalid"],
+        );
         fs::write(repo.join("tracked.txt"), "base\n")
             .unwrap_or_else(|error| panic!("write tracked file: {error}"));
         git_ok(&repo, &["add", "--all"]);
         git_ok(&repo, &["commit", "-m", "base"]);
         git_ok(&repo, &["branch", "-M", "feature"]);
-        let local_base_head = head(&repo).unwrap_or_else(|error| panic!("read pre-sync HEAD: {error}"));
+        let local_base_head =
+            head(&repo).unwrap_or_else(|error| panic!("read pre-sync HEAD: {error}"));
         fs::write(repo.join("tracked.txt"), "base sync\n")
             .unwrap_or_else(|error| panic!("write base-sync change: {error}"));
         git_ok(&repo, &["add", "tracked.txt"]);
@@ -1578,7 +1922,10 @@ mod tests {
 
         finish_conflict_commit(&plan, &repo)
             .unwrap_or_else(|error| panic!("successful sync should be a no-op: {error}"));
-        assert_eq!(super::head(&repo).unwrap_or_else(|error| panic!("read HEAD: {error}")), head);
+        assert_eq!(
+            super::head(&repo).unwrap_or_else(|error| panic!("read HEAD: {error}")),
+            head
+        );
     }
 
     #[test]
@@ -1586,7 +1933,12 @@ mod tests {
         assert_eq!(
             parse_pr_url("https://github.com/owner/repo/pull/12")
                 .unwrap_or_else(|error| panic!("parse GitHub URL: {error}")),
-            (ForgeKind::GitHub, "github.com".into(), "owner/repo".into(), 12)
+            (
+                ForgeKind::GitHub,
+                "github.com".into(),
+                "owner/repo".into(),
+                12
+            )
         );
         assert_eq!(
             parse_pr_url("https://gitlab.example/group/subgroup/repo/-/merge_requests/13")
@@ -1602,16 +1954,23 @@ mod tests {
         assert!(parse_pr_url("https://github.com/owner/fork/pull/12").is_ok());
     }
     #[cfg(unix)]
-    #[test]
-    fn fake_forge_sync_and_push_use_only_a_disposable_bare_remote() {
-        use std::os::unix::fs::PermissionsExt as _;
+    struct FakeForgeFixture {
+        repo: PathBuf,
+        bare: PathBuf,
+        plan: PathBuf,
+        fake_bin: PathBuf,
+        fake_home: PathBuf,
+        pr_head: String,
+        base_head: String,
+    }
 
-        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("create fixture: {error}"));
-        let repo = temp.path().join("repo");
-        let bare = temp.path().join("origin.git");
-        let plan = temp.path().join("session/plan.md");
-        let fake_bin = temp.path().join("fake-bin");
-        let fake_home = temp.path().join("fake-home");
+    #[cfg(unix)]
+    fn fake_forge_fixture(root: &Path) -> FakeForgeFixture {
+        let repo = root.join("repo");
+        let bare = root.join("origin.git");
+        let plan = root.join("session/plan.md");
+        let fake_bin = root.join("fake-bin");
+        let fake_home = root.join("fake-home");
         fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create repo: {error}"));
         fs::create_dir_all(plan.parent().unwrap_or_else(|| panic!("plan parent")))
             .unwrap_or_else(|error| panic!("create session: {error}"));
@@ -1621,7 +1980,10 @@ mod tests {
 
         git_ok(&repo, &["init", "-q"]);
         git_ok(&repo, &["config", "user.name", "Fake Forge Test"]);
-        git_ok(&repo, &["config", "user.email", "fake-forge@example.invalid"]);
+        git_ok(
+            &repo,
+            &["config", "user.email", "fake-forge@example.invalid"],
+        );
         fs::write(repo.join("conflict.txt"), "base\n")
             .unwrap_or_else(|error| panic!("write base conflict: {error}"));
         git_ok(&repo, &["add", "--all"]);
@@ -1640,8 +2002,39 @@ mod tests {
         git_ok(&repo, &["checkout", "feature"]);
         fs::create_dir_all(&bare).unwrap_or_else(|error| panic!("create bare remote: {error}"));
         git_ok(&bare, &["init", "--bare", "-q"]);
-        git_ok(&repo, &["push", bare.to_str().unwrap_or_else(|| panic!("bare path")), "main", "feature"]);
-        git_ok(&repo, &["remote", "add", "origin", "https://github.com/owner/repo.git"]);
+        git_ok(
+            &repo,
+            &[
+                "push",
+                bare.to_str().unwrap_or_else(|| panic!("bare path")),
+                "main",
+                "feature",
+            ],
+        );
+        git_ok(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ],
+        );
+
+        FakeForgeFixture {
+            repo,
+            bare,
+            plan,
+            fake_bin,
+            fake_home,
+            pr_head,
+            base_head,
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_fake_forge_tools(fixture: &FakeForgeFixture) {
+        use std::os::unix::fs::PermissionsExt as _;
 
         let original_path = std::env::var_os("PATH").unwrap_or_default();
         let real_git = std::env::split_paths(&original_path)
@@ -1683,26 +2076,23 @@ case "$1" in
 esac
 "#,
             quote(&real_git),
-            quote(&bare),
+            quote(&fixture.bare),
         );
-        let git_wrapper = fake_bin.join("git");
+        let git_wrapper = fixture.fake_bin.join("git");
         fs::write(&git_wrapper, fake_git).unwrap_or_else(|error| panic!("write fake git: {error}"));
         let gh_json = serde_json::json!({
             "number": 7,
             "url": "https://github.com/owner/repo/pull/7",
             "state": "OPEN",
             "headRefName": "feature",
-            "headRefOid": pr_head,
+            "headRefOid": fixture.pr_head,
             "baseRefName": "main",
             "isCrossRepository": false
         })
         .to_string();
-        let fake_gh = fake_bin.join("gh");
-        fs::write(
-            &fake_gh,
-            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", gh_json),
-        )
-        .unwrap_or_else(|error| panic!("write fake gh: {error}"));
+        let fake_gh = fixture.fake_bin.join("gh");
+        fs::write(&fake_gh, format!("#!/bin/sh\nprintf '%s\\n' '{gh_json}'\n"))
+            .unwrap_or_else(|error| panic!("write fake gh: {error}"));
         for executable in [&git_wrapper, &fake_gh] {
             let mut permissions = fs::metadata(executable)
                 .unwrap_or_else(|error| panic!("read fake executable metadata: {error}"))
@@ -1711,31 +2101,53 @@ esac
             fs::set_permissions(executable, permissions)
                 .unwrap_or_else(|error| panic!("make fake executable: {error}"));
         }
+    }
 
+    #[cfg(unix)]
+    #[test]
+    fn fake_forge_sync_and_push_use_only_a_disposable_bare_remote() {
+        let _git_environment = isolated_host_git_environment();
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("create fixture: {error}"));
+        let fixture = fake_forge_fixture(temp.path());
+        install_fake_forge_tools(&fixture);
+        let FakeForgeFixture {
+            repo,
+            bare,
+            plan,
+            fake_bin,
+            fake_home,
+            base_head,
+            ..
+        } = fixture;
+
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
         let mut paths = vec![fake_bin];
         paths.extend(std::env::split_paths(&original_path));
-        let path = std::env::join_paths(paths).unwrap_or_else(|error| panic!("build fake PATH: {error}"));
-        let output = Command::new(std::env::current_exe().unwrap_or_else(|error| panic!("current test exe: {error}")))
-            .args([
-                "--exact",
-                "host_sync::tests::fake_forge_child",
-                "--nocapture",
-            ])
-            .env("PATH", path)
-            .env("HOME", &fake_home)
-            .env("XDG_CONFIG_HOME", &fake_home)
-            .env_remove("CRUISE_FORGE")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_INDEX_FILE")
-            .env("CRUISE_HOST_SYNC_CHILD", "1")
-            .env("CRUISE_HOST_SYNC_REPO", &repo)
-            .env("CRUISE_HOST_SYNC_PLAN", &plan)
-            .env("CRUISE_HOST_SYNC_BASE_HEAD", base_head)
-            .env("CRUISE_HOST_SYNC_BARE", &bare)
-            .output()
-            .unwrap_or_else(|error| panic!("run isolated fake-forge test: {error}"));
+        let path =
+            std::env::join_paths(paths).unwrap_or_else(|error| panic!("build fake PATH: {error}"));
+        let output = Command::new(
+            std::env::current_exe().unwrap_or_else(|error| panic!("current test exe: {error}")),
+        )
+        .args([
+            "--exact",
+            "host_sync::tests::fake_forge_child",
+            "--nocapture",
+        ])
+        .env("PATH", path)
+        .env("HOME", &fake_home)
+        .env("XDG_CONFIG_HOME", &fake_home)
+        .env_remove("CRUISE_FORGE")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env("CRUISE_HOST_SYNC_CHILD", "1")
+        .env("CRUISE_HOST_SYNC_REPO", &repo)
+        .env("CRUISE_HOST_SYNC_PLAN", &plan)
+        .env("CRUISE_HOST_SYNC_BASE_HEAD", base_head)
+        .env("CRUISE_HOST_SYNC_BARE", &bare)
+        .output()
+        .unwrap_or_else(|error| panic!("run isolated fake-forge test: {error}"));
         assert!(
             output.status.success(),
             "isolated fake-forge test failed:\n{}{}",
@@ -1785,8 +2197,7 @@ esac
         resolve_conflict(&repo);
         finish_conflict_commit(&plan, &repo)
             .unwrap_or_else(|error| panic!("finish verified conflict: {error}"));
-        push_after_sync(&plan, &repo)
-            .unwrap_or_else(|error| panic!("guarded local push: {error}"));
+        push_after_sync(&plan, &repo).unwrap_or_else(|error| panic!("guarded local push: {error}"));
 
         let remote = git_output(
             &repo,

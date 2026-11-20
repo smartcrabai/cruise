@@ -1934,7 +1934,7 @@ pub(crate) async fn run_command_step(
                 vars.set_prev_input(None);
                 return Err(CruiseError::RequiredCommandFailed {
                     step: options.step_name.to_string(),
-                    command: command.to_string(),
+                    command: command.clone(),
                     accepted_exit_codes: accepted_exit_codes.to_vec(),
                     exit_code: None,
                     signal: None,
@@ -1978,7 +1978,7 @@ pub(crate) async fn run_command_step(
                 vars.set_prev_input(None);
                 return Err(CruiseError::RequiredCommandFailed {
                     step: options.step_name.to_string(),
-                    command: command.to_string(),
+                    command: command.clone(),
                     accepted_exit_codes: accepted_exit_codes.to_vec(),
                     exit_code: None,
                     signal: None,
@@ -4634,7 +4634,7 @@ steps:
 command: [echo]
 steps:
   seed:
-    command: true
+    command: 'true'
 after-pr:
   apply:
     command: |
@@ -4657,11 +4657,10 @@ after-pr:
 "#;
         let _guard = crate::test_support::lock_process();
         let config = make_config(yaml);
-        let compiled = crate::workflow::compile(config)
-            .unwrap_or_else(|error| panic!("{error:?}"));
+        let compiled = crate::workflow::compile(config).unwrap_or_else(|error| panic!("{error:?}"));
         let after_compiled = compiled.to_after_pr_compiled();
-        let mut dag = crate::dag::build_dag(&after_compiled, 10)
-            .unwrap_or_else(|error| panic!("{error:?}"));
+        let mut dag =
+            crate::dag::build_dag(&after_compiled, 10).unwrap_or_else(|error| panic!("{error:?}"));
         let start = dag.start.clone();
         let mut vars = VariableStore::new(String::new());
         let mut tracker = FileTracker::with_root(repo.path().to_path_buf());
@@ -4692,7 +4691,10 @@ after-pr:
         .await
         .unwrap_or_else(|error| panic!("{error:?}"));
 
-        assert_eq!(result.failed, 0, "accepted status must not count as failure");
+        assert_eq!(
+            result.failed, 0,
+            "accepted status must not count as failure"
+        );
         assert!(repo.path().join("resolver.txt").exists());
         let invocations = std::fs::read_to_string(repo.path().join("invocations"))
             .unwrap_or_else(|error| panic!("read invocation count: {error}"));
