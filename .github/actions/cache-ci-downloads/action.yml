@@ -12,14 +12,14 @@ runs:
       if: ${{ runner.os == 'Linux' && runner.arch == 'X64' }}
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ${{ runner.temp }}/node-v26.13.0-linux-x64.tar.xz
-        key: node-v1-${{ runner.os }}-${{ runner.arch }}-26.13.0-d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997
+        path: ${{ runner.temp }}/node-v26.13.1-linux-x64.tar.xz
+        key: node-v1-${{ runner.os }}-${{ runner.arch }}-26.13.1-5c063e46bab0fbc1c17cc445d7ff129cbdcd0471be6ed83b6ab864f8143bc864
     - name: Install checksum-verified Node.js toolchain
       if: ${{ runner.os == 'Linux' && runner.arch == 'X64' }}
       shell: bash
       run: |
-        version=26.13.0
-        digest=d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997
+        version=26.13.1
+        digest=5c063e46bab0fbc1c17cc445d7ff129cbdcd0471be6ed83b6ab864f8143bc864
         archive="$RUNNER_TEMP/node-v$version-linux-x64.tar.xz"
         if [[ ! -f "$archive" ]] || [[ $(sha256sum "$archive" | awk '{print $1}') != "$digest" ]]; then
           rm -f "$archive"

@@ -1,6 +1,6 @@
 # Daemon executable specifications
 
-Run `mise exec node@26.13.0 -- bash scripts/check_daemon_specs.sh` from the
+Run `mise exec node@26.13.1 -- bash scripts/check_daemon_specs.sh` from the
 repository root. The secret-free `.github/workflows/daemon-specs.yml` runs the
 same check on pull requests and pushes to `main`, and uploads
 `target/formal-reports/` even when a check fails. Each invocation records exact
@@ -9,7 +9,7 @@ commands and results in a fresh report directory.
 The shared `scripts/setup_formal.sh` installs Node-locked Quint 0.33.0 via
 `npm ci`, checksum-verifies Alloy 6.2.0 (SHA-256
 `6b8c1cb5bc93bedfc7c61435c4e1ab6e688a242dc702a394628d9a9801edb78d`)
-and Temurin 25.0.5+8, and selects Apalache 0.62.1. Node 26.13.0 and Rust
+and Temurin 25.0.5+8, and selects Apalache 0.62.1. Node 26.13.1 and Rust
 1.99.1 are required. Cucumber 0.23.0 is pinned in Cargo.lock. Alloy 6.2.0's
 `help exec` specifies `--command`; expectations are model `expect 0` and
 `expect 1` clauses, not an unsupported CLI `--expect` flag.

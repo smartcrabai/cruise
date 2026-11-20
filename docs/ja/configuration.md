@@ -19,7 +19,7 @@ cruise は次の順序でワークフロー設定を解決します。
    | `security` | 範囲を定めたセキュリティ棚卸しと並列監査、トリアージ、確認済み欠陥の安全な修正、独立検証 |
    | `pr-review-fix` | 既存の GitHub PR ヘッドブランチ上で、対応可能なレビューコメントに対処 |
 
-   `refactor`、`add-tests`、`add-formal-specs`、`security` は既定で `force_exec: true` です。ローカルの計画を外側の plan/session、worktree、自動 PR なしで現在のディレクトリ内で直接実行します。通常の plan/session 経路を使うには `--no-force-exec` を指定してください。
+   `refactor`、`add-tests`、`add-formal-specs`、`security` は既定で `force_exec: true` です。ローカルの計画を外側の plan/session、worktree、自動 PR なしで現在のディレクトリ内で直接実行します。通常の plan/session 経路を使うには `--no-force-exec` を指定してください。これら 4 つは after-PR flag を宣言せず、after-PR step もありません。`--no-force-exec` を指定しても同じで、その場合も通常の worktree 経路で、対象の commit があれば PR を作成します。
 
    `cruise workflow list` はカタログを表示します。組み込みワークフローをカスタマイズするには `cruise workflow eject <name> [--to user|project]` を使います。例: `cruise workflow eject tdd --to project`。eject が受け付けるのはカタログ名のみで、既存ファイルを上書きしません。
 

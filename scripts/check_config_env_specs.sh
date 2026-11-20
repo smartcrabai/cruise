@@ -46,7 +46,7 @@ check_required_quint_tests() {
 }
 
 run_check required-quint-tests check_required_quint_tests
-run_check versions bash -c '[[ $(node --version) == v26.13.0 ]] && node --version && java -version'
+run_check versions bash -c '[[ $(node --version) == v26.13.1 ]] && node --version && java -version'
 run_check quint-version "$Q" --version
 run_check quint-typecheck "$Q" typecheck "$MODEL"
 run_check quint-test "$Q" test "$MODEL" --main config_env_override --backend typescript --seed 20261107 --out-itf "$RUN/test_{test}_{seq}.itf.json"

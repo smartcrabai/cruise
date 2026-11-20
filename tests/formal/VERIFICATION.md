@@ -96,4 +96,4 @@ No remote CI run or remote artifact is claimed. Linux/Windows-specific jobs were
 
 | Family | Verification command | Observed result |
 | --- | --- | --- |
-| `config_env` | `mise exec node@26.13.0 -- bash scripts/check_config_env_specs.sh` | Exit 0: 9 Quint tests, 20 Alloy assertions and 5 witnesses, and 8 Gherkin scenarios / 48 steps passed. The runner's `cargo +1.99.1 test --locked --all-features --test config_env_bdd` also passed. Report: `target/formal-reports/config-env.6vegNP/`. |
+| `config_env` | `mise exec node@26.13.1 -- bash scripts/check_config_env_specs.sh` | Exit 0: 9 Quint tests, 20 Alloy assertions and 5 witnesses, and 8 Gherkin scenarios / 48 steps passed. The runner's `cargo +1.99.1 test --locked --all-features --test config_env_bdd` also passed. Report: `target/formal-reports/config-env.6vegNP/`. |

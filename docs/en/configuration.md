@@ -21,7 +21,7 @@ cruise resolves the workflow config as follows:
    | `security` | Scoped security inventory and parallel audits, triage, safe fixes for confirmed defects, and independent verification |
    | `pr-review-fix` | Address eligible review threads on an existing GitHub PR head branch |
 
-   `refactor`, `add-tests`, `add-formal-specs`, and `security` set `force_exec: true` by default: local planning runs directly in the current directory without an outer plan/session, worktree, or automatic PR. Pass `--no-force-exec` to use the normal plan/session path instead.
+   `refactor`, `add-tests`, `add-formal-specs`, and `security` set `force_exec: true` by default: local planning runs directly in the current directory without an outer plan/session, worktree, or automatic PR. Pass `--no-force-exec` to use the normal plan/session path instead. These four declare no after-PR flags and have no after-PR steps, even with `--no-force-exec`; the normal path still opens a PR in a worktree when the run has eligible commits.
 
    `cruise workflow list` prints the catalog. To customize a built-in, use `cruise workflow eject <name> [--to user|project]`, for example `cruise workflow eject tdd --to project`. Ejection accepts catalog names only and never overwrites an existing file.
 
