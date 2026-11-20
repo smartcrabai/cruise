@@ -70,7 +70,7 @@ Warning: Fallback: provider/primary -> provider/fallback (503, attempt 1/5)
 Model: provider/fallback
 ```
 
-> **`cruise exec`** 是独立的临时生命周期路径：它会在当前目录中执行，不进行规划、不创建工作树或 PR，并在达到终止状态时删除会话。暂停或中断的 exec 会话仍可通过 ID 恢复。设置 `force_exec: true` 可为直接计划入口启用相同路径；使用 `--no-force-exec` 可单次退出此模式。参见 [`cruise exec`](cli-reference.md#cruise-exec)。
+> **`cruise exec`** 是独立的临时生命周期路径：它会在当前目录中执行，不进行规划、不创建工作树或 PR，并在达到终止状态时删除会话。暂停或中断的 exec 会话仍可通过 ID 恢复。WebUI 的 Directory 来源提供 **Exec** 按钮，exec 会话存在期间会显示在侧边栏中；处于 Suspended 状态时可从侧边栏恢复。设置 `force_exec: true` 可为直接计划入口启用相同路径；在 CLI 中使用 `--no-force-exec` 可单次退出此模式，在 WebUI 中可使用 **Create draft** 进行规划。参见 [`cruise exec`](cli-reference.md#cruise-exec)。
 
 <a id="cruise-list-actions"></a>
 ## `cruise list` 操作

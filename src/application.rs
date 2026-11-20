@@ -1833,6 +1833,8 @@ pub struct DirectoryEntry {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionConfigDefaults {
+    #[serde(default)]
+    pub force_exec: bool,
     pub steps: Vec<crate::workflow::SkippableStepNode>,
     pub after_pr_steps: Vec<crate::workflow::SkippableStepNode>,
     pub default_skipped_steps: Vec<String>,
@@ -2827,11 +2829,18 @@ impl CruiseApplication {
     /// Returns an error when the session store cannot be listed or read.
     pub fn list_sessions(&self) -> Result<Vec<SessionState>> {
         Ok(self
-            .manager
-            .list()?
+            .list_sessions_with_exec()?
             .into_iter()
             .filter(|state| !state.exec)
             .collect())
+    }
+    /// List all persisted sessions, including transient exec sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session store cannot be listed or read.
+    pub fn list_sessions_with_exec(&self) -> Result<Vec<SessionState>> {
+        self.manager.list()
     }
     /// Read one persisted session.
     ///
@@ -3274,6 +3283,7 @@ impl CruiseApplication {
             .filter(|step| available.contains(step))
             .collect();
         Ok(NewSessionConfigDefaults {
+            force_exec: config.force_exec(),
             steps,
             after_pr_steps,
             default_skipped_steps,
@@ -7333,6 +7343,135 @@ mod tests {
         let mut guards = crate::test_support::set_fake_home(home);
         guards.extend(crate::test_support::clear_config_override_envs());
         guards
+    }
+
+    #[test]
+    fn app_output_defaults_resolve_in_session_snapshots_and_request_environment() -> Result<()> {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new()?;
+        let _config = isolate_application_config(temp.path());
+        let app_config_dir = crate::paths::config_dir()?;
+        std::fs::create_dir_all(&app_config_dir)?;
+        std::fs::write(
+            app_config_dir.join("config.json"),
+            r#"{"languages":{"plan":"App plan","pr":"App PR"},"commit_message_template":"App commit","pr_body_template":"App body"}"#,
+        )?;
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join(".cruise"))?;
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let create_snapshot = |settings: &str| {
+            app.create_session(NewSessionRequest {
+                input: "app output defaults".into(),
+                base_dir: project.clone(),
+                config_yaml: Some(format!(
+                    "command: [echo]\nsteps:\n  main:\n    prompt: hello\n{settings}"
+                )),
+                ..NewSessionRequest::default()
+            })
+        };
+        let assert_outputs = |config: &crate::config::WorkflowConfig, expected: [&str; 4]| {
+            let [plan, pr, commit, body] = expected;
+            assert_eq!(config.effective_plan_language(), plan);
+            assert_eq!(config.effective_pr_language(), pr);
+            assert_eq!(config.commit_message_template.as_deref(), Some(commit));
+            assert_eq!(config.pr_body_template.as_deref(), Some(body));
+        };
+
+        let app_only = create_snapshot("")?;
+        assert_outputs(
+            &manager.load_config(&app_only)?,
+            ["App plan", "App PR", "App commit", "App body"],
+        );
+
+        std::fs::write(
+            app_config_dir.join("default.yaml"),
+            "languages: {plan: User plan, pr: User PR}\ncommit_message_template: User commit\npr_body_template: User body\n",
+        )?;
+        std::fs::write(
+            project.join(".cruise/default.yaml"),
+            "languages: {plan: Project plan}\npr_body_template: Project body\n",
+        )?;
+        let partial = create_snapshot("languages: {pr: Workflow PR}\n")?;
+        assert_outputs(
+            &manager.load_config(&partial)?,
+            ["Project plan", "Workflow PR", "User commit", "Project body"],
+        );
+        let legacy = create_snapshot(
+            "plan_language: Legacy plan\ncommit_message_template: Workflow commit\n",
+        )?;
+        assert_outputs(
+            &manager.load_config(&legacy)?,
+            ["Legacy plan", "User PR", "Workflow commit", "Project body"],
+        );
+
+        let request_env = BTreeMap::from([
+            ("CRUISE_LANGUAGE_PLAN".into(), "Request plan".into()),
+            ("CRUISE_LANGUAGE_PR".into(), "Request PR".into()),
+            (
+                "CRUISE_COMMIT_MESSAGE_TEMPLATE".into(),
+                "Request commit".into(),
+            ),
+            ("CRUISE_PR_BODY_TEMPLATE".into(), "Request body".into()),
+        ]);
+        assert_outputs(
+            &manager.load_config_with_env(
+                &app_only,
+                crate::config::ConfigEnv::Snapshot(&request_env),
+            )?,
+            [
+                "Request plan",
+                "Request PR",
+                "Request commit",
+                "Request body",
+            ],
+        );
+        assert_outputs(
+            &manager.load_config(&app_only)?,
+            ["App plan", "App PR", "App commit", "App body"],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn app_output_defaults_reject_invalid_effective_template_without_saving_state() -> Result<()> {
+        let _lock = crate::test_support::lock_process();
+        let temp = tempfile::TempDir::new()?;
+        let _config = isolate_application_config(temp.path());
+        let app_config_dir = crate::paths::config_dir()?;
+        std::fs::create_dir_all(&app_config_dir)?;
+        std::fs::write(
+            app_config_dir.join("config.json"),
+            r#"{"pr_body_template":"{typo}"}"#,
+        )?;
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project)?;
+        let manager = SessionManager::new(temp.path().join("sessions"));
+        let app = CruiseApplication::new(manager.clone());
+        let request = |settings: &str| NewSessionRequest {
+            input: "invalid app template".into(),
+            base_dir: project.clone(),
+            config_yaml: Some(format!(
+                "command: [echo]\nsteps:\n  main:\n    prompt: hello\n{settings}"
+            )),
+            ..NewSessionRequest::default()
+        };
+        let Err(error) = app.create_session(request("")) else {
+            panic!("invalid effective app template should be rejected");
+        };
+        assert!(
+            error.to_string().contains("unknown variable `{typo}`"),
+            "{error}"
+        );
+        let sessions = manager.list()?;
+        assert_eq!(sessions.first().map(|session| session.id.as_str()), None);
+
+        let state = app.create_session(request("pr_body_template: '{title}'\n"))?;
+        assert_eq!(
+            manager.load_config(&state)?.pr_body_template.as_deref(),
+            Some("{title}")
+        );
+        Ok(())
     }
 
     #[test]

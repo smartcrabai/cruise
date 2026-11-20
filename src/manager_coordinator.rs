@@ -1218,7 +1218,7 @@ async fn finalize_child_inner(
             }
             runtime.block_on(crate::worktree_pr::commit_changes(
                 worktree,
-                "Finalize Manager task",
+                || Ok("Finalize Manager task".to_string()),
                 None,
             ))?;
         }

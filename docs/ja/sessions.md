@@ -72,7 +72,7 @@ Warning: Fallback: provider/primary -> provider/fallback (503, attempt 1/5)
 Model: provider/fallback
 ```
 
-> **`cruise exec`** は一時的なライフサイクルを持つ別経路です。プランニング、ワークツリー作成、PR 作成を行わずにカレントディレクトリで実行し、終端状態に達するとセッションを削除します。一時停止または中断された exec セッションは ID を指定すれば再開できます。`force_exec: true` を設定すると、直接の plan エントリーポイントでも同じ経路が有効になります。1 回だけ無効にするには `--no-force-exec` を使います。[`cruise exec`](cli-reference.md#cruise-exec)を参照してください。
+> **`cruise exec`** は一時的なライフサイクルを持つ別経路です。プランニング、ワークツリー作成、PR 作成を行わずにカレントディレクトリで実行し、終端状態に達するとセッションを削除します。一時停止または中断された exec セッションは ID を指定すれば再開できます。WebUI の Directory ソースには **Exec** ボタンがあり、exec セッションは存在する間サイドバーに表示され、Suspended の場合はそこから再開できます。`force_exec: true` を設定すると、直接の plan エントリーポイントでも同じ経路が有効になります。CLI で 1 回だけ無効にするには `--no-force-exec` を使い、WebUI で計画するには **Create draft** を使います。[`cruise exec`](cli-reference.md#cruise-exec)を参照してください。
 
 <a id="cruise-list-actions"></a>
 ## `cruise list` のアクション

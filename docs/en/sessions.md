@@ -74,7 +74,7 @@ Warning: Fallback: provider/primary -> provider/fallback (503, attempt 1/5)
 Model: provider/fallback
 ```
 
-> **`cruise exec`** is a separate path with a transient lifecycle: it runs in the current directory without planning, worktree creation, or PR creation, and deletes its session when it reaches a terminal state. Paused or interrupted exec sessions can still be resumed by ID. Set `force_exec: true` to enable the same path for direct plan entry points; use `--no-force-exec` to opt out once. See [`cruise exec`](cli-reference.md#cruise-exec).
+> **`cruise exec`** is a separate path with a transient lifecycle: it runs in the current directory without planning, worktree creation, or PR creation, and deletes its session when it reaches a terminal state. Paused or interrupted exec sessions can still be resumed by ID. The WebUI offers **Exec** for the Directory source and shows exec sessions in the sidebar while they exist; Suspended sessions can be resumed there. Set `force_exec: true` to enable the same path for direct plan entry points; use `--no-force-exec` to opt out once on the CLI or **Create draft** to plan in the WebUI. See [`cruise exec`](cli-reference.md#cruise-exec).
 
 <a id="cruise-list-actions"></a>
 ## `cruise list` Actions
@@ -174,7 +174,7 @@ Each line is a relative path (file or directory). Absolute paths and `..` traver
 
 When `cruise list` or the WebUI session detail view loads a session, a session in the `Running` phase is checked for liveness. If the runner process is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
 
-Ordinary suspended sessions can be resumed from `cruise list` or the WebUI, or reset to Planned. The `run --all` command also picks up ordinary Suspended sessions alongside Planned ones. Manager-owned children instead use the Manager controls described above.
+Ordinary suspended non-exec sessions can be resumed from `cruise list` or the WebUI, or reset to Planned. The `run --all` command also picks them up alongside Planned sessions. Suspended exec sessions can be resumed in the WebUI or with `cruise run <id>`, but cannot be reset to Planned and are excluded from `run --all`. Manager-owned children instead use the Manager controls described above.
 
 <a id="parallel-session-execution"></a>
 ## Parallel Session Execution

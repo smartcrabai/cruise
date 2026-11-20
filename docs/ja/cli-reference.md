@@ -317,6 +317,8 @@ Review は確認済みの欠陥を修正し、review pass で file が変更さ�
 
 workflow config に `force_exec: true` がある場合、従来形式の `cruise "task"`、`cruise plan "task"`、`cruise --plan "task"` は、計画、worktree、PR 作成を行わず現在の directory で実行します。`--no-force-exec`、`--repo`、`--grill`、issue input、image attachment は opt-out になりますが、`--skip-planning` と `--no-interactive-planning` は opt-out になりません。
 
+WebUI では Directory ソースに **Exec** ボタンがあり、`force_exec` workflow では **Create & plan** が **Execute** に置き換わります。どちらも指定された既存の絶対パスの作業 directory で直接実行します。CLI の opt-out とは異なり、WebUI の exec は画像添付と `#N` issue 入力を拒否し、暗黙に計画へ切り替えません。これらを使う場合や `force_exec` workflow で計画する場合は **Create draft** を使ってください。Repository ソースでは exec を実行しません。
+
 <a id="cruise---plan"></a>
 ## `cruise --plan`
 
@@ -393,6 +395,10 @@ Options:
 `cruise config --set-language ja` はアプリケーション設定 `uiLanguage` を保存します（読み込みでは `ui_language` も受け付けます）。`--set-language auto` は保存済みの言語を消去し、自動選択に戻します。明示的に指定できる tag は `en`、`zh-CN`、`es`、`fr`、`pt-BR`、`ja`、`ko` です。大文字小文字と、hyphen の代わりの underscore は許容されますが、`pt` や `en-US` などは受け付けません。`cruise config` は実効 `ui_language` とその適用元（`env`、`config`、`system`、`default`）を表示します。
 
 CLI の UI 言語は `CRUISE_UI_LANGUAGE` > アプリケーション `uiLanguage` > system locale > `en` の優先順です。空または `auto` の環境値、未設定または `auto` の config 値は、その優先層を未指定として扱います。無効な環境値は英語で警告して無視します。CLI setter とアプリケーション config の検証では無効値を拒否します。
+
+アプリケーション設定でもグローバル出力設定を指定できます。対応 key と優先順位は[グローバル出力設定](configuration.md#output-preferences)を参照してください。これらの設定は UI 言語を変更しません。
+
+`cruise config` は設定済みの値を JSON value line で表示します（例: `languages = {"plan":"Japanese","pr":"English"}`、`commit_message_template = "{title} [{session_id}]"`、`pr_body_template = "## Summary\n{body}"`）。他のアプリケーション設定を更新しても、これらの値は保持されます。後から `default.yaml` やアプリケーション設定を編集しても、保存済み snapshot は変わりません。対応する workflow override 環境変数を明示的に送った CLI request では、その request の間だけメモリ上で override されますが、snapshot は書き換えません。
 
 `cruise config --set-auto-requeue-max-attempts <N>` は CLI と WebUI の Run All 用に `run_all_auto_requeue_max_attempts` を設定します。CLI の `--auto-requeue-max-attempts <N>` flag は 1 batch だけ上書きします。
 

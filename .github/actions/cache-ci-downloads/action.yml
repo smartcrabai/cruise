@@ -5,6 +5,10 @@ inputs:
     description: Rust toolchain components included in the cache key.
     required: false
     default: minimal
+  save-rust-dependencies:
+    description: Save shared Linux Rust dependencies on main.
+    required: false
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -38,6 +42,13 @@ runs:
       uses: ./.github/actions/cache-rust-toolchain
       with:
         components: ${{ inputs.rust-components }}
+    - name: Cache shared Linux Rust dependencies
+      if: ${{ runner.os == 'Linux' }}
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      with:
+        shared-key: linux-specs
+        cmd-format: rustup run 1.99.1 {0}
+        save-if: ${{ inputs.save-rust-dependencies == 'true' && github.ref == 'refs/heads/main' }}
     - name: Cache checksum-pinned formal downloads
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:

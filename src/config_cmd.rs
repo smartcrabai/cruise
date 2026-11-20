@@ -62,6 +62,22 @@ pub fn run(args: &ConfigArgs) -> Result<()> {
         if let Some(model) = config.plan_model.as_ref() {
             println!("plan_model = {}", serde_json::to_string(model)?);
         }
+        if let Some(languages) = config
+            .languages
+            .as_ref()
+            .filter(|languages| languages.pr.is_some() || languages.plan.is_some())
+        {
+            println!("languages = {}", serde_json::to_string(languages)?);
+        }
+        if let Some(template) = config.commit_message_template.as_ref() {
+            println!(
+                "commit_message_template = {}",
+                serde_json::to_string(template)?
+            );
+        }
+        if let Some(template) = config.pr_body_template.as_ref() {
+            println!("pr_body_template = {}", serde_json::to_string(template)?);
+        }
         if !config.notifications.is_default() {
             println!(
                 "notifications = {}",

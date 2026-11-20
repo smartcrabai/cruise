@@ -48,15 +48,15 @@ cruise 按以下方式解析工作流配置：
 
 `$XDG_CONFIG_HOME/cruise/default.yaml` 提供用户默认值，`./.cruise/default.yaml` 提供项目默认值。当未设置 `XDG_CONFIG_HOME` 时，在 macOS/Linux 上默认使用 `~/.config/cruise/default.yaml`；在 Windows 上默认使用 `%APPDATA%\cruise\default.yaml`（如果未设置 `APPDATA`，则使用 `~/.config/cruise/default.yaml`）。这些文件为工作流中未设置的字段提供默认值，不能被选作工作流（使用 `-c` 或 `CRUISE_CONFIG` 指向它们会报错）。
 
-在适用时，优先级从高到低依次为：单次调用的 CLI 标志（包括用于选择工作流的 `-c`） > 配置环境变量覆盖 > 工作流文件 > `./.cruise/default.yaml` > `$XDG_CONFIG_HOME/cruise/default.yaml` > 应用程序模型默认值（`config.json` 或 `config.yaml`） > 内置默认值。对于普通提示，步骤级模型覆盖仍具有更高优先级。
+在适用时，优先级从高到低依次为：单次调用的 CLI 标志（包括用于选择工作流的 `-c`）> 配置环境变量覆盖 > 工作流文件 > `./.cruise/default.yaml` > `$XDG_CONFIG_HOME/cruise/default.yaml` > 应用默认值（包括模型和全局输出偏好）> 内置默认值。`languages.plan` 和 `languages.pr` 分别独立解析（参见[提示词语言](#prompt-languages)）。对于普通提示，步骤级模型覆盖仍具有更高优先级。
 
 当实际的 jcode 提示没有生效的模型时，Cruise 会创建 `$XDG_CONFIG_HOME/cruise/default.yaml`（或该平台通常使用的用户配置路径），将其内容设为 `model: null`，并在启动 jcode 前停止。请编辑该用户级文件，设置实际的 `provider/model[:effort]` 引用或裸模型。对于新会话，也可以在 `config.json`、`config.yaml`、工作流或 `CRUISE_MODEL` 中设置 `model`；规划调用可以使用 `plan_model` / `CRUISE_PLAN_MODEL`。
 
-更新设置后，请用发起请求的命令重试：运行失败的会话使用 `cruise run <SESSION>`，规划或执行请求则重新运行相应的 `cruise plan` 或 `cruise exec`。基于文件的会话会重新加载默认值，但快照会话不会重新应用后续的默认值或环境变更；要使用更新后的设置，请启动新的快照会话。
+更新设置后，请用发起请求的命令重试：运行失败的会话使用 `cruise run <SESSION>`，规划或执行请求则重新运行相应的 `cruise plan` 或 `cruise exec`。基于文件的会话会重新加载默认值。之后对 `default.yaml` 或应用配置的编辑不会更改已保存的快照；通过 CLI 请求显式发送的受支持 workflow override 环境变量仍会在该请求期间于内存中覆盖快照值，但不会重写快照。要采用其他配置更改，请启动新的快照会话。
 
 - `env` 和 `mcp_servers` 按键合并（较高层级的值优先）。
 - `command` 和 `sdk` 构成一对：如果某一层设置了其中任意一项，则忽略所有较低层级中的这一对设置。
-- 其他字段（`model`、`plan_model`、`subagent_model`、`max_retries`、`interactive_planning`、`languages`、`cleanup_after_pr`、`force_exec`、`computer_use`、`permission`、`disallowed_tools`、`retry`、`formal_verify`）取自设置了相应字段的最高层级。限制列表在各层级之间采用替换方式；在工作流中显式设置 `disallowed_tools: []` 会清除继承的默认值。
+- 其他字段（`model`、`plan_model`、`subagent_model`、`max_retries`、`interactive_planning`、`cleanup_after_pr`、`force_exec`、`computer_use`、`permission`、`disallowed_tools`、`retry`、`formal_verify`、`commit_message_template`、`pr_body_template`）取自设置了相应字段的最高层级。`languages.plan` 和 `languages.pr` 分别独立解析（参见[提示词语言](#prompt-languages)）。限制列表在各层级之间采用替换方式；在工作流中显式设置 `disallowed_tools: []` 会清除继承的默认值。
 - 如果默认配置指定的后端（`command` / `sdk`）与工作流不同，且会填充未设置的后端专属字段（例如 `model`、`retry`、`mcp_servers`），校验会失败。请在工作流中设置相应字段，或从 `default.yaml` 中移除。
 
 `pre_steps:` 定义仅执行命令的步骤（`command`、`env`、`timeout`、`skip`、`when`），这些步骤会以 `pre/<name>` 的形式插入工作流 `steps` 的开头。它们不会在规划阶段或 `after-pr` 中运行。用户步骤排在前面，项目步骤排在后面；与用户步骤同名的项目步骤会在原位置替换该用户步骤。
@@ -182,7 +182,7 @@ steps:
 
 UI 显示语言独立于提示词语言。可通过应用的 `uiLanguage` 或 `CRUISE_UI_LANGUAGE` 配置；WebUI 浏览器可以使用自己的语言选择器覆盖服务器默认值。这些设置不会更改 `languages.pr` 或 `languages.plan`。
 
-`languages.pr` 控制自动生成的 PR 标题和正文所用语言，`languages.plan` 控制 cruise 内置规划提示词所用语言。`CRUISE_LANGUAGE_PR` 和 `CRUISE_LANGUAGE_PLAN` 会覆盖对应的 YAML 值；空白环境变量值会被忽略。否则，会对 `LC_ALL`、`LC_MESSAGES`、`LANG`、`LANGUAGE` 中第一个非空值进行一次映射（不受支持的值不会继续回退），最后使用 `English`。
+`languages.pr` 控制自动生成的 PR 标题和正文所用语言，`languages.plan` 控制 Cruise 内置规划提示词所用语言。工作流和 `default.yaml` 中的值优先于对应的应用配置；应用配置会分别补充缺失的计划语言或 PR 语言。已弃用的顶层 `pr_language` 和 `plan_language` 也算作显式值。`CRUISE_LANGUAGE_PR` 和 `CRUISE_LANGUAGE_PLAN` 会覆盖已配置的值；空白环境变量值会被忽略。如果没有适用的配置值，则对 `LC_ALL`、`LC_MESSAGES`、`LANG`、`LANGUAGE` 中第一个非空值进行一次映射（不受支持的值不会继续回退），最后使用 `English`。
 
 ```yaml
 languages:
@@ -195,7 +195,7 @@ languages:
 <a id="commit-and-pr-templates"></a>
 ### 提交和 PR 模板
 
-可选的顶层字符串键 `commit_message_template` 和 `pr_body_template` 用于自定义工作树 PR 创建流程中由宿主生成的提交消息和 PR 正文。可在工作流、用户的 `<config_dir>/default.yaml` 或项目的 `.cruise/default.yaml` 中设置它们。优先级为：工作流 > 项目默认值 > 用户默认值 > 未设置。它们不是 CLI 选项，也不是环境变量覆盖项。
+可选的顶层字符串键 `commit_message_template` 和 `pr_body_template` 用于自定义工作树 PR 创建流程中由宿主生成的提交消息和 PR 正文。可在工作流、用户的 `<config_dir>/default.yaml`、项目的 `.cruise/default.yaml` 或应用配置 `config.yaml` / `config.json` 中设置。应用配置也接受 `commitMessageTemplate` 和 `prBodyTemplate`。优先级为：工作流 > 项目默认值 > 用户默认值 > 应用设置 > 未设置；之后，`CRUISE_COMMIT_MESSAGE_TEMPLATE` 和 `CRUISE_PR_BODY_TEMPLATE` 会覆盖已配置的值。它们不是 CLI 选项。
 
 ```yaml
 commit_message_template: "{title} [{session_id}]"
@@ -257,7 +257,7 @@ pr_body_template: |
 
 名称通常由 `CRUISE_` 加上大写的键路径组成，并将点和连字符替换为下划线。上述语言子字段的环境变量名称仅支持表中所示的拼写。值会去除首尾空白，仅包含空白的值会被忽略。布尔值仅接受 `true`、`false`、`1` 或 `0`；整数必须由不带正负号的十进制数字组成。文本按字面值处理。模型值按单个模型的字面值处理，除非以 `[` 或 `{` 开头，此时会按 JSON 解析，并且必须符合该字段通常的模型结构。具体来说，`CRUISE_MODEL` 和 `CRUISE_PLAN_MODEL` 现在接受 JSON 数组：此前，以 `[` 或 `{` 开头的值被视为字面模型名称。包含回退条目的数组会像 YAML 中一样启用模型回退。其他复合值必须使用 JSON，而不是 YAML 流式语法。在受支持的情况下，可选值应使用 JSON `null`，空列表应使用 `[]`，而不是空白值。无效值会触发指明变量名称的错误，并且仍会经过正常的配置验证。
 
-先应用父对象，再应用子字段覆盖，因此 `CRUISE_RETRY_MAX_DELAY_MS` 会覆盖 `CRUISE_RETRY` 中的对应字段，`CRUISE_LANGUAGE_PR` 会覆盖 `CRUISE_LANGUAGES`。设置 `CRUISE_SDK` 会清除已配置的命令，而设置 `CRUISE_COMMAND` 会清除已配置的 SDK。同时将这两个变量设为非空白值会报错。例如：
+先应用父对象，再应用子字段覆盖。`CRUISE_LANGUAGES` 会替换整个 `languages` 对象，然后 `CRUISE_LANGUAGE_PLAN` 和 `CRUISE_LANGUAGE_PR` 分别覆盖对应成员。同样，`CRUISE_RETRY_MAX_DELAY_MS` 会覆盖 `CRUISE_RETRY` 中的对应字段。设置 `CRUISE_SDK` 会清除已配置的命令，而设置 `CRUISE_COMMAND` 会清除已配置的 SDK。同时将这两个变量设为非空白值会报错。例如：
 
 ```sh
 export CRUISE_MODEL='["provider/primary", "provider/fallback"]'
@@ -302,6 +302,33 @@ Cruise 将应用设置与工作流 YAML 分开保存在 `$XDG_CONFIG_HOME/cruise
 对于 CLI，`CRUISE_UI_LANGUAGE` 的优先级高于 `uiLanguage`，其次是系统区域设置，最后回退到英语。环境变量值为空或为 `auto` 时，会使用下一优先级的设置。无效的环境变量值会触发英文警告并被忽略。系统区域设置检测会按顺序使用 `LC_ALL`、`LC_MESSAGES`、`LANG` 或 `LANGUAGE` 中第一个非空的值；如果该值不受支持，也不会尝试后续变量。如果无法通过环境变量确定区域设置，Windows 还会查询用户区域设置。macOS 和 Linux 仅使用环境变量，因此通过 GUI 启动时，如果没有这些环境变量，则默认使用英语。
 
 如果浏览器中的 `cruise_ui_language` Cookie 有效，WebUI 就会使用它，否则使用服务器进程的默认语言。在 WebUI 中选择语言会保存 Cookie 并重新加载页面，不会更改应用配置。界面语言独立于工作流的 `languages.pr` 和 `languages.plan`，这两项设置用于控制生成的提示词。
+
+<a id="output-preferences"></a>
+### 全局输出偏好
+
+应用配置 `config.yaml` 和 `config.json` 接受相同的全局提示词语言和模板设置。模板键也接受 camelCase 别名 `commitMessageTemplate` 和 `prBodyTemplate`。
+
+```yaml
+languages:
+  plan: Japanese
+  pr: English
+commit_message_template: "{title} [{session_id}]"
+pr_body_template: |
+  ## Summary
+  {body}
+```
+
+JSON 使用相同的键名和值类型，例如：
+
+```json
+{
+  "languages": {"plan": "Japanese", "pr": "English"},
+  "commit_message_template": "{title} [{session_id}]",
+  "pr_body_template": "## Summary\n{body}"
+}
+```
+
+提示词语言的 `plan` 和 `pr` 分别独立解析：工作流中的 `languages.plan` / `languages.pr`（或对应的旧版字段 `plan_language` / `pr_language`）> 项目默认值 > 用户默认值 > 应用偏好。`CRUISE_LANGUAGE_PLAN` / `CRUISE_LANGUAGE_PR` 会覆盖已配置的值；只有没有适用的配置值或环境变量覆盖时才使用区域设置推断。模板按工作流 > 项目默认值 > 用户默认值 > 应用设置的顺序解析，对应的模板环境变量会覆盖配置值。这些偏好和模板不会改变界面语言。内置模板通过 `{plan.language}` 和 `{pr.language}` 获取生效值。
 
 <a id="config-hot-reload"></a>
 ## 配置热重载

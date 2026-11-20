@@ -35,12 +35,6 @@ jobs:
           node-version: '26.13.1'
           cache: npm
           cache-dependency-path: tests/formal/package-lock.json
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: daemon-specs
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
       - name: Check lifecycle model and implementation
         run: bash scripts/check_daemon_specs.sh
       - name: Upload specification evidence

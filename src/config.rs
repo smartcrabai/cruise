@@ -107,7 +107,7 @@ where
 }
 
 /// Nested language configuration (new style).
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 pub struct LanguagesConfig {
     /// Language for built-in PR title/body generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,6 +116,13 @@ pub struct LanguagesConfig {
     /// Language for built-in planning prompts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+}
+
+/// Whether a workflow language default can fill this side.
+///
+/// Legacy keys override defaults only for their corresponding language.
+pub(crate) fn language_default_applies(configured: Option<&str>, legacy: Option<&str>) -> bool {
+    configured.is_none() && legacy.is_none()
 }
 
 /// Agent permission mode for prompt steps.
@@ -260,8 +267,9 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub cleanup_after_pr: bool,
     /// Execute the workflow directly in the current directory for direct plan
-    /// entry points: `cruise <input>`, `cruise plan`, and `cruise --plan`.
-    /// Defaults to `false`; `--no-force-exec` opts out for one invocation.
+    /// entry points: `cruise <input>`, `cruise plan`, `cruise --plan`, and
+    /// `WebUI` Create & plan for a Directory source. Defaults to `false`;
+    /// `--no-force-exec` opts out for one CLI invocation. In `WebUI`, use Create draft to plan.
     #[serde(default)]
     pub force_exec: bool,
 

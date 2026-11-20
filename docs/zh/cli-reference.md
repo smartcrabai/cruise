@@ -317,6 +317,8 @@ Review 会修复已确认的缺陷；当 review 轮次更改了文件时，会�
 
 当 workflow 配置中设置了 `force_exec: true` 时，传统的位置参数形式 `cruise "task"`、`cruise plan "task"` 和 `cruise --plan "task"` 都会使用当前目录执行路径，不进行规划、不创建 worktree，也不创建 PR。`--no-force-exec`、`--repo`、`--grill`、issue 输入和图片附件会退出该模式；`--skip-planning` 和 `--no-interactive-planning` 不会退出。
 
+WebUI 的 Directory 来源提供 **Exec** 按钮；对于 `force_exec` workflow，**Execute** 会替代 **Create & plan**。两者都在指定的、已存在的绝对路径工作目录中直接执行。与 CLI 的退出方式不同，WebUI exec 会拒绝图片附件和 `#N` issue 输入，而不会悄悄转为规划；需要使用这些输入或为 `force_exec` workflow 规划时，请使用 **Create draft**。Repository 来源不会执行 exec。
+
 <a id="cruise---plan"></a>
 ## `cruise --plan`
 
@@ -393,6 +395,10 @@ Options:
 `cruise config --set-language ja` 会保存应用设置 `uiLanguage`（读取时也接受 `ui_language`）。使用 `--set-language auto` 可清除该设置，并恢复自动选择。支持的显式标签为 `en`、`zh-CN`、`es`、`fr`、`pt-BR`、`ja` 和 `ko`。大小写不敏感，且可用下划线替代连字符；但不接受 `pt` 和 `en-US` 等其他标签。`cruise config` 会报告生效的 `ui_language` 及其来源：`env`、`config`、`system` 或 `default`。
 
 CLI 的 UI 语言优先级为 `CRUISE_UI_LANGUAGE` > 应用设置 `uiLanguage` > 系统区域设置 > `en`。环境值为空或为 `auto`，以及配置值未设置或为 `auto`，都会使该层保持未指定。无效的环境值会以英语警告并忽略；CLI setter 和应用配置验证会拒绝无效值。
+
+应用配置也可以设置全局输出偏好；支持的键和优先级请参阅[全局输出偏好](configuration.md#output-preferences)。这些偏好不会改变界面语言。
+
+`cruise config` 会以 JSON 值行显示已设置的偏好，例如 `languages = {"plan":"Japanese","pr":"English"}`、`commit_message_template = "{title} [{session_id}]"` 和 `pr_body_template = "## Summary\n{body}"`。更新其他应用设置时会保留这些值。之后编辑 `default.yaml` 或应用配置不会更改已保存的快照；通过 CLI 请求显式发送的受支持 workflow override 环境变量仍会在该请求期间于内存中覆盖快照值，但不会重写快照。
 
 `cruise config --set-auto-requeue-max-attempts <N>` 会为 CLI 和 WebUI Run All 设置 `run_all_auto_requeue_max_attempts`。CLI flag `--auto-requeue-max-attempts <N>` 会在单个批次中覆盖该值。
 

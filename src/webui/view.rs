@@ -95,6 +95,7 @@ pub(crate) struct SessionRowVm {
     /// The raw input, shown as a second line only when `title` is set.
     pub(crate) subtitle: Option<String>,
     pub(crate) dir_label: String,
+    pub(crate) exec: bool,
     pub(crate) time_label: String,
     pub(crate) selected: bool,
     pub(crate) badge: PhaseBadgeVm,
@@ -422,6 +423,8 @@ pub(crate) struct FlagRowVm {
 pub(crate) struct NewSessionVm {
     pub(crate) source_mode: String,
     pub(crate) directory_selected: bool,
+    pub(crate) force_exec: bool,
+    pub(crate) show_exec: bool,
     pub(crate) input: String,
     pub(crate) base_dir: String,
     pub(crate) repo: String,
@@ -776,6 +779,7 @@ pub(crate) fn session_row(
             .filter(|_| !session.input.trim().is_empty())
             .map(|_| truncate(&session.input, 80)),
         dir_label: dir_label(&session.base_dir),
+        exec: session.exec,
         time_label: format_local_time(session.updated_at.as_ref().unwrap_or(&session.created_at)),
         selected: selected_id == Some(session.id.as_str()),
         badge: PhaseBadgeVm::new(session, fixing),
