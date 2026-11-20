@@ -712,8 +712,8 @@ fn provider_error_text_is_classified_for_fallback() {
 
 #[test]
 fn cancellation_requests_session_cancel_before_returning() {
-    let saw_cancel = Arc::new(AtomicBool::new(false));
-    let cancel_in_harness = Arc::clone(&saw_cancel);
+    let (message_accepted_tx, message_accepted_rx) = sync_channel(1);
+    let (cancelled_session_tx, cancelled_session_rx) = sync_channel(1);
     let client = fake_harness(move |frame, writer| match &frame.request {
         ApiRequest::CreateSession { .. } => {
             send_reply(
@@ -724,9 +724,12 @@ fn cancellation_requests_session_cancel_before_returning() {
                 writer,
             );
         }
-        ApiRequest::SendMessage { session_id, .. } => send_message_accepted(writer, session_id),
+        ApiRequest::SendMessage { session_id, .. } => {
+            send_message_accepted(writer, session_id);
+            let _ = message_accepted_tx.send(());
+        }
         ApiRequest::Cancel { session_id } => {
-            cancel_in_harness.store(true, Ordering::SeqCst);
+            let _ = cancelled_session_tx.send(session_id.clone());
             send_reply(frame, jcode_sdk::ApiEvent::Ok, writer);
             send_event(
                 jcode_sdk::ApiEvent::TurnStopped {
@@ -758,11 +761,22 @@ fn cancellation_requests_session_cancel_before_returning() {
     assert!(
         matches!(chunks.recv().unwrap_or_else(|error| panic!("{error}")), StreamChunk::Session(id) if id == "cancel-me")
     );
+    if let Err(error) = message_accepted_rx.recv_timeout(Duration::from_secs(5)) {
+        token.cancel();
+        worker
+            .join()
+            .unwrap_or_else(|_| panic!("turn worker panicked"));
+        panic!("jcode did not accept the session message before cancellation: {error:?}");
+    }
     token.cancel();
     let (result, _, _home) = worker
         .join()
         .unwrap_or_else(|_| panic!("turn worker panicked"));
-    assert!(saw_cancel.load(Ordering::SeqCst));
+    assert_eq!(
+        cancelled_session_rx.try_recv().ok().as_deref(),
+        Some("cancel-me"),
+        "cancellation must target the active session"
+    );
     assert!(matches!(result, Ok(StreamChunk::Error(message)) if message.contains("Interrupted")));
 }
 #[test]

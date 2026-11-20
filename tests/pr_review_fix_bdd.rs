@@ -405,7 +405,7 @@ if [[ "$subcommand" == "push" ]]; then
     "$real_git" --git-dir "$CRUISE_FIXTURE_ORIGIN" \
       update-ref refs/heads/feature "$(cat "$CRUISE_FIXTURE_ROOT/race-head.txt")" || exit
   fi
-  "$real_git" "${git_prefix[@]}" push "${push_flags[@]}" \
+  "$real_git" ${git_prefix[@]+"${git_prefix[@]}"} push "${push_flags[@]}" \
     -- "$CRUISE_FIXTURE_ORIGIN" "$refspec"
   result=$?
   if [ "$result" -eq 0 ]; then touch "$CRUISE_FIXTURE_ROOT/host-pushed"; fi
@@ -418,16 +418,16 @@ if [[ "$subcommand" == "update-ref" \
   && "${1-}" == "--no-deref" && "${2-}" == "-m" \
   && "${4-}" == "refs/heads/feature" && "$#" == 6 ]]; then
   parent=$6
-  tree=$("$real_git" "${git_prefix[@]}" write-tree) || exit
-  sibling=$("$real_git" "${git_prefix[@]}" -c user.name=BDD \
+  tree=$("$real_git" ${git_prefix[@]+"${git_prefix[@]}"} write-tree) || exit
+  sibling=$("$real_git" ${git_prefix[@]+"${git_prefix[@]}"} -c user.name=BDD \
     -c user.email=bdd@example.invalid commit-tree "$tree" -p "$parent" \
     -m 'concurrent sibling') || exit
-  "$real_git" "${git_prefix[@]}" update-ref --no-deref \
+  "$real_git" ${git_prefix[@]+"${git_prefix[@]}"} update-ref --no-deref \
     refs/heads/feature "$sibling" "$parent" || exit
   touch "$CRUISE_FIXTURE_ROOT/cas-raced"
 fi
 
-exec "$real_git" "${git_prefix[@]}" "$subcommand" "$@"
+exec "$real_git" ${git_prefix[@]+"${git_prefix[@]}"} "$subcommand" "$@"
 "#,
         );
         let old_path = std::env::var_os("PATH").unwrap_or_default();
