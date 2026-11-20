@@ -12,10 +12,9 @@ Thank you for your interest in contributing.
 
 ## Native update smoke
 
-On Linux and macOS, native update smoke reuses `cruise-runtime` from
-`cargo test --all-features`. The Linux action daemon test uses it before the
-smoke builds the older binary. On Windows, the smoke builds both versions on a
-separate runner so it can run alongside the tests.
+On Linux and Windows, native update smoke builds both versions on a separate
+runner alongside the tests. On macOS, it reuses `cruise-runtime` from
+`cargo test --all-features` and builds only the older launcher and runtime.
 
 To build both versions and run the smoke locally, use
 `python3 scripts/test_update_smoke.py --build` (`python` on Windows).

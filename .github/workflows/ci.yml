@@ -567,9 +567,30 @@ jobs:
           CRUISE_ACTION_TEST_BIN: target/debug/cruise-runtime
         run: bash scripts/test_action_run.sh
 
-      # The smoke replaces target/debug/cruise-runtime with A, so run the daemon test first.
       - name: Smoke native update with real A/B binaries
+        if: matrix.os == 'macos-latest'
         run: python3 scripts/test_update_smoke.py --build --next-runtime target/debug/cruise-runtime
+
+  native-update-smoke-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: test
+          save-if: false
+
+      - name: Smoke native update with real A/B binaries
+        run: python3 scripts/test_update_smoke.py --build
 
   test-windows:
     name: ${{ matrix.check }}
