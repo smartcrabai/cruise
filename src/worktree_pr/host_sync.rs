@@ -2076,6 +2076,10 @@ while [ "$#" -gt 0 ]; do
         *) break ;;
     esac
 done
+# Bash 3.2 treats an empty argument array as unset under nounset.
+exec_git() {{
+    exec "$REAL_GIT" ${{global[@]+"${{global[@]}}"}} "$@"
+}}
 case "$1" in
     remote)
         test "$2" = get-url
@@ -2084,15 +2088,15 @@ case "$1" in
         test "$2" = --exit-code
         case "$3" in origin|"$BARE") ;; *) exit 91 ;; esac
         shift 3
-        exec "$REAL_GIT" "${{global[@]}}" ls-remote --exit-code "$BARE" "$@" ;;
+        exec_git ls-remote --exit-code "$BARE" "$@" ;;
     fetch)
         test "$5" = origin
-        exec "$REAL_GIT" "${{global[@]}}" "$1" "$2" "$3" "$4" "$BARE" "$6" ;;
+        exec_git "$1" "$2" "$3" "$4" "$BARE" "$6" ;;
     push)
         test "$6" = 'https://github.com/owner/repo.git'
-        exec "$REAL_GIT" "${{global[@]}}" "$1" "$2" "$3" "$4" "$5" "$BARE" "$7" ;;
+        exec_git "$1" "$2" "$3" "$4" "$5" "$BARE" "$7" ;;
     *)
-        exec "$REAL_GIT" "${{global[@]}}" "$@" ;;
+        exec_git "$@" ;;
 esac
 "#,
             quote(&real_git),
@@ -2228,7 +2232,11 @@ esac
                 "refs/heads/feature",
             ],
         );
-        assert!(remote.status.success(), "read disposable bare remote");
+        assert!(
+            remote.status.success(),
+            "read disposable bare remote: {}",
+            String::from_utf8_lossy(&remote.stderr)
+        );
         let remote_oid = std::str::from_utf8(&remote.stdout)
             .unwrap_or_else(|error| panic!("decode bare remote result: {error}"))
             .split_whitespace()
