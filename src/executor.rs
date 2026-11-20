@@ -1169,11 +1169,11 @@ fn build_jcode_config_with_access(
                 .to_owned(),
         ));
     }
-    let resolved = resolver(crate::provider_install::Provider::Jcode, req)?;
+    let provider_installation = resolver(crate::provider_install::Provider::Jcode, req)?;
     #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
-    let binary = Some(resolved.program);
+    let binary = Some(provider_installation.program);
     #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
-    let binary = resolved.explicit_path();
+    let binary = provider_installation.explicit_path();
     Ok(JcodeRunnerConfig {
         binary,
         sandbox_access: sandbox_access.clone(),

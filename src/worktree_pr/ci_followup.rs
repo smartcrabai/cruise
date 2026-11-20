@@ -473,6 +473,14 @@ fn pull_request_identity(root: &Path, target: &Target) -> Result<PullRequestIden
             provider_json(root, "glab", target, &endpoint)?
         }
     };
+    validate_pull_request_response(&value, target)?;
+    match target.provider {
+        Provider::Github => github_pull_request_identity(&value, target),
+        Provider::Gitlab => gitlab_pull_request_identity(root, target, &value),
+    }
+}
+
+fn validate_pull_request_response(value: &Value, target: &Target) -> Result<()> {
     let url = value
         .get(if target.provider == Provider::Github {
             "html_url"
@@ -496,129 +504,117 @@ fn pull_request_identity(root: &Path, target: &Target) -> Result<PullRequestIden
             "PR/MR is not open; CI follow-up is refused".into(),
         ));
     }
-    match target.provider {
-        Provider::Github => {
-            let head = value
-                .pointer("/head/sha")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CruiseError::Other("GitHub PR response omitted source head".into())
-                })?;
-            let branch = value
-                .pointer("/head/ref")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CruiseError::Other("GitHub PR response omitted source branch".into())
-                })?;
-            let source = value
-                .pointer("/head/repo/full_name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CruiseError::Other("GitHub PR response omitted source repository".into())
-                })?;
-            let base = value
-                .pointer("/base/repo/full_name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CruiseError::Other("GitHub PR response omitted base repository".into())
-                })?;
-            if !base.eq_ignore_ascii_case(&target.repository) || !valid_repository_name(source) {
-                return Err(CruiseError::Other(
-                    "GitHub PR repository identity does not match origin".into(),
-                ));
-            }
-            Ok(PullRequestIdentity {
-                head: normalize_oid(head)?,
-                source_repository: source.to_ascii_lowercase(),
-                source_branch: safe_branch(branch)?,
-                source_project_id: None,
-                pipeline_id: None,
-                pipeline_project_id: None,
-            })
-        }
-        Provider::Gitlab => {
-            let head = value
-                .pointer("/diff_refs/head_sha")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CruiseError::Other("GitLab MR response omitted source head".into())
-                })?;
-            let head = normalize_oid(head)?;
-            let branch = safe_branch(
-                value
-                    .get("source_branch")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        CruiseError::Other("GitLab MR response omitted source branch".into())
-                    })?,
-            )?;
-            let project_id = value
-                .get("source_project_id")
-                .and_then(numeric_id)
-                .ok_or_else(|| {
-                    CruiseError::Other("GitLab MR response omitted source project ID".into())
-                })?;
-            let project = provider_json(root, "glab", target, &format!("projects/{project_id}"))?;
-            let source = project
-                .get("path_with_namespace")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CruiseError::Other("GitLab source project response omitted its path".into())
-                })?;
-            if !valid_repository_name(source) {
-                return Err(CruiseError::Other(
-                    "GitLab source project path is invalid".into(),
-                ));
-            }
-            let branch_path = encode_path_segment(&branch);
-            let branch_info = provider_json(
-                root,
-                "glab",
-                target,
-                &format!("projects/{project_id}/repository/branches/{branch_path}"),
-            )?;
-            let branch_head = branch_info
-                .pointer("/commit/id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CruiseError::Other("GitLab source branch response omitted its commit".into())
-                })?;
-            if branch_info.get("name").and_then(Value::as_str) != Some(branch.as_str())
-                || !branch_head.eq_ignore_ascii_case(&head)
-            {
-                return Err(CruiseError::Other(
-                    "GitLab source branch no longer matches the MR head".into(),
-                ));
-            }
-            let (pipeline_id, pipeline_project_id) =
-                match value.get("head_pipeline").filter(|value| !value.is_null()) {
-                    Some(pipeline) => {
-                        let id = pipeline.get("id").and_then(numeric_id).ok_or_else(|| {
-                            CruiseError::Other("GitLab MR head pipeline omitted its ID".into())
-                        })?;
-                        let project =
-                            pipeline
-                                .get("project_id")
-                                .and_then(numeric_id)
-                                .ok_or_else(|| {
-                                    CruiseError::Other(
-                                        "GitLab MR head pipeline omitted its project ID".into(),
-                                    )
-                                })?;
-                        (Some(id), Some(project))
-                    }
-                    None => (None, None),
-                };
-            Ok(PullRequestIdentity {
-                head,
-                source_repository: source.to_ascii_lowercase(),
-                source_branch: branch,
-                source_project_id: Some(project_id),
-                pipeline_id,
-                pipeline_project_id,
-            })
-        }
+    Ok(())
+}
+
+fn github_pull_request_identity(value: &Value, target: &Target) -> Result<PullRequestIdentity> {
+    let head = value
+        .pointer("/head/sha")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CruiseError::Other("GitHub PR response omitted source head".into()))?;
+    let branch = value
+        .pointer("/head/ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CruiseError::Other("GitHub PR response omitted source branch".into()))?;
+    let source = value
+        .pointer("/head/repo/full_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CruiseError::Other("GitHub PR response omitted source repository".into()))?;
+    let base = value
+        .pointer("/base/repo/full_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CruiseError::Other("GitHub PR response omitted base repository".into()))?;
+    if !base.eq_ignore_ascii_case(&target.repository) || !valid_repository_name(source) {
+        return Err(CruiseError::Other(
+            "GitHub PR repository identity does not match origin".into(),
+        ));
     }
+    Ok(PullRequestIdentity {
+        head: normalize_oid(head)?,
+        source_repository: source.to_ascii_lowercase(),
+        source_branch: safe_branch(branch)?,
+        source_project_id: None,
+        pipeline_id: None,
+        pipeline_project_id: None,
+    })
+}
+
+fn gitlab_pull_request_identity(
+    root: &Path,
+    target: &Target,
+    value: &Value,
+) -> Result<PullRequestIdentity> {
+    let head = value
+        .pointer("/diff_refs/head_sha")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CruiseError::Other("GitLab MR response omitted source head".into()))?;
+    let head = normalize_oid(head)?;
+    let branch = safe_branch(
+        value
+            .get("source_branch")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CruiseError::Other("GitLab MR response omitted source branch".into()))?,
+    )?;
+    let project_id = value
+        .get("source_project_id")
+        .and_then(numeric_id)
+        .ok_or_else(|| CruiseError::Other("GitLab MR response omitted source project ID".into()))?;
+    let project = provider_json(root, "glab", target, &format!("projects/{project_id}"))?;
+    let source = project
+        .get("path_with_namespace")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            CruiseError::Other("GitLab source project response omitted its path".into())
+        })?;
+    if !valid_repository_name(source) {
+        return Err(CruiseError::Other(
+            "GitLab source project path is invalid".into(),
+        ));
+    }
+    let branch_path = encode_path_segment(&branch);
+    let branch_info = provider_json(
+        root,
+        "glab",
+        target,
+        &format!("projects/{project_id}/repository/branches/{branch_path}"),
+    )?;
+    let branch_head = branch_info
+        .pointer("/commit/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            CruiseError::Other("GitLab source branch response omitted its commit".into())
+        })?;
+    if branch_info.get("name").and_then(Value::as_str) != Some(branch.as_str())
+        || !branch_head.eq_ignore_ascii_case(&head)
+    {
+        return Err(CruiseError::Other(
+            "GitLab source branch no longer matches the MR head".into(),
+        ));
+    }
+    let (pipeline_id, pipeline_project_id) =
+        match value.get("head_pipeline").filter(|value| !value.is_null()) {
+            Some(pipeline) => {
+                let id = pipeline.get("id").and_then(numeric_id).ok_or_else(|| {
+                    CruiseError::Other("GitLab MR head pipeline omitted its ID".into())
+                })?;
+                let project = pipeline
+                    .get("project_id")
+                    .and_then(numeric_id)
+                    .ok_or_else(|| {
+                        CruiseError::Other("GitLab MR head pipeline omitted its project ID".into())
+                    })?;
+                (Some(id), Some(project))
+            }
+            None => (None, None),
+        };
+    Ok(PullRequestIdentity {
+        head,
+        source_repository: source.to_ascii_lowercase(),
+        source_branch: branch,
+        source_project_id: Some(project_id),
+        pipeline_id,
+        pipeline_project_id,
+    })
 }
 
 fn encode_path_segment(value: &str) -> String {
@@ -1029,47 +1025,8 @@ fn collect_gitlab_evidence(
     if hinted_jobs.is_empty() {
         complete = false;
     }
-    let pipeline_list_endpoint = format!(
-        "{}/merge_requests/{}/pipelines?per_page=100",
-        context.target.gitlab_project(),
-        context.target.number
-    );
-    let pipeline_list = provider_json(
-        &context.root,
-        "glab",
-        &context.target,
-        &pipeline_list_endpoint,
-    )?;
-    let pipeline_list = pipeline_list
-        .as_array()
-        .ok_or_else(|| CruiseError::Other("GitLab MR pipeline response was not an array".into()))?;
-    if pipeline_list.len() >= 100 {
-        complete = false;
-    }
-    let listed = pipeline_list
-        .iter()
-        .find(|pipeline| pipeline.get("id").and_then(numeric_id).as_deref() == Some(pipeline_id));
-    let Some(listed_pipeline) = listed else {
+    if !listed_gitlab_pipeline(context, pipeline_id, project_id, &mut complete)? {
         return Ok((Vec::new(), String::new(), false));
-    };
-    if listed_pipeline
-        .get("project_id")
-        .and_then(numeric_id)
-        .as_deref()
-        != Some(project_id)
-        || listed_pipeline.get("status").and_then(Value::as_str) != Some("failed")
-    {
-        return Ok((Vec::new(), String::new(), false));
-    }
-    if listed_pipeline
-        .get("sha")
-        .and_then(Value::as_str)
-        .is_none_or(|sha| !sha.eq_ignore_ascii_case(&context.head))
-    {
-        return Err(CruiseError::Other(
-            "GitLab merged-results pipeline is not source-head-bound; automatic repair is refused"
-                .into(),
-        ));
     }
     let pipeline = gitlab_pipeline(context, pipeline_id)?;
     let jobs = gitlab_jobs(context, pipeline_id)?;
@@ -1121,6 +1078,48 @@ fn collect_gitlab_evidence(
     }
     assign_selections(&mut checks)?;
     Ok((checks, logs, complete))
+}
+
+fn listed_gitlab_pipeline(
+    context: &Context,
+    pipeline_id: &str,
+    project_id: &str,
+    complete: &mut bool,
+) -> Result<bool> {
+    let endpoint = format!(
+        "{}/merge_requests/{}/pipelines?per_page=100",
+        context.target.gitlab_project(),
+        context.target.number
+    );
+    let pipelines = provider_json(&context.root, "glab", &context.target, &endpoint)?;
+    let pipelines = pipelines
+        .as_array()
+        .ok_or_else(|| CruiseError::Other("GitLab MR pipeline response was not an array".into()))?;
+    if pipelines.len() >= 100 {
+        *complete = false;
+    }
+    let Some(pipeline) = pipelines
+        .iter()
+        .find(|pipeline| pipeline.get("id").and_then(numeric_id).as_deref() == Some(pipeline_id))
+    else {
+        return Ok(false);
+    };
+    if pipeline.get("project_id").and_then(numeric_id).as_deref() != Some(project_id)
+        || pipeline.get("status").and_then(Value::as_str) != Some("failed")
+    {
+        return Ok(false);
+    }
+    if pipeline
+        .get("sha")
+        .and_then(Value::as_str)
+        .is_none_or(|sha| !sha.eq_ignore_ascii_case(&context.head))
+    {
+        return Err(CruiseError::Other(
+            "GitLab merged-results pipeline is not source-head-bound; automatic repair is refused"
+                .into(),
+        ));
+    }
+    Ok(true)
 }
 
 fn gitlab_pipeline_project(context: &Context) -> Result<String> {
@@ -2232,6 +2231,10 @@ exec "$CRUISE_TEST_REAL_GIT" "${args[@]}"
     }
 
     impl Fixture {
+        #[expect(
+            clippy::too_many_lines,
+            reason = "fixture setup preserves the ordered isolated Git/provider lifecycle"
+        )]
         fn new() -> Self {
             let lock = crate::test_support::lock_process();
             let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));

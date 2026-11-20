@@ -93,17 +93,7 @@ pub(super) fn launch(
     }
     let egress_socket = egress.join("model.sock");
     let git = linux_git::prepare(&cwd, &scratch.0)?;
-    let mut inputs = Vec::with_capacity(request.sandbox_access.inputs.len() + 1);
-    for path in &request.sandbox_access.inputs {
-        inputs.push(unalias(path, "requested jcode input")?);
-    }
-    inputs.push(guest_home.join(JCODE_CONFIG_FILE));
-    let output = request
-        .sandbox_access
-        .output_file
-        .as_deref()
-        .map(reserve_output)
-        .transpose()?;
+    let (inputs, output) = sandbox_files(request, &guest_home)?;
     let proxy = linux_proxy::start(&egress_socket, route)
         .map_err(|error| format!("could not start the private jcode model gateway: {error}"))?;
     let mut sandbox = Sandbox::launch(
@@ -133,6 +123,24 @@ pub(super) fn launch(
             _scratch: scratch,
         },
     ))
+}
+
+fn sandbox_files(
+    request: &JcodeRunnerConfig,
+    guest_home: &Path,
+) -> Result<(Vec<PathBuf>, Option<PathBuf>), String> {
+    let mut inputs = Vec::with_capacity(request.sandbox_access.inputs.len() + 1);
+    for path in &request.sandbox_access.inputs {
+        inputs.push(unalias(path, "requested jcode input")?);
+    }
+    inputs.push(guest_home.join(JCODE_CONFIG_FILE));
+    let output = request
+        .sandbox_access
+        .output_file
+        .as_deref()
+        .map(reserve_output)
+        .transpose()?;
+    Ok((inputs, output))
 }
 
 fn canonical(path: &Path, purpose: &str) -> Result<PathBuf, String> {
@@ -214,6 +222,24 @@ fn stage_provider(
             "Bubblewrap jcode requires the same provider for the main turn and subagents".into(),
         );
     }
+    let (route, key, auth_file, guest) = provider_settings(source, provider)?;
+    restrict_provider_environment(&mut env, key);
+    stage_provider_files(source, envelope, state, auth_file, &guest)?;
+    Ok((route, env))
+}
+
+fn provider_settings(
+    source: &Path,
+    provider: &str,
+) -> Result<
+    (
+        Route,
+        Option<&'static str>,
+        Option<&'static str>,
+        toml::Table,
+    ),
+    String,
+> {
     let settings = match fs::read_to_string(source.join(JCODE_CONFIG_FILE)) {
         Ok(value) => value
             .parse::<toml::Table>()
@@ -300,6 +326,10 @@ fn stage_provider(
             file,
         )
     };
+    Ok((route, key, auth_file, guest))
+}
+
+fn restrict_provider_environment(env: &mut HashMap<OsString, OsString>, key: Option<&str>) {
     env.retain(|name, _| {
         name.to_str().is_some_and(|name| {
             Some(name) == key
@@ -327,6 +357,15 @@ fn stage_provider(
         env.entry("JCODE_HOOKS_DISABLED".into()).or_insert(value);
     }
     env.insert("JCODE_DISABLE_CLAUDE_MCP".into(), "1".into());
+}
+
+fn stage_provider_files(
+    source: &Path,
+    envelope: &Path,
+    state: &Path,
+    auth_file: Option<&str>,
+    guest: &toml::Table,
+) -> Result<(), String> {
     for name in ["auth.json", "openai-auth.json", "mcp.json"] {
         let destination = state.join(name);
         if Some(name) == auth_file {
@@ -350,11 +389,11 @@ fn stage_provider(
             return Err(format!("could not revoke previous guest input: {error}"));
         }
     }
-    let guest = toml::to_string(&guest)
+    let guest = toml::to_string(guest)
         .map_err(|_| "could not serialize private jcode settings".to_string())?;
     write_private(envelope, &state.join(JCODE_CONFIG_FILE), guest.as_bytes())
         .map_err(|error| format!("could not stage private jcode settings: {error}"))?;
-    Ok((route, env))
+    Ok(())
 }
 
 fn custom_route(profile: &toml::Table) -> Result<Route, String> {

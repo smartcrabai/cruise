@@ -4433,7 +4433,20 @@ steps:
       no-file-changes: retry
 "#;
         // When: executed with max_retries=3 (loop protection kicks in)
-        let result = run_config_with_retries(yaml, "", None, 3, 0).await;
+        let dir = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let result = run_config_inner(
+            yaml,
+            "",
+            None,
+            dir.path().to_path_buf(),
+            3,
+            0,
+            None,
+            None,
+            &NoOpOptionHandler,
+            &[],
+        )
+        .await;
         // Then: workflow fails with LoopProtection
         assert!(result.is_err(), "expected Err but got Ok");
         let err = result.map_or_else(|e| e, |v| panic!("expected Err, got Ok({v:?})"));

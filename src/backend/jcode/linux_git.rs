@@ -892,6 +892,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps the linked-worktree protection lifecycle and assertions together"
+    )]
     fn linked_worktree_protects_shared_and_private_metadata() {
         let temp = TempDir::new();
         let repo = temp.0.join("repo");

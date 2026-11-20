@@ -1154,37 +1154,12 @@ fn is_direct_child(output: &std::process::Output, commit_oid: &str, parent_oid: 
         && fields.next() == Some(parent_oid)
         && fields.next().is_none()
 }
-
-/// Stage edits and publish one commit-tree object by compare-and-swap.
-async fn commit_prompt_changes(
+/// Stage edits and create a commit-tree object without updating a ref.
+async fn create_host_review_commit(
     pr: &PullRequestRef,
     baseline: &HostCommitBaseline,
     cancel: Option<&CancellationToken>,
-) -> Result<Option<String>> {
-    if git_head(pr, cancel).await?.as_deref() != Some(baseline.head_oid.as_str()) {
-        return Err(failed(
-            "HEAD changed during the review prompt; host commit refused",
-        ));
-    }
-    ensure_checkout_binding(pr, &baseline.branch_ref, &baseline.tracking_ref, cancel).await?;
-    ensure_no_in_progress_git_operation(pr, cancel).await?;
-    ensure_review_git_safety(pr)?;
-    let origin = capture_origin(pr, &baseline.target, cancel).await?;
-    if origin != baseline.origin {
-        return Err(failed("origin changed during the review prompt"));
-    }
-    let status = git_output(
-        pr,
-        &["status", "--porcelain", "--untracked-files=all"],
-        cancel,
-    )
-    .await?;
-    if !status.status.success() {
-        return Err(failed("git status failed after the review prompt"));
-    }
-    if status.stdout.iter().all(u8::is_ascii_whitespace) {
-        return Ok(None);
-    }
+) -> Result<String> {
     let add = git_output(pr, &["add", "--all", "--", "."], cancel).await?;
     if !add.status.success() {
         return Err(failed(format!(
@@ -1224,11 +1199,44 @@ async fn commit_prompt_changes(
             String::from_utf8_lossy(&commit.stderr).trim()
         )));
     }
-    let commit_oid = crate::worktree_pr::gh_output_line(&commit.stdout)
+    crate::worktree_pr::gh_output_line(&commit.stdout)
         .filter(|oid| {
             (oid.len() == 40 || oid.len() == 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
-        .ok_or_else(|| failed("git commit-tree returned an invalid object id"))?;
+        .ok_or_else(|| failed("git commit-tree returned an invalid object id"))
+}
+
+/// Create and attach one commit-tree object by compare-and-swap.
+async fn commit_prompt_changes(
+    pr: &PullRequestRef,
+    baseline: &HostCommitBaseline,
+    cancel: Option<&CancellationToken>,
+) -> Result<Option<String>> {
+    if git_head(pr, cancel).await?.as_deref() != Some(baseline.head_oid.as_str()) {
+        return Err(failed(
+            "HEAD changed during the review prompt; host commit refused",
+        ));
+    }
+    ensure_checkout_binding(pr, &baseline.branch_ref, &baseline.tracking_ref, cancel).await?;
+    ensure_no_in_progress_git_operation(pr, cancel).await?;
+    ensure_review_git_safety(pr)?;
+    let origin = capture_origin(pr, &baseline.target, cancel).await?;
+    if origin != baseline.origin {
+        return Err(failed("origin changed during the review prompt"));
+    }
+    let status = git_output(
+        pr,
+        &["status", "--porcelain", "--untracked-files=all"],
+        cancel,
+    )
+    .await?;
+    if !status.status.success() {
+        return Err(failed("git status failed after the review prompt"));
+    }
+    if status.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let commit_oid = create_host_review_commit(pr, baseline, cancel).await?;
     let update = git_output_args(
         pr,
         vec![
@@ -1265,16 +1273,12 @@ async fn commit_prompt_changes(
     Ok(Some(commit_oid))
 }
 
-/// Push only the captured commit object to the validated PR ref.
-async fn publish_host_commit(
+async fn validate_host_commit_for_publish(
     pr: &PullRequestRef,
     baseline: &HostCommitBaseline,
-    commit_oid: Option<&str>,
+    commit_oid: &str,
     cancel: Option<&CancellationToken>,
 ) -> Result<()> {
-    let Some(commit_oid) = commit_oid else {
-        return Ok(());
-    };
     if git_head(pr, cancel).await?.as_deref() != Some(commit_oid) {
         return Err(failed(
             "HEAD changed before the host commit could be published",
@@ -1316,6 +1320,20 @@ async fn publish_host_commit(
     if !status.status.success() || !status.stdout.iter().all(u8::is_ascii_whitespace) {
         return Err(failed("the host commit left uncommitted changes"));
     }
+    Ok(())
+}
+
+/// Push only the captured commit object to the validated PR ref.
+async fn publish_host_commit(
+    pr: &PullRequestRef,
+    baseline: &HostCommitBaseline,
+    commit_oid: Option<&str>,
+    cancel: Option<&CancellationToken>,
+) -> Result<()> {
+    let Some(commit_oid) = commit_oid else {
+        return Ok(());
+    };
+    validate_host_commit_for_publish(pr, baseline, commit_oid, cancel).await?;
     let lease = format!(
         "--force-with-lease={}:{}",
         baseline.branch_ref, baseline.head_oid
@@ -1675,6 +1693,7 @@ mod tests {
         tmp: TempDir,
         _path: crate::test_support::EnvGuard,
         _dir: crate::test_support::EnvGuard,
+        _git_config: [crate::test_support::EnvGuard; 2],
         _lock: crate::test_support::ProcessLock,
     }
 
@@ -1784,6 +1803,10 @@ esac
                 tmp,
                 _path: path,
                 _dir: dir,
+                _git_config: [
+                    crate::test_support::EnvGuard::set("GIT_CONFIG_NOSYSTEM", "1"),
+                    crate::test_support::EnvGuard::set("GIT_CONFIG_GLOBAL", "/dev/null"),
+                ],
                 _lock: lock,
             };
             f.write("head.txt", OID);
