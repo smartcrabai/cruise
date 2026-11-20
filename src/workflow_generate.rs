@@ -74,13 +74,12 @@ async fn run_prompt_with_usage(
     let sandbox_access = {
         #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
         {
-            let access = crate::backend::jcode::SandboxAccess {
+            crate::backend::jcode::SandboxAccess {
                 read_only: true,
                 require_bubblewrap: false,
                 inputs: Vec::new(),
                 output_file: None,
-            };
-            access
+            }
         }
         #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
         {
