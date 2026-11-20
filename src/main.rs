@@ -304,7 +304,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
                 eprintln!("CRUISE_SYNC_BASE_DIAGNOSTIC_V1 {}", failure.marker_value());
             }
             if let Some(plan) = &plan {
-                let outcome = result.as_ref().map(|()| ()).map_err(|(kind, _)| *kind);
+                let outcome = result.as_ref().copied().map_err(|(kind, _)| *kind);
                 host_sync::record_sync_result(plan, &cwd, &pr_number, url.as_deref(), outcome)?;
             }
             match result {
