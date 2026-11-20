@@ -763,9 +763,11 @@ fn cancellation_requests_session_cancel_before_returning() {
     );
     if let Err(error) = message_accepted_rx.recv_timeout(Duration::from_secs(5)) {
         token.cancel();
-        worker
-            .join()
-            .unwrap_or_else(|_| panic!("turn worker panicked"));
+        drop(
+            worker
+                .join()
+                .unwrap_or_else(|_| panic!("turn worker panicked")),
+        );
         panic!("jcode did not accept the session message before cancellation: {error:?}");
     }
     token.cancel();
