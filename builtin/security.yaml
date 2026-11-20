@@ -1,11 +1,5 @@
 description: Evidence-led security audit, repair of confirmed defects, and independent verification
 force_exec: true
-flags:
-  after_pr:
-    description: Run pull-request or merge-request readiness, synchronization, and CI follow-up
-  merge:
-    description: Run after-PR follow-up and perform a host-managed squash merge
-
 steps:
   inventory:
     output_file: security/scope.md
@@ -138,7 +132,7 @@ steps:
 
       After fixing, run relevant existing safe local commands/scanners, including regression and negative case; bound each to 10 minutes, with no unbounded servers/destructive state changes. Record exact command/exit/status/result; skipped, unavailable, or timed out is not a pass. If tools, secrets, network, or unsafe effects block a check, do not mock it; record blocker and finish safe work. Verify newly exposed in-scope defects, assign stable IDs, update worklist evidence/disposition, and fix if safe/actionable.
 
-      If no accepted findings, make no source changes or unrelated checks; state so. Rejected/blocked items do not authorize edits. Do not independently create/merge a PR; squash merge is host-managed and requires explicit merge-flag opt-in. Prompt completion is not proof of security.
+      If no accepted findings, make no source changes or unrelated checks; state so. Rejected/blocked items do not authorize edits. Do not independently create/merge a PR. Prompt completion is not proof of security.
 
       Save `security/repairs.md`: pre-edit baseline/preservation limits; every worklist ID/disposition (`fixed`, `already resolved`, `rejected`, `blocked`); current evidence, changed files, root-cause fix, regression, safe before/after reproduction, exact commands/results, residual limits. Preserve IDs/explain updates; list new finding IDs. Distinguish changes from unrun checks; fabricate nothing. If no accepted item needed edits, state `NO SOURCE CHANGES` and why.
   verify-and-repair:
@@ -169,33 +163,3 @@ steps:
       For each real defect, assign stable ID without renumbering; make the smallest safe complete fix; add/correct meaningful consumer-visible regression; rerun failed check and the full affected verification set. Continue until accepted IDs are independently closed or exactly blocked. Keep rejected/blocked dispositions/reasons; unblock only with new evidence. No blind suppression, weakened tests, broad upgrades, or unrelated hardening.
 
       Save `security/verification.md`, one row per original/new ID: independent current evidence; root cause; exploitability/preconditions/effective config; test/reproduction and exact command/status; disposition (`verified fixed`, `still open`, `blocked`, `rejected`); residual limits. Include verification changes/post-fix reruns, actual reviewed/excluded/unreviewed scope, exact unrun commands/reasons, and honest overall result. With none accepted, make no source changes and state clean-in-scope result/coverage limits. Never claim exhaustive security, fabricate checks, or infer machine-proven safety from prompt completion.
-after-pr:
-  follow-up:
-    workflow_call: ./_shared/after-pr.yaml
-    flag: [after_pr, merge]
-    with:
-      resolve_conflict_prompt: |-
-          Original request: {input}
-
-          Approved plan: {plan}. Read only if non-empty and relevant; otherwise use the request.
-
-          Scope: use the security scope, adjudicated worklist, and current repair/verification reports:
-          {file:security/scope.md}
-          {file:security/worklist.md}
-          {file:security/repairs.md}
-          {file:security/verification.md}
-
-          Resolve only accepted security-repair-scope conflicts while synchronizing PR/MR #{pr.number} ({pr.url}) with base. Preserve unrelated work. Never weaken tests, scanners, security controls, checks, or branch policy for green.
-      fix_ci_error_scope: |-
-          Use the security scope, adjudicated worklist, and current repair/verification reports:
-          {file:security/scope.md}
-          {file:security/worklist.md}
-          {file:security/repairs.md}
-          {file:security/verification.md}
-  squash-merge:
-    flag: merge
-    squash-merge: true
-    timeout: 10m
-    if:
-      fail: follow-up/sync-base
-
