@@ -202,6 +202,13 @@ impl Drop for Scratch {
     }
 }
 
+struct ProviderSettings {
+    route: Route,
+    key: Option<&'static str>,
+    auth_file: Option<&'static str>,
+    guest: toml::Table,
+}
+
 fn stage_provider(
     request: &JcodeRunnerConfig,
     source: &Path,
@@ -222,24 +229,18 @@ fn stage_provider(
             "Bubblewrap jcode requires the same provider for the main turn and subagents".into(),
         );
     }
-    let (route, key, auth_file, guest) = provider_settings(source, provider)?;
+    let ProviderSettings {
+        route,
+        key,
+        auth_file,
+        guest,
+    } = provider_settings(source, provider)?;
     restrict_provider_environment(&mut env, key);
     stage_provider_files(source, envelope, state, auth_file, &guest)?;
     Ok((route, env))
 }
 
-fn provider_settings(
-    source: &Path,
-    provider: &str,
-) -> Result<
-    (
-        Route,
-        Option<&'static str>,
-        Option<&'static str>,
-        toml::Table,
-    ),
-    String,
-> {
+fn provider_settings(source: &Path, provider: &str) -> Result<ProviderSettings, String> {
     let settings = match fs::read_to_string(source.join(JCODE_CONFIG_FILE)) {
         Ok(value) => value
             .parse::<toml::Table>()
@@ -326,7 +327,12 @@ fn provider_settings(
             file,
         )
     };
-    Ok((route, key, auth_file, guest))
+    Ok(ProviderSettings {
+        route,
+        key,
+        auth_file,
+        guest,
+    })
 }
 
 fn restrict_provider_environment(env: &mut HashMap<OsString, OsString>, key: Option<&str>) {

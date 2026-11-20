@@ -432,7 +432,7 @@ fn finish_merge(
         completed_head,
         recorded_merge_head,
         index_digest,
-        temporary_index,
+        &temporary_index,
     )
 }
 
@@ -443,7 +443,7 @@ fn finish_ready_index_install(
     completed_head: String,
     recorded_merge_head: &str,
     index_digest: &str,
-    temporary_index: TemporaryIndex,
+    temporary_index: &TemporaryIndex,
 ) -> Result<()> {
     let base_head = recorded_merge_head.to_string();
     let mut ready = SyncResult::Ready {
