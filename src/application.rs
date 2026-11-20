@@ -2004,26 +2004,35 @@ fn start_plan_context(
     operation: OperationKind,
     claim: OperationClaim,
     sink: &dyn ApplicationEventSink,
+    execution: Option<&crate::telemetry::Operation>,
 ) -> Result<PlanContext> {
     let state = manager.load(id)?;
-    ensure_no_live_foreign_runner(&state)?;
-    if !planning_operation_allowed(&state, operation) {
-        return Err(CruiseError::Other(format!(
-            "session {id} is not in a phase for this planning action"
-        )));
-    }
-    let before_state = state.clone();
-    let plan_path = state.plan_path(&manager.sessions_dir());
-    let staged_plan_path = manager
-        .sessions_dir()
-        .join(&state.id)
-        .join(format!(".plan.{}.staged", claim.identity()));
-    let old_plan = read_optional_snapshot(&plan_path)?;
-    let _ = std::fs::remove_file(&staged_plan_path);
-    sink.send(ApplicationEvent::PlanStarted {
-        session_id: id.to_string(),
-        operation,
+    let setup = (|| {
+        ensure_no_live_foreign_runner(&state)?;
+        if !planning_operation_allowed(&state, operation) {
+            return Err(CruiseError::Other(format!(
+                "session {id} is not in a phase for this planning action"
+            )));
+        }
+        let plan_path = state.plan_path(&manager.sessions_dir());
+        let staged_plan_path = manager
+            .sessions_dir()
+            .join(&state.id)
+            .join(format!(".plan.{}.staged", claim.identity()));
+        let old_plan = read_optional_snapshot(&plan_path)?;
+        let _ = std::fs::remove_file(&staged_plan_path);
+        sink.send(ApplicationEvent::PlanStarted {
+            session_id: id.to_string(),
+            operation,
+        })?;
+        Ok((plan_path, staged_plan_path, old_plan))
+    })();
+    let (plan_path, staged_plan_path, old_plan) = setup.inspect_err(|_| {
+        if let Some(execution) = execution {
+            execution.set_session_paths(&state.base_dir, None);
+        }
     })?;
+    let before_state = state.clone();
     Ok(PlanContext {
         claim,
         state,
@@ -3704,10 +3713,18 @@ impl CruiseApplication {
         let result = async {
             let _quiet = crate::console_mode::quiet_guard();
             let preparation = crate::telemetry::Operation::phase("prepare");
-            let context_result =
-                async { start_plan_context(&self.manager, id, operation, claim, &*sink) }
-                    .with_context(preparation.context())
-                    .await;
+            let context_result = async {
+                start_plan_context(
+                    &self.manager,
+                    id,
+                    operation,
+                    claim,
+                    &*sink,
+                    Some(&execution),
+                )
+            }
+            .with_context(preparation.context())
+            .await;
             if context_result.is_err() {
                 preparation.finish_result(&context_result);
                 let Err(error) = context_result else {
@@ -3725,6 +3742,10 @@ impl CruiseApplication {
                 .with_context(preparation.context())
                 .await;
             preparation.finish_result(&config_result);
+            let workspace_dir = config_result
+                .is_ok()
+                .then_some(context.state.base_dir.as_path());
+            execution.set_session_paths(&context.state.base_dir, workspace_dir);
 
             let plan_result = match config_result {
                 Err(error) => Err(error),
@@ -4083,19 +4104,38 @@ impl CruiseApplication {
         sink: Arc<dyn ApplicationEventSink>,
         log_sink: Option<Arc<dyn LogSink>>,
     ) -> Result<SessionState> {
-        let prepared = self.prepare_create_pr_operation(id, context.as_ref())?;
+        let prepared = self.prepare_create_pr_operation(id, context).await?;
         self.run_create_pr_operation(id, prepared, sink, log_sink)
             .await
     }
 
-    pub(crate) fn prepare_create_pr_operation(
+    pub(crate) async fn prepare_create_pr_operation(
         &self,
         id: &str,
-        context: Option<&crate::request_context::RequestContext>,
+        context: Option<crate::request_context::RequestContext>,
     ) -> Result<PreparedCreatePr> {
         let claim = self.runtime().try_begin(id, OperationKind::CreatePr)?;
-        let setup = prepare_create_pr(&self.manager, id, context)?;
-        Ok(PreparedCreatePr { claim, setup })
+        let manager = self.manager.clone();
+        let setup_context = opentelemetry::Context::current();
+        tokio::task::spawn_blocking(move || {
+            let _guard = setup_context.attach();
+            let session_id = claim.session_id().to_owned();
+            let execution = crate::telemetry::Operation::execution("create_pr", &session_id, None);
+            match prepare_create_pr(&manager, &session_id, context.as_ref(), &execution) {
+                Ok(setup) => Ok(PreparedCreatePr {
+                    claim,
+                    setup,
+                    execution,
+                }),
+                Err(error) => {
+                    let result: Result<PreparedCreatePr> = Err(error);
+                    execution.finish_result(&result);
+                    result
+                }
+            }
+        })
+        .await
+        .map_err(|error| CruiseError::Other(format!("Create PR setup worker failed: {error}")))?
     }
 
     pub(crate) async fn run_create_pr_operation(
@@ -4105,8 +4145,11 @@ impl CruiseApplication {
         sink: Arc<dyn ApplicationEventSink>,
         log_sink: Option<Arc<dyn LogSink>>,
     ) -> Result<SessionState> {
-        let PreparedCreatePr { claim, setup } = prepared;
-        let execution = crate::telemetry::Operation::execution("create_pr", id, None);
+        let PreparedCreatePr {
+            claim,
+            setup,
+            execution,
+        } = prepared;
         let terminal_sink = Arc::clone(&sink);
         let result = self
             .create_pr_claimed(id, &claim, setup, sink, log_sink)
@@ -4493,8 +4536,13 @@ impl CruiseApplication {
         if let Some((state, _)) = initial_session.as_ref() {
             execution.set_workflow(&state.config);
         }
-        let exec_initial = initial_session
-            .and_then(|(state, fingerprint)| state.exec.then_some((state.phase, fingerprint)));
+        let (initial_base_dir, exec_initial) = match initial_session {
+            Some((state, fingerprint)) => {
+                let exec_initial = state.exec.then_some((state.phase, fingerprint));
+                (Some(state.base_dir), exec_initial)
+            }
+            None => (None, None),
+        };
         let mut unresolved_failed_steps = false;
         let status_sink = log_sink.as_ref().map(|log_sink| {
             let log_sink = Arc::clone(log_sink);
@@ -4512,9 +4560,9 @@ impl CruiseApplication {
             claim,
             request,
             sink,
-            log_sink,
-            batch_started,
+            (log_sink, batch_started),
             &mut unresolved_failed_steps,
+            (&execution, initial_base_dir.as_deref()),
         );
         let result = if let Some(status_sink) = status_sink {
             crate::console_mode::scope_status_sink(status_sink, run)
@@ -4543,9 +4591,9 @@ impl CruiseApplication {
         claim: &OperationClaim,
         request: RunRequest,
         sink: Arc<dyn ApplicationEventSink>,
-        log_sink: Option<Arc<dyn LogSink>>,
-        batch_started: bool,
+        (log_sink, batch_started): (Option<Arc<dyn LogSink>>, bool),
         unresolved_failed_steps: &mut bool,
+        (execution, initial_base_dir): (&crate::telemetry::Operation, Option<&Path>),
     ) -> Result<SessionState> {
         let _quiet = crate::console_mode::quiet_guard();
         let id = claim.session_id();
@@ -4553,17 +4601,17 @@ impl CruiseApplication {
         let setup_result = prepare_run_setup(&self.manager, id, claim, &request)
             .with_context(prepare.context())
             .await;
-        let mut setup = match setup_result {
-            Ok(setup) => setup,
-            Err(error) => {
-                let error_result: Result<RunSetup> = Err(error);
-                prepare.finish_result(&error_result);
-                let Err(error) = error_result else {
-                    unreachable!("failed setup cannot succeed")
-                };
-                return self.finish_setup_failure(id, error, &sink).await;
+        let Ok(mut setup) = setup_result else {
+            prepare.finish_result(&setup_result);
+            let Err(error) = setup_result else {
+                unreachable!("failed setup cannot succeed")
+            };
+            if let Some(base_dir) = initial_base_dir {
+                execution.set_session_paths(base_dir, None);
             }
+            return self.finish_setup_failure(id, error, &sink).await;
         };
+        execution.set_session_paths(&setup.state.base_dir, Some(setup.workspace.path()));
 
         if claim.token().is_cancelled() {
             let cancelled: Result<()> = Err(CruiseError::Interrupted);
@@ -4721,59 +4769,67 @@ struct CreatePrSetup {
 pub(crate) struct PreparedCreatePr {
     claim: OperationClaim,
     setup: CreatePrSetup,
+    execution: crate::telemetry::Operation,
 }
 
 fn prepare_create_pr(
     manager: &SessionManager,
     id: &str,
     context: Option<&crate::request_context::RequestContext>,
+    execution: &crate::telemetry::Operation,
 ) -> Result<CreatePrSetup> {
     let state = manager.load(id)?;
-    if !matches!(state.phase, SessionPhase::PrFailed(_)) {
-        return Err(CruiseError::Other(format!(
-            "session {id} is in '{}' phase; Create PR applies only to PR Failed sessions",
-            state.phase.label()
-        )));
-    }
-    let config_env = context.map_or(crate::config::ConfigEnv::Process, |context| {
-        crate::config::ConfigEnv::Snapshot(&context.config_env)
-    });
-    let config = manager.load_config_with_env(&state, config_env)?;
-    crate::config::validate_config(&config)?;
-    let max_retries = crate::config::resolve_effective_max_retries(None, &config);
-    crate::config::validate_group_retry_budget(&config, max_retries)?;
-    let retry_policy = crate::retry::policy_for_config(config.retry.clone());
-    let compiled = crate::workflow::compile(config)?;
-    if !compiled.create_pr {
-        return Err(CruiseError::Other(
-            "pull-request creation is disabled by the workflow config".to_string(),
-        ));
-    }
-    let ctx = state.worktree_context().ok_or_else(|| {
-        CruiseError::Other(format!(
-            "worktree for {id} is missing; use Reset to Planned and Run to recreate it"
-        ))
-    })?;
-    let sessions_dir = manager.sessions_dir();
-    let mut vars = state.pr_workflow_vars.clone().unwrap_or_else(|| {
-        crate::variable::VariableStore::new(state.template_input(&sessions_dir))
-    });
-    vars.set_named_file(crate::session::PLAN_VAR, state.plan_path(&sessions_dir));
-    vars.set_artifacts_root(state.artifacts_path(&sessions_dir));
-    let tracker = crate::file_tracker::FileTracker::with_root(ctx.path.clone());
-    let skipped_steps = state.skipped_steps.clone();
-    let flags = state.flags.clone();
-    Ok(CreatePrSetup {
-        state,
-        compiled,
-        ctx,
-        max_retries,
-        retry_policy,
-        vars,
-        tracker,
-        skipped_steps,
-        flags,
-    })
+    let base_dir = state.base_dir.clone();
+    let result = (|| {
+        if !matches!(state.phase, SessionPhase::PrFailed(_)) {
+            return Err(CruiseError::Other(format!(
+                "session {id} is in '{}' phase; Create PR applies only to PR Failed sessions",
+                state.phase.label()
+            )));
+        }
+        let config_env = context.map_or(crate::config::ConfigEnv::Process, |context| {
+            crate::config::ConfigEnv::Snapshot(&context.config_env)
+        });
+        let config = manager.load_config_with_env(&state, config_env)?;
+        crate::config::validate_config(&config)?;
+        let max_retries = crate::config::resolve_effective_max_retries(None, &config);
+        crate::config::validate_group_retry_budget(&config, max_retries)?;
+        let retry_policy = crate::retry::policy_for_config(config.retry.clone());
+        let compiled = crate::workflow::compile(config)?;
+        if !compiled.create_pr {
+            return Err(CruiseError::Other(
+                "pull-request creation is disabled by the workflow config".to_string(),
+            ));
+        }
+        let ctx = state.worktree_context().ok_or_else(|| {
+            CruiseError::Other(format!(
+                "worktree for {id} is missing; use Reset to Planned and Run to recreate it"
+            ))
+        })?;
+        let sessions_dir = manager.sessions_dir();
+        let mut vars = state.pr_workflow_vars.clone().unwrap_or_else(|| {
+            crate::variable::VariableStore::new(state.template_input(&sessions_dir))
+        });
+        vars.set_named_file(crate::session::PLAN_VAR, state.plan_path(&sessions_dir));
+        vars.set_artifacts_root(state.artifacts_path(&sessions_dir));
+        let tracker = crate::file_tracker::FileTracker::with_root(ctx.path.clone());
+        let skipped_steps = state.skipped_steps.clone();
+        let flags = state.flags.clone();
+        Ok(CreatePrSetup {
+            state,
+            compiled,
+            ctx,
+            max_retries,
+            retry_policy,
+            vars,
+            tracker,
+            skipped_steps,
+            flags,
+        })
+    })();
+    let setup = result.inspect_err(|_| execution.set_session_paths(&base_dir, None))?;
+    execution.set_session_paths(&setup.state.base_dir, Some(setup.ctx.path.as_path()));
+    Ok(setup)
 }
 
 struct RunSetup {
@@ -7655,6 +7711,7 @@ after-pr:
             OperationKind::Replan,
             plan_claim,
             &|_| Ok(()),
+            None,
         );
         assert_foreign_runner_busy(plan_result, &id, pid, "planning");
         let after_busy = std::fs::read(manager.state_path(&id))
@@ -8000,9 +8057,15 @@ esac
                 .try_begin(&state.id, OperationKind::Generate)
                 .unwrap_or_else(|error| panic!("claim checkpoint test plan: {error}"));
             let sink = |_: ApplicationEvent| Ok(());
-            let mut context =
-                start_plan_context(&manager, &state.id, OperationKind::Generate, claim, &sink)
-                    .unwrap_or_else(|error| panic!("start checkpoint test plan context: {error}"));
+            let mut context = start_plan_context(
+                &manager,
+                &state.id,
+                OperationKind::Generate,
+                claim,
+                &sink,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("start checkpoint test plan context: {error}"));
             let checkpoint = plan_checkpoint_callback(
                 manager.clone(),
                 state.id.clone(),
@@ -8079,9 +8142,15 @@ esac
                 .try_begin(&state.id, OperationKind::Generate)
                 .unwrap_or_else(|error| panic!("claim saved-plan test plan: {error}"));
             let sink = |_: ApplicationEvent| Ok(());
-            let mut context =
-                start_plan_context(&manager, &state.id, OperationKind::Generate, claim, &sink)
-                    .unwrap_or_else(|error| panic!("{error}"));
+            let mut context = start_plan_context(
+                &manager,
+                &state.id,
+                OperationKind::Generate,
+                claim,
+                &sink,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
             let checkpoint = plan_checkpoint_callback(
                 manager.clone(),
                 state.id.clone(),

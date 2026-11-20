@@ -379,14 +379,56 @@ struct SpanRecord {
     status_description: String,
 }
 
-fn spans(requests: &[CapturedRequest]) -> Vec<SpanRecord> {
-    let mut records = Vec::new();
-    for request in requests
+fn span_record(
+    span: opentelemetry_proto::tonic::trace::v1::Span,
+    resource_attributes: &HashMap<String, String>,
+) -> SpanRecord {
+    SpanRecord {
+        name: span.name,
+        trace_id: span.trace_id,
+        span_id: span.span_id,
+        parent_span_id: span.parent_span_id,
+        start_time_unix_nano: span.start_time_unix_nano,
+        end_time_unix_nano: span.end_time_unix_nano,
+        attributes: string_attributes(&span.attributes),
+        bool_attributes: bool_attributes(&span.attributes),
+        int_attributes: int_attributes(&span.attributes),
+        resource_attributes: resource_attributes.clone(),
+        events: span
+            .events
+            .into_iter()
+            .map(|event| EventRecord {
+                name: event.name,
+                attributes: string_attributes(&event.attributes),
+                int_attributes: int_attributes(&event.attributes),
+            })
+            .collect(),
+        status_description: span
+            .status
+            .as_ref()
+            .map_or("", |status| status.message.as_str())
+            .to_owned(),
+        status_code: span.status.map_or(0, |status| status.code),
+    }
+}
+
+fn trace_frames(requests: &[CapturedRequest]) -> impl Iterator<Item = ExportTraceServiceRequest> {
+    requests
         .iter()
         .filter(|request| request.path == "/v1/traces")
-    {
-        let exported = ExportTraceServiceRequest::decode(request.body.as_slice())
-            .unwrap_or_else(|error| panic!("decode OTLP trace request: {error}"));
+        .map(|request| {
+            ExportTraceServiceRequest::decode(request.body.as_slice())
+                .unwrap_or_else(|error| panic!("decode OTLP trace request: {error}"))
+        })
+}
+
+fn spans(requests: &[CapturedRequest]) -> Vec<SpanRecord> {
+    span_records(trace_frames(requests))
+}
+
+fn span_records(frames: impl Iterator<Item = ExportTraceServiceRequest>) -> Vec<SpanRecord> {
+    let mut records = Vec::new();
+    for exported in frames {
         for resource_spans in exported.resource_spans {
             let resource_attributes = resource_spans
                 .resource
@@ -395,36 +437,64 @@ fn spans(requests: &[CapturedRequest]) -> Vec<SpanRecord> {
                 .unwrap_or_default();
             for scope_spans in resource_spans.scope_spans {
                 for span in scope_spans.spans {
-                    records.push(SpanRecord {
-                        name: span.name,
-                        trace_id: span.trace_id,
-                        span_id: span.span_id,
-                        parent_span_id: span.parent_span_id,
-                        start_time_unix_nano: span.start_time_unix_nano,
-                        end_time_unix_nano: span.end_time_unix_nano,
-                        attributes: string_attributes(&span.attributes),
-                        bool_attributes: bool_attributes(&span.attributes),
-                        int_attributes: int_attributes(&span.attributes),
-                        resource_attributes: resource_attributes.clone(),
-                        events: span
-                            .events
-                            .into_iter()
-                            .map(|event| EventRecord {
-                                name: event.name,
-                                attributes: string_attributes(&event.attributes),
-                                int_attributes: int_attributes(&event.attributes),
-                            })
-                            .collect(),
-                        status_description: span
-                            .status
-                            .as_ref()
-                            .map_or("", |status| status.message.as_str())
-                            .to_owned(),
-                        status_code: span.status.map_or(0, |status| status.code),
-                    });
+                    records.push(span_record(span, &resource_attributes));
                 }
             }
         }
+    }
+    records
+}
+
+fn assert_exec_path_privacy(requests: &[CapturedRequest], fixture: &Fixture) -> Vec<SpanRecord> {
+    let project = std::fs::canonicalize(&fixture.project)
+        .unwrap_or_else(|error| panic!("canonicalize exec project: {error}"));
+    let root = std::fs::canonicalize(fixture.root.path())
+        .unwrap_or_else(|error| panic!("canonicalize fixture root: {error}"));
+    let project = project.to_string_lossy();
+    let path_keys = [SESSION_BASE_DIR_ATTRIBUTE, SESSION_WORKSPACE_DIR_ATTRIBUTE];
+    let forbidden = [
+        path_keys[0],
+        path_keys[1],
+        &fixture.root.path().to_string_lossy(),
+        &root.to_string_lossy(),
+    ];
+    let mut roots = 0;
+    let records = span_records(trace_frames(requests).map(|mut frame| {
+        for span in frame
+            .resource_spans
+            .iter_mut()
+            .flat_map(|resource| &mut resource.scope_spans)
+            .flat_map(|scope| &mut scope.spans)
+            .filter(|span| span.name == "cruise.execution" && span.parent_span_id.is_empty())
+        {
+            roots += 1;
+            let attributes = string_attributes(&span.attributes);
+            assert_eq!(
+                attributes.get("cruise.execution.kind").map(String::as_str),
+                Some("exec")
+            );
+            assert_eq!(
+                span.status.as_ref().map(|status| status.code),
+                Some(StatusCode::Error as i32)
+            );
+            assert_session_paths(&attributes, &project, Some(&project));
+            let before = span.attributes.len();
+            span.attributes
+                .retain(|attribute| !path_keys.contains(&attribute.key.as_str()));
+            assert_eq!(before - span.attributes.len(), path_keys.len());
+        }
+        assert_body_omits(&frame.encode_to_vec(), &forbidden);
+        frame
+    }));
+    assert_eq!(
+        roots, 1,
+        "expected one execution root in the failed exec capture"
+    );
+    for request in requests
+        .iter()
+        .filter(|request| request.path != "/v1/traces")
+    {
+        assert_body_omits(&request.body, &forbidden);
     }
     records
 }
@@ -612,18 +682,44 @@ fn retry_count_points(requests: &[CapturedRequest]) -> Vec<MetricPoint> {
     points
 }
 fn assert_payload_omits(requests: &[CapturedRequest], secrets: &[&str]) {
-    let body = requests
-        .iter()
-        .flat_map(|request| request.body.iter().copied())
-        .collect::<Vec<_>>();
-    let body_text = String::from_utf8_lossy(&body);
+    for request in requests {
+        assert_body_omits(&request.body, secrets);
+    }
+}
+
+fn assert_body_omits(body: &[u8], secrets: &[&str]) {
     for secret in secrets {
         assert!(
-            !body_text.contains(secret),
+            find_subslice(body, secret.as_bytes()).is_none(),
             "telemetry payload leaked {secret:?}"
         );
     }
 }
+
+const SESSION_BASE_DIR_ATTRIBUTE: &str = "cruise.session.base_dir";
+const SESSION_WORKSPACE_DIR_ATTRIBUTE: &str = "cruise.session.workspace_dir";
+
+fn assert_session_paths(
+    attributes: &HashMap<String, String>,
+    base_dir: &str,
+    workspace_dir: Option<&str>,
+) {
+    assert_eq!(
+        attributes
+            .get(SESSION_BASE_DIR_ATTRIBUTE)
+            .map(String::as_str),
+        Some(base_dir),
+        "execution root base path"
+    );
+    assert_eq!(
+        attributes
+            .get(SESSION_WORKSPACE_DIR_ATTRIBUTE)
+            .map(String::as_str),
+        workspace_dir,
+        "execution root workspace path"
+    );
+}
+
 fn shell_quote(path: &std::path::Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -1584,7 +1680,8 @@ fn run_application_planning_helper() {
     ]);
     let telemetry = cruise::telemetry::init()
         .unwrap_or_else(|error| panic!("initialize application telemetry: {error}"));
-    let app = CruiseApplication::new(SessionManager::new(temp.path().join("sessions")));
+    let manager = SessionManager::new(temp.path().join("sessions"));
+    let app = CruiseApplication::new(manager.clone());
     let first_id = create_application_session(
         &app,
         temp.path(),
@@ -1610,12 +1707,99 @@ fn run_application_planning_helper() {
     });
     first_result.unwrap_or_else(|error| panic!("first application plan: {error}"));
     second_result.unwrap_or_else(|error| panic!("second application plan: {error}"));
+    let failed_session = app
+        .create_session(NewSessionRequest {
+            input: "application-startup-failure-input-secret".to_owned(),
+            base_dir: temp.path().to_path_buf(),
+            config_yaml: Some(
+                "command: [sh, -c, 'cat >/dev/null']\ncreate_pr: true\nsteps:\n  local:\n    command: 'true'\n"
+                    .to_owned(),
+            ),
+            workspace_mode: WorkspaceMode::Worktree,
+            ..NewSessionRequest::default()
+        })
+        .unwrap_or_else(|error| panic!("create known-state failure session: {error}"));
+    let plan_path = manager
+        .sessions_dir()
+        .join(&failed_session.id)
+        .join("plan.md");
+    std::fs::create_dir(&plan_path)
+        .unwrap_or_else(|error| panic!("make plan snapshot unreadable: {error}"));
+    let Err(plan_error) = runtime.block_on(app.generate(
+        &failed_session.id,
+        PlanRequest::default(),
+        Arc::clone(&sink),
+    )) else {
+        panic!("unreadable saved plan snapshot must fail planning");
+    };
+    assert!(
+        plan_error.to_string().contains("snapshot"),
+        "planning failed for an unexpected reason: {plan_error}"
+    );
+    let mut failed_state = manager
+        .load(&failed_session.id)
+        .unwrap_or_else(|error| panic!("load known-state failure session: {error}"));
+    failed_state.phase = SessionPhase::PrFailed("publication failed".to_owned());
+    failed_state.worktree_path = None;
+    failed_state.worktree_branch = None;
+    manager
+        .save(&failed_state)
+        .unwrap_or_else(|error| panic!("save PR Failed session without worktree: {error}"));
+    let Err(create_pr_error) =
+        runtime.block_on(app.create_pr(&failed_session.id, None, Arc::clone(&sink), None))
+    else {
+        panic!("Create PR without worktree metadata must fail setup");
+    };
+    assert!(
+        create_pr_error.to_string().contains("worktree"),
+        "Create PR failed for an unexpected reason: {create_pr_error}"
+    );
     drop(runtime);
     telemetry.shutdown();
     let result_path = std::env::var_os("CRUISE_TELEMETRY_APPLICATION_RESULT")
         .unwrap_or_else(|| panic!("missing application telemetry result path"));
-    std::fs::write(result_path, format!("{first_id}\n{second_id}\n"))
-        .unwrap_or_else(|error| panic!("write application session ids: {error}"));
+    std::fs::write(
+        result_path,
+        format!(
+            "{first_id}\n{second_id}\n{}\n{}",
+            temp.path().display(),
+            failed_session.id
+        ),
+    )
+    .unwrap_or_else(|error| panic!("write application session ids: {error}"));
+}
+
+fn assert_known_state_failure_root(
+    exported_spans: &[SpanRecord],
+    session_id: &str,
+    operation: &str,
+    base_dir: &str,
+) {
+    let root = exported_spans
+        .iter()
+        .find(|span| {
+            span.name == "cruise.execution"
+                && span
+                    .attributes
+                    .get("cruise.execution.kind")
+                    .map(String::as_str)
+                    == Some(operation)
+                && span
+                    .attributes
+                    .get("cruise.session.id")
+                    .is_some_and(|id| id == session_id)
+        })
+        .unwrap_or_else(|| panic!("missing {operation} root for session {session_id}"));
+    assert!(
+        root.parent_span_id.is_empty(),
+        "execution must be a trace root"
+    );
+    assert_eq!(root.status_code, StatusCode::Error as i32);
+    assert_eq!(
+        root.attributes.get("cruise.outcome").map(String::as_str),
+        Some("error")
+    );
+    assert_session_paths(&root.attributes, base_dir, None);
 }
 
 fn assert_application_planning_traces(collector: &Collector, result_path: &std::path::Path) {
@@ -1628,18 +1812,31 @@ fn assert_application_planning_traces(collector: &Collector, result_path: &std::
     let second_id = session_ids
         .next()
         .unwrap_or_else(|| panic!("application helper omitted second session id"));
+    let base_dir = session_ids
+        .next()
+        .unwrap_or_else(|| panic!("application helper omitted base dir"));
+    let failed_session_id = session_ids
+        .next()
+        .unwrap_or_else(|| panic!("application helper omitted failed session id"));
     assert_ne!(first_id, second_id, "parallel sessions reused an id");
 
-    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let requests =
+        collector.wait_for_span_count("cruise.execution", "cruise.execution.kind", "create_pr", 1);
     let exported_spans = spans(&requests);
     let executions = exported_spans
         .iter()
-        .filter(|span| span.name == "cruise.execution")
+        .filter(|span| {
+            span.name == "cruise.execution"
+                && span
+                    .attributes
+                    .get("cruise.session.id")
+                    .is_some_and(|id| id == first_id || id == second_id)
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         executions.len(),
         2,
-        "expected one root execution per session"
+        "expected one successful planning root per session"
     );
     let first_root = executions
         .iter()
@@ -1671,6 +1868,7 @@ fn assert_application_planning_traces(collector: &Collector, result_path: &std::
         );
         assert!(root.attributes.contains_key("cruise.workflow.kind"));
         assert!(root.attributes.contains_key("cruise.workflow.name"));
+        assert_session_paths(&root.attributes, base_dir, Some(base_dir));
         let planning = exported_spans
             .iter()
             .find(|span| {
@@ -1687,12 +1885,15 @@ fn assert_application_planning_traces(collector: &Collector, result_path: &std::
             .unwrap_or_else(|| panic!("planning agent missing for {root:#?}"));
         assert_eq!(agent.parent_span_id, planning.span_id);
     }
+    assert_known_state_failure_root(&exported_spans, failed_session_id, "generate", base_dir);
+    assert_known_state_failure_root(&exported_spans, failed_session_id, "create_pr", base_dir);
     let result_path = result_path.to_string_lossy().into_owned();
     assert_payload_omits(
         &requests,
         &[
             "application-first-input-secret",
             "application-second-input-secret",
+            "application-startup-failure-input-secret",
             "application-credential-secret",
             result_path.as_str(),
         ],
@@ -1714,10 +1915,10 @@ fn run_application_failed_step_helper() {
     let session = app
         .create_session(NewSessionRequest {
             input: "application-run-input-secret".to_owned(),
-            base_dir: project,
+            base_dir: project.clone(),
             config_path: None,
             config_yaml: Some(
-                "command: [sh, -c, 'cat >/dev/null']\ncreate_pr: false\nsteps:\n  failing:\n    command: 'exit 7'\n"
+                "command: [sh, -c, 'cat >/dev/null']\ncreate_pr: false\nsteps:\n  failing:\n    command: 'touch marker; exit 7'\n"
                     .to_owned(),
             ),
             repo: None,
@@ -1762,11 +1963,30 @@ fn run_application_failed_step_helper() {
     drop(runtime);
     telemetry.shutdown();
 
+    let worktree = completed
+        .worktree_path
+        .as_ref()
+        .unwrap_or_else(|| panic!("completed Worktree run omitted its worktree path"));
+    let base_dir = project.as_path();
+    let worktree = worktree.as_path();
+    assert!(
+        worktree.join("marker").is_file(),
+        "failed command did not write marker in its worktree"
+    );
+    assert!(
+        !base_dir.join("marker").exists(),
+        "failed command wrote marker into the base directory"
+    );
     let result_path = std::env::var_os("CRUISE_TELEMETRY_APPLICATION_RUN_RESULT")
         .unwrap_or_else(|| panic!("missing application run result path"));
     std::fs::write(
         result_path,
-        format!("{}\n{}", session.id, temp.path().display()),
+        format!(
+            "{}\n{}\n{}",
+            session.id,
+            base_dir.display(),
+            worktree.display()
+        ),
     )
     .unwrap_or_else(|error| panic!("write application run result: {error}"));
 }
@@ -1778,9 +1998,12 @@ fn assert_application_failed_run_trace(collector: &Collector, result_path: &std:
     let session_id = result
         .next()
         .unwrap_or_else(|| panic!("application run helper omitted session id"));
-    let helper_path = result
+    let base_dir = result
         .next()
-        .unwrap_or_else(|| panic!("application run helper omitted fixture path"));
+        .unwrap_or_else(|| panic!("application run helper omitted base dir"));
+    let workspace_dir = result
+        .next()
+        .unwrap_or_else(|| panic!("application run helper omitted workspace dir"));
 
     let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
     let exported_spans = spans(&requests);
@@ -1826,13 +2049,17 @@ fn assert_application_failed_run_trace(collector: &Collector, result_path: &std:
         execution.attributes["error.type"]
     );
     assert_eq!(failing.status_description, failing.attributes["error.type"]);
+    assert_session_paths(&execution.attributes, base_dir, Some(workspace_dir));
+    assert_ne!(
+        base_dir, workspace_dir,
+        "Worktree run must export distinct base and workspace paths"
+    );
     let result_path = result_path.to_string_lossy().into_owned();
     assert_payload_omits(
         &requests,
         &[
             "application-run-input-secret",
             "exit 7",
-            helper_path,
             result_path.as_str(),
         ],
     );
@@ -1861,7 +2088,7 @@ fn application_run_keeps_completed_domain_state_but_errors_root_for_failed_steps
             child.env_remove(name.as_ref());
         }
     }
-    let output = child
+    child
         .args([
             "--exact",
             "application_run_keeps_completed_domain_state_but_errors_root_for_failed_steps",
@@ -1872,7 +2099,8 @@ fn application_run_keeps_completed_domain_state_but_errors_root_for_failed_steps
         .env("CRUISE_OBSERVABILITY_ENABLED", "true")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", collector.endpoint())
         .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
-        .env("OTEL_EXPORTER_OTLP_TIMEOUT", "3000")
+        .env("OTEL_EXPORTER_OTLP_TIMEOUT", "3000");
+    let output = child
         .output()
         .unwrap_or_else(|error| panic!("run application telemetry subprocess: {error}"));
     assert_success(&output);
@@ -2076,7 +2304,6 @@ steps:
         "OTLP auth header was not sent as an HTTP header"
     );
 
-    let root_path = fixture.root.path().to_string_lossy().into_owned();
     assert_payload_omits(
         &requests,
         &[
@@ -2088,7 +2315,6 @@ steps:
             "missing-child-command-secret",
             "header-value-secret",
             "credential-value-secret",
-            root_path.as_str(),
         ],
     );
 
@@ -2206,13 +2432,11 @@ fn no_file_changes_retry_attempts_keep_failed_step_telemetry() {
         "failed postcondition duration metric missing or unsafe: {duration_points:#?}"
     );
 
-    let project_path = fixture.project.to_string_lossy().into_owned();
     let home_path = fixture.home.to_string_lossy().into_owned();
     assert_payload_omits(
         &requests,
         &[
             "retry-input-secret",
-            project_path.as_str(),
             home_path.as_str(),
             "touch changed.txt",
         ],
@@ -2271,14 +2495,9 @@ fn no_file_changes_failure_is_recorded_before_recovery() {
     assert_eq!(recovered.status_code, StatusCode::Ok as i32);
     assert_eq!(unchanged.parent_span_id, workflow.span_id);
     assert_eq!(recovered.parent_span_id, workflow.span_id);
-    let project_path = fixture.project.to_string_lossy().into_owned();
     assert_payload_omits(
         &requests,
-        &[
-            "no-change-recovery-input-secret",
-            project_path.as_str(),
-            "touch recovered.txt",
-        ],
+        &["no-change-recovery-input-secret", "touch recovered.txt"],
     );
 }
 
@@ -2365,13 +2584,12 @@ fn skip_planning_foreground_and_background_omit_planning_telemetry() {
         }),
         "skip-planning must not emit agent/planning spans: {exported_spans:#?}"
     );
-    let fixture_path = fixture.root.path().to_string_lossy().into_owned();
     assert_payload_omits(
         &requests,
         &[
             "foreground-plan-input-secret",
             "background-plan-input-secret",
-            fixture_path.as_str(),
+            config.as_str(),
         ],
     );
 }
@@ -2444,6 +2662,8 @@ fn failed_repo_clone_keeps_plan_root_and_preallocated_session_id() {
         &[
             "clone-failure-input-secret",
             "owner/repository",
+            SESSION_BASE_DIR_ATTRIBUTE,
+            SESSION_WORKSPACE_DIR_ATTRIBUTE,
             fixture_path.as_str(),
         ],
     );
@@ -2547,14 +2767,13 @@ fn execute_now_finishes_plan_root_before_separate_run_root() {
         run.attributes.get("cruise.outcome").map(String::as_str),
         Some("success")
     );
-    let fixture_path = fixture.root.path().to_string_lossy().into_owned();
     assert_payload_omits(
         &requests,
         &[
             "execute-now-input-secret",
             "plan-prompt-secret",
             "execution-marker-secret",
-            fixture_path.as_str(),
+            config.as_str(),
         ],
     );
 }
@@ -2627,13 +2846,12 @@ fn cancelling_plan_approval_exits_successfully_deletes_session_after_plan_finish
         }),
         "cancelled approval must not launch workflow execution: {exported_spans:#?}"
     );
-    let fixture_path = fixture.root.path().to_string_lossy().into_owned();
     assert_payload_omits(
         &requests,
         &[
             "cancel-plan-input-secret",
             "plan-prompt-secret",
-            fixture_path.as_str(),
+            config.as_str(),
         ],
     );
 }
@@ -2655,7 +2873,8 @@ fn failed_exec_exports_fixed_error_classification_and_redacts_stderr() {
         "failure workflow unexpectedly succeeded"
     );
     let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics", "/v1/logs"]);
-    let exported_spans = spans(&requests);
+    let exported_spans = assert_exec_path_privacy(&requests, &fixture);
+    assert!(!logs(&requests).is_empty(), "failed command logs missing");
     let workflow = named_span(
         &exported_spans,
         "cruise.workflow",
@@ -2962,8 +3181,7 @@ steps:
             "retry-credential-secret",
         ],
     );
-    let root_path = fixture.root.path().to_string_lossy().into_owned();
-    assert_payload_omits(&requests, &[root_path.as_str()]);
+    assert_payload_omits(&requests, &[&fixture.config.to_string_lossy()]);
 }
 
 #[test]

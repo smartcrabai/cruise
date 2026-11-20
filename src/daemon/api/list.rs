@@ -266,7 +266,8 @@ async fn create_pr(
     }
     let prepared = match state
         .application
-        .prepare_create_pr_operation(&id, request.context.as_ref())
+        .prepare_create_pr_operation(&id, request.context)
+        .await
     {
         Ok(prepared) => prepared,
         Err(error) => {

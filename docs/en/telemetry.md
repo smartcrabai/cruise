@@ -26,7 +26,11 @@ cruise exec --config cruise.yaml
 
 Metrics are `cruise.operation.count` and `cruise.operation.duration` (seconds), labeled only by `cruise.operation` and `cruise.outcome`, plus `cruise.retry.count`, labeled only by `cruise.retry.action` and `cruise.retry.reason`. Session/workflow/model identifiers are trace-only, not metric labels. Token usage and cost are not exported to OpenTelemetry; they are recorded locally as described under `cruise usage`.
 
-Prompt/input text, agent output, command bodies, working paths, and exception messages are not automatically attached to spans or metrics. Session IDs, workflow file names, step/model names, CI check/job names and references, and explicitly supplied resource attributes are exported; keep secrets out of those values.
+Prompt/input text, agent output, command bodies, and exception messages are not automatically attached to spans or metrics. Session IDs, workflow file names, step/model names, CI check/job names and references, and explicitly supplied resource attributes are exported; keep secrets out of those values.
+
+Cruise exports `cruise.session.base_dir` and `cruise.session.workspace_dir` as full-path string attributes on the `cruise.execution` trace span only—not on child spans, metrics, or logs. `base_dir` is the session base directory, not necessarily a Git root; with `--repo`, it is the session's managed clone. It is included when the session is loaded and available to the execution. `workspace_dir` is the actual workspace directory and is included only after resolution, so failures after resolution may include both attributes. Errors with no session available include neither. Paths are raw, not redacted.
+
+These raw paths can contain usernames, project names, and other identifying information. Enable this only when the collector and its storage are trusted and access is limited by RBAC to authorized operators; Cruise configures neither.
 
 A completed failed shell attempt may additionally emit an ERROR OTLP log named `cruise.command.stderr`. Log bodies redact credential headers, known token formats, private-key blocks, and URL userinfo/query values, and are capped at 8,192 bytes. Stderr from successful commands is not exported.
 
