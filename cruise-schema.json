@@ -149,7 +149,7 @@
     },
     "force_exec": {
       "type": "boolean",
-      "description": "Execute direct plan entry points in the current directory instead of planning. Default: false; --no-force-exec opts out for one invocation."
+      "description": "Execute direct plan entry points, including WebUI Create & plan for a Directory source, in the working directory instead of planning. Default: false; --no-force-exec opts out for one CLI invocation, and WebUI Create draft allows planning."
     },
     "disallowed_tools": {
       "type": "array",

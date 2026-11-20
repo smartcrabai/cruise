@@ -118,7 +118,7 @@ pub(crate) fn sidebar_vm(state: &WebState, selected_id: Option<&str>) -> Result<
     let runtime = state.application.runtime();
     let mut sessions: Vec<super::dto::SessionDto> = state
         .application
-        .list_sessions()?
+        .list_sessions_with_exec()?
         .into_iter()
         .map(|session| {
             if matches!(session.phase, crate::session::SessionPhase::Running) {
@@ -236,6 +236,16 @@ pub(crate) fn header_and_row(
     let mut out = replace(&format!("session-header-{session_id}"), &header);
     out.push_str(&row_partial(state, session_id)?);
     Ok(out)
+}
+
+fn header_and_row_or_sidebar(state: &WebState, session_id: &str) -> Result<String> {
+    match header_and_row(state, session_id, None) {
+        Ok(html) => Ok(html),
+        Err(_) if state.application.read_session(session_id).is_err() => {
+            sidebar_list_partial(state, None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn toast(state: &WebState, vm: &ToastVm) -> String {
@@ -558,7 +568,7 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
         ApplicationEvent::PlanFailed { session_id, error }
         | ApplicationEvent::RunFailed { session_id, error } => {
             let input = session_input(state, session_id);
-            let mut html = header_and_row(state, session_id, None)?;
+            let mut html = header_and_row_or_sidebar(state, session_id)?;
             html.push_str(&sse_toast(
                 state,
                 ToastKind::Failed,
@@ -572,7 +582,9 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
         | ApplicationEvent::RunCancelled { session_id }
         | ApplicationEvent::RunStarted { session_id }
         | ApplicationEvent::PrCreated { session_id, .. } => {
-            out.push(SseMessage::Html(header_and_row(state, session_id, None)?));
+            out.push(SseMessage::Html(header_and_row_or_sidebar(
+                state, session_id,
+            )?));
         }
         ApplicationEvent::RunPhase { session_id, .. }
         | ApplicationEvent::StepStarted { session_id, .. } => {
@@ -626,11 +638,21 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
             out.extend(notify(state, ToastKind::InputRequired, prompt));
         }
         ApplicationEvent::RunFinished { session_id, phase } => {
-            let mut html = header_and_row(state, session_id, None)?;
-            html.push_str(&replace(
-                &format!("tab-log-{session_id}"),
-                &log_tab_html(state, session_id, None)?,
-            ));
+            let html_result = (|| -> Result<String> {
+                let mut html = header_and_row(state, session_id, None)?;
+                html.push_str(&replace(
+                    &format!("tab-log-{session_id}"),
+                    &log_tab_html(state, session_id, None)?,
+                ));
+                Ok(html)
+            })();
+            let mut html = match html_result {
+                Ok(html) => html,
+                Err(_) if state.application.read_session(session_id).is_err() => {
+                    sidebar_list_partial(state, None)?
+                }
+                Err(error) => return Err(error),
+            };
             if phase == "Completed" {
                 let input = session_input(state, session_id);
                 html.push_str(&sse_toast(

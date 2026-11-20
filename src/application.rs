@@ -1729,6 +1729,8 @@ pub struct DirectoryEntry {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionConfigDefaults {
+    #[serde(default)]
+    pub force_exec: bool,
     pub steps: Vec<crate::workflow::SkippableStepNode>,
     pub after_pr_steps: Vec<crate::workflow::SkippableStepNode>,
     pub default_skipped_steps: Vec<String>,
@@ -2719,11 +2721,18 @@ impl CruiseApplication {
     /// Returns an error when the session store cannot be listed or read.
     pub fn list_sessions(&self) -> Result<Vec<SessionState>> {
         Ok(self
-            .manager
-            .list()?
+            .list_sessions_with_exec()?
             .into_iter()
             .filter(|state| !state.exec)
             .collect())
+    }
+    /// List all persisted sessions, including transient exec sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session store cannot be listed or read.
+    pub fn list_sessions_with_exec(&self) -> Result<Vec<SessionState>> {
+        self.manager.list()
     }
     /// Read one persisted session.
     ///
@@ -3166,6 +3175,7 @@ impl CruiseApplication {
             .filter(|step| available.contains(step))
             .collect();
         Ok(NewSessionConfigDefaults {
+            force_exec: config.force_exec(),
             steps,
             after_pr_steps,
             default_skipped_steps,

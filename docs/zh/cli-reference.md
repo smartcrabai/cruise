@@ -314,6 +314,8 @@ Review 会修复已确认的缺陷；当 review 轮次更改了文件时，会�
 
 当 workflow 配置中设置了 `force_exec: true` 时，传统的位置参数形式 `cruise "task"`、`cruise plan "task"` 和 `cruise --plan "task"` 都会使用当前目录执行路径，不进行规划、不创建 worktree，也不创建 PR。`--no-force-exec`、`--repo`、`--grill`、issue 输入和图片附件会退出该模式；`--skip-planning` 和 `--no-interactive-planning` 不会退出。
 
+WebUI 的 Directory 来源提供 **Exec** 按钮；对于 `force_exec` workflow，**Execute** 会替代 **Create & plan**。两者都在指定的、已存在的绝对路径工作目录中直接执行。与 CLI 的退出方式不同，WebUI exec 会拒绝图片附件和 `#N` issue 输入，而不会悄悄转为规划；需要使用这些输入或为 `force_exec` workflow 规划时，请使用 **Create draft**。Repository 来源不会执行 exec。
+
 <a id="cruise---plan"></a>
 ## `cruise --plan`
 

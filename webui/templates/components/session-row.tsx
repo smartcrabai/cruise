@@ -10,6 +10,7 @@ export default function SessionRow(props) {
       {props.row.subtitle && <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{props.row.subtitle}</p>}
       <div class="flex items-center gap-1.5 mt-0.5">
         <span class="text-xs text-blue-600/70 dark:text-blue-400/70 font-mono truncate">{props.row.dirLabel}</span>
+        {props.row.exec && <span class="text-xs text-gray-500 dark:text-gray-400">exec</span>}
         <span class="text-xs text-gray-500 dark:text-gray-400">{props.row.timeLabel}</span>
       </div>
     </a>
