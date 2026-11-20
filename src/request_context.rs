@@ -26,7 +26,12 @@ impl RequestContext {
     ///
     /// Returns an error when the current directory cannot be read.
     pub fn capture() -> std::io::Result<Self> {
-        let cwd = std::env::current_dir()?;
+        Ok(Self::for_dir(std::env::current_dir()?))
+    }
+
+    /// Capture this process's workflow overrides for the supplied directory.
+    #[must_use]
+    pub fn for_dir(cwd: PathBuf) -> Self {
         let config_env = crate::config_env::WORKFLOW_ENV_KEYS
             .iter()
             .filter_map(|key| {
@@ -35,7 +40,7 @@ impl RequestContext {
                     .map(|value| (key.var.to_owned(), value))
             })
             .collect();
-        Ok(Self { cwd, config_env })
+        Self { cwd, config_env }
     }
 
     /// The client's raw value for one workflow override variable.

@@ -1,3 +1,5 @@
+import NewSessionActions from "./components/new-session-actions";
+
 export default function NewSession(props) {
   return (
     <form
@@ -132,17 +134,7 @@ export default function NewSession(props) {
         />
       </div>
 
-      <div class="flex flex-wrap gap-2">
-        <button type="button" hx-post="/webui/drafts" hx-include="closest form" hx-swap="none" class="px-5 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">
-          Save draft
-        </button>
-        <button type="button" hx-post="/webui/sessions/draft" hx-include="closest form" hx-target="#main" hx-swap="innerHTML" class="px-5 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">
-          Create draft
-        </button>
-        <button type="submit" class="px-5 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">
-          Create &amp; plan
-        </button>
-      </div>
+      <NewSessionActions forceExec={props.forceExec} showExec={props.showExec} />
       <p id="draft-status" class="text-xs text-gray-500 dark:text-gray-400"></p>
     </form>
   );

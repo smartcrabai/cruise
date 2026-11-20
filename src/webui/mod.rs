@@ -127,6 +127,7 @@ pub(crate) fn router(state: WebState) -> Router {
         )
         .route("/webui/sessions/{id}/editor/{kind}", get(handlers::editor))
         .route("/webui/sessions", post(handlers::create_session))
+        .route("/webui/sessions/exec", post(handlers::create_exec_session))
         .route(
             "/webui/sessions/draft",
             post(handlers::create_draft_session),

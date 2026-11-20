@@ -18,10 +18,54 @@ pub struct ExecStartRequest {
     #[serde(default)]
     pub flags: crate::flags::FlagValues,
     #[serde(default)]
+    pub skipped_steps: Vec<String>,
+    #[serde(default)]
     pub max_retries: Option<usize>,
     #[serde(default = "super::default_rate_limit_retries")]
     pub rate_limit_retries: usize,
     pub context: crate::request_context::RequestContext,
+}
+
+impl ExecStartRequest {
+    pub fn for_directory(
+        base_dir: &std::path::Path,
+        config_path: Option<&str>,
+        input: String,
+        flags: crate::flags::FlagValues,
+        skipped_steps: Vec<String>,
+    ) -> Result<Self> {
+        let input = input.trim().to_owned();
+        if input.is_empty() {
+            return Err(CruiseError::Other("exec input cannot be empty".into()));
+        }
+        if crate::issue_input::parse_binding(&input)?.is_some() {
+            return Err(CruiseError::Other(
+                "exec does not resolve #N issue input; use Create draft to plan from an issue"
+                    .into(),
+            ));
+        }
+        let base = std::path::PathBuf::from(crate::new_session_history::expand_tilde(
+            &base_dir.to_string_lossy(),
+        ));
+        if !base.is_absolute() || !base.is_dir() {
+            return Err(CruiseError::Other(
+                "exec requires an existing absolute working directory".into(),
+            ));
+        }
+        let config_path = config_path.map(crate::new_session_history::expand_tilde);
+        let (config_yaml, source) =
+            crate::resolver::resolve_config_in_dir(config_path.as_deref(), &base)?;
+        Ok(Self {
+            config_yaml,
+            config_source: SessionConfigRef::from_source(&source, None)?,
+            input,
+            flags,
+            skipped_steps,
+            max_retries: None,
+            rate_limit_retries: super::default_rate_limit_retries(),
+            context: crate::request_context::RequestContext::for_dir(base),
+        })
+    }
 }
 
 impl CruiseApplication {
@@ -82,6 +126,13 @@ impl CruiseApplication {
         session.phase = SessionPhase::Planned;
         session.exec = true;
         session.flags = request.flags.clone();
+        let mut nodes = crate::workflow::list_skippable_steps(&config)?;
+        nodes.extend(crate::workflow::list_skippable_after_pr_steps(&config)?);
+        session.skipped_steps = crate::flags::drop_disabled_skips(
+            request.skipped_steps.clone(),
+            &nodes,
+            &request.flags,
+        );
         self.manager.create_with_config(&session, &config)?;
 
         let session_dir = self.manager.sessions_dir().join(&session_id);
@@ -114,3 +165,7 @@ fn resolver_source(config_source: &SessionConfigRef) -> Result<ConfigSource> {
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "exec_tests.rs"]
+mod tests;

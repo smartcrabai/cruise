@@ -39,6 +39,7 @@ fn row() -> SessionRowVm {
         title: "Add a WebUI".to_string(),
         subtitle: Some("add a webui".to_string()),
         dir_label: "cruise".to_string(),
+        exec: true,
         time_label: "2/3/26 04:05".to_string(),
         selected: true,
         badge: badge(),
@@ -188,6 +189,10 @@ fn shell_fixtures() -> Vec<(&'static str, Value)> {
         ),
         ("sidebar", value(&sidebar())),
         ("sidebar-rows", value(&sidebar())),
+        (
+            "components/new-session-actions",
+            json!({ "forceExec": true, "showExec": false }),
+        ),
         (
             "components/run-all-control",
             value(&RunAllControlVm {
@@ -343,6 +348,8 @@ fn tab_fixtures() -> Vec<(&'static str, Value)> {
             value(&NewSessionVm {
                 source_mode: "directory".to_string(),
                 directory_selected: true,
+                force_exec: false,
+                show_exec: true,
                 input: "add a webui".to_string(),
                 base_dir: "/tmp/x".to_string(),
                 repo: String::new(),

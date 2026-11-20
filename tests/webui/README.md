@@ -1,5 +1,9 @@
 # Responsive WebUI executable specifications
 
+## Exec browser contract
+
+From the repository root, run `npm ci --prefix tests/webui --ignore-scripts`, `tests/webui/node_modules/.bin/playwright install chromium` (on Linux use `install --with-deps chromium`), `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, then `node tests/webui/exec-browser.mjs`. The test launches the production daemon and Chromium with isolated temporary HOME, XDG directories, workflows and local Git repository. It checks explicit Exec, rejected issue-only input and its error toast, force_exec action selection and execution, real marker files in the working directory, and absence of additional Git worktrees. It uses no external services or credentials. Screenshots are saved in `target/formal-reports/exec-browser/`, configurable with `WEBUI_EXEC_REPORT_DIR`; `WEBUI_BDD_BIN` overrides the runtime path.
+
 ## Language browser regression
 
 From the repository root, run `npm ci --prefix tests/webui --ignore-scripts`, `tests/webui/node_modules/.bin/playwright install chromium` (on Linux use `install --with-deps chromium`), `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, then `node tests/webui/language.mjs`. The test creates and removes isolated HOME/XDG session data, starts the production runtime on an ephemeral port, and exercises desktop and mobile language selection, persistence, invalid-cookie fallback, and a graph loading failure. Screenshots are saved under `target/formal-reports/language-browser/`, overridable with `WEBUI_LANGUAGE_REPORT_DIR`. The responsive WebUI CI workflow runs the contract and uploads its reports. The graph failure deliberately blocks the external Mermaid CDN, not the application server.

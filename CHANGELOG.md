@@ -26,6 +26,8 @@
 
 ### Added
 
+- Add a WebUI **Exec** button for Directory sessions. With `force_exec`, **Execute** replaces **Create & plan** for Directory workflows. Exec sessions appear in the sidebar while they exist and can be resumed there when Suspended.
+
 - Check GitHub and GitLab base-branch CI before fresh workflow runs by default; opt out with `check_base_ci: false` in `default.yaml`.
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.
 - Add the `if.head-changed` step condition, which routes to a target when a step completes successfully with a different Git `HEAD` OID; untracked, ignored, and uncommitted changes do not count.

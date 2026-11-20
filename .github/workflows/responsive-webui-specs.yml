@@ -70,6 +70,8 @@ jobs:
         run: node tests/webui/pr-failed-real.mjs
       - name: Production PR form browser test
         run: node tests/webui/pr-form.mjs
+      - name: Production exec browser test
+        run: node tests/webui/exec-browser.mjs
       - name: Production local merge browser test
         run: node tests/webui/local-merge.mjs
       - name: Production workflow category browser test

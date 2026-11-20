@@ -314,6 +314,8 @@ Review は確認済みの欠陥を修正し、review pass で file が変更さ�
 
 workflow config に `force_exec: true` がある場合、従来形式の `cruise "task"`、`cruise plan "task"`、`cruise --plan "task"` は、計画、worktree、PR 作成を行わず現在の directory で実行します。`--no-force-exec`、`--repo`、`--grill`、issue input、image attachment は opt-out になりますが、`--skip-planning` と `--no-interactive-planning` は opt-out になりません。
 
+WebUI では Directory ソースに **Exec** ボタンがあり、`force_exec` workflow では **Create & plan** が **Execute** に置き換わります。どちらも指定された既存の絶対パスの作業 directory で直接実行します。CLI の opt-out とは異なり、WebUI の exec は画像添付と `#N` issue 入力を拒否し、暗黙に計画へ切り替えません。これらを使う場合や `force_exec` workflow で計画する場合は **Create draft** を使ってください。Repository ソースでは exec を実行しません。
+
 <a id="cruise---plan"></a>
 ## `cruise --plan`
 
