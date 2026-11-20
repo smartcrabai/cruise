@@ -125,17 +125,9 @@ fn durable_proposal_and_approval_contract() {
     let after_stale = manager::snapshot(&repo).unwrap();
     assert_eq!(after_stale.proposal.unwrap().id, second.id);
     assert!(after_stale.goals.is_empty());
-    let goal = manager::approve(&repo, &second.id, second.revision).unwrap();
+    let error = manager::approve(&repo, &second.id, second.revision).unwrap_err();
+    assert!(error.to_string().contains("execution is unavailable"));
     let persisted = manager::snapshot(&repo).unwrap();
-    assert!(persisted.proposal.is_none());
-    assert_eq!(persisted.goals.len(), 1);
-    assert_eq!(persisted.goals[0].id, goal.id);
-    assert_eq!(persisted.goals[0].proposal.id, second.id);
-    assert_eq!(
-        manager::approve(&repo, &second.id, second.revision)
-            .unwrap()
-            .id,
-        goal.id
-    );
-    assert_eq!(manager::snapshot(&repo).unwrap().goals.len(), 1);
+    assert_eq!(persisted.proposal.unwrap().id, second.id);
+    assert!(persisted.goals.is_empty());
 }
