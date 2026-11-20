@@ -3,15 +3,14 @@ use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
 #[test]
-fn manager_requires_an_interactive_terminal() {
-    let root = TempDir::new().unwrap();
+fn manager_requires_an_interactive_terminal() -> Result<(), Box<dyn std::error::Error>> {
+    let root = TempDir::new()?;
     let home = root.path().join("home");
-    fs::create_dir(&home).unwrap();
+    fs::create_dir(&home)?;
     let status = Command::new("git")
         .args(["init", "-q"])
         .current_dir(root.path())
-        .status()
-        .unwrap();
+        .status()?;
     assert!(status.success());
     let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
     command
@@ -27,8 +26,7 @@ fn manager_requires_an_interactive_terminal() {
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .arg("manager")
-        .output()
-        .unwrap();
+        .output()?;
     let _ = Command::new(env!("CARGO_BIN_EXE_cruise"))
         .current_dir(root.path())
         .env("HOME", &home)
@@ -52,4 +50,5 @@ fn manager_requires_an_interactive_terminal() {
         text.contains("terminal") || text.contains("tty") || text.contains("interactive"),
         "expected actionable terminal error: {text}"
     );
+    Ok(())
 }
