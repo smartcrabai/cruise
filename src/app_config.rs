@@ -39,6 +39,25 @@ pub struct AppConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub plan_model: Option<crate::config::ModelSpec>,
+    /// Default prompt languages, applied independently when workflows do not set them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub languages: Option<crate::config::LanguagesConfig>,
+    /// Default template for the generated commit subject.
+    #[serde(
+        rename = "commit_message_template",
+        alias = "commitMessageTemplate",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub commit_message_template: Option<String>,
+    /// Default template for the generated pull request body.
+    #[serde(
+        rename = "pr_body_template",
+        alias = "prBodyTemplate",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pr_body_template: Option<String>,
     /// Per-channel and per-event notification preferences.
     #[serde(default, skip_serializing_if = "NotificationSettings::is_default")]
     pub notifications: NotificationSettings,
@@ -123,6 +142,11 @@ struct RuntimeConfig {
     model: Option<crate::config::ModelSpec>,
     #[serde(rename = "plan_model", alias = "planModel")]
     plan_model: Option<crate::config::ModelSpec>,
+    languages: Option<crate::config::LanguagesConfig>,
+    #[serde(rename = "commit_message_template", alias = "commitMessageTemplate")]
+    commit_message_template: Option<String>,
+    #[serde(rename = "pr_body_template", alias = "prBodyTemplate")]
+    pr_body_template: Option<String>,
 }
 
 fn default_parallelism() -> usize {
@@ -169,6 +193,9 @@ impl Default for AppConfig {
             run_all_parallelism: 1,
             run_all_auto_requeue_max_attempts: 0,
             model: None,
+            languages: None,
+            commit_message_template: None,
+            pr_body_template: None,
             plan_model: None,
             notifications: NotificationSettings::default(),
             workflow_categories: indexmap::IndexMap::new(),
@@ -247,6 +274,9 @@ impl AppConfig {
             prevent_sleep: runtime.prevent_sleep,
             model: runtime.model,
             plan_model: runtime.plan_model,
+            languages: runtime.languages,
+            commit_message_template: runtime.commit_message_template,
+            pr_body_template: runtime.pr_body_template,
             ..Self::default()
         };
         config.validate()?;

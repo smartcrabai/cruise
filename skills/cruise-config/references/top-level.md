@@ -130,6 +130,18 @@ ordered primary-plus-fallback array. JSON takes precedence when both files
 exist; otherwise an existing YAML file is used. Settings updates preserve the
 selected format; when neither file exists, they create JSON. Invalid selected
 files fail rather than falling back to the other format.
+
+The same application files also accept global `languages: {plan: ..., pr:}`,
+`commit_message_template`, and `pr_body_template` preferences. The application
+template keys also accept the camelCase aliases `commitMessageTemplate` and
+`prBodyTemplate`. Template precedence is workflow > project defaults > user
+defaults > application settings, with the matching environment overrides last.
+Resolve each language independently: a workflow member or its corresponding
+legacy field (`plan_language` / `pr_language`) > project defaults > user
+defaults > application preference. `CRUISE_LANGUAGE_PLAN` / `CRUISE_LANGUAGE_PR`
+override configured values; locale is used only when no configured value or
+environment override applies.
+
 The application-level `notifications` setting controls desktop, sound, and
 webhook channels and their per-event switches. It is not a workflow key; the
 secret Slack webhook URL is supplied only through `CRUISE_NOTIFY_WEBHOOK`.
@@ -154,8 +166,11 @@ or the workflow; environment overrides still win, and step models override
 the effective ordinary model. SDK mode derives fallback chains from these
 arrays just as for workflow arrays; command mode uses only the first entry.
 If no layer sets `plan_model`, planning uses the effective `model`.
-File-backed sessions reload these settings; saved snapshots retain the
-models and fallback policy resolved when they were created.
+File-backed sessions reload these settings. Edits to `default.yaml` or
+application settings do not change a saved snapshot; supported workflow-override
+environment variables explicitly sent with a CLI request still override its
+values in memory for that request without rewriting the snapshot. Create a new
+snapshot to capture other model-default or fallback-policy changes.
 
 For an actual jcode prompt, the resolved `model` must identify a model. If it
 does not, Cruise stops before starting jcode and creates the user-level
@@ -290,7 +305,7 @@ These are workflow prompt languages, not the UI display language. The latter use
 
 `languages.pr` controls the language used for the auto-generated PR title and body, and `languages.plan` controls the language used for built-in planning prompts. The deprecated top-level `pr_language` and `plan_language` fields remain supported.
 
-`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN`, when set, override the corresponding YAML values. Blank values are ignored. Without an environment override, the nested field takes precedence over its deprecated top-level counterpart, then the first non-empty variable among `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE` is mapped once; if that value is not a supported locale, no other variable is consulted and the default is `English`. Unsupported or language-neutral locales use `English`.
+`CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN`, when set, override the corresponding configured values. Blank values are ignored. Resolve each language independently: a workflow `languages` member or its corresponding legacy `pr_language` / `plan_language` field > project defaults > user defaults > application preference. Locale inference is used only if there is no configured value or environment override; the first non-empty variable among `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE` is mapped once, and an unsupported value does not fall through. Unsupported or language-neutral locales use `English`.
 
 ```yaml
 languages:
@@ -381,7 +396,7 @@ See [after-pr.md](after-pr.md) for steps that run after PR creation.
 
 ## `commit_message_template` and `pr_body_template`
 
-These optional top-level strings customize the host-created commit message and PR body in the worktree PR creation path. They may also be set in user `<config_dir>/default.yaml` or project `.cruise/default.yaml`; precedence is workflow > project defaults > user defaults > unset. They are not CLI options or environment overrides.
+These optional top-level strings customize the host-created commit message and PR body in the worktree PR creation path. They may also be set in user `<config_dir>/default.yaml`, project `.cruise/default.yaml`, or application `config.yaml` / `config.json` (application aliases: `commitMessageTemplate` and `prBodyTemplate`). Precedence is workflow > project defaults > user defaults > application settings > unset, followed by the `CRUISE_COMMIT_MESSAGE_TEMPLATE` and `CRUISE_PR_BODY_TEMPLATE` process overrides. They are not CLI options.
 
 ```yaml
 commit_message_template: "{title} [{session_id}]"
