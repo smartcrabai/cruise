@@ -1,4 +1,5 @@
 use crate::cli::ExecArgs;
+use crate::cli_events::{CtrlC, drive, interruptible_startup};
 use crate::config::WorkflowConfig;
 use crate::error::{CruiseError, Result};
 use crate::resolver::{ConfigSource, load_config_from_source, resolve_config};
@@ -74,7 +75,7 @@ pub(crate) async fn run_resolved(
         return Ok(());
     }
 
-    let (_herdr, (client, session_id, stream)) = crate::cli_events::interruptible_startup(async {
+    let (_herdr, (client, session_id, stream, ctrl_c)) = interruptible_startup(async {
         let herdr = crate::herdr::start();
         let flag_values = if req.flags.is_empty() {
             crate::run_cmd::select_flag_values(config, &crate::flags::FlagValues::new())?
@@ -98,12 +99,13 @@ pub(crate) async fn run_resolved(
         let stream = client
             .events(crate::daemon::client::EventFilter::default())
             .await?;
+        let ctrl_c = CtrlC::new()?;
         let session_id = client.start_exec(&request).await?;
-        Ok((herdr, (client, session_id, stream)))
+        Ok((herdr, (client, session_id, stream, ctrl_c)))
     })
     .await?;
     let mut handler = crate::cli_events::TerminalEvents::new(&client, &session_id);
-    let result = match crate::cli_events::drive(&client, &session_id, stream, &mut handler).await {
+    let result = match drive(&client, &session_id, stream, ctrl_c, &mut handler).await {
         Ok(finished) => {
             print_recovery_hint(&client, &finished).await;
             exec_exit_result(finished)

@@ -51,7 +51,7 @@ pub struct Finished {
 
 /// Consume `stream` until the session's operation ends. Ctrl+C requests
 /// cancellation and keeps waiting for the resulting terminal event. A second
-/// Ctrl+C exits immediately.
+/// Ctrl+C exits immediately. Create `ctrl_c` before starting the operation.
 ///
 /// When stdin is not a terminal, a prompt remains active in the daemon so a
 /// WebUI/API client can answer it after this client exits.
@@ -64,6 +64,7 @@ pub async fn drive<H: SessionEventHandler>(
     client: &DaemonClient,
     session_id: &str,
     stream: EventStream,
+    mut ctrl_c: CtrlC,
     handler: &mut H,
 ) -> Result<Finished> {
     let mut cancelled_by_user = false;
@@ -79,10 +80,7 @@ pub async fn drive<H: SessionEventHandler>(
         loop {
             tokio::select! {
                 result = &mut wait => break result,
-                signal = tokio::signal::ctrl_c() => {
-                    signal.map_err(|error| {
-                        CruiseError::Other(format!("failed to listen for Ctrl+C: {error}"))
-                    })?;
+                () = ctrl_c.recv() => {
                     match ctrl_c_action(&mut cancelled_by_user) {
                         CtrlCAction::Cancel => {
                             eprintln!("Cancelling session {session_id}...");
@@ -131,6 +129,35 @@ pub async fn drive<H: SessionEventHandler>(
             cancelled_by_user,
             failure: handler.terminal_failure().map(str::to_owned),
         }),
+    }
+}
+
+/// Ctrl+C listener that keeps a signal delivered while the caller is busy.
+///
+/// A fresh `tokio::signal::ctrl_c()` future only sees signals after its first
+/// poll, so recreating it on every `select!` iteration loses a Ctrl+C that
+/// arrives while another branch runs. Until a listener exists, Ctrl+C kills
+/// the CLI, so create one before asking the daemon to start work.
+pub(crate) struct CtrlC {
+    #[cfg(unix)]
+    signal: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    signal: tokio::signal::windows::CtrlC,
+}
+
+impl CtrlC {
+    pub(crate) fn new() -> Result<Self> {
+        #[cfg(unix)]
+        let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
+        #[cfg(windows)]
+        let signal = tokio::signal::windows::ctrl_c();
+        signal
+            .map(|signal| Self { signal })
+            .map_err(|error| CruiseError::Other(format!("failed to listen for Ctrl+C: {error}")))
+    }
+
+    pub(crate) async fn recv(&mut self) {
+        self.signal.recv().await;
     }
 }
 

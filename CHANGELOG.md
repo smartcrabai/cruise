@@ -61,3 +61,4 @@
 - Keep daemon terminal waits alive through transient session 404s while the event stream can still deliver terminal events; dispose exec sessions only after releasing terminal events.
 - Run approval-title SDK requests from the session workspace.
 - Keep the final stderr lines in OpenCode CLI startup failure messages when the CLI exits before announcing its server.
+- Ctrl+C in `cruise run` (including `--all`), `exec`, `plan`, and **Create PR** in `cruise list` is no longer ignored while the CLI handles daemon events. Outside herdr Core panes, a Ctrl+C right after the work starts now cancels it instead of closing only the CLI.
