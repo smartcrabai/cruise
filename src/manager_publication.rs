@@ -310,20 +310,31 @@ pub(crate) fn reconcile(
     }
 }
 
-fn reconcile_inner(
-    cwd: &Path,
-    id: &str,
-    cancel: &crate::cancellation::CancellationToken,
-) -> Result<()> {
+struct Reconciliation<'a> {
+    cwd: &'a Path,
+    id: &'a str,
+    cancel: &'a crate::cancellation::CancellationToken,
+    goal: Goal,
+    repo: PathBuf,
+    tip: String,
+    reference: String,
+    ctx: crate::forge::ForgeContext,
+}
+
+fn prepare_reconciliation<'a>(
+    cwd: &'a Path,
+    id: &'a str,
+    cancel: &'a crate::cancellation::CancellationToken,
+) -> Result<Option<(Reconciliation<'a>, Publication)>> {
     let goal = load(cwd, id)?;
     if !matches!(
         goal.status,
         GoalStatus::Active | GoalStatus::Verifying | GoalStatus::AwaitingMerge
     ) {
-        return Ok(());
+        return Ok(None);
     }
     if cancel.is_cancelled() {
-        return Ok(());
+        return Ok(None);
     }
     crate::manager_coordinator::validate_execution_contract(&goal)?;
     if !goal.proposal.tasks.iter().all(|t| {
@@ -332,7 +343,7 @@ fn reconcile_inner(
             .iter()
             .any(|a| a.task_id == t.id && a.integrated)
     }) {
-        return Ok(());
+        return Ok(None);
     }
     let repo = anchor(cwd, &goal)?;
     let tip = goal
@@ -363,7 +374,35 @@ fn reconcile_inner(
             "forge or checkout identity differs from approved proposal",
         ));
     }
-    let mut p = if let Some(p) = goal.execution.publication.clone() {
+    let context = Reconciliation {
+        cwd,
+        id,
+        cancel,
+        goal,
+        repo,
+        tip,
+        reference,
+        ctx,
+    };
+    let Some(p) = prepare_worktree(&context)? else {
+        return Ok(None);
+    };
+    Ok(Some((context, p)))
+}
+
+fn prepare_worktree(context: &Reconciliation<'_>) -> Result<Option<Publication>> {
+    let Reconciliation {
+        cwd,
+        id,
+        cancel,
+        goal,
+        repo,
+        tip,
+        ctx,
+        ..
+    } = context;
+    let (cwd, id, cancel) = (*cwd, *id, *cancel);
+    let p = if let Some(p) = goal.execution.publication.clone() {
         p
     } else {
         if goal.status != GoalStatus::Active {
@@ -388,7 +427,7 @@ fn reconcile_inner(
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
         // Worktree creation is recoverable only by inspecting this exact path.
         if let Err(e) = manager_forge::run_effect(
-            &repo,
+            repo,
             "git",
             &[
                 "worktree".into(),
@@ -404,7 +443,7 @@ fn reconcile_inner(
             id,
         ) {
             if cancel.is_cancelled() {
-                return Ok(());
+                return Ok(None);
             }
             block(
                 cwd,
@@ -412,18 +451,34 @@ fn reconcile_inner(
                 p,
                 format!("Cannot create verification worktree: {e}"),
             )?;
-            return Ok(());
+            return Ok(None);
         }
         let mut p = p;
-        if let Err(e) = validate(&repo, &goal, &p) {
+        if let Err(e) = validate(repo, goal, &p) {
             block(cwd, id, p, e.to_string())?;
-            return Ok(());
+            return Ok(None);
         }
         p.phase = Phase::Ready;
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
         p
     };
-    if p.tip != tip
+    Ok(Some(p))
+}
+
+fn validate_publication_intent(
+    context: &Reconciliation<'_>,
+    p: Publication,
+) -> Result<Option<Publication>> {
+    let Reconciliation {
+        cwd,
+        id,
+        goal,
+        tip,
+        ctx,
+        ..
+    } = context;
+    let (cwd, id) = (*cwd, *id);
+    if p.tip != *tip
         || p.branch != format!("cruise/goal/{id}")
         || p.forge_kind != ctx.kind
         || p.forge_host != ctx.host
@@ -435,7 +490,7 @@ fn reconcile_inner(
     }
     if p.checks.len() > goal.proposal.checks.len()
         || p.checks.iter().zip(&goal.proposal.checks).any(|(e, c)| {
-            !e.passed() || e.check_id != c.id || e.argv != c.argv || e.verified_tip != tip
+            !e.passed() || e.check_id != c.id || e.argv != c.argv || e.verified_tip != *tip
         })
         || (p.phase != Phase::CheckIntent && p.pending_check.is_some())
         || (p.phase == Phase::Published) != p.request.is_some()
@@ -452,8 +507,26 @@ fn reconcile_inner(
             "Verification was interrupted. Inspect its worktree and explicitly retry verification"
                 .into(),
         )?;
-        return Ok(());
+        return Ok(None);
     }
+    Ok(Some(p))
+}
+
+fn run_approved_checks(
+    context: &Reconciliation<'_>,
+    mut p: Publication,
+) -> Result<Option<Publication>> {
+    let Reconciliation {
+        cwd,
+        id,
+        cancel,
+        goal,
+        repo,
+        tip,
+        reference,
+        ..
+    } = context;
+    let (cwd, id, cancel) = (*cwd, *id, *cancel);
     if p.phase == Phase::Ready {
         for (index, check) in goal.proposal.checks.iter().enumerate().skip(p.checks.len()) {
             if cancel.is_cancelled() {
@@ -463,11 +536,11 @@ fn reconcile_inner(
                     p,
                     "Verification cancelled. Explicitly retry verification".into(),
                 )?;
-                return Ok(());
+                return Ok(None);
             }
             let latest = load(cwd, id)?;
             if latest.status != GoalStatus::Verifying {
-                return Ok(());
+                return Ok(None);
             }
             let log_dir = p
                 .worktree
@@ -485,11 +558,11 @@ fn reconcile_inner(
             });
             save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
             let result = crate::manager_git::run_verification_check_guarded(
-                &repo,
+                repo,
                 &p.worktree,
-                &reference,
+                reference,
                 &goal.proposal.target_sha,
-                &tip,
+                tip,
                 &check.id,
                 &check.argv,
                 &stdout,
@@ -510,7 +583,7 @@ fn reconcile_inner(
                             p,
                             format!("Verification check {} failed or was interrupted", check.id),
                         )?;
-                        return Ok(());
+                        return Ok(None);
                     }
                     save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
                 }
@@ -521,32 +594,46 @@ fn reconcile_inner(
                         p,
                         format!("Verification check {} could not complete: {e}", check.id),
                     )?;
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         }
-        validate(&repo, &goal, &p)?;
+        validate(repo, goal, &p)?;
         p.phase = Phase::Verified;
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
     }
     if p.checks.len() != goal.proposal.checks.len()
         || p.checks.iter().zip(&goal.proposal.checks).any(|(e, c)| {
-            !e.passed() || e.check_id != c.id || e.argv != c.argv || e.verified_tip != tip
+            !e.passed() || e.check_id != c.id || e.argv != c.argv || e.verified_tip != *tip
         })
     {
         return Err(error(
             "verification evidence does not match approved checks",
         ));
     }
+    Ok(Some(p))
+}
+
+fn reconcile_push(context: &Reconciliation<'_>, mut p: Publication) -> Result<Option<Publication>> {
+    let Reconciliation {
+        cwd,
+        id,
+        cancel,
+        goal,
+        repo,
+        ctx,
+        ..
+    } = context;
+    let (cwd, id, cancel) = (*cwd, *id, *cancel);
     if p.phase == Phase::Published {
         let pr = p
             .request
             .as_ref()
             .ok_or_else(|| error("missing saved PR identity"))?;
-        if !matches_request(pr, &ctx.repository, &goal, &p) {
+        if !matches_request(pr, &ctx.repository, goal, &p) {
             return Err(error("saved PR identity does not match the verified Goal"));
         }
-        match manager_forge::observe(&repo, &ctx, pr, cancel) {
+        match manager_forge::observe(repo, ctx, pr, cancel) {
             Ok(PullRequestState::Merged) => save(cwd, id, p, GoalStatus::Completed, None)?,
             Ok(PullRequestState::Open) => {}
             Ok(PullRequestState::Closed) => block(
@@ -555,7 +642,7 @@ fn reconcile_inner(
                 p,
                 "PR closed without merge. Human resolution required".into(),
             )?,
-            Err(_) if cancel.is_cancelled() => return Ok(()),
+            Err(_) if cancel.is_cancelled() => return Ok(None),
             Err(e) => block(
                 cwd,
                 id,
@@ -563,17 +650,17 @@ fn reconcile_inner(
                 format!("Cannot confirm PR identity and state: {e}"),
             )?,
         }
-        return Ok(());
+        return Ok(None);
     }
     if cancel.is_cancelled() || load(cwd, id)?.status != GoalStatus::Verifying {
-        return Ok(());
+        return Ok(None);
     }
-    validate(&repo, &goal, &p)?;
+    validate(repo, goal, &p)?;
     if p.phase == Phase::PushIntent {
         // Do not repeat an uncertain push. Confirm the remote ref instead.
-        let remote = match manager_forge::remote_head(&repo, &p.branch, cancel) {
+        let remote = match manager_forge::remote_head(repo, &p.branch, cancel) {
             Ok(remote) => remote,
-            Err(_) if cancel.is_cancelled() => return Ok(()),
+            Err(_) if cancel.is_cancelled() => return Ok(None),
             Err(e) => return Err(error(format!("cannot reconcile remote branch: {e}"))),
         };
         if remote != format!("{}\trefs/heads/{}", p.tip, p.branch) {
@@ -583,19 +670,19 @@ fn reconcile_inner(
                 p,
                 "Push outcome uncertain or remote head differs. Human resolution required".into(),
             )?;
-            return Ok(());
+            return Ok(None);
         }
         p.phase = Phase::Pushed;
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
     }
     if p.phase == Phase::Verified {
-        match manager_forge::lookup(&repo, &ctx, &p.branch, &goal.proposal.target_branch, cancel) {
+        match manager_forge::lookup(repo, ctx, &p.branch, &goal.proposal.target_branch, cancel) {
             Ok(None) => {}
             Ok(Some(_)) => {
                 block(cwd, id, p, "A PR already exists for the Goal branch before push. Human resolution required".into())?;
-                return Ok(());
+                return Ok(None);
             }
-            Err(_) if cancel.is_cancelled() => return Ok(()),
+            Err(_) if cancel.is_cancelled() => return Ok(None),
             Err(e) => {
                 block(
                     cwd,
@@ -603,27 +690,41 @@ fn reconcile_inner(
                     p,
                     format!("Cannot establish PR absence before push: {e}"),
                 )?;
-                return Ok(());
+                return Ok(None);
             }
         }
         p.phase = Phase::PushIntent;
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
-        if let Err(e) = manager_forge::push(&repo, &p.tip, &p.branch, cancel, id) {
+        if let Err(e) = manager_forge::push(repo, &p.tip, &p.branch, cancel, id) {
             if cancel.is_cancelled() {
-                return Ok(());
+                return Ok(None);
             }
             block(cwd, id, p, format!("Push outcome uncertain: {e}"))?;
-            return Ok(());
+            return Ok(None);
         }
         p.phase = Phase::Pushed;
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
     }
     if cancel.is_cancelled() || load(cwd, id)?.status != GoalStatus::Verifying {
-        return Ok(());
+        return Ok(None);
     }
-    validate(&repo, &goal, &p)?;
+    Ok(Some(p))
+}
+
+fn finish_publication(context: &Reconciliation<'_>, mut p: Publication) -> Result<()> {
+    let Reconciliation {
+        cwd,
+        id,
+        cancel,
+        goal,
+        repo,
+        ctx,
+        ..
+    } = context;
+    let (cwd, id, cancel) = (*cwd, *id, *cancel);
+    validate(repo, goal, &p)?;
     let existing =
-        match manager_forge::lookup(&repo, &ctx, &p.branch, &goal.proposal.target_branch, cancel) {
+        match manager_forge::lookup(repo, ctx, &p.branch, &goal.proposal.target_branch, cancel) {
             Ok(pr) => pr,
             Err(_) if cancel.is_cancelled() => return Ok(()),
             Err(e) => {
@@ -655,8 +756,8 @@ fn reconcile_inner(
         p.phase = Phase::CreateIntent;
         save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
         let create_result = manager_forge::create(
-            &repo,
-            &ctx,
+            repo,
+            ctx,
             &p.branch,
             &goal.proposal.target_branch,
             &goal.proposal.objective,
@@ -667,7 +768,7 @@ fn reconcile_inner(
         if cancel.is_cancelled() {
             return Ok(());
         }
-        match manager_forge::lookup(&repo, &ctx, &p.branch, &goal.proposal.target_branch, cancel) {
+        match manager_forge::lookup(repo, ctx, &p.branch, &goal.proposal.target_branch, cancel) {
             Ok(Some(pr)) => pr,
             _ if cancel.is_cancelled() => return Ok(()),
             other => {
@@ -683,7 +784,7 @@ fn reconcile_inner(
             }
         }
     };
-    if !matches_request(&pr, &ctx.repository, &goal, &p) {
+    if !matches_request(&pr, &ctx.repository, goal, &p) {
         block(
             cwd,
             id,
@@ -692,7 +793,7 @@ fn reconcile_inner(
         )?;
         return Ok(());
     }
-    let state = pr.state.clone();
+    let state = pr.state;
     p.request = Some(pr);
     p.phase = Phase::Published;
     match state {
@@ -704,5 +805,85 @@ fn reconcile_inner(
             p,
             "PR closed without merge. Human resolution required".into(),
         ),
+    }
+}
+
+fn reconcile_inner(
+    cwd: &Path,
+    id: &str,
+    cancel: &crate::cancellation::CancellationToken,
+) -> Result<()> {
+    let Some((context, p)) = prepare_reconciliation(cwd, id, cancel)? else {
+        return Ok(());
+    };
+    let Some(p) = validate_publication_intent(&context, p)? else {
+        return Ok(());
+    };
+    let Some(p) = run_approved_checks(&context, p)? else {
+        return Ok(());
+    };
+    let Some(p) = reconcile_push(&context, p)? else {
+        return Ok(());
+    };
+    finish_publication(&context, p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_intent_and_check_evidence_must_match_goal()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let goal: Goal = serde_json::from_value(serde_json::json!({
+            "id": "g", "status": "verifying", "reason": null,
+            "proposal": {
+                "id": "p", "revision": 1, "objective": "goal",
+                "target_branch": "main", "target_sha": "base", "criteria": [],
+                "checks": [], "tasks": [], "workflow": "builtin:tdd"
+            }
+        }))?;
+        let cancel = crate::cancellation::CancellationToken::new();
+        let context = Reconciliation {
+            cwd: Path::new("."),
+            id: "g",
+            cancel: &cancel,
+            goal,
+            repo: PathBuf::from("."),
+            tip: "tip".into(),
+            reference: "refs/heads/cruise/goal/g".into(),
+            ctx: crate::forge::ForgeContext {
+                kind: crate::forge::ForgeKind::GitHub,
+                host: "github.com".into(),
+                repository: "example/project".into(),
+            },
+        };
+        let publication = Publication {
+            tip: "tip".into(),
+            worktree: PathBuf::from("verification"),
+            branch: "cruise/goal/g".into(),
+            phase: Phase::Verified,
+            checks: vec![],
+            pending_check: None,
+            request: None,
+            forge_kind: crate::forge::ForgeKind::GitHub,
+            forge_host: "github.com".into(),
+            forge_repository: "example/project".into(),
+        };
+        let validated = validate_publication_intent(&context, publication.clone())?
+            .ok_or("valid intent unexpectedly stopped")?;
+        assert!(run_approved_checks(&context, validated)?.is_some());
+        let mut wrong_tip = publication.clone();
+        wrong_tip.tip = "other".into();
+        assert!(validate_publication_intent(&context, wrong_tip).is_err());
+        let mut unexpected_pending = publication;
+        unexpected_pending.pending_check = Some(PendingCheck {
+            check_id: "check".into(),
+            argv: vec!["true".into()],
+            stdout_log: PathBuf::from("stdout"),
+            stderr_log: PathBuf::from("stderr"),
+        });
+        assert!(validate_publication_intent(&context, unexpected_pending).is_err());
+        Ok(())
     }
 }
