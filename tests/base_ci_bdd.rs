@@ -8,6 +8,7 @@ mod contracts {
     use std::path::Path;
     use std::path::PathBuf;
     use std::process::{Command, Output, Stdio};
+    use std::sync::OnceLock;
 
     const SESSION: &str = "20261112000000001";
     // Every scenario shares one copy of the fake tools: copying the test binary per
