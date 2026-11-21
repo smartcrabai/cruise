@@ -45,13 +45,15 @@ jobs:
           cache-dependency-path: |
             tests/formal/package-lock.json
             tests/webui/package-lock.json
-      - name: Quint, Alloy receipts and real browser Gherkin
+      - name: Responsive and Planning keyboard specifications (Quint, Alloy and Chromium Gherkin)
         run: bash scripts/check_responsive_webui_specs.sh
       - name: Production graph and Diff browser tests
         run: |
           cargo +1.99.1 build --locked --all-features --bin cruise-runtime
           node tests/webui/graph-flags.mjs
           node tests/webui/diff-browser.mjs
+      - name: Production Option dialog browser test
+        run: node tests/webui/option-dialog.mjs
       - name: Production locale browser test
         run: |
           node tests/webui/language.mjs
