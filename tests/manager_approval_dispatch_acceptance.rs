@@ -18,13 +18,16 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .output()
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{error}"));
     assert!(
         out.status.success(),
         "git {args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    String::from_utf8(out.stdout)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .trim()
+        .to_owned()
 }
 
 fn isolated(command: &mut Command, home: &Path) {
@@ -39,7 +42,10 @@ fn isolated(command: &mut Command, home: &Path) {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
-        .env("CRUISE_COMMAND", serde_json::to_string(&[backend]).unwrap());
+        .env(
+            "CRUISE_COMMAND",
+            serde_json::to_string(&[backend]).unwrap_or_else(|error| panic!("{error}")),
+        );
 }
 
 fn cli(home: &Path, args: &[&str]) -> Output {
@@ -50,7 +56,7 @@ fn cli(home: &Path, args: &[&str]) -> Output {
         .stdin(Stdio::null())
         .args(args)
         .output()
-        .unwrap()
+        .unwrap_or_else(|error| panic!("{error}"))
 }
 
 struct Stop<'a>(&'a Path);
@@ -105,31 +111,39 @@ fn save_dispatch_preview_fixture() {
         workflow: "builtin:tdd".into(),
         contract: None,
     };
-    let proposal = manager::save_proposal(repo, proposal).unwrap();
+    let proposal = manager::save_proposal(repo, proposal).unwrap_or_else(|error| panic!("{error}"));
     fs::write(
-        std::env::var_os("DISPATCH_PREVIEW_OUTPUT").unwrap(),
-        serde_json::to_vec(&proposal).unwrap(),
+        std::env::var_os("DISPATCH_PREVIEW_OUTPUT")
+            .unwrap_or_else(|| panic!("missing preview output path")),
+        serde_json::to_vec(&proposal).unwrap_or_else(|error| panic!("{error}")),
     )
-    .unwrap();
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
-#[tokio::test]
-async fn approval_rejects_new_goal_and_preserves_preview() {
-    let root = TempDir::new().unwrap();
-    let home = root.path();
+fn prepare_preview(home: &Path) -> (std::path::PathBuf, Value) {
     // Never invoke an installed agent or inherit credentials. The command backend
     // remains alive until daemon shutdown, letting both ready tasks be observed.
     let backend = home.join("inert-agent");
-    fs::write(&backend, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
-    fs::set_permissions(&backend, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(&backend, "#!/bin/sh\nexec /bin/sleep 30\n")
+        .unwrap_or_else(|error| panic!("{error}"));
+    fs::set_permissions(&backend, fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("{error}"));
     let repo = home.join("repo");
     let bare = home.join("origin.git");
-    fs::create_dir(&repo).unwrap();
-    git(home, &["init", "--bare", "-q", bare.to_str().unwrap()]);
+    fs::create_dir(&repo).unwrap_or_else(|error| panic!("{error}"));
+    git(
+        home,
+        &[
+            "init",
+            "--bare",
+            "-q",
+            bare.to_str().unwrap_or_else(|| panic!("path is not UTF-8")),
+        ],
+    );
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.name", "Test"]);
     git(&repo, &["config", "user.email", "test@example.test"]);
-    fs::write(repo.join("file"), "base\n").unwrap();
+    fs::write(repo.join("file"), "base\n").unwrap_or_else(|error| panic!("{error}"));
     git(&repo, &["add", "file"]);
     git(&repo, &["commit", "-qm", "base"]);
     let sha = git(&repo, &["rev-parse", "HEAD"]);
@@ -142,24 +156,68 @@ async fn approval_rejects_new_goal_and_preserves_preview() {
             "https://github.com/example/project.git",
         ],
     );
-    git(&repo, &["push", "-q", bare.to_str().unwrap(), "main"]);
+    git(
+        &repo,
+        &[
+            "push",
+            "-q",
+            bare.to_str().unwrap_or_else(|| panic!("path is not UTF-8")),
+            "main",
+        ],
+    );
     git(&repo, &["update-ref", "refs/remotes/origin/main", &sha]);
     let output_path = home.join("preview.json");
-    let mut fixture = Command::new(std::env::current_exe().unwrap());
+    let mut fixture =
+        Command::new(std::env::current_exe().unwrap_or_else(|error| panic!("{error}")));
     isolated(&mut fixture, home);
     let output = fixture
         .args(["--exact", "save_dispatch_preview_fixture", "--nocapture"])
         .env("DISPATCH_PREVIEW_REPO", &repo)
         .env("DISPATCH_PREVIEW_OUTPUT", &output_path)
         .output()
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{error}"));
     assert!(
         output.status.success(),
         "preview fixture: {}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let preview: Value = serde_json::from_slice(&fs::read(output_path).unwrap()).unwrap();
+    let preview: Value =
+        serde_json::from_slice(&fs::read(output_path).unwrap_or_else(|error| panic!("{error}")))
+            .unwrap_or_else(|error| panic!("{error}"));
+    (repo, preview)
+}
+
+async fn snapshot(client: &reqwest::Client, instance: &Value, token: &str, repo: &Path) -> Value {
+    let mut snapshot_url = reqwest::Url::parse(&format!(
+        "{}api/manager/snapshot",
+        instance["origin"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected string"))
+    ))
+    .unwrap_or_else(|error| panic!("{error}"));
+    snapshot_url.query_pairs_mut().append_pair(
+        "cwd",
+        repo.to_str().unwrap_or_else(|| panic!("path is not UTF-8")),
+    );
+    client
+        .get(snapshot_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+        .error_for_status()
+        .unwrap_or_else(|error| panic!("{error}"))
+        .json()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+#[tokio::test]
+async fn approval_rejects_new_goal_and_preserves_preview() {
+    let root = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+    let home = root.path();
+    let (repo, preview) = prepare_preview(home);
     let started = cli(home, &["daemon", "start", "--port", "0"]);
     assert!(
         started.status.success(),
@@ -167,20 +225,33 @@ async fn approval_rejects_new_goal_and_preserves_preview() {
         String::from_utf8_lossy(&started.stderr)
     );
     let _stop = Stop(home);
-    let instance: Value =
-        serde_json::from_slice(&fs::read(home.join("state/cruise/daemon/instance.json")).unwrap())
-            .unwrap();
+    let instance: Value = serde_json::from_slice(
+        &fs::read(home.join("state/cruise/daemon/instance.json"))
+            .unwrap_or_else(|error| panic!("{error}")),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
-        .unwrap();
-    let url = format!("{}api/manager/action", instance["origin"].as_str().unwrap());
-    let token = instance["token"].as_str().unwrap();
+        .unwrap_or_else(|error| panic!("{error}"));
+    let url = format!(
+        "{}api/manager/action",
+        instance["origin"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected string"))
+    );
+    let token = instance["token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected string"));
     let action = |id: Value, revision: Value| json!({"cwd":repo,"action":{"type":"approve","proposal_id":id,"revision":revision}});
     let sessions = home.join("data/cruise/sessions");
     assert!(
-        !sessions.exists() || fs::read_dir(&sessions).unwrap().next().is_none(),
+        !sessions.exists()
+            || fs::read_dir(&sessions)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .next()
+                .is_none(),
         "preview started a child"
     );
     let stale = client
@@ -188,14 +259,23 @@ async fn approval_rejects_new_goal_and_preserves_preview() {
         .bearer_auth(token)
         .json(&action(
             preview["id"].clone(),
-            json!(preview["revision"].as_u64().unwrap() + 1),
+            json!(
+                preview["revision"]
+                    .as_u64()
+                    .unwrap_or_else(|| panic!("expected revision"))
+                    + 1
+            ),
         ))
         .send()
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{error}"));
     assert!(!stale.status().is_success(), "stale approval accepted");
     assert!(
-        !sessions.exists() || fs::read_dir(&sessions).unwrap().next().is_none(),
+        !sessions.exists()
+            || fs::read_dir(&sessions)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .next()
+                .is_none(),
         "stale approval started a child"
     );
     let request = action(preview["id"].clone(), preview["revision"].clone());
@@ -205,34 +285,31 @@ async fn approval_rejects_new_goal_and_preserves_preview() {
         .json(&request)
         .send()
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{error}"));
     assert!(
         !response.status().is_success(),
         "new approval unexpectedly succeeded"
     );
-    let error = response.text().await.unwrap();
+    let error = response
+        .text()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
     assert!(error.contains("unavailable end to end"), "{error}");
-    let mut snapshot_url = reqwest::Url::parse(&format!(
-        "{}api/manager/snapshot",
-        instance["origin"].as_str().unwrap()
-    ))
-    .unwrap();
-    snapshot_url
-        .query_pairs_mut()
-        .append_pair("cwd", repo.to_str().unwrap());
-    let snapshot: Value = client
-        .get(snapshot_url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let snapshot = snapshot(&client, &instance, token, &repo).await;
     assert_eq!(snapshot["proposal"]["id"], preview["id"]);
     assert_eq!(snapshot["proposal"]["revision"], preview["revision"]);
-    assert!(snapshot["goals"].as_array().unwrap().is_empty());
-    assert!(!sessions.exists() || fs::read_dir(&sessions).unwrap().next().is_none());
+    assert_eq!(
+        snapshot["goals"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected goals array"))
+            .as_slice(),
+        &[] as &[Value]
+    );
+    assert!(
+        !sessions.exists()
+            || fs::read_dir(&sessions)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .next()
+                .is_none()
+    );
 }
