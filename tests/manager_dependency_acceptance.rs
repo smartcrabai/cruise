@@ -112,11 +112,7 @@ fn save_dispatch_preview_fixture() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[tokio::test]
-async fn dependent_child_starts_from_integrated_prerequisite_sha()
--> Result<(), Box<dyn std::error::Error>> {
-    let root = TempDir::new()?;
-    let home = root.path();
+fn setup_agents(home: &Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     fs::create_dir_all(home.join("config/cruise"))?;
     fs::write(
         home.join("config/cruise/default.yaml"),
@@ -166,6 +162,10 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
 "#,
     )?;
     fs::set_permissions(&sdk, fs::Permissions::from_mode(0o700))?;
+    Ok(bin)
+}
+
+fn setup_repo(home: &Path) -> Result<(std::path::PathBuf, String), Box<dyn std::error::Error>> {
     let repo = home.join("repo");
     let bare_repo = home.join("origin.git");
     fs::create_dir(&repo)?;
@@ -204,6 +204,10 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
         ],
     )?;
     git(&repo, &["update-ref", "refs/remotes/origin/main", &base])?;
+    Ok((repo, base))
+}
+
+fn save_preview(home: &Path, bin: &Path, repo: &Path) -> Result<Value, Box<dyn std::error::Error>> {
     let output_path = home.join("preview.json");
     let mut fixture = Command::new(std::env::current_exe()?);
     isolated(&mut fixture, home)?;
@@ -213,7 +217,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
         .env_remove("CRUISE_COMMAND")
         .env("CRUISE_SDK", "claude")
         .env("PATH", &path)
-        .env("DISPATCH_PREVIEW_REPO", &repo)
+        .env("DISPATCH_PREVIEW_REPO", repo)
         .env("DISPATCH_PREVIEW_OUTPUT", &output_path)
         .output()?;
     assert!(
@@ -222,7 +226,11 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let preview: Value = serde_json::from_slice(&fs::read(output_path)?)?;
+    Ok(serde_json::from_slice(&fs::read(output_path)?)?)
+}
+
+fn start_daemon(home: &Path, bin: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let path = format!("{}:/usr/bin:/bin", bin.display());
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_cruise"));
     isolated(&mut daemon, home)?;
     let started = daemon
@@ -239,6 +247,18 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
         String::from_utf8_lossy(&started.stdout),
         String::from_utf8_lossy(&started.stderr)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn dependent_child_starts_from_integrated_prerequisite_sha()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = TempDir::new()?;
+    let home = root.path();
+    let bin = setup_agents(home)?;
+    let (repo, base) = setup_repo(home)?;
+    let preview = save_preview(home, &bin, &repo)?;
+    start_daemon(home, &bin)?;
     let _stop = Stop(home);
     let instance: Value =
         serde_json::from_slice(&fs::read(home.join("state/cruise/daemon/instance.json"))?)?;
