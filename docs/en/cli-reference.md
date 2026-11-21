@@ -354,7 +354,7 @@ Options:
       --json   Print all sessions as a JSON array to stdout instead of opening the interactive selector
 ```
 
-With no flags, opens an interactive session browser whose menu depends on each session's phase (see [`cruise list` Actions](sessions.md#cruise-list-actions)). With `--json`, prints every session as a JSON array and exits.
+On an interactive terminal, the top-level picker offers **New Session**, **Clean**, **Run All**, and **Quit** even when there are no sessions. Selecting a session opens its phase-specific menu. See [`cruise list` Actions](sessions.md#cruise-list-actions) for creation modes, confirmations, and navigation. With `--json`, prints every session as a JSON array and exits without prompting.
 
 <a id="cruise-diff"></a>
 ## `cruise diff`

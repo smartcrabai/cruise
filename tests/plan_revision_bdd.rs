@@ -499,7 +499,8 @@ mod contracts {
             reader: Some(reader),
             output,
         };
-        pty.wait_for("Select a session:");
+        let picker = pty.wait_for("Quit");
+        assert!(picker.contains("Action:") && picker.contains("Run All"), "top-level picker missing: {picker}");
         pty.writer
             .as_mut()
             .unwrap_or_else(|| panic!("CLI PTY writer missing"))

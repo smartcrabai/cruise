@@ -5,15 +5,15 @@ use std::time::Duration;
 
 use cruise::session::{SessionManager, SessionPhase, SessionState};
 use cruise::session_config::SessionConfigRef;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tempfile::TempDir;
 
-struct Daemon {
-    home: TempDir,
+pub(crate) struct Daemon {
+    pub(crate) home: TempDir,
 }
 
 impl Daemon {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             home: TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}")),
         }
@@ -29,6 +29,7 @@ impl Daemon {
             .env("XDG_STATE_HOME", home.join("state"))
             .env("GIT_CONFIG_COUNT", "0")
             .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+            .env("CRUISE_UI_LANGUAGE", "en")
             .env_remove("CRUISE_CONFIG")
             .env_remove("CRUISE_DAEMON_PORT")
             .env_remove("HERDR_ENV")
@@ -38,7 +39,7 @@ impl Daemon {
             .unwrap_or_else(|error| panic!("run {args:?}: {error}"))
     }
 
-    fn start(&self) -> Value {
+    pub(crate) fn start(&self) -> Value {
         let output = self.command(&["daemon", "start", "--port", "0"]);
         assert!(
             output.status.success(),
@@ -57,7 +58,7 @@ impl Daemon {
         self.home.path().join("state/cruise/daemon/instance.json")
     }
 
-    fn success(&self, args: &[&str]) -> Output {
+    pub(crate) fn success(&self, args: &[&str]) -> Output {
         let output = self.command(args);
         assert!(
             output.status.success(),
@@ -77,7 +78,7 @@ impl Drop for Daemon {
     }
 }
 
-fn write_cli_session(home: &Path) {
+pub(crate) fn write_cli_session(home: &Path) {
     let project = home.join("project");
     fs::create_dir_all(&project).unwrap_or_else(|error| panic!("create project: {error}"));
     let config = project.join("cruise.yml");
@@ -111,11 +112,25 @@ fn write_cli_session(home: &Path) {
         .unwrap_or_else(|error| panic!("save list session: {error}"));
 }
 
-#[tokio::test]
-async fn sessions_api_json_matches_cruise_list_json() {
+#[test]
+fn headless_list_json_returns_an_empty_array_without_prompting() {
     let daemon = Daemon::new();
-    let instance = daemon.start();
-    write_cli_session(daemon.home.path());
+    daemon.start();
+
+    let cli = daemon.success(&["list", "--json"]);
+    let sessions: Value = serde_json::from_slice(&cli.stdout)
+        .unwrap_or_else(|error| panic!("parse empty cruise list --json: {error}"));
+    assert_eq!(sessions, serde_json::json!([]));
+    let stderr = String::from_utf8_lossy(&cli.stderr);
+    assert!(
+        !["No sessions found", "Select a session", "New Session"]
+            .into_iter()
+            .any(|prompt| stderr.contains(prompt)),
+        "unexpected interactive output: {stderr}"
+    );
+}
+
+pub(crate) async fn fetch_sessions(instance: &Value) -> Value {
     let origin = instance["origin"]
         .as_str()
         .unwrap_or_else(|| panic!("instance origin missing"));
@@ -132,10 +147,18 @@ async fn sessions_api_json_matches_cruise_list_json() {
         .await
         .unwrap_or_else(|error| panic!("GET sessions: {error}"));
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let api_json = response
+    response
         .json::<Value>()
         .await
-        .unwrap_or_else(|error| panic!("parse sessions API: {error}"));
+        .unwrap_or_else(|error| panic!("parse sessions API: {error}"))
+}
+
+#[tokio::test]
+async fn sessions_api_json_matches_cruise_list_json() {
+    let daemon = Daemon::new();
+    let instance = daemon.start();
+    write_cli_session(daemon.home.path());
+    let api_json = fetch_sessions(&instance).await;
 
     let cli = daemon.success(&["list", "--json"]);
     let cli_json: Value = serde_json::from_slice(&cli.stdout)
@@ -170,5 +193,5 @@ async fn sessions_api_json_matches_cruise_list_json() {
     assert_eq!(item["auto_requeue_count"], 2);
     assert!(item.get("baseDir").is_none());
     assert!(item.get("configSource").is_none());
-    assert_eq!(item["workspace_mode"], json!("Worktree"));
+    assert_eq!(item["workspace_mode"], serde_json::json!("Worktree"));
 }

@@ -353,7 +353,7 @@ Options:
       --json   Print all sessions as a JSON array to stdout instead of opening the interactive selector
 ```
 
-flag を付けずに実行すると、session のフェーズに応じたメニューを持つ対話型 session browser が開きます（[`cruise list` の操作](sessions.md#cruise-list-actions)を参照）。`--json` を指定すると、全 session を JSON array として出力して終了します。
+対話型ターミナルでは、セッションがない場合でも一覧メニューに **新規セッション**、**クリーンアップ**、**一括実行**、**終了** が表示されます。セッションを選ぶと、そのフェーズに応じた操作メニューが開きます。作成方法、確認、操作キーについては [`cruise list` のアクション](sessions.md#cruise-list-actions)を参照してください。`--json` を指定すると、確認を求めずに全セッションを JSON 配列として出力して終了します。
 
 <a id="cruise-diff"></a>
 ## `cruise diff`

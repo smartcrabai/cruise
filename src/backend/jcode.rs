@@ -139,10 +139,10 @@ pub(crate) struct JcodeRunnerConfig {
 
 #[derive(Clone, Default)]
 #[cfg_attr(
-    not(all(target_os = "linux", feature = "jcode-bubblewrap")),
+    not(any(test, all(target_os = "linux", feature = "jcode-bubblewrap"))),
     expect(
         dead_code,
-        reason = "only the Bubblewrap backend consumes filesystem grants"
+        reason = "only the Bubblewrap backend and tests read filesystem grants"
     )
 )]
 pub(crate) struct SandboxAccess {

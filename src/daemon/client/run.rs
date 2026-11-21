@@ -19,6 +19,13 @@ pub(crate) struct RunSessionSummary {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunAllResponse {
+    #[serde(default)]
+    no_active_batch: bool,
+}
+
+#[derive(Deserialize)]
 struct CancelledResponse {
     cancelled: bool,
 }
@@ -39,9 +46,9 @@ impl DaemonClient {
     }
 
     /// Start Run All or attach to its currently active batch.
-    pub(crate) async fn start_run_all(&self, request: &RunAllRequest) -> Result<()> {
-        let _: Value = self.post_json("run-all", request).await?;
-        Ok(())
+    pub(crate) async fn start_run_all(&self, request: &RunAllRequest) -> Result<bool> {
+        let response: RunAllResponse = self.post_json("run-all", request).await?;
+        Ok(!response.no_active_batch)
     }
 
     /// Submit an instruction to a running session.

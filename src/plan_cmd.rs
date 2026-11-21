@@ -1008,7 +1008,18 @@ pub async fn launch_background_plan(
     flags: &[(String, bool)],
 ) -> Result<()> {
     let input = read_background_plan_input(plan_input)?;
-    let binding = crate::issue_input::parse_binding(&input)?;
+    launch_background_task(&input, skip_planning, repo, images, no_force_exec, flags).await
+}
+
+pub(crate) async fn launch_background_task(
+    input: &str,
+    skip_planning: bool,
+    repo: Option<&str>,
+    images: &[String],
+    no_force_exec: bool,
+    flags: &[(String, bool)],
+) -> Result<()> {
+    let binding = crate::issue_input::parse_binding(input)?;
     let target = resolve_plan_target(repo, None, binding.is_some())?;
     let detected_images = images.iter().map(PathBuf::from).collect::<Vec<_>>();
 
@@ -1037,7 +1048,7 @@ pub async fn launch_background_plan(
 
     let context = crate::request_context::RequestContext::capture()?;
     let task_input = crate::issue_input::resolve_task_input(
-        &input,
+        input,
         None,
         repo,
         &context.cwd,
