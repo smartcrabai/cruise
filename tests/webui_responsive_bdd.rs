@@ -124,7 +124,9 @@ fn planning_editor_isolation(world: &mut ResponsiveWorld) {
     planning_evidence(world, "ASK_KEYBOARD_EDITOR_PASSED");
 }
 
-#[then("the intercepted answer POST fails without replay and only the explicit retry reaches the daemon with the original request ID and text and clears the question")]
+#[then(
+    "the intercepted answer POST fails without replay and only the explicit retry reaches the daemon with the original request ID and text and clears the question"
+)]
 fn planning_submission(world: &mut ResponsiveWorld) {
     planning_evidence(world, "ASK_KEYBOARD_SUBMISSION_PASSED");
 }
