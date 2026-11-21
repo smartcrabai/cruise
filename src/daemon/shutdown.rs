@@ -4,7 +4,9 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::application::CruiseApplication;
-use crate::error::{CruiseError, Result};
+#[cfg(unix)]
+use crate::error::CruiseError;
+use crate::error::Result;
 use crate::webui::WebState;
 
 /// Hard deadline between the first signal and process exit.

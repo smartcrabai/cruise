@@ -10,6 +10,8 @@ file-artifacts-cli = { max-threads = 1 }
 model-logging-cli = { max-threads = 1 }
 planning-spinner-pty = { max-threads = 1 }
 run-prompts-pty = { max-threads = 1 }
+# Manager tests spawn isolated daemons; avoid saturating CI with concurrent servers.
+manager-integration = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = "binary_id(=cruise::file_artifacts_cli)"
@@ -26,6 +28,28 @@ test-group = "planning-spinner-pty"
 [[profile.default.overrides]]
 filter = "binary_id(=cruise::run_prompts_pty)"
 test-group = "run-prompts-pty"
+
+[[profile.default.overrides]]
+filter = """
+binary_id(=cruise::manager_approval_bdd)
+| binary_id(=cruise::manager_approval_dispatch_acceptance)
+| binary_id(=cruise::manager_cli)
+| binary_id(=cruise::manager_conversation_restart_acceptance)
+| binary_id(=cruise::manager_corrective_approval)
+| binary_id(=cruise::manager_corrective_lifecycle_acceptance)
+| binary_id(=cruise::manager_corrupt_daemon_isolation)
+| binary_id(=cruise::manager_daemon_api)
+| binary_id(=cruise::manager_dependency_acceptance)
+| binary_id(=cruise::manager_forge_lifecycle)
+| binary_id(=cruise::manager_git_integration)
+| binary_id(=cruise::manager_ownership_boundary)
+| binary_id(=cruise::manager_proposal_contract)
+| binary_id(=cruise::manager_reservation_publication)
+| binary_id(=cruise::manager_resume_recovery)
+| binary_id(=cruise::manager_terminal_pty)
+| binary_id(=cruise::manager_verification_retry)
+"""
+test-group = "manager-integration"
 
 # Start the suites whose tests take 15-90 seconds on some CI platform first, so
 # they do not finish last.

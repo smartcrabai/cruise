@@ -213,7 +213,8 @@ impl Fixture {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        let mut retry_start = !out.status.success();
+        let already_running = last_start_output.contains("daemon is already running at ");
+        let mut retry_start = !out.status.success() && !already_running;
         if retry_start
             && !last_start_output.contains("timeout: global")
             && !last_start_output.contains("timed out starting daemon")
@@ -265,7 +266,8 @@ impl Fixture {
                     String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr)
                 );
-                retry_start = !out.status.success();
+                retry_start = !out.status.success()
+                    && !last_start_output.contains("daemon is already running at ");
                 if retry_start
                     && !last_start_output.contains("timeout: global")
                     && !last_start_output.contains("timed out starting daemon")
