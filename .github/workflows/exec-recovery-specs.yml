@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   exec-recovery-specs:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 40
     env:
       CARGO_TERM_COLOR: always
@@ -34,7 +34,7 @@ jobs:
       - name: Install pinned PTY test runners
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends bats=1.10.0-1 expect=5.45.4-3 tcl-expect=5.45.4-3
+          sudo apt-get install -y --no-install-recommends bats=1.13.0-1 expect=5.45.4-4build1 tcl-expect=5.45.4-4build1
       - name: Run exec recovery specifications
         run: bash scripts/check_exec_recovery_specs.sh
       - name: Upload model and scenario evidence
