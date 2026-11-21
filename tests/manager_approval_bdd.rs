@@ -1,5 +1,5 @@
 //! Production-connected approval boundary scenarios, using isolated Git repositories.
-use cruise::manager::{self, Check, Criterion, GoalStatus, Proposal, Task};
+use cruise::manager::{self, Check, Criterion, Proposal, Task};
 use cucumber::{World as _, given, then, when};
 use std::{path::Path, process::Command};
 
@@ -8,7 +8,6 @@ struct World {
     root: Option<tempfile::TempDir>,
     first: Option<Proposal>,
     current: Option<Proposal>,
-    goal_ids: Vec<String>,
 }
 
 fn git(repo: &Path, args: &[&str]) -> String {
@@ -115,32 +114,22 @@ fn no_goal(world: &mut World) {
     assert!(snapshot.goals.is_empty());
 }
 
-#[when("the current proposal is approved twice")]
+#[when("approval of the current proposal is attempted twice")]
 fn approve(world: &mut World) {
     let p = world.current.as_ref().unwrap();
     for _ in 0..2 {
-        world.goal_ids.push(
-            manager::approve(world.root.as_ref().unwrap().path(), &p.id, p.revision)
-                .unwrap()
-                .id,
+        let error = manager::approve(world.repo(), &p.id, p.revision).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Manager execution is unavailable end to end")
         );
     }
 }
 
-#[then("one active goal exists for that exact proposal without child attempts")]
-fn one_goal(world: &mut World) {
-    let snapshot = manager::snapshot(world.repo()).unwrap();
-    assert!(snapshot.proposal.is_none());
-    assert_eq!(snapshot.goals.len(), 1);
-    let goal = &snapshot.goals[0];
-    let p = world.current.as_ref().unwrap();
-    assert_eq!(world.goal_ids, [goal.id.clone(), goal.id.clone()]);
-    assert_eq!(
-        (&goal.proposal.id, goal.proposal.revision),
-        (&p.id, p.revision)
-    );
-    assert_eq!(goal.status, GoalStatus::Active);
-    assert!(goal.execution.attempts.is_empty());
+#[then("the proposal remains available and no goal or child attempt exists")]
+fn proposal_preserved(world: &mut World) {
+    no_goal(world);
 }
 
 #[tokio::main(flavor = "current_thread")]
