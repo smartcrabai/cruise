@@ -10,6 +10,9 @@ mod contracts {
     use std::process::{Command, Output, Stdio};
 
     const SESSION: &str = "20261112000000001";
+    // Every scenario shares one copy of the fake tools: copying the test binary per
+    // scenario dominated this suite's runtime on Windows.
+    static FIXTURE_BIN: OnceLock<PathBuf> = OnceLock::new();
 
     fn executable(dir: &Path, name: &str) -> PathBuf {
         dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
@@ -149,9 +152,11 @@ mod contracts {
                 .current_dir(self.path("repo"))
                 .env(
                     "PATH",
-                    std::env::join_paths(std::iter::once(self.path("bin")).chain(
-                        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-                    ))
+                    std::env::join_paths(
+                        std::iter::once(FIXTURE_BIN.get().unwrap().clone()).chain(
+                            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+                        ),
+                    )
                     .unwrap(),
                 )
                 .env("HOME", self.path("home"))
@@ -191,7 +196,7 @@ mod contracts {
         w.rollup.clone_from(&state);
         w.forge.clone_from(&forge);
         w.root = Some(tempfile::tempdir().unwrap());
-        for dir in ["bin", "repo", "home", "config"] {
+        for dir in ["repo", "home", "config"] {
             std::fs::create_dir_all(w.path(dir)).unwrap();
         }
         assert!(
@@ -238,13 +243,6 @@ mod contracts {
                 .unwrap()
                 .success()
         );
-        for name in ["git", "gh", "glab", "cat"] {
-            std::fs::copy(
-                std::env::current_exe().unwrap(),
-                executable(&w.path("bin"), name),
-            )
-            .unwrap();
-        }
         let session_dir = w.state().parent().unwrap().to_path_buf();
         std::fs::create_dir_all(&session_dir).unwrap();
         let state = json!({"id":SESSION,"base_dir":w.path("repo"),"phase":"Planned","config":{"kind":"builtin_snapshot"},"input":"","current_step":null,"created_at":"2026-11-12T00:00:00Z","completed_at":null,"worktree_path":null,"worktree_branch":null,"input_as_plan":true});
@@ -397,6 +395,15 @@ mod contracts {
     }
     pub async fn run() {
         use cucumber::writer::Stats as _;
+        let bin = tempfile::tempdir().unwrap();
+        for name in ["git", "gh", "glab", "cat"] {
+            std::fs::copy(
+                std::env::current_exe().unwrap(),
+                executable(bin.path(), name),
+            )
+            .unwrap();
+        }
+        FIXTURE_BIN.set(bin.path().to_path_buf()).unwrap();
         let writer = BaseCiWorld::cucumber()
             .fail_on_skipped()
             .run("tests/features/base_ci.feature")
