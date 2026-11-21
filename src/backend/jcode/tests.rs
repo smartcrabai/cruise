@@ -229,6 +229,7 @@ fn model_settings_harness(requests: Arc<Mutex<Vec<&'static str>>>, fail: bool) -
                         model: None,
                         reasoning_effort: None,
                         auth_method: None,
+                        account_label: None,
                         routes: vec![ModelRouteInfo {
                             model: "cheap-model".to_string(),
                             provider: "OpenAI-compatible".to_string(),
