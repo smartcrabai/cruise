@@ -66,6 +66,7 @@ pub async fn drive<H: SessionEventHandler>(
     stream: EventStream,
     handler: &mut H,
 ) -> Result<Finished> {
+    let mut ctrl_c = CtrlC::new()?;
     let mut cancelled_by_user = false;
     let mut retry_cancellation = false;
     let mut retry = tokio::time::interval_at(
@@ -79,10 +80,7 @@ pub async fn drive<H: SessionEventHandler>(
         loop {
             tokio::select! {
                 result = &mut wait => break result,
-                signal = tokio::signal::ctrl_c() => {
-                    signal.map_err(|error| {
-                        CruiseError::Other(format!("failed to listen for Ctrl+C: {error}"))
-                    })?;
+                () = ctrl_c.recv() => {
                     match ctrl_c_action(&mut cancelled_by_user) {
                         CtrlCAction::Cancel => {
                             eprintln!("Cancelling session {session_id}...");
@@ -131,6 +129,34 @@ pub async fn drive<H: SessionEventHandler>(
             cancelled_by_user,
             failure: handler.terminal_failure().map(str::to_owned),
         }),
+    }
+}
+
+/// Ctrl+C listener that keeps a signal delivered while the caller is busy.
+///
+/// A fresh `tokio::signal::ctrl_c()` future only sees signals after its first
+/// poll, so recreating it on every `select!` iteration loses a Ctrl+C that
+/// arrives while another branch runs.
+pub(crate) struct CtrlC {
+    #[cfg(unix)]
+    signal: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    signal: tokio::signal::windows::CtrlC,
+}
+
+impl CtrlC {
+    pub(crate) fn new() -> Result<Self> {
+        #[cfg(unix)]
+        let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
+        #[cfg(windows)]
+        let signal = tokio::signal::windows::ctrl_c();
+        signal
+            .map(|signal| Self { signal })
+            .map_err(|error| CruiseError::Other(format!("failed to listen for Ctrl+C: {error}")))
+    }
+
+    pub(crate) async fn recv(&mut self) {
+        self.signal.recv().await;
     }
 }
 

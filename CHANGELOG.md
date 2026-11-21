@@ -61,3 +61,4 @@
 - Keep daemon terminal waits alive through transient session 404s while the event stream can still deliver terminal events; dispose exec sessions only after releasing terminal events.
 - Run approval-title SDK requests from the session workspace.
 - Keep the final stderr lines in OpenCode CLI startup failure messages when the CLI exits before announcing its server.
+- Stop ignoring a Ctrl+C that arrives while `cruise run` or `exec` is handling daemon events; `run --all` and single-session runs now always request cancellation.

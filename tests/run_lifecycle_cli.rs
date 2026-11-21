@@ -110,11 +110,7 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> TestResult<Output> {
-        let mut child = self.spawn(args)?;
-        match child.wait(CHILD_TIMEOUT) {
-            Ok(output) => Ok(output),
-            Err(error) => Err(format!("{error}; CLI output: {}", child.current_text()?).into()),
-        }
+        Ok(self.spawn(args)?.wait(CHILD_TIMEOUT)?)
     }
 
     fn start_daemon(&self) -> TestResult<()> {
@@ -226,7 +222,12 @@ struct CapturedChild {
 
 impl CapturedChild {
     fn wait(&mut self, timeout: Duration) -> io::Result<Output> {
-        let status = wait_for_child(&mut self.child, timeout)?;
+        let status = wait_for_child(&mut self.child, timeout).map_err(|error| {
+            let output = self
+                .current_text()
+                .unwrap_or_else(|read| format!("<unreadable: {read}>"));
+            io::Error::new(error.kind(), format!("{error}; CLI output: {output}"))
+        })?;
         Ok(Output {
             status,
             stdout: fs::read(&self.stdout_path)?,

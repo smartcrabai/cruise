@@ -662,6 +662,7 @@ async fn drive_batch(
     mut stream: crate::daemon::client::EventStream,
     events: &mut BatchEvents<'_>,
 ) -> Result<bool> {
+    let mut ctrl_c = crate::cli_events::CtrlC::new()?;
     let mut cancelled_by_user = false;
     let mut batch_seen_active = false;
     let mut status_resync = tokio::time::interval_at(
@@ -679,8 +680,7 @@ async fn drive_batch(
                     return Ok(true);
                 }
             }
-            signal = tokio::signal::ctrl_c() => {
-                signal.map_err(|error| CruiseError::Other(format!("failed to listen for Ctrl+C: {error}")))?;
+            () = ctrl_c.recv() => {
                 if cancelled_by_user {
                     return Err(CruiseError::Interrupted);
                 }
