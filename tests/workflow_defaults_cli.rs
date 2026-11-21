@@ -1086,6 +1086,17 @@ if [ "$1" != api ] || [ "$2" != graphql ]; then
   printf 'unexpected fake gh call: %s\n' "$*" >&2
   exit 91
 fi
+for arg in "$@"; do
+  case "$arg" in
+    query=*)
+      opens=$(printf '%s' "${arg#query=}" | tr -cd '{' | wc -c)
+      closes=$(printf '%s' "${arg#query=}" | tr -cd '}' | wc -c)
+      if [ "$opens" -ne "$closes" ]; then
+        printf 'gh: GraphQL query has unbalanced braces (%s open, %s close)\n' "$opens" "$closes" >&2
+        exit 1
+      fi ;;
+  esac
+done
 case " $* " in
   *" head=$WAIT_CI_EXPECTED_HEAD "*) ;;
   *) printf 'GraphQL request was not pinned to local HEAD: %s\n' "$*" >&2; exit 92 ;;

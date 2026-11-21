@@ -330,7 +330,8 @@ impl Operation {
         }
     }
 
-    /// Ends the span and records its outcome and duration. Unknown outcomes are treated as errors.
+    /// Ends the span and records its outcome and duration. Success is Ok, paused/cancelled leave
+    /// status unset, and all other outcomes (including unknown outcomes) are errors.
     pub fn finish(mut self, outcome: &'static str) {
         self.finish_inner(outcome);
     }
@@ -377,30 +378,25 @@ impl Operation {
         };
 
         let span = context.span();
-        let error_type = if outcome == "success" {
-            None
-        } else {
-            let fallback = match outcome {
-                "cancelled" => "cancelled",
-                "timeout" => "timeout",
-                "paused" => "paused",
-                _ => "step_failed",
-            };
-            if claim_error_type(context, fallback) {
-                span.set_attribute(KeyValue::new("error.type", fallback));
-            }
-            Some(
-                context
+        span.set_attribute(KeyValue::new("cruise.outcome", outcome));
+        match outcome {
+            "success" => span.set_status(opentelemetry::trace::Status::Ok),
+            "paused" | "cancelled" => {}
+            _ => {
+                let fallback = if outcome == "timeout" {
+                    "timeout"
+                } else {
+                    "step_failed"
+                };
+                if claim_error_type(context, fallback) {
+                    span.set_attribute(KeyValue::new("error.type", fallback));
+                }
+                let error_type = context
                     .get::<ErrorTypeState>()
                     .and_then(|state| state.0.get().copied())
-                    .unwrap_or(fallback),
-            )
-        };
-        span.set_attribute(KeyValue::new("cruise.outcome", outcome));
-        if let Some(error_type) = error_type {
-            span.set_status(opentelemetry::trace::Status::error(error_type));
-        } else {
-            span.set_status(opentelemetry::trace::Status::Ok);
+                    .unwrap_or(fallback);
+                span.set_status(opentelemetry::trace::Status::error(error_type));
+            }
         }
         span.end();
 

@@ -2247,6 +2247,9 @@ steps:
         let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
 
         let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        // Keep the host's application config (e.g. `languages.plan`) from
+        // pre-empting locale inference, which only applies when nothing is configured.
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path().join("xdg").as_os_str());
         let path = write_file(
             &dir,
             "cruise.yaml",
