@@ -12,6 +12,8 @@ use crate::error::CruiseError;
 #[serde(rename_all = "camelCase")]
 pub struct RunAllRequest {
     #[serde(default)]
+    pub attach_only: bool,
+    #[serde(default)]
     pub parallelism: Option<usize>,
     #[serde(default)]
     pub auto_requeue_max_attempts: Option<u32>,

@@ -77,6 +77,13 @@ The WebUI offers **Exec** for the Directory source, or **Execute** when `force_e
 <a id="cruise-list-actions"></a>
 ## `cruise list` Actions
 
+The interactive picker stays open even when there are no sessions. The following actions don't require selecting a session:
+
+- **New Session** uses the current directory as the session’s base directory and follows the normal workflow configuration lookup. Choose **Plan interactively** to enter a task and review the generated plan, **Plan in background** to let the daemon generate the plan while you return to the picker, or **Save draft** to record the task without running the planner. Cancelling task entry creates no session. Both planning modes require an explicit decision before running the workflow, even if the configuration sets `force_exec`.
+- **Clean** uses the same cleanup rules as `cruise clean`. It asks for confirmation (default: No), then returns to the refreshed picker, even if it removed the last visible session.
+- **Run All** runs eligible Planned and Suspended sessions using the same defaults as `cruise run --all`. If a batch is already active, it offers to attach to it instead. Both prompts default to No. If there's no batch and no eligible work, it shows a message and returns to the picker.
+- **Quit**, Esc, or Ctrl+C exits from the top-level picker. Cancelling a nested menu returns to the picker.
+
 The interactive session list shows a menu of actions depending on the session's phase:
 
 | Phase | Available Actions |

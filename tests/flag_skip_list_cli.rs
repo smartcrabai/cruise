@@ -58,7 +58,7 @@ fn list_settings_select_flags_before_filtering_skips_but_keep_all_resume_steps()
     let (success, text) = list_in_pty(
         &root,
         &[
-            ("Select a session:", b"\r"),
+            ("Quit", b"\r"),
             ("Edit Settings", b"\x1b[B\r"),
             // Change both saved values. Filtering must use these new values,
             // not the session's previously persisted flag map.
@@ -72,10 +72,14 @@ fn list_settings_select_flags_before_filtering_skips_but_keep_all_resume_steps()
             // menu to reopen before sending Back, otherwise inquire may discard
             // an Escape received while it is initializing terminal input.
             ("Action:", b"\x1b"),
-            ("Select a session:", b"\x1b"),
+            ("Quit", b"\x1b"),
         ],
     );
     assert!(success, "{text}");
+    assert!(
+        text.contains("Action:") && text.contains("Run All"),
+        "top-level picker missing: {text}"
+    );
     let e2e = text
         .find("Flag 'e2e':")
         .unwrap_or_else(|| panic!("missing e2e flag prompt: {text}"));
