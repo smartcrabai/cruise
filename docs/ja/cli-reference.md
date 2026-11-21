@@ -3,7 +3,7 @@
 <a id="cli-reference"></a>
 # CLI リファレンス
 
-`cruise manager` は試験的な対話型クライアントです。[Manager の記録と現在の制限](sessions.md#試験的な-manager-の記録)を参照してください。
+`cruise manager` は試験的な対話型クライアントです。提案を明示的に承認すると永続的な Goal が登録され、非同期実行が許可されます。Manager は検証後に 1 つの PR/MR を公開し、人間によるマージを待ちます。利用前に[Manager のゴールと実行](sessions.md#試験的な-manager-の記録)を参照してください。
 
 ```
 cruise [OPTIONS] [INPUT] [COMMAND]

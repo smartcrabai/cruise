@@ -213,8 +213,46 @@ async fn snapshot(client: &reqwest::Client, instance: &Value, token: &str, repo:
         .unwrap_or_else(|error| panic!("{error}"))
 }
 
+fn assert_no_sessions(sessions: &Path, message: &str) {
+    assert!(
+        !sessions.exists()
+            || fs::read_dir(sessions)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .next()
+                .is_none(),
+        "{message}"
+    );
+}
+
+async fn submit_approval(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    request: &Value,
+) -> Value {
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .json(request)
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        response.status().is_success(),
+        "approval failed: {}",
+        response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+    );
+    response
+        .json()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
 #[tokio::test]
-async fn approval_rejects_new_goal_and_preserves_preview() {
+async fn approval_registers_goal_and_is_idempotent() {
     let root = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
     let home = root.path();
     let (repo, preview) = prepare_preview(home);
@@ -246,14 +284,7 @@ async fn approval_rejects_new_goal_and_preserves_preview() {
         .unwrap_or_else(|| panic!("expected string"));
     let action = |id: Value, revision: Value| json!({"cwd":repo,"action":{"type":"approve","proposal_id":id,"revision":revision}});
     let sessions = home.join("data/cruise/sessions");
-    assert!(
-        !sessions.exists()
-            || fs::read_dir(&sessions)
-                .unwrap_or_else(|error| panic!("{error}"))
-                .next()
-                .is_none(),
-        "preview started a child"
-    );
+    assert_no_sessions(&sessions, "preview started a child");
     let stale = client
         .post(&url)
         .bearer_auth(token)
@@ -270,46 +301,28 @@ async fn approval_rejects_new_goal_and_preserves_preview() {
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     assert!(!stale.status().is_success(), "stale approval accepted");
-    assert!(
-        !sessions.exists()
-            || fs::read_dir(&sessions)
-                .unwrap_or_else(|error| panic!("{error}"))
-                .next()
-                .is_none(),
-        "stale approval started a child"
-    );
+    assert_no_sessions(&sessions, "stale approval started a child");
+
     let request = action(preview["id"].clone(), preview["revision"].clone());
-    let response = client
-        .post(&url)
-        .bearer_auth(token)
-        .json(&request)
-        .send()
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    assert!(
-        !response.status().is_success(),
-        "new approval unexpectedly succeeded"
-    );
-    let error = response
-        .text()
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    assert!(error.contains("unavailable end to end"), "{error}");
+    let first_goal = submit_approval(&client, &url, token, &request).await;
+    let second_goal = submit_approval(&client, &url, token, &request).await;
+    assert_eq!(first_goal["id"], second_goal["id"]);
+
     let snapshot = snapshot(&client, &instance, token, &repo).await;
-    assert_eq!(snapshot["proposal"]["id"], preview["id"]);
-    assert_eq!(snapshot["proposal"]["revision"], preview["revision"]);
+    assert!(snapshot["proposal"].is_null());
+    let goals = snapshot["goals"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected goals array"));
+    assert_eq!(goals.len(), 1, "approval created duplicate Goals");
+    let goal = &goals[0];
+    assert_eq!(goal["id"], first_goal["id"]);
+    assert_eq!(goal["proposal"]["id"], preview["id"]);
+    assert_eq!(goal["proposal"]["revision"], preview["revision"]);
+    assert_eq!(goal["execution"]["integrated_tip"], preview["target_sha"]);
+    assert_eq!(goal["execution"]["anchor"], preview["contract"]["anchor"]);
+    assert_eq!(goal["execution"]["origin"], preview["contract"]["origin"]);
     assert_eq!(
-        snapshot["goals"]
-            .as_array()
-            .unwrap_or_else(|| panic!("expected goals array"))
-            .as_slice(),
-        &[] as &[Value]
-    );
-    assert!(
-        !sessions.exists()
-            || fs::read_dir(&sessions)
-                .unwrap_or_else(|error| panic!("{error}"))
-                .next()
-                .is_none()
+        goal["execution"]["workflow"],
+        preview["contract"]["workflow"]
     );
 }

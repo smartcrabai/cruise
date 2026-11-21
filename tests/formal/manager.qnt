@@ -58,10 +58,13 @@ module manager {
     s.merged implies s.published,
   }
   val pauseSafety = previous.paused and event != "resume" implies s == previous
-  val safety = authority and dependencies and lifecycle and pauseSafety
+  val approvalDoesNotDispatch = event != "approve" or all {
+    s.approved, s.reserved == Set(), s.running == Set(), s.integrated == Set(), not(s.verifying)
+  }
+  val safety = authority and dependencies and lifecycle and pauseSafety and approvalDoesNotDispatch
 
-  run approvalDoesNotDispatchTest = init.then(approve)
-    .expect(s.approved and s.reserved == Set() and safety)
+  run approvalAuthorizesAsynchronousSchedulingTest = init.then(approve).then(reserve(0)).then(launch(0))
+    .expect(s.approved and s.running == Set(0) and safety)
   run dependencyAndPublicationTest = init.then(approve).then(reserve(0)).then(launch(0))
     .then(integrate(0)).then(reserve(1)).then(launch(1)).then(integrate(1))
     .then(verify).then(passChecks).then(publish).then(merge).expect(s.merged and safety)

@@ -40,7 +40,40 @@ async fn snapshot(
                 prompts.push(serde_json::json!({"goal_id": goal.id, "prompt": prompt}));
             }
         }
-        let mut value = serde_json::to_value(snapshot)?;
+        let mut value = serde_json::to_value(&snapshot)?;
+        if let Some(goals) = value["goals"].as_array_mut() {
+            for (goal_value, goal) in goals.iter_mut().zip(&snapshot.goals) {
+                if let Some(attempts) = goal_value["execution"]["attempts"].as_array_mut() {
+                    for (attempt_value, attempt) in
+                        attempts.iter_mut().zip(&goal.execution.attempts)
+                    {
+                        attempt_value["child_state"] =
+                            match state.application.read_session(&attempt.session_id) {
+                                Ok(child) => {
+                                    let failure = match &child.phase {
+                                        crate::session::SessionPhase::Failed(message)
+                                        | crate::session::SessionPhase::PrFailed(message) => {
+                                            Some(message.clone())
+                                        }
+                                        _ => None,
+                                    };
+                                    serde_json::json!({
+                                        "phase": child.phase.label(),
+                                        "failure": failure,
+                                    })
+                                }
+                                Err(error) => serde_json::json!({
+                                    "phase": "Unavailable",
+                                    "failure": format!(
+                                        "Could not inspect child {}: {error}",
+                                        attempt.session_id
+                                    ),
+                                }),
+                            };
+                    }
+                }
+            }
+        }
         value["prompts"] = serde_json::Value::Array(prompts);
         Ok(value)
     })

@@ -861,27 +861,53 @@ pub(crate) fn save_proposal_for_turn(
     Ok(proposal)
 }
 
-/// Reject new approvals while end-to-end Manager execution is unavailable.
-/// Previously approved proposals remain idempotent.
+/// Approve the reviewed proposal and durably register its initial Goal.
+/// Re-approval of the same proposal returns the existing Goal.
 ///
 /// # Errors
-/// Returns an error if the proposal cannot be found or approved, or state cannot be read.
+/// Returns an error if the proposal is stale, its reviewed contract changed,
+/// or state cannot be persisted.
 pub fn approve(cwd: &Path, proposal_id: &str, revision: u64) -> Result<Goal> {
     let _guard = WRITER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let snapshot = load(repository(cwd)?)?;
+    let mut snapshot = load(repository(cwd)?)?;
     if let Some(goal) = snapshot
         .goals
         .iter()
-        .find(|g| g.proposal.id == proposal_id && g.proposal.revision == revision)
+        .find(|goal| goal.proposal.id == proposal_id && goal.proposal.revision == revision)
     {
         return Ok(goal.clone());
     }
-    snapshot
+
+    let proposal = snapshot
         .proposal
         .as_ref()
-        .filter(|p| p.id == proposal_id && p.revision == revision)
-        .ok_or_else(|| CruiseError::Busy("stale or unknown manager proposal".into()))?;
-    Err(CruiseError::Busy("Manager execution is unavailable end to end; the proposal is preserved for review and manual execution".into()))
+        .filter(|proposal| proposal.id == proposal_id && proposal.revision == revision)
+        .ok_or_else(|| CruiseError::Busy("stale or unknown manager proposal".into()))?
+        .clone();
+    proposal.validate()?;
+    verify_contract(cwd, &snapshot.repository, &proposal)?;
+    let contract = proposal
+        .contract
+        .as_ref()
+        .ok_or_else(|| CruiseError::Other("proposal has no frozen execution contract".into()))?;
+    let execution = GoalExecution {
+        anchor: Some(contract.anchor.clone()),
+        origin: Some(contract.origin.clone()),
+        workflow: Some(contract.workflow.clone()),
+        integrated_tip: Some(proposal.target_sha.clone()),
+        ..GoalExecution::default()
+    };
+    let goal = Goal {
+        id: uuid::Uuid::new_v4().to_string(),
+        proposal,
+        status: GoalStatus::Active,
+        reason: None,
+        execution,
+    };
+    snapshot.proposal = None;
+    snapshot.goals.push(goal.clone());
+    save(&snapshot)?;
+    Ok(goal)
 }

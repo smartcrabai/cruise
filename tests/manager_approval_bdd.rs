@@ -127,7 +127,9 @@ fn approve(world: &mut World) {
     }
 }
 
-#[then("one active goal exists for that exact proposal without child attempts")]
+#[then(
+    "one active goal exists for that exact proposal at its frozen target tip without child attempts"
+)]
 fn one_goal(world: &mut World) {
     let snapshot = manager::snapshot(world.repo()).unwrap();
     assert!(snapshot.proposal.is_none());
@@ -140,6 +142,23 @@ fn one_goal(world: &mut World) {
         (&p.id, p.revision)
     );
     assert_eq!(goal.status, GoalStatus::Active);
+    let contract = p
+        .contract
+        .as_ref()
+        .expect("proposal has a frozen execution contract");
+    assert_eq!(
+        goal.execution.integrated_tip.as_deref(),
+        Some(p.target_sha.as_str())
+    );
+    assert_eq!(goal.execution.anchor.as_ref(), Some(&contract.anchor));
+    assert_eq!(
+        goal.execution.origin.as_deref(),
+        Some(contract.origin.as_str())
+    );
+    assert_eq!(
+        serde_json::to_value(goal.execution.workflow.as_ref()).unwrap(),
+        serde_json::to_value(Some(&contract.workflow)).unwrap()
+    );
     assert!(goal.execution.attempts.is_empty());
 }
 

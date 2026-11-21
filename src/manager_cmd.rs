@@ -387,6 +387,30 @@ fn show_snapshot(snapshot: &Value) {
                 text("goal"),
                 serde_json::to_string_pretty(goal).unwrap_or_default()
             );
+            if let Some(attempts) = goal
+                .get("execution")
+                .and_then(|execution| execution.get("attempts"))
+                .and_then(Value::as_array)
+            {
+                for attempt in attempts {
+                    if attempt
+                        .get("child_state")
+                        .and_then(|state| state.get("phase"))
+                        .and_then(Value::as_str)
+                        != Some("Failed")
+                    {
+                        continue;
+                    }
+                    let goal_id = goal.get("id").and_then(Value::as_str).unwrap_or("GOAL");
+                    let task_id = attempt
+                        .get("task_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("TASK");
+                    println!(
+                        "Next action: `/resume {goal_id} {task_id}` continues this child with its existing worktree and logs; `/retry {goal_id} {task_id}` starts a fresh attempt."
+                    );
+                }
+            }
             if goal
                 .get("execution")
                 .and_then(|execution| execution.get("corrective_preview"))

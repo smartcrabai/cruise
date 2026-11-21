@@ -1,4 +1,4 @@
-use cruise::manager::{self, Check, Criterion, Proposal, Task};
+use cruise::manager::{self, Check, Criterion, GoalStatus, Proposal, Task};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -120,9 +120,13 @@ fn durable_proposal_and_approval_contract() {
     );
     git(&repo, &["update-ref", "refs/remotes/origin/main", &sha]);
 
+    assert_approval_transitions(&repo, &sha);
+}
+
+fn assert_approval_transitions(repo: &Path, sha: &str) {
     let first =
-        manager::save_proposal(&repo, proposal(&sha)).unwrap_or_else(|error| panic!("{error}"));
-    let loaded = manager::snapshot(&repo).unwrap_or_else(|error| panic!("{error}"));
+        manager::save_proposal(repo, proposal(sha)).unwrap_or_else(|error| panic!("{error}"));
+    let loaded = manager::snapshot(repo).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         loaded
             .proposal
@@ -132,12 +136,12 @@ fn durable_proposal_and_approval_contract() {
     );
     assert!(loaded.goals.is_empty());
     let second =
-        manager::save_proposal(&repo, proposal(&sha)).unwrap_or_else(|error| panic!("{error}"));
+        manager::save_proposal(repo, proposal(sha)).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(second.revision, first.revision + 1);
     assert_ne!(second.id, first.id);
-    assert!(manager::approve(&repo, &first.id, first.revision).is_err());
-    assert!(manager::approve(&repo, &second.id, first.revision).is_err());
-    let after_stale = manager::snapshot(&repo).unwrap_or_else(|error| panic!("{error}"));
+    assert!(manager::approve(repo, &first.id, first.revision).is_err());
+    assert!(manager::approve(repo, &second.id, first.revision).is_err());
+    let after_stale = manager::snapshot(repo).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         after_stale
             .proposal
@@ -146,21 +150,40 @@ fn durable_proposal_and_approval_contract() {
         second.id
     );
     assert!(after_stale.goals.is_empty());
-    let goal = manager::approve(&repo, &second.id, second.revision)
+    let goal = manager::approve(repo, &second.id, second.revision)
         .unwrap_or_else(|error| panic!("{error}"));
-    let persisted = manager::snapshot(&repo).unwrap_or_else(|error| panic!("{error}"));
+    let persisted = manager::snapshot(repo).unwrap_or_else(|error| panic!("{error}"));
     assert!(persisted.proposal.is_none());
     assert_eq!(persisted.goals.len(), 1);
+    assert_eq!(persisted.goals[0].status, GoalStatus::Active);
+    assert_eq!(
+        goal.execution.integrated_tip.as_deref(),
+        Some(second.target_sha.as_str())
+    );
+    let contract = second
+        .contract
+        .as_ref()
+        .unwrap_or_else(|| panic!("missing frozen contract"));
+    assert_eq!(goal.execution.anchor.as_ref(), Some(&contract.anchor));
+    assert_eq!(
+        goal.execution.origin.as_deref(),
+        Some(contract.origin.as_str())
+    );
+    assert_eq!(
+        serde_json::to_value(goal.execution.workflow.as_ref())
+            .unwrap_or_else(|error| panic!("{error}")),
+        serde_json::to_value(Some(&contract.workflow)).unwrap_or_else(|error| panic!("{error}"))
+    );
     assert_eq!(persisted.goals[0].id, goal.id);
     assert_eq!(persisted.goals[0].proposal.id, second.id);
     assert_eq!(
-        manager::approve(&repo, &second.id, second.revision)
+        manager::approve(repo, &second.id, second.revision)
             .unwrap_or_else(|error| panic!("{error}"))
             .id,
         goal.id
     );
     assert_eq!(
-        manager::snapshot(&repo)
+        manager::snapshot(repo)
             .unwrap_or_else(|error| panic!("{error}"))
             .goals
             .len(),

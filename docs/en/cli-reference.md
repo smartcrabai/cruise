@@ -4,7 +4,7 @@
 <a id="cli-reference"></a>
 # Command-line reference
 
-`cruise manager` is an experimental interactive client. See [Manager records and current limitations](sessions.md#experimental-manager-records) before using it.
+`cruise manager` is an experimental interactive client. Explicitly approving a proposal registers a durable Goal and authorizes asynchronous execution; Manager verifies and publishes one PR/MR, then waits for a human merge. See [Manager goals and execution](sessions.md#experimental-manager-records) before using it.
 
 ```
 cruise [OPTIONS] [INPUT] [COMMAND]

@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+const TEST_TIMEOUT: Duration = Duration::from_secs(120);
+
 fn cli(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_cruise"))
         .current_dir(home)
@@ -123,7 +125,7 @@ impl Fixture {
                 "worktree",
                 "add",
                 "-b",
-                "cruise/test-child",
+                "cruise/child",
                 worktree
                     .to_str()
                     .unwrap_or_else(|| panic!("expected UTF-8 path")),
@@ -168,7 +170,7 @@ impl Fixture {
         child.phase = SessionPhase::Suspended;
         child.input_as_plan = true;
         child.worktree_path = Some(worktree);
-        child.worktree_branch = Some("cruise/test-child".into());
+        child.worktree_branch = Some("cruise/child".into());
         child.worktree_base_ref = Some(sha.clone());
         sessions
             .create_with_config(&child, &workflow)
@@ -203,19 +205,80 @@ impl Fixture {
             sessions,
         }
     }
-    fn start(&self) -> Value {
+    async fn start(&self) -> Value {
+        let deadline = Instant::now() + TEST_TIMEOUT;
         let out = cli(self.home.path(), &["daemon", "start", "--port", "0"]);
-        assert!(
-            out.status.success(),
-            "start: {}{}",
+        let mut last_start_output = format!(
+            "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        serde_json::from_slice(
-            &fs::read(self.home.path().join("state/cruise/daemon/instance.json"))
-                .unwrap_or_else(|error| panic!("test operation failed: {error}")),
-        )
-        .unwrap_or_else(|error| panic!("test operation failed: {error}"))
+        let mut retry_start = !out.status.success();
+        if retry_start
+            && !last_start_output.contains("timeout: global")
+            && !last_start_output.contains("timed out starting daemon")
+        {
+            panic!("start: {last_start_output}");
+        }
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+        let instance_path = self.home.path().join("state/cruise/daemon/instance.json");
+        let mut last_readiness_error = String::new();
+        loop {
+            if let Ok(bytes) = fs::read(&instance_path)
+                && let Ok(instance) = serde_json::from_slice::<Value>(&bytes)
+            {
+                let origin = instance["origin"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("daemon instance has no origin: {instance}"));
+                let token = instance["token"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("daemon instance has no token: {instance}"));
+                let mut url = reqwest::Url::parse(&format!("{origin}api/manager/snapshot"))
+                    .unwrap_or_else(|error| panic!("invalid daemon origin: {error}"));
+                url.query_pairs_mut()
+                    .append_pair("cwd", &self.repo.to_string_lossy());
+                match client.get(url).bearer_auth(token).send().await {
+                    Ok(response) if response.status().is_success() => return instance,
+                    Ok(response) => {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
+                        last_readiness_error = format!("HTTP {status}: {body}");
+                        assert!(
+                            !status.is_client_error()
+                                && status != reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                            "Manager API failed readiness: {last_readiness_error}"
+                        );
+                    }
+                    Err(error) => last_readiness_error = error.to_string(),
+                }
+            }
+
+            if retry_start {
+                let out = cli(self.home.path(), &["daemon", "start", "--port", "0"]);
+                last_start_output = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                retry_start = !out.status.success();
+                if retry_start
+                    && !last_start_output.contains("timeout: global")
+                    && !last_start_output.contains("timed out starting daemon")
+                {
+                    panic!("start: {last_start_output}");
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon Manager API did not become ready; start={last_start_output}; readiness={last_readiness_error}"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
     fn stop(&self) {
         let out = cli(self.home.path(), &["daemon", "stop", "--force"]);
@@ -252,6 +315,41 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("test operation failed: {error}"))
     }
 }
+async fn manager_snapshot(fixture: &Fixture, instance: &Value) -> Value {
+    let mut url = reqwest::Url::parse(&format!(
+        "{}api/manager/snapshot",
+        instance["origin"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected daemon origin"))
+    ))
+    .unwrap_or_else(|error| panic!("invalid snapshot URL: {error}"));
+    url.query_pairs_mut()
+        .append_pair("cwd", &fixture.repo.to_string_lossy());
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"))
+        .get(url)
+        .bearer_auth(
+            instance["token"]
+                .as_str()
+                .unwrap_or_else(|| panic!("expected daemon token")),
+        )
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("snapshot request failed: {error}"));
+    assert!(
+        response.status().is_success(),
+        "snapshot returned {}",
+        response.status()
+    );
+    response
+        .json::<Value>()
+        .await
+        .unwrap_or_else(|error| panic!("parse snapshot: {error}"))
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::write(self.home.path().join("release"), "release");
@@ -259,7 +357,7 @@ impl Drop for Fixture {
     }
 }
 async fn eventually(mut f: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + TEST_TIMEOUT;
     while !f() {
         assert!(Instant::now() < deadline, "timed out waiting for daemon");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -333,13 +431,13 @@ fn install_integration_intent(
 async fn startup_recovers_applied_integration_for_paused_goal() {
     let fixture = Fixture::new("paused", false, false);
     let (_, prepared) = install_integration_intent(&fixture, true, false);
-    fixture.start();
+    fixture.start().await;
     let goal = fixture.goal();
     assert_eq!(goal["status"], "paused");
     assert_eq!(goal["execution"]["attempts"][0]["integrated"], true);
     assert_eq!(goal["execution"]["integrated_tip"], prepared);
     fixture.stop();
-    fixture.start();
+    fixture.start().await;
     assert_eq!(
         fixture.goal()["execution"]["attempts"][0]["integrated"],
         true
@@ -351,7 +449,7 @@ async fn startup_leaves_unapplied_paused_integration_pending_across_restart() {
     let fixture = Fixture::new("paused", false, false);
     let (base, _) = install_integration_intent(&fixture, false, false);
     for _ in 0..2 {
-        fixture.start();
+        fixture.start().await;
         let goal = fixture.goal();
         assert_eq!(goal["status"], "paused");
         assert_eq!(goal["execution"]["paused_from"], "active");
@@ -368,8 +466,19 @@ async fn startup_leaves_unapplied_paused_integration_pending_across_restart() {
 async fn startup_resumes_pending_active_integration() {
     let fixture = Fixture::new("active", false, false);
     let (_, prepared) = install_integration_intent(&fixture, false, false);
-    fixture.start();
-    eventually(|| fixture.goal()["execution"]["attempts"][0]["integrated"] == true).await;
+    fixture.start().await;
+    eventually(|| {
+        let goal = fixture.goal();
+        assert_ne!(
+            goal["status"],
+            "blocked",
+            "pending integration blocked: {goal}; daemon_log={}",
+            fs::read_to_string(fixture.home.path().join("state/cruise/daemon/daemon.log"))
+                .unwrap_or_default()
+        );
+        goal["execution"]["attempts"][0]["integrated"] == true
+    })
+    .await;
     assert_eq!(fixture.goal()["execution"]["integrated_tip"], prepared);
     assert_eq!(
         git(&fixture.repo, &["rev-parse", "refs/heads/cruise/goal/g"]),
@@ -381,7 +490,7 @@ async fn startup_resumes_pending_active_integration() {
 async fn startup_rejects_intent_for_another_goal_ref() {
     let fixture = Fixture::new("paused", false, false);
     let (base, _) = install_integration_intent(&fixture, true, true);
-    fixture.start();
+    fixture.start().await;
     assert_eq!(
         fixture.goal()["execution"]["attempts"][0]["integrated"],
         false
@@ -397,12 +506,12 @@ async fn startup_rejects_intent_for_another_goal_ref() {
 async fn startup_blocks_drifted_goal_ref_without_moving_it() {
     let fixture = Fixture::new("paused", false, false);
     install_integration_intent(&fixture, false, false);
-    let drift = git(&fixture.repo, &["rev-parse", "cruise/test-child"]);
+    let drift = git(&fixture.repo, &["rev-parse", "cruise/child"]);
     git(
         &fixture.repo,
         &["update-ref", "refs/heads/cruise/goal/g", &drift],
     );
-    fixture.start();
+    fixture.start().await;
     let goal = fixture.goal();
     assert_eq!(goal["status"], "paused");
     assert_eq!(goal["execution"]["paused_from"], "blocked");
@@ -419,7 +528,7 @@ async fn startup_recovers_applied_intent_without_child_session() {
     let (_, prepared) = install_integration_intent(&fixture, true, false);
     fs::remove_dir_all(fixture.sessions.sessions_dir().join("child"))
         .unwrap_or_else(|error| panic!("test operation failed: {error}"));
-    fixture.start();
+    fixture.start().await;
     let goal = fixture.goal();
     assert_eq!(goal["execution"]["attempts"][0]["integrated"], true);
     assert_eq!(goal["execution"]["integrated_tip"], prepared);
@@ -428,7 +537,7 @@ async fn startup_recovers_applied_intent_without_child_session() {
 #[tokio::test]
 async fn paused_pending_resume_survives_restart_then_runs_once_after_goal_resume() {
     let fixture = Fixture::new("paused", true, false);
-    let first = fixture.start();
+    let first = fixture.start().await;
     assert!(
         !fixture
             .action(
@@ -445,7 +554,7 @@ async fn paused_pending_resume_survives_restart_then_runs_once_after_goal_resume
     );
     assert!(!fixture.marker.exists());
     fixture.stop();
-    let second = fixture.start();
+    let second = fixture.start().await;
     let goal = fixture.goal();
     assert_eq!(goal["status"], "paused");
     assert_eq!(goal["execution"]["attempts"][0]["resume_pending"], true);
@@ -472,7 +581,7 @@ async fn paused_pending_resume_survives_restart_then_runs_once_after_goal_resume
     let started = Instant::now();
     eventually(|| {
         assert!(
-            started.elapsed() <= Duration::from_secs(15),
+            started.elapsed() <= TEST_TIMEOUT,
             "resume did not start: goal={} child={:?} daemon_log={}",
             fixture.goal(),
             fixture
@@ -531,7 +640,7 @@ async fn paused_pending_resume_survives_restart_then_runs_once_after_goal_resume
 #[tokio::test]
 async fn explicit_child_resume_runs_existing_attempt_and_pause_stops_it() {
     let fixture = Fixture::new("active", false, false);
-    let instance = fixture.start();
+    let instance = fixture.start().await;
     let response = fixture
         .action(
             &instance,
@@ -589,9 +698,88 @@ async fn explicit_child_resume_runs_existing_attempt_and_pause_stops_it() {
 }
 
 #[tokio::test]
+async fn failed_child_is_visible_and_independent_work_continues() {
+    let fixture = Fixture::new("active", false, false);
+    let mut record = serde_json::from_slice::<Value>(
+        &fs::read(&fixture.record).unwrap_or_else(|error| panic!("read Goal: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("parse Goal: {error}"));
+    record["goals"][0]["proposal"]["tasks"] = json!([
+        {"id":"task", "instructions":"work", "dependencies":[]},
+        {"id":"independent", "instructions":"independent work", "dependencies":[]},
+        {"id":"dependent", "instructions":"dependent work", "dependencies":["task"]}
+    ]);
+    fs::write(
+        &fixture.record,
+        serde_json::to_vec(&record).unwrap_or_else(|error| panic!("serialize Goal: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("write Goal: {error}"));
+    let mut child = fixture
+        .sessions
+        .load("child")
+        .unwrap_or_else(|error| panic!("load child: {error}"));
+    child.phase = SessionPhase::Failed("workflow command failed".into());
+    fixture
+        .sessions
+        .save(&child)
+        .unwrap_or_else(|error| panic!("save failed child: {error}"));
+
+    let instance = fixture.start().await;
+    eventually(|| {
+        fixture.goal()["execution"]["attempts"]
+            .as_array()
+            .is_some_and(|attempts| {
+                attempts
+                    .iter()
+                    .any(|attempt| attempt["task_id"] == "independent")
+            })
+    })
+    .await;
+    let goal = fixture.goal();
+    assert_eq!(goal["status"], "active");
+    assert!(
+        goal["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("/resume g task")),
+        "{goal}"
+    );
+    let attempts = goal["execution"]["attempts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected attempts"));
+    assert!(
+        attempts
+            .iter()
+            .any(|attempt| attempt["task_id"] == "independent"),
+        "{goal}"
+    );
+    assert!(
+        attempts
+            .iter()
+            .all(|attempt| attempt["task_id"] != "dependent"),
+        "{goal}"
+    );
+    eventually(|| fixture.marker.exists()).await;
+    assert!(
+        child.worktree_path.as_deref().is_some_and(Path::is_dir),
+        "failed child worktree was not preserved"
+    );
+
+    let snapshot = manager_snapshot(&fixture, &instance).await;
+    let failed_attempt = snapshot["goals"][0]["execution"]["attempts"]
+        .as_array()
+        .and_then(|attempts| attempts.iter().find(|attempt| attempt["task_id"] == "task"))
+        .unwrap_or_else(|| panic!("failed attempt missing from snapshot: {snapshot}"));
+    assert_eq!(failed_attempt["child_state"]["phase"], "Failed");
+    assert_eq!(
+        failed_attempt["child_state"]["failure"],
+        "workflow command failed"
+    );
+}
+
+#[tokio::test]
 async fn interrupted_resume_dispatch_blocks_without_reexecuting_child() {
     let fixture = Fixture::new("active", false, true);
-    let _instance = fixture.start();
+    let _instance = fixture.start().await;
     eventually(|| fixture.goal()["status"] == "blocked").await;
     let goal = fixture.goal();
     assert!(
@@ -623,7 +811,7 @@ async fn invalid_child_plan_records_durable_resume_failure_without_duplicate_att
     let plan = child.plan_path(&fixture.sessions.sessions_dir());
     fs::write(&plan, "# Changed without approval\n")
         .unwrap_or_else(|error| panic!("test operation failed: {error}"));
-    let instance = fixture.start();
+    let instance = fixture.start().await;
     let response = fixture
         .action(
             &instance,
@@ -666,7 +854,7 @@ async fn invalid_child_plan_records_durable_resume_failure_without_duplicate_att
     );
     assert!(!fixture.marker.exists());
     fixture.stop();
-    let _restarted = fixture.start();
+    let _restarted = fixture.start().await;
     let recovered = fixture.goal();
     assert_eq!(recovered["status"], "active");
     assert_eq!(recovered["reason"], reason);

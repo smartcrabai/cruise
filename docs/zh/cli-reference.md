@@ -3,7 +3,7 @@
 <a id="cli-reference"></a>
 # CLI 命令参考
 
-`cruise manager` 是实验性交互式客户端。使用前请参阅 [Manager 记录及当前限制](sessions.md#实验性-manager-记录)。
+`cruise manager` 是实验性交互式客户端。明确批准提案会注册一个持久化 Goal 并授权异步执行；Manager 会验证并发布一个 PR/MR，然后等待人工合并。使用前请参阅 [Manager 目标与执行](sessions.md#实验性-manager-记录)。
 
 ```
 cruise [OPTIONS] [INPUT] [COMMAND]

@@ -34,7 +34,7 @@ run_check alloy-version java -jar target/formal-tools/alloy-6.2.0.jar version
 run_check alloy-exec-help java -jar target/formal-tools/alloy-6.2.0.jar help exec
 run_check quint-typecheck "$Q" typecheck "$MODEL"
 run_check quint-test "$Q" test "$MODEL" --backend typescript --seed 20261120
-for test in approvalDoesNotDispatchTest dependencyAndPublicationTest pauseResumeTest; do
+for test in approvalAuthorizesAsynchronousSchedulingTest dependencyAndPublicationTest pauseResumeTest; do
   if ! grep -Fq "ok $test passed" "$RUN/quint-test.log"; then
     echo "Missing Quint test result: $test" | tee -a "$RUN/results.log"
     status=1

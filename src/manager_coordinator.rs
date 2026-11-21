@@ -27,6 +27,21 @@ static PUBLICATIONS: std::sync::LazyLock<
     Mutex<std::collections::HashMap<String, (uuid::Uuid, crate::cancellation::CancellationToken)>>,
 > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
+fn same_canonical_path(left: &Path, right: &Path) -> Result<bool> {
+    Ok(left.canonicalize()? == right.canonicalize()?)
+}
+
+fn clear_failed_child_reason(goal: &mut Goal, task_id: &str) {
+    let prefix = format!("Managed child failure for task {task_id} ");
+    if goal
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with(&prefix))
+    {
+        goal.reason = None;
+    }
+}
+
 pub(crate) struct PublicationLease {
     goal_id: String,
     repository: std::path::PathBuf,
@@ -36,7 +51,8 @@ pub(crate) struct PublicationLease {
 
 impl PublicationLease {
     pub(crate) fn owns(&self, cwd: &Path, goal_id: &str) -> Result<bool> {
-        Ok(self.goal_id == goal_id && self.repository == manager::snapshot(cwd)?.repository)
+        Ok(self.goal_id == goal_id
+            && same_canonical_path(&self.repository, &manager::snapshot(cwd)?.repository)?)
     }
 }
 
@@ -149,6 +165,10 @@ fn block_active(cwd: &Path, goal_id: &str, reason: String) -> Result<()> {
     })
 }
 
+#[expect(
+    clippy::large_futures,
+    reason = "Tokio's JoinSet stores the managed operation in a heap-allocated task"
+)]
 fn dispatch_pending_resumes(
     application: &CruiseApplication,
     sink: &std::sync::Arc<dyn crate::application::ApplicationEventSink>,
@@ -237,6 +257,75 @@ fn dispatch_pending_resumes(
     }
 }
 
+fn record_failed_child(
+    cwd: &Path,
+    goal: &Goal,
+    attempt: &TaskAttempt,
+    failure: &str,
+) -> Result<()> {
+    let reason = format!(
+        "Managed child failure for task {} (session {}): {failure}. Preserve its worktree and logs. Next action: `/resume {} {}` resumes this child; `/retry {} {}` starts a fresh attempt.",
+        attempt.task_id, attempt.session_id, goal.id, attempt.task_id, goal.id, attempt.task_id,
+    );
+    if goal.reason.as_deref() == Some(reason.as_str()) {
+        return Ok(());
+    }
+    manager::update_goal(cwd, &goal.id, |current| {
+        let attempt_is_current = current.execution.attempts.iter().any(|saved| {
+            saved.task_id == attempt.task_id
+                && saved.attempt == attempt.attempt
+                && saved.session_id == attempt.session_id
+        }) && !current
+            .execution
+            .attempts
+            .iter()
+            .any(|newer| newer.task_id == attempt.task_id && newer.attempt > attempt.attempt);
+        if current.status == manager::GoalStatus::Active && attempt_is_current {
+            current.reason = Some(reason.clone());
+        }
+        Ok(())
+    })
+}
+
+async fn finalize_and_integrate_child(
+    application: &CruiseApplication,
+    goal: &Goal,
+    anchor: &Path,
+    attempt: &TaskAttempt,
+    stop: &crate::cancellation::CancellationToken,
+) -> std::result::Result<bool, String> {
+    if let Err(error) = finalize_child(
+        application,
+        anchor,
+        &goal.id,
+        &attempt.task_id,
+        attempt.attempt,
+    )
+    .await
+    {
+        return Err(format!(
+            "Child {} finalization requires attention: {error}",
+            attempt.session_id
+        ));
+    }
+    if stop.is_cancelled() {
+        return Ok(false);
+    }
+    if let Err(error) = integrate(
+        application,
+        anchor,
+        &goal.id,
+        &attempt.task_id,
+        attempt.attempt,
+    ) {
+        return Err(format!(
+            "Child {} integration requires attention: {error}",
+            attempt.session_id
+        ));
+    }
+    Ok(true)
+}
+
 async fn inspect_goal_children(
     application: &CruiseApplication,
     goal: &Goal,
@@ -299,38 +388,25 @@ async fn inspect_goal_children(
         }
         match child.phase {
             crate::session::SessionPhase::Completed => {
-                if let Err(error) = finalize_child(
-                    application,
-                    anchor,
-                    &goal.id,
-                    &attempt.task_id,
-                    attempt.attempt,
-                )
-                .await
-                {
-                    unsafe_state = Some(format!(
-                        "Child {} finalization requires attention: {error}",
-                        attempt.session_id
-                    ));
-                    break;
+                match finalize_and_integrate_child(application, goal, anchor, attempt, stop).await {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(reason) => {
+                        unsafe_state = Some(reason);
+                        break;
+                    }
                 }
-                if stop.is_cancelled() {
-                    break;
-                }
-                if let Err(error) = integrate(
-                    application,
-                    anchor,
-                    &goal.id,
-                    &attempt.task_id,
-                    attempt.attempt,
-                ) {
+            }
+            crate::session::SessionPhase::Failed(failure) => {
+                if let Err(error) = record_failed_child(anchor, goal, attempt, &failure) {
                     unsafe_state = Some(format!(
-                        "Child {} integration requires attention: {error}",
+                        "Could not record failure for child {}: {error}",
                         attempt.session_id
                     ));
                     break;
                 }
             }
+
             crate::session::SessionPhase::Planned | crate::session::SessionPhase::Running => {
                 unsafe_state = Some(format!(
                     "Child {} has an interrupted or uncertain launch; explicit review is required",
@@ -344,6 +420,10 @@ async fn inspect_goal_children(
     unsafe_state
 }
 
+#[expect(
+    clippy::large_futures,
+    reason = "Tokio's JoinSet stores the managed operation in a heap-allocated task"
+)]
 fn dispatch_ready_goal(
     application: &CruiseApplication,
     goal: &Goal,
@@ -758,8 +838,7 @@ pub(crate) fn validate_claimed_child(
         .ok_or_else(|| CruiseError::Other("Manager contract is missing".into()))?;
     let actual_config = application.session_config(child)?;
     if child.managed_child.as_ref() != Some(&owner(goal, attempt))
-        || child.base_dir != contract.anchor
-        || child.base_dir.canonicalize()? != contract.anchor
+        || !same_canonical_path(&child.base_dir, &contract.anchor)?
         || git_output(&child.base_dir, &["remote", "get-url", "origin"])? != contract.origin
         || git_output(
             &child.base_dir,
@@ -915,11 +994,10 @@ fn validate_checkout(
     contract: &manager::FrozenContract,
     repository: &Path,
 ) -> Result<()> {
-    if anchor.canonicalize()? != *anchor
-        || std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?)
-            .canonicalize()?
-            != *anchor
-        || manager::snapshot(anchor)?.repository != repository
+    if !same_canonical_path(
+        anchor,
+        &std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?),
+    )? || !same_canonical_path(&manager::snapshot(anchor)?.repository, repository)?
         || git_output(anchor, &["remote", "get-url", "origin"])? != contract.origin
         || git_output(anchor, &["remote", "get-url", "--push", "--all", "origin"])?
             != contract.origin
@@ -1165,12 +1243,11 @@ fn validate_finalization_worktree(
     anchor: &Path,
     repository: &Path,
 ) -> Result<String> {
-    if worktree.canonicalize()? != worktree
-        || std::path::PathBuf::from(git_output(worktree, &["rev-parse", "--show-toplevel"])?)
-            .canonicalize()?
-            != worktree
-        || manager::snapshot(worktree)?.repository != repository
-        || worktree == anchor
+    if !same_canonical_path(
+        worktree,
+        &std::path::PathBuf::from(git_output(worktree, &["rev-parse", "--show-toplevel"])?),
+    )? || !same_canonical_path(&manager::snapshot(worktree)?.repository, repository)?
+        || same_canonical_path(worktree, anchor)?
         || worktree.file_name().and_then(|name| name.to_str()) != Some(attempt.session_id.as_str())
     {
         return Err(CruiseError::Other("child worktree identity changed".into()));
@@ -1250,11 +1327,10 @@ fn finalization_intent(
 }
 
 fn validate_finalization_anchor(goal: &Goal, anchor: &Path, repository: &Path) -> Result<()> {
-    if anchor.canonicalize()? != anchor
-        || std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?)
-            .canonicalize()?
-            != anchor
-        || manager::snapshot(anchor)?.repository != repository
+    if !same_canonical_path(
+        anchor,
+        &std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?),
+    )? || !same_canonical_path(&manager::snapshot(anchor)?.repository, repository)?
     {
         return Err(CruiseError::Other("Goal repository anchor changed".into()));
     }
@@ -1458,7 +1534,7 @@ fn validate_integrated_child(
         .worktree_path
         .as_deref()
         .ok_or_else(|| CruiseError::Other("completed child has no worktree".into()))?;
-    if manager::snapshot(worktree)?.repository != repository {
+    if !same_canonical_path(&manager::snapshot(worktree)?.repository, repository)? {
         return Err(CruiseError::Other(
             "child worktree belongs to a different repository".into(),
         ));
@@ -1478,14 +1554,13 @@ fn validate_integrated_child(
 }
 
 fn validate_integration_anchor(goal: &Goal, anchor: &Path, repository: &Path) -> Result<()> {
-    if anchor.canonicalize()? != anchor
-        || std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?)
-            .canonicalize()?
-            != anchor
-    {
+    if !same_canonical_path(
+        anchor,
+        &std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?),
+    )? {
         return Err(CruiseError::Other("Goal checkout anchor changed".into()));
     }
-    if manager::snapshot(anchor)?.repository != repository {
+    if !same_canonical_path(&manager::snapshot(anchor)?.repository, repository)? {
         return Err(CruiseError::Other("Goal repository anchor changed".into()));
     }
     let origin = goal
@@ -1778,8 +1853,10 @@ fn validate_resume_worktree(
         .managed_session_store()
         .worktrees_dir()
         .join(&child.id);
-    if anchor.canonicalize()? != anchor
-        || manager::snapshot(anchor)?.repository != repository
+    if !same_canonical_path(
+        anchor,
+        &std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?),
+    )? || !same_canonical_path(&manager::snapshot(anchor)?.repository, repository)?
         || git_output(
             anchor,
             &[
@@ -1789,8 +1866,8 @@ fn validate_resume_worktree(
             ],
         )? != tip
         || !expected.is_dir()
-        || worktree.canonicalize()? != expected.canonicalize()?
-        || manager::snapshot(worktree)?.repository != repository
+        || !same_canonical_path(worktree, &expected)?
+        || !same_canonical_path(&manager::snapshot(worktree)?.repository, repository)?
         || !Command::new("git")
             .arg("-C")
             .arg(worktree)
@@ -1931,6 +2008,7 @@ fn resume_task_inner(
                 })
                 .ok_or_else(|| CruiseError::Other("child attempt changed".into()))?;
             saved.resume_pending = true;
+            clear_failed_child_reason(saved_goal, task_id);
             Ok(())
         })?;
     }
@@ -1980,7 +2058,7 @@ fn validate_retry_phase(
                 .worktree_path
                 .as_deref()
                 .ok_or_else(|| CruiseError::Other("child worktree missing".into()))?;
-            if manager::snapshot(worktree)?.repository != repository
+            if !same_canonical_path(&manager::snapshot(worktree)?.repository, repository)?
                 || git_output(worktree, &["rev-parse", "HEAD"])? != result
                 || !git_output(
                     worktree,
@@ -2145,8 +2223,10 @@ pub(crate) fn retry_task(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| CruiseError::Other("Goal tip missing".into()))?;
     let reference = format!("refs/heads/cruise/goal/{goal_id}");
-    if anchor.canonicalize()? != anchor
-        || manager::snapshot(anchor)?.repository != snapshot.repository
+    if !same_canonical_path(
+        anchor,
+        &std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?),
+    )? || !same_canonical_path(&manager::snapshot(anchor)?.repository, &snapshot.repository)?
         || git_output(anchor, &["rev-parse", "--verify", &reference])? != *tip
     {
         return Err(CruiseError::Other("Goal anchor or ref changed".into()));
@@ -2181,6 +2261,7 @@ pub(crate) fn retry_task(
             current.status = manager::GoalStatus::Active;
             current.reason = None;
         }
+        clear_failed_child_reason(current, task_id);
         Ok(current.clone())
     })
 }

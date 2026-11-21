@@ -9,4 +9,4 @@ Feature: Manager proposal approval is explicit and revision-bound
   Scenario: Approval is durable and idempotent
     Given an isolated repository with a manager proposal
     When the current proposal is approved twice
-    Then one active goal exists for that exact proposal without child attempts
+    Then one active goal exists for that exact proposal at its frozen target tip without child attempts
