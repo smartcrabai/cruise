@@ -22,7 +22,7 @@ fn cli(home: &Path, args: &[&str]) -> Output {
         .stdin(Stdio::null())
         .args(args)
         .output()
-        .unwrap()
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"))
 }
 fn git(repo: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -31,13 +31,16 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .output()
-        .unwrap();
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     assert!(
         out.status.success(),
         "git {args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    String::from_utf8(out.stdout)
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"))
+        .trim()
+        .to_owned()
 }
 struct Fixture {
     home: TempDir,
@@ -46,32 +49,73 @@ struct Fixture {
     marker: PathBuf,
     sessions: SessionManager,
 }
+fn setup_repo(root: &Path) -> (PathBuf, String) {
+    fs::create_dir_all(root.join("config/cruise"))
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    fs::write(
+        root.join("config/cruise/default.yaml"),
+        "check_base_ci: false\n",
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let repo = root.join("repo");
+    fs::create_dir(&repo).unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    git(&repo, &["config", "user.email", "test@example.test"]);
+    fs::write(repo.join("file"), "base\n")
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    git(&repo, &["add", "file"]);
+    git(&repo, &["commit", "-qm", "base"]);
+    let sha = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["update-ref", "refs/heads/cruise/goal/g", &sha]);
+    let origin = "https://github.com/example/project.git";
+    git(&repo, &["remote", "add", "origin", origin]);
+    (repo, sha)
+}
+
+fn write_goal_record(root: &Path, common: &Path, goal: &Value) -> PathBuf {
+    let key = Sha256::digest(common.to_string_lossy().as_bytes())
+        .iter()
+        .fold(String::new(), |mut output, byte| {
+            use std::fmt::Write;
+            write!(output, "{byte:02x}")
+                .unwrap_or_else(|error| panic!("format digest failed: {error}"));
+            output
+        });
+    let record = root.join("data/cruise/manager").join(format!("{key}.json"));
+    fs::create_dir_all(
+        record
+            .parent()
+            .unwrap_or_else(|| panic!("expected parent directory")),
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    fs::write(
+        &record,
+        serde_json::to_vec_pretty(
+            &json!({"repository":common,"transcript":[],"proposal":null,"goals":[goal]}),
+        )
+        .unwrap_or_else(|error| panic!("test operation failed: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    record
+}
+
 impl Fixture {
     fn new(status: &str, pending: bool, starting: bool) -> Self {
-        let home = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error}"));
         let root = home.path();
-        fs::create_dir_all(root.join("config/cruise")).unwrap();
-        fs::write(
-            root.join("config/cruise/default.yaml"),
-            "check_base_ci: false\n",
-        )
-        .unwrap();
-        let repo = root.join("repo");
-        fs::create_dir(&repo).unwrap();
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["config", "user.name", "Test"]);
-        git(&repo, &["config", "user.email", "test@example.test"]);
-        fs::write(repo.join("file"), "base\n").unwrap();
-        git(&repo, &["add", "file"]);
-        git(&repo, &["commit", "-qm", "base"]);
-        let sha = git(&repo, &["rev-parse", "HEAD"]);
-        git(&repo, &["update-ref", "refs/heads/cruise/goal/g", &sha]);
+        let (repo, sha) = setup_repo(root);
         let origin = "https://github.com/example/project.git";
-        git(&repo, &["remote", "add", "origin", origin]);
-        let anchor = repo.canonicalize().unwrap();
-        let common = repo.join(".git").canonicalize().unwrap();
+        let anchor = repo
+            .canonicalize()
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+        let common = repo
+            .join(".git")
+            .canonicalize()
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"));
         let sessions = SessionManager::new(root.join("data/cruise"));
-        fs::create_dir_all(sessions.worktrees_dir()).unwrap();
+        fs::create_dir_all(sessions.worktrees_dir())
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"));
         let worktree = sessions.worktrees_dir().join("child");
         git(
             &repo,
@@ -80,7 +124,9 @@ impl Fixture {
                 "add",
                 "-b",
                 "cruise/test-child",
-                worktree.to_str().unwrap(),
+                worktree
+                    .to_str()
+                    .unwrap_or_else(|| panic!("expected UTF-8 path")),
                 &sha,
             ],
         );
@@ -102,8 +148,9 @@ impl Fixture {
             "create_pr":false, "cleanup_after_pr":false, "force_exec":false,
             "steps":{"run":{"command":command}}
         }))
-        .unwrap();
-        let workflow_json = serde_json::to_value(&workflow).unwrap();
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+        let workflow_json = serde_json::to_value(&workflow)
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"));
         let owner = ManagedChildOwner {
             goal_id: "g".into(),
             task_id: "task".into(),
@@ -123,17 +170,20 @@ impl Fixture {
         child.worktree_path = Some(worktree);
         child.worktree_branch = Some("cruise/test-child".into());
         child.worktree_base_ref = Some(sha.clone());
-        sessions.create_with_config(&child, &workflow).unwrap();
+        sessions
+            .create_with_config(&child, &workflow)
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"));
         fs::write(
             sessions.sessions_dir().join("child/manager-owner.json"),
-            serde_json::to_vec(&owner).unwrap(),
+            serde_json::to_vec(&owner)
+                .unwrap_or_else(|error| panic!("test operation failed: {error}")),
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
         fs::write(
             child.plan_path(&sessions.sessions_dir()),
             "# Goal\n\ngoal\n\n# Task\n\nwork\n\n# Acceptance criteria\n\n- c: works\n\n# Exclusions\n\n",
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
         let proposal = json!({"id":"p", "revision":1, "objective":"goal", "target_branch":"main", "target_sha":sha,
             "exclusions":[], "criteria":[{"id":"c","description":"works"}],
             "checks":[{"id":"check","criterion_ids":["c"],"argv":["true"]}],
@@ -144,20 +194,7 @@ impl Fixture {
         let goal = json!({"id":"g","proposal":proposal,"status":status,"reason":null,
             "execution":{"anchor":anchor,"origin":origin,"workflow":workflow_json,"integrated_tip":sha,"attempts":[attempt],
             "paused_from":if status == "paused" { json!("active") } else { Value::Null }, "paused_reason":null,"publication":null,"publication_history":[]}});
-        let key: String = Sha256::digest(common.to_string_lossy().as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let record = root.join("data/cruise/manager").join(format!("{key}.json"));
-        fs::create_dir_all(record.parent().unwrap()).unwrap();
-        fs::write(
-            &record,
-            serde_json::to_vec_pretty(
-                &json!({"repository":common,"transcript":[],"proposal":null,"goals":[goal]}),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        let record = write_goal_record(root, &common, &goal);
         Self {
             home,
             repo,
@@ -175,9 +212,10 @@ impl Fixture {
             String::from_utf8_lossy(&out.stderr)
         );
         serde_json::from_slice(
-            &fs::read(self.home.path().join("state/cruise/daemon/instance.json")).unwrap(),
+            &fs::read(self.home.path().join("state/cruise/daemon/instance.json"))
+                .unwrap_or_else(|error| panic!("test operation failed: {error}")),
         )
-        .unwrap()
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"))
     }
     fn stop(&self) {
         let out = cli(self.home.path(), &["daemon", "stop", "--force"]);
@@ -188,20 +226,30 @@ impl Fixture {
         );
     }
     fn goal(&self) -> Value {
-        serde_json::from_slice::<Value>(&fs::read(&self.record).unwrap()).unwrap()["goals"][0]
+        serde_json::from_slice::<Value>(
+            &fs::read(&self.record)
+                .unwrap_or_else(|error| panic!("test operation failed: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"))["goals"][0]
             .clone()
     }
     async fn action(&self, instance: &Value, action: Value) -> reqwest::Response {
         reqwest::Client::new()
             .post(format!(
                 "{}api/manager/action",
-                instance["origin"].as_str().unwrap()
+                instance["origin"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("expected string"))
             ))
-            .bearer_auth(instance["token"].as_str().unwrap())
+            .bearer_auth(
+                instance["token"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("expected string")),
+            )
             .json(&json!({"cwd":self.repo,"action":action}))
             .send()
             .await
-            .unwrap()
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"))
     }
 }
 impl Drop for Fixture {
@@ -223,10 +271,17 @@ fn install_integration_intent(
     applied: bool,
     foreign_ref: bool,
 ) -> (String, String) {
-    let mut child = fixture.sessions.load("child").unwrap();
-    let worktree = child.worktree_path.as_ref().unwrap();
+    let mut child = fixture
+        .sessions
+        .load("child")
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let worktree = child
+        .worktree_path
+        .as_ref()
+        .unwrap_or_else(|| panic!("expected worktree"));
     let base = git(worktree, &["rev-parse", "HEAD"]);
-    fs::write(worktree.join("file"), "child result\n").unwrap();
+    fs::write(worktree.join("file"), "child result\n")
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     git(worktree, &["add", "file"]);
     git(worktree, &["commit", "-qm", "child result"]);
     let result = git(worktree, &["rev-parse", "HEAD"]);
@@ -253,13 +308,24 @@ fn install_integration_intent(
         git(&fixture.repo, &["update-ref", reference, &prepared]);
     }
     child.phase = SessionPhase::Completed;
-    fixture.sessions.save(&child).unwrap();
-    let mut record: Value = serde_json::from_slice(&fs::read(&fixture.record).unwrap()).unwrap();
+    fixture
+        .sessions
+        .save(&child)
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let mut record: Value = serde_json::from_slice(
+        &fs::read(&fixture.record).unwrap_or_else(|error| panic!("test operation failed: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     let attempt = &mut record["goals"][0]["execution"]["attempts"][0];
     attempt["result_sha"] = json!(result);
     attempt["integration_intent"] = json!({"goal_ref":reference,"expected_tip":base,
         "child_base":base,"child_result":result,"prepared_tip":prepared});
-    fs::write(&fixture.record, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    fs::write(
+        &fixture.record,
+        serde_json::to_vec_pretty(&record)
+            .unwrap_or_else(|error| panic!("test operation failed: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     (base, prepared)
 }
 
@@ -351,7 +417,8 @@ async fn startup_blocks_drifted_goal_ref_without_moving_it() {
 async fn startup_recovers_applied_intent_without_child_session() {
     let fixture = Fixture::new("paused", false, false);
     let (_, prepared) = install_integration_intent(&fixture, true, false);
-    fs::remove_dir_all(fixture.sessions.sessions_dir().join("child")).unwrap();
+    fs::remove_dir_all(fixture.sessions.sessions_dir().join("child"))
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     fixture.start();
     let goal = fixture.goal();
     assert_eq!(goal["execution"]["attempts"][0]["integrated"], true);
@@ -383,7 +450,11 @@ async fn paused_pending_resume_survives_restart_then_runs_once_after_goal_resume
     assert_eq!(goal["status"], "paused");
     assert_eq!(goal["execution"]["attempts"][0]["resume_pending"], true);
     assert_eq!(
-        fixture.sessions.load("child").unwrap().phase,
+        fixture
+            .sessions
+            .load("child")
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"))
+            .phase,
         SessionPhase::Suspended
     );
     assert!(!fixture.marker.exists());
@@ -393,31 +464,43 @@ async fn paused_pending_resume_survives_restart_then_runs_once_after_goal_resume
     assert!(
         response.status().is_success(),
         "resume: {}",
-        response.text().await.unwrap()
+        response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"))
     );
     let started = Instant::now();
     eventually(|| {
-        if started.elapsed() > Duration::from_secs(15) {
-            panic!(
-                "resume did not start: goal={} child={:?} daemon_log={}",
-                fixture.goal(),
-                fixture.sessions.load("child").unwrap().phase,
-                fs::read_to_string(fixture.home.path().join("state/cruise/daemon/daemon.log"))
-                    .unwrap_or_default()
-            );
-        }
+        assert!(
+            started.elapsed() <= Duration::from_secs(15),
+            "resume did not start: goal={} child={:?} daemon_log={}",
+            fixture.goal(),
+            fixture
+                .sessions
+                .load("child")
+                .unwrap_or_else(|error| panic!("test operation failed: {error}"))
+                .phase,
+            fs::read_to_string(fixture.home.path().join("state/cruise/daemon/daemon.log"))
+                .unwrap_or_default()
+        );
         fixture.marker.exists()
     })
     .await;
     assert_eq!(
         fs::read_to_string(&fixture.marker)
-            .unwrap()
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"))
             .lines()
             .collect::<Vec<_>>(),
         vec!["started"]
     );
     let goal = fixture.goal();
-    assert_eq!(goal["execution"]["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        goal["execution"]["attempts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected array"))
+            .len(),
+        1
+    );
     assert_eq!(goal["execution"]["attempts"][0]["session_id"], "child");
     assert_eq!(goal["execution"]["attempts"][0]["resume_pending"], false);
     let paused = fixture
@@ -426,7 +509,11 @@ async fn paused_pending_resume_survives_restart_then_runs_once_after_goal_resume
     assert!(paused.status().is_success());
     eventually(|| {
         matches!(
-            fixture.sessions.load("child").unwrap().phase,
+            fixture
+                .sessions
+                .load("child")
+                .unwrap_or_else(|error| panic!("test operation failed: {error}"))
+                .phase,
             SessionPhase::Suspended | SessionPhase::Failed(_)
         )
     })
@@ -434,7 +521,7 @@ async fn paused_pending_resume_survives_restart_then_runs_once_after_goal_resume
     assert_eq!(fixture.goal()["status"], "paused");
     assert_eq!(
         fs::read_to_string(&fixture.marker)
-            .unwrap()
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"))
             .lines()
             .collect::<Vec<_>>(),
         vec!["started"]
@@ -454,15 +541,24 @@ async fn explicit_child_resume_runs_existing_attempt_and_pause_stops_it() {
     assert!(
         response.status().is_success(),
         "resume child: {}",
-        response.text().await.unwrap()
+        response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"))
     );
     eventually(|| fixture.marker.exists()).await;
     let goal = fixture.goal();
-    assert_eq!(goal["execution"]["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        goal["execution"]["attempts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected array"))
+            .len(),
+        1
+    );
     assert_eq!(goal["execution"]["attempts"][0]["session_id"], "child");
     assert_eq!(
         fs::read_to_string(&fixture.marker)
-            .unwrap()
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"))
             .lines()
             .collect::<Vec<_>>(),
         vec!["started"]
@@ -473,7 +569,11 @@ async fn explicit_child_resume_runs_existing_attempt_and_pause_stops_it() {
     assert!(response.status().is_success());
     eventually(|| {
         matches!(
-            fixture.sessions.load("child").unwrap().phase,
+            fixture
+                .sessions
+                .load("child")
+                .unwrap_or_else(|error| panic!("test operation failed: {error}"))
+                .phase,
             SessionPhase::Suspended | SessionPhase::Failed(_)
         )
     })
@@ -481,7 +581,7 @@ async fn explicit_child_resume_runs_existing_attempt_and_pause_stops_it() {
     assert_eq!(fixture.goal()["status"], "paused");
     assert_eq!(
         fs::read_to_string(&fixture.marker)
-            .unwrap()
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"))
             .lines()
             .collect::<Vec<_>>(),
         vec!["started"]
@@ -494,10 +594,20 @@ async fn interrupted_resume_dispatch_blocks_without_reexecuting_child() {
     let _instance = fixture.start();
     eventually(|| fixture.goal()["status"] == "blocked").await;
     let goal = fixture.goal();
-    assert!(!goal["reason"].as_str().unwrap().is_empty(), "{goal}");
+    assert!(
+        !goal["reason"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected string"))
+            .is_empty(),
+        "{goal}"
+    );
     assert_eq!(goal["execution"]["attempts"][0]["resume_starting"], true);
     assert_eq!(
-        fixture.sessions.load("child").unwrap().phase,
+        fixture
+            .sessions
+            .load("child")
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"))
+            .phase,
         SessionPhase::Suspended
     );
     assert!(!fixture.marker.exists());
@@ -506,9 +616,13 @@ async fn interrupted_resume_dispatch_blocks_without_reexecuting_child() {
 #[tokio::test]
 async fn invalid_child_plan_records_durable_resume_failure_without_duplicate_attempt() {
     let fixture = Fixture::new("active", false, false);
-    let child = fixture.sessions.load("child").unwrap();
+    let child = fixture
+        .sessions
+        .load("child")
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     let plan = child.plan_path(&fixture.sessions.sessions_dir());
-    fs::write(&plan, "# Changed without approval\n").unwrap();
+    fs::write(&plan, "# Changed without approval\n")
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     let instance = fixture.start();
     let response = fixture
         .action(
@@ -519,7 +633,10 @@ async fn invalid_child_plan_records_durable_resume_failure_without_duplicate_att
     assert!(
         response.status().is_success(),
         "resume request: {}",
-        response.text().await.unwrap()
+        response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("test operation failed: {error}"))
     );
     eventually(|| {
         fixture.goal()["reason"]
@@ -528,14 +645,23 @@ async fn invalid_child_plan_records_durable_resume_failure_without_duplicate_att
     })
     .await;
     let goal = fixture.goal();
-    let reason = goal["reason"].as_str().unwrap().to_owned();
+    let reason = goal["reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected string"))
+        .to_owned();
     assert_eq!(goal["status"], "active");
-    assert_eq!(goal["execution"]["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        goal["execution"]["attempts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected array"))
+            .len(),
+        1
+    );
     assert_eq!(goal["execution"]["attempts"][0]["session_id"], "child");
     assert_eq!(goal["execution"]["attempts"][0]["resume_pending"], false);
     assert_eq!(goal["execution"]["attempts"][0]["resume_starting"], false);
     assert_eq!(
-        fs::read_to_string(&plan).unwrap(),
+        fs::read_to_string(&plan).unwrap_or_else(|error| panic!("test operation failed: {error}")),
         "# Changed without approval\n"
     );
     assert!(!fixture.marker.exists());
@@ -545,7 +671,10 @@ async fn invalid_child_plan_records_durable_resume_failure_without_duplicate_att
     assert_eq!(recovered["status"], "active");
     assert_eq!(recovered["reason"], reason);
     assert_eq!(
-        recovered["execution"]["attempts"].as_array().unwrap().len(),
+        recovered["execution"]["attempts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected array"))
+            .len(),
         1
     );
     assert_eq!(recovered["execution"]["attempts"][0]["session_id"], "child");

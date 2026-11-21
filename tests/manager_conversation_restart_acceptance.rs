@@ -31,10 +31,13 @@ fn command(home: &Path, sdk: bool, args: &[&str]) -> Output {
     } else {
         c.env(
             "CRUISE_COMMAND",
-            serde_json::to_string(&[home.join("forbidden-command")]).unwrap(),
+            serde_json::to_string(&[home.join("forbidden-command")])
+                .unwrap_or_else(|error| panic!("test operation failed: {error}")),
         );
     }
-    c.args(args).output().unwrap()
+    c.args(args)
+        .output()
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"))
 }
 struct Stop<'a>(&'a Path);
 impl Drop for Stop<'_> {
@@ -52,13 +55,16 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .current_dir(repo)
         .args(args)
         .output()
-        .unwrap();
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     assert!(
         out.status.success(),
         "git {args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8(out.stdout).unwrap().trim().into()
+    String::from_utf8(out.stdout)
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"))
+        .trim()
+        .into()
 }
 fn start(home: &Path, sdk: bool) -> (String, String) {
     let out = command(home, sdk, &["daemon", "start", "--port", "0"]);
@@ -68,29 +74,41 @@ fn start(home: &Path, sdk: bool) -> (String, String) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let v: Value =
-        serde_json::from_slice(&fs::read(home.join("state/cruise/daemon/instance.json")).unwrap())
-            .unwrap();
+    let v: Value = serde_json::from_slice(
+        &fs::read(home.join("state/cruise/daemon/instance.json"))
+            .unwrap_or_else(|error| panic!("test operation failed: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     (
-        v["origin"].as_str().unwrap().into(),
-        v["token"].as_str().unwrap().into(),
+        v["origin"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected string"))
+            .into(),
+        v["token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected string"))
+            .into(),
     )
 }
 async fn snapshot(client: &reqwest::Client, origin: &str, token: &str, repo: &Path) -> Value {
-    let mut url = reqwest::Url::parse(&format!("{origin}api/manager/snapshot")).unwrap();
-    url.query_pairs_mut()
-        .append_pair("cwd", repo.to_str().unwrap());
+    let mut url = reqwest::Url::parse(&format!("{origin}api/manager/snapshot"))
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    url.query_pairs_mut().append_pair(
+        "cwd",
+        repo.to_str()
+            .unwrap_or_else(|| panic!("expected UTF-8 path")),
+    );
     client
         .get(url)
         .bearer_auth(token)
         .send()
         .await
-        .unwrap()
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"))
         .error_for_status()
-        .unwrap()
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"))
         .json()
         .await
-        .unwrap()
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"))
 }
 async fn action(
     client: &reqwest::Client,
@@ -105,11 +123,14 @@ async fn action(
         .json(&json!({"cwd":repo,"action":action}))
         .send()
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     let status = response.status();
-    let body = response.text().await.unwrap();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     assert_eq!(status, reqwest::StatusCode::ACCEPTED, "action: {body}");
-    serde_json::from_str(&body).unwrap()
+    serde_json::from_str(&body).unwrap_or_else(|error| panic!("test operation failed: {error}"))
 }
 async fn wait_for(
     client: &reqwest::Client,
@@ -130,23 +151,28 @@ async fn wait_for(
 }
 fn no_children(home: &Path, s: &Value) {
     assert!(
-        s["goals"].as_array().unwrap().is_empty(),
+        s["goals"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected array"))
+            .is_empty(),
         "unexpected goals: {s}"
     );
     let dir = home.join("data/cruise/sessions");
     assert!(
-        !dir.exists() || fs::read_dir(dir).unwrap().next().is_none(),
+        !dir.exists()
+            || fs::read_dir(dir)
+                .unwrap_or_else(|error| panic!("test operation failed: {error}"))
+                .next()
+                .is_none(),
         "unauthorized child session"
     );
 }
 
-#[tokio::test]
-async fn conversation_and_preview_survive_disconnect_and_restart_and_command_is_rejected() {
-    let root = TempDir::new().unwrap();
-    let home = root.path();
-    fs::create_dir(home.join("bin")).unwrap();
+fn install_sdk(home: &Path) {
+    fs::create_dir(home.join("bin"))
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     let sdk = home.join("bin/claude");
-    fs::write(&sdk, r##"#!/bin/sh
+    fs::write(&sdk, r#"#!/bin/sh
 read -r frame
 printf '%s\n' invoked >> "$HOME/sdk-calls"
 while [ ! -f "$HOME/release-sdk" ]; do /bin/sleep 0.1; done
@@ -157,14 +183,19 @@ esac
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"fixture"}'
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"fixture"}\n' "$result"
 printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixture","result":"%s"}\n' "$result"
-"##).unwrap();
-    fs::set_permissions(&sdk, fs::Permissions::from_mode(0o700)).unwrap();
+"#).unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    fs::set_permissions(&sdk, fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+}
+
+fn setup_repo(home: &Path) -> std::path::PathBuf {
     let repo = home.join("repo");
-    fs::create_dir(&repo).unwrap();
+    fs::create_dir(&repo).unwrap_or_else(|error| panic!("test operation failed: {error}"));
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.name", "Test"]);
     git(&repo, &["config", "user.email", "test@example.test"]);
-    fs::write(repo.join("file"), "base\n").unwrap();
+    fs::write(repo.join("file"), "base\n")
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     git(&repo, &["add", "file"]);
     git(&repo, &["commit", "-qm", "base"]);
     let sha = git(&repo, &["rev-parse", "HEAD"]);
@@ -178,16 +209,27 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
             "https://github.com/example/project.git",
         ],
     );
+    repo
+}
+
+#[tokio::test]
+async fn conversation_and_preview_survive_disconnect_and_restart_and_command_is_rejected() {
+    let root = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let home = root.path();
+    install_sdk(home);
+    let repo = setup_repo(home);
     let forbidden = home.join("forbidden-command");
-    fs::write(&forbidden, "#!/bin/sh\ntouch \"$HOME/command-ran\"\n").unwrap();
-    fs::set_permissions(&forbidden, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(&forbidden, "#!/bin/sh\ntouch \"$HOME/command-ran\"\n")
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    fs::set_permissions(&forbidden, fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     let _stop = Stop(home);
     let (origin, token) = start(home, true);
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
-        .unwrap();
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     let turn = action(
         &client,
         &origin,
@@ -197,16 +239,17 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
     )
     .await;
     drop(client);
-    fs::write(home.join("release-sdk"), "release").unwrap();
+    fs::write(home.join("release-sdk"), "release")
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
-        .unwrap();
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
     let s = wait_for(&client, &origin, &token, &repo, |s| {
         s["transcript"]
             .as_array()
-            .unwrap()
+            .unwrap_or_else(|| panic!("expected array"))
             .iter()
             .any(|t| t["text"] == "Discussed goal")
     })
@@ -214,7 +257,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
     assert!(
         s["transcript"]
             .as_array()
-            .unwrap()
+            .unwrap_or_else(|| panic!("expected array"))
             .iter()
             .any(|t| t["id"] == turn["id"] && t["status"] == "completed")
     );
@@ -238,7 +281,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
     assert!(
         s["transcript"]
             .as_array()
-            .unwrap()
+            .unwrap_or_else(|| panic!("expected array"))
             .iter()
             .any(|t| t["id"] == turn["id"] && t["status"] == "completed")
     );
@@ -254,7 +297,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
     let s = wait_for(&client, &origin, &token, &repo, |s| {
         s["transcript"]
             .as_array()
-            .unwrap()
+            .unwrap_or_else(|| panic!("expected array"))
             .iter()
             .any(|t| t["text"].as_str().unwrap_or("").contains("not command"))
     })
