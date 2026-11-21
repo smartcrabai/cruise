@@ -376,7 +376,16 @@ impl WorkflowDefaults {
         self.plan_model = sourced(file.plan_model, path).or(self.plan_model.take());
         self.max_retries = file.max_retries.or(self.max_retries);
         self.interactive_planning = file.interactive_planning.or(self.interactive_planning);
-        self.languages = file.languages.or(self.languages.take());
+        if let Some(file_languages) = file.languages {
+            let mut languages = self.languages.take().unwrap_or_default();
+            languages.pr = file_languages.pr.or(languages.pr);
+            languages.plan = file_languages.plan.or(languages.plan);
+            self.languages = if languages.pr.is_some() || languages.plan.is_some() {
+                Some(languages)
+            } else {
+                None
+            };
+        }
         self.commit_message_template = file
             .commit_message_template
             .or(self.commit_message_template.take());
@@ -559,11 +568,30 @@ impl WorkflowDefaults {
         {
             config.interactive_planning = value;
         }
-        if config.languages.is_none()
-            && config.pr_language.is_none()
-            && config.plan_language.is_none()
-        {
-            config.languages.clone_from(&self.languages);
+        if let Some(defaults) = &self.languages {
+            let apply_pr = crate::config::language_default_applies(
+                config
+                    .languages
+                    .as_ref()
+                    .and_then(|languages| languages.pr.as_deref()),
+                config.pr_language.as_deref(),
+            ) && defaults.pr.is_some();
+            let apply_plan = crate::config::language_default_applies(
+                config
+                    .languages
+                    .as_ref()
+                    .and_then(|languages| languages.plan.as_deref()),
+                config.plan_language.as_deref(),
+            ) && defaults.plan.is_some();
+            if apply_pr || apply_plan {
+                let languages = config.languages.get_or_insert_with(Default::default);
+                if apply_pr {
+                    languages.pr.clone_from(&defaults.pr);
+                }
+                if apply_plan {
+                    languages.plan.clone_from(&defaults.plan);
+                }
+            }
         }
         if !presence.cleanup_after_pr
             && let Some(value) = self.cleanup_after_pr

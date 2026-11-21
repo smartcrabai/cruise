@@ -235,7 +235,7 @@ fn installed_input_bearing_dependencies_remain_usable_without_upstream() {
     for field in ["workflow_call", "with", "prompt_file"] {
         assert!(step.get(field).is_none(), "installed step retains {field}");
     }
-    let config = cruise::workflow_call::resolve_workflow_calls_without_app_model_defaults(
+    let config = cruise::workflow_call::resolve_workflow_calls_without_app_defaults(
         cruise::config::WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|error| panic!("{error}")),
         fx.workflows(),
         &cruise::workflow_defaults::WorkflowDefaults::default(),

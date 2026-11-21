@@ -123,10 +123,10 @@ pub fn resolve_workflow_calls_with_defaults(
 }
 
 /// Resolve workflow calls for an explicit workflow artifact without loading
-/// machine-level app model defaults.
+/// application-level defaults.
 ///
 /// This applies the supplied [`WorkflowDefaults`] and normal environment
-/// overrides, but intentionally omits `AppConfig` model defaults. Use this when
+/// overrides, but intentionally omits `AppConfig` defaults. Use this when
 /// resolving a generated or otherwise self-contained workflow artifact; use
 /// [`resolve_workflow_calls_with_defaults`] for runtime workflow resolution.
 ///
@@ -135,7 +135,7 @@ pub fn resolve_workflow_calls_with_defaults(
 /// Returns an error when a referenced workflow or prompt file cannot be loaded,
 /// when call-site fields or defaults are invalid, when environment overrides
 /// fail, or when retry policy validation fails.
-pub fn resolve_workflow_calls_without_app_model_defaults(
+pub fn resolve_workflow_calls_without_app_defaults(
     config: WorkflowConfig,
     base_dir: impl Into<PathBuf>,
     defaults: &WorkflowDefaults,
@@ -318,7 +318,7 @@ fn load_embedded_workflow_yaml(
 fn finish_resolved_config(
     mut resolution: WorkflowConfigResolution,
     defaults: &WorkflowDefaults,
-    apply_app_model_defaults: bool,
+    apply_app_defaults: bool,
     doctor: bool,
     env: crate::config::ConfigEnv<'_>,
 ) -> Result<WorkflowConfig> {
@@ -329,13 +329,43 @@ fn finish_resolved_config(
     }
     defaults.apply_to(&mut resolution)?;
     let config = &mut resolution.config;
-    if apply_app_model_defaults {
+    if apply_app_defaults {
         let app_config = crate::app_config::AppConfig::load_runtime()?;
         if config.model.is_none() {
             config.model = app_config.model;
         }
         if config.plan_model.is_none() {
             config.plan_model = app_config.plan_model;
+        }
+        let crate::config::LanguagesConfig { pr, plan } = app_config.languages.unwrap_or_default();
+        let apply_pr = crate::config::language_default_applies(
+            config
+                .languages
+                .as_ref()
+                .and_then(|languages| languages.pr.as_deref()),
+            config.pr_language.as_deref(),
+        ) && pr.is_some();
+        let apply_plan = crate::config::language_default_applies(
+            config
+                .languages
+                .as_ref()
+                .and_then(|languages| languages.plan.as_deref()),
+            config.plan_language.as_deref(),
+        ) && plan.is_some();
+        if apply_pr || apply_plan {
+            let languages = config.languages.get_or_insert_with(Default::default);
+            if apply_pr {
+                languages.pr = pr;
+            }
+            if apply_plan {
+                languages.plan = plan;
+            }
+        }
+        if config.commit_message_template.is_none() {
+            config.commit_message_template = app_config.commit_message_template;
+        }
+        if config.pr_body_template.is_none() {
+            config.pr_body_template = app_config.pr_body_template;
         }
     }
     config.apply_env_overrides_with(env)?;
@@ -2217,6 +2247,9 @@ steps:
         let _lang = EnvGuard::set("LANG", "ja_JP.UTF-8");
 
         let dir = TempDir::new().unwrap_or_else(|e| panic!("tempdir failed: {e}"));
+        // Keep the host's application config (e.g. `languages.plan`) from
+        // pre-empting locale inference, which only applies when nothing is configured.
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path().join("xdg").as_os_str());
         let path = write_file(
             &dir,
             "cruise.yaml",

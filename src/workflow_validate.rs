@@ -11,7 +11,7 @@ use crate::error::{CruiseError, Result};
 pub fn validate_generated_yaml(yaml: &str, base_dir: &Path) -> Result<()> {
     let config = WorkflowConfig::from_yaml(yaml)
         .map_err(|e| CruiseError::ConfigParseError(e.to_string()))?;
-    let config = crate::workflow_call::resolve_workflow_calls_without_app_model_defaults(
+    let config = crate::workflow_call::resolve_workflow_calls_without_app_defaults(
         config,
         base_dir,
         &crate::workflow_defaults::WorkflowDefaults::default(),

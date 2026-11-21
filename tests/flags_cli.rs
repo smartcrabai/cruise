@@ -79,6 +79,16 @@ impl Fixture {
     }
 
     fn exec(&self, extra: &[&str]) -> Output {
+        self.cli()
+            .arg("exec")
+            .arg("--config")
+            .arg(&self.config)
+            .args(extra)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run cruise exec command: {error}"))
+    }
+
+    fn cli(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("CRUISE_") {
@@ -86,10 +96,6 @@ impl Fixture {
             }
         }
         command
-            .arg("exec")
-            .arg("--config")
-            .arg(&self.config)
-            .args(extra)
             .current_dir(&self.repo)
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("XDG_DATA_HOME", self.root.path().join("data"))
@@ -102,8 +108,6 @@ impl Fixture {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         command
-            .output()
-            .unwrap_or_else(|error| panic!("failed to run cruise exec command: {error}"))
     }
 }
 
@@ -762,6 +766,63 @@ steps:
         assert!(!text.contains(FLAG_PROMPT), "{text}");
         assert!(f.repo.join("docs.txt").exists(), "{text}");
         assert!(!f.repo.join("e2e.txt").exists(), "{text}");
+    }
+
+    #[test]
+    fn failed_force_exec_dispatches_resume_with_original_flags()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for args in [
+            &["plan", "task"][..],
+            &["task"][..],
+            &["--plan", "task"][..],
+        ] {
+            let f = Fixture::new();
+            std::fs::write(
+                f.repo.join("cruise.yaml"),
+                "force_exec: true
+command: [echo]
+flags:
+  e2e:
+    description: Run E2E
+steps:
+  build:
+    command: echo build >> visits.txt
+  e2e-test:
+    flag: e2e
+    command: echo e2e >> visits.txt && test -f e2e-ready
+  finish:
+    command: echo finish >> visits.txt
+",
+            )?;
+            let (success, message) =
+                cli_in_pty(&f, args, &[("./cruise.yaml", b"\r"), ("Run E2E", b" \r")]);
+            assert!(!success, "{args:?}: {message}");
+            assert!(message.contains("force_exec:"), "{args:?}: {message}");
+            let visits = f.repo.join("visits.txt");
+            assert_eq!(std::fs::read_to_string(&visits)?, "build\ne2e\nfinish\n");
+
+            let manager = cruise::session::SessionManager::new(f.root.path().join("data/cruise"));
+            let sessions = manager.list()?;
+            assert_eq!(sessions.len(), 1, "{args:?}: {message}");
+            let session = &sessions[0];
+            assert!(session.exec);
+            assert!(matches!(
+                session.phase,
+                cruise::session::SessionPhase::Failed(_)
+            ));
+            assert_eq!(session.flags.get("e2e"), Some(&true));
+            assert!(message.contains(&session.id), "{args:?}: {message}");
+
+            std::fs::write(f.repo.join("e2e-ready"), "ready")?;
+            let output = f.cli().args(["run", &session.id]).output()?;
+            assert!(output.status.success(), "{args:?}: {}", text(&output));
+            assert_eq!(
+                std::fs::read_to_string(&visits)?,
+                "build\ne2e\nfinish\ne2e\nfinish\n"
+            );
+            assert!(manager.list()?.is_empty(), "{args:?}: {}", text(&output));
+        }
+        Ok(())
     }
 
     #[test]

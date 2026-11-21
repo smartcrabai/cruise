@@ -85,7 +85,7 @@ pub(crate) fn session_actions(
     let show_create_worktree = !is_active_run && session.phase == "Planned" && usable_plan;
     let show_run = !is_active_run
         && !is_awaiting_refresh
-        && usable_plan
+        && (usable_plan || session.exec)
         && (session.phase == "Suspended" || session.phase == "Failed");
     let show_create_pr =
         session.phase == "PR Failed" && active_operation.is_none() && !is_active_run;
@@ -96,6 +96,7 @@ pub(crate) fn session_actions(
     };
     let show_reset = !is_active_run
         && !is_awaiting_refresh
+        && !session.exec
         && (session.phase == "Suspended"
             || session.phase == "Failed"
             || session.phase == "PR Failed"
@@ -184,6 +185,23 @@ mod tests {
         let mut session = make_session(phase);
         session.plan_available = plan_available;
         session_actions(&session, operation, pending_prompt)
+    }
+
+    #[test]
+    fn suspended_exec_without_plan_can_resume_but_not_reset() {
+        let mut session = make_session("Suspended");
+        session.exec = true;
+        let actions = session_actions(&session, None, false);
+        assert!(actions.show_run);
+        assert_eq!(actions.run_label, "Resume");
+        assert!(!actions.show_reset);
+    }
+
+    #[test]
+    fn suspended_non_exec_still_requires_plan_to_resume() {
+        let actions = actions("Suspended", false, None, false);
+        assert!(!actions.show_run);
+        assert!(actions.show_reset);
     }
 
     #[test]

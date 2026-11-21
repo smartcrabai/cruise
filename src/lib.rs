@@ -6,30 +6,32 @@ pub mod artifacts;
 pub mod ask_handler;
 pub mod attachments;
 pub mod auto_requeue;
-#[cfg_attr(
-    all(target_os = "linux", feature = "jcode-bubblewrap"),
-    expect(
-        dead_code,
-        unused_imports,
-        reason = "CLI-only Bubblewrap relay and verifier"
-    )
-)]
 pub mod backend;
 mod base_ci;
 pub mod branch_diff;
 pub mod builtin_workflows;
 pub mod cancellation;
-#[cfg(test)]
 #[path = "worktree_pr/ci_followup.rs"]
 mod ci_followup;
+mod clean_cmd;
+mod cli;
+mod cli_events;
 pub(crate) mod commit_guard;
 pub mod condition;
 pub mod config;
+mod config_cmd;
 pub mod config_env;
 pub mod configs;
+mod daemon;
 pub mod dag;
+mod diff_cmd;
+#[cfg(test)]
+mod diff_cmd_contract_tests;
+mod docs_cmd;
+mod draft_cmd;
 pub mod engine;
 pub mod error;
+mod exec_cmd;
 pub mod executor;
 pub mod file_tracker;
 pub mod flags;
@@ -37,21 +39,18 @@ pub(crate) mod forge;
 pub mod formal_verify;
 pub mod github_review;
 pub mod graph;
-#[cfg(test)]
 #[path = "worktree_pr/host_sync.rs"]
 mod host_sync;
-#[expect(
-    dead_code,
-    reason = "the binary-only updater also uses these shared download helpers"
-)]
 mod http_download;
 pub mod i18n;
+mod install_identity;
+mod instant_exec;
 pub mod instruction_inbox;
 pub(crate) mod issue_images;
 pub(crate) mod issue_input;
 pub mod issue_publish;
-#[cfg(test)]
 mod ledger_snapshot;
+mod list_cmd;
 pub mod local_merge;
 pub mod metadata;
 pub mod model_schedule;
@@ -60,6 +59,7 @@ pub mod new_session_draft;
 pub mod new_session_history;
 pub mod option_handler;
 pub mod paths;
+mod plan_cmd;
 pub mod planning;
 pub mod pr_merge;
 pub mod pr_review_fix;
@@ -71,37 +71,35 @@ pub mod repo_clone;
 pub mod request_context;
 pub mod resolver;
 pub mod retry;
+mod run_cmd;
 pub mod sdk_tools;
 pub mod session;
 pub mod session_config;
 pub mod session_edit;
+mod ssh_cmd;
 pub mod step;
 pub mod telemetry;
+mod tell_cmd;
 pub mod timeout;
-#[expect(
-    dead_code,
-    reason = "pre-tool gate entry point is used only by the runtime binary"
-)]
 pub mod tool_policy;
+mod update_cmd;
 pub mod usage;
 pub mod usage_cmd;
 pub mod variable;
+mod webui;
 pub mod workflow;
-mod workflow_validate;
-pub mod workflow_generate {
-    pub use crate::workflow_validate::validate_generated_yaml;
-}
 pub mod workflow_call;
 pub mod workflow_categories;
 pub mod workflow_cmd;
 pub mod workflow_defaults;
+mod workflow_doctor;
+mod workflow_doctor_targets;
+pub mod workflow_generate;
+mod workflow_make;
 pub(crate) mod workflow_packages;
+mod workflow_validate;
 pub mod workspace;
 pub mod worktree;
-#[expect(
-    dead_code,
-    reason = "the CLI uses the pinned review and base-sync entry points"
-)]
 pub mod worktree_pr;
 pub mod yaml_metadata;
 
@@ -111,10 +109,6 @@ pub mod console_mode;
 pub mod display;
 pub mod herdr;
 pub(crate) mod multiline_input;
-#[expect(
-    dead_code,
-    reason = "the daemon login opener is used only by the runtime binary"
-)]
 pub mod platform;
 pub mod run_observer;
 pub mod sleep_guard;
@@ -123,10 +117,8 @@ mod spinner;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_support;
 
-#[expect(
-    dead_code,
-    reason = "the library registers the binary-facing notification helper module"
-)]
 mod desktop_notifications;
 mod notification_sound;
 mod notification_webhook;
+#[doc(hidden)]
+pub mod runtime;

@@ -83,9 +83,9 @@ path fails the operation, for both saves and reads.
 Empty output, Markdown, JSON, non-ASCII text, and trailing
 newlines are preserved. A write error fails the prompt step; a later workflow
 failure does not remove an artifact from a session that remains retained.
-Artifacts belong to the session: deleting the session removes them. Terminal
-`cruise exec` sessions are removed after completion, while interrupted exec
-sessions and suspended `cruise run` sessions keep their artifacts for resume.
+Artifacts are deleted with their session. Successful exec sessions are removed
+automatically. Failed, paused, or interrupted exec sessions and suspended
+ordinary runs keep their artifacts for resume.
 
 Saved content can be included in a later prompt with `{file:initial-state.md}`:
 

@@ -540,9 +540,8 @@ pub struct RunArgs {
 
     /// Maximum number of times a budgeted graph transition may be traversed.
     ///
-    /// When omitted, falls back to the workflow config's top-level `max_retries`
-    /// if set, otherwise defaults to 3. An explicitly-passed flag always wins
-    /// over the config value.
+    /// Precedence: this flag, the original explicit exec value when resuming
+    /// an exec, the workflow config's top-level `max_retries`, then 3.
     #[arg(long)]
     pub max_retries: Option<usize>,
 

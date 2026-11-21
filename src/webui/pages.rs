@@ -381,27 +381,66 @@ pub(crate) fn step_tree_html(
     skipped: Option<&[String]>,
     flags: &crate::flags::FlagValues,
 ) -> Result<String> {
+    Ok(new_session_step_tree_html(state, base_dir, config_path, repo, skipped, flags)?.0)
+}
+
+pub(crate) fn new_session_step_tree_html(
+    state: &WebState,
+    base_dir: &str,
+    config_path: Option<&str>,
+    repo: Option<&str>,
+    skipped: Option<&[String]>,
+    flags: &crate::flags::FlagValues,
+) -> Result<(String, bool)> {
+    let (vm, force_exec) = step_tree(state, base_dir, config_path, repo, skipped, flags);
+    Ok((state.templates.render("step-tree", &vm)?, force_exec))
+}
+
+fn step_tree(
+    state: &WebState,
+    base_dir: &str,
+    config_path: Option<&str>,
+    repo: Option<&str>,
+    skipped: Option<&[String]>,
+    flags: &crate::flags::FlagValues,
+) -> (StepTreeVm, bool) {
     let defaults = state.application.new_session_config_defaults(
         std::path::Path::new(base_dir),
         config_path.filter(|path| !path.is_empty()),
         repo.filter(|repo| !repo.trim().is_empty()),
     );
-    let vm = match defaults {
+    match defaults {
         Ok(defaults) => {
             let effective = skipped.unwrap_or(&defaults.default_skipped_steps);
             let steps = crate::flags::skip_candidates(&defaults.steps, flags);
             let after_pr = crate::flags::skip_candidates(&defaults.after_pr_steps, flags);
             let mut vm = step_tree_vm(&steps, &after_pr, effective);
             vm.flags = flag_toggle_rows(&defaults.flags, flags);
-            vm
+            (vm, defaults.force_exec)
         }
-        Err(_) => StepTreeVm {
-            steps: Vec::new(),
-            empty: true,
-            flags: Vec::new(),
-        },
-    };
-    state.templates.render("step-tree", &vm)
+        Err(_) => (
+            StepTreeVm {
+                steps: Vec::new(),
+                empty: true,
+                flags: Vec::new(),
+            },
+            false,
+        ),
+    }
+}
+
+pub(crate) fn new_session_actions_html(
+    state: &WebState,
+    directory: bool,
+    force_exec: bool,
+) -> Result<String> {
+    state.templates.render(
+        "components/new-session-actions",
+        &serde_json::json!({
+            "forceExec": directory && force_exec,
+            "showExec": directory && !force_exec,
+        }),
+    )
 }
 
 pub(crate) fn config_select_html(
@@ -483,9 +522,19 @@ pub(crate) fn new_session_html(state: &WebState) -> Result<String> {
     } else {
         "repo"
     };
+    let (steps, force_exec) = new_session_step_tree_html(
+        state,
+        &base_dir,
+        config_path.as_deref(),
+        Some(&repo),
+        (!skipped.is_empty()).then_some(skipped.as_slice()),
+        &crate::flags::FlagValues::new(),
+    )?;
     let vm = NewSessionVm {
         source_mode: source_mode.to_string(),
         directory_selected: source_mode == "directory",
+        force_exec: source_mode == "directory" && force_exec,
+        show_exec: source_mode == "directory" && !force_exec,
         input: draft
             .as_ref()
             .map(|draft| draft.input.clone())
@@ -505,14 +554,7 @@ pub(crate) fn new_session_html(state: &WebState) -> Result<String> {
             Some(&repo),
             config_path.as_deref(),
         )?),
-        steps: RawHtml::new(step_tree_html(
-            state,
-            &base_dir,
-            config_path.as_deref(),
-            Some(&repo),
-            (!skipped.is_empty()).then_some(skipped.as_slice()),
-            &crate::flags::FlagValues::new(),
-        )?),
+        steps: RawHtml::new(steps),
         attachments: RawHtml::new(state.templates.render(
             "attachment-list",
             &super::view::AttachmentListVm {

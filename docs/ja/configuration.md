@@ -49,15 +49,15 @@ cruise は次の順序でワークフロー設定を解決します。
 
 `$XDG_CONFIG_HOME/cruise/default.yaml` は user default、`./.cruise/default.yaml` は project default を設定します。`XDG_CONFIG_HOME` 未設定時の既定 path は macOS/Linux で `~/.config/cruise/default.yaml`、Windows では `%APPDATA%\cruise\default.yaml`（`APPDATA` がない場合は `~/.config/cruise/default.yaml`）です。これらのファイルは workflow が未指定の field に既定値を与えます。workflow として選択することはできず、`-c` または `CRUISE_CONFIG` で指定するとエラーになります。
 
-該当する項目での優先順位（高い順）: invocation ごとの CLI flag（workflow 選択用 `-c` を含む） > 設定環境変数による override > workflow file > `./.cruise/default.yaml` > `$XDG_CONFIG_HOME/cruise/default.yaml` > アプリケーション model default (`config.json` または `config.yaml`) > 組み込み default。通常の prompt では step-level model override が引き続き優先されます。
+該当する項目の優先順位（高い順）: invocation ごとの CLI flag（workflow 選択用 `-c` を含む） > 設定環境変数による override > workflow file > `./.cruise/default.yaml` > `$XDG_CONFIG_HOME/cruise/default.yaml` > アプリケーション default（model とグローバル出力設定を含む） > 組み込み default。`languages.plan` と `languages.pr` は個別に解決します（[prompt の言語](#prompt-languages)参照）。通常の prompt では step-level model override が引き続き優先されます。
 
 実際の jcode prompt に有効な model がない場合、Cruise は `$XDG_CONFIG_HOME/cruise/default.yaml`（またはプラットフォーム標準の user config path）に `model: null` を持つ template を作成し、jcode を起動する前に停止します。user-level file を編集して実際の `provider/model[:effort]` reference または bare model を設定してください。新しい session では `config.json`、`config.yaml`、workflow、`CRUISE_MODEL` で `model` を設定することもできます。planning call では `plan_model` / `CRUISE_PLAN_MODEL` を使えます。
 
-設定後は、最初に処理を始めたコマンドを再試行してください。失敗した run session には `cruise run <SESSION>`、plan や exec の要求にはそれぞれ `cruise plan` または `cruise exec` を再実行します。file-backed session は default を再読み込みしますが、snapshot session は後からの default や環境変更を再適用しません。更新後の設定を使うには新しい snapshot session を開始してください。
+設定後は、最初に処理を始めたコマンドを再試行してください。失敗した run session には `cruise run <SESSION>`、plan や exec の要求にはそれぞれ `cruise plan` または `cruise exec` を再実行します。file-backed session は default を再読み込みします。後からの `default.yaml` やアプリケーション設定の編集では、保存済み snapshot は変わりません。対応する workflow override 環境変数を明示的に送った CLI request では、その request の間だけメモリ上で snapshot 値を上書きしますが、snapshot は書き換えません。その他の設定変更を反映するには新しい snapshot session を開始してください。
 
 - `env` と `mcp_servers` は key ごとにマージし、上位レイヤーが優先されます。
 - `command` と `sdk` は一組です。あるレイヤーがどちらかを設定すると、下位レイヤーの組は無視されます。
-- その他の field (`model`、`plan_model`、`subagent_model`、`max_retries`、`interactive_planning`、`languages`、`cleanup_after_pr`、`force_exec`、`computer_use`、`permission`、`disallowed_tools`、`retry`、`formal_verify`) は、最上位で設定されたレイヤーの値を使います。制限リストはレイヤー間で置換されます。workflow の `disallowed_tools: []` を明示すると継承した default をクリアします。
+- その他の field (`model`、`plan_model`、`subagent_model`、`max_retries`、`interactive_planning`、`cleanup_after_pr`、`force_exec`、`computer_use`、`permission`、`disallowed_tools`、`retry`、`formal_verify`、`commit_message_template`、`pr_body_template`) は、最上位で設定されたレイヤーの値を使います。`languages.plan` と `languages.pr` は個別に解決します（[prompt の言語](#prompt-languages)参照）。制限リストはレイヤー間で置換されます。workflow の `disallowed_tools: []` を明示すると継承した default をクリアします。
 - Worktree 設定 `base_branch` と `auto_fetch` は default 専用 key で、project 値が user 値に優先します。マージ後の `base_branch` が空であれば `auto_fetch: true` は無効です。
 - default が workflow と異なる種類の backend（`command` / `sdk`）を指定し、backend 固有の未設定 field（`model`、`retry`、`mcp_servers` など）を補う場合は検証エラーになります。workflow で field を設定するか、`default.yaml` から削除してください。
 
@@ -184,7 +184,7 @@ steps:
 
 UI の表示言語は prompt の言語と独立しています。アプリケーション設定の `uiLanguage` または `CRUISE_UI_LANGUAGE` で設定します。WebUI では、browser 側の言語選択で server default を上書きできます。これらの設定は `languages.pr` や `languages.plan` を変更しません。
 
-`languages.pr` は自動生成する PR title/body の言語、`languages.plan` は cruise 組み込み planning prompt の言語を指定します。`CRUISE_LANGUAGE_PR` と `CRUISE_LANGUAGE_PLAN` はそれぞれ対応する YAML 値を上書きし、空白の環境変数値は無視されます。それ以外では `LC_ALL`、`LC_MESSAGES`、`LANG`、`LANGUAGE` のうち最初の空でない値を1回マッピングして使います（未対応値でも次の変数には進みません）。それもなければ `English` です。
+`languages.pr` は自動生成する PR title/body の言語、`languages.plan` は Cruise 組み込み planning prompt の言語を指定します。workflow と `default.yaml` の値が対応するアプリケーション設定より優先され、アプリケーション値は plan と PR の不足している側だけを個別に補います。非推奨の top-level `pr_language` と `plan_language` も明示値として扱います。`CRUISE_LANGUAGE_PR` と `CRUISE_LANGUAGE_PLAN` は設定値を上書きし、空白の環境変数値は無視されます。設定値がなければ `LC_ALL`、`LC_MESSAGES`、`LANG`、`LANGUAGE` のうち最初の空でない値を1回マッピングして使います（未対応値でも次の変数には進みません）。それもなければ `English` です。
 
 ```yaml
 languages:
@@ -197,7 +197,7 @@ languages:
 <a id="commit-and-pr-templates"></a>
 ### commit と PR の template
 
-省略可能な top-level string key `commit_message_template` と `pr_body_template` は、worktree PR 作成経路でホストが作成する commit と PR body をカスタマイズします。workflow、user `<config_dir>/default.yaml`、または project `.cruise/default.yaml` に設定します。優先順位は workflow > project default > user default > 未設定です。CLI option や環境変数による override ではありません。
+省略可能な top-level string key `commit_message_template` と `pr_body_template` は、worktree PR 作成経路でホストが作成する commit と PR body をカスタマイズします。workflow、user `<config_dir>/default.yaml`、project `.cruise/default.yaml`、またはアプリケーション `config.yaml` / `config.json` に設定できます。アプリケーション設定では `commitMessageTemplate` と `prBodyTemplate` も受け付けます。優先順位は workflow > project default > user default > アプリケーション設定 > 未設定で、その後 `CRUISE_COMMIT_MESSAGE_TEMPLATE` と `CRUISE_PR_BODY_TEMPLATE` が設定値を上書きします。CLI option ではありません。
 
 ```yaml
 commit_message_template: "{title} [{session_id}]"
@@ -259,7 +259,7 @@ process-level 設定 override は workflow と default の解決後に適用さ�
 
 通常は key path を大文字にして `CRUISE_` を付け、ドットとハイフンを underscore に置換します。言語の子 key は上記の綴りのみサポートされます。値は trim され、空白だけの値は無視されます。boolean は `true`、`false`、`1`、`0` のみ、integer は符号なし10進数字のみ受け付けます。text はそのままです。model 値は通常、単一 model の文字列です。ただし `[` または `{` で始まる場合は JSON として parse し、その field の通常の model 形状に一致する必要があります。特に `CRUISE_MODEL` と `CRUISE_PLAN_MODEL` は JSON array を受け付けるようになりました。以前は `[` や `{` で始まる値も文字どおりの model 名として扱われていました。fallback entry を持つ array は YAML と同じように model fallback を有効にします。その他の複合値には YAML flow syntax ではなく JSON が必要です。対応する任意値には空欄ではなく JSON `null`、対応する空 list には `[]` を使ってください。不正値は変数名を含むエラーになり、通常の設定検証も行われます。
 
-親 object を子 override より先に適用します。そのため `CRUISE_RETRY_MAX_DELAY_MS` は `CRUISE_RETRY` 内の対応 field を上書きし、`CRUISE_LANGUAGE_PR` は `CRUISE_LANGUAGES` を上書きします。`CRUISE_SDK` を設定すると設定済み `command` が消え、`CRUISE_COMMAND` を設定すると設定済み `sdk` が消えます。両方の変数に空でない値を設定するとエラーです。例:
+親 object は子 override より先に適用されます。`CRUISE_LANGUAGES` は `languages` object 全体を置き換え、その後 `CRUISE_LANGUAGE_PLAN` と `CRUISE_LANGUAGE_PR` が対応する member を上書きします。同様に `CRUISE_RETRY_MAX_DELAY_MS` は `CRUISE_RETRY` 内の対応 field を上書きします。`CRUISE_SDK` を設定すると設定済み `command` が消え、`CRUISE_COMMAND` を設定すると設定済み `sdk` が消えます。両方の変数に空でない値を設定するとエラーです。例:
 
 ```sh
 export CRUISE_MODEL='["provider/primary", "provider/fallback"]'
@@ -304,6 +304,33 @@ Cruise はアプリケーション設定を workflow YAML とは別に `$XDG_CON
 CLI では、`CRUISE_UI_LANGUAGE` が `uiLanguage` より優先され、その次に system locale、最後に英語となります。空白または `auto` の環境変数値は次の層に委ねます。不正な環境変数値は英語の警告を出して無視します。system locale は `LC_ALL`、`LC_MESSAGES`、`LANG`、`LANGUAGE` のうち最初の空でない値を使います。その値が未対応でも後続の変数は試しません。環境変数から言語を決定できない場合、Windows は user locale も確認します。macOS と Linux は環境変数のみを使うため、環境変数のない GUI 起動では英語が既定になります。
 
 WebUI では、有効な browser cookie `cruise_ui_language` があればそれを使い、なければ server process の既定言語を使います。WebUI の言語選択は cookie を保存してページを再読み込みし、アプリケーション設定は変更しません。UI 言語は、生成 prompt の言語を制御する workflow `languages.pr` と `languages.plan` から独立しています。
+
+<a id="output-preferences"></a>
+### グローバル出力設定
+
+アプリケーション `config.yaml` と `config.json` は、共通の prompt 言語と template 設定を受け付けます。template key は camelCase alias `commitMessageTemplate` と `prBodyTemplate` も受け付けます。
+
+```yaml
+languages:
+  plan: Japanese
+  pr: English
+commit_message_template: "{title} [{session_id}]"
+pr_body_template: |
+  ## Summary
+  {body}
+```
+
+JSON でも同じ key 名と値の型を使います。たとえば:
+
+```json
+{
+  "languages": {"plan": "Japanese", "pr": "English"},
+  "commit_message_template": "{title} [{session_id}]",
+  "pr_body_template": "## Summary\n{body}"
+}
+```
+
+prompt 言語は `plan` と `pr` を個別に解決します。workflow の `languages.plan` / `languages.pr`（または対応する旧形式 field `plan_language` / `pr_language`）> project default > user default > application preference の順です。`CRUISE_LANGUAGE_PLAN` / `CRUISE_LANGUAGE_PR` は設定値を上書きし、設定値も環境変数 override もない場合に locale 推定を使います。template は workflow > project default > user default > application settings の順で、対応する template 環境変数が設定値を上書きします。これらの設定は UI 言語を変更しません。組み込み template では有効値を `{plan.language}` と `{pr.language}` で参照できます。
 
 <a id="config-hot-reload"></a>
 ## 設定の hot-reload

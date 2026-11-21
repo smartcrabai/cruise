@@ -1,6 +1,6 @@
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,6 +24,8 @@ pub(super) fn routes() -> Router<WebState> {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct SessionListItem {
     pub(crate) id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) exec: bool,
     pub(crate) base_dir: String,
     pub(crate) phase: String,
     pub(crate) phase_error: Option<String>,
@@ -70,6 +72,7 @@ fn list_item(state: &WebState, session: SessionState) -> SessionListItem {
     SessionListItem {
         phase: phase.to_owned(),
         id: session.id,
+        exec: session.exec,
         base_dir: session.base_dir.to_string_lossy().into_owned(),
         phase_error,
         plan_error: session.plan_error,
@@ -97,8 +100,21 @@ fn list_item(state: &WebState, session: SessionState) -> SessionListItem {
     }
 }
 
-async fn list_sessions(State(state): State<WebState>) -> Response {
-    match state.application.reconciled_sessions() {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionListQuery {
+    #[serde(default)]
+    include_failed_exec: bool,
+}
+
+async fn list_sessions(
+    State(state): State<WebState>,
+    Query(query): Query<SessionListQuery>,
+) -> Response {
+    match state
+        .application
+        .reconciled_sessions(query.include_failed_exec)
+    {
         Ok(sessions) => axum::Json(
             sessions
                 .into_iter()

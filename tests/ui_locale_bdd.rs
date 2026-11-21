@@ -177,6 +177,7 @@ fn platform_fallback(w: &mut LocaleWorld) {
 #[tokio::test(flavor = "current_thread")]
 async fn ui_locale_bdd() {
     LocaleWorld::cucumber()
+        .with_default_cli()
         .max_concurrent_scenarios(1)
         .fail_on_skipped()
         .run_and_exit(concat!(

@@ -13,6 +13,342 @@ use crate::session::{SessionManager, SessionState, WorkspaceMode};
 
 const CONFIG_YAML: &str = "command: [cat]\nsteps:\n  s1:\n    prompt: plan\n";
 
+fn exec_fixture(harness: &Harness, force: bool) -> (std::path::PathBuf, std::path::PathBuf) {
+    let base = harness.dir.path().join("exec-work");
+    std::fs::create_dir_all(&base).unwrap_or_else(|error| panic!("create exec directory: {error}"));
+    let output = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&base)
+        .output()
+        .unwrap_or_else(|error| panic!("git init: {error}"));
+    assert!(output.status.success());
+    let output = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ])
+        .current_dir(&base)
+        .output()
+        .unwrap_or_else(|error| panic!("git commit: {error}"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = harness.dir.path().join("exec-workflow.yaml");
+    let marker = if cfg!(windows) {
+        "type nul > marker"
+    } else {
+        "touch marker"
+    };
+    std::fs::write(
+        &config,
+        format!(
+            "command: [cat]\nforce_exec: {force}\nsteps:\n  marker:\n    command: '{marker}'\n"
+        ),
+    )
+    .unwrap_or_else(|error| panic!("write exec workflow: {error}"));
+    (base, config)
+}
+
+fn form_body(fields: &[(&str, &str)]) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(fields.iter().copied())
+        .finish()
+}
+
+async fn post_form(harness: &Harness, uri: &str, body: String) -> axum::response::Response {
+    let request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("host", "localhost:8484")
+        .header("cookie", "cruise_webui=test-session")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap_or_else(|error| panic!("request: {error}"));
+    raw_response(harness, request).await
+}
+
+async fn wait_for_exec(harness: &Harness, base: &std::path::Path) {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if base.join("marker").exists()
+                && harness
+                    .manager
+                    .list()
+                    .unwrap_or_else(|error| panic!("list sessions: {error}"))
+                    .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|error| panic!("exec did not complete: {error}"));
+}
+
+#[tokio::test]
+async fn exec_new_session_actions_follow_config_and_source() {
+    let harness = harness();
+    let (base, config) = exec_fixture(&harness, true);
+    for (source, forced) in [("directory", true), ("repo", false)] {
+        let query = form_body(&[
+            (
+                "baseDir",
+                base.to_str().unwrap_or_else(|| panic!("non-UTF-8 base")),
+            ),
+            (
+                "configPath",
+                config
+                    .to_str()
+                    .unwrap_or_else(|| panic!("non-UTF-8 config")),
+            ),
+            ("sourceMode", source),
+        ]);
+        let (status, _, html) = get(&harness, &format!("/webui/new/steps?{query}"), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert!(html.contains("id=\"new-session-actions\""), "{html}");
+        assert_eq!(html.contains(">Execute</button>"), forced, "{html}");
+        assert_eq!(html.contains("Create &amp; plan"), !forced, "{html}");
+        assert!(!html.contains("hx-post=\"/webui/sessions/exec\""), "{html}");
+    }
+    std::fs::write(
+        &config,
+        "command: [cat]\nsteps:\n  marker:\n    command: 'true'\n",
+    )
+    .unwrap_or_else(|error| panic!("write workflow: {error}"));
+    let query = form_body(&[
+        (
+            "baseDir",
+            base.to_str().unwrap_or_else(|| panic!("non-UTF-8 base")),
+        ),
+        (
+            "configPath",
+            config
+                .to_str()
+                .unwrap_or_else(|| panic!("non-UTF-8 config")),
+        ),
+        ("sourceMode", "directory"),
+    ]);
+    let (_, _, html) = get(&harness, &format!("/webui/new/steps?{query}"), &[]).await;
+    assert!(html.contains("hx-post=\"/webui/sessions/exec\""), "{html}");
+    assert!(html.contains("Create &amp; plan"), "{html}");
+    let (status, _, html) = get(&harness, "/new", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains("hx-post=\"/webui/sessions/exec\""), "{html}");
+}
+
+#[tokio::test]
+async fn exec_rejects_unsafe_form_inputs_without_creating_sessions() {
+    let harness = harness();
+    let (base, config) = exec_fixture(&harness, false);
+    for (source, directory, input, attachment) in [
+        (
+            "repo",
+            base.to_str().unwrap_or_else(|| panic!("non-UTF-8 base")),
+            "task",
+            "",
+        ),
+        (
+            "directory",
+            base.to_str().unwrap_or_else(|| panic!("non-UTF-8 base")),
+            "task",
+            "image.png",
+        ),
+        ("directory", "", "task", ""),
+        (
+            "directory",
+            base.to_str().unwrap_or_else(|| panic!("non-UTF-8 base")),
+            "#12",
+            "",
+        ),
+    ] {
+        let mut fields = vec![
+            ("sourceMode", source),
+            ("baseDir", directory),
+            (
+                "configPath",
+                config
+                    .to_str()
+                    .unwrap_or_else(|| panic!("non-UTF-8 config")),
+            ),
+            ("input", input),
+        ];
+        if !attachment.is_empty() {
+            fields.push(("attachments", attachment));
+        }
+        let response = post_form(&harness, "/webui/sessions/exec", form_body(&fields)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_else(|error| panic!("response body: {error}"));
+        assert!(String::from_utf8_lossy(&body).contains("hx-target=\"#toasts\""));
+        assert_eq!(
+            harness
+                .manager
+                .list()
+                .unwrap_or_else(|error| panic!("list: {error}")),
+            []
+        );
+    }
+}
+
+#[tokio::test]
+async fn exec_route_runs_in_directory_and_disposes_session() {
+    let harness = harness();
+    let (base, config) = exec_fixture(&harness, false);
+    let body = form_body(&[
+        ("sourceMode", "directory"),
+        (
+            "baseDir",
+            base.to_str().unwrap_or_else(|| panic!("non-UTF-8 base")),
+        ),
+        (
+            "configPath",
+            config
+                .to_str()
+                .unwrap_or_else(|| panic!("non-UTF-8 config")),
+        ),
+        ("input", "task"),
+    ]);
+    let response = post_form(&harness, "/webui/sessions/exec", body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    if let Some(value) = response.headers().get("hx-push-url") {
+        let value = value
+            .to_str()
+            .unwrap_or_else(|error| panic!("header: {error}"));
+        assert!(
+            value.starts_with("/sessions/") && value.ends_with("?tab=log"),
+            "{value}"
+        );
+    } else {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_else(|error| panic!("response body: {error}"));
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(!html.contains("hx-target=\"#toasts\""), "{html}");
+    }
+    wait_for_exec(&harness, &base).await;
+}
+
+#[tokio::test]
+async fn exec_route_applies_unchecked_steps_and_flag_selectors() {
+    let harness = harness();
+    let (base, config) = exec_fixture(&harness, false);
+    let marker_command = |name| {
+        if cfg!(windows) {
+            format!("type nul > {name}")
+        } else {
+            format!("touch {name}")
+        }
+    };
+    std::fs::write(&config, format!("command: [cat]\nflags:\n  extra: {{}}\nsteps:\n  skipped: {{command: '{}'}}\n  flagged: {{flag: extra, command: '{}'}}\n  marker: {{command: '{}'}}\n", marker_command("skipped"), marker_command("flagged"), marker_command("marker")))
+        .unwrap_or_else(|error| panic!("write workflow: {error}"));
+    let body = form_body(&[
+        ("sourceMode", "directory"),
+        (
+            "baseDir",
+            base.to_str().unwrap_or_else(|| panic!("base path")),
+        ),
+        (
+            "configPath",
+            config.to_str().unwrap_or_else(|| panic!("config path")),
+        ),
+        ("input", "task"),
+        ("stepIds", "skipped"),
+        ("stepIds", "flagged"),
+        ("stepIds", "marker"),
+        ("runSteps", "flagged"),
+        ("runSteps", "marker"),
+        ("flag.extra", "on"),
+    ]);
+    let response = post_form(&harness, "/webui/sessions/exec", body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    wait_for_exec(&harness, &base).await;
+    assert!(!base.join("skipped").exists());
+    assert!(base.join("flagged").exists());
+}
+
+#[tokio::test]
+async fn exec_force_config_runs_directly_but_draft_does_not() {
+    let harness = harness();
+    let (base, config) = exec_fixture(&harness, true);
+    let body = form_body(&[
+        ("sourceMode", "directory"),
+        (
+            "baseDir",
+            base.to_str().unwrap_or_else(|| panic!("non-UTF-8 base")),
+        ),
+        (
+            "configPath",
+            config
+                .to_str()
+                .unwrap_or_else(|| panic!("non-UTF-8 config")),
+        ),
+        ("input", "task"),
+    ]);
+    let response = post_form(&harness, "/webui/sessions/draft", body.clone()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let sessions = harness
+        .manager
+        .list()
+        .unwrap_or_else(|error| panic!("list: {error}"));
+    assert_eq!(sessions.len(), 1);
+    assert!(matches!(
+        sessions[0].phase,
+        crate::session::SessionPhase::Draft
+    ));
+    assert!(!base.join("marker").exists());
+    harness
+        .manager
+        .delete(&sessions[0].id)
+        .unwrap_or_else(|error| panic!("delete draft fixture: {error}"));
+    let response = post_form(&harness, "/webui/sessions", body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    wait_for_exec(&harness, &base).await;
+}
+
+#[tokio::test]
+async fn exec_suspended_session_is_visible_in_sidebar_but_not_run_all() {
+    let harness = harness();
+    let session = create_session(&harness);
+    external_edit(&harness, &session.id, |state| {
+        state.exec = true;
+        state.phase = crate::session::SessionPhase::Suspended;
+    });
+    let (status, _, html) = get(&harness, "/webui/sidebar", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains(&session.id), "{html}");
+    assert!(html.contains(">exec<"), "{html}");
+    let sessions: Vec<_> = harness
+        .manager
+        .list()
+        .unwrap_or_else(|error| panic!("list: {error}"))
+        .into_iter()
+        .map(|session| super::dto::session_dto(&harness.state.application, session, false))
+        .collect();
+    assert_eq!(super::view::runnable_count(&sessions), 0);
+    external_edit(&harness, &session.id, |state| {
+        state.phase = crate::session::SessionPhase::Failed("fixture command failed".into());
+    });
+    let (status, _, html) = get(&harness, "/webui/sidebar", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(!html.contains(&session.id), "{html}");
+    let update = super::partials::row_partial(&harness.state, &session.id)
+        .unwrap_or_else(|error| panic!("sidebar update: {error}"));
+    assert!(
+        !update.is_empty() && !update.contains(&session.id),
+        "{update}"
+    );
+}
+
 fn webui_root() -> std::path::PathBuf {
     std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/webui"))
 }
@@ -1805,6 +2141,21 @@ mod event_partials {
         messages
             .iter()
             .any(|message| matches!(message, SseMessage::Notify { .. }))
+    }
+
+    #[test]
+    fn disposed_exec_run_finished_still_emits_toast() {
+        let harness = harness();
+        let messages = for_event(
+            &harness.state,
+            &ApplicationEvent::RunFinished {
+                session_id: "disposed-exec".to_string(),
+                phase: "Completed".to_string(),
+            },
+        );
+        let html = html_of(&messages);
+        assert!(html.contains("toast"), "{html}");
+        assert!(html.contains("session-list"), "{html}");
     }
 
     #[test]

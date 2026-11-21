@@ -91,7 +91,7 @@ cruise list
 cruise diff <SESSION_ID>
 cruise diff <SESSION_ID> --stat
 
-# Remove closed/merged PR sessions and terminal no-PR sessions
+# Remove eligible closed/merged PR and no-PR sessions (keeps failed exec sessions)
 cruise clean
 
 # With no forwarded args, run `cruise list` on the remote project
