@@ -76,7 +76,10 @@ fn list_settings_select_flags_before_filtering_skips_but_keep_all_resume_steps()
         ],
     );
     assert!(success, "{text}");
-    assert!(text.contains("Action:") && text.contains("Run All"), "top-level picker missing: {text}");
+    assert!(
+        text.contains("Action:") && text.contains("Run All"),
+        "top-level picker missing: {text}"
+    );
     let e2e = text
         .find("Flag 'e2e':")
         .unwrap_or_else(|| panic!("missing e2e flag prompt: {text}"));

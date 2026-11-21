@@ -372,18 +372,21 @@ async fn run_global_action(
             if !confirm_global_action(&prompt)? {
                 return Ok(());
             }
-            crate::run_cmd::run_with_batch_intent(crate::cli::RunArgs {
-                session: None,
-                all: true,
-                parallelism: None,
-                auto_requeue_max_attempts: None,
-                max_retries: None,
-                rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
-                dry_run: false,
-                cleanup_after_pr: false,
-                no_cleanup_after_pr: false,
-                flags: vec![],
-            }, attach_only)
+            crate::run_cmd::run_with_batch_intent(
+                crate::cli::RunArgs {
+                    session: None,
+                    all: true,
+                    parallelism: None,
+                    auto_requeue_max_attempts: None,
+                    max_retries: None,
+                    rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
+                    dry_run: false,
+                    cleanup_after_pr: false,
+                    no_cleanup_after_pr: false,
+                    flags: vec![],
+                },
+                attach_only,
+            )
             .await
         }
         ListChoice::Session { .. } | ListChoice::Quit => unreachable!("not a global action"),
@@ -1129,7 +1132,10 @@ mod tests {
     #[test]
     fn populated_selector_preserves_session_order_and_starts_on_first_session() {
         let [first_id, second_id] = ["20260101120100", "20260101120000"];
-        let rows = vec![session_row(first_id, "First"), session_row(second_id, "Second")];
+        let rows = vec![
+            session_row(first_id, "First"),
+            session_row(second_id, "Second"),
+        ];
         let (choices, cursor) = list_choices(rows);
         assert!(matches!(
             choices.as_slice(),

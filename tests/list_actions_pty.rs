@@ -46,7 +46,6 @@ fn run_fixture_command(command: &mut Command, timeout: Duration) -> Result<(), S
             Ok(Some(status)) => break status.to_string(),
             Ok(None) if Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(10));
-                continue;
             }
             outcome => {
                 let reason = match outcome {

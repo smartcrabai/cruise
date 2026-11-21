@@ -2,7 +2,7 @@
 set timeout 20
 spawn -noecho $env(CRUISE_BIN) list
 expect {
-    -re {Select a session:.*Failed} {}
+    -re {Action:.*New Session.*Clean.*Run All.*> [^\r\n]*Failed[^\r\n]*\r\n[^\r\n]*Quit} {}
     timeout { puts stderr "failed exec did not appear in the picker"; exit 1 }
     eof { puts stderr "list exited before offering the failed exec"; exit 1 }
 }
@@ -30,6 +30,14 @@ expect {
 # Use the menu's filter, not an assumed index or default selection.
 send -- $env(RECOVERY_ACTION)
 send -- "\r"
+if {$env(RECOVERY_ACTION) eq "Delete"} {
+    expect {
+        -re {Session [^\r\n]+ deleted\..*Action:.*New Session.*Clean.*Run All.*Quit} {}
+        timeout { puts stderr "Delete did not return to the empty action picker"; exit 1 }
+        eof { puts stderr "list exited before showing the empty action picker"; exit 1 }
+    }
+    send -- "Quit\r"
+}
 expect {
     eof {}
     timeout { puts stderr "selected action did not finish"; exit 1 }
