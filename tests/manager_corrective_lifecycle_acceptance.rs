@@ -18,13 +18,16 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .output()
-        .unwrap();
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
     assert!(
         out.status.success(),
         "git {args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8(out.stdout).unwrap().trim().to_string()
+    String::from_utf8(out.stdout)
+        .unwrap_or_else(|error| panic!("operation failed: {error}"))
+        .trim()
+        .to_string()
 }
 fn command(home: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_cruise"));
@@ -83,26 +86,29 @@ fn corrective_preview_fixture() {
         workflow: "builtin:tdd".into(),
         contract: None,
     };
-    let proposal = manager::save_proposal(repo, proposal).unwrap();
+    let proposal = manager::save_proposal(repo, proposal)
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
     fs::write(
-        std::env::var_os("CORRECTIVE_OUTPUT").unwrap(),
-        serde_json::to_vec(&proposal).unwrap(),
+        std::env::var_os("CORRECTIVE_OUTPUT")
+            .unwrap_or_else(|| panic!("CORRECTIVE_OUTPUT must be set")),
+        serde_json::to_vec(&proposal).unwrap_or_else(|error| panic!("operation failed: {error}")),
     )
-    .unwrap();
+    .unwrap_or_else(|error| panic!("operation failed: {error}"));
 }
 
 #[tokio::test]
 async fn approved_correction_executes_and_reverifies() {
-    let root = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap_or_else(|error| panic!("operation failed: {error}"));
     let home = root.path();
-    fs::create_dir_all(home.join("config/cruise")).unwrap();
+    fs::create_dir_all(home.join("config/cruise"))
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
     fs::write(
         home.join("config/cruise/default.yaml"),
         "check_base_ci: false\n",
     )
-    .unwrap();
+    .unwrap_or_else(|error| panic!("operation failed: {error}"));
     let bin = home.join("bin");
-    fs::create_dir(&bin).unwrap();
+    fs::create_dir(&bin).unwrap_or_else(|error| panic!("operation failed: {error}"));
     fs::write(
         bin.join("cruise"),
         format!(
@@ -110,8 +116,9 @@ async fn approved_correction_executes_and_reverifies() {
             env!("CARGO_BIN_EXE_cruise")
         ),
     )
-    .unwrap();
-    fs::set_permissions(bin.join("cruise"), fs::Permissions::from_mode(0o700)).unwrap();
+    .unwrap_or_else(|error| panic!("operation failed: {error}"));
+    fs::set_permissions(bin.join("cruise"), fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
     fs::write(bin.join("claude"), r##"#!/bin/sh
 read -r frame
 id=${PWD##*/}
@@ -132,14 +139,16 @@ esac
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"fixture"}'
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"fixture"}\n' "$result"
 printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixture","result":"%s"}\n' "$result"
-"##).unwrap();
-    fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o700)).unwrap();
+"##).unwrap_or_else(|error| panic!("operation failed: {error}"));
+    fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
     let repo = home.join("repo");
-    fs::create_dir(&repo).unwrap();
+    fs::create_dir(&repo).unwrap_or_else(|error| panic!("operation failed: {error}"));
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.name", "Test"]);
     git(&repo, &["config", "user.email", "test@example.test"]);
-    fs::write(repo.join("file"), "base\n").unwrap();
+    fs::write(repo.join("file"), "base\n")
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
     git(&repo, &["add", "file"]);
     git(&repo, &["commit", "-qm", "base"]);
     let sha = git(&repo, &["rev-parse", "HEAD"]);
@@ -147,7 +156,9 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
     git(&repo, &["remote", "add", "origin", origin]);
     git(&repo, &["update-ref", "refs/remotes/origin/main", &sha]);
     let output = home.join("proposal.json");
-    let mut fixture = Command::new(std::env::current_exe().unwrap());
+    let mut fixture = Command::new(
+        std::env::current_exe().unwrap_or_else(|error| panic!("operation failed: {error}")),
+    );
     let result = fixture
         .env_clear()
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
@@ -160,34 +171,43 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
         .env("CORRECTIVE_OUTPUT", &output)
         .args(["--exact", "corrective_preview_fixture", "--nocapture"])
         .output()
-        .unwrap();
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
     assert!(
         result.status.success(),
         "fixture: {}{}",
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
-    let proposal: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    let proposal: Value = serde_json::from_slice(
+        &fs::read(output).unwrap_or_else(|error| panic!("operation failed: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("operation failed: {error}"));
     let started = command(home)
         .args(["daemon", "start", "--port", "0"])
         .output()
-        .unwrap();
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
     assert!(
         started.status.success(),
         "daemon: {}",
         String::from_utf8_lossy(&started.stderr)
     );
     let _stop = Stop(home);
-    let instance: Value =
-        serde_json::from_slice(&fs::read(home.join("state/cruise/daemon/instance.json")).unwrap())
-            .unwrap();
+    let instance: Value = serde_json::from_slice(
+        &fs::read(home.join("state/cruise/daemon/instance.json"))
+            .unwrap_or_else(|error| panic!("operation failed: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("operation failed: {error}"));
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
-        .unwrap();
-    let origin_url = instance["origin"].as_str().unwrap();
-    let token = instance["token"].as_str().unwrap();
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
+    let origin_url = instance["origin"]
+        .as_str()
+        .unwrap_or_else(|| panic!("daemon origin missing"));
+    let token = instance["token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("daemon token missing"));
     let post = |action: Value| {
         client
             .post(format!("{origin_url}api/manager/action"))
@@ -199,17 +219,30 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
         json!({"type":"approve","proposal_id":proposal["id"],"revision":proposal["revision"]}),
     )
     .await
-    .unwrap();
+    .unwrap_or_else(|error| panic!("operation failed: {error}"));
     assert!(
         response.status().is_success(),
         "initial approval: {}",
-        response.text().await.unwrap()
+        response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("operation failed: {error}"))
     );
-    let initial: Value = response.json().await.unwrap();
-    let goal_id = initial["id"].as_str().unwrap().to_owned();
-    let mut url = reqwest::Url::parse(&format!("{origin_url}api/manager/snapshot")).unwrap();
-    url.query_pairs_mut()
-        .append_pair("cwd", repo.to_str().unwrap());
+    let initial: Value = response
+        .json()
+        .await
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
+    let goal_id = initial["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("goal id missing"))
+        .to_owned();
+    let mut url = reqwest::Url::parse(&format!("{origin_url}api/manager/snapshot"))
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
+    url.query_pairs_mut().append_pair(
+        "cwd",
+        repo.to_str()
+            .unwrap_or_else(|| panic!("repository path is not UTF-8")),
+    );
     let deadline = Instant::now() + Duration::from_secs(90);
     let (publication, sha) = loop {
         let snapshot: Value = client
@@ -217,12 +250,12 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
             .bearer_auth(token)
             .send()
             .await
-            .unwrap()
+            .unwrap_or_else(|error| panic!("operation failed: {error}"))
             .error_for_status()
-            .unwrap()
+            .unwrap_or_else(|error| panic!("operation failed: {error}"))
             .json()
             .await
-            .unwrap();
+            .unwrap_or_else(|error| panic!("operation failed: {error}"));
         let goal = &snapshot["goals"][0];
         if goal["status"] == "blocked" {
             let publication = goal["execution"]["publication"].clone();
@@ -235,7 +268,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
                 publication,
                 goal["execution"]["integrated_tip"]
                     .as_str()
-                    .unwrap()
+                    .unwrap_or_else(|| panic!("integrated tip missing"))
                     .to_owned(),
             );
         }
@@ -248,20 +281,32 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let response = post(json!({"type":"preview_corrective","goal_id":goal_id,"expected_tip":sha,"task":{"id":"fixed","instructions":"Fix the failed check","dependencies":["original"]}})).await.unwrap();
+    let response = post(json!({"type":"preview_corrective","goal_id":goal_id,"expected_tip":sha,"task":{"id":"fixed","instructions":"Fix the failed check","dependencies":["original"]}})).await.unwrap_or_else(|error| panic!("operation failed: {error}"));
     assert!(
         response.status().is_success(),
         "preview: {}",
-        response.text().await.unwrap()
+        response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("operation failed: {error}"))
     );
-    let preview: Value = response.json().await.unwrap();
-    let response = post(json!({"type":"approve_corrective","goal_id":goal_id,"preview_id":preview["id"],"revision":preview["revision"]})).await.unwrap();
+    let preview: Value = response
+        .json()
+        .await
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
+    let response = post(json!({"type":"approve_corrective","goal_id":goal_id,"preview_id":preview["id"],"revision":preview["revision"]})).await.unwrap_or_else(|error| panic!("operation failed: {error}"));
     assert!(
         response.status().is_success(),
         "approval: {}",
-        response.text().await.unwrap()
+        response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("operation failed: {error}"))
     );
-    let approved: Value = response.json().await.unwrap();
+    let approved: Value = response
+        .json()
+        .await
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
     assert_eq!(
         approved["execution"]["publication_history"],
         json!([publication])
@@ -277,23 +322,24 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
             .bearer_auth(token)
             .send()
             .await
-            .unwrap()
+            .unwrap_or_else(|error| panic!("operation failed: {error}"))
             .error_for_status()
-            .unwrap()
+            .unwrap_or_else(|error| panic!("operation failed: {error}"))
             .json()
             .await
-            .unwrap();
+            .unwrap_or_else(|error| panic!("operation failed: {error}"));
         let goal = &snapshot["goals"][0];
         let attempt = goal["execution"]["attempts"]
             .as_array()
-            .unwrap()
+            .unwrap_or_else(|| panic!("attempts missing"))
             .iter()
             .find(|a| a["task_id"] == "fixed");
         if let Some(check) = goal["execution"]["publication"]["checks"]
             .as_array()
             .and_then(|c| c.first())
         {
-            let attempt = attempt.expect("verification without corrective attempt");
+            let attempt =
+                attempt.unwrap_or_else(|| panic!("verification without corrective attempt"));
             assert_eq!(attempt["base_sha"], sha);
             assert_eq!(attempt["integrated"], true);
             assert_ne!(goal["execution"]["integrated_tip"], sha);
@@ -305,7 +351,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
             );
             assert!(
                 fs::read_to_string(home.join("sdk-owners"))
-                    .unwrap()
+                    .unwrap_or_else(|error| panic!("operation failed: {error}"))
                     .contains("\"task_id\":\"fixed\"")
             );
             break;
