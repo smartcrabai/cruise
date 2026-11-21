@@ -10,6 +10,7 @@ use crate::application::{
     ApplicationEvent, EventStream as OutputStream, RunAllRequest, RunRequest,
 };
 use crate::cli::RunArgs;
+use crate::cli_events::CtrlC;
 use crate::daemon::client::{DaemonClient, EventFilter, EventStream};
 use crate::error::{CruiseError, Result};
 use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
@@ -20,6 +21,7 @@ enum RunSetup {
         client: DaemonClient,
         session_id: String,
         stream: EventStream,
+        ctrl_c: CtrlC,
     },
     All {
         client: DaemonClient,
@@ -29,6 +31,7 @@ enum RunSetup {
 
 struct RunAllSetup {
     stream: EventStream,
+    ctrl_c: CtrlC,
     sessions: Vec<crate::daemon::client::RunSessionSummary>,
     dashboard: Option<crate::batch_dashboard::BatchDashboard>,
 }
@@ -138,7 +141,8 @@ async fn run_inner(args: RunArgs) -> Result<()> {
             client,
             session_id,
             stream,
-        } => run_single(&client, &session_id, stream).await,
+            ctrl_c,
+        } => run_single(&client, &session_id, stream, ctrl_c).await,
         RunSetup::All { client, setup } => run_all(&client, setup).await,
     }
 }
@@ -176,16 +180,20 @@ async fn prepare_run(args: RunArgs) -> Result<RunSetup> {
         let setup = prepare_run_all(&client, args).await?;
         Ok(RunSetup::All { client, setup })
     } else {
-        let (session_id, stream) = prepare_run_single(&client, args).await?;
+        let (session_id, stream, ctrl_c) = prepare_run_single(&client, args).await?;
         Ok(RunSetup::Single {
             client,
             session_id,
             stream,
+            ctrl_c,
         })
     }
 }
 
-async fn prepare_run_single(client: &DaemonClient, args: RunArgs) -> Result<(String, EventStream)> {
+async fn prepare_run_single(
+    client: &DaemonClient,
+    args: RunArgs,
+) -> Result<(String, EventStream, CtrlC)> {
     let context = crate::request_context::RequestContext::capture()?;
     let session_id = match args.session.as_deref() {
         Some(id) => id.to_owned(),
@@ -241,13 +249,20 @@ async fn prepare_run_single(client: &DaemonClient, args: RunArgs) -> Result<(Str
             "Steps at and after the retry point may run again. Files and external effects are not rolled back."
         );
     }
+    let ctrl_c = CtrlC::new()?;
     client.start_run(&session_id, &request).await?;
-    Ok((session_id, stream))
+    Ok((session_id, stream, ctrl_c))
 }
 
-async fn run_single(client: &DaemonClient, session_id: &str, stream: EventStream) -> Result<()> {
+async fn run_single(
+    client: &DaemonClient,
+    session_id: &str,
+    stream: EventStream,
+    ctrl_c: CtrlC,
+) -> Result<()> {
     let mut handler = crate::cli_events::TerminalEvents::new(client, session_id);
-    let finished = crate::cli_events::drive(client, session_id, stream, &mut handler).await?;
+    let finished =
+        crate::cli_events::drive(client, session_id, stream, ctrl_c, &mut handler).await?;
     if finished.cancelled_by_user {
         let message = match &finished.state.phase {
             SessionPhase::Suspended => "Interrupted -- session saved as Suspended.",
@@ -410,6 +425,7 @@ async fn prepare_run_all(client: &DaemonClient, args: RunArgs) -> Result<RunAllS
             ..EventFilter::default()
         })
         .await?;
+    let ctrl_c = CtrlC::new()?;
     client
         .start_run_all(&RunAllRequest {
             parallelism: Some(run_all_parallelism(args.parallelism)),
@@ -419,6 +435,7 @@ async fn prepare_run_all(client: &DaemonClient, args: RunArgs) -> Result<RunAllS
         .await?;
     Ok(RunAllSetup {
         stream,
+        ctrl_c,
         sessions,
         dashboard,
     })
@@ -427,6 +444,7 @@ async fn prepare_run_all(client: &DaemonClient, args: RunArgs) -> Result<RunAllS
 async fn run_all(client: &DaemonClient, setup: RunAllSetup) -> Result<()> {
     let RunAllSetup {
         stream,
+        ctrl_c,
         sessions,
         dashboard,
     } = setup;
@@ -436,7 +454,7 @@ async fn run_all(client: &DaemonClient, setup: RunAllSetup) -> Result<()> {
             events.record_session(&session.id);
         }
     }
-    let cancelled_by_user = drive_batch(client, stream, &mut events).await?;
+    let cancelled_by_user = drive_batch(client, stream, ctrl_c, &mut events).await?;
     let results = load_batch_results(client, &events.session_order).await;
     for state in &results {
         let phase = state.phase.label().to_owned();
@@ -660,9 +678,9 @@ fn queue_pause_for_session(
 async fn drive_batch(
     client: &DaemonClient,
     mut stream: crate::daemon::client::EventStream,
+    mut ctrl_c: CtrlC,
     events: &mut BatchEvents<'_>,
 ) -> Result<bool> {
-    let mut ctrl_c = crate::cli_events::CtrlC::new()?;
     let mut cancelled_by_user = false;
     let mut batch_seen_active = false;
     let mut status_resync = tokio::time::interval_at(

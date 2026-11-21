@@ -51,7 +51,7 @@ pub struct Finished {
 
 /// Consume `stream` until the session's operation ends. Ctrl+C requests
 /// cancellation and keeps waiting for the resulting terminal event. A second
-/// Ctrl+C exits immediately.
+/// Ctrl+C exits immediately. Create `ctrl_c` before starting the operation.
 ///
 /// When stdin is not a terminal, a prompt remains active in the daemon so a
 /// WebUI/API client can answer it after this client exits.
@@ -64,9 +64,9 @@ pub async fn drive<H: SessionEventHandler>(
     client: &DaemonClient,
     session_id: &str,
     stream: EventStream,
+    mut ctrl_c: CtrlC,
     handler: &mut H,
 ) -> Result<Finished> {
-    let mut ctrl_c = CtrlC::new()?;
     let mut cancelled_by_user = false;
     let mut retry_cancellation = false;
     let mut retry = tokio::time::interval_at(
@@ -136,7 +136,8 @@ pub async fn drive<H: SessionEventHandler>(
 ///
 /// A fresh `tokio::signal::ctrl_c()` future only sees signals after its first
 /// poll, so recreating it on every `select!` iteration loses a Ctrl+C that
-/// arrives while another branch runs.
+/// arrives while another branch runs. Until a listener exists, Ctrl+C kills
+/// the CLI, so create one before asking the daemon to start work.
 pub(crate) struct CtrlC {
     #[cfg(unix)]
     signal: tokio::signal::unix::Signal,
