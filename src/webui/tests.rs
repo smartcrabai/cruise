@@ -1489,6 +1489,18 @@ fn publish_dialog_hides_trigger_checkbox_when_unsupported() {
 }
 
 #[test]
+fn session_header_fixture_preserves_flat_activity_fields() {
+    let fixtures = super::fixtures::all();
+    let (_, props) = fixtures
+        .iter()
+        .find(|(name, _)| *name == "components/session-header")
+        .unwrap_or_else(|| panic!("missing session header fixture"));
+    assert_eq!(props["busy"], true);
+    assert_eq!(props["awaitingInput"], true);
+    assert!(props.get("activity").is_none());
+}
+
+#[test]
 fn templates_render_all_fixtures() {
     let harness = harness();
     let root = webui_root().join("templates");

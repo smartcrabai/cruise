@@ -231,8 +231,10 @@ fn shell_fixtures() -> Vec<(&'static str, Value)> {
                 pr_is_link: true,
                 actions: actions(),
                 managed: false,
-                busy: true,
-                awaiting_input: true,
+                activity: super::view::SessionHeaderActivityVm {
+                    busy: true,
+                    awaiting_input: true,
+                },
                 base_url: "/webui/sessions/s1".to_string(),
             }),
         ),

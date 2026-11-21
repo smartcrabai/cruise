@@ -121,8 +121,10 @@ pub(crate) fn header_vm(
         pr_is_link,
         actions,
         managed,
-        busy: operation.is_some(),
-        awaiting_input: session.awaiting_input,
+        activity: super::view::SessionHeaderActivityVm {
+            busy: operation.is_some(),
+            awaiting_input: session.awaiting_input,
+        },
         base_url: format!("/webui/sessions/{}", session.id),
     })
 }
