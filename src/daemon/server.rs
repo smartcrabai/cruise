@@ -303,6 +303,7 @@ async fn run_instance(
 }
 
 /// Serve the `WebUI` and daemon API until shutdown begins, then drain operations.
+#[cfg(test)]
 pub(crate) async fn serve<F>(
     listener: tokio::net::TcpListener,
     mut state: WebState,

@@ -236,11 +236,11 @@ fn parse(ctx: &ForgeContext, v: &serde_json::Value) -> Result<PullRequest, Strin
             // Project identity is scoped by the API endpoint. Reject cross-project source MRs.
             let source_id = v
                 .pointer("/source_project_id")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .ok_or("missing source project ID")?;
             let target_id = v
                 .pointer("/target_project_id")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .ok_or("missing target project ID")?;
             if source_id != target_id {
                 return Err("merge request source belongs to another repository".into());
@@ -257,7 +257,7 @@ fn parse(ctx: &ForgeContext, v: &serde_json::Value) -> Result<PullRequest, Strin
         }
     };
     let number = number
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .filter(|n| *n > 0)
         .ok_or("missing PR number")?;
     Ok(PullRequest {
@@ -298,10 +298,7 @@ pub(crate) fn lookup(
     target: &str,
     cancel: &crate::cancellation::CancellationToken,
 ) -> Result<Option<PullRequest>, String> {
-    let query = match ctx.kind {
-        ForgeKind::GitHub => format!("{}?state=all&per_page=100", endpoint(ctx)),
-        ForgeKind::GitLab => format!("{}?state=all&per_page=100", endpoint(ctx)),
-    };
+    let query = format!("{}?state=all&per_page=100", endpoint(ctx));
     let values = api(dir, ctx, &query, true, cancel)?;
     let mut found = None;
     for value in values.as_array().ok_or("forge list is not an array")? {
