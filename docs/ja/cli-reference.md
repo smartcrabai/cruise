@@ -302,6 +302,12 @@ Options:
 
 workflow のステップを現在の directory で直接実行します。plan の生成、git worktree の作成、自動 PR 作成はありません。入力待ちで pause した（`Running`）session と Ctrl+C で中断した（`Suspended`）session は保持され、`cruise run <id>` で再開できます。exec session は `cruise run` の自動選択と `cruise run --all` の対象外です。既存の未 commit 変更は許容され、stash、commit、reset せずその上で実行します。workflow が生成した file と既存変更が混在し得ることを警告します。branch が checkout 済みである必要はあります。
 
+未処理の非ゼロ終了があっても後続のステップは実行されますが、未解決の失敗が残ればコマンドは非ゼロで終了します。失敗したセッションの ID、チェックポイント、ログ、成果物は、再開に成功するか `cruise list` で **Delete** を選ぶまで保持されます。`--instant` と `force_exec` も同様です。原因を解消したら、`cruise list` の **Resume** または `cruise run <id>` で再開してください。再開には元の作業ディレクトリとブランチを使います。`cruise run <id> --dry-run` で再開位置を確認できます。
+
+再開は最初の未解決の失敗ステップから始まります。それ以前に未解決の失敗がないハードエラーの場合は、保存済みのチェックポイントから再開します。再開位置以降のステップは再実行されることがあります。作業ファイルや外部への副作用は元に戻りません。開始済みのワークフローでチェックポイントが欠落、破損、または互換性がない場合、最初からやり直すのではなくエラーになります。
+
+再開時は、`cruise run <id> --max-retries <N>` で上書きしない限り、最初に明示した `--max-retries` が使われます。どちらも指定しない場合はワークフローの既定値が使われます。`--rate-limit-retries` は実行ごとに適用されます。
+
 `--instant` は workflow YAML を解決せず、単一の implement step を持つ workflow をその場で組み立てて使います。指定しない場合、`cruise exec` は通常の設定解決を維持します。config file がない対話型 terminal では分類済み selector に組み込み workflow が表示され、非対話実行では `tdd` を自動選択します。instant には空白でない task が必要で、単一の implement step を含みます。workflow 既定値で command の pre-step を先頭に追加できます。workflow 既定値と環境 override は引き続き適用され、`CRUISE_SDK` / `CRUISE_MODEL` は `--sdk` / `--model` より優先されます。
 
 ```sh
@@ -505,6 +511,8 @@ cruise clean
 ```
 
 各 Completed session の PR status を `gh pr view`（GitLab では `glab mr view`）で確認します。PR が close または merge 済みの session は worktree（残っている `--repo` clone も含む）とともに削除します。開始されておらず `plan.md` が欠落または空白だけの Planned current-branch session も削除されます。Suspended session とその他の planned session は再開用に保持されます。
+
+成功した exec セッションは自動的に削除されます。`cruise clean` は失敗した exec セッションを削除しません。作業ファイルを変更せずにセッションを破棄するには、`cruise list` で **Delete** を選びます。
 
 > **注意:** `gh pr create` が失敗、または実行に至らなかった場合、session に PR URL がないことがあります。PR に紐付く URL なし session は保持されます。session log を確認するか `gh pr create` を手動で再実行してください。
 

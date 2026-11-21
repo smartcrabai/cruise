@@ -136,11 +136,54 @@ fn validate_checkpoint(graph: &ExecutionGraph) -> Result<()> {
             return Err(invalid());
         }
     }
+    graph.validate_exec_failure(graph)?;
     Ok(())
 }
 
 /// Default file name for a persisted DAG inside a session directory.
 pub const DAG_FILE_NAME: &str = "dag.json";
+
+pub(crate) struct ExecResume {
+    pub node: super::NodeId,
+    pub rewound: bool,
+}
+
+/// Select an exec retry point in memory. Only the run admission path commits it.
+pub(crate) fn prepare_exec_resume(
+    graph: &mut ExecutionGraph,
+    path: &Path,
+    has_checkpoint: bool,
+    failed: bool,
+    execution_id: Option<&str>,
+) -> Result<ExecResume> {
+    let mut node = prepare_resume(graph, path, has_checkpoint, None, false, execution_id)?;
+    let positioned = graph.state.completed || graph.state.current.is_some();
+    if (has_checkpoint && !positioned)
+        || (positioned && graph.state.execution_id.as_deref() != execution_id)
+    {
+        return Err(CruiseError::Other(
+            "started exec has no reliable execution checkpoint".into(),
+        ));
+    }
+    let mut rewound = false;
+    if failed || graph.state.completed {
+        if let Some(failure) = graph.state.exec_failure.take() {
+            node = failure.node;
+            graph.state.current = Some(node.clone());
+            graph.state.runtime = failure.runtime;
+            graph.state.edge_counts = failure.edge_counts;
+            graph.state.group_counts = failure.group_counts;
+            graph.state.pending = None;
+            graph.state.completed = false;
+            rewound = true;
+        } else if failed && graph.state.completed {
+            return Err(CruiseError::Other(
+                "completed exec checkpoint has no reliable retry point".into(),
+            ));
+        }
+    }
+    Ok(ExecResume { node, rewound })
+}
 
 /// Restore checkpoint authority before workspace creation. A step-name override
 /// is an explicit reposition operation, not a fresh retry budget.
@@ -222,4 +265,117 @@ pub fn prepare_resume(
         .current
         .clone()
         .unwrap_or_else(|| graph.start.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{EdgeCounter, ExecFailure, NodeRuntime, build_graph};
+    use std::collections::HashMap;
+
+    #[test]
+    fn exec_retry_prefix_rejects_zero_traversals_on_load_and_reload() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(DAG_FILE_NAME);
+        let config = crate::config::WorkflowConfig::from_yaml(
+            "command: [echo]\ngroups:\n  checks:\n    max_retries: 1\n    if:\n      file-changed: prefix\n    steps:\n      verify:\n        command: 'true'\nsteps:\n  prefix:\n    command: 'true'\n  checks:\n    group: checks\n  repair:\n    command: 'false'\n",
+        )
+        .expect("valid retry prefix fixture");
+        let fresh = build_graph(&crate::workflow::compile(config)?, 3)?;
+        let pair = ("prefix".to_owned(), "checks/verify".to_owned());
+        let mut saved = fresh.clone();
+        saved.state.execution_id = Some("exec".into());
+        saved.state.completed = true;
+        saved.state.edge_counts.insert(pair.clone(), EdgeCounter {
+            traversals: 1,
+            budgeted_traversals: 0,
+        });
+        saved.state.group_counts.insert("checks".into(), 1);
+        saved.state.exec_failure = Some(ExecFailure {
+            unresolved: 1,
+            node: "repair".into(),
+            runtime: NodeRuntime::default(),
+            edge_counts: saved.state.edge_counts.clone(),
+            group_counts: saved.state.group_counts.clone(),
+        });
+        save_graph(&saved, &path)?;
+        load_graph(&path)?;
+        fresh.clone().restore_for_reload(&saved)?;
+        for zero_edge in [true, false] {
+            let mut damaged = saved.clone();
+            let failure = damaged.state.exec_failure.as_mut().expect("retry prefix");
+            if zero_edge {
+                failure.edge_counts.get_mut(&pair).expect("known edge").traversals = 0;
+            } else {
+                *failure.group_counts.get_mut("checks").expect("known group") = 0;
+            }
+            save_graph(&damaged, &path)?;
+            assert!(load_graph(&path).is_err(), "zero_edge={zero_edge}");
+            assert!(fresh.clone().restore_for_reload(&damaged).is_err(), "zero_edge={zero_edge}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_exec_rejects_missing_corrupt_or_unrecoverable_started_checkpoint() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(DAG_FILE_NAME);
+        let compile = |steps| {
+            let config = crate::config::WorkflowConfig::from_yaml(steps)
+                .unwrap_or_else(|error| panic!("invalid fixture: {error}"));
+            crate::workflow::compile(config)
+        };
+        let compiled = compile("command: [echo]\nsteps:\n  first:\n    command: 'true'\n")?;
+        let fresh = build_graph(&compiled, 3)?;
+        assert_eq!(
+            prepare_exec_resume(&mut fresh.clone(), &path, false, true, Some("exec"))?.node,
+            "first"
+        );
+        assert!(prepare_exec_resume(&mut fresh.clone(), &path, true, true, Some("exec")).is_err());
+        let mut completed = fresh.clone();
+        completed.state.execution_id = Some("exec".into());
+        completed.state.completed = true;
+        let no_retry_point = serde_json::to_string(&completed)?;
+        completed.state.exec_failure = Some(ExecFailure {
+            unresolved: 1,
+            node: "removed".into(),
+            runtime: NodeRuntime::default(),
+            edge_counts: HashMap::new(),
+            group_counts: HashMap::new(),
+        });
+        let removed_retry_point = serde_json::to_string(&completed)?;
+        if let Some(failure) = &mut completed.state.exec_failure {
+            failure.node = "first".into();
+        }
+        let reload = compile("command: [echo]\nsteps:\n  new:\n    command: 'true'\n")?;
+        assert!(
+            build_graph(&reload, 3)?
+                .restore_for_reload(&completed)
+                .is_err()
+        );
+        if let Some(failure) = &mut completed.state.exec_failure {
+            failure.edge_counts.insert(
+                ("first".into(), "removed".into()),
+                EdgeCounter {
+                    traversals: 1,
+                    budgeted_traversals: 1,
+                },
+            );
+        }
+        let corrupt_prefix = serde_json::to_string(&completed)?;
+        for bad in [
+            "{corrupt".into(),
+            serde_json::to_string(&fresh)?,
+            no_retry_point,
+            removed_retry_point,
+            corrupt_prefix,
+        ] {
+            std::fs::write(&path, &bad)?;
+            assert!(
+                prepare_exec_resume(&mut fresh.clone(), &path, true, true, Some("exec")).is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path)?, bad);
+        }
+        Ok(())
+    }
 }

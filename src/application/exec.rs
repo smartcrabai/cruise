@@ -8,7 +8,7 @@ use crate::resolver::ConfigSource;
 use crate::session::{SessionPhase, SessionState, WorkspaceMode};
 use crate::session_config::SessionConfigRef;
 
-/// Resolved input needed to create and execute a transient exec session.
+/// Resolved input needed to create and execute an exec session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecStartRequest {
@@ -25,10 +25,10 @@ pub struct ExecStartRequest {
 }
 
 impl CruiseApplication {
-    /// Create and start a transient exec session in the requesting client's directory.
+    /// Create and start an exec session in the requesting client's directory.
     ///
-    /// Terminal sessions are disposed by the regular application run path; paused and
-    /// suspended sessions remain available for explicit resume.
+    /// Successful sessions are disposed by the regular application run path. Failed
+    /// and suspended sessions remain available for explicit recovery.
     ///
     /// # Errors
     ///
@@ -81,6 +81,7 @@ impl CruiseApplication {
         session.allow_dirty_working_tree = true;
         session.phase = SessionPhase::Planned;
         session.exec = true;
+        session.exec_max_retries = request.max_retries;
         session.flags = request.flags.clone();
         self.manager.create_with_config(&session, &config)?;
 

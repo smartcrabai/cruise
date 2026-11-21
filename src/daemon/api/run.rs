@@ -67,15 +67,10 @@ async fn start_run(Path(id): Path<String>, State(state): State<WebState>, body: 
         let application = state.application.clone();
         let (sink, log_sink) = state.hub.sinks();
         let sink = std::sync::Arc::new(super::TerminalEventSink::new(sink));
-        let terminal_sink = std::sync::Arc::clone(&sink);
-        let operation_id = id.clone();
         tokio::spawn(async move {
             let _ = application
                 .run_with_claim_and_log_sink(claim, request, sink, Some(log_sink))
                 .await;
-            if let Err(error) = terminal_sink.finish() {
-                eprintln!("daemon run terminal event delivery failed for {operation_id}: {error}");
-            }
         });
     }
     (

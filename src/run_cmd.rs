@@ -204,13 +204,14 @@ async fn prepare_run_single(client: &DaemonClient, args: RunArgs) -> Result<(Str
                 session.phase.label()
             )));
         }
-        if session.plan_error.is_some()
-            || client
-                .run_sessions()
-                .await?
-                .into_iter()
-                .find(|listed| listed.id == session_id)
-                .is_some_and(|listed| !listed.plan_available)
+        if !session.exec
+            && (session.plan_error.is_some()
+                || client
+                    .run_sessions()
+                    .await?
+                    .into_iter()
+                    .find(|listed| listed.id == session_id)
+                    .is_some_and(|listed| !listed.plan_available))
         {
             return Err(CruiseError::Other(format!(
                 "Session {session_id} has no usable plan; retry planning first."
@@ -235,6 +236,11 @@ async fn prepare_run_single(client: &DaemonClient, args: RunArgs) -> Result<(Str
             batch: false,
         })
         .await?;
+    if !active && session.exec {
+        eprintln!(
+            "Steps at and after the retry point may run again. Files and external effects are not rolled back."
+        );
+    }
     client.start_run(&session_id, &request).await?;
     Ok((session_id, stream))
 }
@@ -243,12 +249,17 @@ async fn run_single(client: &DaemonClient, session_id: &str, stream: EventStream
     let mut handler = crate::cli_events::TerminalEvents::new(client, session_id);
     let finished = crate::cli_events::drive(client, session_id, stream, &mut handler).await?;
     if finished.cancelled_by_user {
-        crate::status_eprintln!(
-            "\n{} Interrupted -- session saved as Suspended.",
-            style("||").yellow().bold()
-        );
+        let message = match &finished.state.phase {
+            SessionPhase::Suspended => "Interrupted -- session saved as Suspended.",
+            SessionPhase::Failed(_) if finished.state.exec => {
+                "Interrupted: exec session is still Failed."
+            }
+            _ => "Interrupted.",
+        };
+        crate::status_eprintln!("\n{} {message}", style("||").yellow().bold());
         return Err(CruiseError::Interrupted);
     }
+    crate::exec_cmd::print_recovery_hint(client, &finished).await;
     if let Some(error) = finished.failure.as_ref() {
         return Err(match &finished.state.phase {
             SessionPhase::PrFailed(_) => CruiseError::PrPublicationFailed(error.clone()),
@@ -292,8 +303,8 @@ fn client_run_request(
         request.workspace_mode = Some(prompt_workspace_mode()?);
     }
 
-    let needs_config =
-        !args.flags.is_empty() || (fresh && session.flags.is_empty() && stdin_is_terminal());
+    let needs_config = !args.flags.is_empty()
+        || (!session.exec && fresh && session.flags.is_empty() && stdin_is_terminal());
     if needs_config {
         let manager = SessionManager::new(crate::paths::data_dir()?);
         let config = manager.load_config_with_env(
@@ -806,18 +817,38 @@ fn dry_run_session(manager: &SessionManager, id: &str, args: &RunArgs) -> Result
             session.phase.label()
         )));
     }
-    let config = manager.load_config(&session)?;
+    let config = if session.exec {
+        let context = crate::request_context::RequestContext::capture()?;
+        manager.load_config_with_env(
+            &session,
+            crate::config::ConfigEnv::Snapshot(&context.config_env),
+        )?
+    } else {
+        manager.load_config(&session)?
+    };
     crate::config::validate_config(&config)?;
     let flags = crate::flags::from_cli(&args.flags)?;
     crate::flags::validate_names(&config, &flags)?;
     session.flags.extend(flags);
-    let max_retries = crate::config::resolve_effective_max_retries(args.max_retries, &config);
+    let max_retries = crate::config::resolve_effective_max_retries(
+        session.exec_retry_budget(args.max_retries),
+        &config,
+    );
     crate::config::validate_group_retry_budget(&config, max_retries)?;
     let compiled = crate::workflow::compile(config.clone())?;
     let mut dag = crate::graph::build_graph(&compiled, max_retries)?;
     let after_pr = session.execution_stage == crate::session::SessionExecutionStage::AfterPr;
     let start = if after_pr {
         dag.start.clone()
+    } else if session.exec {
+        crate::graph::prepare_exec_resume(
+            &mut dag,
+            &manager.dag_path(id),
+            session.has_dag || session.current_step.is_some(),
+            matches!(session.phase, SessionPhase::Failed(_)),
+            session.execution_id.as_deref(),
+        )?
+        .node
     } else {
         crate::graph::persistence::prepare_resume(
             &mut dag,
@@ -837,7 +868,16 @@ fn dry_run_session(manager: &SessionManager, id: &str, args: &RunArgs) -> Result
         )?;
     }
     eprintln!("{}", style(format!("Session: {id}")).dim());
-    crate::engine::print_dry_run(&config, session.current_step.as_deref());
+    if session.exec && !after_pr {
+        let step = dag
+            .nodes
+            .get(&start)
+            .map_or(start.as_str(), |node| node.step_name.as_str());
+        eprintln!("Exec resume step: {step}");
+        crate::engine::print_dry_run_steps(&config, &compiled.steps, Some(step));
+    } else {
+        crate::engine::print_dry_run(&config, session.current_step.as_deref());
+    }
     Ok(())
 }
 

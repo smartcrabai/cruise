@@ -51,7 +51,7 @@ struct LocalMergeResponse {
 
 impl DaemonClient {
     pub(crate) async fn sessions(&self) -> Result<Vec<SessionListItem>> {
-        self.get_json("sessions").await
+        self.get_json("sessions?includeFailedExec=true").await
     }
 
     pub(crate) async fn session_details(&self, id: &str) -> Result<SessionDetails> {

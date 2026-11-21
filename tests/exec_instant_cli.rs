@@ -71,6 +71,12 @@ fi
     }
 
     fn command(&self) -> Command {
+        let mut command = self.cli();
+        command.arg("exec");
+        command
+    }
+
+    fn cli(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cruise"));
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("CRUISE_") {
@@ -78,7 +84,6 @@ fi
             }
         }
         command
-            .arg("exec")
             .current_dir(&self.repo)
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("XDG_DATA_HOME", self.root.path().join("data"))
@@ -225,11 +230,16 @@ fn review_detects_tracked_file_in_target() -> TestResult {
 }
 
 #[test]
-fn failed_verification_fails_the_run() -> TestResult {
+fn failed_verification_can_be_repaired_without_replaying_implementation() -> TestResult {
     let f = Fixture::new()?;
     let output = f
         .command()
-        .args(["--instant", "--verify", "false", "task"])
+        .args([
+            "--instant",
+            "--verify",
+            "echo verify >> verification.txt && test -f verifier-ready",
+            "task",
+        ])
         .output()?;
     assert!(!output.status.success(), "{}", terminal(&output));
     assert!(
@@ -238,6 +248,56 @@ fn failed_verification_fails_the_run() -> TestResult {
         terminal(&output)
     );
     assert_eq!(f.calls(), ["implement"]);
+    let manager = cruise::session::SessionManager::new(f.root.path().join("data/cruise"));
+    let sessions = manager.list()?;
+    assert_eq!(sessions.len(), 1, "{}", terminal(&output));
+    let session = &sessions[0];
+    assert!(session.exec);
+    assert!(matches!(
+        session.phase,
+        cruise::session::SessionPhase::Failed(_)
+    ));
+    assert!(terminal(&output).contains(&session.id));
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("verification.txt"))?,
+        "verify\n"
+    );
+
+    let checkpoint = manager.dag_path(&session.id);
+    let saved = std::fs::read(&checkpoint)?;
+    for (command, rejection) in [
+        ("echo", "invalid value for CRUISE_COMMAND"),
+        (r#"["echo"]"#, "CRUISE_SDK and CRUISE_COMMAND are mutually exclusive"),
+    ] {
+        for preview in [true, false] {
+            let mut cmd = f.cli();
+            cmd.args(["run", &session.id])
+                .env("CRUISE_SDK", "jcode")
+                .env("CRUISE_COMMAND", command);
+            if preview {
+                cmd.arg("--dry-run");
+            }
+            let output = cmd.output()?;
+            let text = terminal(&output);
+            assert!(!output.status.success() && text.contains(rejection), "{text}");
+            assert_eq!(std::fs::read(&checkpoint)?, saved);
+            assert_eq!(f.calls(), ["implement"]);
+            assert_eq!(std::fs::read_to_string(f.repo.join("verification.txt"))?, "verify\n");
+        }
+    }
+    std::fs::write(f.repo.join("verifier-ready"), "ready")?;
+    let preview = f.cli().args(["run", &session.id, "--dry-run"]).output()?;
+    let text = terminal(&preview);
+    assert!(preview.status.success() && text.contains("Exec resume step: verify-1"), "{text}");
+    let output = f.cli().args(["run", &session.id]).output()?;
+    let text = terminal(&output);
+    assert!(output.status.success() && text.contains("> verify-1"), "{text}");
+    assert_eq!(f.calls(), ["implement"]);
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("verification.txt"))?,
+        "verify\nverify\n"
+    );
+    f.assert_no_sessions()?;
     Ok(())
 }
 

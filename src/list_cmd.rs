@@ -38,7 +38,9 @@ pub async fn run(args: ListArgs) -> Result<()> {
         let id = selected.id.clone();
         let mut details = client.session_details(&id).await?;
         loop {
-            if let Ok(content) = client.session_plan(&id).await {
+            if !details.state.exec
+                && let Ok(content) = client.session_plan(&id).await
+            {
                 crate::display::print_bordered(&content, Some("plan.md"));
             }
             let actions = available_session_actions(&details.capabilities);

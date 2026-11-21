@@ -26,6 +26,7 @@
 
 ### Added
 
+- Retain failed `cruise exec` sessions, including `--instant` and `force_exec`, under the same ID until success or explicit Delete. Use `cruise run <id>` or Resume in `cruise list` to retry from the first unresolved failed step or, for a hard error with no earlier unresolved failure, the saved checkpoint. If setup failed before workflow execution started and no checkpoint exists, recovery starts at the beginning. A missing or unusable checkpoint blocks recovery for a workflow that already started. Steps at and after the retry point may repeat. Files and external effects are not rolled back. `cruise clean`, automatic run selection, `run --all`, and WebUI inventory exclude failed exec sessions. `cruise list --json` adds `"exec": true` only for failed exec rows.
 - Check GitHub and GitLab base-branch CI before fresh workflow runs by default; opt out with `check_base_ci: false` in `default.yaml`.
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.
 - Add the `if.head-changed` step condition, which routes to a target when a step completes successfully with a different Git `HEAD` OID; untracked, ignored, and uncommitted changes do not count.

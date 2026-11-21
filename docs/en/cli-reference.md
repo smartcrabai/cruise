@@ -62,7 +62,7 @@ The daemon also refuses (HTTP 409, CLI exit 1, state unchanged) to run or plan a
 
 Session commands (`plan`, `--plan`, `draft`, `run`, `run --all`, `exec`, `list`, `tell`, `clean`, and `diff`) are daemon clients and autostart it when needed. `config`, `usage`, `update`, `install`, `workflow *`, `docs`, `ssh`, and every `--dry-run` are local-only. CLI workflow resolution happens on the client; its working directory and allowlisted workflow-override variables such as `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, and `CRUISE_SDK` apply only to that request. Process-level variables (`PATH`, `GH_TOKEN`, provider credentials, `CRUISE_FORGE`, `CRUISE_SKIP_AGENT_AUTH_CHECK`, `CRUISE_DISABLE_NOTIFICATIONS`, `CRUISE_COMMIT_COAUTHOR_*`, and others) come from the daemon environment; restart with `cruise daemon restart` after changing them. Autostart removes workflow-override variables from the daemon environment, while explicit `daemon start` and `serve` preserve them. WebUI requests use the daemon environment and its home-directory working directory.
 
-When a client finds a daemon from another Cruise version, it restarts it automatically if idle. If the daemon is busy, the client asks you to run `cruise daemon restart` when it is idle. After `cruise update`, the next command restarts an idle daemon. Foreground commands stream progress; Ctrl+C cancels the operation (`run` becomes `Suspended`, planning is restored). Closing the terminal does not stop daemon work; reattach with `cruise run <session-id>` or the WebUI. Ask and Option prompts appear in the terminal and WebUI, and the first answer wins. A pending prompt in a non-interactive client leaves the session waiting for an answer in the WebUI or from `cruise run <session-id>`. `cruise --plan` also runs planning inside the daemon, not a detached worker. Claims prevent duplicate work on a session, so separate CLI processes and the WebUI can safely mutate sessions concurrently.
+When a client finds a daemon from another Cruise version, it restarts it automatically if idle. If the daemon is busy, the client asks you to run `cruise daemon restart` when it is idle. After `cruise update`, the next command restarts an idle daemon. Foreground commands stream progress; Ctrl+C cancels the operation: runs normally become `Suspended`, but canceling recovery of a failed exec before it enters `Running` leaves it `Failed`. Planning cancellation restores the prior planning state. Closing the terminal does not stop daemon work; reattach with `cruise run <session-id>` or the WebUI. Ask and Option prompts appear in the terminal and WebUI, and the first answer wins. A pending prompt in a non-interactive client leaves the session waiting for an answer in the WebUI or from `cruise run <session-id>`. `cruise --plan` also runs planning inside the daemon, not a detached worker. Claims prevent duplicate work on a session, so separate CLI processes and the WebUI can safely mutate sessions concurrently.
 
 <a id="cruise-install"></a>
 ## `cruise install`
@@ -261,7 +261,7 @@ Options:
       --all                        Run all planned or suspended sessions (live dashboard on interactive terminals for non-dry runs)
       --parallelism <N>            Max number of sessions `--all` executes concurrently (no flag default; 1 when omitted, must be >= 1, requires `--all`)
       --auto-requeue-max-attempts <N>  Maximum automatic retries per session (requires `--all`)
-      --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (no flag default; falls back to the workflow config's top-level `max_retries`, else 3)
+      --max-retries <N>            Maximum number of times a budgeted graph transition may be traversed (precedence: this flag, the original explicit exec value when resuming an exec, the workflow's top-level `max_retries`, then 3)
       --rate-limit-retries <N>     Maximum number of retries per step (SDK fallback policies also use it for retryable 4xx, 5xx, and network failures and fallback switching) [default: 5]
       --dry-run                    Print the workflow flow without executing it
       --cleanup-after-pr           Delete local worktree and branch after PR creation
@@ -302,6 +302,12 @@ Options:
   -f, --flag <NAME[,NAME...]>     Enable named workflow flags; NAME=on|off|true|false also works (repeatable; see Workflow flags)
 ```
 Runs workflow steps directly in the current directory: no plan is generated, no git worktree is created, and no PR is opened automatically. Sessions paused for input (`Running`) or interrupted with Ctrl+C (`Suspended`) are kept and can be resumed with `cruise run <id>`; exec sessions are excluded from automatic `cruise run` selection and `cruise run --all`. Existing uncommitted changes are allowed; Cruise runs on top of them without stashing, committing, or resetting the working tree, and warns that workflow-generated files may be mixed with those changes. An attached branch is required.
+
+An unhandled nonzero step exit does not stop later steps, but the attempt exits nonzero if failures remain. A failed session keeps its original ID, checkpoint, logs, and artifacts until it succeeds or you select **Delete** in `cruise list`. This also applies to `--instant` and `force_exec`. To recover, fix the underlying problem and select **Resume** in `cruise list` or run `cruise run <id>`. Resume uses the original working directory and requires the original branch. Use `cruise run <id> --dry-run` to preview where it resumes.
+
+Recovery starts at the first unresolved failed step, or at the saved checkpoint after a hard error if no earlier failure remains unresolved. If setup failed before workflow execution started and no checkpoint exists, recovery starts at the beginning. Steps at and after the retry point may run again. Cruise does not roll back working files or external side effects. A missing, corrupt, or incompatible checkpoint for a started workflow blocks recovery rather than restarting it.
+
+Resume uses the original explicit `--max-retries` unless you override it with `cruise run <id> --max-retries <N>`. If neither was supplied, the workflow default applies. `--rate-limit-retries` still applies per attempt.
 
 `--instant` builds a workflow with one implement step in memory without resolving workflow YAML. Without it, `cruise exec` retains normal config resolution. With no config file, an interactive terminal offers built-in workflows in a categorized selector, while non-interactive execution selects `tdd` automatically. Instant requires a nonblank task. Workflow defaults can prepend command pre-steps; workflow defaults and environment overrides still apply, and `CRUISE_SDK` / `CRUISE_MODEL` take precedence over `--sdk` / `--model`.
 
@@ -514,6 +520,8 @@ cruise clean
 ```
 
 Checks each Completed session's PR status via `gh pr view` (or `glab mr view` on GitLab). Sessions whose PR is closed or merged are deleted along with their worktrees (and any leftover `--repo` clone). Planned current-branch sessions whose `plan.md` is missing or blank and that never started are deleted too. Suspended sessions and other planned sessions remain available for resumption.
+
+Successful exec sessions are removed automatically. `cruise clean` leaves failed exec sessions in place. Use **Delete** in `cruise list` to discard the session without changing working files.
 
 > **Note:** A session may lack a PR URL if `gh pr create` failed or was not reached. PR-backed sessions without a PR URL are retained; inspect the session logs or re-run PR creation manually with `gh pr create`.
 

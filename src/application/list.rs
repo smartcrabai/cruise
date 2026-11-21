@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::session::SessionState;
+use crate::session::{SessionPhase, SessionState};
 
 impl super::CruiseApplication {
     /// List sessions after reconciling stale running phases against this daemon's runtime.
@@ -7,9 +7,15 @@ impl super::CruiseApplication {
     /// # Errors
     ///
     /// Returns an error if listing or reconciling session state fails.
-    pub fn reconciled_sessions(&self) -> Result<Vec<SessionState>> {
+    pub fn reconciled_sessions(&self, include_failed_exec: bool) -> Result<Vec<SessionState>> {
         let mut sessions = self.manager.list()?;
-        sessions.retain(|session| !session.exec);
+        sessions.retain(|session| {
+            !session.exec
+                || (include_failed_exec
+                    && matches!(session.phase, SessionPhase::Failed(_))
+                    && self.runtime.active_identity(&session.id).is_none()
+                    && session.live_foreign_runner_pid().is_none())
+        });
         for session in &mut sessions {
             let active = self.runtime.active_identity(&session.id).is_some();
             self.manager.reconcile_running_phase(session, active);

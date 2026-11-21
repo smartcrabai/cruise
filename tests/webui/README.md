@@ -141,3 +141,15 @@ The browser package is pinned to Playwright **1.62.1** and its lockfile records 
 Negative controls first select `undefined-control.feature` through the test-only `WEBUI_BDD_FEATURE` override and require the real Rust runner to fail its undefined/skipped step. That deliberately invalid fixture is outside the normal feature path. They then copy production assets to a temporary directory and run the same browser contracts against the real server. Removing Escape focus restoration must fail its focus assertion. Forcing mobile text controls to 14px must fail the computed-font assertion. A crash or unrelated failure does not count as detecting a mutant.
 
 The browser uses reduced motion for deterministic observation, not arbitrary transition sleeps. The drawer scenario explicitly asserts that reduced-motion styling wins even while open and that the mobile header responds to dark mode. Assertions use computed layout, hit testing, native dialogs, network requests, localStorage, keyboard focus and real HTMX swaps rather than checking CSS source strings. The suite does not claim physical iOS behavior or exhaustive browser coverage.
+# Failed exec inventory boundary
+
+From the repository root, using the browser workflow's pinned Node 26.13.1 and Rust 1.99.1:
+
+```sh
+npm ci --prefix tests/webui
+tests/webui/node_modules/.bin/playwright install chromium # macOS; add --with-deps on Linux CI
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/exec-recovery-inventory.mjs
+```
+
+The test starts the production daemon on a dynamic loopback port with a disposable HOME and XDG tree, then logs in through the real WebUI. It seeds ordinary and exec failed records in the durable format, checks sidebar exclusion on initial render and after HTMX polling updates the ordinary row, opens the ordinary failure detail, and checks that Run All is disabled. It deletes its temporary state on normal completion and handled failures. If the 90-second watchdog expires, the disposable HOME and XDG state may remain. No workflow commands, CLI recovery actions, or external services are exercised. Screenshots are written to `target/formal-reports/exec-recovery-browser/` and uploaded by the Responsive WebUI CI workflow.
