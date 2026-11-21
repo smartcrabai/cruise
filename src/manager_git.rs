@@ -446,6 +446,20 @@ impl CheckEvidence {
     }
 }
 
+/// Inputs for executing one approved verification check.
+pub struct VerificationCheck<'a> {
+    pub repo: &'a Path,
+    pub worktree: &'a Path,
+    pub goal_ref: &'a str,
+    pub approved_base: &'a str,
+    pub verified_tip: &'a str,
+    pub check_id: &'a str,
+    pub argv: &'a [String],
+    pub stdout_log: &'a Path,
+    pub stderr_log: &'a Path,
+    pub cancel: &'a crate::cancellation::CancellationToken,
+}
+
 /// Run exactly one approved argv in an already-created detached worktree.
 /// Log paths must be new, so a retry cannot overwrite earlier evidence. This
 /// function blocks and should run on a blocking worker, not an async executor.
@@ -453,47 +467,22 @@ impl CheckEvidence {
 /// # Errors
 ///
 /// Returns an error if state validation, log creation, or check execution fails.
-pub fn run_verification_check(
-    repo: &Path,
-    worktree: &Path,
-    goal_ref: &str,
-    approved_base: &str,
-    verified_tip: &str,
-    check_id: &str,
-    argv: &[String],
-    stdout_log: &Path,
-    stderr_log: &Path,
-    cancel: &crate::cancellation::CancellationToken,
-) -> Result<CheckEvidence, String> {
-    run_verification_check_inner(
-        repo,
-        worktree,
-        goal_ref,
-        approved_base,
-        verified_tip,
-        check_id,
-        argv,
-        stdout_log,
-        stderr_log,
-        cancel,
-        None,
-    )
+pub fn run_verification_check(check: VerificationCheck<'_>) -> Result<CheckEvidence, String> {
+    run_verification_check_inner(check, None)
 }
 
 pub(crate) fn run_verification_check_guarded(
-    repo: &Path,
-    worktree: &Path,
-    goal_ref: &str,
-    approved_base: &str,
-    verified_tip: &str,
-    check_id: &str,
-    argv: &[String],
-    stdout_log: &Path,
-    stderr_log: &Path,
-    cancel: &crate::cancellation::CancellationToken,
+    check: VerificationCheck<'_>,
     goal_id: &str,
 ) -> Result<CheckEvidence, String> {
-    run_verification_check_inner(
+    run_verification_check_inner(check, Some(goal_id))
+}
+
+fn run_verification_check_inner(
+    check: VerificationCheck<'_>,
+    goal_id: Option<&str>,
+) -> Result<CheckEvidence, String> {
+    let VerificationCheck {
         repo,
         worktree,
         goal_ref,
@@ -504,23 +493,7 @@ pub(crate) fn run_verification_check_guarded(
         stdout_log,
         stderr_log,
         cancel,
-        Some(goal_id),
-    )
-}
-
-fn run_verification_check_inner(
-    repo: &Path,
-    worktree: &Path,
-    goal_ref: &str,
-    approved_base: &str,
-    verified_tip: &str,
-    check_id: &str,
-    argv: &[String],
-    stdout_log: &Path,
-    stderr_log: &Path,
-    cancel: &crate::cancellation::CancellationToken,
-    goal_id: Option<&str>,
-) -> Result<CheckEvidence, String> {
+    } = check;
     use std::process::Stdio;
     if check_id.trim().is_empty() || argv.is_empty() || argv[0].is_empty() {
         return Err("invalid approved check".into());

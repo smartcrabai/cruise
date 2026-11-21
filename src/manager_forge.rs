@@ -407,17 +407,27 @@ pub(crate) fn push(
     Ok(())
 }
 
+pub(crate) struct CreateRequest<'a> {
+    pub source: &'a str,
+    pub target: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+}
+
 /// Create once after an authoritative absence lookup. The caller must reconcile any error.
 pub(crate) fn create(
     dir: &Path,
     ctx: &ForgeContext,
-    source: &str,
-    target: &str,
-    title: &str,
-    body: &str,
+    request: CreateRequest<'_>,
     cancel: &crate::cancellation::CancellationToken,
     goal_id: &str,
 ) -> Result<(), String> {
+    let CreateRequest {
+        source,
+        target,
+        title,
+        body,
+    } = request;
     let repo = format!("{}/{}", ctx.host, ctx.repository);
     let (program, args): (&str, Vec<String>) = match ctx.kind {
         ForgeKind::GitHub => (

@@ -558,16 +558,18 @@ fn run_approved_checks(
             });
             save(cwd, id, p.clone(), GoalStatus::Verifying, None)?;
             let result = crate::manager_git::run_verification_check_guarded(
-                repo,
-                &p.worktree,
-                reference,
-                &goal.proposal.target_sha,
-                tip,
-                &check.id,
-                &check.argv,
-                &stdout,
-                &stderr,
-                cancel,
+                crate::manager_git::VerificationCheck {
+                    repo,
+                    worktree: &p.worktree,
+                    goal_ref: reference,
+                    approved_base: &goal.proposal.target_sha,
+                    verified_tip: tip,
+                    check_id: &check.id,
+                    argv: &check.argv,
+                    stdout_log: &stdout,
+                    stderr_log: &stderr,
+                    cancel,
+                },
                 id,
             );
             match result {
@@ -758,10 +760,12 @@ fn finish_publication(context: &Reconciliation<'_>, mut p: Publication) -> Resul
         let create_result = manager_forge::create(
             repo,
             ctx,
-            &p.branch,
-            &goal.proposal.target_branch,
-            &goal.proposal.objective,
-            "Created by Cruise Manager. Merge manually after review.",
+            manager_forge::CreateRequest {
+                source: &p.branch,
+                target: &goal.proposal.target_branch,
+                title: &goal.proposal.objective,
+                body: "Created by Cruise Manager. Merge manually after review.",
+            },
             cancel,
             id,
         );
