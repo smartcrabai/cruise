@@ -1,3 +1,8 @@
+# Most tests wait on subprocesses and timers (about 1.5 busy cores at 6 test
+# threads), so CI runs more tests at once than its 3-4 cores.
+[profile.ci]
+test-threads = 8
+
 # These suites serialize their tests with in-process locks; nextest runs each
 # test in its own process, so keep them one at a time.
 [test-groups]

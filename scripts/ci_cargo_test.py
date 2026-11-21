@@ -30,7 +30,7 @@ def main() -> int:
     if harnessless:
         filterset = "not (" + " | ".join(f"binary_id(={package}::{name})" for name in harnessless) + ")"
     try:
-        run("cargo", "nextest", "run", "--all-features", "-E", filterset)
+        run("cargo", "nextest", "run", "--profile", "ci", "--all-features", "-E", filterset)
         if harnessless:
             run("cargo", "test", "--all-features", *(arg for name in harnessless for arg in ("--test", name)))
         run("cargo", "test", "--all-features", "--doc")
