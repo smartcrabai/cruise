@@ -29,7 +29,7 @@ The runner reuses `scripts/setup_formal.sh` and `tests/formal/package-lock.json`
 
 Production BDD reuses the existing Rust Cucumber **0.23.0** dependency and adds a locked `tests/webui` package with Playwright **1.62.1**, selecting Chromium **151.0.7922.34** / revision **1234**. Its wrapper installs the browser/system dependencies, captures the actual runtime version, runs the production Cucumber target and runs all three negative controls. See `../webui/README.md` for scenario-level production entrypoints and fixture isolation.
 
-Actual commands executed by the runner (`Q=tests/formal/node_modules/.bin/quint`, `R` is a fresh report directory, `PORT` is an OS-allocated isolated port):
+Responsive-shell and shared checks executed by the runner (`Q=tests/formal/node_modules/.bin/quint`, `R` is a fresh report directory, `PORT` is an OS-allocated isolated port). See [Planning answer keyboard](PLANNING_ANSWER_KEYBOARD.md) for the aggregate runner's Planning Quint checks, Alloy execution, and receipt validation:
 
 ```sh
 "$Q" typecheck tests/formal/responsive_webui.qnt
