@@ -91,6 +91,9 @@ async fn start_run_all(State(state): State<WebState>, body: Bytes) -> Response {
         return super::error_response(StatusCode::BAD_REQUEST, "parallelism must be at least 1");
     }
     let attached = state.application.runtime().batch_active();
+    if request.attach_only && !attached {
+        return axum::Json(serde_json::json!({ "noActiveBatch": true })).into_response();
+    }
     if !attached {
         let titles = state
             .application

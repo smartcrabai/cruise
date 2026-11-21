@@ -361,7 +361,7 @@ Options:
       --json   Print all sessions as a JSON array to stdout instead of opening the interactive selector
 ```
 
-不带 flags 时，会打开交互式 session 浏览器，其菜单取决于每个 session 所处阶段（参见 [`cruise list` 操作](sessions.md#cruise-list-actions)）。使用 `--json` 时，会将所有 session 以 JSON 数组输出，然后退出。
+在交互式终端中，即使没有会话，主菜单也提供 **新建会话**、**清理**、**批量运行** 和 **退出**。选择会话后，会打开对应阶段的操作菜单。创建方式、确认提示和按键详见 [`cruise list` 操作](sessions.md#cruise-list-actions)。指定 `--json` 时，会将所有会话以 JSON 数组输出，不显示提示，然后退出。
 
 <a id="cruise-diff"></a>
 ## `cruise diff`
