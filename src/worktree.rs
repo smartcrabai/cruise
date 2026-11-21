@@ -152,22 +152,7 @@ pub(crate) fn setup_managed_worktree(
     let branch =
         existing_branch.map_or_else(|| default_branch_name(session_id, input), str::to_owned);
     let reused = path.is_dir();
-    if !reused {
-        fs::create_dir_all(worktrees_dir)?;
-        let output = Command::new("git")
-            .args(["worktree", "add", "-b", &branch])
-            .arg(&path)
-            .arg(base_sha)
-            .current_dir(base_dir)
-            .stdin(std::process::Stdio::null())
-            .output()?;
-        if !output.status.success() {
-            return Err(CruiseError::WorktreeError(format!(
-                "git worktree add failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-    } else {
+    if reused {
         // Recovery must not adopt an unrelated directory or branch.
         let common_dir = |dir: &Path| -> Result<PathBuf> {
             let output = Command::new("git")
@@ -203,6 +188,21 @@ pub(crate) fn setup_managed_worktree(
             return Err(CruiseError::WorktreeError(
                 "managed worktree identity or base does not match".into(),
             ));
+        }
+    } else {
+        fs::create_dir_all(worktrees_dir)?;
+        let output = Command::new("git")
+            .args(["worktree", "add", "-b", &branch])
+            .arg(&path)
+            .arg(base_sha)
+            .current_dir(base_dir)
+            .stdin(std::process::Stdio::null())
+            .output()?;
+        if !output.status.success() {
+            return Err(CruiseError::WorktreeError(format!(
+                "git worktree add failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
     }
     Ok((

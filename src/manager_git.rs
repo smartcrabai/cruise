@@ -96,6 +96,10 @@ fn ancestor(repo: &Path, base: &str, tip: &str) -> Result<bool, String> {
 }
 
 /// Initialize once, or recover an already initialized ref at exactly the approved base.
+///
+/// # Errors
+///
+/// Returns an error for invalid inputs, ref drift, or Git failures.
 pub fn initialize(repo: &Path, goal_ref: &str, base: &str) -> Result<(), String> {
     validate_ref(repo, goal_ref)?;
     let base = object(repo, base)?;
@@ -122,6 +126,10 @@ pub fn initialize(repo: &Path, goal_ref: &str, base: &str) -> Result<(), String>
 
 /// Build an immutable integration intent without updating any ref. The caller must
 /// persist the entire intent before applying it, including for a no-change result.
+///
+/// # Errors
+///
+/// Returns an error for invalid inputs or ancestry, ref drift, merge conflicts, or Git failures.
 pub fn prepare_integration(
     repo: &Path,
     goal_ref: &str,
@@ -269,6 +277,10 @@ pub enum IntegrationObservation {
 
 /// Validate an intent and distinguish a pending ref from an applied one.
 /// Any missing or unrelated ref is drift, not evidence of a pending update.
+///
+/// # Errors
+///
+/// Returns an error if the intent is invalid, the ref drifted, or Git fails.
 pub fn observe_integration(
     repo: &Path,
     intent: &IntegrationIntent,
@@ -288,6 +300,10 @@ pub fn observe_integration(
 
 /// Check whether the exact validated integration is already present, without
 /// updating a ref. This is safe to use when a Goal is paused after a crash.
+///
+/// # Errors
+///
+/// Returns an error if the intent is invalid or Git fails.
 pub fn integration_already_applied(
     repo: &Path,
     intent: &IntegrationIntent,
@@ -296,6 +312,11 @@ pub fn integration_already_applied(
     Ok(read_ref(repo, &intent.goal_ref)?.as_deref() == Some(prepared.as_str()))
 }
 
+/// Apply a validated integration intent using a compare-and-swap ref update.
+///
+/// # Errors
+///
+/// Returns an error if the intent is invalid, the ref drifted, or Git fails.
 pub fn apply_integration(repo: &Path, intent: &IntegrationIntent) -> Result<ApplyOutcome, String> {
     let (expected, prepared) = validate_intent(repo, intent)?;
     let actual = read_ref(repo, &intent.goal_ref)?;
@@ -328,6 +349,10 @@ pub fn apply_integration(repo: &Path, intent: &IntegrationIntent) -> Result<Appl
 
 /// Check Git facts before and after approved checks. The caller must separately
 /// persist each check result and reject cancellation or a nonzero exit.
+///
+/// # Errors
+///
+/// Returns an error if repository or worktree state is invalid, changed, or cannot be inspected.
 pub fn validate_verification_state(
     repo: &Path,
     worktree: &Path,
@@ -415,6 +440,7 @@ pub struct CheckEvidence {
 }
 
 impl CheckEvidence {
+    #[must_use]
     pub fn passed(&self) -> bool {
         self.exit_code == Some(0) && !self.cancelled && self.state_error.is_none()
     }
@@ -423,6 +449,10 @@ impl CheckEvidence {
 /// Run exactly one approved argv in an already-created detached worktree.
 /// Log paths must be new, so a retry cannot overwrite earlier evidence. This
 /// function blocks and should run on a blocking worker, not an async executor.
+///
+/// # Errors
+///
+/// Returns an error if state validation, log creation, or check execution fails.
 pub fn run_verification_check(
     repo: &Path,
     worktree: &Path,
