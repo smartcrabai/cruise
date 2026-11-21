@@ -4,6 +4,7 @@
 //! client. The durable attempt identity and the live runtime claim must agree.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
@@ -19,10 +20,8 @@ use crate::session::ManagedChildOwner;
 // operation. Do not let a concurrent resume overtake that signal.
 pub(crate) static CONTROL: Mutex<()> = Mutex::new(());
 static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
-static RESUMES: Mutex<(
-    bool,
-    Vec<(std::path::PathBuf, String, String, u32, OperationClaim)>,
-)> = Mutex::new((false, Vec::new()));
+type ResumeRequest = (std::path::PathBuf, String, String, u32, OperationClaim);
+static RESUMES: Mutex<(bool, Vec<ResumeRequest>)> = Mutex::new((false, Vec::new()));
 static ACTIVE_COORDINATORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static PUBLICATIONS: std::sync::LazyLock<
     Mutex<std::collections::HashMap<String, (uuid::Uuid, crate::cancellation::CancellationToken)>>,
@@ -262,12 +261,12 @@ pub(crate) async fn run_daemon(
                     }) {
                         attempt.resume_starting = false;
                     }
-                    if let Some(error) = &failure {
-                        if goal.status == manager::GoalStatus::Active {
-                            goal.reason = Some(format!(
-                                "Child resume failed for {task_id}; inspect the session before retrying: {error}"
-                            ));
-                        }
+                    if let Some(error) = &failure
+                        && goal.status == manager::GoalStatus::Active
+                    {
+                        goal.reason = Some(format!(
+                            "Child resume failed for {task_id}; inspect the session before retrying: {error}"
+                        ));
                     }
                     Ok(())
                 }) {
@@ -310,19 +309,18 @@ pub(crate) async fn run_daemon(
                                     .runtime()
                                     .active_operation(&attempt.session_id)
                                     .is_none()
-                            {
-                                if let Err(error) = resume_task_inner(
+                                && let Err(error) = resume_task_inner(
                                     &application,
                                     &anchor,
                                     &goal.id,
                                     &attempt.task_id,
                                     true,
-                                ) {
-                                    eprintln!(
-                                        "warning: Manager pending resume for {} not admitted: {error}",
-                                        attempt.session_id
-                                    );
-                                }
+                                )
+                            {
+                                eprintln!(
+                                    "warning: Manager pending resume for {} not admitted: {error}",
+                                    attempt.session_id
+                                );
                             }
                         }
                         let mut unsafe_state = None;
@@ -436,26 +434,20 @@ pub(crate) async fn run_daemon(
                         }
                         // Re-read after integration: the snapshot above predates any
                         // child finalization performed during this iteration.
-                        if let Ok(current) = manager::snapshot(&anchor) {
-                            if let Some(current_goal) =
+                        if let Ok(current) = manager::snapshot(&anchor)
+                            && let Some(current_goal) =
                                 current.goals.iter().find(|g| g.id == goal.id)
-                            {
-                                if current_goal.status == manager::GoalStatus::Active
-                                    && current_goal.proposal.tasks.iter().all(|task| {
-                                        current_goal.execution.attempts.iter().any(|attempt| {
-                                            attempt.task_id == task.id && attempt.integrated
-                                        })
-                                    })
-                                {
-                                    schedule_publication(
-                                        &mut publications,
-                                        &anchor,
-                                        &goal.id,
-                                        &stop,
-                                    );
-                                    continue;
-                                }
-                            }
+                            && current_goal.status == manager::GoalStatus::Active
+                            && current_goal.proposal.tasks.iter().all(|task| {
+                                current_goal
+                                    .execution
+                                    .attempts
+                                    .iter()
+                                    .any(|attempt| attempt.task_id == task.id && attempt.integrated)
+                            })
+                        {
+                            schedule_publication(&mut publications, &anchor, &goal.id, &stop);
+                            continue;
                         }
                         match reserve_and_claim(&application, &anchor, &goal.id) {
                             Ok(Some(claim)) => {
@@ -632,11 +624,11 @@ fn approved_child_plan(goal: &Goal, task: &manager::Task) -> String {
         goal.proposal.objective, task.instructions
     );
     for criterion in &goal.proposal.criteria {
-        plan.push_str(&format!("\n- {}: {}", criterion.id, criterion.description));
+        let _ = write!(plan, "\n- {}: {}", criterion.id, criterion.description);
     }
     plan.push_str("\n\n# Exclusions\n");
     for exclusion in &goal.proposal.exclusions {
-        plan.push_str(&format!("\n- {exclusion}"));
+        let _ = write!(plan, "\n- {exclusion}");
     }
     plan.push('\n');
     plan
@@ -728,22 +720,44 @@ pub(crate) fn validate_claimed_child(
     Ok(())
 }
 
-/// Reserve a previously undispatched task and claim its new child while holding
-/// the same gate as pause. The returned claim must be run or dropped by the
-/// daemon. An interrupted reservation is never silently launched again.
-pub(crate) fn reserve_and_claim(
+fn check_orphan_children(application: &CruiseApplication, ids: &HashSet<&String>) -> Result<()> {
+    let store = application.managed_session_store();
+    match std::fs::read_dir(store.sessions_dir()) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() && entry.path().join("manager-owner.json").exists() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if !ids.contains(&name) {
+                        return Err(CruiseError::Other(format!(
+                            "orphan Manager reservation {name} prevents safe capacity accounting"
+                        )));
+                    }
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for child in application.list_sessions()? {
+        if child.managed_child.is_some() && !ids.contains(&child.id) {
+            return Err(CruiseError::Other(format!(
+                "orphan Manager child {} prevents safe capacity accounting",
+                child.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn count_active_children(
     application: &CruiseApplication,
-    cwd: &Path,
-    goal_id: &str,
-) -> Result<Option<OperationClaim>> {
-    let _guard = CONTROL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let inventory = manager::snapshots()?;
+    inventory: &[manager::Snapshot],
+) -> Result<usize> {
     let runtime = application.runtime();
     let mut active = 0usize;
     let mut ids = HashSet::new();
-    for snapshot in &inventory {
+    for snapshot in inventory {
         for existing_goal in &snapshot.goals {
             for attempt in &existing_goal.execution.attempts {
                 if !ids.insert(&attempt.session_id) {
@@ -821,74 +835,20 @@ pub(crate) fn reserve_and_claim(
             }
         }
     }
-    let store = application.managed_session_store();
-    match std::fs::read_dir(store.sessions_dir()) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() && entry.path().join("manager-owner.json").exists() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if !ids.contains(&name) {
-                        return Err(CruiseError::Other(format!(
-                            "orphan Manager reservation {name} prevents safe capacity accounting"
-                        )));
-                    }
-                }
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    for child in application.list_sessions()? {
-        if child.managed_child.is_some() && !ids.contains(&child.id) {
-            return Err(CruiseError::Other(format!(
-                "orphan Manager child {} prevents safe capacity accounting",
-                child.id
-            )));
-        }
-    }
-    if active >= 2 {
-        return Ok(None);
-    }
-    let snapshot = manager::snapshot(cwd)?;
-    let goal = snapshot
-        .goals
-        .iter()
-        .find(|goal| goal.id == goal_id)
-        .ok_or_else(|| CruiseError::Other("unknown Manager goal for this repository".into()))?;
-    if goal.status != manager::GoalStatus::Active {
-        return Ok(None);
-    }
-    let recoverable: Vec<_> = goal
-        .execution
-        .attempts
-        .iter()
-        .filter(|attempt| attempt.launch_started == Some(false))
-        .collect();
-    if recoverable.len() > 1 {
-        return Err(CruiseError::Other(
-            "multiple interrupted Manager reservations require review".into(),
-        ));
-    }
-    let task_id = if let Some(attempt) = recoverable.first() {
-        attempt.task_id.clone()
-    } else if let Some(task_id) = ready_tasks(goal, 1)?.into_iter().next() {
-        task_id
-    } else {
-        return Ok(None);
-    };
-    validate_execution_contract(goal)?;
-    let contract = goal
-        .proposal
-        .contract
-        .as_ref()
-        .ok_or_else(|| CruiseError::Other("missing Manager contract".into()))?;
-    let anchor = &contract.anchor;
+    check_orphan_children(application, &ids)?;
+    Ok(active)
+}
+
+fn validate_checkout(
+    anchor: &Path,
+    contract: &manager::FrozenContract,
+    repository: &Path,
+) -> Result<()> {
     if anchor.canonicalize()? != *anchor
         || std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?)
             .canonicalize()?
             != *anchor
-        || manager::snapshot(anchor)?.repository != snapshot.repository
+        || manager::snapshot(anchor)?.repository != repository
         || git_output(anchor, &["remote", "get-url", "origin"])? != contract.origin
         || git_output(anchor, &["remote", "get-url", "--push", "--all", "origin"])?
             != contract.origin
@@ -914,75 +874,28 @@ pub(crate) fn reserve_and_claim(
             "unsafe Manager workflow settings".into(),
         ));
     }
-    let tip = goal
-        .execution
-        .integrated_tip
-        .as_ref()
-        .ok_or_else(|| CruiseError::Other("missing Goal tip".into()))?;
-    let reference = format!("refs/heads/cruise/goal/{}", goal.id);
-    // Initializing this ref is only allowed from the approved target, before
-    // any task was reserved. Existing refs must match the durable exact tip.
-    if goal.execution.attempts.is_empty() && tip == &goal.proposal.target_sha {
-        crate::manager_git::initialize(anchor, &reference, tip).map_err(CruiseError::Other)?;
-    }
-    if git_output(anchor, &["rev-parse", "--verify", &reference])? != *tip {
-        return Err(CruiseError::Other(
-            "Goal ref does not match integrated tip".into(),
-        ));
-    }
-    let task = goal
+    Ok(())
+}
+
+fn claim_reserved_child(
+    application: &CruiseApplication,
+    cwd: &Path,
+    goal_id: &str,
+    goal: &Goal,
+    attempt: &TaskAttempt,
+    child: &crate::session::SessionState,
+    plan: &str,
+) -> Result<Option<OperationClaim>> {
+    let contract = goal
         .proposal
-        .tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .ok_or_else(|| CruiseError::Other("Manager task disappeared".into()))?;
-    let plan = approved_child_plan(goal, task);
-    let attempt = recoverable
-        .first()
-        .map(|attempt| (*attempt).clone())
-        .unwrap_or_else(|| TaskAttempt {
-            task_id: task_id.clone(),
-            attempt: 1,
-            session_id: crate::session::SessionManager::new_session_id(),
-            base_sha: tip.clone(),
-            launch_started: Some(false),
-            resume_pending: false,
-            resume_starting: false,
-            result_sha: None,
-            finalization_intent: None,
-            integrated: false,
-            integration_intent: None,
-        });
-    if attempt.base_sha != *tip || attempt.integrated || attempt.result_sha.is_some() {
-        return Err(CruiseError::Other(
-            "interrupted Manager reservation no longer matches Goal tip".into(),
-        ));
-    }
-    let child_owner = owner(goal, &attempt);
-    let mut child = crate::session::SessionState::new(
-        attempt.session_id.clone(),
-        anchor.clone(),
-        crate::session_config::SessionConfigRef::inline_snapshot(),
-        task.instructions.clone(),
-    );
-    child.managed_child = Some(child_owner.clone());
-    child.mark_input_as_plan();
-    child.phase = crate::session::SessionPhase::Planned;
-    if recoverable.is_empty() {
-        manager::update_goal(cwd, goal_id, |current| {
-            if current.status != manager::GoalStatus::Active
-                || current.execution.integrated_tip.as_ref() != Some(tip)
-                || !ready_tasks(current, 1)?.contains(&task_id)
-            {
-                return Err(CruiseError::Other("Manager dispatch state changed".into()));
-            }
-            current.execution.attempts.push(attempt.clone());
-            Ok(())
-        })?;
-    }
+        .contract
+        .as_ref()
+        .ok_or_else(|| CruiseError::Other("missing Manager contract".into()))?;
+    let child_owner = owner(goal, attempt);
+    let runtime = application.runtime();
     let store = application.managed_session_store();
     let result = (|| {
-        let created = store.create_managed_child(&child, &contract.workflow, &plan)?;
+        let created = store.create_managed_child(child, &contract.workflow, plan)?;
         if created.managed_child.as_ref() != Some(&child_owner)
             || created.phase != crate::session::SessionPhase::Planned
             || application.session_plan(&created.id)? != plan
@@ -1035,6 +948,131 @@ pub(crate) fn reserve_and_claim(
         });
     }
     result.map(Some)
+}
+
+fn validate_goal_tip<'a>(goal: &'a Goal, anchor: &Path) -> Result<&'a String> {
+    let tip = goal
+        .execution
+        .integrated_tip
+        .as_ref()
+        .ok_or_else(|| CruiseError::Other("missing Goal tip".into()))?;
+    let reference = format!("refs/heads/cruise/goal/{}", goal.id);
+    // Initializing this ref is only allowed from the approved target, before
+    // any task was reserved. Existing refs must match the durable exact tip.
+    if goal.execution.attempts.is_empty() && tip == &goal.proposal.target_sha {
+        crate::manager_git::initialize(anchor, &reference, tip).map_err(CruiseError::Other)?;
+    }
+    if git_output(anchor, &["rev-parse", "--verify", &reference])? != *tip {
+        return Err(CruiseError::Other(
+            "Goal ref does not match integrated tip".into(),
+        ));
+    }
+    Ok(tip)
+}
+
+/// Reserve a previously undispatched task and claim its new child while holding
+/// the same gate as pause. The returned claim must be run or dropped by the
+/// daemon. An interrupted reservation is never silently launched again.
+pub(crate) fn reserve_and_claim(
+    application: &CruiseApplication,
+    cwd: &Path,
+    goal_id: &str,
+) -> Result<Option<OperationClaim>> {
+    let _guard = CONTROL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let inventory = manager::snapshots()?;
+    let active = count_active_children(application, &inventory)?;
+    if active >= 2 {
+        return Ok(None);
+    }
+    let snapshot = manager::snapshot(cwd)?;
+    let goal = snapshot
+        .goals
+        .iter()
+        .find(|goal| goal.id == goal_id)
+        .ok_or_else(|| CruiseError::Other("unknown Manager goal for this repository".into()))?;
+    if goal.status != manager::GoalStatus::Active {
+        return Ok(None);
+    }
+    let recoverable: Vec<_> = goal
+        .execution
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.launch_started == Some(false))
+        .collect();
+    if recoverable.len() > 1 {
+        return Err(CruiseError::Other(
+            "multiple interrupted Manager reservations require review".into(),
+        ));
+    }
+    let task_id = if let Some(attempt) = recoverable.first() {
+        attempt.task_id.clone()
+    } else if let Some(task_id) = ready_tasks(goal, 1)?.into_iter().next() {
+        task_id
+    } else {
+        return Ok(None);
+    };
+    validate_execution_contract(goal)?;
+    let contract = goal
+        .proposal
+        .contract
+        .as_ref()
+        .ok_or_else(|| CruiseError::Other("missing Manager contract".into()))?;
+    let anchor = &contract.anchor;
+    validate_checkout(anchor, contract, &snapshot.repository)?;
+    let tip = validate_goal_tip(goal, anchor)?;
+    let task = goal
+        .proposal
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .ok_or_else(|| CruiseError::Other("Manager task disappeared".into()))?;
+    let plan = approved_child_plan(goal, task);
+    let attempt = recoverable.first().map_or_else(
+        || TaskAttempt {
+            task_id: task_id.clone(),
+            attempt: 1,
+            session_id: crate::session::SessionManager::new_session_id(),
+            base_sha: tip.clone(),
+            launch_started: Some(false),
+            resume_pending: false,
+            resume_starting: false,
+            result_sha: None,
+            finalization_intent: None,
+            integrated: false,
+            integration_intent: None,
+        },
+        |attempt| (*attempt).clone(),
+    );
+    if attempt.base_sha != *tip || attempt.integrated || attempt.result_sha.is_some() {
+        return Err(CruiseError::Other(
+            "interrupted Manager reservation no longer matches Goal tip".into(),
+        ));
+    }
+    let child_owner = owner(goal, &attempt);
+    let mut child = crate::session::SessionState::new(
+        attempt.session_id.clone(),
+        anchor.clone(),
+        crate::session_config::SessionConfigRef::inline_snapshot(),
+        task.instructions.clone(),
+    );
+    child.managed_child = Some(child_owner.clone());
+    child.mark_input_as_plan();
+    child.phase = crate::session::SessionPhase::Planned;
+    if recoverable.is_empty() {
+        manager::update_goal(cwd, goal_id, |current| {
+            if current.status != manager::GoalStatus::Active
+                || current.execution.integrated_tip.as_ref() != Some(tip)
+                || !ready_tasks(current, 1)?.contains(&task_id)
+            {
+                return Err(CruiseError::Other("Manager dispatch state changed".into()));
+            }
+            current.execution.attempts.push(attempt.clone());
+            Ok(())
+        })?;
+    }
+    claim_reserved_child(application, cwd, goal_id, goal, &attempt, &child, &plan)
 }
 
 /// Finalize a completed owned child without publishing or touching the user's checkout.
@@ -1169,40 +1207,37 @@ async fn finalize_child_inner(
             }
             return Ok(result.clone());
         }
-        let intent = match &attempt.finalization_intent {
-            Some(intent) => intent.clone(),
-            None => {
-                if goal.status == manager::GoalStatus::Paused || observed_only {
+        let intent = if let Some(intent) = &attempt.finalization_intent {
+            intent.clone()
+        } else {
+            if goal.status == manager::GoalStatus::Paused || observed_only {
+                return Err(CruiseError::Other(
+                    "Goal is paused; finalization has not begun".into(),
+                ));
+            }
+            // Staging is confined to the owned worktree. Persist the resulting
+            // tree before the commit so a lost receipt is distinguishable.
+            git_output(worktree, &["add", "-A"])?;
+            let intent = manager::ChildFinalizationIntent {
+                expected_head: head.clone(),
+                expected_tree: git_output(worktree, &["write-tree"])?,
+            };
+            manager::update_goal(&cwd, &goal_id, |goal| {
+                let attempt = goal
+                    .execution
+                    .attempts
+                    .iter_mut()
+                    .find(|attempt| attempt.task_id == task_id && attempt.attempt == attempt_number)
+                    .ok_or_else(|| CruiseError::Other("Manager attempt disappeared".into()))?;
+                if attempt.finalization_intent.is_some() || attempt.result_sha.is_some() {
                     return Err(CruiseError::Other(
-                        "Goal is paused; finalization has not begun".into(),
+                        "Manager finalization state changed".into(),
                     ));
                 }
-                // Staging is confined to the owned worktree. Persist the resulting
-                // tree before the commit so a lost receipt is distinguishable.
-                git_output(worktree, &["add", "-A"])?;
-                let intent = manager::ChildFinalizationIntent {
-                    expected_head: head.clone(),
-                    expected_tree: git_output(worktree, &["write-tree"])?,
-                };
-                manager::update_goal(&cwd, &goal_id, |goal| {
-                    let attempt = goal
-                        .execution
-                        .attempts
-                        .iter_mut()
-                        .find(|attempt| {
-                            attempt.task_id == task_id && attempt.attempt == attempt_number
-                        })
-                        .ok_or_else(|| CruiseError::Other("Manager attempt disappeared".into()))?;
-                    if attempt.finalization_intent.is_some() || attempt.result_sha.is_some() {
-                        return Err(CruiseError::Other(
-                            "Manager finalization state changed".into(),
-                        ));
-                    }
-                    attempt.finalization_intent = Some(intent.clone());
-                    Ok(())
-                })?;
-                intent
-            }
+                attempt.finalization_intent = Some(intent.clone());
+                Ok(())
+            })?;
+            intent
         };
         if head == intent.expected_head {
             if goal.status == manager::GoalStatus::Paused || observed_only {
@@ -1278,6 +1313,44 @@ pub(crate) fn integrate(
     integrate_inner(application, cwd, goal_id, task_id, attempt_number, false)
 }
 
+fn validate_integrated_child(
+    application: &CruiseApplication,
+    goal: &Goal,
+    attempt: &TaskAttempt,
+    repository: &Path,
+    result: &str,
+) -> Result<()> {
+    let child = application.read_session(&attempt.session_id)?;
+    if child.managed_child.as_ref() != Some(&owner(goal, attempt))
+        || child.phase != crate::session::SessionPhase::Completed
+    {
+        return Err(CruiseError::Other(
+            "child owner or completion state does not match Goal attempt".into(),
+        ));
+    }
+    let worktree = child
+        .worktree_path
+        .as_deref()
+        .ok_or_else(|| CruiseError::Other("completed child has no worktree".into()))?;
+    if manager::snapshot(worktree)?.repository != repository {
+        return Err(CruiseError::Other(
+            "child worktree belongs to a different repository".into(),
+        ));
+    }
+    if git_output(worktree, &["rev-parse", "HEAD"])? != result
+        || !git_output(
+            worktree,
+            &["status", "--porcelain", "--untracked-files=all"],
+        )?
+        .is_empty()
+    {
+        return Err(CruiseError::Other(
+            "child worktree changed after result was pinned".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn integrate_inner(
     application: &CruiseApplication,
     cwd: &Path,
@@ -1348,34 +1421,7 @@ fn integrate_inner(
         .as_deref()
         .ok_or_else(|| CruiseError::Other("child result is not pinned".into()))?;
     if !observed_only {
-        let child = application.read_session(&attempt.session_id)?;
-        if child.managed_child.as_ref() != Some(&owner(goal, attempt))
-            || child.phase != crate::session::SessionPhase::Completed
-        {
-            return Err(CruiseError::Other(
-                "child owner or completion state does not match Goal attempt".into(),
-            ));
-        }
-        let worktree = child
-            .worktree_path
-            .as_deref()
-            .ok_or_else(|| CruiseError::Other("completed child has no worktree".into()))?;
-        if manager::snapshot(worktree)?.repository != snapshot.repository {
-            return Err(CruiseError::Other(
-                "child worktree belongs to a different repository".into(),
-            ));
-        }
-        if git_output(worktree, &["rev-parse", "HEAD"])? != result
-            || !git_output(
-                worktree,
-                &["status", "--porcelain", "--untracked-files=all"],
-            )?
-            .is_empty()
-        {
-            return Err(CruiseError::Other(
-                "child worktree changed after result was pinned".into(),
-            ));
-        }
+        validate_integrated_child(application, goal, attempt, &snapshot.repository, result)?;
     }
     let tip = goal
         .execution
@@ -1637,18 +1683,14 @@ fn resume_task_inner(
                         "duplicate Manager child reservation".into(),
                     ));
                 }
-                match application.read_session(&existing.session_id) {
-                    Ok(state) => {
-                        if state.managed_child.as_ref() != Some(&owner(existing_goal, existing)) {
-                            return Err(CruiseError::Other("Manager child owner changed".into()));
-                        }
-                        if application.runtime().active_operation(&state.id).is_some()
-                            || state.live_foreign_runner_pid().is_some()
-                        {
-                            active += 1;
-                        }
-                    }
-                    Err(error) => return Err(error),
+                let state = application.read_session(&existing.session_id)?;
+                if state.managed_child.as_ref() != Some(&owner(existing_goal, existing)) {
+                    return Err(CruiseError::Other("Manager child owner changed".into()));
+                }
+                if application.runtime().active_operation(&state.id).is_some()
+                    || state.live_foreign_runner_pid().is_some()
+                {
+                    active += 1;
                 }
             }
         }
@@ -1963,14 +2005,13 @@ pub(crate) async fn reconcile_applied(application: &CruiseApplication) -> Result
                     .attempts
                     .iter()
                     .any(|attempt| !attempt.integrated && attempt.integration_intent.is_some())
-                {
-                    if let Err(error) = manager::block_startup_goal(
+                    && let Err(error) = manager::block_startup_goal(
                         &snapshot.repository,
                         &goal.id,
                         "Goal has no approved repository anchor",
-                    ) {
-                        errors.push(format!("{}: {error}", goal.id));
-                    }
+                    )
+                {
+                    errors.push(format!("{}: {error}", goal.id));
                 }
                 continue;
             };
