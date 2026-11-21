@@ -1351,42 +1351,7 @@ fn validate_integrated_child(
     Ok(())
 }
 
-fn integrate_inner(
-    application: &CruiseApplication,
-    cwd: &Path,
-    goal_id: &str,
-    task_id: &str,
-    attempt_number: u32,
-    observed_only: bool,
-) -> Result<()> {
-    let _guard = CONTROL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let snapshot = manager::snapshot(cwd)?;
-    let goal = snapshot
-        .goals
-        .iter()
-        .find(|goal| goal.id == goal_id)
-        .ok_or_else(|| CruiseError::Other("unknown Manager goal for this repository".into()))?;
-    validate_execution_contract(goal)?;
-    if observed_only {
-        let mut validation = goal.clone();
-        validation.status = manager::GoalStatus::Active;
-        ready_tasks(&validation, 1)?;
-    }
-    if !matches!(
-        goal.status,
-        manager::GoalStatus::Active | manager::GoalStatus::Paused
-    ) {
-        return Err(CruiseError::Other(
-            "Goal is not active; integration is paused".into(),
-        ));
-    }
-    let anchor = goal
-        .execution
-        .anchor
-        .as_deref()
-        .ok_or_else(|| CruiseError::Other("Goal has no approved repository anchor".into()))?;
+fn validate_integration_anchor(goal: &Goal, anchor: &Path, repository: &Path) -> Result<()> {
     if anchor.canonicalize()? != anchor
         || std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?)
             .canonicalize()?
@@ -1394,7 +1359,7 @@ fn integrate_inner(
     {
         return Err(CruiseError::Other("Goal checkout anchor changed".into()));
     }
-    if manager::snapshot(anchor)?.repository != snapshot.repository {
+    if manager::snapshot(anchor)?.repository != repository {
         return Err(CruiseError::Other("Goal repository anchor changed".into()));
     }
     let origin = goal
@@ -1407,22 +1372,23 @@ fn integrate_inner(
             "Goal origin changed since approval".into(),
         ));
     }
-    let attempt = goal
-        .execution
-        .attempts
-        .iter()
-        .find(|attempt| attempt.task_id == task_id && attempt.attempt == attempt_number)
-        .ok_or_else(|| CruiseError::Other("unknown Manager task attempt".into()))?;
-    if attempt.integrated {
-        return Ok(());
-    }
+    Ok(())
+}
+
+fn integration_intent(
+    cwd: &Path,
+    anchor: &Path,
+    goal: &Goal,
+    attempt: &TaskAttempt,
+    observed_only: bool,
+) -> Result<crate::manager_git::IntegrationIntent> {
+    let goal_id = &goal.id;
+    let task_id = attempt.task_id.as_str();
+    let attempt_number = attempt.attempt;
     let result = attempt
         .result_sha
         .as_deref()
         .ok_or_else(|| CruiseError::Other("child result is not pinned".into()))?;
-    if !observed_only {
-        validate_integrated_child(application, goal, attempt, &snapshot.repository, result)?;
-    }
     let tip = goal
         .execution
         .integrated_tip
@@ -1466,6 +1432,63 @@ fn integrate_inner(
         })?;
         intent
     };
+    Ok(intent)
+}
+
+fn integrate_inner(
+    application: &CruiseApplication,
+    cwd: &Path,
+    goal_id: &str,
+    task_id: &str,
+    attempt_number: u32,
+    observed_only: bool,
+) -> Result<()> {
+    let _guard = CONTROL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let snapshot = manager::snapshot(cwd)?;
+    let goal = snapshot
+        .goals
+        .iter()
+        .find(|goal| goal.id == goal_id)
+        .ok_or_else(|| CruiseError::Other("unknown Manager goal for this repository".into()))?;
+    validate_execution_contract(goal)?;
+    if observed_only {
+        let mut validation = goal.clone();
+        validation.status = manager::GoalStatus::Active;
+        ready_tasks(&validation, 1)?;
+    }
+    if !matches!(
+        goal.status,
+        manager::GoalStatus::Active | manager::GoalStatus::Paused
+    ) {
+        return Err(CruiseError::Other(
+            "Goal is not active; integration is paused".into(),
+        ));
+    }
+    let anchor = goal
+        .execution
+        .anchor
+        .as_deref()
+        .ok_or_else(|| CruiseError::Other("Goal has no approved repository anchor".into()))?;
+    validate_integration_anchor(goal, anchor, &snapshot.repository)?;
+    let attempt = goal
+        .execution
+        .attempts
+        .iter()
+        .find(|attempt| attempt.task_id == task_id && attempt.attempt == attempt_number)
+        .ok_or_else(|| CruiseError::Other("unknown Manager task attempt".into()))?;
+    if attempt.integrated {
+        return Ok(());
+    }
+    let result = attempt
+        .result_sha
+        .as_deref()
+        .ok_or_else(|| CruiseError::Other("child result is not pinned".into()))?;
+    if !observed_only {
+        validate_integrated_child(application, goal, attempt, &snapshot.repository, result)?;
+    }
+    let intent = integration_intent(cwd, anchor, goal, attempt, observed_only)?;
     if observed_only {
         if crate::manager_git::observe_integration(anchor, &intent).map_err(CruiseError::Other)?
             == crate::manager_git::IntegrationObservation::Pending
