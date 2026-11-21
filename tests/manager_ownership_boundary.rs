@@ -1,5 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "isolated manager contract fixtures")]
-
 use cruise::application::{CruiseApplication, OperationKind};
 use cruise::error::CruiseError;
 use cruise::instruction_inbox::Origin;
