@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -99,10 +100,10 @@ async fn retry_refuses_unsafe_recovery_states_without_mutating_them() -> Result<
         goals.push(g);
     }
     goals.push(make_goal("eligible"));
-    let key: String = Sha256::digest(common.to_string_lossy().as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let mut key = String::new();
+    for byte in Sha256::digest(common.to_string_lossy().as_bytes()) {
+        write!(key, "{byte:02x}")?;
+    }
     let record = home.join("data/cruise/manager").join(format!("{key}.json"));
     fs::create_dir_all(record.parent().ok_or("record has no parent")?)?;
     fs::write(
@@ -124,6 +125,52 @@ async fn retry_refuses_unsafe_recovery_states_without_mutating_them() -> Result<
         .timeout(Duration::from_secs(15))
         .build()?;
     let before: Value = serde_json::from_slice(&fs::read(&record)?)?;
+    assert_unsafe_retries_rejected(&client, &instance, &repo, &before).await?;
+    let after: Value = serde_json::from_slice(&fs::read(&record)?)?;
+    assert_eq!(after, before);
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"])?, sha);
+    assert_eligible_retry(&client, &instance, &repo, &publication).await?;
+    Ok(())
+}
+
+async fn assert_eligible_retry(
+    client: &reqwest::Client,
+    instance: &Value,
+    repo: &Path,
+    publication: &Value,
+) -> Result<()> {
+    let response = client
+        .post(format!(
+            "{}api/manager/action",
+            instance["origin"]
+                .as_str()
+                .ok_or("missing daemon credential")?
+        ))
+        .bearer_auth(
+            instance["token"]
+                .as_str()
+                .ok_or("missing daemon credential")?,
+        )
+        .json(&json!({"cwd":repo,"action":{"type":"retry","goal_id":"eligible"}}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let goal: Value = response.json().await?;
+    assert_eq!(goal["status"], "active");
+    assert!(goal["execution"]["publication"].is_null());
+    assert_eq!(
+        goal["execution"]["publication_history"],
+        json!([publication])
+    );
+    Ok(())
+}
+
+async fn assert_unsafe_retries_rejected(
+    client: &reqwest::Client,
+    instance: &Value,
+    repo: &Path,
+    before: &Value,
+) -> Result<()> {
     for goal in before["goals"].as_array().ok_or("goals is not an array")? {
         if goal["id"] == "eligible" {
             continue;
@@ -151,31 +198,5 @@ async fn retry_refuses_unsafe_recovery_states_without_mutating_them() -> Result<
             );
         }
     }
-    let after: Value = serde_json::from_slice(&fs::read(&record)?)?;
-    assert_eq!(after, before);
-    assert_eq!(git(&repo, &["rev-parse", "HEAD"])?, sha);
-    let response = client
-        .post(format!(
-            "{}api/manager/action",
-            instance["origin"]
-                .as_str()
-                .ok_or("missing daemon credential")?
-        ))
-        .bearer_auth(
-            instance["token"]
-                .as_str()
-                .ok_or("missing daemon credential")?,
-        )
-        .json(&json!({"cwd":repo,"action":{"type":"retry","goal_id":"eligible"}}))
-        .send()
-        .await?;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let goal: Value = response.json().await?;
-    assert_eq!(goal["status"], "active");
-    assert!(goal["execution"]["publication"].is_null());
-    assert_eq!(
-        goal["execution"]["publication_history"],
-        json!([publication])
-    );
     Ok(())
 }
