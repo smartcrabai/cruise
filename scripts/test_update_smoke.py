@@ -2,8 +2,7 @@
 """Exercise native update using real, versioned Cruise launcher/runtime binaries.
 
 Build A and B from isolated source copies with debug assertions and the
-``test-utils`` feature, then pass the resulting artifacts to this script. With
-``--build --next-runtime``, reuse a prebuilt B runtime and build only A. The
+``test-utils`` feature, then pass the resulting artifacts to this script. The
 script intentionally fails when artifacts or test-only seams are missing.
 """
 
@@ -211,11 +210,6 @@ def build_and_smoke(args: argparse.Namespace) -> None:
     manifest = repo / "Cargo.toml"
     if not manifest.is_file():
         fail(f"source repository has no Cargo.toml: {repo}")
-    provided_next_runtime = None
-    if args.next_runtime is not None:
-        provided_next_runtime = Path(args.next_runtime).resolve()
-        if not provided_next_runtime.is_file():
-            fail(f"--next-runtime is not a file: {provided_next_runtime}")
     next_version = args.next_version or workspace_version(manifest)
     if next_version != workspace_version(manifest):
         fail(
@@ -245,11 +239,9 @@ def build_and_smoke(args: argparse.Namespace) -> None:
         fail(f"build output already contains source copies: {output}")
 
     copy_source_tree(repo, source_a)
-    if provided_next_runtime is None:
-        copy_source_tree(repo, source_b)
+    copy_source_tree(repo, source_b)
     set_workspace_version(source_a / "Cargo.toml", current_version)
-    if provided_next_runtime is None:
-        set_workspace_version(source_b / "Cargo.toml", next_version)
+    set_workspace_version(source_b / "Cargo.toml", next_version)
     target_dir = Path(args.cargo_target_dir or os.environ.get("CARGO_TARGET_DIR", repo / "target")).resolve()
     build_env = os.environ.copy()
     build_env["CARGO_TARGET_DIR"] = str(target_dir)
@@ -263,14 +255,8 @@ def build_and_smoke(args: argparse.Namespace) -> None:
     artifact_b = output / "B"
     artifact_a.mkdir()
     artifact_b.mkdir()
-    if provided_next_runtime is not None:
-        # A's shared-target build can replace B in Cargo's debug directory.
-        shutil.copy2(provided_next_runtime, artifact_b / runtime_name())
 
-    builds = [(current_version, source_a)]
-    if provided_next_runtime is None:
-        builds.append((next_version, source_b))
-    for version, source in builds:
+    for version, source in ((current_version, source_a), (next_version, source_b)):
         print(f"Building real Cruise {version} binaries from isolated source {source}")
         try:
             result = subprocess.run(
@@ -863,21 +849,14 @@ def smoke(args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--build",
-        action="store_true",
-        help="build A/B in isolated source copies (or reuse --next-runtime), then run the smoke",
-    )
+    parser.add_argument("--build", action="store_true", help="build A/B in isolated source copies, then run the smoke")
     parser.add_argument("--repo", default=Path(__file__).resolve().parent.parent, help="repository source to copy in --build mode")
     parser.add_argument("--output-dir", help="artifact/source-copy output directory in --build mode")
     parser.add_argument("--cargo-target-dir", help="shared Cargo cache directory for both source copies")
     parser.add_argument("--cargo", default="cargo", help="Cargo executable for --build mode")
     parser.add_argument("--launcher", help="compiled A cruise launcher")
     parser.add_argument("--runtime", help="compiled A cruise-runtime")
-    parser.add_argument(
-        "--next-runtime",
-        help="compiled newer B cruise-runtime; with --build, stage it and build only A",
-    )
+    parser.add_argument("--next-runtime", help="compiled newer B cruise-runtime")
     parser.add_argument("--current-version", help="stable version compiled into A, e.g. 0.2.15")
     parser.add_argument("--next-version", help="stable version compiled into B, e.g. 0.2.16")
     parser.add_argument("--target", help="Rust release target triple for B (or host target with --build)")
