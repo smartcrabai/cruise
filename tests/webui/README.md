@@ -61,6 +61,14 @@ node tests/webui/workflow-categories.mjs
 
 On Linux, use `playwright install --with-deps chromium` if system libraries are missing. Screenshots are written to `target/formal-reports/workflow-categories/` and uploaded by the existing responsive WebUI CI job. The test creates and removes its own HOME, XDG directories, workflow files, and session fixtures. It uses the production server, templates, and HTMX endpoints, without external credentials.
 
+## Workflow flag button browser regression
+
+From the repository root, run `npm ci --prefix tests/webui --ignore-scripts`, `tests/webui/node_modules/.bin/playwright install chromium` (use `install --with-deps chromium` on Linux if needed), `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, then `node tests/webui/flag-buttons.mjs`. The responsive WebUI CI job runs this contract with the same runtime build and pinned browser as the other WebUI tests.
+
+The test uses the production WebUI and local, provider-free workflows in isolated HOME/XDG directories. It checks keyboard and mouse activation, focus, preview request coordination, responsive layout, and persisted flags and step skips in both editors. The race checks delay delivery of real preview responses without replacing their contents. `WEBUI_BDD_BIN` selects an alternate runtime.
+
+Screenshots of both narrow themes, the pending preview, the no-flags workflow, and reopened Settings are saved to `target/formal-reports/flag-buttons-browser/` (override with `WEBUI_FLAG_BUTTONS_REPORT_DIR`) and uploaded by the existing CI report step.
+
 ## Local merge browser contract
 
 After installing the pinned dependencies and Chromium as described below, build the runtime with `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, then run `node tests/webui/local-merge.mjs` from the repository root. Set `WEBUI_BDD_BIN` to use a different prebuilt runtime. This runs the production server and real Chromium against disposable Git repositories and isolated HOME/XDG directories. It covers confirmation cancellation, staging committed and uncommitted work, dirty-base rejection, and squash merge with cleanup, checking browser feedback and Git/session state. It never modifies the checkout running the test.

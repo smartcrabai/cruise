@@ -81,6 +81,8 @@ export default function NewSession(props) {
         hx-include="#new-session-form"
         hx-target="this"
         hx-swap="innerHTML"
+        hx-sync="#step-tree:replace"
+        hx-disable="#step-tree [data-flag-toggle], #step-tree input[name='runSteps'], [data-step-tree-commit]"
       >{props.steps}</div>
 
       <div class="space-y-1.5">
