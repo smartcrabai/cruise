@@ -1560,9 +1560,13 @@ fn paused_exec_exports_paused_root_and_keeps_session_resumable() {
         "execution outcome: {execution:#?}"
     );
     assert_eq!(
-        execution.attributes.get("error.type").map(String::as_str),
-        Some("paused"),
-        "execution error classification: {execution:#?}"
+        execution.status_code,
+        StatusCode::Unset as i32,
+        "paused execution must leave span status unset: {execution:#?}"
+    );
+    assert!(
+        !execution.attributes.contains_key("error.type"),
+        "paused execution must not have error.type: {execution:#?}"
     );
 
     let session_id = execution
@@ -2572,6 +2576,112 @@ fn no_file_changes_failure_is_recorded_before_recovery() {
     assert_payload_omits(
         &requests,
         &["no-change-recovery-input-secret", "touch recovered.txt"],
+    );
+}
+
+#[test]
+fn sequential_skip_prev_success_recovers_failed_workflow_telemetry() {
+    let collector = Collector::start();
+    let fixture = Fixture::new(
+        "steps:\n  failing:\n    command: 'exit 7'\n  recover:\n    command: 'touch recovered.txt'\n    skip: prev.success\n",
+    );
+    let output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "sequential-recovery-input-secret",
+    );
+    assert_success(&output);
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported_spans = spans(&requests);
+    let execution = named_span(
+        &exported_spans,
+        "cruise.execution",
+        "cruise.execution.kind",
+        "exec",
+    );
+    let workflow = named_span(
+        &exported_spans,
+        "cruise.workflow",
+        "cruise.operation",
+        "workflow",
+    );
+    let failing = named_span(
+        &exported_spans,
+        "cruise.step",
+        "cruise.step.name",
+        "failing",
+    );
+    let recover = named_span(
+        &exported_spans,
+        "cruise.step",
+        "cruise.step.name",
+        "recover",
+    );
+
+    assert_eq!(failing.status_code, StatusCode::Error as i32);
+    assert_eq!(
+        failing.attributes.get("error.type").map(String::as_str),
+        Some("command_exit")
+    );
+    assert_eq!(recover.status_code, StatusCode::Ok as i32);
+    for span in [&workflow, &execution] {
+        assert_eq!(span.status_code, StatusCode::Ok as i32, "{span:#?}");
+        assert_eq!(
+            span.attributes.get("cruise.outcome").map(String::as_str),
+            Some("success"),
+            "{span:#?}"
+        );
+        assert!(!span.attributes.contains_key("error.type"), "{span:#?}");
+    }
+    assert_payload_omits(
+        &requests,
+        &[
+            "sequential-recovery-input-secret",
+            "exit 7",
+            "touch recovered.txt",
+        ],
+    );
+}
+
+#[test]
+fn timed_out_step_before_skip_prev_success_stays_failed() {
+    let collector = Collector::start();
+    // The timeout leaves `prev.success` from `check` (true), so `recover` is skipped.
+    let fixture = Fixture::new(
+        "steps:\n  check:\n    command: 'true'\n  slow:\n    command: 'sleep 5'\n    timeout: '1s'\n  recover:\n    command: 'touch recovered.txt'\n    skip: prev.success\n",
+    );
+    let _output = fixture.run(
+        &borrowed_env(&otlp_env(&collector.endpoint())),
+        "stale-prev-success-input-secret",
+    );
+
+    let requests = collector.wait_for_paths(&["/v1/traces", "/v1/metrics"]);
+    let exported_spans = spans(&requests);
+    let workflow = named_span(
+        &exported_spans,
+        "cruise.workflow",
+        "cruise.operation",
+        "workflow",
+    );
+    assert!(
+        !exported_spans.iter().any(|span| {
+            span.name == "cruise.step"
+                && span.attributes.get("cruise.step.name").map(String::as_str) == Some("recover")
+        }),
+        "recover must be skipped"
+    );
+    assert_eq!(
+        workflow.status_code,
+        StatusCode::Error as i32,
+        "{workflow:#?}"
+    );
+    assert_eq!(
+        workflow
+            .attributes
+            .get("cruise.outcome")
+            .map(String::as_str),
+        Some("failed"),
+        "{workflow:#?}"
     );
 }
 
@@ -3886,7 +3996,7 @@ steps:
 }
 
 #[test]
-fn timeout_and_sigint_exports_fixed_error_classifications() {
+fn timeout_is_an_error_but_sigint_is_not_a_span_error() {
     let timeout_collector = Collector::start();
     let timeout_fixture = Fixture::new(
         "command: [sh, -c, 'cat >/dev/null; exit 0']\nsteps:\n  slow:\n    command: 'sleep 30'\n    timeout: '1'\n",
@@ -3941,9 +4051,21 @@ fn timeout_and_sigint_exports_fixed_error_classifications() {
     let cancel_spans = spans(&cancel_requests);
     let cancel_step = named_span(&cancel_spans, "cruise.step", "cruise.step.name", "slow");
     assert_eq!(
-        cancel_step.attributes.get("error.type").map(String::as_str),
+        cancel_step
+            .attributes
+            .get("cruise.outcome")
+            .map(String::as_str),
         Some("cancelled"),
-        "cancellation must have a fixed classification: {cancel_step:#?}"
+        "cancellation outcome: {cancel_step:#?}"
+    );
+    assert_eq!(
+        cancel_step.status_code,
+        StatusCode::Unset as i32,
+        "cancelled step must leave span status unset: {cancel_step:#?}"
+    );
+    assert!(
+        !cancel_step.attributes.contains_key("error.type"),
+        "cancelled step must not have error.type: {cancel_step:#?}"
     );
     assert_payload_omits(&cancel_requests, &["cancel-input-secret", "sleep 30"]);
 }

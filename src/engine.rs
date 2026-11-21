@@ -1110,6 +1110,7 @@ async fn step_loop_iteration(
             TransitionReason::Sequential
         };
         let native_resync = native_resync_required && if_fail_next.is_some();
+        let unhandled_failure = outcome.failed && if_fail_next.is_none() && !if_fail_retry;
         let effective_next = if_fail_next
             .or(if_fail_retry.then(|| current_step.to_string()))
             .or(gate_retry.then(|| current_step.to_string()))
@@ -1118,6 +1119,26 @@ async fn step_loop_iteration(
             .or(outcome.option_next)
             .or(step_next);
         let next = get_next_step(&ctx.compiled.steps, current_step, effective_next.as_deref());
+        // Only a recovery step that will actually run resolves the failure: a stale
+        // `prev.success` (e.g. after a command timeout) or a `when` guard can skip it.
+        if unhandled_failure
+            && vars.prev_success() == Some(false)
+            && next
+                .as_ref()
+                .and_then(|next| ctx.compiled.steps.get(next))
+                .is_some_and(|config| {
+                    config.when.is_none()
+                        && matches!(
+                            config.skip.as_ref(),
+                            Some(SkipCondition::Variable(name)) if name == "prev.success"
+                        )
+                })
+        {
+            // A failure handled by the next `skip: prev.success` recovery step
+            // is not an unresolved workflow failure. Keep the failed attempt
+            // visible in the step log, but do not report it in ExecutionResult::failed.
+            state.counters.failed -= 1;
+        }
         let target = next
             .map(|target| crate::graph::resolve_target(ctx.compiled, &target))
             .transpose()?;

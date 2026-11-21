@@ -25,6 +25,7 @@ cruise exec --config cruise.yaml
 - Resources default to `service.name=cruise` and the package's `service.version`. `OTEL_RESOURCE_ATTRIBUTES` adds or overrides resource attributes; `OTEL_SERVICE_NAME` takes precedence for the service name.
 
 Metrics are `cruise.operation.count` and `cruise.operation.duration` (seconds), labeled only by `cruise.operation` and `cruise.outcome`, plus `cruise.retry.count`, labeled only by `cruise.retry.action` and `cruise.retry.reason`. Session/workflow/model identifiers are trace-only, not metric labels. Token usage and cost are not exported to OpenTelemetry; they are recorded locally as described under `cruise usage`.
+Span status follows the operation outcome: `success` is `Ok`; `paused` and `cancelled` leave it `Unset` (recording the outcome in `cruise.outcome` without `error.type`); failures and timeouts set `Error` with `error.type`.
 
 Prompt/input text, agent output, command bodies, and exception messages are not automatically attached to spans or metrics. Session IDs, workflow file names, step/model names, CI check/job names and references, and explicitly supplied resource attributes are exported; keep secrets out of those values.
 

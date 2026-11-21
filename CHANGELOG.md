@@ -23,6 +23,7 @@
 - Shorten built-in workflow prompts by about 24% without changing step structure, and stop TDD consolidate/apply and security triage from inlining the previous step output twice.
 - Update SwiftUI and Slint UI E2E policies with faster feedback loops that keep target-runtime verification separate.
 - Move the built-in TDD ledger snapshot and post-PR Git operations to the host. Keep Git metadata read-only in isolated jcode turns; stop on an unexpected command status rather than advancing to publication.
+- Leave OpenTelemetry span status unset and omit `error.type` for `paused` and `cancelled` operations; `cruise.outcome` and operation metrics still carry these outcomes. Failures and timeouts remain errors.
 
 ### Added
 
@@ -43,6 +44,8 @@
 
 ### Fixed
 
+- Fix the built-in GitHub `wait-ci` details GraphQL query, which had an unbalanced brace and failed on every CI failure, so failed check names reach the CI diagnostic, span attributes, and CI repair evidence again instead of an empty truncated list.
+- Stop reporting a step failure as unresolved when the next `skip: prev.success` recovery step runs because of it, so recovered after-PR workflows (base-sync conflict or CI repair) no longer end as `failed` with `error.type=step_failed`. The failed step span still records the failure.
 - Stop unverified or stale built-in CI repairs before publication. Only a verified repair or eligible one-time same-head retry returns to the CI wait.
 - Resume fatal after-PR failures from their separate graph checkpoint, preserving retry counts and avoiding repeated main-workflow and PR-publication effects. Legacy sessions without the stage marker retain their previous after-PR restart behavior.
 - Prevent stack overflow while reporting early CLI workflow failures, including missing-model diagnostics, when after-PR steps are configured.
