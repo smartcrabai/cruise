@@ -62,204 +62,8 @@ pub(crate) async fn run() -> Result<()> {
             }
             continue;
         }
-        let action = if input == "/make-goal" {
-            json!({"type":"propose"})
-        } else if input.starts_with("/corrective ") {
-            let (_, rest) = take_word(input);
-            let (goal_id, rest) = take_word(rest);
-            let (task_id, rest) = take_word(rest);
-            let (Some(goal_id), Some(task_id)) = (goal_id, task_id) else {
-                println!("{}", text("corrective_usage"));
-                continue;
-            };
-            if !rest.is_empty() {
-                println!("{}", text("corrective_usage"));
-                continue;
-            }
-            let current = match client.manager_snapshot(cwd).await {
-                Ok(value) => value,
-                Err(error) => {
-                    eprintln!("{}: {}", text("refresh_failed"), error.detailed_message());
-                    continue;
-                }
-            };
-            let Some(goal) = current
-                .get("goals")
-                .and_then(Value::as_array)
-                .and_then(|goals| {
-                    goals
-                        .iter()
-                        .find(|goal| goal.get("id").and_then(Value::as_str) == Some(goal_id))
-                })
-            else {
-                println!("{}", text("corrective_unknown_goal"));
-                continue;
-            };
-            let Some(tip) = goal
-                .get("execution")
-                .and_then(|execution| execution.get("integrated_tip"))
-                .and_then(Value::as_str)
-            else {
-                println!("{}", text("corrective_missing_tip"));
-                continue;
-            };
-            println!(
-                "{}\n{}",
-                text("corrective_review"),
-                serde_json::to_string_pretty(goal).unwrap_or_default()
-            );
-            let InputResult::Submitted(instructions) =
-                prompt_multiline(&text("corrective_instructions"))?
-            else {
-                continue;
-            };
-            if instructions.trim().is_empty() {
-                println!("{}", text("corrective_empty"));
-                continue;
-            }
-            json!({"type":"preview_corrective", "goal_id":goal_id, "expected_tip":tip, "task":{"id":task_id, "instructions":instructions, "dependencies":[]}})
-        } else if input.starts_with("/approve-corrective ") {
-            let (_, rest) = take_word(input);
-            let (goal_id, rest) = take_word(rest);
-            let Some(goal_id) = goal_id.filter(|_| rest.is_empty()) else {
-                println!("{}", text("corrective_approve_usage"));
-                continue;
-            };
-            let current = match client.manager_snapshot(cwd).await {
-                Ok(value) => value,
-                Err(error) => {
-                    eprintln!("{}: {}", text("refresh_failed"), error.detailed_message());
-                    continue;
-                }
-            };
-            let Some(goal) = current
-                .get("goals")
-                .and_then(Value::as_array)
-                .and_then(|goals| {
-                    goals
-                        .iter()
-                        .find(|goal| goal.get("id").and_then(Value::as_str) == Some(goal_id))
-                })
-            else {
-                println!("{}", text("corrective_unknown_goal"));
-                continue;
-            };
-            let Some(preview) = goal
-                .get("execution")
-                .and_then(|execution| execution.get("corrective_preview"))
-                .filter(|preview| !preview.is_null())
-            else {
-                println!("{}", text("corrective_no_preview"));
-                continue;
-            };
-            println!(
-                "{}\n{}",
-                text("proposal_to_approve"),
-                serde_json::to_string_pretty(goal).unwrap_or_default()
-            );
-            let (Some(id), Some(revision)) = (
-                preview.get("id").and_then(Value::as_str),
-                preview.get("revision").and_then(Value::as_u64),
-            ) else {
-                eprintln!("{}", text("missing_revision"));
-                continue;
-            };
-            if !confirm_review()? {
-                continue;
-            }
-            json!({"type":"approve_corrective", "goal_id":goal_id, "preview_id":id, "revision":revision})
-        } else if input == "/approve" {
-            match client.manager_snapshot(cwd).await {
-                Ok(value) => snapshot = value,
-                Err(error) => {
-                    eprintln!("{}: {}", text("refresh_failed"), error.detailed_message());
-                    continue;
-                }
-            }
-            let Some(proposal) = snapshot.get("proposal").filter(|value| !value.is_null()) else {
-                println!("{}", text("no_proposal"));
-                continue;
-            };
-            // Re-display the full executable contract before asking for explicit approval.
-            println!(
-                "{}\n{}",
-                text("proposal_to_approve"),
-                serde_json::to_string_pretty(proposal).unwrap_or_default()
-            );
-            let (Some(id), Some(revision)) = (
-                proposal.get("id").and_then(Value::as_str),
-                proposal.get("revision").and_then(Value::as_u64),
-            ) else {
-                eprintln!("{}", text("missing_revision"));
-                continue;
-            };
-            if !confirm_review()? {
-                continue;
-            }
-            json!({"type":"approve", "proposal_id":id, "revision":revision})
-        } else if input.starts_with('/') {
-            let (command, rest) = take_word(input);
-            let (goal, rest) = take_word(rest);
-            let (item, rest) = take_word(rest);
-            match (command, goal, item) {
-                (Some("/pause"), Some(goal), None) => json!({"type":"pause", "goal_id":goal}),
-                (Some("/resume"), Some(goal), None) => {
-                    json!({"type":"resume", "goal_id":goal})
-                }
-                (Some("/resume"), Some(goal), Some(task)) if rest.is_empty() => {
-                    json!({"type":"resume_task", "goal_id":goal, "task_id":task})
-                }
-                (Some("/retry"), Some(goal), None) => {
-                    json!({"type":"retry", "goal_id":goal})
-                }
-                (Some("/retry"), Some(goal), Some(task)) if rest.is_empty() => {
-                    json!({"type":"retry", "goal_id":goal, "task_id":task})
-                }
-                (Some("/answer"), Some(goal), Some(prompt)) => {
-                    let current = match client.manager_snapshot(cwd).await {
-                        Ok(value) => value,
-                        Err(error) => {
-                            eprintln!("{}: {}", text("refresh_failed"), error.detailed_message());
-                            continue;
-                        }
-                    };
-                    let Some(pending) = find_prompt(&current, goal, prompt) else {
-                        eprintln!("{}", text("stale_prompt"));
-                        continue;
-                    };
-                    match pending.kind {
-                        crate::application::PendingPromptKind::Ask => {
-                            if rest.is_empty() {
-                                println!("{}", text("empty_answer"));
-                                continue;
-                            }
-                            json!({"type":"answer", "goal_id":goal, "prompt_id":prompt, "answer":rest})
-                        }
-                        crate::application::PendingPromptKind::Option => {
-                            if !rest.is_empty() {
-                                eprintln!("{}", text("option_answer_usage"));
-                                continue;
-                            }
-                            let option = match crate::cli_events::prompt_option(
-                                &pending.session_id,
-                                pending.question.as_deref(),
-                                &pending.choices,
-                            ) {
-                                Ok(option) => option,
-                                Err(CruiseError::StepPaused) => continue,
-                                Err(error) => return Err(error),
-                            };
-                            json!({"type":"answer_option", "goal_id":goal, "prompt_id":prompt, "option":option})
-                        }
-                    }
-                }
-                _ => {
-                    println!("{}", text("unknown_command"));
-                    continue;
-                }
-            }
-        } else {
-            json!({"type":"message", "text":input})
+        let Some(action) = build_action(&client, cwd, input, &mut snapshot).await? else {
+            continue;
         };
         match client
             .manager_action(&json!({"cwd":cwd, "action":action}))
@@ -288,6 +92,243 @@ pub(crate) async fn run() -> Result<()> {
             Err(error) => eprintln!("{}: {}", text("refresh_failed"), error.detailed_message()),
         }
     }
+}
+
+async fn build_action(
+    client: &DaemonClient,
+    cwd: &str,
+    input: &str,
+    snapshot: &mut Value,
+) -> Result<Option<Value>> {
+    let action = if input == "/make-goal" {
+        json!({"type":"propose"})
+    } else if input.starts_with("/corrective ") {
+        return preview_corrective(client, cwd, input).await;
+    } else if input.starts_with("/approve-corrective ") {
+        return approve_corrective(client, cwd, input).await;
+    } else if input == "/approve" {
+        return approve_proposal(client, cwd, snapshot).await;
+    } else if input.starts_with('/') {
+        let (command, rest) = take_word(input);
+        let (goal, rest) = take_word(rest);
+        let (item, rest) = take_word(rest);
+        match (command, goal, item) {
+            (Some("/pause"), Some(goal), None) => json!({"type":"pause", "goal_id":goal}),
+            (Some("/resume"), Some(goal), None) => {
+                json!({"type":"resume", "goal_id":goal})
+            }
+            (Some("/resume"), Some(goal), Some(task)) if rest.is_empty() => {
+                json!({"type":"resume_task", "goal_id":goal, "task_id":task})
+            }
+            (Some("/retry"), Some(goal), None) => {
+                json!({"type":"retry", "goal_id":goal})
+            }
+            (Some("/retry"), Some(goal), Some(task)) if rest.is_empty() => {
+                json!({"type":"retry", "goal_id":goal, "task_id":task})
+            }
+            (Some("/answer"), Some(goal), Some(prompt)) => {
+                let current = match client.manager_snapshot(cwd).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        eprintln!("{}: {}", text("refresh_failed"), error.detailed_message());
+                        return Ok(None);
+                    }
+                };
+                let Some(pending) = find_prompt(&current, goal, prompt) else {
+                    eprintln!("{}", text("stale_prompt"));
+                    return Ok(None);
+                };
+                match pending.kind {
+                    crate::application::PendingPromptKind::Ask => {
+                        if rest.is_empty() {
+                            println!("{}", text("empty_answer"));
+                            return Ok(None);
+                        }
+                        json!({"type":"answer", "goal_id":goal, "prompt_id":prompt, "answer":rest})
+                    }
+                    crate::application::PendingPromptKind::Option => {
+                        if !rest.is_empty() {
+                            eprintln!("{}", text("option_answer_usage"));
+                            return Ok(None);
+                        }
+                        let option = match crate::cli_events::prompt_option(
+                            &pending.session_id,
+                            pending.question.as_deref(),
+                            &pending.choices,
+                        ) {
+                            Ok(option) => option,
+                            Err(CruiseError::StepPaused) => return Ok(None),
+                            Err(error) => return Err(error),
+                        };
+                        json!({"type":"answer_option", "goal_id":goal, "prompt_id":prompt, "option":option})
+                    }
+                }
+            }
+            _ => {
+                println!("{}", text("unknown_command"));
+                return Ok(None);
+            }
+        }
+    } else {
+        json!({"type":"message", "text":input})
+    };
+    Ok(Some(action))
+}
+
+async fn preview_corrective(
+    client: &DaemonClient,
+    cwd: &str,
+    input: &str,
+) -> Result<Option<Value>> {
+    let (_, rest) = take_word(input);
+    let (goal_id, rest) = take_word(rest);
+    let (task_id, rest) = take_word(rest);
+    let (Some(goal_id), Some(task_id)) = (goal_id, task_id) else {
+        println!("{}", text("corrective_usage"));
+        return Ok(None);
+    };
+    if !rest.is_empty() {
+        println!("{}", text("corrective_usage"));
+        return Ok(None);
+    }
+    let current = match client.manager_snapshot(cwd).await {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{}: {}", text("refresh_failed"), error.detailed_message());
+            return Ok(None);
+        }
+    };
+    let Some(goal) = current
+        .get("goals")
+        .and_then(Value::as_array)
+        .and_then(|goals| {
+            goals
+                .iter()
+                .find(|goal| goal.get("id").and_then(Value::as_str) == Some(goal_id))
+        })
+    else {
+        println!("{}", text("corrective_unknown_goal"));
+        return Ok(None);
+    };
+    let Some(tip) = goal
+        .get("execution")
+        .and_then(|execution| execution.get("integrated_tip"))
+        .and_then(Value::as_str)
+    else {
+        println!("{}", text("corrective_missing_tip"));
+        return Ok(None);
+    };
+    println!(
+        "{}\n{}",
+        text("corrective_review"),
+        serde_json::to_string_pretty(goal).unwrap_or_default()
+    );
+    let InputResult::Submitted(instructions) = prompt_multiline(&text("corrective_instructions"))?
+    else {
+        return Ok(None);
+    };
+    if instructions.trim().is_empty() {
+        println!("{}", text("corrective_empty"));
+        return Ok(None);
+    }
+    Ok(Some(
+        json!({"type":"preview_corrective", "goal_id":goal_id, "expected_tip":tip, "task":{"id":task_id, "instructions":instructions, "dependencies":[]}}),
+    ))
+}
+
+async fn approve_corrective(
+    client: &DaemonClient,
+    cwd: &str,
+    input: &str,
+) -> Result<Option<Value>> {
+    let (_, rest) = take_word(input);
+    let (goal_id, rest) = take_word(rest);
+    let Some(goal_id) = goal_id.filter(|_| rest.is_empty()) else {
+        println!("{}", text("corrective_approve_usage"));
+        return Ok(None);
+    };
+    let current = match client.manager_snapshot(cwd).await {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{}: {}", text("refresh_failed"), error.detailed_message());
+            return Ok(None);
+        }
+    };
+    let Some(goal) = current
+        .get("goals")
+        .and_then(Value::as_array)
+        .and_then(|goals| {
+            goals
+                .iter()
+                .find(|goal| goal.get("id").and_then(Value::as_str) == Some(goal_id))
+        })
+    else {
+        println!("{}", text("corrective_unknown_goal"));
+        return Ok(None);
+    };
+    let Some(preview) = goal
+        .get("execution")
+        .and_then(|execution| execution.get("corrective_preview"))
+        .filter(|preview| !preview.is_null())
+    else {
+        println!("{}", text("corrective_no_preview"));
+        return Ok(None);
+    };
+    println!(
+        "{}\n{}",
+        text("proposal_to_approve"),
+        serde_json::to_string_pretty(goal).unwrap_or_default()
+    );
+    let (Some(id), Some(revision)) = (
+        preview.get("id").and_then(Value::as_str),
+        preview.get("revision").and_then(Value::as_u64),
+    ) else {
+        eprintln!("{}", text("missing_revision"));
+        return Ok(None);
+    };
+    if !confirm_review()? {
+        return Ok(None);
+    }
+    Ok(Some(
+        json!({"type":"approve_corrective", "goal_id":goal_id, "preview_id":id, "revision":revision}),
+    ))
+}
+
+async fn approve_proposal(
+    client: &DaemonClient,
+    cwd: &str,
+    snapshot: &mut Value,
+) -> Result<Option<Value>> {
+    match client.manager_snapshot(cwd).await {
+        Ok(value) => *snapshot = value,
+        Err(error) => {
+            eprintln!("{}: {}", text("refresh_failed"), error.detailed_message());
+            return Ok(None);
+        }
+    }
+    let Some(proposal) = snapshot.get("proposal").filter(|value| !value.is_null()) else {
+        println!("{}", text("no_proposal"));
+        return Ok(None);
+    };
+    // Re-display the full executable contract before asking for explicit approval.
+    println!(
+        "{}\n{}",
+        text("proposal_to_approve"),
+        serde_json::to_string_pretty(proposal).unwrap_or_default()
+    );
+    let (Some(id), Some(revision)) = (
+        proposal.get("id").and_then(Value::as_str),
+        proposal.get("revision").and_then(Value::as_u64),
+    ) else {
+        eprintln!("{}", text("missing_revision"));
+        return Ok(None);
+    };
+    if !confirm_review()? {
+        return Ok(None);
+    }
+    Ok(Some(
+        json!({"type":"approve", "proposal_id":id, "revision":revision}),
+    ))
 }
 
 fn find_prompt(
