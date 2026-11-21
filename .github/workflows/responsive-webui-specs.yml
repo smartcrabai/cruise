@@ -78,6 +78,10 @@ jobs:
         run: node tests/webui/workflow-categories.mjs
       - name: Managed-child WebUI browser boundary
         run: node tests/webui/managed-child.mjs
+      - name: Workflow flag buttons browser regression
+        run: node tests/webui/flag-buttons.mjs
+      - name: Failed exec stays out of WebUI inventory
+        run: node tests/webui/exec-recovery-inventory.mjs
       - name: Production notification browser test
         run: node tests/webui/notifications.mjs
       - name: Upload specification evidence

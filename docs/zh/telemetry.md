@@ -23,6 +23,7 @@ cruise exec --config cruise.yaml
 - 默认资源属性为 `service.name=cruise` 和软件包的 `service.version`。`OTEL_RESOURCE_ATTRIBUTES` 可添加或覆盖资源属性；对于服务名称，`OTEL_SERVICE_NAME` 优先级更高。
 
 Metrics 包括 `cruise.operation.count` 和 `cruise.operation.duration`（秒），标签仅为 `cruise.operation` 和 `cruise.outcome`；以及 `cruise.retry.count`，标签仅为 `cruise.retry.action` 和 `cruise.retry.reason`。Session/workflow/model 标识只用于 traces，不是 metrics 标签。不会向 OpenTelemetry 导出 token 用量和成本；这些信息会像 `cruise usage` 中所述记录在本地。
+Span 状态遵循操作结果：`success` 为 `Ok`；`paused` 和 `cancelled` 保持 `Unset`（结果记录在 `cruise.outcome` 中，不设置 `error.type`）；失败和超时为 `Error` 并设置 `error.type`。
 
 Prompt/input 文本、代理输出、命令正文和异常消息不会自动附加到 spans 或 metrics。Session ID、workflow 文件名、步骤/模型名称、CI 检查/job 名称和引用，以及显式提供的资源属性会被导出；请勿在这些值中放入秘密信息。
 

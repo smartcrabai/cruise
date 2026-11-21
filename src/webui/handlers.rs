@@ -189,7 +189,7 @@ fn settings_html(state: &WebState, id: &str, open: bool) -> Result<String> {
             let steps = crate::flags::skip_candidates(&defaults.steps, &session_flags);
             let after_pr = crate::flags::skip_candidates(&defaults.after_pr_steps, &session_flags);
             let mut tree = super::pages::step_tree_vm(&steps, &after_pr, &session.skipped_steps);
-            tree.flags = super::pages::flag_rows(&defaults.flags, &session_flags);
+            tree.flags = super::pages::flag_toggle_rows(&defaults.flags, &session_flags);
             let options = all_steps
                 .steps
                 .iter()
@@ -445,7 +445,7 @@ fn skipped_steps(fields: &Fields) -> Vec<String> {
     ids.into_iter().filter(|id| !enabled.contains(id)).collect()
 }
 
-/// `flag.NAME` selectors posted by the step tree. Empty values do not add map entries.
+/// `flag.NAME` fields submitted by the step tree. Empty values do not add map entries.
 fn flag_values(fields: &Fields) -> Option<crate::flags::FlagValues> {
     let mut found = false;
     let mut values = crate::flags::FlagValues::new();

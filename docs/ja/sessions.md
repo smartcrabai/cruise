@@ -72,7 +72,11 @@ Warning: Fallback: provider/primary -> provider/fallback (503, attempt 1/5)
 Model: provider/fallback
 ```
 
-> **`cruise exec`** は一時的なライフサイクルを持つ別経路です。プランニング、ワークツリー作成、PR 作成を行わずにカレントディレクトリで実行し、終端状態に達するとセッションを削除します。一時停止または中断された exec セッションは ID を指定すれば再開できます。WebUI の Directory ソースには **Exec** ボタンがあり、exec セッションは存在する間サイドバーに表示され、Suspended の場合はそこから再開できます。`force_exec: true` を設定すると、直接の plan エントリーポイントでも同じ経路が有効になります。CLI で 1 回だけ無効にするには `--no-force-exec` を使い、WebUI で計画するには **Create draft** を使います。[`cruise exec`](cli-reference.md#cruise-exec)を参照してください。
+`cruise exec` は、プランニング、ワークツリー作成、PR 作成を行わずにカレントディレクトリで実行します。成功するとセッションは削除されます。失敗したセッションは、明示的に再開または削除できるよう同じ ID で保持されます。一時停止または中断された exec セッションも ID で再開できます。`--instant` と `force_exec` にも同じ動作が適用されます。[exec コマンドリファレンス](cli-reference.md#cruise-exec)を参照してください。`force_exec` を 1 回だけ無効にするには `--no-force-exec` を使います。
+
+失敗した exec セッションは `cruise list` に表示されますが、WebUI の一覧、`cruise run` の自動選択、`cruise run --all` の対象にはなりません。通常の Failed 用アクションの代わりに **Resume**、**Delete**、**Back** が表示されます。`cruise list --json` では、これらの行に `"exec": true` が追加され、`"plan_available": false` になります。通常の行の形式は変わりません。
+
+WebUI の Directory ソースでは **Exec**、`force_exec` が有効な場合は **Execute** が表示されます。計画するには **Create draft** を使います。Running または Suspended の exec セッションはサイドバーに表示され、Suspended の場合はそこから再開できます。
 
 <a id="cruise-list-actions"></a>
 ## `cruise list` のアクション

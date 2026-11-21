@@ -338,9 +338,14 @@ fn legacy_server_helper() -> TestResult {
     );
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let origin = format!("http://{}/", listener.local_addr()?);
-    let ready_path = std::env::var_os("CRUISE_LEGACY_READY_PATH")
-        .ok_or_else(|| io::Error::other("ready path is required"))?;
-    std::fs::write(ready_path, origin)?;
+    let ready_path = PathBuf::from(
+        std::env::var_os("CRUISE_LEGACY_READY_PATH")
+            .ok_or_else(|| io::Error::other("ready path is required"))?,
+    );
+    // The parent polls for this file; rename so it never observes it empty.
+    let staging_path = ready_path.with_extension("ready.tmp");
+    std::fs::write(&staging_path, origin)?;
+    std::fs::rename(&staging_path, &ready_path)?;
     let expected_token = "legacy-control-secret";
     let token_path = std::env::var_os("CRUISE_LEGACY_TOKEN_PATH")
         .ok_or_else(|| io::Error::other("token path is required"))?;

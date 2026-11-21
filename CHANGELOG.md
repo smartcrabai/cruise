@@ -23,12 +23,13 @@
 - Shorten built-in workflow prompts by about 24% without changing step structure, and stop TDD consolidate/apply and security triage from inlining the previous step output twice.
 - Update SwiftUI and Slint UI E2E policies with faster feedback loops that keep target-runtime verification separate.
 - Move the built-in TDD ledger snapshot and post-PR Git operations to the host. Keep Git metadata read-only in isolated jcode turns; stop on an unexpected command status rather than advancing to publication.
+- Leave OpenTelemetry span status unset and omit `error.type` for `paused` and `cancelled` operations; `cruise.outcome` and operation metrics still carry these outcomes. Failures and timeouts remain errors.
 
 ### Added
 
 - Add an experimental `cruise manager` terminal client with repository-scoped durable conversation and SDK-generated proposal previews. New approval is rejected while end-to-end execution is unavailable, preserving the proposal for review and manual execution. Goal pause, resume, and prompt-answer controls are available. Retry can reserve a new attempt for an eligible previously failed or suspended child of an active Goal, or a completed child of a blocked Goal with a safely established integration conflict, subject to safety checks. For an eligible definite failed check, `/corrective GOAL TASK` saves a human-authored corrective preview without authorizing it, and `/approve-corrective GOAL` displays the goal for explicit approval of that preview and integrated tip, preserving prior verification evidence and approved checks. The end-to-end execution lifecycle remains unavailable.
 - Add a WebUI **Exec** button for Directory sessions. With `force_exec`, **Execute** replaces **Create & plan** for Directory workflows. Exec sessions appear in the sidebar while they exist and can be resumed there when Suspended.
-
+- Retain failed `cruise exec` sessions, including `--instant` and `force_exec`, under the same ID until success or explicit Delete. Use `cruise run <id>` or Resume in `cruise list` to retry from the first unresolved failed step or, for a hard error with no earlier unresolved failure, the saved checkpoint. If setup failed before workflow execution started and no checkpoint exists, recovery starts at the beginning. A missing or unusable checkpoint blocks recovery for a workflow that already started. Steps at and after the retry point may repeat. Files and external effects are not rolled back. `cruise clean`, automatic run selection, `run --all`, and WebUI inventory exclude failed exec sessions. `cruise list --json` adds `"exec": true` only for failed exec rows.
 - Check GitHub and GitLab base-branch CI before fresh workflow runs by default; opt out with `check_base_ci: false` in `default.yaml`.
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.
 - Add the `if.head-changed` step condition, which routes to a target when a step completes successfully with a different Git `HEAD` OID; untracked, ignored, and uncommitted changes do not count.
@@ -38,13 +39,14 @@
 - Start Docker images as a foreground daemon on port 8484 by default, and document long-lived service-container use.
 - Rotate detached `daemon.log` files above 5 MiB into a single `daemon.log.1` generation.
 - Add locale selection and translations for English, Simplified Chinese, Spanish, French, Brazilian Portuguese, Japanese, and Korean across the CLI and WebUI.
-- Set application-level `languages.plan` / `languages.pr` fallbacks and global commit-message and PR-body templates in `config.yaml` and `config.json`.
 - Add the bounded `plan_revision` Quint/Alloy specification with production Gherkin and negative controls (`scripts/check_plan_revision_specs.sh`) covering planning-input delivery, client action parity, and phase preservation.
 - Add best-effort client-side Herdr lifecycle reporting over OSC 7501 for CLI `plan`/`run`/`exec` (including Run/Resume from `cruise list`), with fully configured classic Herdr taking precedence. Only `cruise list` browsing/action-selection menus and WebUI daemon sessions are excluded.
 - Export the session base (managed clone with `--repo`) and resolved workspace as raw `cruise.execution`-only trace attributes; telemetry remains opt-in.
 
 ### Fixed
 
+- Fix the built-in GitHub `wait-ci` details GraphQL query, which had an unbalanced brace and failed on every CI failure, so failed check names reach the CI diagnostic, span attributes, and CI repair evidence again instead of an empty truncated list.
+- Stop reporting a step failure as unresolved when the next `skip: prev.success` recovery step runs because of it, so recovered after-PR workflows (base-sync conflict or CI repair) no longer end as `failed` with `error.type=step_failed`. The failed step span still records the failure.
 - Stop unverified or stale built-in CI repairs before publication. Only a verified repair or eligible one-time same-head retry returns to the CI wait.
 - Resume fatal after-PR failures from their separate graph checkpoint, preserving retry counts and avoiding repeated main-workflow and PR-publication effects. Legacy sessions without the stage marker retain their previous after-PR restart behavior.
 - Prevent stack overflow while reporting early CLI workflow failures, including missing-model diagnostics, when after-PR steps are configured.
@@ -59,3 +61,5 @@
 - Render daemon-run output once with the existing step and parallel-child formatting, and leave sessions runnable when base-CI preflight rejects a run.
 - Keep daemon terminal waits alive through transient session 404s while the event stream can still deliver terminal events; dispose exec sessions only after releasing terminal events.
 - Run approval-title SDK requests from the session workspace.
+- Keep the final stderr lines in OpenCode CLI startup failure messages when the CLI exits before announcing its server.
+- Ctrl+C in `cruise run` (including `--all`), `exec`, `plan`, and **Create PR** in `cruise list` is no longer ignored while the CLI handles daemon events. Outside herdr Core panes, a Ctrl+C right after the work starts now cancels it instead of closing only the CLI.

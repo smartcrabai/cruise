@@ -89,7 +89,7 @@ cruise list
 cruise diff <SESSION_ID>
 cruise diff <SESSION_ID> --stat
 
-# Remove closed/merged PR sessions and terminal no-PR sessions
+# クローズ・マージ済み PR や対象の PR なしセッションを削除（失敗した exec は保持）
 cruise clean
 
 # 転送引数がない場合、リモートで `cruise list` を実行します

@@ -89,13 +89,13 @@ pub(crate) fn setup_session_worktree_with_ref(
     ensure_git_repo(base_dir)?;
 
     let worktree_path = worktrees_dir.join(session_id);
+    let branch = existing_branch.map_or_else(
+        || default_branch_name(session_id, input),
+        std::string::ToString::to_string,
+    );
 
     // Reuse existing worktree directory if present.
     if worktree_path.is_dir() {
-        let branch = existing_branch.map_or_else(
-            || default_branch_name(session_id, input),
-            std::string::ToString::to_string,
-        );
         return Ok((
             WorktreeContext {
                 path: worktree_path,
@@ -108,33 +108,13 @@ pub(crate) fn setup_session_worktree_with_ref(
         ));
     }
 
-    let branch = default_branch_name(session_id, input);
     fs::create_dir_all(worktrees_dir)?;
 
     let guard = WORKTREE_BASE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let start = resolve_start_point(base_dir, base)?;
-    let mut command = Command::new("git");
-    command
-        .args(["worktree", "add", "-b", &branch])
-        .arg(&worktree_path);
-    if let Some(ref start) = start {
-        command.arg(start);
-    }
-    let output = command
-        .current_dir(base_dir)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CruiseError::WorktreeError(format!(
-            "git worktree add failed: {}",
-            stderr.trim()
-        )));
-    }
+    let (reused, start) =
+        prepare_new_session_worktree(base_dir, session_id, &worktree_path, &branch, base)?;
     drop(guard);
 
     copy_worktree_includes(base_dir, &worktree_path)?;
@@ -146,7 +126,7 @@ pub(crate) fn setup_session_worktree_with_ref(
             original_dir: base_dir.to_path_buf(),
             owns_branch: true,
         },
-        false,
+        reused,
         start,
     ))
 }
@@ -234,6 +214,160 @@ pub(crate) fn setup_managed_worktree(
         },
         reused,
     ))
+}
+
+fn prepare_new_session_worktree(
+    base_dir: &Path,
+    session_id: &str,
+    worktree_path: &Path,
+    branch: &str,
+    base: &WorktreeBase,
+) -> Result<(bool, Option<String>)> {
+    let branch_ref = format!("refs/heads/{branch}");
+    let branch_exists = git_status(base_dir, &["rev-parse", "--verify", "--quiet", &branch_ref])?;
+    if !branch_exists {
+        let start = resolve_start_point(base_dir, base)?;
+        add_session_worktree(base_dir, worktree_path, branch, start.as_deref(), true)?;
+        return Ok((false, start));
+    }
+
+    git_output(base_dir, &["worktree", "prune"])?;
+    let worktree_list = git_output(base_dir, &["worktree", "list", "--porcelain"])?;
+    let branch_line = format!("branch {branch_ref}");
+    let checked_out_path = worktree_list
+        .split("\n\n")
+        .find(|entry| entry.lines().any(|line| line == branch_line.as_str()))
+        .and_then(|entry| {
+            entry
+                .lines()
+                .find_map(|line| line.strip_prefix("worktree "))
+        });
+    if let Some(path) = checked_out_path {
+        return Err(CruiseError::WorktreeError(format!(
+            "branch {branch} is checked out in another worktree at {path}; remove or detach that worktree before retrying"
+        )));
+    }
+
+    if !branch_belongs_to_session(session_id, branch) {
+        return Err(CruiseError::WorktreeError(format!(
+            "branch {branch} already exists and is not owned by this session; delete it manually with `git branch -D {branch}` or choose another branch"
+        )));
+    }
+
+    let start = resolve_start_point(base_dir, base)?;
+    let base_ref = start.as_deref().unwrap_or("HEAD");
+    let recreate = if git_status(
+        base_dir,
+        &["merge-base", "--is-ancestor", &branch_ref, base_ref],
+    )? {
+        true
+    } else {
+        let cherry_output = git_output(base_dir, &["cherry", base_ref, &branch_ref])?;
+        if cherry_output.lines().all(|line| line.starts_with('-')) {
+            true
+        } else {
+            let base_tree_ref = format!("{base_ref}^{{tree}}");
+            let base_tree = git_output(base_dir, &["rev-parse", &base_tree_ref])?;
+            let merge_tree_matches_base = Command::new("git")
+                .args(["merge-tree", "--write-tree", base_ref, &branch_ref])
+                .current_dir(base_dir)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .is_ok_and(|output| {
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout)
+                            .lines()
+                            .next()
+                            .is_some_and(|tree| tree == base_tree.trim())
+                });
+            merge_tree_matches_base || branch_has_only_creation_reflog_entry(base_dir, &branch_ref)
+        }
+    };
+
+    if recreate {
+        git_output(base_dir, &["branch", "-D", branch])?;
+        add_session_worktree(base_dir, worktree_path, branch, start.as_deref(), true)?;
+        Ok((false, start))
+    } else {
+        add_session_worktree(base_dir, worktree_path, branch, None, false)?;
+        Ok((true, None))
+    }
+}
+
+// Reflog expiry drops oldest entries first, so a surviving lone creation entry proves the branch never moved.
+fn branch_has_only_creation_reflog_entry(base_dir: &Path, branch_ref: &str) -> bool {
+    let Ok(output) = Command::new("git")
+        .args(["reflog", "show", "--format=%H %gs", branch_ref])
+        .current_dir(base_dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let reflog = String::from_utf8_lossy(&output.stdout);
+    let mut entries = reflog.lines();
+    let Some(entry) = entries.next() else {
+        return false;
+    };
+    if entries.next().is_some() {
+        return false;
+    }
+    let Some((reflog_tip, subject)) = entry.split_once(' ') else {
+        return false;
+    };
+    if !subject.starts_with("branch: Created from") {
+        return false;
+    }
+    let Ok(branch_tip) = git_output(base_dir, &["rev-parse", "--verify", branch_ref]) else {
+        return false;
+    };
+    reflog_tip == branch_tip.trim()
+}
+
+fn add_session_worktree(
+    base_dir: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    start: Option<&str>,
+    create_branch: bool,
+) -> Result<()> {
+    let mut command = Command::new("git");
+    command.args(["worktree", "add"]);
+    if create_branch {
+        command.args(["-b", branch]);
+    }
+    command.arg(worktree_path);
+    if create_branch {
+        if let Some(start) = start {
+            command.arg(start);
+        }
+    } else {
+        command.arg(branch);
+    }
+    let output = command
+        .current_dir(base_dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| CruiseError::WorktreeError(format!("failed to run git: {error}")))?;
+
+    if !output.status.success() {
+        return Err(CruiseError::WorktreeError(format!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn branch_belongs_to_session(session_id: &str, branch: &str) -> bool {
+    let prefix = format!("cruise/{session_id}");
+    branch
+        .strip_prefix(&prefix)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('-'))
 }
 
 /// Create or reuse a worktree on an existing PR head without resetting its branch.
@@ -910,6 +1044,287 @@ mod tests {
 
         assert_eq!(ctx.branch, format!("cruise/{session_id}"));
         cleanup_worktree(&ctx).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn setup_session_worktree_recreates_orphan_branch_at_or_behind_base() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+
+        let worktrees_dir = tmp.path().join("worktrees");
+        let session_id = "orphan-no-work";
+        let (original, reused) = setup_session_worktree(
+            &repo,
+            session_id,
+            "",
+            &worktrees_dir,
+            None,
+            &WorktreeBase::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!reused);
+        let branch = original.branch.clone();
+        fs::remove_dir_all(&original.path).unwrap_or_else(|e| panic!("{e:?}"));
+        git(&repo, &["commit", "--allow-empty", "-m", "advance base"]);
+
+        let (recovered, reused) = setup_session_worktree(
+            &repo,
+            session_id,
+            "",
+            &worktrees_dir,
+            None,
+            &WorktreeBase::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!reused, "a branch behind its base should be recreated");
+        assert!(recovered.path.is_dir());
+        assert_eq!(recovered.branch, branch);
+        assert_eq!(
+            git(&recovered.path, &["rev-parse", "HEAD"]).trim(),
+            git(&repo, &["rev-parse", "HEAD"]).trim()
+        );
+        cleanup_worktree(&recovered).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn setup_session_worktree_reuses_orphan_branch_with_session_commit() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+
+        let worktrees_dir = tmp.path().join("worktrees");
+        let session_id = "orphan-with-work";
+        let (original, _) = setup_session_worktree(
+            &repo,
+            session_id,
+            "",
+            &worktrees_dir,
+            None,
+            &WorktreeBase::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        fs::write(original.path.join("session-work.txt"), "session work\n")
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        git(&original.path, &["add", "session-work.txt"]);
+        git(&original.path, &["commit", "-m", "session work"]);
+        let expected_head = git(&original.path, &["rev-parse", "HEAD"]);
+        let original_path = original
+            .path
+            .to_str()
+            .unwrap_or_else(|| panic!("test path must be UTF-8"));
+        git(&repo, &["worktree", "remove", "--force", original_path]);
+
+        let (recovered, reused) = setup_session_worktree(
+            &repo,
+            session_id,
+            "",
+            &worktrees_dir,
+            None,
+            &WorktreeBase::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(reused, "a branch with session work should be reused");
+        assert!(recovered.owns_branch);
+        assert_eq!(git(&recovered.path, &["rev-parse", "HEAD"]), expected_head);
+        cleanup_worktree(&recovered).unwrap_or_else(|e| panic!("{e:?}"));
+    }
+
+    #[test]
+    fn setup_session_worktree_recreates_orphan_branch_after_squash_merge()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = lock_process();
+        let tmp = TempDir::new()?;
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo)?;
+        init_git_repo(&repo);
+
+        let session_id = "orphan-squash";
+        let branch = format!("cruise/{session_id}-x");
+        let worktrees_dir = tmp.path().join("worktrees");
+        let (original, _, _) = setup_session_worktree_with_ref(
+            &repo,
+            session_id,
+            "",
+            &worktrees_dir,
+            Some(&branch),
+            &WorktreeBase::default(),
+        )?;
+        fs::write(original.path.join("first.txt"), "first\n")?;
+        git(&original.path, &["add", "first.txt"]);
+        git(&original.path, &["commit", "-m", "first session change"]);
+        fs::write(original.path.join("second.txt"), "second\n")?;
+        git(&original.path, &["add", "second.txt"]);
+        git(&original.path, &["commit", "-m", "second session change"]);
+        let old_branch_head = git(&repo, &["rev-parse", &branch]).trim().to_owned();
+        let original_path = original.path.to_str().ok_or("test path must be UTF-8")?;
+        git(&repo, &["worktree", "remove", "--force", original_path]);
+
+        fs::write(repo.join("first.txt"), "first\n")?;
+        fs::write(repo.join("second.txt"), "second\n")?;
+        git(&repo, &["add", "first.txt", "second.txt"]);
+        git(&repo, &["commit", "-m", "squash session changes"]);
+        let base_head = git(&repo, &["rev-parse", "HEAD"]);
+
+        let (recovered, reused, _) = setup_session_worktree_with_ref(
+            &repo,
+            session_id,
+            "",
+            &worktrees_dir,
+            Some(&branch),
+            &WorktreeBase::default(),
+        )?;
+        assert!(!reused, "a squash-merged branch should be recreated");
+        assert_eq!(recovered.branch, branch);
+        assert_eq!(git(&recovered.path, &["rev-parse", "HEAD"]), base_head);
+        assert_eq!(git(&repo, &["rev-parse", &branch]), base_head);
+        assert!(
+            !git_status(
+                &repo,
+                &["merge-base", "--is-ancestor", &old_branch_head, &branch]
+            )?,
+            "the orphan branch's old commits should no longer be reachable"
+        );
+        cleanup_worktree(&recovered)?;
+        Ok(())
+    }
+
+    #[test]
+    fn setup_session_worktree_recreates_unmoved_orphan_branch_after_base_diverges()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _lock = lock_process();
+        let tmp = TempDir::new()?;
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo)?;
+        init_git_repo(&repo);
+
+        let main_branch = git(&repo, &["branch", "--show-current"]).trim().to_owned();
+        git(&repo, &["switch", "-c", "side/orphan-base"]);
+        fs::write(repo.join("README.md"), "side first\n")?;
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "first side commit"]);
+        fs::write(repo.join("README.md"), "side second\n")?;
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "second side commit"]);
+
+        let session_id = "orphan-unmoved";
+        let branch = format!("cruise/{session_id}-x");
+        let worktrees_dir = tmp.path().join("worktrees");
+        let (original, _, _) = setup_session_worktree_with_ref(
+            &repo,
+            session_id,
+            "",
+            &worktrees_dir,
+            Some(&branch),
+            &WorktreeBase::default(),
+        )?;
+        let old_branch_head = git(&repo, &["rev-parse", &branch]).trim().to_owned();
+        fs::remove_dir_all(&original.path)?;
+
+        git(&repo, &["switch", &main_branch]);
+        fs::write(repo.join("README.md"), "main diverged\n")?;
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "diverge main"]);
+        let base_head = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+
+        let reflog = git(&repo, &["reflog", "show", "--format=%H %gs", &branch]);
+        assert_eq!(reflog.lines().count(), 1);
+        assert!(reflog.contains("branch: Created from"));
+        assert_eq!(
+            reflog
+                .lines()
+                .next()
+                .and_then(|entry| entry.split_whitespace().next()),
+            Some(old_branch_head.as_str())
+        );
+
+        let (recovered, reused, _) = setup_session_worktree_with_ref(
+            &repo,
+            session_id,
+            "",
+            &worktrees_dir,
+            Some(&branch),
+            &WorktreeBase::default(),
+        )?;
+        assert!(!reused, "an unmoved orphan branch should be recreated");
+        assert_eq!(recovered.branch, branch);
+        assert_eq!(
+            git(&recovered.path, &["rev-parse", "HEAD"]).trim(),
+            base_head
+        );
+        assert_eq!(git(&repo, &["rev-parse", &branch]).trim(), base_head);
+        cleanup_worktree(&recovered)?;
+        Ok(())
+    }
+
+    #[test]
+    fn setup_session_worktree_rejects_existing_foreign_branch() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+        let branch = "cruise/session2";
+        git(&repo, &["branch", branch]);
+
+        let worktrees_dir = tmp.path().join("worktrees");
+        let Err(error) = setup_session_worktree_with_ref(
+            &repo,
+            "session",
+            "",
+            &worktrees_dir,
+            Some(branch),
+            &WorktreeBase::default(),
+        ) else {
+            panic!("a branch outside this session's exact prefix should be rejected");
+        };
+        let message = error.to_string();
+        assert!(message.contains("not owned by this session"));
+        assert!(message.contains("git branch -D cruise/session2"));
+        assert!(!worktrees_dir.join("session").exists());
+    }
+
+    #[test]
+    fn setup_session_worktree_rejects_branch_checked_out_elsewhere() {
+        let _lock = lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|e| panic!("{e:?}"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap_or_else(|e| panic!("{e:?}"));
+        init_git_repo(&repo);
+
+        let session_id = "checked-out";
+        let branch = format!("cruise/{session_id}");
+        git(&repo, &["branch", &branch]);
+        let other_worktree = tmp.path().join("other-worktree");
+        let other_path = other_worktree
+            .to_str()
+            .unwrap_or_else(|| panic!("test path must be UTF-8"));
+        git(&repo, &["worktree", "add", other_path, &branch]);
+
+        let worktrees_dir = tmp.path().join("worktrees");
+        let Err(error) = setup_session_worktree(
+            &repo,
+            session_id,
+            "",
+            &worktrees_dir,
+            None,
+            &WorktreeBase::default(),
+        ) else {
+            panic!("a branch checked out elsewhere should be rejected");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("checked out in another worktree")
+        );
+        assert!(!worktrees_dir.join(session_id).exists());
+
+        git(&repo, &["worktree", "remove", "--force", other_path]);
+        git(&repo, &["branch", "-D", &branch]);
     }
 
     #[test]

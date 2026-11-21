@@ -305,6 +305,12 @@ Options:
 
 直接在当前目录运行 workflow steps：不生成计划、不创建 git worktree，也不会自动创建 PR。因等待输入而暂停的 session（`Running`），或因 Ctrl+C 中断的 session（`Suspended`）会保留，并可通过 `cruise run <id>` 恢复；exec session 不会被 `cruise run` 自动选中，也不会纳入 `cruise run --all`。允许存在未提交的更改；Cruise 会在这些更改之上运行，不会 stash、提交或重置工作树，并会警告 workflow 生成的文件可能与现有更改混在一起。仍然必须处于一个已附加的分支上。
 
+普通步骤出现未处理的非零退出时，后续步骤仍会执行；如果仍有未解决的失败，本次运行将以非零状态退出。失败会话保留原 ID、检查点、日志和工件，直至恢复成功或在 `cruise list` 中选择 **Delete**。这也适用于 `--instant` 和 `force_exec`。解决失败原因后，可在 `cruise list` 中选择 **Resume**，或运行 `cruise run <id>`。恢复会在原目录中执行，并要求检出原分支。可用 `cruise run <id> --dry-run` 预览恢复位置。
+
+恢复从第一个尚未解决的失败步骤开始。如果发生硬错误且此前没有未解决的失败，则从已保存的检查点继续。恢复位置及之后的步骤可能重新执行。Cruise 不会回滚工作文件或外部副作用。已启动的工作流如果检查点缺失、损坏或不兼容，恢复会报错，而不是从头开始。
+
+恢复时会沿用最初显式指定的 `--max-retries`，除非通过 `cruise run <id> --max-retries <N>` 覆盖。如果两次都未指定，则使用工作流默认值。`--rate-limit-retries` 仍按每次运行单独设置。
+
 `--instant` 会在内存中组装一个包含单个 implement step 的 workflow，不解析 workflow YAML。未指定时，`cruise exec` 仍使用常规配置解析。没有配置文件时，交互式终端会在分类选择器中提供内置 workflow；非交互执行会自动选择 `tdd`。Instant 要求非空白任务。Workflow 默认值可以在开头插入 command pre-steps；workflow 默认值和环境变量覆盖仍然生效，且 `CRUISE_SDK` / `CRUISE_MODEL` 优先于 `--sdk` / `--model`。
 
 ```sh
@@ -523,6 +529,8 @@ cruise clean
 ```
 
 通过 `gh pr view`（GitLab 上为 `glab mr view`）检查每个 Completed session 的 PR 状态。PR 已关闭或已合并的 session 会连同其 worktree（以及任何残留的 `--repo` 克隆）一起删除。若 Planned current-branch session 从未启动，且其 `plan.md` 缺失或为空，也会被删除。Suspended session 和其他 planned session 会继续保留以供恢复。
+
+成功的 exec 会话会自动删除。`cruise clean` 不会删除失败的 exec 会话。若要保留工作文件并丢弃会话，请在 `cruise list` 中选择 **Delete**。
 
 > **注意：** 若 `gh pr create` 失败或未执行，session 可能没有 PR URL。没有 PR URL 的 PR-backed session 会保留；请检查 session 日志，或手动使用 `gh pr create` 重新创建 PR。
 

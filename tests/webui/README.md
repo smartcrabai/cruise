@@ -65,6 +65,14 @@ node tests/webui/workflow-categories.mjs
 
 On Linux, use `playwright install --with-deps chromium` if system libraries are missing. Screenshots are written to `target/formal-reports/workflow-categories/` and uploaded by the existing responsive WebUI CI job. The test creates and removes its own HOME, XDG directories, workflow files, and session fixtures. It uses the production server, templates, and HTMX endpoints, without external credentials.
 
+## Workflow flag button browser regression
+
+From the repository root, run `npm ci --prefix tests/webui --ignore-scripts`, `tests/webui/node_modules/.bin/playwright install chromium` (use `install --with-deps chromium` on Linux if needed), `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, then `node tests/webui/flag-buttons.mjs`. The responsive WebUI CI job runs this contract with the same runtime build and pinned browser as the other WebUI tests.
+
+The test uses the production WebUI and local, provider-free workflows in isolated HOME/XDG directories. It checks keyboard and mouse activation, focus, preview request coordination, responsive layout, and persisted flags and step skips in both editors. The race checks delay delivery of real preview responses without replacing their contents. `WEBUI_BDD_BIN` selects an alternate runtime.
+
+Screenshots of both narrow themes, the pending preview, the no-flags workflow, and reopened Settings are saved to `target/formal-reports/flag-buttons-browser/` (override with `WEBUI_FLAG_BUTTONS_REPORT_DIR`) and uploaded by the existing CI report step.
+
 ## Local merge browser contract
 
 After installing the pinned dependencies and Chromium as described below, build the runtime with `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, then run `node tests/webui/local-merge.mjs` from the repository root. Set `WEBUI_BDD_BIN` to use a different prebuilt runtime. This runs the production server and real Chromium against disposable Git repositories and isolated HOME/XDG directories. It covers confirmation cancellation, staging committed and uncommitted work, dirty-base rejection, and squash merge with cleanup, checking browser feedback and Git/session state. It never modifies the checkout running the test.
@@ -149,3 +157,15 @@ The browser package is pinned to Playwright **1.62.1** and its lockfile records 
 Negative controls first select `undefined-control.feature` through the test-only `WEBUI_BDD_FEATURE` override and require the real Rust runner to fail its undefined/skipped step. That deliberately invalid fixture is outside the normal feature path. They then copy production assets to a temporary directory and run the same browser contracts against the real server. Removing Escape focus restoration must fail its focus assertion. Forcing mobile text controls to 14px must fail the computed-font assertion. A crash or unrelated failure does not count as detecting a mutant.
 
 The browser uses reduced motion for deterministic observation, not arbitrary transition sleeps. The drawer scenario explicitly asserts that reduced-motion styling wins even while open and that the mobile header responds to dark mode. Assertions use computed layout, hit testing, native dialogs, network requests, localStorage, keyboard focus and real HTMX swaps rather than checking CSS source strings. The suite does not claim physical iOS behavior or exhaustive browser coverage.
+# Failed exec inventory boundary
+
+From the repository root, using the browser workflow's pinned Node 26.13.1 and Rust 1.99.1:
+
+```sh
+npm ci --prefix tests/webui
+tests/webui/node_modules/.bin/playwright install chromium # macOS; add --with-deps on Linux CI
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/exec-recovery-inventory.mjs
+```
+
+The test starts the production daemon on a dynamic loopback port with a disposable HOME and XDG tree, then logs in through the real WebUI. It seeds ordinary and exec failed records in the durable format, checks sidebar exclusion on initial render and after HTMX polling updates the ordinary row, opens the ordinary failure detail, and checks that Run All is disabled. It deletes its temporary state on normal completion and handled failures. If the 90-second watchdog expires, the disposable HOME and XDG state may remain. No workflow commands, CLI recovery actions, or external services are exercised. Screenshots are written to `target/formal-reports/exec-recovery-browser/` and uploaded by the Responsive WebUI CI workflow.

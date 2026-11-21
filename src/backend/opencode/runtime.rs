@@ -334,6 +334,11 @@ impl Runtime {
             }
         }));
         if read == 0 {
+            // The CLI closed stdout; let the stderr reader catch up before reporting stderr.
+            if !self.readers.is_empty() {
+                let stderr_reader = self.readers.remove(0);
+                let _ = tokio::time::timeout(Duration::from_secs(1), stderr_reader).await;
+            }
             return Err(format!(
                 "OpenCode CLI startup failed: {}. Run `cruise install opencode` if the CLI is missing.",
                 self.diagnostic()

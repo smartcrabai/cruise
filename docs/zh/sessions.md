@@ -70,7 +70,11 @@ Warning: Fallback: provider/primary -> provider/fallback (503, attempt 1/5)
 Model: provider/fallback
 ```
 
-> **`cruise exec`** 是独立的临时生命周期路径：它会在当前目录中执行，不进行规划、不创建工作树或 PR，并在达到终止状态时删除会话。暂停或中断的 exec 会话仍可通过 ID 恢复。WebUI 的 Directory 来源提供 **Exec** 按钮，exec 会话存在期间会显示在侧边栏中；处于 Suspended 状态时可从侧边栏恢复。设置 `force_exec: true` 可为直接计划入口启用相同路径；在 CLI 中使用 `--no-force-exec` 可单次退出此模式，在 WebUI 中可使用 **Create draft** 进行规划。参见 [`cruise exec`](cli-reference.md#cruise-exec)。
+`cruise exec` 在当前目录执行，不进行规划、不创建工作树或 PR。成功后会删除会话；失败后会保留原 ID，供显式恢复或删除。暂停或中断的 exec 会话仍可按 ID 恢复。`--instant` 和 `force_exec` 也遵循此规则。请参阅 [exec 命令参考](cli-reference.md#cruise-exec)。使用 `--no-force-exec` 可单次退出 `force_exec` 模式。
+
+失败的 exec 会话会显示在 `cruise list` 中，但不会出现在 WebUI 会话列表中，也不会被不带 ID 的 `cruise run` 或 `cruise run --all` 选中。菜单提供 **Resume**、**Delete** 和 **Back**，而不是普通 Failed 会话的操作。`cruise list --json` 会为这些条目新增 `"exec": true`，其 `"plan_available"` 为 `false`。普通条目的格式不变。
+
+WebUI 的 Directory 来源提供 **Exec** 按钮，启用 `force_exec` 时则显示 **Execute**。如需规划，请选择 **Create draft**。Running 和 Suspended 状态的 exec 会话会显示在侧边栏中，Suspended 会话可以从那里恢复。
 
 <a id="cruise-list-actions"></a>
 ## `cruise list` 操作

@@ -402,16 +402,24 @@ pub(crate) struct StepRowVm {
 pub(crate) struct StepTreeVm {
     pub(crate) steps: Vec<StepRowVm>,
     pub(crate) empty: bool,
-    pub(crate) flags: Vec<FlagRowVm>,
+    pub(crate) flags: Vec<FlagToggleVm>,
 }
 
-/// One declared workflow flag as an on/off selector, defaulting to off.
+/// One declared workflow flag and its effective value, defaulting to off.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FlagRowVm {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) on: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FlagToggleVm {
+    #[serde(flatten)]
+    pub(crate) row: FlagRowVm,
+    pub(crate) toggle_vals: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

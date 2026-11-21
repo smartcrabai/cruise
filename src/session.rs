@@ -254,9 +254,12 @@ pub struct SessionState {
     /// creating a duplicate.
     #[serde(default)]
     pub published_issue_url: Option<String>,
-    /// Whether this is a transient session created by `cruise exec`.
+    /// Whether this session was created by `cruise exec`.
     #[serde(default)]
     pub exec: bool,
+    /// Explicit graph retry budget supplied when starting an exec session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_max_retries: Option<usize>,
     /// True when the session's input was written verbatim to plan.md
     /// (`--skip-planning` / input-as-plan). `input` is then stored empty.
     #[serde(default)]
@@ -393,11 +396,20 @@ impl SessionState {
             current_step_is_node_id: false,
             published_issue_url: None,
             exec: false,
+            exec_max_retries: None,
             input_as_plan: false,
             auto_requeue_count: 0,
             pr_target: None,
             issue_number: None,
         }
+    }
+
+    pub(crate) fn exec_retry_budget(&self, resume_override: Option<usize>) -> Option<usize> {
+        resume_override.or(if self.exec {
+            self.exec_max_retries
+        } else {
+            None
+        })
     }
 
     /// Clear `input` and set `input_as_plan`.
@@ -1361,46 +1373,14 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Dispose of an exec session after its run returns.
-    ///
-    /// Paused and suspended sessions remain available for explicit resume.
-    /// An untouched initial `Planned` session can be removed after a preflight
-    /// failure; the fingerprint protects a session reset by another process.
-    pub fn dispose_exec_session_if_owned(
-        &self,
-        id: &str,
-        initial_phase: &SessionPhase,
-        initial_fingerprint: SessionStateFingerprint,
-    ) {
-        if validate_session_id(id).is_err() {
-            return;
-        }
-        let remove = |manager: &Self| {
-            if let Err(e) = manager.delete(id) {
-                eprintln!("warning: failed to remove exec session {id}: {e}");
-            }
-        };
-        match self.inspect_state_file(id) {
-            Ok(SessionFileContents::Parsed { state, fingerprint })
-                if matches!(
-                    state.phase,
-                    SessionPhase::Completed | SessionPhase::Failed(_) | SessionPhase::PrFailed(_)
-                ) || (matches!(initial_phase, SessionPhase::Planned)
-                    && fingerprint == initial_fingerprint) =>
-            {
-                remove(self);
-            }
-            Ok(SessionFileContents::Parsed { state, .. }) => {
-                eprintln!(
-                    "exec session {id} kept in '{}' phase: cruise run {id}",
-                    state.phase.label()
-                );
-            }
-            Ok(SessionFileContents::Missing | SessionFileContents::Invalid { .. }) | Err(_) => {
-                // A corrupt or already-missing transient session is safe to
-                // remove, but only after the ID has passed validation above.
-                remove(self);
-            }
+    /// Dispose of a durably completed exec while the caller owns its Run claim.
+    pub(crate) fn dispose_completed_exec(&self, id: &str) {
+        if self
+            .load(id)
+            .is_ok_and(|state| state.exec && state.phase == SessionPhase::Completed)
+            && let Err(error) = self.delete(id)
+        {
+            eprintln!("warning: failed to remove exec session {id}: {error}");
         }
     }
 
@@ -1531,15 +1511,16 @@ pub(crate) fn validate_session_id(id: &str) -> Result<()> {
 /// Returns whether a session has no PR path and can therefore be reclaimed
 /// without consulting GitHub.
 fn is_unreclaimable_no_pr_session(session: &SessionState, plan_available: bool) -> bool {
+    if session.exec {
+        return matches!(
+            session.phase,
+            SessionPhase::Completed | SessionPhase::PrFailed(_)
+        );
+    }
     let terminal = matches!(
         session.phase,
         SessionPhase::Completed | SessionPhase::Failed(_) | SessionPhase::PrFailed(_)
     );
-    if session.exec {
-        // Explicitly resumed exec sessions remain transient, but a reset exec
-        // session is still resumable and must not be reclaimed by clean.
-        return terminal;
-    }
 
     let legacy_current_branch =
         session.workspace_mode == WorkspaceMode::CurrentBranch && session.pr_url.is_none();
@@ -4662,7 +4643,7 @@ mod tests {
         reason = "the cleanup matrix covers all retention categories"
     )]
     fn test_cleanup_by_pr_status_removes_no_pr_terminal_sessions_without_gh() {
-        // Given: terminal exec/legacy sessions and resumable or plan-backed sessions
+        // Given: disposable no-PR sessions and resumable or plan-backed sessions
         use std::os::unix::fs::PermissionsExt;
 
         let _lock = crate::test_support::lock_process();
@@ -4810,12 +4791,11 @@ mod tests {
             .cleanup_by_pr_status()
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        // Then: only terminal no-PR sessions are removed, without a gh call for them
-        assert_eq!(report.deleted, 5);
-        assert_eq!(report.no_pr_deleted, 5);
+        // Then: disposable no-PR sessions are removed, without a gh call for them
+        assert_eq!(report.deleted, 4);
+        assert_eq!(report.no_pr_deleted, 4);
         for id in [
             "cleanup-exec-completed",
-            "cleanup-exec-failed",
             "cleanup-legacy-completed",
             "cleanup-legacy-failed",
             "cleanup-planned-empty",
@@ -4826,6 +4806,7 @@ mod tests {
             );
         }
         for id in [
+            "cleanup-exec-failed",
             "cleanup-exec-suspended",
             "cleanup-exec-running",
             "cleanup-planned-nonempty",

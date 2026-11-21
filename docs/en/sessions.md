@@ -74,7 +74,11 @@ Warning: Fallback: provider/primary -> provider/fallback (503, attempt 1/5)
 Model: provider/fallback
 ```
 
-> **`cruise exec`** is a separate path with a transient lifecycle: it runs in the current directory without planning, worktree creation, or PR creation, and deletes its session when it reaches a terminal state. Paused or interrupted exec sessions can still be resumed by ID. The WebUI offers **Exec** for the Directory source and shows exec sessions in the sidebar while they exist; Suspended sessions can be resumed there. Set `force_exec: true` to enable the same path for direct plan entry points; use `--no-force-exec` to opt out once on the CLI or **Create draft** to plan in the WebUI. See [`cruise exec`](cli-reference.md#cruise-exec).
+`cruise exec` runs in the current directory without planning, worktree creation, or PR creation. A successful run removes the session. A failed run retains the same ID for explicit recovery or deletion. Paused or interrupted exec sessions remain resumable by ID. This lifecycle also applies to `--instant` and `force_exec`. See [the exec command reference](cli-reference.md#cruise-exec). Use `--no-force-exec` to opt out of `force_exec` once.
+
+Failed exec sessions are visible in `cruise list` but not in WebUI inventory, automatic `cruise run` selection, or `cruise run --all`. Their menu offers **Resume**, **Delete**, and **Back** instead of ordinary Failed actions. In `cruise list --json`, these rows add `"exec": true` and have `"plan_available": false`. Ordinary rows keep their existing shape.
+
+The WebUI offers **Exec** for the Directory source, or **Execute** when `force_exec` is enabled. Use **Create draft** to plan instead. Running and Suspended exec sessions appear in the sidebar, and Suspended sessions can be resumed there.
 
 <a id="cruise-list-actions"></a>
 ## `cruise list` Actions
@@ -91,7 +95,8 @@ Manager-owned child sessions are an exception: their list controls offer only **
 | **Planned** | Run, Publish as Issue, Edit Settings, Replan, Delete, Back |
 | **Running** | Resume, Tell*, Reset to Planned, Delete, Back |
 | **Suspended** | Resume, Edit Settings, Reset to Planned, Delete, Back |
-| **Failed** | Run, Edit Settings, Reset to Planned, Delete, Back |
+| **Failed** (non-exec) | Run, Edit Settings, Reset to Planned, Delete, Back |
+| **Failed** (inactive exec) | Resume, Delete, Back |
 | **PR Failed** | Create PR, Open PR*, Reset to Planned, Delete, Back |
 | **Completed** | Open PR*, Merge PR*, Stage local merge**, Merge locally & cleanup**, Reset to Planned, Delete, Back |
 
