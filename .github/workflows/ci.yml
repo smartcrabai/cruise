@@ -545,6 +545,11 @@ jobs:
       - name: Update Rust toolchain
         run: rustup update stable
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2
+        with:
+          tool: cargo-nextest@0.9.152
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -559,7 +564,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::large_futures
 
       - name: Run tests
-        run: cargo test --all-features
+        run: python3 scripts/ci_cargo_test.py
 
       - name: Test GitHub Action through the local daemon
         if: matrix.os == 'ubuntu-latest'
@@ -610,6 +615,12 @@ jobs:
       - name: Update Rust toolchain
         run: rustup update stable
 
+      - name: Install cargo-nextest
+        if: matrix.check == 'test-windows'
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2
+        with:
+          tool: cargo-nextest@0.9.152
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -619,11 +630,7 @@ jobs:
 
       - name: Run tests
         if: matrix.check == 'test-windows'
-        run: cargo test --all-features --all-targets
-
-      - name: Run doctests
-        if: matrix.check == 'test-windows'
-        run: cargo test --all-features --doc
+        run: python scripts/ci_cargo_test.py
 
       - name: Smoke native update with real A/B binaries
         if: matrix.check == 'native-update-smoke-windows'

@@ -1,0 +1,23 @@
+# These suites serialize their tests with in-process locks; nextest runs each
+# test in its own process, so keep them one at a time.
+[test-groups]
+file-artifacts-cli = { max-threads = 1 }
+model-logging-cli = { max-threads = 1 }
+planning-spinner-pty = { max-threads = 1 }
+run-prompts-pty = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "binary_id(=cruise::file_artifacts_cli)"
+test-group = "file-artifacts-cli"
+
+[[profile.default.overrides]]
+filter = "binary_id(=cruise::model_logging_cli)"
+test-group = "model-logging-cli"
+
+[[profile.default.overrides]]
+filter = "binary_id(=cruise::planning_spinner_pty)"
+test-group = "planning-spinner-pty"
+
+[[profile.default.overrides]]
+filter = "binary_id(=cruise::run_prompts_pty)"
+test-group = "run-prompts-pty"
