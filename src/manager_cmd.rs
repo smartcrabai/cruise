@@ -309,27 +309,6 @@ fn find_prompt(
         })
 }
 
-#[cfg(test)]
-mod prompt_tests {
-    use super::*;
-
-    #[test]
-    fn answer_selects_only_exact_goal_and_request() {
-        let snapshot = json!({"prompts": [{"goal_id": "goal-a", "prompt": {
-            "requestId": "request-a", "sessionId": "child", "kind": "option",
-            "question": "Choose", "choices": [{"label": "Continue", "kind": "selector", "nextStep": "next"}]
-        }}]});
-        let prompt = find_prompt(&snapshot, "goal-a", "request-a").unwrap();
-        assert!(matches!(
-            prompt.kind,
-            crate::application::PendingPromptKind::Option
-        ));
-        assert_eq!(prompt.choices[0].next_step.as_deref(), Some("next"));
-        assert!(find_prompt(&snapshot, "goal-b", "request-a").is_none());
-        assert!(find_prompt(&snapshot, "goal-a", "request-old").is_none());
-    }
-}
-
 fn take_word(input: &str) -> (Option<&str>, &str) {
     let input = input.trim_start();
     if input.is_empty() {
@@ -382,5 +361,28 @@ fn show_snapshot(snapshot: &Value) {
             text("pending_prompts"),
             serde_json::to_string_pretty(prompts).unwrap_or_default()
         );
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn answer_selects_only_exact_goal_and_request() -> Result<()> {
+        let snapshot = json!({"prompts": [{"goal_id": "goal-a", "prompt": {
+            "requestId": "request-a", "sessionId": "child", "kind": "option",
+            "question": "Choose", "choices": [{"label": "Continue", "kind": "selector", "nextStep": "next"}]
+        }}]});
+        let prompt = find_prompt(&snapshot, "goal-a", "request-a")
+            .ok_or_else(|| CruiseError::Other("expected prompt".into()))?;
+        assert!(matches!(
+            prompt.kind,
+            crate::application::PendingPromptKind::Option
+        ));
+        assert_eq!(prompt.choices[0].next_step.as_deref(), Some("next"));
+        assert!(find_prompt(&snapshot, "goal-b", "request-a").is_none());
+        assert!(find_prompt(&snapshot, "goal-a", "request-old").is_none());
+        Ok(())
     }
 }

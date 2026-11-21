@@ -24,14 +24,13 @@ async fn snapshot(
 ) -> Response {
     match tokio::task::spawn_blocking(move || -> crate::error::Result<serde_json::Value> {
         let mut snapshot = crate::manager::snapshot(&request.cwd)?;
-        if let Some(id) = crate::manager_provider::active_turn(&snapshot.repository) {
-            if let Some(turn) = snapshot
+        if let Some(id) = crate::manager_provider::active_turn(&snapshot.repository)
+            && let Some(turn) = snapshot
                 .transcript
                 .iter_mut()
                 .find(|turn| turn.id == id && turn.status == "interrupted")
-            {
-                turn.status = "running".into();
-            }
+        {
+            turn.status = "running".into();
         }
         let mut prompts = Vec::new();
         for goal in &snapshot.goals {
@@ -105,26 +104,6 @@ enum Action {
     },
 }
 
-#[cfg(test)]
-mod prompt_action_tests {
-    use super::Action;
-
-    #[test]
-    fn manager_prompt_actions_accept_ask_and_typed_option() {
-        let ask: Action = serde_json::from_value(serde_json::json!({
-            "type": "answer", "goal_id": "g", "prompt_id": "p", "answer": "yes"
-        }))
-        .unwrap();
-        assert!(matches!(ask, Action::Answer { answer, .. } if answer == "yes"));
-        let option: Action = serde_json::from_value(serde_json::json!({
-            "type": "answer_option", "goal_id": "g", "prompt_id": "p",
-            "option": {"nextStep": "next", "textInput": "details"}
-        }))
-        .unwrap();
-        assert!(matches!(option, Action::AnswerOption { option, .. }
-            if option.next_step.as_deref() == Some("next") && option.text_input.as_deref() == Some("details")));
-    }
-}
 async fn action(
     State(state): State<WebState>,
     axum::Json(request): axum::Json<ActionRequest>,
@@ -200,6 +179,21 @@ async fn action(
                 }
             }
         }
+        other => {
+            action_control(
+                state,
+                ActionRequest {
+                    cwd: request.cwd,
+                    action: other,
+                },
+            )
+            .await
+        }
+    }
+}
+
+async fn action_control(state: WebState, request: ActionRequest) -> Response {
+    match request.action {
         Action::Pause { goal_id } => {
             match tokio::task::spawn_blocking(move || {
                 crate::manager_coordinator::pause(&state.application, &request.cwd, &goal_id)
@@ -272,6 +266,21 @@ async fn action(
                 }
             }
         }
+        other => {
+            action_answer(
+                state,
+                ActionRequest {
+                    cwd: request.cwd,
+                    action: other,
+                },
+            )
+            .await
+        }
+    }
+}
+
+async fn action_answer(state: WebState, request: ActionRequest) -> Response {
+    match request.action {
         Action::AnswerOption {
             goal_id,
             prompt_id,
@@ -326,5 +335,29 @@ async fn action(
                 }
             }
         }
+        _ => super::error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unexpected manager action",
+        ),
+    }
+}
+
+#[cfg(test)]
+mod prompt_action_tests {
+    use super::Action;
+
+    #[test]
+    fn manager_prompt_actions_accept_ask_and_typed_option() -> Result<(), serde_json::Error> {
+        let ask: Action = serde_json::from_value(serde_json::json!({
+            "type": "answer", "goal_id": "g", "prompt_id": "p", "answer": "yes"
+        }))?;
+        assert!(matches!(ask, Action::Answer { answer, .. } if answer == "yes"));
+        let option: Action = serde_json::from_value(serde_json::json!({
+            "type": "answer_option", "goal_id": "g", "prompt_id": "p",
+            "option": {"nextStep": "next", "textInput": "details"}
+        }))?;
+        assert!(matches!(option, Action::AnswerOption { option, .. }
+            if option.next_step.as_deref() == Some("next") && option.text_input.as_deref() == Some("details")));
+        Ok(())
     }
 }
