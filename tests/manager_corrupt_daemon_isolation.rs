@@ -1,3 +1,5 @@
+#![expect(clippy::unwrap_used, reason = "isolated manager contract fixtures")]
+
 use std::fs;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
