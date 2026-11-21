@@ -22,8 +22,8 @@ impl Drop for StopDaemon<'_> {
 }
 
 #[tokio::test]
-async fn manager_routes_require_bearer_authentication() {
-    let home = TempDir::new().unwrap();
+async fn manager_routes_require_bearer_authentication() -> Result<(), Box<dyn std::error::Error>> {
+    let home = TempDir::new()?;
     let command = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_cruise"))
             .current_dir(home.path())
@@ -36,24 +36,21 @@ async fn manager_routes_require_bearer_authentication() {
             .stdin(Stdio::null())
             .args(args)
             .output()
-            .unwrap()
     };
-    let started = command(&["daemon", "start", "--port", "0"]);
+    let started = command(&["daemon", "start", "--port", "0"])?;
     assert!(
         started.status.success(),
         "daemon start: {}",
         String::from_utf8_lossy(&started.stderr)
     );
     let _stop = StopDaemon(home.path());
-    let record: Value = serde_json::from_slice(
-        &fs::read(home.path().join("state/cruise/daemon/instance.json")).unwrap(),
-    )
-    .unwrap();
-    let origin = record["origin"].as_str().unwrap();
+    let record: Value = serde_json::from_slice(&fs::read(
+        home.path().join("state/cruise/daemon/instance.json"),
+    )?)?;
+    let origin = record["origin"].as_str().ok_or("daemon origin missing")?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
-        .build()
-        .unwrap();
+        .build()?;
     let mut statuses = Vec::new();
     for path in ["api/manager/snapshot", "api/manager/action"] {
         for token in [None, Some("invalid-token")] {
@@ -65,8 +62,9 @@ async fn manager_routes_require_bearer_authentication() {
             if let Some(token) = token {
                 request = request.bearer_auth(token);
             }
-            statuses.push(request.send().await.unwrap().status());
+            statuses.push(request.send().await?.status());
         }
     }
     assert_eq!(statuses, vec![StatusCode::UNAUTHORIZED; 4]);
+    Ok(())
 }
