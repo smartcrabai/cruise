@@ -1087,6 +1087,169 @@ pub(crate) async fn finalize_child(
     finalize_child_inner(application, cwd, goal_id, task_id, attempt_number, false).await
 }
 
+fn validate_finalization_worktree(
+    child: &crate::session::SessionState,
+    attempt: &TaskAttempt,
+    worktree: &Path,
+    anchor: &Path,
+    repository: &Path,
+) -> Result<String> {
+    if worktree.canonicalize()? != worktree
+        || std::path::PathBuf::from(git_output(worktree, &["rev-parse", "--show-toplevel"])?)
+            .canonicalize()?
+            != worktree
+        || manager::snapshot(worktree)?.repository != repository
+        || worktree == anchor
+        || worktree.file_name().and_then(|name| name.to_str()) != Some(attempt.session_id.as_str())
+    {
+        return Err(CruiseError::Other("child worktree identity changed".into()));
+    }
+    let branch = child
+        .worktree_branch
+        .as_deref()
+        .ok_or_else(|| CruiseError::Other("completed child has no worktree branch".into()))?;
+    let prefix = format!("cruise/{}", attempt.session_id);
+    if !(branch == prefix
+        || branch
+            .strip_prefix(&prefix)
+            .is_some_and(|suffix| suffix.starts_with('-')))
+        || git_output(worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"])? != branch
+    {
+        return Err(CruiseError::Other("child worktree branch changed".into()));
+    }
+    let head = git_output(worktree, &["rev-parse", "HEAD"])?;
+    if !Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["merge-base", "--is-ancestor", &attempt.base_sha, &head])
+        .status()?
+        .success()
+    {
+        return Err(CruiseError::Other(
+            "child HEAD does not descend from its pinned base".into(),
+        ));
+    }
+    Ok(head)
+}
+
+fn finalization_intent(
+    cwd: &Path,
+    goal: &Goal,
+    attempt: &TaskAttempt,
+    worktree: &Path,
+    head: &str,
+    observed_only: bool,
+) -> Result<manager::ChildFinalizationIntent> {
+    let goal_id = goal.id.as_str();
+    let task_id = attempt.task_id.as_str();
+    let attempt_number = attempt.attempt;
+    let intent = if let Some(intent) = &attempt.finalization_intent {
+        intent.clone()
+    } else {
+        if goal.status == manager::GoalStatus::Paused || observed_only {
+            return Err(CruiseError::Other(
+                "Goal is paused; finalization has not begun".into(),
+            ));
+        }
+        // Staging is confined to the owned worktree. Persist the resulting
+        // tree before the commit so a lost receipt is distinguishable.
+        git_output(worktree, &["add", "-A"])?;
+        let intent = manager::ChildFinalizationIntent {
+            expected_head: head.to_owned(),
+            expected_tree: git_output(worktree, &["write-tree"])?,
+        };
+        manager::update_goal(cwd, goal_id, |goal| {
+            let attempt = goal
+                .execution
+                .attempts
+                .iter_mut()
+                .find(|attempt| attempt.task_id == task_id && attempt.attempt == attempt_number)
+                .ok_or_else(|| CruiseError::Other("Manager attempt disappeared".into()))?;
+            if attempt.finalization_intent.is_some() || attempt.result_sha.is_some() {
+                return Err(CruiseError::Other(
+                    "Manager finalization state changed".into(),
+                ));
+            }
+            attempt.finalization_intent = Some(intent.clone());
+            Ok(())
+        })?;
+        intent
+    };
+    Ok(intent)
+}
+
+fn validate_finalization_anchor(goal: &Goal, anchor: &Path, repository: &Path) -> Result<()> {
+    if anchor.canonicalize()? != anchor
+        || std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?)
+            .canonicalize()?
+            != anchor
+        || manager::snapshot(anchor)?.repository != repository
+    {
+        return Err(CruiseError::Other("Goal repository anchor changed".into()));
+    }
+    let origin = goal
+        .execution
+        .origin
+        .as_deref()
+        .ok_or_else(|| CruiseError::Other("Goal has no approved origin".into()))?;
+    if git_output(anchor, &["remote", "get-url", "origin"])? != origin {
+        return Err(CruiseError::Other(
+            "Goal origin changed since approval".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_finalized_commit(
+    worktree: &Path,
+    intent: &manager::ChildFinalizationIntent,
+) -> Result<String> {
+    let result = git_output(worktree, &["rev-parse", "HEAD"])?;
+    let tree = git_output(worktree, &["rev-parse", "HEAD^{tree}"])?;
+    if tree != intent.expected_tree
+        || !git_output(
+            worktree,
+            &["status", "--porcelain", "--untracked-files=all"],
+        )?
+        .is_empty()
+    {
+        return Err(CruiseError::Other(
+            "finalized child tree does not match its saved intent".into(),
+        ));
+    }
+    if result != intent.expected_head {
+        let parents = git_output(worktree, &["rev-list", "--parents", "-n", "1", &result])?;
+        if parents != format!("{result} {}", intent.expected_head) {
+            return Err(CruiseError::Other(
+                "finalized child commit does not match its saved parent".into(),
+            ));
+        }
+    }
+    Ok(result)
+}
+
+fn existing_finalized_result(
+    attempt: &TaskAttempt,
+    worktree: &Path,
+    head: &str,
+) -> Result<Option<String>> {
+    if let Some(result) = &attempt.result_sha {
+        if head != *result
+            || !git_output(
+                worktree,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )?
+            .is_empty()
+        {
+            return Err(CruiseError::Other(
+                "child worktree changed after result was pinned".into(),
+            ));
+        }
+        return Ok(Some(result.clone()));
+    }
+    Ok(None)
+}
+
 async fn finalize_child_inner(
     application: &CruiseApplication,
     cwd: &Path,
@@ -1121,24 +1284,7 @@ async fn finalize_child_inner(
             goal.execution.anchor.as_deref().ok_or_else(|| {
                 CruiseError::Other("Goal has no approved repository anchor".into())
             })?;
-        if anchor.canonicalize()? != anchor
-            || std::path::PathBuf::from(git_output(anchor, &["rev-parse", "--show-toplevel"])?)
-                .canonicalize()?
-                != anchor
-            || manager::snapshot(anchor)?.repository != snapshot.repository
-        {
-            return Err(CruiseError::Other("Goal repository anchor changed".into()));
-        }
-        let origin = goal
-            .execution
-            .origin
-            .as_deref()
-            .ok_or_else(|| CruiseError::Other("Goal has no approved origin".into()))?;
-        if git_output(anchor, &["remote", "get-url", "origin"])? != origin {
-            return Err(CruiseError::Other(
-                "Goal origin changed since approval".into(),
-            ));
-        }
+        validate_finalization_anchor(goal, anchor, &snapshot.repository)?;
         let attempt = goal
             .execution
             .attempts
@@ -1157,88 +1303,17 @@ async fn finalize_child_inner(
             .worktree_path
             .as_deref()
             .ok_or_else(|| CruiseError::Other("completed child has no worktree".into()))?;
-        if worktree.canonicalize()? != worktree
-            || std::path::PathBuf::from(git_output(worktree, &["rev-parse", "--show-toplevel"])?)
-                .canonicalize()?
-                != worktree
-            || manager::snapshot(worktree)?.repository != snapshot.repository
-            || worktree == anchor
-            || worktree.file_name().and_then(|name| name.to_str())
-                != Some(attempt.session_id.as_str())
-        {
-            return Err(CruiseError::Other("child worktree identity changed".into()));
+        let head = validate_finalization_worktree(
+            &child,
+            attempt,
+            worktree,
+            anchor,
+            &snapshot.repository,
+        )?;
+        if let Some(result) = existing_finalized_result(attempt, worktree, &head)? {
+            return Ok(result);
         }
-        let branch = child
-            .worktree_branch
-            .as_deref()
-            .ok_or_else(|| CruiseError::Other("completed child has no worktree branch".into()))?;
-        let prefix = format!("cruise/{}", attempt.session_id);
-        if !(branch == prefix
-            || branch
-                .strip_prefix(&prefix)
-                .is_some_and(|suffix| suffix.starts_with('-')))
-            || git_output(worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"])? != branch
-        {
-            return Err(CruiseError::Other("child worktree branch changed".into()));
-        }
-        let head = git_output(worktree, &["rev-parse", "HEAD"])?;
-        if !Command::new("git")
-            .arg("-C")
-            .arg(worktree)
-            .args(["merge-base", "--is-ancestor", &attempt.base_sha, &head])
-            .status()?
-            .success()
-        {
-            return Err(CruiseError::Other(
-                "child HEAD does not descend from its pinned base".into(),
-            ));
-        }
-        if let Some(result) = &attempt.result_sha {
-            if head != *result
-                || !git_output(
-                    worktree,
-                    &["status", "--porcelain", "--untracked-files=all"],
-                )?
-                .is_empty()
-            {
-                return Err(CruiseError::Other(
-                    "child worktree changed after result was pinned".into(),
-                ));
-            }
-            return Ok(result.clone());
-        }
-        let intent = if let Some(intent) = &attempt.finalization_intent {
-            intent.clone()
-        } else {
-            if goal.status == manager::GoalStatus::Paused || observed_only {
-                return Err(CruiseError::Other(
-                    "Goal is paused; finalization has not begun".into(),
-                ));
-            }
-            // Staging is confined to the owned worktree. Persist the resulting
-            // tree before the commit so a lost receipt is distinguishable.
-            git_output(worktree, &["add", "-A"])?;
-            let intent = manager::ChildFinalizationIntent {
-                expected_head: head.clone(),
-                expected_tree: git_output(worktree, &["write-tree"])?,
-            };
-            manager::update_goal(&cwd, &goal_id, |goal| {
-                let attempt = goal
-                    .execution
-                    .attempts
-                    .iter_mut()
-                    .find(|attempt| attempt.task_id == task_id && attempt.attempt == attempt_number)
-                    .ok_or_else(|| CruiseError::Other("Manager attempt disappeared".into()))?;
-                if attempt.finalization_intent.is_some() || attempt.result_sha.is_some() {
-                    return Err(CruiseError::Other(
-                        "Manager finalization state changed".into(),
-                    ));
-                }
-                attempt.finalization_intent = Some(intent.clone());
-                Ok(())
-            })?;
-            intent
-        };
+        let intent = finalization_intent(&cwd, goal, attempt, worktree, &head, observed_only)?;
         if head == intent.expected_head {
             if goal.status == manager::GoalStatus::Paused || observed_only {
                 return Err(CruiseError::Other(
@@ -1257,27 +1332,7 @@ async fn finalize_child_inner(
                 None,
             ))?;
         }
-        let result = git_output(worktree, &["rev-parse", "HEAD"])?;
-        let tree = git_output(worktree, &["rev-parse", "HEAD^{tree}"])?;
-        if tree != intent.expected_tree
-            || !git_output(
-                worktree,
-                &["status", "--porcelain", "--untracked-files=all"],
-            )?
-            .is_empty()
-        {
-            return Err(CruiseError::Other(
-                "finalized child tree does not match its saved intent".into(),
-            ));
-        }
-        if result != intent.expected_head {
-            let parents = git_output(worktree, &["rev-list", "--parents", "-n", "1", &result])?;
-            if parents != format!("{result} {}", intent.expected_head) {
-                return Err(CruiseError::Other(
-                    "finalized child commit does not match its saved parent".into(),
-                ));
-            }
-        }
+        let result = validate_finalized_commit(worktree, &intent)?;
         manager::update_goal(&cwd, &goal_id, |goal| {
             let attempt = goal
                 .execution
@@ -1570,6 +1625,162 @@ pub(crate) fn resume_task(
     resume_task_inner(application, cwd, goal_id, task_id, false)
 }
 
+fn validate_resume_capacity(
+    application: &CruiseApplication,
+    inventory: &[manager::Snapshot],
+) -> Result<()> {
+    let mut ids = HashSet::new();
+    let mut active = 0;
+    for repository in inventory {
+        for existing_goal in &repository.goals {
+            for existing in &existing_goal.execution.attempts {
+                if !ids.insert(existing.session_id.clone()) {
+                    return Err(CruiseError::Other(
+                        "duplicate Manager child reservation".into(),
+                    ));
+                }
+                let state = application.read_session(&existing.session_id)?;
+                if state.managed_child.as_ref() != Some(&owner(existing_goal, existing)) {
+                    return Err(CruiseError::Other("Manager child owner changed".into()));
+                }
+                if application.runtime().active_operation(&state.id).is_some()
+                    || state.live_foreign_runner_pid().is_some()
+                {
+                    active += 1;
+                }
+            }
+        }
+    }
+    match std::fs::read_dir(application.managed_session_store().sessions_dir()) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                if entry.file_type()?.is_dir()
+                    && entry.path().join("manager-owner.json").exists()
+                    && !ids.contains(&entry.file_name().to_string_lossy().into_owned())
+                {
+                    return Err(CruiseError::Other(
+                        "orphan Manager reservation prevents safe capacity accounting".into(),
+                    ));
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for state in application.list_sessions()? {
+        if state.managed_child.is_some() && !ids.contains(&state.id) {
+            return Err(CruiseError::Other(
+                "orphan Manager child prevents safe capacity accounting".into(),
+            ));
+        }
+    }
+    if active >= 2 {
+        return Err(CruiseError::Other("Manager child capacity is full".into()));
+    }
+    Ok(())
+}
+
+fn validate_resume_worktree(
+    application: &CruiseApplication,
+    goal: &Goal,
+    attempt: &TaskAttempt,
+    child: &crate::session::SessionState,
+    repository: &Path,
+) -> Result<()> {
+    let goal_id = &goal.id;
+    let anchor = goal
+        .execution
+        .anchor
+        .as_deref()
+        .ok_or_else(|| CruiseError::Other("Goal anchor missing".into()))?;
+    let tip = goal
+        .execution
+        .integrated_tip
+        .as_deref()
+        .ok_or_else(|| CruiseError::Other("Goal tip missing".into()))?;
+    let worktree = child
+        .worktree_path
+        .as_deref()
+        .ok_or_else(|| CruiseError::Other("child worktree missing".into()))?;
+    let expected = application
+        .managed_session_store()
+        .worktrees_dir()
+        .join(&child.id);
+    if anchor.canonicalize()? != anchor
+        || manager::snapshot(anchor)?.repository != repository
+        || git_output(
+            anchor,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/cruise/goal/{goal_id}"),
+            ],
+        )? != tip
+        || !expected.is_dir()
+        || worktree.canonicalize()? != expected.canonicalize()?
+        || manager::snapshot(worktree)?.repository != repository
+        || !Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(["merge-base", "--is-ancestor", &attempt.base_sha, "HEAD"])
+            .status()?
+            .success()
+    {
+        return Err(CruiseError::Other(
+            "Goal ref or child worktree identity changed".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_resume_child(
+    application: &CruiseApplication,
+    goal: &Goal,
+    attempt: &TaskAttempt,
+) -> Result<crate::session::SessionState> {
+    let child = application.read_session(&attempt.session_id)?;
+    if child.managed_child.as_ref() != Some(&owner(goal, attempt))
+        || !matches!(
+            child.phase,
+            crate::session::SessionPhase::Failed(_) | crate::session::SessionPhase::Suspended
+        )
+        || child.live_foreign_runner_pid().is_some()
+        || application.runtime().active_operation(&child.id).is_some()
+    {
+        return Err(CruiseError::Other(
+            "child owner, phase or runtime state is unsafe for resume".into(),
+        ));
+    }
+    Ok(child)
+}
+
+fn validate_resume_attempt(attempt: &TaskAttempt, recovery: bool) -> Result<()> {
+    if attempt.resume_starting {
+        return Err(CruiseError::Other(
+            "child resume dispatch requires explicit review".into(),
+        ));
+    }
+    if attempt.resume_pending != recovery {
+        return Err(CruiseError::Other(if recovery {
+            "resume is no longer pending".into()
+        } else {
+            "child resume is already pending".into()
+        }));
+    }
+    if attempt.launch_started != Some(true)
+        || attempt.integrated
+        || attempt.result_sha.is_some()
+        || attempt.finalization_intent.is_some()
+        || attempt.integration_intent.is_some()
+    {
+        return Err(CruiseError::Other(
+            "child attempt has an uncertain launch or finalization".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn resume_task_inner(
     application: &CruiseApplication,
     cwd: &Path,
@@ -1619,132 +1830,10 @@ fn resume_task_inner(
         .filter(|attempt| attempt.task_id == task_id)
         .max_by_key(|attempt| attempt.attempt)
         .ok_or_else(|| CruiseError::Other("task has no previous attempt".into()))?;
-    if attempt.resume_starting {
-        return Err(CruiseError::Other(
-            "child resume dispatch requires explicit review".into(),
-        ));
-    }
-    if attempt.resume_pending != recovery {
-        return Err(CruiseError::Other(if recovery {
-            "resume is no longer pending".into()
-        } else {
-            "child resume is already pending".into()
-        }));
-    }
-    if attempt.launch_started != Some(true)
-        || attempt.integrated
-        || attempt.result_sha.is_some()
-        || attempt.finalization_intent.is_some()
-        || attempt.integration_intent.is_some()
-    {
-        return Err(CruiseError::Other(
-            "child attempt has an uncertain launch or finalization".into(),
-        ));
-    }
-    let child = application.read_session(&attempt.session_id)?;
-    if child.managed_child.as_ref() != Some(&owner(goal, attempt))
-        || !matches!(
-            child.phase,
-            crate::session::SessionPhase::Failed(_) | crate::session::SessionPhase::Suspended
-        )
-        || child.live_foreign_runner_pid().is_some()
-        || application.runtime().active_operation(&child.id).is_some()
-    {
-        return Err(CruiseError::Other(
-            "child owner, phase or runtime state is unsafe for resume".into(),
-        ));
-    }
-    let anchor = goal
-        .execution
-        .anchor
-        .as_deref()
-        .ok_or_else(|| CruiseError::Other("Goal anchor missing".into()))?;
-    let tip = goal
-        .execution
-        .integrated_tip
-        .as_deref()
-        .ok_or_else(|| CruiseError::Other("Goal tip missing".into()))?;
-    let worktree = child
-        .worktree_path
-        .as_deref()
-        .ok_or_else(|| CruiseError::Other("child worktree missing".into()))?;
-    let expected = application
-        .managed_session_store()
-        .worktrees_dir()
-        .join(&child.id);
-    if anchor.canonicalize()? != anchor
-        || manager::snapshot(anchor)?.repository != snapshot.repository
-        || git_output(
-            anchor,
-            &[
-                "rev-parse",
-                "--verify",
-                &format!("refs/heads/cruise/goal/{goal_id}"),
-            ],
-        )? != tip
-        || !expected.is_dir()
-        || worktree.canonicalize()? != expected.canonicalize()?
-        || manager::snapshot(worktree)?.repository != snapshot.repository
-        || !Command::new("git")
-            .arg("-C")
-            .arg(worktree)
-            .args(["merge-base", "--is-ancestor", &attempt.base_sha, "HEAD"])
-            .status()?
-            .success()
-    {
-        return Err(CruiseError::Other(
-            "Goal ref or child worktree identity changed".into(),
-        ));
-    }
-    let mut ids = HashSet::new();
-    let mut active = 0;
-    for repository in &inventory {
-        for existing_goal in &repository.goals {
-            for existing in &existing_goal.execution.attempts {
-                if !ids.insert(existing.session_id.clone()) {
-                    return Err(CruiseError::Other(
-                        "duplicate Manager child reservation".into(),
-                    ));
-                }
-                let state = application.read_session(&existing.session_id)?;
-                if state.managed_child.as_ref() != Some(&owner(existing_goal, existing)) {
-                    return Err(CruiseError::Other("Manager child owner changed".into()));
-                }
-                if application.runtime().active_operation(&state.id).is_some()
-                    || state.live_foreign_runner_pid().is_some()
-                {
-                    active += 1;
-                }
-            }
-        }
-    }
-    match std::fs::read_dir(application.managed_session_store().sessions_dir()) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry?;
-                if entry.file_type()?.is_dir()
-                    && entry.path().join("manager-owner.json").exists()
-                    && !ids.contains(&entry.file_name().to_string_lossy().into_owned())
-                {
-                    return Err(CruiseError::Other(
-                        "orphan Manager reservation prevents safe capacity accounting".into(),
-                    ));
-                }
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    for state in application.list_sessions()? {
-        if state.managed_child.is_some() && !ids.contains(&state.id) {
-            return Err(CruiseError::Other(
-                "orphan Manager child prevents safe capacity accounting".into(),
-            ));
-        }
-    }
-    if active >= 2 {
-        return Err(CruiseError::Other("Manager child capacity is full".into()));
-    }
+    validate_resume_attempt(attempt, recovery)?;
+    let child = validate_resume_child(application, goal, attempt)?;
+    validate_resume_worktree(application, goal, attempt, &child, &snapshot.repository)?;
+    validate_resume_capacity(application, &inventory)?;
     let mut resumes = RESUMES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1785,37 +1874,87 @@ fn resume_task_inner(
     Ok(goal.clone())
 }
 
-/// Explicitly reserve a fresh attempt without changing or deleting prior evidence.
-/// The coordinator gate serializes this decision with dispatch and integration.
-pub(crate) fn retry_task(
-    application: &CruiseApplication,
-    cwd: &Path,
-    goal_id: &str,
-    task_id: &str,
-) -> Result<Goal> {
-    let _guard = CONTROL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let snapshot = manager::snapshot(cwd)?;
-    let goal = snapshot
-        .goals
-        .iter()
-        .find(|g| g.id == goal_id)
-        .ok_or_else(|| CruiseError::Other("unknown Manager goal for this repository".into()))?;
-    validate_execution_contract(goal)?;
-    if !matches!(
-        goal.status,
-        manager::GoalStatus::Active | manager::GoalStatus::Blocked
-    ) {
-        return Err(CruiseError::Other(
-            "Goal must be active or blocked to retry a task".into(),
-        ));
+fn validate_retry_phase(
+    goal: &Goal,
+    previous: &TaskAttempt,
+    child: &crate::session::SessionState,
+    repository: &Path,
+    anchor: &Path,
+    tip: &str,
+) -> Result<()> {
+    match &child.phase {
+        crate::session::SessionPhase::Failed(_) | crate::session::SessionPhase::Suspended
+            if goal.status == manager::GoalStatus::Active
+                && previous.result_sha.is_none()
+                && previous.finalization_intent.is_none() => {}
+        crate::session::SessionPhase::Completed if goal.status == manager::GoalStatus::Blocked => {
+            let expected_reason = format!(
+                "Child {} integration requires attention:",
+                previous.session_id
+            );
+            if !goal
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with(&expected_reason))
+            {
+                return Err(CruiseError::Other(
+                    "Goal is blocked for a different reason".into(),
+                ));
+            }
+            let result = previous
+                .result_sha
+                .as_deref()
+                .ok_or_else(|| CruiseError::Other("child result is not pinned".into()))?;
+            let worktree = child
+                .worktree_path
+                .as_deref()
+                .ok_or_else(|| CruiseError::Other("child worktree missing".into()))?;
+            if manager::snapshot(worktree)?.repository != repository
+                || git_output(worktree, &["rev-parse", "HEAD"])? != result
+                || !git_output(
+                    worktree,
+                    &["status", "--porcelain", "--untracked-files=all"],
+                )?
+                .is_empty()
+            {
+                return Err(CruiseError::Other(
+                    "child result or worktree changed".into(),
+                ));
+            }
+            for commit in [tip, result] {
+                if !Command::new("git")
+                    .arg("-C")
+                    .arg(anchor)
+                    .args(["merge-base", "--is-ancestor", &previous.base_sha, commit])
+                    .status()?
+                    .success()
+                {
+                    return Err(CruiseError::Other(
+                        "child base ancestry cannot be established".into(),
+                    ));
+                }
+            }
+            let merge = Command::new("git")
+                .arg("-C")
+                .arg(anchor)
+                .args(["merge-tree", "--write-tree", tip, result])
+                .output()?;
+            if merge.status.code() != Some(1) {
+                return Err(CruiseError::Other(
+                    "integration conflict cannot be established safely".into(),
+                ));
+            }
+        }
+        _ => {
+            return Err(CruiseError::Other(
+                "previous task attempt is not safely retryable".into(),
+            ));
+        }
     }
-    // Reuse the scheduler's complete attempt identity validation, even for a
-    // blocked Goal, before treating an older attempt as superseded.
-    let mut validation = goal.clone();
-    validation.status = manager::GoalStatus::Active;
-    ready_tasks(&validation, 1)?;
+    Ok(())
+}
+
+fn select_retry_attempt<'a>(goal: &'a Goal, task_id: &str) -> Result<&'a TaskAttempt> {
     let task = goal
         .proposal
         .tasks
@@ -1876,6 +2015,41 @@ pub(crate) fn retry_task(
                 .into(),
         ));
     }
+    Ok(*previous)
+}
+
+/// Explicitly reserve a fresh attempt without changing or deleting prior evidence.
+/// The coordinator gate serializes this decision with dispatch and integration.
+pub(crate) fn retry_task(
+    application: &CruiseApplication,
+    cwd: &Path,
+    goal_id: &str,
+    task_id: &str,
+) -> Result<Goal> {
+    let _guard = CONTROL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let snapshot = manager::snapshot(cwd)?;
+    let goal = snapshot
+        .goals
+        .iter()
+        .find(|g| g.id == goal_id)
+        .ok_or_else(|| CruiseError::Other("unknown Manager goal for this repository".into()))?;
+    validate_execution_contract(goal)?;
+    if !matches!(
+        goal.status,
+        manager::GoalStatus::Active | manager::GoalStatus::Blocked
+    ) {
+        return Err(CruiseError::Other(
+            "Goal must be active or blocked to retry a task".into(),
+        ));
+    }
+    // Reuse the scheduler's complete attempt identity validation, even for a
+    // blocked Goal, before treating an older attempt as superseded.
+    let mut validation = goal.clone();
+    validation.status = manager::GoalStatus::Active;
+    ready_tasks(&validation, 1)?;
+    let previous = select_retry_attempt(goal, task_id)?;
     let child = application.read_session(&previous.session_id)?;
     if child.managed_child.as_ref() != Some(&owner(goal, previous))
         || application
@@ -1906,75 +2080,7 @@ pub(crate) fn retry_task(
     {
         return Err(CruiseError::Other("Goal anchor or ref changed".into()));
     }
-    match &child.phase {
-        crate::session::SessionPhase::Failed(_) | crate::session::SessionPhase::Suspended
-            if goal.status == manager::GoalStatus::Active
-                && previous.result_sha.is_none()
-                && previous.finalization_intent.is_none() => {}
-        crate::session::SessionPhase::Completed if goal.status == manager::GoalStatus::Blocked => {
-            let expected_reason = format!(
-                "Child {} integration requires attention:",
-                previous.session_id
-            );
-            if !goal
-                .reason
-                .as_deref()
-                .is_some_and(|r| r.starts_with(&expected_reason))
-            {
-                return Err(CruiseError::Other(
-                    "Goal is blocked for a different reason".into(),
-                ));
-            }
-            let result = previous
-                .result_sha
-                .as_deref()
-                .ok_or_else(|| CruiseError::Other("child result is not pinned".into()))?;
-            let worktree = child
-                .worktree_path
-                .as_deref()
-                .ok_or_else(|| CruiseError::Other("child worktree missing".into()))?;
-            if manager::snapshot(worktree)?.repository != snapshot.repository
-                || git_output(worktree, &["rev-parse", "HEAD"])? != result
-                || !git_output(
-                    worktree,
-                    &["status", "--porcelain", "--untracked-files=all"],
-                )?
-                .is_empty()
-            {
-                return Err(CruiseError::Other(
-                    "child result or worktree changed".into(),
-                ));
-            }
-            for commit in [tip.as_str(), result] {
-                if !Command::new("git")
-                    .arg("-C")
-                    .arg(anchor)
-                    .args(["merge-base", "--is-ancestor", &previous.base_sha, commit])
-                    .status()?
-                    .success()
-                {
-                    return Err(CruiseError::Other(
-                        "child base ancestry cannot be established".into(),
-                    ));
-                }
-            }
-            let merge = Command::new("git")
-                .arg("-C")
-                .arg(anchor)
-                .args(["merge-tree", "--write-tree", tip, result])
-                .output()?;
-            if merge.status.code() != Some(1) {
-                return Err(CruiseError::Other(
-                    "integration conflict cannot be established safely".into(),
-                ));
-            }
-        }
-        _ => {
-            return Err(CruiseError::Other(
-                "previous task attempt is not safely retryable".into(),
-            ));
-        }
-    }
+    validate_retry_phase(goal, previous, &child, &snapshot.repository, anchor, tip)?;
     let number = previous
         .attempt
         .checked_add(1)
