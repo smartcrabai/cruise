@@ -447,6 +447,7 @@ impl CheckEvidence {
 }
 
 /// Inputs for executing one approved verification check.
+#[derive(Clone, Copy)]
 pub struct VerificationCheck<'a> {
     pub repo: &'a Path,
     pub worktree: &'a Path,
@@ -482,6 +483,8 @@ fn run_verification_check_inner(
     check: VerificationCheck<'_>,
     goal_id: Option<&str>,
 ) -> Result<CheckEvidence, String> {
+    use std::process::Stdio;
+
     let VerificationCheck {
         repo,
         worktree,
@@ -494,7 +497,6 @@ fn run_verification_check_inner(
         stderr_log,
         cancel,
     } = check;
-    use std::process::Stdio;
     if check_id.trim().is_empty() || argv.is_empty() || argv[0].is_empty() {
         return Err("invalid approved check".into());
     }

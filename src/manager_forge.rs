@@ -407,6 +407,7 @@ pub(crate) fn push(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct CreateRequest<'a> {
     pub source: &'a str,
     pub target: &'a str,
