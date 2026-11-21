@@ -3501,11 +3501,22 @@ impl CruiseApplication {
     }
 
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "central policy for session menu actions"
+    )]
     pub fn capabilities(&self, state: &SessionState) -> Vec<SessionAction> {
         let live_foreign_runner = matches!(
             &state.phase,
             SessionPhase::Planned | SessionPhase::Failed(_) | SessionPhase::Suspended
         ) && state.live_foreign_runner_pid().is_some();
+        if state.exec && matches!(state.phase, SessionPhase::Failed(_)) {
+            return if live_foreign_runner || self.runtime.active_identity(&state.id).is_some() {
+                Vec::new()
+            } else {
+                vec![SessionAction::Resume, SessionAction::Delete]
+            };
+        }
         let usable_plan =
             state.plan_error.is_none() && state.has_usable_plan(&self.manager.sessions_dir());
         let mut actions = Vec::new();
@@ -4098,8 +4109,12 @@ impl CruiseApplication {
         log_sink: Option<Arc<dyn LogSink>>,
     ) -> Result<SessionState> {
         let id = claim.session_id().to_owned();
-        self.run_claimed(&id, &claim, request, sink, log_sink, false)
-            .await
+        let result = self
+            .run_claimed(&id, &claim, request, Arc::clone(&sink), log_sink, false)
+            .await;
+        drop(claim);
+        sink.operation_finished(&id)?;
+        result
     }
 
     /// Retry publication without executing the workflow again.
@@ -4477,10 +4492,12 @@ impl CruiseApplication {
         let message = error.to_string();
         state.pr_skipped_reason = None;
         if matches!(&error, CruiseError::Interrupted) {
-            state.phase = SessionPhase::Suspended;
-            state.clear_pending_input();
-            state.clear_runner();
-            self.manager.save(&state)?;
+            if !(state.exec && matches!(state.phase, SessionPhase::Failed(_))) {
+                state.phase = SessionPhase::Suspended;
+                state.clear_pending_input();
+                state.clear_runner();
+                self.manager.save(&state)?;
+            }
             sink.send(ApplicationEvent::RunCancelled {
                 session_id: id.to_string(),
             })?;
@@ -4489,11 +4506,7 @@ impl CruiseApplication {
             state.completed_at = Some(crate::session::current_iso8601());
             state.clear_pending_input();
             state.clear_runner();
-            self.manager.save(&state)?;
-            sink.send(ApplicationEvent::RunFailed {
-                session_id: id.to_string(),
-                error: message,
-            })?;
+            save_run_failure(&self.manager, id, &**sink, &state, message)?;
         }
         Err(error)
     }
@@ -4501,15 +4514,18 @@ impl CruiseApplication {
     async fn finish_setup_failure(
         &self,
         id: &str,
+        is_exec: bool,
         error: CruiseError,
         sink: &Arc<dyn ApplicationEventSink>,
     ) -> Result<SessionState> {
         let finalize = crate::telemetry::Operation::phase("finalize");
         let result = async {
-            if matches!(
-                &error,
-                CruiseError::AgentAuthExpired(_) | CruiseError::BaseCiFailed(_)
-            ) {
+            if !is_exec
+                && matches!(
+                    &error,
+                    CruiseError::AgentAuthExpired(_) | CruiseError::BaseCiFailed(_)
+                )
+            {
                 sink.send(ApplicationEvent::RunFailed {
                     session_id: id.to_string(),
                     error: error.to_string(),
@@ -4535,24 +4551,15 @@ impl CruiseApplication {
         batch_started: bool,
     ) -> Result<SessionState> {
         let _sleep_guard = crate::sleep_guard::prevent_sleep_for_run();
-        let initial_session = self.manager.load_with_fingerprint(id).ok();
-        let is_exec = initial_session
-            .as_ref()
-            .is_some_and(|(state, _)| state.exec);
-        // Exec is a distinct CLI operation even though its transient session follows the run path.
+        let initial_session = self.manager.load(id).ok();
+        let is_exec = initial_session.as_ref().is_some_and(|state| state.exec);
+        // Exec is a distinct CLI operation even though its session follows the run path.
         let execution =
             crate::telemetry::Operation::execution(if is_exec { "exec" } else { "run" }, id, None);
         let terminal_sink = Arc::clone(&sink);
-        if let Some((state, _)) = initial_session.as_ref() {
+        if let Some(state) = initial_session.as_ref() {
             execution.set_workflow(&state.config);
         }
-        let (initial_base_dir, exec_initial) = match initial_session {
-            Some((state, fingerprint)) => {
-                let exec_initial = state.exec.then_some((state.phase, fingerprint));
-                (Some(state.base_dir), exec_initial)
-            }
-            None => (None, None),
-        };
         let mut unresolved_failed_steps = false;
         let status_sink = log_sink.as_ref().map(|log_sink| {
             let log_sink = Arc::clone(log_sink);
@@ -4572,7 +4579,7 @@ impl CruiseApplication {
             sink,
             (log_sink, batch_started),
             &mut unresolved_failed_steps,
-            (&execution, initial_base_dir.as_deref()),
+            (&execution, initial_session.as_ref()),
         );
         let result = if let Some(status_sink) = status_sink {
             crate::console_mode::scope_status_sink(status_sink, run)
@@ -4587,15 +4594,19 @@ impl CruiseApplication {
         } else {
             finish_session_operation(execution, &result, unresolved_failed_steps);
         }
-        let release_result = terminal_sink.operation_finished(id);
-        if let Some((initial_phase, fingerprint)) = exec_initial {
+        if is_exec && result.is_ok() {
             let _guard = execution_context.attach();
-            self.manager
-                .dispose_exec_session_if_owned(id, &initial_phase, fingerprint);
+            self.manager.dispose_completed_exec(id);
         }
-        release_result?;
+        if batch_started {
+            terminal_sink.operation_finished(id)?;
+        }
         result
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "run admission and execution share one claim"
+    )]
     async fn run_claimed_inner(
         &self,
         claim: &OperationClaim,
@@ -4603,7 +4614,7 @@ impl CruiseApplication {
         sink: Arc<dyn ApplicationEventSink>,
         (log_sink, batch_started): (Option<Arc<dyn LogSink>>, bool),
         unresolved_failed_steps: &mut bool,
-        (execution, initial_base_dir): (&crate::telemetry::Operation, Option<&Path>),
+        (execution, initial_session): (&crate::telemetry::Operation, Option<&SessionState>),
     ) -> Result<SessionState> {
         let _quiet = crate::console_mode::quiet_guard();
         let id = claim.session_id();
@@ -4616,10 +4627,17 @@ impl CruiseApplication {
             let Err(error) = setup_result else {
                 unreachable!("failed setup cannot succeed")
             };
-            if let Some(base_dir) = initial_base_dir {
-                execution.set_session_paths(base_dir, None);
+            if let Some(state) = initial_session {
+                execution.set_session_paths(&state.base_dir, None);
             }
-            return self.finish_setup_failure(id, error, &sink).await;
+            return self
+                .finish_setup_failure(
+                    id,
+                    initial_session.is_some_and(|state| state.exec),
+                    error,
+                    &sink,
+                )
+                .await;
         };
         execution.set_session_paths(&setup.state.base_dir, Some(setup.workspace.path()));
 
@@ -4635,7 +4653,7 @@ impl CruiseApplication {
             return result;
         }
 
-        let inputs_result = prepare_run_inputs(&self.manager, &mut setup);
+        let inputs_result = prepare_run_inputs(&self.manager, &mut setup, claim);
         if inputs_result.is_err() {
             prepare.finish_result(&inputs_result);
             let Err(error) = inputs_result else {
@@ -4717,11 +4735,13 @@ impl CruiseApplication {
             &setup.workspace,
             setup.repo_clone_created,
         );
-        setup.state.phase = SessionPhase::Suspended;
-        setup.state.pr_skipped_reason = None;
-        setup.state.clear_pending_input();
-        setup.state.clear_runner();
-        self.manager.save(&setup.state)?;
+        if !(setup.state.exec && matches!(setup.state.phase, SessionPhase::Failed(_))) {
+            setup.state.phase = SessionPhase::Suspended;
+            setup.state.pr_skipped_reason = None;
+            setup.state.clear_pending_input();
+            setup.state.clear_runner();
+            self.manager.save(&setup.state)?;
+        }
         sink.send(ApplicationEvent::RunCancelled {
             session_id: id.to_string(),
         })?;
@@ -4851,6 +4871,7 @@ struct RunSetup {
     rate_limit_retries: usize,
     retry_policy: Option<Arc<crate::retry::RetryPolicy>>,
     dag: crate::graph::ExecutionGraph,
+    exec_resume: Option<crate::graph::persistence::ExecResume>,
     config_context: Option<crate::request_context::RequestContext>,
 }
 
@@ -4960,6 +4981,7 @@ struct PreparedRunGraph {
     max_retries: usize,
     retry_policy: Option<Arc<crate::retry::RetryPolicy>>,
     dag: crate::graph::ExecutionGraph,
+    exec_resume: Option<crate::graph::persistence::ExecResume>,
 }
 fn execution_workspace_mode(
     state: &SessionState,
@@ -5072,6 +5094,7 @@ fn setup_run_blocking(
         rate_limit_retries: options.rate_limit_retries,
         retry_policy: graph.retry_policy,
         dag: graph.dag,
+        exec_resume: graph.exec_resume,
         config_context: options.config_context,
     })
 }
@@ -5084,8 +5107,10 @@ fn prepare_run_graph(
     after_pr: bool,
     max_retries_override: Option<usize>,
 ) -> Result<PreparedRunGraph> {
-    let max_retries = max_retries_override
-        .unwrap_or_else(|| crate::config::resolve_effective_max_retries(None, &config));
+    let max_retries = crate::config::resolve_effective_max_retries(
+        state.exec_retry_budget(max_retries_override),
+        &config,
+    );
     crate::config::validate_group_retry_budget(&config, max_retries)?;
     let retry_policy = crate::retry::policy_for_config(config.retry.clone());
     let compiled = crate::workflow::compile(config)?;
@@ -5097,8 +5122,23 @@ fn prepare_run_graph(
         )?;
     }
     let mut dag = crate::graph::build_graph(&compiled, max_retries)?;
+    let mut exec_resume = None;
     let entry = if after_pr {
         dag.start.clone()
+    } else if state.exec {
+        let failed = matches!(state.phase, SessionPhase::Failed(_));
+        let selection = crate::graph::prepare_exec_resume(
+            &mut dag,
+            &manager.dag_path(id),
+            state.has_dag || state.current_step.is_some(),
+            failed,
+            state.execution_id.as_deref(),
+        )?;
+        let entry = selection.node.clone();
+        if failed || selection.rewound {
+            exec_resume = Some(selection);
+        }
+        entry
     } else {
         crate::graph::persistence::prepare_resume(
             &mut dag,
@@ -5122,6 +5162,7 @@ fn prepare_run_graph(
         max_retries,
         retry_policy,
         dag,
+        exec_resume,
     })
 }
 async fn prepare_run_setup(
@@ -5165,16 +5206,37 @@ struct RunInputs {
     flags: crate::flags::FlagValues,
 }
 
-fn prepare_run_inputs(manager: &SessionManager, setup: &mut RunSetup) -> Result<RunInputs> {
+fn prepare_run_inputs(
+    manager: &SessionManager,
+    setup: &mut RunSetup,
+    claim: &OperationClaim,
+) -> Result<RunInputs> {
     let plan_path = setup.state.plan_path(&manager.sessions_dir());
     let mut vars = setup.state.run_variables(&manager.sessions_dir())?;
     vars.set_named_file(crate::session::PLAN_VAR, plan_path);
     vars.set_artifacts_root(setup.state.artifacts_path(&manager.sessions_dir()));
     let tracker = crate::file_tracker::FileTracker::with_root(setup.workspace.path().to_path_buf());
-    setup.state.pr_skipped_reason = None;
-    setup.state.phase = SessionPhase::Running;
-    setup.state.set_runner_to_current_process();
-    manager.save(&setup.state)?;
+    let is_exec = setup.state.exec;
+    let mut persist = || {
+        if let Some(selection) = setup.exec_resume.as_ref().filter(|resume| resume.rewound) {
+            // The graph is authoritative even if the display-state save fails.
+            crate::graph::persistence::save_graph(&setup.dag, &manager.dag_path(&setup.state.id))?;
+            setup.state.current_step = Some(selection.node.clone());
+            setup.state.current_step_is_node_id = true;
+            setup.state.has_dag = true;
+        }
+        setup.state.pr_skipped_reason = None;
+        setup.state.phase = SessionPhase::Running;
+        setup.state.set_runner_to_current_process();
+        manager.save(&setup.state)
+    };
+    if is_exec {
+        if !claim.runtime.persist_if_active(claim, persist)? {
+            return Err(CruiseError::Interrupted);
+        }
+    } else {
+        persist()?;
+    }
     Ok(RunInputs {
         vars,
         tracker,
@@ -5209,6 +5271,9 @@ fn emit_run_started(
         setup.state.clear_pending_input();
         let _ = manager.save(&setup.state);
         return Err(error);
+    }
+    if let Some(selection) = &setup.exec_resume {
+        crate::status_eprintln!("Resuming exec at step '{}'.", selection.node);
     }
     Ok(())
 }
@@ -5269,10 +5334,11 @@ async fn run_engine_steps(
              + Send
              + Sync
      ),
+    exec: bool,
 ) -> Result<crate::engine::ExecutionResult> {
     crate::retry::with_active_policy(
         retry_policy.cloned(),
-        crate::engine::execute_steps_with_graph(ctx, vars, tracker, dag, on_node_start),
+        crate::engine::execute_steps_with_graph_mode(ctx, vars, tracker, dag, on_node_start, exec),
     )
     .await
 }
@@ -5588,6 +5654,7 @@ async fn execute_run(
             &mut inputs.tracker,
             &mut setup.dag,
             &on_node_start,
+            setup.state.exec,
         )
         .with_context(workflow.context())
         .await
@@ -5781,12 +5848,30 @@ fn fail_run(
     setup.state.completed_at = Some(crate::session::current_iso8601());
     setup.state.clear_pending_input();
     setup.state.clear_runner();
-    manager.save(&setup.state)?;
+    save_run_failure(manager, id, sink, &setup.state, error.to_string())?;
+    Err(error)
+}
+
+fn save_run_failure(
+    manager: &SessionManager,
+    id: &str,
+    sink: &dyn ApplicationEventSink,
+    state: &SessionState,
+    message: String,
+) -> Result<()> {
+    if let Err(error) = manager.save(state) {
+        if state.exec {
+            sink.send(ApplicationEvent::RunFailed {
+                session_id: id.to_string(),
+                error: error.to_string(),
+            })?;
+        }
+        return Err(error);
+    }
     sink.send(ApplicationEvent::RunFailed {
         session_id: id.to_string(),
-        error: error.to_string(),
-    })?;
-    Err(error)
+        error: message,
+    })
 }
 
 fn finish_run(

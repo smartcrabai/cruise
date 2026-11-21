@@ -120,6 +120,7 @@ pub(crate) fn sidebar_vm(state: &WebState, selected_id: Option<&str>) -> Result<
         .application
         .list_sessions_with_exec()?
         .into_iter()
+        .filter(visible_in_sidebar)
         .map(|session| {
             if matches!(session.phase, crate::session::SessionPhase::Running) {
                 state
@@ -206,13 +207,17 @@ pub(crate) fn session_sync_partials(state: &WebState, id: &str, version: &str) -
     Ok(out)
 }
 
+fn visible_in_sidebar(session: &crate::session::SessionState) -> bool {
+    !(session.exec && matches!(session.phase, crate::session::SessionPhase::Failed(_)))
+}
+
 pub(crate) fn row_partial(state: &WebState, session_id: &str) -> Result<String> {
     let runtime = state.application.runtime();
-    let session = super::dto::session_dto(
-        &state.application,
-        state.application.reconcile_session(session_id)?,
-        false,
-    );
+    let session = state.application.reconcile_session(session_id)?;
+    if !visible_in_sidebar(&session) {
+        return sidebar_list_partial(state, None);
+    }
+    let session = super::dto::session_dto(&state.application, session, false);
     let fixing = is_planning(runtime.active_operation(session_id)) || session.fix_in_progress;
     let vm = session_row(&session, None, fixing);
     let html = state

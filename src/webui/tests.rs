@@ -335,6 +335,18 @@ async fn exec_suspended_session_is_visible_in_sidebar_but_not_run_all() {
         .map(|session| super::dto::session_dto(&harness.state.application, session, false))
         .collect();
     assert_eq!(super::view::runnable_count(&sessions), 0);
+    external_edit(&harness, &session.id, |state| {
+        state.phase = crate::session::SessionPhase::Failed("fixture command failed".into());
+    });
+    let (status, _, html) = get(&harness, "/webui/sidebar", &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(!html.contains(&session.id), "{html}");
+    let update = super::partials::row_partial(&harness.state, &session.id)
+        .unwrap_or_else(|error| panic!("sidebar update: {error}"));
+    assert!(
+        !update.is_empty() && !update.contains(&session.id),
+        "{update}"
+    );
 }
 
 fn webui_root() -> std::path::PathBuf {

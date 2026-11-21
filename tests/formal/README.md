@@ -209,6 +209,43 @@ CP-01 through CP-08 are reconstructed repository contract identifiers, not recov
 
 The engine checks budget before incrementing counters, uses checked additions, saves rejected pending outcomes and saves accepted transitions before continuing. A completed graph bypasses the execution loop. `prepare_resume` treats node-ID/automatic position as checkpoint-authoritative, while a human step-name override explicitly clears pending/completed position but retains history. The models deliberately exclude this reposition operation. Runtime restoration is exercised with fresh runtime objects and stale caller variables, not just equality of synthetic records.
 
+## Exec recovery contract
+
+Run `bash scripts/check_exec_recovery_specs.sh` from the repository on macOS
+arm64 or Linux x86_64 with Node 26.13.1 and Rust 1.99.1 available. The production
+scenarios also need Bats with tag filtering, Expect, Git, curl and jq. The dedicated
+`.github/workflows/exec-recovery-specs.yml` installs Bats 1.10.0 and Expect
+5.45.4 on Ubuntu 24.04 and runs the same suite without provider credentials.
+
+The Quint and Alloy models abstract one session, the live checkpoint, the
+first unresolved failure, and the prefix bookkeeping restored on retry.
+They distinguish a failed rewind from live continuation, and keep already
+produced effects when retrying. They do not prove arbitrary graph topology,
+filesystem durability, or exactly-once external effects. Alloy 6.2.0 puts
+`expect 0` and `expect 1` on model commands rather than on its CLI. Its runner
+selects every command and validates the JSON receipt. The Gherkin scenarios
+run the production launcher and daemon with isolated XDG state and real
+shell effects. Reports are under `target/formal-reports/exec-recovery*/`.
+
+The aggregate `commands.log` lists the three component runner invocations.
+The Quint component’s `verify.log` records the expanded verifier arguments,
+including the dynamically allocated loopback endpoint. The commands below use
+`Q=tests/formal/node_modules/.bin/quint`, `M=tests/formal/exec_recovery.qnt`,
+and `R` set to a fresh absolute report directory.
+
+```sh
+bash scripts/setup_formal.sh
+source target/formal-tools/env.sh
+"$Q" typecheck "$M"
+"$Q" test "$M" --main exec_recovery --backend typescript --seed 20261121 --out-itf "$R/test_{test}_{seq}.itf.json"
+"$Q" run "$M" --main exec_recovery --init init --step step --invariant safety --backend typescript --seed 20261121 --max-samples 1000 --max-steps 30 --out-itf "$R/simulation_{seq}.itf.json"
+node scripts/formal/verify_quint.cjs "$Q" "$M" exec_recovery 15 "$R/counterexample.itf.json"
+java -jar target/formal-tools/alloy-6.2.0.jar help exec
+java --enable-native-access=ALL-UNNAMED -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --solver sat4j --output "$R/alloy" --type json tests/formal/exec_recovery.als
+node scripts/formal/check_alloy_receipt.cjs tests/formal/exec_recovery.als "$R/alloy/receipt.json"
+cargo +1.99.1 test --locked --all-features --test exec_recovery_bdd
+```
+
 ## Pins and real commands
 
 Run from the repository root with Node **26.13.1** on PATH and Rust **1.99.1** installed. Run Cargo-based checks sequentially when they share `CARGO_TARGET_DIR`: concurrent default-feature, all-feature and A/B smoke builds can replace the sibling CLI binaries that integration tests execute. CI jobs have separate runner filesystems, and the existing production job runs tests before the smoke build.
