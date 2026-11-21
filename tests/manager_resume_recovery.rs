@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use base64::Engine as _;
 use cruise::session::{ManagedChildOwner, SessionManager, SessionPhase, SessionState};
 use cruise::session_config::SessionConfigRef;
 use serde_json::{Value, json};
@@ -102,6 +104,21 @@ fn write_goal_record(root: &Path, common: &Path, goal: &Value) -> PathBuf {
     record
 }
 
+#[cfg(windows)]
+fn windows_marker_command(marker: &Path, release: &Path) -> String {
+    let quote_path = |path: &Path| path.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$marker = '{}'; $release = '{}'; [System.IO.File]::AppendAllText($marker, 'started' + [Environment]::NewLine); while (!(Test-Path -LiteralPath $release)) {{ Start-Sleep -Milliseconds 100 }}",
+        quote_path(marker),
+        quote_path(release),
+    );
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    format!(
+        "powershell.exe -NoProfile -EncodedCommand {}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
 impl Fixture {
     fn new(status: &str, pending: bool, starting: bool) -> Self {
         let home = TempDir::new().unwrap_or_else(|error| panic!("test operation failed: {error}"));
@@ -141,11 +158,7 @@ impl Fixture {
             release.display()
         );
         #[cfg(windows)]
-        let command = format!(
-            "echo started>>\"{}\" & powershell -NoProfile -Command \"while (!(Test-Path -LiteralPath '{}')) {{ Start-Sleep -Milliseconds 100 }}\"",
-            marker.display(),
-            release.display().to_string().replace('\'', "''")
-        );
+        let command = windows_marker_command(&marker, &release);
         let workflow: cruise::config::WorkflowConfig = serde_json::from_value(json!({
             "create_pr":false, "cleanup_after_pr":false, "force_exec":false,
             "steps":{"run":{"command":command}}
@@ -350,6 +363,26 @@ async fn manager_snapshot(fixture: &Fixture, instance: &Value) -> Value {
         .json::<Value>()
         .await
         .unwrap_or_else(|error| panic!("parse snapshot: {error}"))
+}
+async fn wait_for_child_marker(fixture: &Fixture, instance: &Value) {
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    while !fixture.marker.exists() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let snapshot = manager_snapshot(fixture, instance).await;
+    let child = fixture
+        .sessions
+        .load("child")
+        .unwrap_or_else(|error| panic!("load child after resume timeout: {error}"));
+    let daemon_log = fs::read_to_string(fixture.home.path().join("state/cruise/daemon/daemon.log"))
+        .unwrap_or_default();
+    assert!(
+        fixture.marker.exists(),
+        "child marker timeout: goal={} child_phase={:?} child_runner={:?} snapshot={snapshot} daemon_log={daemon_log}",
+        fixture.goal(),
+        child.phase,
+        child.live_foreign_runner_pid()
+    );
 }
 
 impl Drop for Fixture {
@@ -657,7 +690,7 @@ async fn explicit_child_resume_runs_existing_attempt_and_pause_stops_it() {
             .await
             .unwrap_or_else(|error| panic!("test operation failed: {error}"))
     );
-    eventually(|| fixture.marker.exists()).await;
+    wait_for_child_marker(&fixture, &instance).await;
     let goal = fixture.goal();
     assert_eq!(
         goal["execution"]["attempts"]
@@ -760,7 +793,7 @@ async fn failed_child_is_visible_and_independent_work_continues() {
             .all(|attempt| attempt["task_id"] != "dependent"),
         "{goal}"
     );
-    eventually(|| fixture.marker.exists()).await;
+    wait_for_child_marker(&fixture, &instance).await;
     assert!(
         child.worktree_path.as_deref().is_some_and(Path::is_dir),
         "failed child worktree was not preserved"
