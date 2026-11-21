@@ -86,10 +86,17 @@ impl Fixture {
         );
         let marker = root.join("started");
         let release = root.join("release");
+        #[cfg(not(windows))]
         let command = format!(
             "echo started >> '{}'; while [ ! -f '{}' ]; do sleep 0.1; done",
             marker.display(),
             release.display()
+        );
+        #[cfg(windows)]
+        let command = format!(
+            "echo started>>\"{}\" & powershell -NoProfile -Command \"while (!(Test-Path -LiteralPath '{}')) {{ Start-Sleep -Milliseconds 100 }}\"",
+            marker.display(),
+            release.display().to_string().replace('\'', "''")
         );
         let workflow: cruise::config::WorkflowConfig = serde_json::from_value(json!({
             "create_pr":false, "cleanup_after_pr":false, "force_exec":false,
@@ -402,7 +409,13 @@ async fn paused_pending_resume_survives_restart_then_runs_once_after_goal_resume
         fixture.marker.exists()
     })
     .await;
-    assert_eq!(fs::read_to_string(&fixture.marker).unwrap(), "started\n");
+    assert_eq!(
+        fs::read_to_string(&fixture.marker)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["started"]
+    );
     let goal = fixture.goal();
     assert_eq!(goal["execution"]["attempts"].as_array().unwrap().len(), 1);
     assert_eq!(goal["execution"]["attempts"][0]["session_id"], "child");
@@ -419,7 +432,13 @@ async fn paused_pending_resume_survives_restart_then_runs_once_after_goal_resume
     })
     .await;
     assert_eq!(fixture.goal()["status"], "paused");
-    assert_eq!(fs::read_to_string(&fixture.marker).unwrap(), "started\n");
+    assert_eq!(
+        fs::read_to_string(&fixture.marker)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["started"]
+    );
 }
 
 #[tokio::test]
@@ -441,7 +460,13 @@ async fn explicit_child_resume_runs_existing_attempt_and_pause_stops_it() {
     let goal = fixture.goal();
     assert_eq!(goal["execution"]["attempts"].as_array().unwrap().len(), 1);
     assert_eq!(goal["execution"]["attempts"][0]["session_id"], "child");
-    assert_eq!(fs::read_to_string(&fixture.marker).unwrap(), "started\n");
+    assert_eq!(
+        fs::read_to_string(&fixture.marker)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["started"]
+    );
     let response = fixture
         .action(&instance, json!({"type":"pause","goal_id":"g"}))
         .await;
@@ -454,7 +479,13 @@ async fn explicit_child_resume_runs_existing_attempt_and_pause_stops_it() {
     })
     .await;
     assert_eq!(fixture.goal()["status"], "paused");
-    assert_eq!(fs::read_to_string(&fixture.marker).unwrap(), "started\n");
+    assert_eq!(
+        fs::read_to_string(&fixture.marker)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["started"]
+    );
 }
 
 #[tokio::test]
