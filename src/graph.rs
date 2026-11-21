@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 pub mod persistence;
+pub(crate) use persistence::prepare_exec_resume;
 pub mod validation;
 pub type NodeId = String;
 pub const CHECKPOINT_VERSION: u32 = 1;
@@ -58,6 +59,19 @@ pub struct ExecutionState {
     pub edge_counts: HashMap<(String, String), EdgeCounter>,
     pub group_counts: HashMap<String, usize>,
     pub runtime: NodeRuntime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_failure: Option<ExecFailure>,
+}
+
+/// The first unresolved exec failure, with its pre-attempt resume state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecFailure {
+    pub unresolved: usize,
+    pub node: NodeId,
+    pub runtime: NodeRuntime,
+    #[serde(with = "edge_counter_records")]
+    pub edge_counts: HashMap<(String, String), EdgeCounter>,
+    pub group_counts: HashMap<String, usize>,
 }
 
 mod edge_counter_records {
@@ -596,6 +610,41 @@ impl ExecutionGraph {
                     "checkpoint pending transition no longer exists".into(),
                 ));
             }
+        }
+        self.validate_exec_failure(other)?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_exec_failure(&self, other: &Self) -> Result<()> {
+        let Some(failure) = &other.state.exec_failure else {
+            return Ok(());
+        };
+        let pairs = self.edge_pairs();
+        if failure.unresolved == 0
+            || (!other.state.completed && other.state.current.is_none())
+            || !self.nodes.get(&failure.node).is_some_and(|node| {
+                node.id == failure.node
+                    && other.nodes.get(&failure.node).is_some_and(|saved| {
+                        node.step_name == saved.step_name
+                    })
+            })
+            || failure.edge_counts.iter().any(|(pair, prefix)| {
+                !pairs.contains(pair)
+                    || prefix.traversals == 0
+                    || prefix.budgeted_traversals > prefix.traversals
+                    || other.state.edge_counts.get(pair).is_none_or(|live| {
+                        prefix.traversals > live.traversals
+                    })
+            })
+            // Native resync may reset live group and budgeted edge counts.
+            || failure.group_counts.iter().any(|(site, count)| {
+                *count == 0 || !self.group_sites.contains(site)
+            })
+        {
+            return Err(CruiseError::Other(
+                "checkpoint exec retry point or its traversal counters no longer match the graph"
+                    .into(),
+            ));
         }
         Ok(())
     }

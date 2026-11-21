@@ -302,6 +302,12 @@ Options:
 
 直接在当前目录运行 workflow steps：不生成计划、不创建 git worktree，也不会自动创建 PR。因等待输入而暂停的 session（`Running`），或因 Ctrl+C 中断的 session（`Suspended`）会保留，并可通过 `cruise run <id>` 恢复；exec session 不会被 `cruise run` 自动选中，也不会纳入 `cruise run --all`。允许存在未提交的更改；Cruise 会在这些更改之上运行，不会 stash、提交或重置工作树，并会警告 workflow 生成的文件可能与现有更改混在一起。仍然必须处于一个已附加的分支上。
 
+普通步骤出现未处理的非零退出时，后续步骤仍会执行；如果仍有未解决的失败，本次运行将以非零状态退出。失败会话保留原 ID、检查点、日志和工件，直至恢复成功或在 `cruise list` 中选择 **Delete**。这也适用于 `--instant` 和 `force_exec`。解决失败原因后，可在 `cruise list` 中选择 **Resume**，或运行 `cruise run <id>`。恢复会在原目录中执行，并要求检出原分支。可用 `cruise run <id> --dry-run` 预览恢复位置。
+
+恢复从第一个尚未解决的失败步骤开始。如果发生硬错误且此前没有未解决的失败，则从已保存的检查点继续。恢复位置及之后的步骤可能重新执行。Cruise 不会回滚工作文件或外部副作用。已启动的工作流如果检查点缺失、损坏或不兼容，恢复会报错，而不是从头开始。
+
+恢复时会沿用最初显式指定的 `--max-retries`，除非通过 `cruise run <id> --max-retries <N>` 覆盖。如果两次都未指定，则使用工作流默认值。`--rate-limit-retries` 仍按每次运行单独设置。
+
 `--instant` 会在内存中组装一个包含单个 implement step 的 workflow，不解析 workflow YAML。未指定时，`cruise exec` 仍使用常规配置解析。没有配置文件时，交互式终端会在分类选择器中提供内置 workflow；非交互执行会自动选择 `tdd`。Instant 要求非空白任务。Workflow 默认值可以在开头插入 command pre-steps；workflow 默认值和环境变量覆盖仍然生效，且 `CRUISE_SDK` / `CRUISE_MODEL` 优先于 `--sdk` / `--model`。
 
 ```sh
@@ -313,6 +319,8 @@ cruise exec --instant --dry-run "implement the feature"
 Review 会修复已确认的缺陷；当 review 轮次更改了文件时，会在指定轮数内重复执行（默认 2 轮）。某轮未产生更改时循环结束。验证命令按提供顺序在实现和 review 之后运行；命令失败会使运行失败，不会启动自动修复循环。`--max-retries`、`--rate-limit-retries` 和 `--dry-run` 也适用；若 `--max-retries` 预算小于 review 轮数，则无效。Instant 不声明 workflow flags，且不能与 `-c` 或 `-f` 同时使用。它要求在已附加分支的 git 仓库中运行。远程使用方式为 `cruise ssh <host> -- exec --instant "task"`。
 
 当 workflow 配置中设置了 `force_exec: true` 时，传统的位置参数形式 `cruise "task"`、`cruise plan "task"` 和 `cruise --plan "task"` 都会使用当前目录执行路径，不进行规划、不创建 worktree，也不创建 PR。`--no-force-exec`、`--repo`、`--grill`、issue 输入和图片附件会退出该模式；`--skip-planning` 和 `--no-interactive-planning` 不会退出。
+
+WebUI 的 Directory 来源提供 **Exec** 按钮；对于 `force_exec` workflow，**Execute** 会替代 **Create & plan**。两者都在指定的、已存在的绝对路径工作目录中直接执行。与 CLI 的退出方式不同，WebUI exec 会拒绝图片附件和 `#N` issue 输入，而不会悄悄转为规划；需要使用这些输入或为 `force_exec` workflow 规划时，请使用 **Create draft**。Repository 来源不会执行 exec。
 
 <a id="cruise---plan"></a>
 ## `cruise --plan`
@@ -390,6 +398,10 @@ Options:
 `cruise config --set-language ja` 会保存应用设置 `uiLanguage`（读取时也接受 `ui_language`）。使用 `--set-language auto` 可清除该设置，并恢复自动选择。支持的显式标签为 `en`、`zh-CN`、`es`、`fr`、`pt-BR`、`ja` 和 `ko`。大小写不敏感，且可用下划线替代连字符；但不接受 `pt` 和 `en-US` 等其他标签。`cruise config` 会报告生效的 `ui_language` 及其来源：`env`、`config`、`system` 或 `default`。
 
 CLI 的 UI 语言优先级为 `CRUISE_UI_LANGUAGE` > 应用设置 `uiLanguage` > 系统区域设置 > `en`。环境值为空或为 `auto`，以及配置值未设置或为 `auto`，都会使该层保持未指定。无效的环境值会以英语警告并忽略；CLI setter 和应用配置验证会拒绝无效值。
+
+应用配置也可以设置全局输出偏好；支持的键和优先级请参阅[全局输出偏好](configuration.md#output-preferences)。这些偏好不会改变界面语言。
+
+`cruise config` 会以 JSON 值行显示已设置的偏好，例如 `languages = {"plan":"Japanese","pr":"English"}`、`commit_message_template = "{title} [{session_id}]"` 和 `pr_body_template = "## Summary\n{body}"`。更新其他应用设置时会保留这些值。之后编辑 `default.yaml` 或应用配置不会更改已保存的快照；通过 CLI 请求显式发送的受支持 workflow override 环境变量仍会在该请求期间于内存中覆盖快照值，但不会重写快照。
 
 `cruise config --set-auto-requeue-max-attempts <N>` 会为 CLI 和 WebUI Run All 设置 `run_all_auto_requeue_max_attempts`。CLI flag `--auto-requeue-max-attempts <N>` 会在单个批次中覆盖该值。
 
@@ -514,6 +526,8 @@ cruise clean
 ```
 
 通过 `gh pr view`（GitLab 上为 `glab mr view`）检查每个 Completed session 的 PR 状态。PR 已关闭或已合并的 session 会连同其 worktree（以及任何残留的 `--repo` 克隆）一起删除。若 Planned current-branch session 从未启动，且其 `plan.md` 缺失或为空，也会被删除。Suspended session 和其他 planned session 会继续保留以供恢复。
+
+成功的 exec 会话会自动删除。`cruise clean` 不会删除失败的 exec 会话。若要保留工作文件并丢弃会话，请在 `cruise list` 中选择 **Delete**。
 
 > **注意：** 若 `gh pr create` 失败或未执行，session 可能没有 PR URL。没有 PR URL 的 PR-backed session 会保留；请检查 session 日志，或手动使用 `gh pr create` 重新创建 PR。
 

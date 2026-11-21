@@ -51,15 +51,15 @@ Uncategorized user and built-in workflows appear in `Others` or the configured `
 
 `$XDG_CONFIG_HOME/cruise/default.yaml` supplies user defaults, and `./.cruise/default.yaml` supplies project defaults. When `XDG_CONFIG_HOME` is unset, the path defaults to `~/.config/cruise/default.yaml` on macOS/Linux, and to `%APPDATA%\cruise\default.yaml` on Windows (`~/.config/cruise/default.yaml` if `APPDATA` is unset). These files provide defaults for fields a workflow leaves unset and cannot be selected as workflows (`-c` or `CRUISE_CONFIG` pointing at them is an error).
 
-Precedence, highest first where applicable: per-invocation CLI flags (including `-c` for workflow selection) > configuration environment overrides > workflow file > `./.cruise/default.yaml` > `$XDG_CONFIG_HOME/cruise/default.yaml` > application model defaults (`config.json` or `config.yaml`) > built-in defaults. Step-level model overrides still take precedence for ordinary prompts.
+Precedence, highest first where applicable: per-invocation CLI flags (including `-c` for workflow selection) > configuration environment overrides > workflow file > `./.cruise/default.yaml` > `$XDG_CONFIG_HOME/cruise/default.yaml` > application defaults (including model and global output preferences) > built-in defaults. `languages.plan` and `languages.pr` resolve independently as described in [Prompt Languages](#prompt-languages). Step-level model overrides still take precedence for ordinary prompts.
 
 When an actual jcode prompt has no effective model, Cruise creates `$XDG_CONFIG_HOME/cruise/default.yaml` (or the platform's normal user config path) with `model: null` and stops before starting jcode. Edit that user-level file to set a real `provider/model[:effort]` reference or bare model. For a new session, you can instead set `model` in `config.json`, `config.yaml`, the workflow, or `CRUISE_MODEL`; planning calls can use `plan_model` / `CRUISE_PLAN_MODEL`.
 
-After updating settings, retry the command that initiated the request: use `cruise run <SESSION>` for a failed run session, or rerun `cruise plan` or `cruise exec` for those requests. File-backed sessions reload defaults, but snapshot sessions do not reapply later defaults or environment changes; start a new snapshot session to use updated settings.
+After updating settings, retry the command that initiated the request: use `cruise run <SESSION>` for a failed run session, or rerun `cruise plan` or `cruise exec` for those requests. File-backed sessions reload defaults. Edits to `default.yaml` or application settings do not change a saved snapshot; supported workflow-override environment variables explicitly sent with a CLI request still override its values in memory for that request, without rewriting the snapshot. Start a new snapshot session to capture other configuration changes.
 
 - `env` and `mcp_servers` merge per key (higher layer wins).
 - `command` and `sdk` form one pair: if a layer sets either, the lower layers' pair is ignored.
-- Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `languages`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`, `formal_verify`) are taken from the highest layer that sets them. Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
+- Other fields (`model`, `plan_model`, `subagent_model`, `max_retries`, `interactive_planning`, `cleanup_after_pr`, `force_exec`, `computer_use`, `permission`, `disallowed_tools`, `retry`, `formal_verify`, `commit_message_template`, `pr_body_template`) are taken from the highest layer that sets them. `languages.plan` and `languages.pr` are resolved independently; see [Prompt Languages](#prompt-languages). Restriction lists replace across layers; explicit workflow `disallowed_tools: []` clears inherited defaults.
 - `base_branch`, `auto_fetch`, and `check_base_ci` are defaults-only keys, with project values overriding user values. For `--repo` sessions, the base-CI check reads user defaults only, not the cloned repository's project defaults. `auto_fetch: true` requires a nonempty `base_branch` after merging; `check_base_ci` defaults to `true`.
 - If defaults specify a backend (`command` / `sdk`) different from the workflow's, validation fails when they fill an unset backend-specific field (`model`, `retry`, `mcp_servers`, etc.). Set the field in the workflow or remove it from `default.yaml`.
 
@@ -200,7 +200,7 @@ steps:
 
 UI display language is independent of prompt languages. Configure it with application `uiLanguage` or `CRUISE_UI_LANGUAGE`; a WebUI browser can override the server default with its own language selector. These settings do not change `languages.pr` or `languages.plan`.
 
-`languages.pr` controls the language for auto-generated PR titles and bodies, and `languages.plan` controls the language for Cruise's built-in planning prompts. `CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override the corresponding YAML values; blank environment values are ignored. Otherwise, the first non-empty of `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE` is mapped once (an unsupported value does not fall through), then `English`.
+`languages.pr` controls the language for auto-generated PR titles and bodies, and `languages.plan` controls the language for Cruise's built-in planning prompts. Workflow and `default.yaml` values take precedence over the corresponding application preference; application values fill a missing plan or PR language independently, including when only one `languages` member is configured. The deprecated top-level `pr_language` and `plan_language` fields also count as explicit values. `CRUISE_LANGUAGE_PR` and `CRUISE_LANGUAGE_PLAN` override configured values; blank environment values are ignored. If no configured value applies, the first non-empty of `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LANGUAGE` is mapped once (an unsupported value does not fall through), then `English`.
 
 ```yaml
 languages:
@@ -213,7 +213,7 @@ The effective values are available to built-in templates as `{pr.language}` and 
 <a id="commit-and-pr-templates"></a>
 ### Commit and PR Templates
 
-Optional top-level string keys `commit_message_template` and `pr_body_template` customize the host-created commit and PR body in the worktree PR creation path. Set them in the workflow or in user `<config_dir>/default.yaml` or project `.cruise/default.yaml`. Precedence is workflow > project defaults > user defaults > unset. They are not CLI options or environment overrides.
+Optional top-level string keys `commit_message_template` and `pr_body_template` customize the host-created commit and PR body in the worktree PR creation path. Set them in the workflow, user `<config_dir>/default.yaml`, project `.cruise/default.yaml`, or application `config.yaml` / `config.json`; application config also accepts `commitMessageTemplate` and `prBodyTemplate`. Precedence is workflow > project defaults > user defaults > application settings > unset, then `CRUISE_COMMIT_MESSAGE_TEMPLATE` and `CRUISE_PR_BODY_TEMPLATE` override the configured values. These are not CLI options.
 
 ```yaml
 commit_message_template: "{title} [{session_id}]"
@@ -275,7 +275,7 @@ Process-level configuration overrides apply after workflow and defaults resoluti
 
 Names normally use `CRUISE_` plus the uppercase key path, replacing dots and hyphens with underscores. The language child names above are the only supported spellings. Values are trimmed and whitespace-only values are ignored. Booleans accept only `true`, `false`, `1`, or `0`; integers are unsigned decimal digits without a sign. Text is literal. Model values are literal single models unless they start with `[` or `{`, in which case they are parsed as JSON and must match the field's normal model shape. In particular, `CRUISE_MODEL` and `CRUISE_PLAN_MODEL` now accept JSON arrays: values beginning with `[` or `{` were previously treated as literal model names. Arrays with fallback entries enable model fallback as in YAML. Other composite values require JSON, not YAML flow syntax. Use JSON `null` for an optional value or `[]` for an empty list where supported, not a blank value. Invalid values produce an error naming the variable and still undergo normal configuration validation.
 
-Parent objects are applied before child overrides, so `CRUISE_RETRY_MAX_DELAY_MS` overrides the corresponding field in `CRUISE_RETRY`, and `CRUISE_LANGUAGE_PR` overrides `CRUISE_LANGUAGES`. Setting `CRUISE_SDK` clears a configured command, while `CRUISE_COMMAND` clears a configured SDK. Setting both nonblank variables is an error. For example:
+Parent objects are applied before child overrides: `CRUISE_LANGUAGES` replaces the entire `languages` object, then `CRUISE_LANGUAGE_PLAN` and `CRUISE_LANGUAGE_PR` override their respective members. Likewise, `CRUISE_RETRY_MAX_DELAY_MS` overrides the corresponding field in `CRUISE_RETRY`. Setting `CRUISE_SDK` clears a configured command, while `CRUISE_COMMAND` clears a configured SDK. Setting both nonblank variables is an error. For example:
 
 ```sh
 export CRUISE_MODEL='["provider/primary", "provider/fallback"]'
@@ -284,7 +284,7 @@ export CRUISE_RETRY_MAX_DELAY_MS=5000
 ```
 
 `CRUISE_RUN_ALL_PARALLELISM` overrides the app setting for WebUI Run All and effective config display, but is not saved to the config file. It does not change CLI `run --all`, which uses `--parallelism`.
-With the resident daemon, the CLI sends its working directory and allowlisted workflow-override variables (such as `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, and `CRUISE_SDK`) with each request; they apply only to that request. Process-level variables such as `PATH`, `GH_TOKEN`, provider credentials, `CRUISE_FORGE`, and notification or auth switches come from the daemon environment. Restart the daemon with `cruise daemon restart` after changing them. Autostart removes workflow-override variables from the daemon environment; explicit `cruise daemon start` or `serve` preserves them. WebUI requests use the daemon environment and its home-directory working directory.
+With the resident daemon, the CLI sends its working directory and allowlisted workflow-override variables (such as `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, and `CRUISE_SDK`) with each request; they apply only to that request. Process-level variables such as `PATH`, `GH_TOKEN`, provider credentials, `CRUISE_FORGE`, and notification or auth switches come from the daemon environment. Restart the daemon with `cruise daemon restart` after changing them. Autostart removes workflow-override variables from the daemon environment; explicit `cruise daemon start` or `serve` preserves them. WebUI requests use the daemon environment and generally its home-directory working directory; WebUI exec uses the selected Directory as its working directory.
 
 `CRUISE_UI_LANGUAGE` controls the process UI language, not a workflow field or generated prompt language. See [`cruise config`](cli-reference.md#cruise-config) for supported tags and precedence.
 
@@ -320,6 +320,33 @@ Set `uiLanguage` in application configuration, or use `cruise config --set-langu
 For CLI, `CRUISE_UI_LANGUAGE` takes precedence over `uiLanguage`, then system locale, then English. A blank or `auto` environment value defers to the next layer. Invalid environment values produce an English warning and are ignored. System locale detection uses the first nonempty `LC_ALL`, `LC_MESSAGES`, `LANG`, or `LANGUAGE`, without trying later variables when that value is unsupported. Windows also consults the user locale if environment variables do not determine one. macOS and Linux use environment variables only, so a GUI launch without them defaults to English.
 
 The WebUI uses its browser's `cruise_ui_language` cookie when valid, otherwise the server process default. Selecting a language in the WebUI saves the cookie and reloads the page, without changing application configuration. UI language is independent of workflow `languages.pr` and `languages.plan`, which control generated prompts.
+
+<a id="output-preferences"></a>
+### Global output preferences
+
+Application `config.yaml` and `config.json` accept the same global prompt-language and template settings. The template keys also accept the camelCase aliases `commitMessageTemplate` and `prBodyTemplate`:
+
+```yaml
+languages:
+  plan: Japanese
+  pr: English
+commit_message_template: "{title} [{session_id}]"
+pr_body_template: |
+  ## Summary
+  {body}
+```
+
+The JSON form uses the same keys and value types, for example:
+
+```json
+{
+  "languages": {"plan": "Japanese", "pr": "English"},
+  "commit_message_template": "{title} [{session_id}]",
+  "pr_body_template": "## Summary\n{body}"
+}
+```
+
+Resolve each prompt language independently: a workflow `languages.plan` / `languages.pr` value (or its corresponding legacy `plan_language` / `pr_language` field) takes precedence over project defaults, then user defaults, then the application preference. `CRUISE_LANGUAGE_PLAN` / `CRUISE_LANGUAGE_PR` override configured values; locale inference is used only when neither a configured value nor an environment override applies. Template settings follow workflow > project defaults > user defaults > application settings, then the matching template environment overrides. These preferences and templates do not change the UI language. Built-in templates use the effective values as `{plan.language}` and `{pr.language}`.
 
 <a id="config-hot-reload"></a>
 ## Config hot-reload

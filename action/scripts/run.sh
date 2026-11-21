@@ -227,7 +227,7 @@ if [ -n "${GH_TOKEN:-}" ]; then
 fi
 
 latest_session_id() {
-  cruise list --json 2>/dev/null | jq -r 'sort_by(.created_at) | last | .id // empty'
+  cruise list --json 2>/dev/null | jq -r 'map(select(.exec != true)) | sort_by(.created_at) | last | .id // empty'
 }
 
 session_plan_path() { # $1=session_id

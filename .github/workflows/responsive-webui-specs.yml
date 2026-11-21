@@ -72,10 +72,16 @@ jobs:
         run: node tests/webui/pr-failed-real.mjs
       - name: Production PR form browser test
         run: node tests/webui/pr-form.mjs
+      - name: Production exec browser test
+        run: node tests/webui/exec-browser.mjs
       - name: Production local merge browser test
         run: node tests/webui/local-merge.mjs
       - name: Production workflow category browser test
         run: node tests/webui/workflow-categories.mjs
+      - name: Workflow flag buttons browser regression
+        run: node tests/webui/flag-buttons.mjs
+      - name: Failed exec stays out of WebUI inventory
+        run: node tests/webui/exec-recovery-inventory.mjs
       - name: Production notification browser test
         run: node tests/webui/notifications.mjs
       - name: Upload specification evidence

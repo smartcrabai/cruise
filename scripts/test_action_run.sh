@@ -193,7 +193,12 @@ case "$1" in
     printf '%s' "${5:-}" > "$STATE/exec_input.txt"
     echo "cruise-stub: exec running"
     code="${CRUISE_STUB_EXEC_EXIT:-0}"
-    new_session "${CRUISE_STUB_SESSION_ID:-sess-exec}"
+    id="${CRUISE_STUB_SESSION_ID:-sess-exec}"
+    new_session "$id"
+    if [ "$code" != "0" ]; then
+      tmp="$(mktemp)"
+      jq --arg id "$id" 'map(if .id == $id then . + {exec: true, phase: "Failed"} else . end)' "$SESSIONS" > "$tmp" && mv "$tmp" "$SESSIONS"
+    fi
     if [ "$code" = "0" ] && [ "${CRUISE_STUB_EXEC_CHANGES:-false}" = "true" ]; then
       echo "generated change" >> "${CRUISE_STUB_WORKSPACE:?}/exec_change.txt"
     fi
@@ -699,10 +704,13 @@ assert_fail_reason_hygiene "exec/missing-exec-config-path"
 begin_case
 COMMAND=exec; CRUISE_STUB_EXEC_EXIT=1
 GH_STUB_COMMENTS_JSON='[]'; GH_STUB_ISSUE_TITLE="T"; GH_STUB_ISSUE_BODY="B"
+# Retained exec failures must not change the Action's latest-session candidate set.
+echo '[{"id":"ordinary-session","created_at":1,"phase":"Planned"},{"id":"stale-failed-exec","created_at":2,"phase":"Failed","exec":true}]' > "$CRUISE_STATE/sessions.json"
 before_sha="$(git -C "$REPO_DIR" rev-parse HEAD)"
 run_run
 after_sha="$(git -C "$REPO_DIR" rev-parse HEAD)"
 check "exec: a failed cruise exec step exits non-zero" $([ "$RUN_STATUS" -ne 0 ]; echo $?) "$RUN_OUT"
+assert_eq "exec: latest session ignores newer retained exec failures" "ordinary-session" "$(out session_id)"
 assert_eq "exec: commit_url output is empty when cruise exec fails" "" "$(out commit_url)"
 check "exec: nothing is committed when cruise exec fails" $([ "$before_sha" = "$after_sha" ]; echo $?) "before=$before_sha after=$after_sha"
 assert_contains "exec: fail_reason names the cruise exec failure" "$(out fail_reason)" "cruise exec failed"

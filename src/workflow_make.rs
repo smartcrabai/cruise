@@ -6,8 +6,8 @@ use crate::cli::WorkflowMakeArgs;
 use crate::config::{PermissionMode, WorkflowConfig};
 use crate::error::{CruiseError, Result};
 use crate::workflow_generate::{
-    RepairError, destination_path, run_prompt, run_with_repairs, validate_generated_yaml,
-    write_new_workflow,
+    RepairError, check_generated_yaml as validate_generated_yaml, destination_path, run_prompt,
+    run_with_repairs, write_new_workflow,
 };
 
 const TEMPLATE: &str = include_str!("../prompts/workflow-make.md");

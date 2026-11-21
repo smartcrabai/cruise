@@ -23,9 +23,12 @@
 - Shorten built-in workflow prompts by about 24% without changing step structure, and stop TDD consolidate/apply and security triage from inlining the previous step output twice.
 - Update SwiftUI and Slint UI E2E policies with faster feedback loops that keep target-runtime verification separate.
 - Move the built-in TDD ledger snapshot and post-PR Git operations to the host. Keep Git metadata read-only in isolated jcode turns; stop on an unexpected command status rather than advancing to publication.
+- Leave OpenTelemetry span status unset and omit `error.type` for `paused` and `cancelled` operations; `cruise.outcome` and operation metrics still carry these outcomes. Failures and timeouts remain errors.
 
 ### Added
 
+- Add a WebUI **Exec** button for Directory sessions. With `force_exec`, **Execute** replaces **Create & plan** for Directory workflows. The sidebar shows exec sessions while they run or are suspended, and Suspended sessions can be resumed there.
+- Retain failed `cruise exec` sessions, including `--instant` and `force_exec`, under the same ID until success or explicit Delete. Use `cruise run <id>` or Resume in `cruise list` to retry from the first unresolved failed step or, for a hard error with no earlier unresolved failure, the saved checkpoint. If setup failed before workflow execution started and no checkpoint exists, recovery starts at the beginning. A missing or unusable checkpoint blocks recovery for a workflow that already started. Steps at and after the retry point may repeat. Files and external effects are not rolled back. `cruise clean`, automatic run selection, `run --all`, and WebUI inventory exclude failed exec sessions. `cruise list --json` adds `"exec": true` only for failed exec rows.
 - Check GitHub and GitLab base-branch CI before fresh workflow runs by default; opt out with `check_base_ci: false` in `default.yaml`.
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.
 - Add the `if.head-changed` step condition, which routes to a target when a step completes successfully with a different Git `HEAD` OID; untracked, ignored, and uncommitted changes do not count.
@@ -41,6 +44,8 @@
 
 ### Fixed
 
+- Fix the built-in GitHub `wait-ci` details GraphQL query, which had an unbalanced brace and failed on every CI failure, so failed check names reach the CI diagnostic, span attributes, and CI repair evidence again instead of an empty truncated list.
+- Stop reporting a step failure as unresolved when the next `skip: prev.success` recovery step runs because of it, so recovered after-PR workflows (base-sync conflict or CI repair) no longer end as `failed` with `error.type=step_failed`. The failed step span still records the failure.
 - Stop unverified or stale built-in CI repairs before publication. Only a verified repair or eligible one-time same-head retry returns to the CI wait.
 - Resume fatal after-PR failures from their separate graph checkpoint, preserving retry counts and avoiding repeated main-workflow and PR-publication effects. Legacy sessions without the stage marker retain their previous after-PR restart behavior.
 - Prevent stack overflow while reporting early CLI workflow failures, including missing-model diagnostics, when after-PR steps are configured.
@@ -55,3 +60,5 @@
 - Render daemon-run output once with the existing step and parallel-child formatting, and leave sessions runnable when base-CI preflight rejects a run.
 - Keep daemon terminal waits alive through transient session 404s while the event stream can still deliver terminal events; dispose exec sessions only after releasing terminal events.
 - Run approval-title SDK requests from the session workspace.
+- Keep the final stderr lines in OpenCode CLI startup failure messages when the CLI exits before announcing its server.
+- Ctrl+C in `cruise run` (including `--all`), `exec`, `plan`, and **Create PR** in `cruise list` is no longer ignored while the CLI handles daemon events. Outside herdr Core panes, a Ctrl+C right after the work starts now cancels it instead of closing only the CLI.

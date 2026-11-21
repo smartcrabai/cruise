@@ -374,9 +374,20 @@ pub async fn execute_steps_with_graph(
     graph: &mut ExecutionGraph,
     checkpoint: &(dyn Fn(&NodeCheckpoint<'_>, &ExecutionGraph) -> Result<()> + Send + Sync),
 ) -> Result<ExecutionResult> {
+    execute_steps_with_graph_mode(ctx, vars, tracker, graph, checkpoint, false).await
+}
+
+pub(crate) async fn execute_steps_with_graph_mode(
+    ctx: &ExecutionContext<'_>,
+    vars: &mut VariableStore,
+    tracker: &mut FileTracker,
+    graph: &mut ExecutionGraph,
+    checkpoint: &(dyn Fn(&NodeCheckpoint<'_>, &ExecutionGraph) -> Result<()> + Send + Sync),
+    exec: bool,
+) -> Result<ExecutionResult> {
     let operation = crate::telemetry::Operation::start("workflow", &[]);
     let context = operation.context();
-    let result = execute_steps_with_graph_inner(ctx, vars, tracker, graph, checkpoint)
+    let result = execute_steps_with_graph_inner(ctx, vars, tracker, graph, checkpoint, exec)
         .with_context(context)
         .await;
     match &result {
@@ -393,6 +404,7 @@ async fn execute_steps_with_graph_inner(
     tracker: &mut FileTracker,
     graph: &mut ExecutionGraph,
     checkpoint: &(dyn Fn(&NodeCheckpoint<'_>, &ExecutionGraph) -> Result<()> + Send + Sync),
+    exec: bool,
 ) -> Result<ExecutionResult> {
     if graph.version != crate::graph::CHECKPOINT_VERSION {
         return Err(CruiseError::Other(
@@ -405,7 +417,15 @@ async fn execute_steps_with_graph_inner(
         counters: LoopCounters {
             run: 0,
             skipped: 0,
-            failed: 0,
+            failed: if exec {
+                graph
+                    .state
+                    .exec_failure
+                    .as_ref()
+                    .map_or(0, |failure| failure.unresolved)
+            } else {
+                0
+            },
         },
     };
     if graph.state.current.is_some() || graph.state.completed {
@@ -433,21 +453,27 @@ async fn execute_steps_with_graph_inner(
                 }
                 let mut replacement =
                     crate::graph::build_graph(&new_workflow.compiled, ctx.max_retries)?;
-                replacement.restore_for_reload(graph)?;
-                crate::graph::validation::validate_workflow(
-                    &new_workflow.compiled,
-                    &replacement,
-                    &current,
-                    &crate::flags::preflight_skips(
+                if let Err(error) = replacement.validate_exec_failure(graph) {
+                    crate::status_eprintln!(
+                        "config reload ignored: {error}; continuing the existing graph"
+                    );
+                } else {
+                    replacement.restore_for_reload(graph)?;
+                    crate::graph::validation::validate_workflow(
                         &new_workflow.compiled,
-                        ctx.flags,
-                        ctx.skipped_steps,
-                    ),
-                )?;
-                *graph = replacement;
-                tracker.restore_snapshots(graph.state.runtime.file_snapshots.clone());
-                reloaded = Some(new_workflow);
-                checkpointed = false;
+                        &replacement,
+                        &current,
+                        &crate::flags::preflight_skips(
+                            &new_workflow.compiled,
+                            ctx.flags,
+                            ctx.skipped_steps,
+                        ),
+                    )?;
+                    *graph = replacement;
+                    tracker.restore_snapshots(graph.state.runtime.file_snapshots.clone());
+                    reloaded = Some(new_workflow);
+                    checkpointed = false;
+                }
             } else {
                 crate::status_eprintln!(
                     "config reload ignored: current step '{current}' was removed; continuing the existing graph"
@@ -482,6 +508,7 @@ async fn execute_steps_with_graph_inner(
                 .edge_counts
                 .get(&(current.clone(), current.clone()))
                 .map_or(0, |count| count.budgeted_traversals);
+            let failures_before = state.counters.failed;
             let result = if let Some(workflow) = &reloaded {
                 crate::retry::with_active_policy(
                     workflow.retry_policy.clone(),
@@ -509,11 +536,30 @@ async fn execute_steps_with_graph_inner(
                 .await
             };
             let outcome = result?;
-            if ctx
-                .cancel_token
-                .is_some_and(CancellationToken::is_cancelled)
+            // Failure handlers have already adjusted the count. The graph still
+            // holds the runtime and traversal totals from before this attempt.
+            let new_exec_failure = exec && state.counters.failed > failures_before;
+            if !new_exec_failure
+                && ctx
+                    .cancel_token
+                    .is_some_and(CancellationToken::is_cancelled)
             {
                 return Err(CruiseError::Interrupted);
+            }
+            if new_exec_failure {
+                let unresolved = state.counters.failed;
+                let state = &mut graph.state;
+                if let Some(failure) = &mut state.exec_failure {
+                    failure.unresolved = unresolved;
+                } else {
+                    state.exec_failure = Some(crate::graph::ExecFailure {
+                        unresolved,
+                        node: current.clone(),
+                        runtime: std::mem::take(&mut state.runtime),
+                        edge_counts: state.edge_counts.clone(),
+                        group_counts: state.group_counts.clone(),
+                    });
+                }
             }
             graph.state.runtime = capture_runtime(vars, tracker);
             graph
@@ -532,6 +578,13 @@ async fn execute_steps_with_graph_inner(
         // Commit before reload, cancellation, or any further side effect.
         save_checkpoint(graph, &current, checkpoint)?;
         checkpointed = true;
+        if exec
+            && ctx
+                .cancel_token
+                .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(CruiseError::Interrupted);
+        }
     }
     let c = &state.counters;
     crate::status_eprintln!(
@@ -1057,6 +1110,7 @@ async fn step_loop_iteration(
             TransitionReason::Sequential
         };
         let native_resync = native_resync_required && if_fail_next.is_some();
+        let unhandled_failure = outcome.failed && if_fail_next.is_none() && !if_fail_retry;
         let effective_next = if_fail_next
             .or(if_fail_retry.then(|| current_step.to_string()))
             .or(gate_retry.then(|| current_step.to_string()))
@@ -1065,6 +1119,26 @@ async fn step_loop_iteration(
             .or(outcome.option_next)
             .or(step_next);
         let next = get_next_step(&ctx.compiled.steps, current_step, effective_next.as_deref());
+        // Only a recovery step that will actually run resolves the failure: a stale
+        // `prev.success` (e.g. after a command timeout) or a `when` guard can skip it.
+        if unhandled_failure
+            && vars.prev_success() == Some(false)
+            && next
+                .as_ref()
+                .and_then(|next| ctx.compiled.steps.get(next))
+                .is_some_and(|config| {
+                    config.when.is_none()
+                        && matches!(
+                            config.skip.as_ref(),
+                            Some(SkipCondition::Variable(name)) if name == "prev.success"
+                        )
+                })
+        {
+            // A failure handled by the next `skip: prev.success` recovery step
+            // is not an unresolved workflow failure. Keep the failed attempt
+            // visible in the step log, but do not report it in ExecutionResult::failed.
+            state.counters.failed -= 1;
+        }
         let target = next
             .map(|target| crate::graph::resolve_target(ctx.compiled, &target))
             .transpose()?;
@@ -2150,6 +2224,14 @@ fn print_dry_run_config(config: &WorkflowConfig) {
 
 /// Print a dry-run summary of the workflow flow.
 pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
+    print_dry_run_steps(config, &config.steps, from);
+}
+
+pub(crate) fn print_dry_run_steps(
+    config: &WorkflowConfig,
+    steps: &indexmap::IndexMap<String, crate::config::StepConfig>,
+    from: Option<&str>,
+) {
     println!("{}", style("=== Dry Run: Workflow Flow ===").bold());
     println!("command: {}", config.command.join(" "));
 
@@ -2159,7 +2241,7 @@ pub fn print_dry_run(config: &WorkflowConfig, from: Option<&str>) {
 
     let mut started = from.is_none();
 
-    for (name, step) in &config.steps {
+    for (name, step) in steps {
         if !started {
             if Some(name.as_str()) == from {
                 started = true;
@@ -2247,6 +2329,195 @@ mod tests {
 
     fn make_config(yaml: &str) -> WorkflowConfig {
         WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "exercise the complete retry lifecycle"
+    )]
+    async fn exec_retries_first_unresolved_step_after_live_continuation() -> Result<()> {
+        use crate::graph::persistence::{load_graph, save_graph};
+
+        let tmp = TempDir::new()?;
+        let path = tmp.path().join("dag.json");
+        let effects = tmp.path().join("effects");
+        let token = CancellationToken::new();
+        let compiled = crate::workflow::compile(make_config(
+            r#"
+command: [echo]
+steps:
+  prefix:
+    command: 'echo prefix >> effects'
+    next: first-failure
+  first-failure:
+    command: 'echo first >> effects; test "$PREFIX" = true && test -f repaired'
+    env:
+      PREFIX: '{prev.success}'
+  later-failure:
+    command: 'echo later >> effects; test -f repaired'
+  tail:
+    command: 'echo tail >> effects'
+"#,
+        ))?;
+        let mut graph = crate::graph::build_graph(&compiled, 2)?;
+        graph.state.execution_id = Some("exec".into());
+        let mut vars = VariableStore::new(String::new());
+        let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+        let ctx = ExecutionContext {
+            instructions: None,
+            usage_session_id: None,
+            compiled: &compiled,
+            max_retries: 2,
+            rate_limit_retries: 0,
+            on_step_start: &|_| Ok(()),
+            cancel_token: Some(&token),
+            option_handler: &NoOpOptionHandler,
+            ask_handler: None,
+            config_reloader: None,
+            working_dir: Some(tmp.path()),
+            skipped_steps: &[],
+            flags: &crate::flags::NO_FLAGS,
+            on_step_log: None,
+        };
+        let pause = execute_steps_with_graph_mode(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut graph,
+            &|_, graph| {
+                save_graph(graph, &path)?;
+                if graph.state.exec_failure.is_some() {
+                    token.cancel();
+                }
+                Ok(())
+            },
+            true,
+        )
+        .await;
+        assert!(matches!(pause, Err(CruiseError::Interrupted)));
+
+        let mut continuation = crate::graph::build_graph(&compiled, 2)?;
+        let resume =
+            crate::graph::prepare_exec_resume(&mut continuation, &path, true, false, Some("exec"))?;
+        assert_eq!(resume.node, "later-failure");
+        assert!(!resume.rewound);
+        let ctx = ExecutionContext {
+            cancel_token: None,
+            ..ctx
+        };
+        let run = execute_steps_with_graph_mode(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut continuation,
+            &|_, graph| save_graph(graph, &path),
+            true,
+        )
+        .await?;
+        assert_eq!(run.failed, 2);
+        let completed = load_graph(&path)?;
+        assert!(completed.state.completed);
+        let failure = completed
+            .state
+            .exec_failure
+            .as_ref()
+            .unwrap_or_else(|| panic!("failure marker is missing"));
+        assert_eq!(failure.unresolved, 2);
+        assert_eq!(failure.node, "first-failure");
+        assert_eq!(failure.runtime.prev_success, Some(true));
+        assert_eq!(failure.edge_counts.len(), 1);
+        assert_eq!(
+            failure
+                .edge_counts
+                .values()
+                .next()
+                .map(|c| c.budgeted_traversals),
+            Some(1)
+        );
+
+        // An interruption between saving the completed graph and Failed status
+        // must not turn the soft failures into a no-op successful resume.
+        let mut retry = crate::graph::build_graph(&compiled, 2)?;
+        let resume =
+            crate::graph::prepare_exec_resume(&mut retry, &path, true, false, Some("exec"))?;
+        assert_eq!(resume.node, "first-failure");
+        assert!(resume.rewound);
+        assert_eq!(retry.state.edge_counts, failure.edge_counts);
+        assert_eq!(retry.state.runtime, failure.runtime);
+        assert!(retry.state.exec_failure.is_none());
+        assert_eq!(load_graph(&path)?.state, completed.state);
+        std::fs::write(tmp.path().join("repaired"), "")?;
+        let run = execute_steps_with_graph_mode(
+            &ctx,
+            &mut vars,
+            &mut tracker,
+            &mut retry,
+            &|_, graph| save_graph(graph, &path),
+            true,
+        )
+        .await?;
+        assert_eq!(run.failed, 0);
+        assert_eq!(
+            std::fs::read_to_string(&effects)?,
+            "prefix\nfirst\nlater\ntail\nfirst\nlater\ntail\n"
+        );
+        assert!(retry.state.exec_failure.is_none());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_records_failure_before_rejected_edge_and_keeps_hard_checkpoint() -> Result<()> {
+        use crate::graph::persistence::{load_graph, save_graph};
+
+        let tmp = TempDir::new()?;
+        let path = tmp.path().join("dag.json");
+        for (command, expected_rewind) in [("false", true), ("true", false)] {
+            let compiled = crate::workflow::compile(make_config(&format!(
+                "command: [echo]\nsteps:\n  attempt:\n    command: '{command}'\n    next: tail\n  tail:\n    command: 'touch tail'\n"
+            )))?;
+            let mut graph = crate::graph::build_graph(&compiled, 0)?;
+            let mut vars = VariableStore::new(String::new());
+            let mut tracker = FileTracker::with_root(tmp.path().to_path_buf());
+            let ctx = ExecutionContext {
+                instructions: None,
+                usage_session_id: None,
+                compiled: &compiled,
+                max_retries: 0,
+                rate_limit_retries: 0,
+                on_step_start: &|_| Ok(()),
+                cancel_token: None,
+                option_handler: &NoOpOptionHandler,
+                ask_handler: None,
+                config_reloader: None,
+                working_dir: Some(tmp.path()),
+                skipped_steps: &[],
+                flags: &crate::flags::NO_FLAGS,
+                on_step_log: None,
+            };
+            let result = execute_steps_with_graph_mode(
+                &ctx,
+                &mut vars,
+                &mut tracker,
+                &mut graph,
+                &|_, graph| save_graph(graph, &path),
+                true,
+            )
+            .await;
+            assert!(matches!(result, Err(CruiseError::LoopProtection { .. })));
+            let persisted = load_graph(&path)?;
+            assert!(persisted.state.pending.is_some());
+            assert_eq!(persisted.state.exec_failure.is_some(), expected_rewind);
+            let mut retry = crate::graph::build_graph(&compiled, 1)?;
+            let resume = crate::graph::prepare_exec_resume(&mut retry, &path, true, true, None)?;
+            assert_eq!(resume.node, "attempt");
+            assert_eq!(resume.rewound, expected_rewind);
+            assert_eq!(retry.state.pending.is_none(), expected_rewind);
+            assert!(!tmp.path().join("tail").exists());
+        }
+        Ok(())
     }
 
     async fn run_config(
