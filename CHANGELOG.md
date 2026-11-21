@@ -57,3 +57,4 @@
 - Render daemon-run output once with the existing step and parallel-child formatting, and leave sessions runnable when base-CI preflight rejects a run.
 - Keep daemon terminal waits alive through transient session 404s while the event stream can still deliver terminal events; dispose exec sessions only after releasing terminal events.
 - Run approval-title SDK requests from the session workspace.
+- Keep the final stderr lines in OpenCode CLI startup failure messages when the CLI exits before announcing its server.

@@ -155,7 +155,7 @@ async fn generate_yaml_with_working_dir(
             .await
         },
         |candidate| {
-            validate_generated_yaml(candidate, destination_parent)?;
+            check_generated_yaml(candidate, destination_parent)?;
             Ok(candidate.to_owned())
         },
         |candidate, err| format!(
@@ -168,7 +168,8 @@ async fn generate_yaml_with_working_dir(
     })
 }
 
-pub(crate) use crate::workflow_doctor::check_generated_yaml as validate_generated_yaml;
+pub(crate) use crate::workflow_doctor::check_generated_yaml;
+pub use crate::workflow_validate::validate_generated_yaml;
 
 /// Check that `name` is a plain file stem (ASCII alphanumerics, `-`, `_`).
 ///
@@ -448,13 +449,13 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         assert_eq!(resolved.languages, None);
         assert_eq!(resolved.commit_message_template, None);
         assert_eq!(resolved.pr_body_template, None);
-        validate_generated_yaml(VALID, home.path()).unwrap();
+        check_generated_yaml(VALID, home.path()).unwrap();
     }
 
     #[test]
     fn validate_accepts_minimal_workflow() {
         let tmp = TempDir::new().unwrap();
-        validate_generated_yaml(VALID, tmp.path()).unwrap();
+        check_generated_yaml(VALID, tmp.path()).unwrap();
     }
 
     #[test]
@@ -463,7 +464,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         for bad in [BROKEN, "command: [cat]\nsteps: 3\n"] {
             assert!(
                 matches!(
-                    validate_generated_yaml(bad, tmp.path()),
+                    check_generated_yaml(bad, tmp.path()),
                     Err(CruiseError::ConfigParseError(_))
                 ),
                 "{bad:?}"
@@ -476,7 +477,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         let tmp = TempDir::new().unwrap();
         // config validation: sdk and command are mutually exclusive
         assert!(
-            validate_generated_yaml(
+            check_generated_yaml(
                 "sdk: claude\ncommand: [cat]\nsteps:\n  a:\n    command: echo\n",
                 tmp.path()
             )
@@ -484,7 +485,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         );
         // undefined transition target
         assert!(
-            validate_generated_yaml(
+            check_generated_yaml(
                 "command: [cat]\nsteps:\n  a:\n    command: echo\n    next: missing\n",
                 tmp.path()
             )
@@ -492,7 +493,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         );
         // exitless cycle
         assert!(matches!(
-            validate_generated_yaml(
+            check_generated_yaml(
                 "command: [cat]\nsteps:\n  loop:\n    command: echo\n    next: loop\n",
                 tmp.path()
             ),
@@ -500,7 +501,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         ));
         // group retry budget beyond the effective ceiling
         assert!(
-            validate_generated_yaml(
+            check_generated_yaml(
                 &crate::test_support::group_retry_budget_config_with(5),
                 tmp.path()
             )
@@ -512,9 +513,9 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     fn generated_yaml_ignores_inactive_file_changed_target() {
         let tmp = TempDir::new().unwrap();
         let yaml = "command: [cat]\nsteps:\n  a:\n    command: echo\n    if:\n      file-changed: missing\n";
-        assert!(validate_generated_yaml(yaml, tmp.path()).is_err());
+        assert!(check_generated_yaml(yaml, tmp.path()).is_err());
         assert!(
-            validate_generated_yaml(
+            check_generated_yaml(
                 &format!("{yaml}      no-file-changes: failed\n"),
                 tmp.path()
             )
@@ -526,14 +527,14 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     fn validate_resolves_references_relative_to_base_dir() {
         let tmp = TempDir::new().unwrap();
         let yaml = "command: [cat]\nsteps:\n  a:\n    prompt_file: p.md\n";
-        assert!(validate_generated_yaml(yaml, tmp.path()).is_err());
+        assert!(check_generated_yaml(yaml, tmp.path()).is_err());
         fs::write(tmp.path().join("p.md"), "hello").unwrap();
-        validate_generated_yaml(yaml, tmp.path()).unwrap();
+        check_generated_yaml(yaml, tmp.path()).unwrap();
 
         let call = "command: [cat]\nsteps:\n  a:\n    workflow_call: ./sub.yaml\n";
-        assert!(validate_generated_yaml(call, tmp.path()).is_err());
+        assert!(check_generated_yaml(call, tmp.path()).is_err());
         fs::write(tmp.path().join("sub.yaml"), VALID).unwrap();
-        validate_generated_yaml(call, tmp.path()).unwrap();
+        check_generated_yaml(call, tmp.path()).unwrap();
     }
 
     #[tokio::test]
@@ -557,7 +558,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
             .unwrap();
         assert_eq!(out.trim_end(), VALID.trim_end());
         assert_eq!(turns(tmp.path()), 4);
-        let diag = validate_generated_yaml(BROKEN, tmp.path())
+        let diag = check_generated_yaml(BROKEN, tmp.path())
             .unwrap_err()
             .to_string();
         let repair = prompt(tmp.path(), 2);
@@ -583,7 +584,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         let err = generate_yaml(&cfg, "d", tmp.path()).await.unwrap_err();
         assert!(matches!(err, CruiseError::InvalidStepConfig(_)), "{err:?}");
         assert_eq!(turns(tmp.path()), 4);
-        let diag = validate_generated_yaml(BROKEN, tmp.path())
+        let diag = check_generated_yaml(BROKEN, tmp.path())
             .unwrap_err()
             .to_string();
         assert!(err.to_string().contains(&diag), "{err}");
