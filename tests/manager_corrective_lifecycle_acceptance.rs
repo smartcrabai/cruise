@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
@@ -96,8 +96,7 @@ fn corrective_preview_fixture() {
     .unwrap_or_else(|error| panic!("operation failed: {error}"));
 }
 
-#[tokio::test]
-async fn approved_correction_executes_and_reverifies() {
+fn setup_corrective_fixture() -> (TempDir, PathBuf, Value) {
     let root = TempDir::new().unwrap_or_else(|error| panic!("operation failed: {error}"));
     let home = root.path();
     fs::create_dir_all(home.join("config/cruise"))
@@ -119,7 +118,7 @@ async fn approved_correction_executes_and_reverifies() {
     .unwrap_or_else(|error| panic!("operation failed: {error}"));
     fs::set_permissions(bin.join("cruise"), fs::Permissions::from_mode(0o700))
         .unwrap_or_else(|error| panic!("operation failed: {error}"));
-    fs::write(bin.join("claude"), r##"#!/bin/sh
+    fs::write(bin.join("claude"), r#"#!/bin/sh
 read -r frame
 id=${PWD##*/}
 cat "$HOME/data/cruise/sessions/$id/manager-owner.json" >> "$HOME/sdk-owners"
@@ -139,7 +138,7 @@ esac
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"fixture"}'
 printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"fixture"}\n' "$result"
 printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixture","result":"%s"}\n' "$result"
-"##).unwrap_or_else(|error| panic!("operation failed: {error}"));
+"#).unwrap_or_else(|error| panic!("operation failed: {error}"));
     fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o700))
         .unwrap_or_else(|error| panic!("operation failed: {error}"));
     let repo = home.join("repo");
@@ -182,6 +181,13 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
         &fs::read(output).unwrap_or_else(|error| panic!("operation failed: {error}")),
     )
     .unwrap_or_else(|error| panic!("operation failed: {error}"));
+    (root, repo, proposal)
+}
+
+#[tokio::test]
+async fn approved_correction_executes_and_reverifies() {
+    let (root, repo, proposal) = setup_corrective_fixture();
+    let home = root.path();
     let started = command(home)
         .args(["daemon", "start", "--port", "0"])
         .output()
@@ -243,8 +249,52 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
         repo.to_str()
             .unwrap_or_else(|| panic!("repository path is not UTF-8")),
     );
+    let (publication, sha) = wait_for_blocked_goal(&client, &url, token, home).await;
+    let response = post(json!({"type":"preview_corrective","goal_id":goal_id,"expected_tip":sha,"task":{"id":"fixed","instructions":"Fix the failed check","dependencies":["original"]}})).await.unwrap_or_else(|error| panic!("operation failed: {error}"));
+    assert!(
+        response.status().is_success(),
+        "preview: {}",
+        response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("operation failed: {error}"))
+    );
+    let preview: Value = response
+        .json()
+        .await
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
+    let response = post(json!({"type":"approve_corrective","goal_id":goal_id,"preview_id":preview["id"],"revision":preview["revision"]})).await.unwrap_or_else(|error| panic!("operation failed: {error}"));
+    assert!(
+        response.status().is_success(),
+        "approval: {}",
+        response
+            .text()
+            .await
+            .unwrap_or_else(|error| panic!("operation failed: {error}"))
+    );
+    let approved: Value = response
+        .json()
+        .await
+        .unwrap_or_else(|error| panic!("operation failed: {error}"));
+    assert_eq!(
+        approved["execution"]["publication_history"],
+        json!([publication])
+    );
+    assert_eq!(
+        approved["execution"]["corrective_approvals"],
+        json!([preview])
+    );
+    verify_corrective_completion(&client, &url, token, home, &sha, &publication).await;
+}
+
+async fn wait_for_blocked_goal(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    token: &str,
+    home: &Path,
+) -> (Value, String) {
     let deadline = Instant::now() + Duration::from_secs(90);
-    let (publication, sha) = loop {
+    loop {
         let snapshot: Value = client
             .get(url.clone())
             .bearer_auth(token)
@@ -280,41 +330,17 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
             fs::read_to_string(home.join("state/cruise/daemon/daemon.log")).unwrap_or_default()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    let response = post(json!({"type":"preview_corrective","goal_id":goal_id,"expected_tip":sha,"task":{"id":"fixed","instructions":"Fix the failed check","dependencies":["original"]}})).await.unwrap_or_else(|error| panic!("operation failed: {error}"));
-    assert!(
-        response.status().is_success(),
-        "preview: {}",
-        response
-            .text()
-            .await
-            .unwrap_or_else(|error| panic!("operation failed: {error}"))
-    );
-    let preview: Value = response
-        .json()
-        .await
-        .unwrap_or_else(|error| panic!("operation failed: {error}"));
-    let response = post(json!({"type":"approve_corrective","goal_id":goal_id,"preview_id":preview["id"],"revision":preview["revision"]})).await.unwrap_or_else(|error| panic!("operation failed: {error}"));
-    assert!(
-        response.status().is_success(),
-        "approval: {}",
-        response
-            .text()
-            .await
-            .unwrap_or_else(|error| panic!("operation failed: {error}"))
-    );
-    let approved: Value = response
-        .json()
-        .await
-        .unwrap_or_else(|error| panic!("operation failed: {error}"));
-    assert_eq!(
-        approved["execution"]["publication_history"],
-        json!([publication])
-    );
-    assert_eq!(
-        approved["execution"]["corrective_approvals"],
-        json!([preview])
-    );
+    }
+}
+
+async fn verify_corrective_completion(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    token: &str,
+    home: &Path,
+    sha: &str,
+    publication: &Value,
+) {
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let snapshot: Value = client
