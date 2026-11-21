@@ -10,6 +10,7 @@ use crate::application::{
     ApproveRequest, Interactive, NewSessionImage, NewSessionRequest, PlanRequest,
 };
 use crate::cli::{DEFAULT_RATE_LIMIT_RETRIES, PLAN_STDIN_SENTINEL, PlanArgs};
+use crate::cli_events::{CtrlC, drive};
 use crate::config::WorkflowConfig;
 use crate::daemon::client::{DaemonClient, EventFilter, SessionEventHandler};
 use crate::error::{CruiseError, Result};
@@ -285,8 +286,9 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
                     batch: false,
                 })
                 .await?;
+            let ctrl_c = CtrlC::new()?;
             client.start_plan(&session.id, &plan_request).await?;
-            Some(stream)
+            Some((stream, ctrl_c))
         } else {
             None
         };
@@ -294,9 +296,9 @@ pub async fn run(mut args: PlanArgs) -> Result<()> {
     })
     .await?;
 
-    if let Some(stream) = stream {
+    if let Some((stream, ctrl_c)) = stream {
         let mut events = PlanningEvents::new(&client, &session.id);
-        let finished = crate::cli_events::drive(&client, &session.id, stream, &mut events).await?;
+        let finished = drive(&client, &session.id, stream, ctrl_c, &mut events).await?;
         if finished.cancelled_by_user {
             client.delete_session(&session.id, &context).await?;
             return Err(CruiseError::Interrupted);
@@ -958,13 +960,14 @@ async fn drive_plan_operation(
     session_id: &str,
     operation: PlanOperation,
 ) -> Result<SessionState> {
-    let stream = crate::cli_events::interruptible_startup(async {
+    let (stream, ctrl_c) = crate::cli_events::interruptible_startup(async {
         let stream = client
             .events(EventFilter {
                 session: Some(session_id.to_string()),
                 batch: false,
             })
             .await?;
+        let ctrl_c = CtrlC::new()?;
         match operation {
             PlanOperation::Generate(request) => client.start_plan(session_id, &request).await?,
             PlanOperation::Fix(request) => client.fix_plan(session_id, &request).await?,
@@ -972,11 +975,11 @@ async fn drive_plan_operation(
             PlanOperation::Verify(request) => client.verify_plan(session_id, &request).await?,
             PlanOperation::Replan(request) => client.replan_plan(session_id, &request).await?,
         }
-        Ok(stream)
+        Ok((stream, ctrl_c))
     })
     .await?;
     let mut events = PlanningEvents::new(client, session_id);
-    let finished = crate::cli_events::drive(client, session_id, stream, &mut events).await?;
+    let finished = drive(client, session_id, stream, ctrl_c, &mut events).await?;
     if finished.cancelled_by_user {
         return Err(CruiseError::Interrupted);
     }
@@ -1079,6 +1082,7 @@ pub(crate) async fn launch_background_task(
             batch: false,
         })
         .await?;
+    let ctrl_c = CtrlC::new()?;
     client.start_plan(&session.id, &plan_request).await?;
 
     if skip_planning {
@@ -1086,7 +1090,7 @@ pub(crate) async fn launch_background_task(
         // already `Planned` when this command returns (scripts run it next).
         let mut events =
             crate::cli_events::TerminalEvents::new(&client, &session.id).with_plan_chunks(true);
-        let finished = crate::cli_events::drive(&client, &session.id, stream, &mut events).await?;
+        let finished = drive(&client, &session.id, stream, ctrl_c, &mut events).await?;
         if finished.cancelled_by_user {
             return Err(CruiseError::Interrupted);
         }

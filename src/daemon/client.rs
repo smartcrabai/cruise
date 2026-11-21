@@ -952,7 +952,13 @@ mod tests {
         let mut handler = crate::cli_events::TerminalEvents::new(&client, "failed-resync");
         let finished = tokio::time::timeout(
             Duration::from_secs(5),
-            crate::cli_events::drive(&client, "failed-resync", stream, &mut handler),
+            crate::cli_events::drive(
+                &client,
+                "failed-resync",
+                stream,
+                crate::cli_events::CtrlC::new()?,
+                &mut handler,
+            ),
         )
         .await
         .map_err(|error| CruiseError::Other(format!("terminal wait timed out: {error}")))??;

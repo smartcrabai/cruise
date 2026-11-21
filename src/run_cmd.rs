@@ -10,6 +10,7 @@ use crate::application::{
     ApplicationEvent, EventStream as OutputStream, RunAllRequest, RunRequest,
 };
 use crate::cli::RunArgs;
+use crate::cli_events::CtrlC;
 use crate::daemon::client::{DaemonClient, EventFilter, EventStream};
 use crate::error::{CruiseError, Result};
 use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
@@ -20,6 +21,7 @@ enum RunSetup {
         client: DaemonClient,
         session_id: String,
         stream: EventStream,
+        ctrl_c: CtrlC,
     },
     All {
         client: DaemonClient,
@@ -29,6 +31,7 @@ enum RunSetup {
 
 struct RunAllSetup {
     stream: EventStream,
+    ctrl_c: CtrlC,
     sessions: Vec<crate::daemon::client::RunSessionSummary>,
     dashboard: Option<crate::batch_dashboard::BatchDashboard>,
 }
@@ -142,7 +145,8 @@ async fn run_inner(args: RunArgs, attach_only: bool) -> Result<()> {
             client,
             session_id,
             stream,
-        } => run_single(&client, &session_id, stream).await,
+            ctrl_c,
+        } => run_single(&client, &session_id, stream, ctrl_c).await,
         RunSetup::All { client, setup } => run_all(&client, setup).await,
     }
 }
@@ -182,16 +186,20 @@ async fn prepare_run(args: RunArgs, attach_only: bool) -> Result<RunSetup> {
             None => Ok(RunSetup::NoRun),
         }
     } else {
-        let (session_id, stream) = prepare_run_single(&client, args).await?;
+        let (session_id, stream, ctrl_c) = prepare_run_single(&client, args).await?;
         Ok(RunSetup::Single {
             client,
             session_id,
             stream,
+            ctrl_c,
         })
     }
 }
 
-async fn prepare_run_single(client: &DaemonClient, args: RunArgs) -> Result<(String, EventStream)> {
+async fn prepare_run_single(
+    client: &DaemonClient,
+    args: RunArgs,
+) -> Result<(String, EventStream, CtrlC)> {
     let context = crate::request_context::RequestContext::capture()?;
     let session_id = match args.session.as_deref() {
         Some(id) => id.to_owned(),
@@ -210,13 +218,14 @@ async fn prepare_run_single(client: &DaemonClient, args: RunArgs) -> Result<(Str
                 session.phase.label()
             )));
         }
-        if session.plan_error.is_some()
-            || client
-                .run_sessions()
-                .await?
-                .into_iter()
-                .find(|listed| listed.id == session_id)
-                .is_some_and(|listed| !listed.plan_available)
+        if !session.exec
+            && (session.plan_error.is_some()
+                || client
+                    .run_sessions()
+                    .await?
+                    .into_iter()
+                    .find(|listed| listed.id == session_id)
+                    .is_some_and(|listed| !listed.plan_available))
         {
             return Err(CruiseError::Other(format!(
                 "Session {session_id} has no usable plan; retry planning first."
@@ -241,20 +250,37 @@ async fn prepare_run_single(client: &DaemonClient, args: RunArgs) -> Result<(Str
             batch: false,
         })
         .await?;
+    if !active && session.exec {
+        eprintln!(
+            "Steps at and after the retry point may run again. Files and external effects are not rolled back."
+        );
+    }
+    let ctrl_c = CtrlC::new()?;
     client.start_run(&session_id, &request).await?;
-    Ok((session_id, stream))
+    Ok((session_id, stream, ctrl_c))
 }
 
-async fn run_single(client: &DaemonClient, session_id: &str, stream: EventStream) -> Result<()> {
+async fn run_single(
+    client: &DaemonClient,
+    session_id: &str,
+    stream: EventStream,
+    ctrl_c: CtrlC,
+) -> Result<()> {
     let mut handler = crate::cli_events::TerminalEvents::new(client, session_id);
-    let finished = crate::cli_events::drive(client, session_id, stream, &mut handler).await?;
+    let finished =
+        crate::cli_events::drive(client, session_id, stream, ctrl_c, &mut handler).await?;
     if finished.cancelled_by_user {
-        crate::status_eprintln!(
-            "\n{} Interrupted -- session saved as Suspended.",
-            style("||").yellow().bold()
-        );
+        let message = match &finished.state.phase {
+            SessionPhase::Suspended => "Interrupted -- session saved as Suspended.",
+            SessionPhase::Failed(_) if finished.state.exec => {
+                "Interrupted: exec session is still Failed."
+            }
+            _ => "Interrupted.",
+        };
+        crate::status_eprintln!("\n{} {message}", style("||").yellow().bold());
         return Err(CruiseError::Interrupted);
     }
+    crate::exec_cmd::print_recovery_hint(client, &finished).await;
     if let Some(error) = finished.failure.as_ref() {
         return Err(match &finished.state.phase {
             SessionPhase::PrFailed(_) => CruiseError::PrPublicationFailed(error.clone()),
@@ -298,8 +324,8 @@ fn client_run_request(
         request.workspace_mode = Some(prompt_workspace_mode()?);
     }
 
-    let needs_config =
-        !args.flags.is_empty() || (fresh && session.flags.is_empty() && stdin_is_terminal());
+    let needs_config = !args.flags.is_empty()
+        || (!session.exec && fresh && session.flags.is_empty() && stdin_is_terminal());
     if needs_config {
         let manager = SessionManager::new(crate::paths::data_dir()?);
         let config = manager.load_config_with_env(
@@ -431,6 +457,7 @@ async fn prepare_run_all(
             ..EventFilter::default()
         })
         .await?;
+    let ctrl_c = CtrlC::new()?;
     if !client
         .start_run_all(&RunAllRequest {
             attach_only,
@@ -444,6 +471,7 @@ async fn prepare_run_all(
     }
     Ok(Some(RunAllSetup {
         stream,
+        ctrl_c,
         sessions,
         dashboard,
     }))
@@ -452,6 +480,7 @@ async fn prepare_run_all(
 async fn run_all(client: &DaemonClient, setup: RunAllSetup) -> Result<()> {
     let RunAllSetup {
         stream,
+        ctrl_c,
         sessions,
         dashboard,
     } = setup;
@@ -461,7 +490,7 @@ async fn run_all(client: &DaemonClient, setup: RunAllSetup) -> Result<()> {
             events.record_session(&session.id);
         }
     }
-    let cancelled_by_user = drive_batch(client, stream, &mut events).await?;
+    let cancelled_by_user = drive_batch(client, stream, ctrl_c, &mut events).await?;
     let results = load_batch_results(client, &events.session_order).await;
     for state in &results {
         let phase = state.phase.label().to_owned();
@@ -685,6 +714,7 @@ fn queue_pause_for_session(
 async fn drive_batch(
     client: &DaemonClient,
     mut stream: crate::daemon::client::EventStream,
+    mut ctrl_c: CtrlC,
     events: &mut BatchEvents<'_>,
 ) -> Result<bool> {
     let mut cancelled_by_user = false;
@@ -704,8 +734,7 @@ async fn drive_batch(
                     return Ok(true);
                 }
             }
-            signal = tokio::signal::ctrl_c() => {
-                signal.map_err(|error| CruiseError::Other(format!("failed to listen for Ctrl+C: {error}")))?;
+            () = ctrl_c.recv() => {
                 if cancelled_by_user {
                     return Err(CruiseError::Interrupted);
                 }
@@ -842,18 +871,38 @@ fn dry_run_session(manager: &SessionManager, id: &str, args: &RunArgs) -> Result
             session.phase.label()
         )));
     }
-    let config = manager.load_config(&session)?;
+    let config = if session.exec {
+        let context = crate::request_context::RequestContext::capture()?;
+        manager.load_config_with_env(
+            &session,
+            crate::config::ConfigEnv::Snapshot(&context.config_env),
+        )?
+    } else {
+        manager.load_config(&session)?
+    };
     crate::config::validate_config(&config)?;
     let flags = crate::flags::from_cli(&args.flags)?;
     crate::flags::validate_names(&config, &flags)?;
     session.flags.extend(flags);
-    let max_retries = crate::config::resolve_effective_max_retries(args.max_retries, &config);
+    let max_retries = crate::config::resolve_effective_max_retries(
+        session.exec_retry_budget(args.max_retries),
+        &config,
+    );
     crate::config::validate_group_retry_budget(&config, max_retries)?;
     let compiled = crate::workflow::compile(config.clone())?;
     let mut dag = crate::graph::build_graph(&compiled, max_retries)?;
     let after_pr = session.execution_stage == crate::session::SessionExecutionStage::AfterPr;
     let start = if after_pr {
         dag.start.clone()
+    } else if session.exec {
+        crate::graph::prepare_exec_resume(
+            &mut dag,
+            &manager.dag_path(id),
+            session.has_dag || session.current_step.is_some(),
+            matches!(session.phase, SessionPhase::Failed(_)),
+            session.execution_id.as_deref(),
+        )?
+        .node
     } else {
         crate::graph::persistence::prepare_resume(
             &mut dag,
@@ -873,7 +922,16 @@ fn dry_run_session(manager: &SessionManager, id: &str, args: &RunArgs) -> Result
         )?;
     }
     eprintln!("{}", style(format!("Session: {id}")).dim());
-    crate::engine::print_dry_run(&config, session.current_step.as_deref());
+    if session.exec && !after_pr {
+        let step = dag
+            .nodes
+            .get(&start)
+            .map_or(start.as_str(), |node| node.step_name.as_str());
+        eprintln!("Exec resume step: {step}");
+        crate::engine::print_dry_run_steps(&config, &compiled.steps, Some(step));
+    } else {
+        crate::engine::print_dry_run(&config, session.current_step.as_deref());
+    }
     Ok(())
 }
 

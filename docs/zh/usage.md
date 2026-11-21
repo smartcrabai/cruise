@@ -89,7 +89,7 @@ cruise list
 cruise diff <SESSION_ID>
 cruise diff <SESSION_ID> --stat
 
-# Remove closed/merged PR sessions and terminal no-PR sessions
+# 清理符合条件的已关闭或合并的 PR 会话及无 PR 会话（保留失败的 exec 会话）
 cruise clean
 
 # 未转发参数时，在远程项目中运行 `cruise list`

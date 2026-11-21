@@ -302,6 +302,12 @@ Options:
 
 workflow のステップを現在の directory で直接実行します。plan の生成、git worktree の作成、自動 PR 作成はありません。入力待ちで pause した（`Running`）session と Ctrl+C で中断した（`Suspended`）session は保持され、`cruise run <id>` で再開できます。exec session は `cruise run` の自動選択と `cruise run --all` の対象外です。既存の未 commit 変更は許容され、stash、commit、reset せずその上で実行します。workflow が生成した file と既存変更が混在し得ることを警告します。branch が checkout 済みである必要はあります。
 
+未処理の非ゼロ終了があっても後続のステップは実行されますが、未解決の失敗が残ればコマンドは非ゼロで終了します。失敗したセッションの ID、チェックポイント、ログ、成果物は、再開に成功するか `cruise list` で **Delete** を選ぶまで保持されます。`--instant` と `force_exec` も同様です。原因を解消したら、`cruise list` の **Resume** または `cruise run <id>` で再開してください。再開には元の作業ディレクトリとブランチを使います。`cruise run <id> --dry-run` で再開位置を確認できます。
+
+再開は最初の未解決の失敗ステップから始まります。それ以前に未解決の失敗がないハードエラーの場合は、保存済みのチェックポイントから再開します。再開位置以降のステップは再実行されることがあります。作業ファイルや外部への副作用は元に戻りません。開始済みのワークフローでチェックポイントが欠落、破損、または互換性がない場合、最初からやり直すのではなくエラーになります。
+
+再開時は、`cruise run <id> --max-retries <N>` で上書きしない限り、最初に明示した `--max-retries` が使われます。どちらも指定しない場合はワークフローの既定値が使われます。`--rate-limit-retries` は実行ごとに適用されます。
+
 `--instant` は workflow YAML を解決せず、単一の implement step を持つ workflow をその場で組み立てて使います。指定しない場合、`cruise exec` は通常の設定解決を維持します。config file がない対話型 terminal では分類済み selector に組み込み workflow が表示され、非対話実行では `tdd` を自動選択します。instant には空白でない task が必要で、単一の implement step を含みます。workflow 既定値で command の pre-step を先頭に追加できます。workflow 既定値と環境 override は引き続き適用され、`CRUISE_SDK` / `CRUISE_MODEL` は `--sdk` / `--model` より優先されます。
 
 ```sh
@@ -313,6 +319,8 @@ cruise exec --instant --dry-run "implement the feature"
 Review は確認済みの欠陥を修正し、review pass で file が変更された場合、指定回数（既定 2 回）まで繰り返します。変更がない pass で loop は終わります。検証コマンドは実装と review の後、指定順に実行されます。コマンドが失敗すると run は失敗し、自動修復 loop には入りません。`--max-retries`、`--rate-limit-retries`、`--dry-run` も適用され、`--max-retries` 予算が review 上限より小さい場合は無効です。Instant は workflow flag を宣言せず、`-c` または `-f` と併用できません。branch が checkout 済みの git repository が必要です。リモートでは `cruise ssh <host> -- exec --instant "task"` を使えます。
 
 workflow config に `force_exec: true` がある場合、従来形式の `cruise "task"`、`cruise plan "task"`、`cruise --plan "task"` は、計画、worktree、PR 作成を行わず現在の directory で実行します。`--no-force-exec`、`--repo`、`--grill`、issue input、image attachment は opt-out になりますが、`--skip-planning` と `--no-interactive-planning` は opt-out になりません。
+
+WebUI では Directory ソースに **Exec** ボタンがあり、`force_exec` workflow では **Create & plan** が **Execute** に置き換わります。どちらも指定された既存の絶対パスの作業 directory で直接実行します。CLI の opt-out とは異なり、WebUI の exec は画像添付と `#N` issue 入力を拒否し、暗黙に計画へ切り替えません。これらを使う場合や `force_exec` workflow で計画する場合は **Create draft** を使ってください。Repository ソースでは exec を実行しません。
 
 <a id="cruise---plan"></a>
 ## `cruise --plan`
@@ -390,6 +398,10 @@ Options:
 `cruise config --set-language ja` はアプリケーション設定 `uiLanguage` を保存します（読み込みでは `ui_language` も受け付けます）。`--set-language auto` は保存済みの言語を消去し、自動選択に戻します。明示的に指定できる tag は `en`、`zh-CN`、`es`、`fr`、`pt-BR`、`ja`、`ko` です。大文字小文字と、hyphen の代わりの underscore は許容されますが、`pt` や `en-US` などは受け付けません。`cruise config` は実効 `ui_language` とその適用元（`env`、`config`、`system`、`default`）を表示します。
 
 CLI の UI 言語は `CRUISE_UI_LANGUAGE` > アプリケーション `uiLanguage` > system locale > `en` の優先順です。空または `auto` の環境値、未設定または `auto` の config 値は、その優先層を未指定として扱います。無効な環境値は英語で警告して無視します。CLI setter とアプリケーション config の検証では無効値を拒否します。
+
+アプリケーション設定でもグローバル出力設定を指定できます。対応 key と優先順位は[グローバル出力設定](configuration.md#output-preferences)を参照してください。これらの設定は UI 言語を変更しません。
+
+`cruise config` は設定済みの値を JSON value line で表示します（例: `languages = {"plan":"Japanese","pr":"English"}`、`commit_message_template = "{title} [{session_id}]"`、`pr_body_template = "## Summary\n{body}"`）。他のアプリケーション設定を更新しても、これらの値は保持されます。後から `default.yaml` やアプリケーション設定を編集しても、保存済み snapshot は変わりません。対応する workflow override 環境変数を明示的に送った CLI request では、その request の間だけメモリ上で override されますが、snapshot は書き換えません。
 
 `cruise config --set-auto-requeue-max-attempts <N>` は CLI と WebUI の Run All 用に `run_all_auto_requeue_max_attempts` を設定します。CLI の `--auto-requeue-max-attempts <N>` flag は 1 batch だけ上書きします。
 
@@ -505,6 +517,8 @@ cruise clean
 ```
 
 各 Completed session の PR status を `gh pr view`（GitLab では `glab mr view`）で確認します。PR が close または merge 済みの session は worktree（残っている `--repo` clone も含む）とともに削除します。開始されておらず `plan.md` が欠落または空白だけの Planned current-branch session も削除されます。Suspended session とその他の planned session は再開用に保持されます。
+
+成功した exec セッションは自動的に削除されます。`cruise clean` は失敗した exec セッションを削除しません。作業ファイルを変更せずにセッションを破棄するには、`cruise list` で **Delete** を選びます。
 
 > **注意:** `gh pr create` が失敗、または実行に至らなかった場合、session に PR URL がないことがあります。PR に紐付く URL なし session は保持されます。session log を確認するか `gh pr create` を手動で再実行してください。
 

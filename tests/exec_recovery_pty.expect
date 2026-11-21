@@ -1,0 +1,38 @@
+# Exercise the installed executable's menu in a real terminal.
+set timeout 20
+spawn -noecho $env(CRUISE_BIN) list
+expect {
+    -re {Select a session:.*Failed} {}
+    timeout { puts stderr "failed exec did not appear in the picker"; exit 1 }
+    eof { puts stderr "list exited before offering the failed exec"; exit 1 }
+}
+send -- "\r"
+if {$env(RECOVERY_ACTION) eq "Ordinary"} {
+    expect {
+        -re {Action:.*Run.*Edit Settings.*Reset to Planned.*Delete.*Back} {
+            if {[regexp {Resume} $expect_out(buffer)]} { exit 1 }
+            exit 0
+        }
+        timeout { exit 1 }
+        eof { exit 1 }
+    }
+}
+expect {
+    -re {Action:.*Resume.*Delete.*Back} {
+        if {[regexp {plan\.md|Generate Plan|View Diff|Create PR|Reset to Planned} $expect_out(buffer)]} {
+            puts stderr "failed exec exposed ordinary plan or workspace actions"
+            exit 1
+        }
+    }
+    timeout { puts stderr "expected Resume, Delete and Back in the action menu"; exit 1 }
+    eof { puts stderr "list exited before showing actions"; exit 1 }
+}
+# Use the menu's filter, not an assumed index or default selection.
+send -- $env(RECOVERY_ACTION)
+send -- "\r"
+expect {
+    eof {}
+    timeout { puts stderr "selected action did not finish"; exit 1 }
+}
+set result [wait]
+exit [lindex $result 3]

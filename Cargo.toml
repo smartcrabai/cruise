@@ -279,6 +279,13 @@ path = "tests/daemon_bdd.rs"
 
 [[test]]
 harness = false
+name = "exec_recovery_bdd"
+path = "tests/exec_recovery_bdd.rs"
+# Explicit POSIX acceptance check: requires Bats, jq, curl and Expect.
+test = false
+
+[[test]]
+harness = false
 name = "pr_failed_bdd"
 path = "tests/pr_failed_bdd.rs"
 

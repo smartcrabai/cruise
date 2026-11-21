@@ -25,6 +25,7 @@ cruise exec --config cruise.yaml
 - リソースのデフォルトは `service.name=cruise` とパッケージの `service.version` です。`OTEL_RESOURCE_ATTRIBUTES` でリソース属性を追加または上書きできます。サービス名には `OTEL_SERVICE_NAME` が優先されます。
 
 メトリクスは `cruise.operation.count` と `cruise.operation.duration`（秒）で、ラベルは `cruise.operation` と `cruise.outcome` のみです。さらに `cruise.retry.count` があり、ラベルは `cruise.retry.action` と `cruise.retry.reason` のみです。セッション／ワークフロー／モデルの識別子はトレース専用で、メトリクスラベルにはなりません。トークン使用量とコストは OpenTelemetry にエクスポートされません。これらは `cruise usage` に記載のとおりローカルに記録されます。
+スパンのステータスは操作結果に対応します。`success` は `Ok`、`paused` と `cancelled` は `Unset`（結果は `cruise.outcome` に記録し、`error.type` は設定しない）、失敗とタイムアウトは `Error`（`error.type` を設定）です。
 
 プロンプト／入力テキスト、エージェント出力、コマンド本文、例外メッセージがスパンまたはメトリクスに自動的に付加されることはありません。セッション ID、ワークフローファイル名、ステップ名／モデル名、CI チェック／ジョブ名と参照、および明示的に指定されたリソース属性はエクスポートされます。これらの値に秘密情報を含めないでください。
 

@@ -2,7 +2,7 @@
 //! Fixtures deliberately use YAML and observable JSON, not proposed Rust fields or types.
 use cruise::config::{WorkflowConfig, validate_config};
 use cruise::error::CruiseError;
-use cruise::workflow_call::resolve_workflow_calls_without_app_model_defaults;
+use cruise::workflow_call::resolve_workflow_calls_without_app_defaults;
 use cruise::workflow_defaults::WorkflowDefaults;
 use serde_json::{Value, json};
 use std::sync::OnceLock;
@@ -127,7 +127,7 @@ fn workflow_call_site_rejects_restrictions() {
     let config = parse(
         "sdk: jcode\nsteps:\n  call:\n    workflow_call: ./callee.yaml\n    disallowed_tools: [web]\n",
     );
-    let result = resolve_workflow_calls_without_app_model_defaults(
+    let result = resolve_workflow_calls_without_app_defaults(
         config,
         dir.path(),
         &WorkflowDefaults::default(),
@@ -375,7 +375,7 @@ fn schema_and_runtime_agree_on_empty_and_nonempty_step_restrictions() {
             let yaml = serde_yaml::to_string(&document).unwrap_or_else(|error| panic!("{error}"));
             let config = parse(&yaml);
             let result = if name == "workflow_call" {
-                resolve_workflow_calls_without_app_model_defaults(
+                resolve_workflow_calls_without_app_defaults(
                     config,
                     dir.path(),
                     &WorkflowDefaults::default(),

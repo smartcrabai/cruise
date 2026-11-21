@@ -948,6 +948,7 @@ exec "$real_git" ${git_prefix[@]+"${git_prefix[@]}"} "$subcommand" "$@"
                 .unwrap_or_else(|error| panic!("parse feature: {error}"));
         assert_eq!(feature.scenarios.len(), 23);
         let writer = ReviewWorld::cucumber()
+            .with_default_cli()
             .max_concurrent_scenarios(1)
             .fail_on_skipped()
             .run(path)

@@ -1,4 +1,5 @@
 use crate::cli::ExecArgs;
+use crate::cli_events::{CtrlC, drive, interruptible_startup};
 use crate::config::WorkflowConfig;
 use crate::error::{CruiseError, Result};
 use crate::resolver::{ConfigSource, load_config_from_source, resolve_config};
@@ -74,7 +75,7 @@ pub(crate) async fn run_resolved(
         return Ok(());
     }
 
-    let (_herdr, (client, session_id, stream)) = crate::cli_events::interruptible_startup(async {
+    let (_herdr, (client, session_id, stream, ctrl_c)) = interruptible_startup(async {
         let herdr = crate::herdr::start();
         let flag_values = if req.flags.is_empty() {
             crate::run_cmd::select_flag_values(config, &crate::flags::FlagValues::new())?
@@ -88,6 +89,7 @@ pub(crate) async fn run_resolved(
             config_source: SessionConfigRef::from_source(source, None)?,
             input: req.input,
             flags: flag_values,
+            skipped_steps: Vec::new(),
             max_retries: req.max_retries,
             rate_limit_retries: req.rate_limit_retries,
             context,
@@ -97,15 +99,40 @@ pub(crate) async fn run_resolved(
         let stream = client
             .events(crate::daemon::client::EventFilter::default())
             .await?;
+        let ctrl_c = CtrlC::new()?;
         let session_id = client.start_exec(&request).await?;
-        Ok((herdr, (client, session_id, stream)))
+        Ok((herdr, (client, session_id, stream, ctrl_c)))
     })
     .await?;
     let mut handler = crate::cli_events::TerminalEvents::new(&client, &session_id);
-    let result = crate::cli_events::drive(&client, &session_id, stream, &mut handler)
-        .await
-        .and_then(exec_exit_result);
+    let result = match drive(&client, &session_id, stream, ctrl_c, &mut handler).await {
+        Ok(finished) => {
+            print_recovery_hint(&client, &finished).await;
+            exec_exit_result(finished)
+        }
+        Err(error) => Err(error),
+    };
     crate::run_cmd::finish_cli_run(result)
+}
+
+pub(crate) async fn print_recovery_hint(
+    client: &crate::daemon::client::DaemonClient,
+    finished: &crate::cli_events::Finished,
+) {
+    let state = &finished.state;
+    if !finished.cancelled_by_user
+        && state.exec
+        && (finished.failure.is_some() || matches!(state.phase, SessionPhase::Failed(_)))
+        && let Ok((saved, false)) = client.run_session(&state.id).await
+        && saved.exec
+        && matches!(saved.phase, SessionPhase::Failed(error)
+            if finished.failure.as_ref().is_none_or(|reported| *reported == error))
+    {
+        let id = &state.id;
+        eprintln!(
+            "Exec session {id} is available for recovery. Run `cruise run {id}` or choose Resume in `cruise list`."
+        );
+    }
 }
 
 fn exec_exit_result(finished: crate::cli_events::Finished) -> Result<()> {

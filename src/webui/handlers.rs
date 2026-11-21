@@ -1,6 +1,6 @@
 //! Fragment and action routes under `/webui`.
 
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -11,8 +11,8 @@ use tower::ServiceExt as _;
 use tower_http::services::ServeFile;
 
 use crate::application::{
-    CurrentStepUpdateDto, Interactive, MergePrOutcome, NewSessionRequest, OperationKind,
-    PlanRequest, PrMergeMethod, RunRequest, SessionSettingsRequest,
+    CurrentStepUpdateDto, ExecStartRequest, Interactive, MergePrOutcome, NewSessionRequest,
+    OperationKind, PlanRequest, PrMergeMethod, RunRequest, SessionSettingsRequest,
 };
 use crate::error::{CruiseError, Result};
 use crate::session::WorkspaceMode;
@@ -189,7 +189,7 @@ fn settings_html(state: &WebState, id: &str, open: bool) -> Result<String> {
             let steps = crate::flags::skip_candidates(&defaults.steps, &session_flags);
             let after_pr = crate::flags::skip_candidates(&defaults.after_pr_steps, &session_flags);
             let mut tree = super::pages::step_tree_vm(&steps, &after_pr, &session.skipped_steps);
-            tree.flags = super::pages::flag_rows(&defaults.flags, &session_flags);
+            tree.flags = super::pages::flag_toggle_rows(&defaults.flags, &session_flags);
             let options = all_steps
                 .steps
                 .iter()
@@ -332,14 +332,27 @@ pub(crate) async fn configs(UiState(state): UiState, Query(params): Params) -> R
 pub(crate) async fn new_steps(UiState(state): UiState, Query(params): Params) -> Response {
     let params = Fields::from(params);
     fragment(&state, "Steps", || {
-        super::pages::step_tree_html(
+        let repo = if params.get("sourceMode").is_some_and(|mode| mode != "repo") {
+            None
+        } else {
+            params.opt("repo")
+        };
+        let config_path = super::dto::normalize_config_path(params.opt("configPath"));
+        let (mut steps, force_exec) = super::pages::new_session_step_tree_html(
             &state,
             &params.text("baseDir"),
-            params.get("configPath"),
-            params.opt("repo").as_deref(),
+            config_path.as_deref(),
+            repo.as_deref(),
             None,
             &crate::flags::FlagValues::new(),
-        )
+        )?;
+        let actions = super::pages::new_session_actions_html(
+            &state,
+            params.text("sourceMode") != "repo",
+            force_exec,
+        )?;
+        steps.push_str(&partials::replace("new-session-actions", &actions));
+        Ok(steps)
     })
 }
 
@@ -351,11 +364,16 @@ pub(crate) async fn new_steps_for_flags(
     let flags = flag_values(&params).unwrap_or_default();
     let skipped = skipped_steps(&params);
     fragment(&state, "Steps", || {
+        let repo = if params.get("sourceMode").is_some_and(|mode| mode != "repo") {
+            None
+        } else {
+            params.opt("repo")
+        };
         super::pages::step_tree_html(
             &state,
             &params.text("baseDir"),
             params.get("configPath"),
-            params.opt("repo").as_deref(),
+            repo.as_deref(),
             Some(&skipped),
             &flags,
         )
@@ -427,7 +445,7 @@ fn skipped_steps(fields: &Fields) -> Vec<String> {
     ids.into_iter().filter(|id| !enabled.contains(id)).collect()
 }
 
-/// `flag.NAME` selectors posted by the step tree. Empty values do not add map entries.
+/// `flag.NAME` fields submitted by the step tree. Empty values do not add map entries.
 fn flag_values(fields: &Fields) -> Option<crate::flags::FlagValues> {
     let mut found = false;
     let mut values = crate::flags::FlagValues::new();
@@ -540,6 +558,9 @@ async fn create_session_inner(state: &WebState, fields: &Fields, plan: bool) -> 
             });
         }
     }
+    if plan && fields.text("sourceMode") != "repo" && force_exec_selected(state, fields) {
+        return start_exec_response(state, fields);
+    }
     let request = new_session_request(fields);
     let application = state.application.clone();
     let blocking_request = request.clone();
@@ -576,6 +597,67 @@ async fn create_session_inner(state: &WebState, fields: &Fields, plan: bool) -> 
             ));
         }
         Ok(push_url(html(body), &format!("/sessions/{id}")))
+    })
+}
+
+fn force_exec_selected(state: &WebState, fields: &Fields) -> bool {
+    let config_path = super::dto::normalize_config_path(fields.opt("configPath"));
+    state
+        .application
+        .new_session_config_defaults(
+            FsPath::new(&fields.text("baseDir")),
+            config_path.as_deref(),
+            None,
+        )
+        .is_ok_and(|defaults| defaults.force_exec)
+}
+
+pub(crate) async fn create_exec_session(
+    UiState(state): UiState,
+    axum::extract::Form(pairs): Form,
+) -> Response {
+    start_exec_response(&state, &Fields::from(pairs))
+}
+
+fn start_exec_response(state: &WebState, fields: &Fields) -> Response {
+    run(state, "Exec", || {
+        if fields.text("sourceMode") == "repo" {
+            return Err(CruiseError::Other(
+                "Exec runs in a local working directory; choose the Directory source".to_string(),
+            ));
+        }
+        if !fields.all("attachments").is_empty() {
+            return Err(CruiseError::Other(
+                "Exec does not accept image attachments; use Create draft to plan with images"
+                    .to_string(),
+            ));
+        }
+        let config_path = super::dto::normalize_config_path(fields.opt("configPath"));
+        let request = ExecStartRequest::for_directory(
+            FsPath::new(&fields.text("baseDir")),
+            config_path.as_deref(),
+            &fields.text("input"),
+            flag_values(fields).unwrap_or_default(),
+            skipped_steps(fields),
+        )?;
+        let (sink, log_sink) = state.hub.sinks();
+        let id = state
+            .application
+            .start_exec(request, sink, Some(log_sink))?;
+        let _ = state.application.clear_draft();
+        let mut body = match super::pages::session_detail_html(state, &id, "log") {
+            Ok(main) => main,
+            Err(error) => {
+                if state.application.read_session(&id).is_ok() {
+                    return Err(error);
+                }
+                let mut main = super::pages::empty_state_html(state)?;
+                main.push_str(&partials::sidebar_list_partial(state, None)?);
+                return Ok(html(main));
+            }
+        };
+        body.push_str(&partials::sidebar_list_partial(state, Some(&id))?);
+        Ok(push_url(html(body), &format!("/sessions/{id}?tab=log")))
     })
 }
 

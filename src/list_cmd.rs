@@ -47,7 +47,9 @@ pub async fn run(args: ListArgs) -> Result<()> {
         };
         let mut details = client.session_details(&id).await?;
         loop {
-            if let Ok(content) = client.session_plan(&id).await {
+            if !details.state.exec
+                && let Ok(content) = client.session_plan(&id).await
+            {
                 crate::display::print_bordered(&content, Some("plan.md"));
             }
             let actions = available_session_actions(&details.capabilities);
@@ -200,11 +202,14 @@ pub async fn run(args: ListArgs) -> Result<()> {
                             batch: true,
                         })
                         .await?;
+                    let ctrl_c = crate::cli_events::CtrlC::new()?;
                     if let Err(error) = client.start_create_pr(&id, &context).await {
                         eprintln!("PR creation failed: {error}");
                     } else {
                         let mut handler = crate::cli_events::TerminalEvents::new(&client, &id);
-                        match crate::cli_events::drive(&client, &id, stream, &mut handler).await {
+                        match crate::cli_events::drive(&client, &id, stream, ctrl_c, &mut handler)
+                            .await
+                        {
                             Ok(finished) => {
                                 if let SessionPhase::PrFailed(error) | SessionPhase::Failed(error) =
                                     finished.state.phase

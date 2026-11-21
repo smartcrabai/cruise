@@ -180,8 +180,10 @@ pub fn absolute_path(path: &Path) -> Result<PathBuf> {
 ///
 /// # Errors
 ///
-/// Returns an error when the resolved workflow cannot be represented as YAML.
+/// Returns an error when an effective PR template is invalid or the resolved
+/// workflow cannot be represented as YAML.
 pub fn serialize_resolved_config(config: &WorkflowConfig) -> Result<String> {
+    crate::pr_template::validate_config(config)?;
     serde_yaml::to_string(config).map_err(|error| {
         CruiseError::Other(format!(
             "failed to serialize resolved workflow config for session: {error}"

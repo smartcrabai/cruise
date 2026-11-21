@@ -68,6 +68,21 @@ impl Daemon {
         );
         output
     }
+
+    fn sessions_request(instance: &Value, query: &str) -> reqwest::RequestBuilder {
+        let origin = instance["origin"]
+            .as_str()
+            .unwrap_or_else(|| panic!("instance origin missing"));
+        let token = instance["token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("instance token missing"));
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|error| panic!("HTTP client: {error}"))
+            .get(format!("{origin}api/v1/sessions{query}"))
+            .bearer_auth(token)
+    }
 }
 
 impl Drop for Daemon {
@@ -131,18 +146,7 @@ fn headless_list_json_returns_an_empty_array_without_prompting() {
 }
 
 pub(crate) async fn fetch_sessions(instance: &Value) -> Value {
-    let origin = instance["origin"]
-        .as_str()
-        .unwrap_or_else(|| panic!("instance origin missing"));
-    let token = instance["token"]
-        .as_str()
-        .unwrap_or_else(|| panic!("instance token missing"));
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .unwrap_or_else(|error| panic!("HTTP client: {error}"))
-        .get(format!("{origin}api/v1/sessions"))
-        .bearer_auth(token)
+    let response = Daemon::sessions_request(instance, "")
         .send()
         .await
         .unwrap_or_else(|error| panic!("GET sessions: {error}"));
@@ -194,4 +198,73 @@ async fn sessions_api_json_matches_cruise_list_json() {
     assert!(item.get("baseDir").is_none());
     assert!(item.get("configSource").is_none());
     assert_eq!(item["workspace_mode"], serde_json::json!("Worktree"));
+}
+
+#[tokio::test]
+async fn failed_exec_requires_inventory_opt_in() {
+    let daemon = Daemon::new();
+    let instance = daemon.start();
+    let home = daemon.home.path();
+    write_cli_session(home);
+    let manager = SessionManager::new(home.join("data/cruise"));
+    let project = home.join("project");
+    for (id, phase) in [
+        (
+            "exec-failed",
+            SessionPhase::Failed("step failed".to_owned()),
+        ),
+        ("exec-suspended", SessionPhase::Suspended),
+        ("exec-completed", SessionPhase::Completed),
+    ] {
+        let mut session = SessionState::new(
+            id.to_owned(),
+            project.clone(),
+            SessionConfigRef::File {
+                path: project.join("cruise.yml"),
+            },
+            "exec inventory fixture".to_owned(),
+        );
+        session.exec = true;
+        session.phase = phase;
+        manager
+            .create(&session)
+            .unwrap_or_else(|error| panic!("create {id}: {error}"));
+    }
+
+    let inventory = |query: &'static str| {
+        let request = Daemon::sessions_request(&instance, query);
+        async move {
+            request
+                .send()
+                .await
+                .unwrap_or_else(|error| panic!("GET sessions{query}: {error}"))
+                .error_for_status()
+                .unwrap_or_else(|error| panic!("sessions{query} status: {error}"))
+                .json::<Vec<Value>>()
+                .await
+                .unwrap_or_else(|error| panic!("parse session inventory: {error}"))
+        }
+    };
+    let default = inventory("").await;
+    assert_eq!(default.len(), 1);
+    assert_eq!(default[0]["id"], "list-json-session");
+    assert!(default[0].get("exec").is_none());
+    assert_eq!(inventory("?includeFailedExec=false").await, default);
+
+    let opted_in = inventory("?includeFailedExec=true").await;
+    assert_eq!(opted_in.len(), 2);
+    assert!(opted_in.contains(&default[0]));
+    let failed = opted_in
+        .iter()
+        .find(|item| item["id"] == "exec-failed")
+        .unwrap_or_else(|| panic!("failed exec missing from opted-in inventory"));
+    assert_eq!(failed["exec"], true);
+    assert_eq!(failed["phase"], "Failed");
+    assert_eq!(failed["phase_error"], "step failed");
+    assert_eq!(failed["plan_available"], false);
+
+    let cli = daemon.success(&["list", "--json"]);
+    let cli_rows: Vec<Value> = serde_json::from_slice(&cli.stdout)
+        .unwrap_or_else(|error| panic!("parse CLI inventory: {error}"));
+    assert_eq!(cli_rows, opted_in);
 }
