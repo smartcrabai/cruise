@@ -572,12 +572,15 @@ jobs:
           CRUISE_ACTION_TEST_BIN: target/debug/cruise-runtime
         run: bash scripts/test_action_run.sh
 
-      - name: Smoke native update with real A/B binaries
-        if: matrix.os == 'macos-latest'
-        run: python3 scripts/test_update_smoke.py --build --next-runtime target/debug/cruise-runtime
-
-  native-update-smoke-linux:
-    runs-on: ubuntu-latest
+  native-update-smoke:
+    name: native-update-smoke-${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux, os: ubuntu-latest }
+          - { name: macos, os: macos-latest }
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
       contents: read
