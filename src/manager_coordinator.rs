@@ -149,6 +149,363 @@ fn block_active(cwd: &Path, goal_id: &str, reason: String) -> Result<()> {
     })
 }
 
+fn dispatch_pending_resumes(
+    application: &CruiseApplication,
+    sink: &std::sync::Arc<dyn crate::application::ApplicationEventSink>,
+    log_sink: &std::sync::Arc<dyn crate::application::LogSink>,
+    stop: &crate::cancellation::CancellationToken,
+    children: &mut tokio::task::JoinSet<()>,
+) {
+    let resumes = std::mem::take(
+        &mut RESUMES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1,
+    );
+    for (cwd, goal_id, task_id, attempt_number, claim) in resumes {
+        // Pause and shutdown use the same gate, so neither can overtake
+        // dispatch after the durable intent is consumed.
+        let _guard = CONTROL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if stop.is_cancelled() || claim.token().is_cancelled() {
+            continue;
+        }
+        let admitted =
+            manager::update_goal(&cwd, &goal_id, |goal| {
+                if goal.status != manager::GoalStatus::Active {
+                    return Ok(false);
+                }
+                let Some(attempt) = goal.execution.attempts.iter_mut().find(|attempt| {
+                    attempt.task_id == task_id && attempt.attempt == attempt_number
+                }) else {
+                    return Ok(false);
+                };
+                if !attempt.resume_pending {
+                    return Ok(false);
+                }
+                attempt.resume_pending = false;
+                attempt.resume_starting = true;
+                Ok(true)
+            });
+        match admitted {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                eprintln!("warning: Manager resume dispatch failed: {error}");
+                continue;
+            }
+        }
+        let application = application.clone();
+        let sink = std::sync::Arc::clone(sink);
+        let log_sink = std::sync::Arc::clone(log_sink);
+        children.spawn(async move {
+            let result = application
+                .run_with_claim_and_log_sink(
+                    claim,
+                    crate::application::RunRequest::default(),
+                    sink,
+                    Some(log_sink),
+                )
+                .await;
+            let failure = result.err().map(|error| error.to_string());
+            if let Some(error) = &failure {
+                eprintln!("warning: Manager child resume failed: {error}");
+            }
+            let _guard = CONTROL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Err(error) = manager::update_goal(&cwd, &goal_id, |goal| {
+                if let Some(attempt) = goal.execution.attempts.iter_mut().find(|attempt| {
+                    attempt.task_id == task_id && attempt.attempt == attempt_number
+                }) {
+                    attempt.resume_starting = false;
+                }
+                if let Some(error) = &failure
+                    && goal.status == manager::GoalStatus::Active
+                {
+                    goal.reason = Some(format!(
+                        "Child resume failed for {task_id}; inspect the session before retrying: {error}"
+                    ));
+                }
+                Ok(())
+            }) {
+                eprintln!("warning: Manager could not record resume outcome: {error}");
+            }
+            wake();
+        });
+    }
+}
+
+async fn inspect_goal_children(
+    application: &CruiseApplication,
+    goal: &Goal,
+    anchor: &Path,
+    stop: &crate::cancellation::CancellationToken,
+    interrupted_resumes: Option<&HashSet<String>>,
+) -> Option<String> {
+    let mut unsafe_state = None;
+    for attempt in &goal.execution.attempts {
+        // A newer explicitly reserved attempt supersedes this one,
+        // but its session and result remain durable evidence.
+        if goal
+            .execution
+            .attempts
+            .iter()
+            .any(|newer| newer.task_id == attempt.task_id && newer.attempt > attempt.attempt)
+        {
+            continue;
+        }
+        if attempt.integrated {
+            continue;
+        }
+        if attempt.launch_started == Some(false) {
+            continue;
+        }
+        let child = match application.read_session(&attempt.session_id) {
+            Ok(child) => child,
+            Err(error) => {
+                unsafe_state = Some(format!(
+                    "Cannot recover child {}: {error}",
+                    attempt.session_id
+                ));
+                break;
+            }
+        };
+        if child.managed_child.as_ref() != Some(&owner(goal, attempt)) {
+            unsafe_state = Some(format!(
+                "Child {} has a different owner",
+                attempt.session_id
+            ));
+            break;
+        }
+        if application
+            .runtime()
+            .active_operation(&attempt.session_id)
+            .is_some()
+            || child.live_foreign_runner_pid().is_some()
+        {
+            continue;
+        }
+        if attempt.resume_starting
+            && interrupted_resumes.is_some_and(|ids| ids.contains(&attempt.session_id))
+            && !matches!(child.phase, crate::session::SessionPhase::Completed)
+        {
+            unsafe_state = Some(format!(
+                "Child {} has an interrupted resume dispatch; explicit review is required",
+                attempt.session_id
+            ));
+            break;
+        }
+        match child.phase {
+            crate::session::SessionPhase::Completed => {
+                if let Err(error) = finalize_child(
+                    application,
+                    anchor,
+                    &goal.id,
+                    &attempt.task_id,
+                    attempt.attempt,
+                )
+                .await
+                {
+                    unsafe_state = Some(format!(
+                        "Child {} finalization requires attention: {error}",
+                        attempt.session_id
+                    ));
+                    break;
+                }
+                if stop.is_cancelled() {
+                    break;
+                }
+                if let Err(error) = integrate(
+                    application,
+                    anchor,
+                    &goal.id,
+                    &attempt.task_id,
+                    attempt.attempt,
+                ) {
+                    unsafe_state = Some(format!(
+                        "Child {} integration requires attention: {error}",
+                        attempt.session_id
+                    ));
+                    break;
+                }
+            }
+            crate::session::SessionPhase::Planned | crate::session::SessionPhase::Running => {
+                unsafe_state = Some(format!(
+                    "Child {} has an interrupted or uncertain launch; explicit review is required",
+                    attempt.session_id
+                ));
+                break;
+            }
+            _ => {}
+        }
+    }
+    unsafe_state
+}
+
+fn dispatch_ready_goal(
+    application: &CruiseApplication,
+    goal: &Goal,
+    anchor: &Path,
+    sinks: (
+        &std::sync::Arc<dyn crate::application::ApplicationEventSink>,
+        &std::sync::Arc<dyn crate::application::LogSink>,
+    ),
+    stop: &crate::cancellation::CancellationToken,
+    children: &mut tokio::task::JoinSet<()>,
+    publications: &mut tokio::task::JoinSet<()>,
+) {
+    // Re-read after integration: the snapshot above predates any
+    // child finalization performed during this iteration.
+    if let Ok(current) = manager::snapshot(anchor)
+        && let Some(current_goal) = current.goals.iter().find(|g| g.id == goal.id)
+        && current_goal.status == manager::GoalStatus::Active
+        && current_goal.proposal.tasks.iter().all(|task| {
+            current_goal
+                .execution
+                .attempts
+                .iter()
+                .any(|attempt| attempt.task_id == task.id && attempt.integrated)
+        })
+    {
+        schedule_publication(publications, anchor, &goal.id, stop);
+        return;
+    }
+    match reserve_and_claim(application, anchor, &goal.id) {
+        Ok(Some(claim)) => {
+            if stop.is_cancelled() || claim.token().is_cancelled() {
+                drop(claim);
+                return;
+            }
+            let application = application.clone();
+            let sink = std::sync::Arc::clone(sinks.0);
+            let log_sink = std::sync::Arc::clone(sinks.1);
+            children.spawn(async move {
+                if let Err(error) = application
+                    .run_with_claim_and_log_sink(
+                        claim,
+                        crate::application::RunRequest::default(),
+                        sink,
+                        Some(log_sink),
+                    )
+                    .await
+                {
+                    eprintln!("warning: Manager child run failed: {error}");
+                }
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            if let Err(block_error) = block_active(
+                anchor,
+                &goal.id,
+                format!("Manager dispatch requires attention: {error}"),
+            ) {
+                eprintln!(
+                    "warning: Manager could not block goal {}: {block_error}",
+                    goal.id
+                );
+            }
+        }
+    }
+}
+
+async fn schedule_inventory(
+    application: &CruiseApplication,
+    sinks: (
+        &std::sync::Arc<dyn crate::application::ApplicationEventSink>,
+        &std::sync::Arc<dyn crate::application::LogSink>,
+    ),
+    stop: &crate::cancellation::CancellationToken,
+    interrupted_resumes: Option<&HashSet<String>>,
+    children: &mut tokio::task::JoinSet<()>,
+    publications: &mut tokio::task::JoinSet<()>,
+) -> bool {
+    let mut observing = false;
+    match manager::snapshots() {
+        Ok(snapshots) => {
+            for snapshot in snapshots {
+                for goal in snapshot.goals {
+                    if stop.is_cancelled() {
+                        break;
+                    }
+                    if matches!(
+                        goal.status,
+                        manager::GoalStatus::Verifying | manager::GoalStatus::AwaitingMerge
+                    ) {
+                        observing = true;
+                        if let Some(anchor) = goal.execution.anchor.clone() {
+                            schedule_publication(publications, &anchor, &goal.id, stop);
+                        }
+                        continue;
+                    }
+                    if goal.status != manager::GoalStatus::Active {
+                        continue;
+                    }
+                    observing = true;
+                    let Some(anchor) = goal.execution.anchor.clone() else {
+                        continue;
+                    };
+                    // Durable pending requests are re-admitted after restart. A
+                    // paused goal is never considered by this active-only loop.
+                    for attempt in &goal.execution.attempts {
+                        if attempt.resume_pending
+                            && application
+                                .runtime()
+                                .active_operation(&attempt.session_id)
+                                .is_none()
+                            && let Err(error) = resume_task_inner(
+                                application,
+                                &anchor,
+                                &goal.id,
+                                &attempt.task_id,
+                                true,
+                            )
+                        {
+                            eprintln!(
+                                "warning: Manager pending resume for {} not admitted: {error}",
+                                attempt.session_id
+                            );
+                        }
+                    }
+                    let unsafe_state = inspect_goal_children(
+                        application,
+                        &goal,
+                        &anchor,
+                        stop,
+                        interrupted_resumes,
+                    )
+                    .await;
+                    if let Some(reason) = unsafe_state {
+                        if let Err(error) = block_active(&anchor, &goal.id, reason) {
+                            eprintln!("warning: Manager could not block goal {}: {error}", goal.id);
+                        }
+                        continue;
+                    }
+                    if stop.is_cancelled() {
+                        break;
+                    }
+                    dispatch_ready_goal(
+                        application,
+                        &goal,
+                        &anchor,
+                        sinks,
+                        stop,
+                        children,
+                        publications,
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("warning: Manager inventory unavailable, dispatch stopped: {error}");
+            observing = true;
+        }
+    }
+    observing
+}
+
 /// The daemon owns this loop and joins it during shutdown. It never retries a
 /// failed or uncertain child and never starts a Goal that is not active.
 pub(crate) async fn run_daemon(
@@ -197,303 +554,17 @@ pub(crate) async fn run_daemon(
                 }
             }
         }
-        let resumes = std::mem::take(
-            &mut RESUMES
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .1,
-        );
-        for (cwd, goal_id, task_id, attempt_number, claim) in resumes {
-            // Pause and shutdown use the same gate, so neither can overtake
-            // dispatch after the durable intent is consumed.
-            let _guard = CONTROL
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if stop.is_cancelled() || claim.token().is_cancelled() {
-                continue;
-            }
-            let admitted = manager::update_goal(&cwd, &goal_id, |goal| {
-                if goal.status != manager::GoalStatus::Active {
-                    return Ok(false);
-                }
-                let Some(attempt) = goal.execution.attempts.iter_mut().find(|attempt| {
-                    attempt.task_id == task_id && attempt.attempt == attempt_number
-                }) else {
-                    return Ok(false);
-                };
-                if !attempt.resume_pending {
-                    return Ok(false);
-                }
-                attempt.resume_pending = false;
-                attempt.resume_starting = true;
-                Ok(true)
-            });
-            match admitted {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => {
-                    eprintln!("warning: Manager resume dispatch failed: {error}");
-                    continue;
-                }
-            }
-            let application = application.clone();
-            let sink = std::sync::Arc::clone(&sink);
-            let log_sink = std::sync::Arc::clone(&log_sink);
-            children.spawn(async move {
-                let result = application
-                    .run_with_claim_and_log_sink(
-                        claim,
-                        crate::application::RunRequest::default(),
-                        sink,
-                        Some(log_sink),
-                    )
-                    .await;
-                let failure = result.err().map(|error| error.to_string());
-                if let Some(error) = &failure {
-                    eprintln!("warning: Manager child resume failed: {error}");
-                }
-                let _guard = CONTROL
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Err(error) = manager::update_goal(&cwd, &goal_id, |goal| {
-                    if let Some(attempt) = goal.execution.attempts.iter_mut().find(|attempt| {
-                        attempt.task_id == task_id && attempt.attempt == attempt_number
-                    }) {
-                        attempt.resume_starting = false;
-                    }
-                    if let Some(error) = &failure
-                        && goal.status == manager::GoalStatus::Active
-                    {
-                        goal.reason = Some(format!(
-                            "Child resume failed for {task_id}; inspect the session before retrying: {error}"
-                        ));
-                    }
-                    Ok(())
-                }) {
-                    eprintln!("warning: Manager could not record resume outcome: {error}");
-                }
-                wake();
-            });
-        }
+        dispatch_pending_resumes(&application, &sink, &log_sink, &stop, &mut children);
         let work = CoordinatorWork::begin();
-        let mut observing = false;
-        match manager::snapshots() {
-            Ok(snapshots) => {
-                for snapshot in snapshots {
-                    for goal in snapshot.goals {
-                        if stop.is_cancelled() {
-                            break;
-                        }
-                        if matches!(
-                            goal.status,
-                            manager::GoalStatus::Verifying | manager::GoalStatus::AwaitingMerge
-                        ) {
-                            observing = true;
-                            if let Some(anchor) = goal.execution.anchor.clone() {
-                                schedule_publication(&mut publications, &anchor, &goal.id, &stop);
-                            }
-                            continue;
-                        }
-                        if goal.status != manager::GoalStatus::Active {
-                            continue;
-                        }
-                        observing = true;
-                        let Some(anchor) = goal.execution.anchor.clone() else {
-                            continue;
-                        };
-                        // Durable pending requests are re-admitted after restart. A
-                        // paused goal is never considered by this active-only loop.
-                        for attempt in &goal.execution.attempts {
-                            if attempt.resume_pending
-                                && application
-                                    .runtime()
-                                    .active_operation(&attempt.session_id)
-                                    .is_none()
-                                && let Err(error) = resume_task_inner(
-                                    &application,
-                                    &anchor,
-                                    &goal.id,
-                                    &attempt.task_id,
-                                    true,
-                                )
-                            {
-                                eprintln!(
-                                    "warning: Manager pending resume for {} not admitted: {error}",
-                                    attempt.session_id
-                                );
-                            }
-                        }
-                        let mut unsafe_state = None;
-                        for attempt in &goal.execution.attempts {
-                            // A newer explicitly reserved attempt supersedes this one,
-                            // but its session and result remain durable evidence.
-                            if goal.execution.attempts.iter().any(|newer| {
-                                newer.task_id == attempt.task_id && newer.attempt > attempt.attempt
-                            }) {
-                                continue;
-                            }
-                            if attempt.integrated {
-                                continue;
-                            }
-                            if attempt.launch_started == Some(false) {
-                                continue;
-                            }
-                            let child = match application.read_session(&attempt.session_id) {
-                                Ok(child) => child,
-                                Err(error) => {
-                                    unsafe_state = Some(format!(
-                                        "Cannot recover child {}: {error}",
-                                        attempt.session_id
-                                    ));
-                                    break;
-                                }
-                            };
-                            if child.managed_child.as_ref() != Some(&owner(&goal, attempt)) {
-                                unsafe_state = Some(format!(
-                                    "Child {} has a different owner",
-                                    attempt.session_id
-                                ));
-                                break;
-                            }
-                            if application
-                                .runtime()
-                                .active_operation(&attempt.session_id)
-                                .is_some()
-                                || child.live_foreign_runner_pid().is_some()
-                            {
-                                continue;
-                            }
-                            if attempt.resume_starting
-                                && interrupted_resumes
-                                    .as_ref()
-                                    .is_some_and(|ids| ids.contains(&attempt.session_id))
-                                && !matches!(child.phase, crate::session::SessionPhase::Completed)
-                            {
-                                unsafe_state = Some(format!(
-                                    "Child {} has an interrupted resume dispatch; explicit review is required",
-                                    attempt.session_id
-                                ));
-                                break;
-                            }
-                            match child.phase {
-                                crate::session::SessionPhase::Completed => {
-                                    if let Err(error) = finalize_child(
-                                        &application,
-                                        &anchor,
-                                        &goal.id,
-                                        &attempt.task_id,
-                                        attempt.attempt,
-                                    )
-                                    .await
-                                    {
-                                        unsafe_state = Some(format!(
-                                            "Child {} finalization requires attention: {error}",
-                                            attempt.session_id
-                                        ));
-                                        break;
-                                    }
-                                    if stop.is_cancelled() {
-                                        break;
-                                    }
-                                    if let Err(error) = integrate(
-                                        &application,
-                                        &anchor,
-                                        &goal.id,
-                                        &attempt.task_id,
-                                        attempt.attempt,
-                                    ) {
-                                        unsafe_state = Some(format!(
-                                            "Child {} integration requires attention: {error}",
-                                            attempt.session_id
-                                        ));
-                                        break;
-                                    }
-                                }
-                                crate::session::SessionPhase::Planned
-                                | crate::session::SessionPhase::Running => {
-                                    unsafe_state = Some(format!(
-                                        "Child {} has an interrupted or uncertain launch; explicit review is required",
-                                        attempt.session_id
-                                    ));
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-                        if let Some(reason) = unsafe_state {
-                            if let Err(error) = block_active(&anchor, &goal.id, reason) {
-                                eprintln!(
-                                    "warning: Manager could not block goal {}: {error}",
-                                    goal.id
-                                );
-                            }
-                            continue;
-                        }
-                        if stop.is_cancelled() {
-                            break;
-                        }
-                        // Re-read after integration: the snapshot above predates any
-                        // child finalization performed during this iteration.
-                        if let Ok(current) = manager::snapshot(&anchor)
-                            && let Some(current_goal) =
-                                current.goals.iter().find(|g| g.id == goal.id)
-                            && current_goal.status == manager::GoalStatus::Active
-                            && current_goal.proposal.tasks.iter().all(|task| {
-                                current_goal
-                                    .execution
-                                    .attempts
-                                    .iter()
-                                    .any(|attempt| attempt.task_id == task.id && attempt.integrated)
-                            })
-                        {
-                            schedule_publication(&mut publications, &anchor, &goal.id, &stop);
-                            continue;
-                        }
-                        match reserve_and_claim(&application, &anchor, &goal.id) {
-                            Ok(Some(claim)) => {
-                                if stop.is_cancelled() || claim.token().is_cancelled() {
-                                    drop(claim);
-                                    continue;
-                                }
-                                let application = application.clone();
-                                let sink = std::sync::Arc::clone(&sink);
-                                let log_sink = std::sync::Arc::clone(&log_sink);
-                                children.spawn(async move {
-                                    if let Err(error) = application
-                                        .run_with_claim_and_log_sink(
-                                            claim,
-                                            crate::application::RunRequest::default(),
-                                            sink,
-                                            Some(log_sink),
-                                        )
-                                        .await
-                                    {
-                                        eprintln!("warning: Manager child run failed: {error}");
-                                    }
-                                });
-                            }
-                            Ok(None) => {}
-                            Err(error) => {
-                                if let Err(block_error) = block_active(
-                                    &anchor,
-                                    &goal.id,
-                                    format!("Manager dispatch requires attention: {error}"),
-                                ) {
-                                    eprintln!(
-                                        "warning: Manager could not block goal {}: {block_error}",
-                                        goal.id
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(error) => {
-                eprintln!("warning: Manager inventory unavailable, dispatch stopped: {error}");
-                observing = true;
-            }
-        }
+        let observing = schedule_inventory(
+            &application,
+            (&sink, &log_sink),
+            &stop,
+            interrupted_resumes.as_ref(),
+            &mut children,
+            &mut publications,
+        )
+        .await;
         drop(work);
         tokio::select! {
             () = stop.cancelled() => break,
