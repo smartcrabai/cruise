@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Run every Rust test that CI covers, with integration tests under cargo-nextest.
+"""Run every Rust test that CI covers, in parallel under cargo-nextest.
 
-Unit tests and doctests stay on `cargo test`. Integration-test binaries run in
-parallel under nextest, except `harness = false` targets: nextest needs libtest's
-`--list`, so those run through `cargo test --test`.
+Doctests stay on `cargo test`, as do `harness = false` targets: nextest needs
+libtest's `--list`.
 """
 
 from __future__ import annotations
@@ -27,13 +26,11 @@ def main() -> int:
         for target in manifest.get("test", [])
         if target.get("harness", True) is False and target.get("test", True)
     ]
-    integration = "kind(test)"
+    filterset = "all()"
     if harnessless:
-        excluded = " | ".join(f"binary_id(={package}::{name})" for name in harnessless)
-        integration += f" and not ({excluded})"
+        filterset = "not (" + " | ".join(f"binary_id(={package}::{name})" for name in harnessless) + ")"
     try:
-        run("cargo", "test", "--all-features", "--lib", "--bins")
-        run("cargo", "nextest", "run", "--all-features", "-E", integration)
+        run("cargo", "nextest", "run", "--all-features", "-E", filterset)
         if harnessless:
             run("cargo", "test", "--all-features", *(arg for name in harnessless for arg in ("--test", name)))
         run("cargo", "test", "--all-features", "--doc")
