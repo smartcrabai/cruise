@@ -11,7 +11,7 @@ use tempfile::TempDir;
 struct Daemon(TempDir);
 
 impl Daemon {
-    fn command(&self, args: &[&str]) -> Output {
+    fn command(&self, args: &[&str]) -> std::io::Result<Output> {
         let home = self.0.path();
         Command::new(env!("CARGO_BIN_EXE_cruise"))
             .current_dir(home)
@@ -26,7 +26,6 @@ impl Daemon {
             .stdin(Stdio::null())
             .args(args)
             .output()
-            .unwrap()
     }
 }
 
@@ -44,17 +43,17 @@ impl Drop for Daemon {
 }
 
 #[tokio::test]
-async fn corrupt_manager_record_does_not_disable_ordinary_daemon_service() {
-    let daemon = Daemon(TempDir::new().unwrap());
+async fn corrupt_manager_record_does_not_disable_ordinary_daemon_service()
+-> Result<(), Box<dyn std::error::Error>> {
+    let daemon = Daemon(TempDir::new()?);
     let home = daemon.0.path();
     let project = home.join("project");
-    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&project)?;
     let config = project.join("cruise.yml");
     fs::write(
         &config,
         "command: [echo]\nsteps:\n  build:\n    prompt: make a change\n",
-    )
-    .unwrap();
+    )?;
     let sessions = SessionManager::new(home.join("data/cruise"));
     let mut session = SessionState::new(
         "ordinary-session".to_owned(),
@@ -63,13 +62,13 @@ async fn corrupt_manager_record_does_not_disable_ordinary_daemon_service() {
         "ordinary service".to_owned(),
     );
     session.phase = SessionPhase::Planned;
-    sessions.create(&session).unwrap();
+    sessions.create(&session)?;
 
     let record = home.join("data/cruise/manager/corrupt.json");
-    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::create_dir_all(record.parent().ok_or("record has no parent")?)?;
     let corrupt = b"{not valid json";
-    fs::write(&record, corrupt).unwrap();
-    let started = daemon.command(&["daemon", "start", "--port", "0"]);
+    fs::write(&record, corrupt)?;
+    let started = daemon.command(&["daemon", "start", "--port", "0"])?;
     assert!(
         started.status.success(),
         "daemon start: {}{}",
@@ -77,40 +76,36 @@ async fn corrupt_manager_record_does_not_disable_ordinary_daemon_service() {
         String::from_utf8_lossy(&started.stderr)
     );
     let instance: Value =
-        serde_json::from_slice(&fs::read(home.join("state/cruise/daemon/instance.json")).unwrap())
-            .unwrap();
-    let origin = instance["origin"].as_str().unwrap();
-    let token = instance["token"].as_str().unwrap();
+        serde_json::from_slice(&fs::read(home.join("state/cruise/daemon/instance.json"))?)?;
+    let origin = instance["origin"]
+        .as_str()
+        .ok_or("instance field missing")?;
+    let token = instance["token"].as_str().ok_or("instance field missing")?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
-        .build()
-        .unwrap();
+        .build()?;
     let response = client
         .get(format!("{origin}api/v1/sessions"))
         .bearer_auth(token)
         .send()
-        .await
-        .unwrap();
+        .await?;
     assert_eq!(response.status(), StatusCode::OK);
-    let listed: Value = response.json().await.unwrap();
+    let listed: Value = response.json().await?;
     assert!(
         listed
             .as_array()
-            .unwrap()
+            .ok_or("sessions response is not an array")?
             .iter()
             .any(|s| s["id"] == "ordinary-session" && s["phase"] == "Planned"),
         "sessions: {listed}"
     );
-    let cli = daemon.command(&["list", "--json"]);
+    let cli = daemon.command(&["list", "--json"])?;
     assert!(
         cli.status.success(),
         "list: {}",
         String::from_utf8_lossy(&cli.stderr)
     );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&cli.stdout).unwrap(),
-        listed
-    );
+    assert_eq!(serde_json::from_slice::<Value>(&cli.stdout)?, listed);
 
     for action in [
         json!({"type":"message", "text":"hello"}),
@@ -127,13 +122,13 @@ async fn corrupt_manager_record_does_not_disable_ordinary_daemon_service() {
             .bearer_auth(token)
             .json(&json!({"cwd":project, "action":action}))
             .send()
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(
             response.status(),
             StatusCode::SERVICE_UNAVAILABLE,
             "action: {action}"
         );
     }
-    assert_eq!(fs::read(record).unwrap(), corrupt);
+    assert_eq!(fs::read(record)?, corrupt);
+    Ok(())
 }
