@@ -58,11 +58,14 @@ jobs:
       - name: Run selector and related CLI regressions
         if: '!cancelled()'
         run: |
-          cargo test --locked --all-features --bin cruise-runtime list_cmd::tests
+          cargo test --locked --all-features --lib list_cmd::tests
           cargo test --locked --all-features --test list_actions_pty --test list_generate_plan --test planning_spinner_pty --test run_lifecycle_cli --test daemon_list_api --test skip_planning_state --test ui_language_catalog --test ui_language_cli --test ssh_entrypoint
       - name: Check Rust formatting
         if: '!cancelled()'
         run: cargo fmt -- --check
       - name: Run repository Clippy checks
         if: '!cancelled()'
-        run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::large_futures
+        # Match the main CI lint toolchain. The scenario and format checks stay pinned.
+        run: |
+          rustup update stable
+          cargo +stable clippy --all-targets --all-features -- -D warnings -A clippy::large_futures
