@@ -72,6 +72,8 @@ Model: provider/fallback
 
 Failed exec sessions are visible in `cruise list` but not in WebUI inventory, automatic `cruise run` selection, or `cruise run --all`. Their menu offers **Resume**, **Delete**, and **Back** instead of ordinary Failed actions. In `cruise list --json`, these rows add `"exec": true` and have `"plan_available": false`. Ordinary rows keep their existing shape.
 
+The WebUI offers **Exec** for the Directory source, or **Execute** when `force_exec` is enabled. Use **Create draft** to plan instead. Running and Suspended exec sessions appear in the sidebar, and Suspended sessions can be resumed there.
+
 <a id="cruise-list-actions"></a>
 ## `cruise list` Actions
 

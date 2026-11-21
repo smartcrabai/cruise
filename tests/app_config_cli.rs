@@ -675,3 +675,78 @@ fn prepend_command_path(command: &mut Command, bin: &Path) {
         std::env::join_paths(paths).unwrap_or_else(|error| panic!("join PATH: {error}")),
     );
 }
+
+#[test]
+fn app_output_defaults_config_display_and_unrelated_writeback_preserve_formats()
+-> Result<(), Box<dyn std::error::Error>> {
+    let expected_languages = serde_json::json!({
+        "plan": "App plan",
+        "pr": "App PR"
+    });
+    let expected_commit_template = "App commit template";
+    let expected_pr_template = "App PR body template";
+    let cases = [
+        (
+            "json",
+            r#"{"languages":{"plan":"App plan","pr":"App PR"},"commit_message_template":"App commit template","prBodyTemplate":"App PR body template"}"#,
+        ),
+        (
+            "yaml",
+            "languages:\n  plan: App plan\n  pr: App PR\ncommitMessageTemplate: App commit template\npr_body_template: App PR body template\n",
+        ),
+    ];
+
+    for (extension, contents) in cases {
+        let fixture = Fixture::new();
+        let path = fixture.write_app_config(extension, contents);
+
+        let shown = fixture.run(&["config"]);
+        assert!(
+            shown.status.success(),
+            "{extension}: {}",
+            output_text(&shown)
+        );
+        let stdout = String::from_utf8_lossy(&shown.stdout);
+        let displayed_value = |name: &str| {
+            let prefix = format!("{name} = ");
+            let raw = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap_or_else(|| panic!("{extension}: missing {name} in {stdout}"));
+            serde_json::from_str::<serde_json::Value>(raw)
+                .unwrap_or_else(|error| panic!("{extension}: invalid {name} JSON: {error}"))
+        };
+        assert_eq!(displayed_value("languages"), expected_languages);
+        assert_eq!(
+            displayed_value("commit_message_template"),
+            expected_commit_template
+        );
+        assert_eq!(displayed_value("pr_body_template"), expected_pr_template);
+
+        let updated = fixture.run(&["config", "--set-parallelism", "7"]);
+        assert!(
+            updated.status.success(),
+            "{extension}: {}",
+            output_text(&updated)
+        );
+        let saved = std::fs::read_to_string(path)?;
+        let persisted = if extension == "yaml" {
+            serde_json::to_value(serde_yaml::from_str::<serde_yaml::Value>(&saved)?)?
+        } else {
+            serde_json::from_str::<serde_json::Value>(&saved)?
+        };
+        assert_eq!(persisted["runAllParallelism"], 7);
+        assert_eq!(persisted["languages"], expected_languages);
+        let persisted_field =
+            |snake: &str, camel: &str| persisted.get(camel).or_else(|| persisted.get(snake));
+        assert_eq!(
+            persisted_field("commit_message_template", "commitMessageTemplate"),
+            Some(&serde_json::json!(expected_commit_template))
+        );
+        assert_eq!(
+            persisted_field("pr_body_template", "prBodyTemplate"),
+            Some(&serde_json::json!(expected_pr_template))
+        );
+    }
+    Ok(())
+}

@@ -422,22 +422,22 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
     }
 
     #[test]
-    fn generated_workflow_resolution_ignores_app_model_defaults() {
+    fn generated_workflow_resolution_ignores_app_defaults() {
         let _lock = lock_process();
         let home = TempDir::new().unwrap();
         let _home = set_fake_home(home.path());
-        let _model = EnvGuard::remove("CRUISE_MODEL");
-        let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
+        let _overrides = crate::test_support::clear_config_override_envs();
+        let _locale = EnvGuard::set("LC_ALL", "C");
         let app_config_dir = home.path().join(".config/cruise");
         fs::create_dir_all(&app_config_dir).unwrap();
         fs::write(
             app_config_dir.join("config.json"),
-            r#"{"model":"host/model","plan_model":["host/plan","host/plan-fallback"]}"#,
+            r#"{"model":"host/model","plan_model":["host/plan","host/plan-fallback"],"languages":{"plan":"Host Plan","pr":"Host PR"},"commit_message_template":"app commit","pr_body_template":"app body"}"#,
         )
         .unwrap();
 
         let config = WorkflowConfig::from_yaml(VALID).unwrap();
-        let resolved = crate::workflow_call::resolve_workflow_calls_without_app_model_defaults(
+        let resolved = crate::workflow_call::resolve_workflow_calls_without_app_defaults(
             config,
             home.path(),
             &crate::workflow_defaults::WorkflowDefaults::default(),
@@ -445,6 +445,9 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         .unwrap();
         assert_eq!(resolved.model, None);
         assert_eq!(resolved.plan_model, None);
+        assert_eq!(resolved.languages, None);
+        assert_eq!(resolved.commit_message_template, None);
+        assert_eq!(resolved.pr_body_template, None);
         validate_generated_yaml(VALID, home.path()).unwrap();
     }
 

@@ -70,6 +70,8 @@ Model: provider/fallback
 
 失敗した exec セッションは `cruise list` に表示されますが、WebUI の一覧、`cruise run` の自動選択、`cruise run --all` の対象にはなりません。通常の Failed 用アクションの代わりに **Resume**、**Delete**、**Back** が表示されます。`cruise list --json` では、これらの行に `"exec": true` が追加され、`"plan_available": false` になります。通常の行の形式は変わりません。
 
+WebUI の Directory ソースでは **Exec**、`force_exec` が有効な場合は **Execute** が表示されます。計画するには **Create draft** を使います。Running または Suspended の exec セッションはサイドバーに表示され、Suspended の場合はそこから再開できます。
+
 <a id="cruise-list-actions"></a>
 ## `cruise list` のアクション
 

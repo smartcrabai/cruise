@@ -42,11 +42,50 @@ pub(crate) fn validate_config(config: &WorkflowConfig) -> Result<()> {
 pub(crate) struct PrTexts {
     pub title: String,
     pub body: String,
-    pub commit_message: Option<String>,
 }
 
 fn issue_variable(_session: &SessionState) -> String {
     String::new()
+}
+
+fn template_title<'a>(generated_title: &'a str, session: &'a SessionState) -> &'a str {
+    if generated_title.is_empty() {
+        session
+            .input_or_title()
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("")
+    } else {
+        generated_title
+    }
+}
+
+fn render_template(
+    template: &str,
+    allowed: &[&str],
+    title: &str,
+    body: &str,
+    session: &SessionState,
+    branch: &str,
+) -> Result<String> {
+    let issue = issue_variable(session);
+    resolve_template_with_lookup(template, |name| {
+        if !allowed.contains(&name) {
+            return Err(CruiseError::UndefinedVariable(name.to_owned()));
+        }
+        let value = match name {
+            "title" => title,
+            "body" => body,
+            "issue" => &issue,
+            "session_id" => &session.id,
+            "branch" => branch,
+            _ => {
+                return Err(CruiseError::UndefinedVariable(name.to_owned()));
+            }
+        };
+        Ok(value.to_owned())
+    })
 }
 
 pub(crate) fn render_pr_texts(
@@ -57,73 +96,53 @@ pub(crate) fn render_pr_texts(
     generated_body: &str,
 ) -> Result<PrTexts> {
     let generated_title = generated_title.trim();
-    if compiled.commit_message_template.is_none() && compiled.pr_body_template.is_none() {
+    let Some(template) = compiled.pr_body_template.as_deref() else {
         return Ok(PrTexts {
             title: generated_title.to_owned(),
             body: generated_body.to_owned(),
-            commit_message: None,
         });
-    }
-    let title = if generated_title.is_empty() {
-        session
-            .input_or_title()
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or("")
-    } else {
-        generated_title
     };
-    if compiled.pr_body_template.is_some() && title.is_empty() {
+    let title = template_title(generated_title, session);
+    if title.is_empty() {
         return Err(CruiseError::Other(
             "pr_body_template requires a nonempty generated or session title".to_owned(),
         ));
     }
-    let issue = issue_variable(session);
-    let render = |template: &str, allowed: &[&str]| {
-        resolve_template_with_lookup(template, |name| {
-            if !allowed.contains(&name) {
-                return Err(CruiseError::UndefinedVariable(name.to_owned()));
-            }
-            let value = match name {
-                "title" => title,
-                "body" => generated_body.trim(),
-                "issue" => &issue,
-                "session_id" => &session.id,
-                "branch" => branch,
-                _ => {
-                    return Err(CruiseError::UndefinedVariable(name.to_owned()));
-                }
-            };
-            Ok(value.to_owned())
-        })
-    };
-    let commit_message = compiled
-        .commit_message_template
-        .as_deref()
-        .map(|template| {
-            let rendered = render(template, COMMIT_VARIABLES)?.trim().to_owned();
-            if rendered.is_empty() {
-                return Err(CruiseError::Other(
-                    "commit_message_template rendered an empty commit message".to_owned(),
-                ));
-            }
-            Ok(rendered)
-        })
-        .transpose()?;
-    let (output_title, body) = if let Some(template) = compiled.pr_body_template.as_deref() {
-        (
-            title.to_owned(),
-            render(template, BODY_VARIABLES)?.trim().to_owned(),
-        )
-    } else {
-        (generated_title.to_owned(), generated_body.to_owned())
-    };
+    let body = render_template(
+        template,
+        BODY_VARIABLES,
+        title,
+        generated_body.trim(),
+        session,
+        branch,
+    )?
+    .trim()
+    .to_owned();
     Ok(PrTexts {
-        title: output_title,
+        title: title.to_owned(),
         body,
-        commit_message,
     })
+}
+
+pub(crate) fn render_commit_message(
+    compiled: &CompiledWorkflow,
+    session: &SessionState,
+    branch: &str,
+    generated_title: &str,
+) -> Result<Option<String>> {
+    let Some(template) = compiled.commit_message_template.as_deref() else {
+        return Ok(None);
+    };
+    let title = template_title(generated_title.trim(), session);
+    let rendered = render_template(template, COMMIT_VARIABLES, title, "", session, branch)?
+        .trim()
+        .to_owned();
+    if rendered.is_empty() {
+        return Err(CruiseError::Other(
+            "commit_message_template rendered an empty commit message".to_owned(),
+        ));
+    }
+    Ok(Some(rendered))
 }
 
 #[cfg(test)]
@@ -151,7 +170,6 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(texts.title, "");
         assert_eq!(texts.body, " body \n");
-        assert_eq!(texts.commit_message, None);
     }
 
     #[test]
@@ -159,18 +177,15 @@ mod tests {
         let workflow = compiled(
             "commit_message_template: 'feat: {title} ({branch})'\npr_body_template: '{{x}} {body} {session_id} {issue}'",
         );
-        let texts = render_pr_texts(
-            &workflow,
-            &session("\n task first \nsecond"),
-            "feature",
-            "",
-            " body {plan} ",
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+        let session = session("\n task first \nsecond");
+        let texts = render_pr_texts(&workflow, &session, "feature", "", " body {plan} ")
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(texts.title, "task first");
         assert_eq!(texts.body, "{x} body {plan} session-1");
         assert_eq!(
-            texts.commit_message.as_deref(),
+            render_commit_message(&workflow, &session, "feature", "")
+                .unwrap_or_else(|e| panic!("{e}"))
+                .as_deref(),
             Some("feat: task first (feature)")
         );
     }
@@ -178,12 +193,20 @@ mod tests {
     #[test]
     fn commit_only_preserves_pr_fill_and_rejects_empty_message() {
         let workflow = compiled("commit_message_template: '{title}'");
-        let texts = render_pr_texts(&workflow, &session("task"), "feature", " ", " original ")
+        let session = session("task");
+        let texts = render_pr_texts(&workflow, &session, "feature", " ", " original ")
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(texts.title, "");
         assert_eq!(texts.body, " original ");
-        assert_eq!(texts.commit_message.as_deref(), Some("task"));
+        assert_eq!(
+            render_commit_message(&workflow, &session, "feature", "")
+                .unwrap_or_else(|e| panic!("{e}"))
+                .as_deref(),
+            Some("task")
+        );
+
         let workflow = compiled("commit_message_template: '{issue}'");
-        assert!(render_pr_texts(&workflow, &session("task"), "feature", "title", "").is_err());
+        assert!(render_pr_texts(&workflow, &session, "feature", "title", "").is_ok());
+        assert!(render_commit_message(&workflow, &session, "feature", "title").is_err());
     }
 }

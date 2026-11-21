@@ -88,6 +88,7 @@ pub(crate) async fn run_resolved(
             config_source: SessionConfigRef::from_source(source, None)?,
             input: req.input,
             flags: flag_values,
+            skipped_steps: Vec::new(),
             max_retries: req.max_retries,
             rate_limit_retries: req.rate_limit_retries,
             context,

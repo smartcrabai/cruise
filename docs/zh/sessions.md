@@ -68,6 +68,8 @@ Model: provider/fallback
 
 失败的 exec 会话会显示在 `cruise list` 中，但不会出现在 WebUI 会话列表中，也不会被不带 ID 的 `cruise run` 或 `cruise run --all` 选中。菜单提供 **Resume**、**Delete** 和 **Back**，而不是普通 Failed 会话的操作。`cruise list --json` 会为这些条目新增 `"exec": true`，其 `"plan_available"` 为 `false`。普通条目的格式不变。
 
+WebUI 的 Directory 来源提供 **Exec** 按钮，启用 `force_exec` 时则显示 **Execute**。如需规划，请选择 **Create draft**。Running 和 Suspended 状态的 exec 会话会显示在侧边栏中，Suspended 会话可以从那里恢复。
+
 <a id="cruise-list-actions"></a>
 ## `cruise list` 操作
 
