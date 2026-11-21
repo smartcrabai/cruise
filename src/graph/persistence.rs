@@ -280,16 +280,19 @@ mod tests {
         let config = crate::config::WorkflowConfig::from_yaml(
             "command: [echo]\ngroups:\n  checks:\n    max_retries: 1\n    if:\n      file-changed: prefix\n    steps:\n      verify:\n        command: 'true'\nsteps:\n  prefix:\n    command: 'true'\n  checks:\n    group: checks\n  repair:\n    command: 'false'\n",
         )
-        .expect("valid retry prefix fixture");
+        .map_err(|error| CruiseError::ConfigParseError(error.to_string()))?;
         let fresh = build_graph(&crate::workflow::compile(config)?, 3)?;
         let pair = ("prefix".to_owned(), "checks/verify".to_owned());
         let mut saved = fresh.clone();
         saved.state.execution_id = Some("exec".into());
         saved.state.completed = true;
-        saved.state.edge_counts.insert(pair.clone(), EdgeCounter {
-            traversals: 1,
-            budgeted_traversals: 0,
-        });
+        saved.state.edge_counts.insert(
+            pair.clone(),
+            EdgeCounter {
+                traversals: 1,
+                budgeted_traversals: 0,
+            },
+        );
         saved.state.group_counts.insert("checks".into(), 1);
         saved.state.exec_failure = Some(ExecFailure {
             unresolved: 1,
@@ -303,15 +306,29 @@ mod tests {
         fresh.clone().restore_for_reload(&saved)?;
         for zero_edge in [true, false] {
             let mut damaged = saved.clone();
-            let failure = damaged.state.exec_failure.as_mut().expect("retry prefix");
+            let failure = damaged
+                .state
+                .exec_failure
+                .as_mut()
+                .ok_or_else(|| CruiseError::Other("missing retry prefix".into()))?;
             if zero_edge {
-                failure.edge_counts.get_mut(&pair).expect("known edge").traversals = 0;
+                failure
+                    .edge_counts
+                    .get_mut(&pair)
+                    .ok_or_else(|| CruiseError::Other("missing fixture edge".into()))?
+                    .traversals = 0;
             } else {
-                *failure.group_counts.get_mut("checks").expect("known group") = 0;
+                *failure
+                    .group_counts
+                    .get_mut("checks")
+                    .ok_or_else(|| CruiseError::Other("missing fixture group".into()))? = 0;
             }
             save_graph(&damaged, &path)?;
             assert!(load_graph(&path).is_err(), "zero_edge={zero_edge}");
-            assert!(fresh.clone().restore_for_reload(&damaged).is_err(), "zero_edge={zero_edge}");
+            assert!(
+                fresh.clone().restore_for_reload(&damaged).is_err(),
+                "zero_edge={zero_edge}"
+            );
         }
         Ok(())
     }

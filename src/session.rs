@@ -1277,7 +1277,10 @@ pub(crate) fn validate_session_id(id: &str) -> Result<()> {
 /// without consulting GitHub.
 fn is_unreclaimable_no_pr_session(session: &SessionState, plan_available: bool) -> bool {
     if session.exec {
-        return matches!(session.phase, SessionPhase::Completed | SessionPhase::PrFailed(_));
+        return matches!(
+            session.phase,
+            SessionPhase::Completed | SessionPhase::PrFailed(_)
+        );
     }
     let terminal = matches!(
         session.phase,

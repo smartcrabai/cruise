@@ -267,7 +267,10 @@ fn failed_verification_can_be_repaired_without_replaying_implementation() -> Tes
     let saved = std::fs::read(&checkpoint)?;
     for (command, rejection) in [
         ("echo", "invalid value for CRUISE_COMMAND"),
-        (r#"["echo"]"#, "CRUISE_SDK and CRUISE_COMMAND are mutually exclusive"),
+        (
+            r#"["echo"]"#,
+            "CRUISE_SDK and CRUISE_COMMAND are mutually exclusive",
+        ),
     ] {
         for preview in [true, false] {
             let mut cmd = f.cli();
@@ -279,19 +282,31 @@ fn failed_verification_can_be_repaired_without_replaying_implementation() -> Tes
             }
             let output = cmd.output()?;
             let text = terminal(&output);
-            assert!(!output.status.success() && text.contains(rejection), "{text}");
+            assert!(
+                !output.status.success() && text.contains(rejection),
+                "{text}"
+            );
             assert_eq!(std::fs::read(&checkpoint)?, saved);
             assert_eq!(f.calls(), ["implement"]);
-            assert_eq!(std::fs::read_to_string(f.repo.join("verification.txt"))?, "verify\n");
+            assert_eq!(
+                std::fs::read_to_string(f.repo.join("verification.txt"))?,
+                "verify\n"
+            );
         }
     }
     std::fs::write(f.repo.join("verifier-ready"), "ready")?;
     let preview = f.cli().args(["run", &session.id, "--dry-run"]).output()?;
     let text = terminal(&preview);
-    assert!(preview.status.success() && text.contains("Exec resume step: verify-1"), "{text}");
+    assert!(
+        preview.status.success() && text.contains("Exec resume step: verify-1"),
+        "{text}"
+    );
     let output = f.cli().args(["run", &session.id]).output()?;
     let text = terminal(&output);
-    assert!(output.status.success() && text.contains("> verify-1"), "{text}");
+    assert!(
+        output.status.success() && text.contains("> verify-1"),
+        "{text}"
+    );
     assert_eq!(f.calls(), ["implement"]);
     assert_eq!(
         std::fs::read_to_string(f.repo.join("verification.txt"))?,

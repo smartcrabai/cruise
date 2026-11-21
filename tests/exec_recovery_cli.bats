@@ -139,8 +139,10 @@ assert_work_preserved() {
 
 # bats test_tags=recovery-artifact-retention
 @test "clean preserves failed exec artifacts for retry and success removes them" {
+  # The mock agent returns the requested payload, not the extra instructions
+  # that Cruise can append to the prompt.
   cat > "$workflow" <<'YAML'
-command: [cat]
+command: [sed, '-n', 1p]
 steps:
   save:
     prompt: retained-evidence
@@ -152,7 +154,10 @@ steps:
 YAML
   start_failure
   artifact="$sessions/$id/artifacts/evidence.md"
-  [[ "$(cat "$artifact")" == retained-evidence ]]
+  [[ "$(cat "$artifact")" == retained-evidence ]] || {
+    printf 'unexpected artifact contents: %s\n%s\n' "$(cat "$artifact")" "$failure_output"
+    return 1
+  }
   run "$CRUISE_BIN" clean </dev/null
   [[ "$status" -eq 0 && "$(cat "$artifact")" == retained-evidence ]]
   touch repaired
