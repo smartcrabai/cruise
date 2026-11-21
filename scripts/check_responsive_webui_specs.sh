@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Responsive shell contract. Every failure remains a failure, including setup.
+# Responsive shell and Planning answer contracts. Setup failures also fail the gate.
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT" || exit 1
@@ -43,10 +43,18 @@ run_check quint-test "$Q" test "$MODEL" --backend typescript --seed 20261025 --o
 run_check quint-simulation "$Q" run --seed 20261025 --max-samples 1000 --max-steps 20 --backend typescript --invariant safety --out-itf "$RUN/simulation_{seq}.itf.json" "$MODEL"
 # This helper prints and executes actual quint verify argv on an isolated port.
 run_check quint-verify node scripts/formal/verify_quint.cjs "$Q" "$MODEL" responsive_webui 8 "$RUN/counterexample.itf.json"
+ASK_MODEL=tests/formal/ask_keyboard.qnt
+run_check planning-answer-quint-typecheck "$Q" typecheck "$ASK_MODEL"
+run_check planning-answer-quint-test "$Q" test "$ASK_MODEL" --backend typescript --seed 20261120
+run_check planning-answer-quint-simulation "$Q" run --seed 20261120 --max-samples 1000 --max-steps 20 --backend typescript --invariant safety --out-itf "$RUN/planning-answer-simulation_{seq}.itf.json" "$ASK_MODEL"
+run_check planning-answer-quint-verify node scripts/formal/verify_quint.cjs "$Q" "$ASK_MODEL" ask_keyboard 8 "$RUN/planning-answer-counterexample.itf.json"
 # Alloy 6.2.0 help has no --expect option. Use supported command-level expect
 # 0 for assertions and expect 1 for witnesses, then validate every receipt.
 run_check alloy java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --solver sat4j --type json --output "$RUN/alloy" tests/formal/responsive_webui.als
 run_check alloy-receipt node scripts/formal/check_alloy_receipt.cjs tests/formal/responsive_webui.als "$RUN/alloy/receipt.json"
+ANSWERS=tests/formal/planning_answer_keyboard.als
+run_check planning-answer-alloy java -jar target/formal-tools/alloy-6.2.0.jar exec --command '*' --solver sat4j --type json --output "$RUN/planning-answer-alloy" "$ANSWERS"
+run_check planning-answer-alloy-receipt node scripts/formal/check_alloy_receipt.cjs "$ANSWERS" "$RUN/planning-answer-alloy/receipt.json"
 run_check receipt-validator-tests node --test scripts/formal/check_alloy_receipt.test.cjs
 run_check responsive-bdd bash scripts/check_responsive_webui_bdd.sh
 run_check webui-regressions cargo +1.99.1 test --locked --all-features --bin cruise-runtime webui::

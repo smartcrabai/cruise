@@ -302,6 +302,13 @@ name = "manager_approval_bdd"
 path = "tests/manager_approval_bdd.rs"
 test = false
 
+[[test]]
+harness = false
+name = "list_actions_bdd"
+path = "tests/list_actions_bdd.rs"
+# macOS/Linux PTY contract, explicitly runnable with --test list_actions_bdd.
+test = false
+
 [profile.release]
 codegen-units = 1
 lto = true

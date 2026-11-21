@@ -332,6 +332,14 @@
   }
 
   function setup() {
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
+      if (!(event.target instanceof HTMLTextAreaElement)) return;
+      const form = event.target.closest('[id^="ask-panel-"] form[hx-post]');
+      if (!form) return;
+      event.preventDefault();
+      form.requestSubmit();
+    });
     document.addEventListener("change", (event) => {
       const target = event.target;
       if (!(target instanceof HTMLSelectElement) || !["ui-language", "ui-language-mobile"].includes(target.id)) return;

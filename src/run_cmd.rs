@@ -16,7 +16,7 @@ use crate::error::{CruiseError, Result};
 use crate::session::{SessionManager, SessionPhase, SessionState, WorkspaceMode};
 
 enum RunSetup {
-    DryRun,
+    NoRun,
     Single {
         client: DaemonClient,
         session_id: String,
@@ -114,7 +114,11 @@ pub(crate) fn select_flag_values(
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
-    finish_cli_run(run_inner(args).await)
+    run_with_batch_intent(args, false).await
+}
+
+pub(crate) async fn run_with_batch_intent(args: RunArgs, attach_only: bool) -> Result<()> {
+    finish_cli_run(run_inner(args, attach_only).await)
 }
 
 pub(crate) fn finish_cli_run(result: Result<()>) -> Result<()> {
@@ -127,16 +131,16 @@ pub(crate) fn finish_cli_run(result: Result<()>) -> Result<()> {
     }
 }
 
-async fn run_inner(args: RunArgs) -> Result<()> {
+async fn run_inner(args: RunArgs, attach_only: bool) -> Result<()> {
     let (_herdr, setup) = crate::cli_events::interruptible_startup(async {
         let herdr = crate::herdr::start();
-        let setup = prepare_run(args).await?;
+        let setup = prepare_run(args, attach_only).await?;
         Ok((herdr, setup))
     })
     .await?;
 
     match setup {
-        RunSetup::DryRun => Ok(()),
+        RunSetup::NoRun => Ok(()),
         RunSetup::Single {
             client,
             session_id,
@@ -147,7 +151,7 @@ async fn run_inner(args: RunArgs) -> Result<()> {
     }
 }
 
-async fn prepare_run(args: RunArgs) -> Result<RunSetup> {
+async fn prepare_run(args: RunArgs, attach_only: bool) -> Result<RunSetup> {
     if args.auto_requeue_max_attempts.is_some() && !args.all {
         return Err(CruiseError::Other(
             "--auto-requeue-max-attempts requires --all".to_owned(),
@@ -172,13 +176,15 @@ async fn prepare_run(args: RunArgs) -> Result<RunSetup> {
     }
     if args.dry_run {
         run_dry_run(&args)?;
-        return Ok(RunSetup::DryRun);
+        return Ok(RunSetup::NoRun);
     }
 
     let client = DaemonClient::connect().await?;
     if args.all {
-        let setup = prepare_run_all(&client, args).await?;
-        Ok(RunSetup::All { client, setup })
+        match prepare_run_all(&client, args, attach_only).await? {
+            Some(setup) => Ok(RunSetup::All { client, setup }),
+            None => Ok(RunSetup::NoRun),
+        }
     } else {
         let (session_id, stream, ctrl_c) = prepare_run_single(&client, args).await?;
         Ok(RunSetup::Single {
@@ -402,14 +408,40 @@ fn select_from_summaries(sessions: &[crate::daemon::client::RunSessionSummary]) 
     Ok(sessions[index].id.clone())
 }
 
-async fn prepare_run_all(client: &DaemonClient, args: RunArgs) -> Result<RunAllSetup> {
+pub(crate) enum RunAllAvailability {
+    Active,
+    Ready,
+    NoWork,
+}
+
+pub(crate) async fn run_all_availability(client: &DaemonClient) -> Result<RunAllAvailability> {
+    let batch_active = client.batch_active().await?;
+    let sessions = client.run_sessions().await?;
+    Ok(if batch_active {
+        RunAllAvailability::Active
+    } else if sessions.iter().any(is_batch_candidate) {
+        RunAllAvailability::Ready
+    } else {
+        RunAllAvailability::NoWork
+    })
+}
+
+fn is_batch_candidate(session: &crate::daemon::client::RunSessionSummary) -> bool {
+    matches!(session.phase.as_str(), "Planned" | "Suspended")
+}
+
+async fn prepare_run_all(
+    client: &DaemonClient,
+    args: RunArgs,
+    attach_only: bool,
+) -> Result<Option<RunAllSetup>> {
     let context = crate::request_context::RequestContext::capture()?;
     let sessions = client.run_sessions().await?;
     let dashboard = std::io::stderr()
         .is_terminal()
         .then(crate::batch_dashboard::BatchDashboard::start);
     for session in &sessions {
-        if matches!(session.phase.as_str(), "Planned" | "Suspended")
+        if is_batch_candidate(session)
             && let Some(dashboard) = &dashboard
         {
             dashboard.add_summary(
@@ -426,19 +458,23 @@ async fn prepare_run_all(client: &DaemonClient, args: RunArgs) -> Result<RunAllS
         })
         .await?;
     let ctrl_c = CtrlC::new()?;
-    client
+    if !client
         .start_run_all(&RunAllRequest {
+            attach_only,
             parallelism: Some(run_all_parallelism(args.parallelism)),
             auto_requeue_max_attempts: args.auto_requeue_max_attempts,
             context: Some(context),
         })
-        .await?;
-    Ok(RunAllSetup {
+        .await?
+    {
+        return Ok(None);
+    }
+    Ok(Some(RunAllSetup {
         stream,
         ctrl_c,
         sessions,
         dashboard,
-    })
+    }))
 }
 
 async fn run_all(client: &DaemonClient, setup: RunAllSetup) -> Result<()> {
@@ -450,7 +486,7 @@ async fn run_all(client: &DaemonClient, setup: RunAllSetup) -> Result<()> {
     } = setup;
     let mut events = BatchEvents::new(client, dashboard.as_ref());
     for session in &sessions {
-        if matches!(session.phase.as_str(), "Planned" | "Suspended") {
+        if is_batch_candidate(session) {
             events.record_session(&session.id);
         }
     }

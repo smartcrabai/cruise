@@ -1,5 +1,5 @@
 use std::fmt::{self, Write as _};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use console::style;
 use inquire::InquireError;
@@ -10,6 +10,7 @@ use crate::daemon::client::list::SessionListItem;
 use crate::daemon::client::{DaemonClient, EventFilter};
 use crate::error::{CruiseError, Result};
 use crate::multiline_input::{InputResult, prompt_multiline};
+use crate::request_context::RequestContext;
 use crate::session::{SessionManager, SessionPhase, SessionState};
 use crate::workflow::{list_skippable_after_pr_steps, list_skippable_steps};
 
@@ -30,12 +31,20 @@ pub async fn run(args: ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    let context = crate::request_context::RequestContext::capture()?;
+    let context = RequestContext::capture()?;
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     loop {
-        let Some(selected) = pick_session(&client).await? else {
-            return Ok(());
+        let id = match pick_list_choice(&client, interactive).await? {
+            None | Some(ListChoice::Quit) => return Ok(()),
+            Some(ListChoice::Session { id, .. }) => id,
+            Some(choice) => {
+                match run_global_action(&choice, &client, &context).await {
+                    Ok(()) | Err(CruiseError::StepPaused | CruiseError::Interrupted) => {}
+                    Err(error) => eprintln!("{error}"),
+                }
+                continue;
+            }
         };
-        let id = selected.id.clone();
         let mut details = client.session_details(&id).await?;
         loop {
             if !details.state.exec
@@ -282,32 +291,185 @@ pub async fn run(args: ListArgs) -> Result<()> {
     }
 }
 
-async fn pick_session(client: &DaemonClient) -> Result<Option<SessionListItem>> {
-    let mut sessions = client.sessions().await?;
+async fn pick_list_choice(client: &DaemonClient, interactive: bool) -> Result<Option<ListChoice>> {
+    let sessions = client.sessions().await?;
     if sessions.is_empty() {
         eprintln!(
             "{}",
             crate::i18n::t(crate::i18n::process_locale(), "cli.list.empty")
         );
-        return Ok(None);
-    }
-    let labels: Vec<String> = sessions.iter().map(format_session_label).collect();
-    let label_refs: Vec<&str> = labels.iter().map(std::string::String::as_str).collect();
-    crate::platform::reclaim_terminal_foreground();
-    let prompt = list_text("cli.list.select_session", "Select a session:");
-    let selected = match inquire::Select::new(&prompt, label_refs).prompt() {
-        Ok(selected) => selected,
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+        if !interactive {
             return Ok(None);
         }
-        Err(error) => return Err(CruiseError::Other(format!("selection error: {error}"))),
+    }
+    let (choices, cursor) = if interactive {
+        list_choices(sessions)
+    } else {
+        (sessions.into_iter().map(ListChoice::session).collect(), 0)
     };
-    let Some(index) = labels.iter().position(|label| label.as_str() == selected) else {
-        return Err(CruiseError::Other(format!(
-            "selected label not found: {selected}"
-        )));
+    crate::platform::reclaim_terminal_foreground();
+    let prompt = if interactive {
+        list_text("cli.list.action_prompt", "Action:")
+    } else {
+        list_text("cli.list.select_session", "Select a session:")
     };
-    Ok(Some(sessions.remove(index)))
+    prompt_result(
+        inquire::Select::new(&prompt, choices)
+            .with_starting_cursor(cursor)
+            .prompt(),
+    )
+}
+
+fn prompt_result<T>(result: std::result::Result<T, InquireError>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
+        Err(error) => Err(CruiseError::Other(format!("selection error: {error}"))),
+    }
+}
+
+fn confirm_global_action(prompt: &str) -> Result<bool> {
+    crate::platform::reclaim_terminal_foreground();
+    Ok(prompt_result(inquire::Confirm::new(prompt).with_default(false).prompt())? == Some(true))
+}
+
+async fn run_global_action(
+    choice: &ListChoice,
+    client: &DaemonClient,
+    context: &RequestContext,
+) -> Result<()> {
+    use crate::run_cmd::RunAllAvailability;
+
+    match choice {
+        ListChoice::NewSession => new_session().await,
+        ListChoice::Clean => {
+            let prompt = list_text(
+                "cli.list.prompt.clean_confirm",
+                "Clean up eligible sessions?",
+            );
+            if confirm_global_action(&prompt)? {
+                crate::clean_cmd::clean_and_report(client, context).await?;
+            }
+            Ok(())
+        }
+        ListChoice::RunAll => {
+            let availability = crate::run_cmd::run_all_availability(client).await?;
+            let attach_only = matches!(availability, RunAllAvailability::Active);
+            let prompt = match availability {
+                RunAllAvailability::Active => list_text(
+                    "cli.list.prompt.run_all_attach_confirm",
+                    "Run All: Attach to the active batch?",
+                ),
+                RunAllAvailability::Ready => list_text(
+                    "cli.list.prompt.run_all_confirm",
+                    "Run All: Start eligible sessions?",
+                ),
+                RunAllAvailability::NoWork => {
+                    eprintln!(
+                        "{}",
+                        list_text(
+                            "cli.list.run_all_no_work",
+                            "No Planned or Suspended sessions to run."
+                        )
+                    );
+                    return Ok(());
+                }
+            };
+            if !confirm_global_action(&prompt)? {
+                return Ok(());
+            }
+            crate::run_cmd::run_with_batch_intent(
+                crate::cli::RunArgs {
+                    session: None,
+                    all: true,
+                    parallelism: None,
+                    auto_requeue_max_attempts: None,
+                    max_retries: None,
+                    rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
+                    dry_run: false,
+                    cleanup_after_pr: false,
+                    no_cleanup_after_pr: false,
+                    flags: vec![],
+                },
+                attach_only,
+            )
+            .await
+        }
+        ListChoice::Session { .. } | ListChoice::Quit => unreachable!("not a global action"),
+    }
+}
+
+enum NewSessionMode {
+    Interactive,
+    Background,
+    Draft,
+}
+
+impl fmt::Display for NewSessionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Interactive => {
+                list_text("cli.list.action.plan_interactively", "Plan interactively")
+            }
+            Self::Background => {
+                list_text("cli.list.action.plan_in_background", "Plan in background")
+            }
+            Self::Draft => list_text("cli.list.action.save_draft", "Save draft"),
+        };
+        f.write_str(&label)
+    }
+}
+
+async fn new_session() -> Result<()> {
+    crate::platform::reclaim_terminal_foreground();
+    let prompt = list_text(
+        "cli.list.prompt.new_session_prompt",
+        "How would you like to create the session?",
+    );
+    let modes = vec![
+        NewSessionMode::Interactive,
+        NewSessionMode::Background,
+        NewSessionMode::Draft,
+    ];
+    match prompt_result(inquire::Select::new(&prompt, modes).prompt())? {
+        None => Ok(()),
+        Some(NewSessionMode::Interactive) => {
+            Box::pin(crate::plan_cmd::run(crate::cli::PlanArgs {
+                input: None,
+                pr: None,
+                issue: None,
+                config: None,
+                dry_run: false,
+                no_force_exec: true,
+                skip_planning: false,
+                grill: false,
+                no_interactive_planning: false,
+                repo: None,
+                rate_limit_retries: DEFAULT_RATE_LIMIT_RETRIES,
+                images: vec![],
+                flags: vec![],
+            }))
+            .await
+        }
+        Some(NewSessionMode::Background) => {
+            let prompt = list_text(
+                "cli.list.prompt.task_prompt",
+                "What would you like to implement?",
+            );
+            let InputResult::Submitted(task) = prompt_multiline(&prompt)? else {
+                return Ok(());
+            };
+            crate::plan_cmd::launch_background_task(&task, false, None, &[], true, &[]).await
+        }
+        Some(NewSessionMode::Draft) => {
+            crate::draft_cmd::run(crate::cli::DraftArgs {
+                input: None,
+                issue: None,
+                config: None,
+            })
+            .await
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -889,9 +1051,130 @@ fn format_suffix(session: &SessionListItem) -> String {
     }
     suffix
 }
+enum ListChoice {
+    NewSession,
+    Clean,
+    RunAll,
+    Session { id: String, label: String },
+    Quit,
+}
+
+impl ListChoice {
+    fn session(session: SessionListItem) -> Self {
+        let label = format_session_label(&session);
+        Self::Session {
+            id: session.id,
+            label,
+        }
+    }
+}
+
+impl fmt::Display for ListChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::NewSession => list_text("cli.list.action.new_session", "New Session"),
+            Self::Clean => list_text("cli.list.action.clean", "Clean"),
+            Self::RunAll => list_text("cli.list.action.run_all", "Run All"),
+            Self::Quit => list_text("cli.list.action.quit", "Quit"),
+            Self::Session { label, .. } => return f.write_str(label),
+        };
+        f.write_str(&label)
+    }
+}
+
+fn list_choices(sessions: Vec<SessionListItem>) -> (Vec<ListChoice>, usize) {
+    let mut choices = vec![
+        ListChoice::NewSession,
+        ListChoice::Clean,
+        ListChoice::RunAll,
+    ];
+    let cursor = if sessions.is_empty() {
+        0
+    } else {
+        choices.len()
+    };
+    choices.extend(sessions.into_iter().map(ListChoice::session));
+    choices.push(ListChoice::Quit);
+    (choices, cursor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_row(id: &str, title: &str) -> SessionListItem {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "base_dir": "/project",
+            "phase": "Draft",
+            "config_source": "cruise.yml",
+            "input": "task",
+            "title": title,
+            "created_at": "2026-01-01T12:00:00Z",
+            "workspace_mode": "Worktree",
+            "awaiting_input": false,
+            "plan_available": false,
+            "pending_instructions": 0,
+            "auto_requeue_count": 0
+        }))
+        .unwrap_or_else(|error| panic!("list row fixture: {error}"))
+    }
+
+    #[test]
+    fn empty_selector_offers_global_actions_and_starts_on_new_session() {
+        let (choices, cursor) = list_choices(vec![]);
+        assert!(matches!(
+            choices.as_slice(),
+            [
+                ListChoice::NewSession,
+                ListChoice::Clean,
+                ListChoice::RunAll,
+                ListChoice::Quit
+            ]
+        ));
+        assert!(matches!(choices.get(cursor), Some(ListChoice::NewSession)));
+    }
+
+    #[test]
+    fn populated_selector_preserves_session_order_and_starts_on_first_session() {
+        let [first_id, second_id] = ["20260101120100", "20260101120000"];
+        let rows = vec![
+            session_row(first_id, "First"),
+            session_row(second_id, "Second"),
+        ];
+        let (choices, cursor) = list_choices(rows);
+        assert!(matches!(
+            choices.as_slice(),
+            [ListChoice::NewSession, ListChoice::Clean, ListChoice::RunAll,
+                ListChoice::Session { id: first, .. }, ListChoice::Session { id: second, .. }, ListChoice::Quit]
+                if first == first_id && second == second_id
+        ));
+        assert!(matches!(
+            choices.get(cursor),
+            Some(ListChoice::Session { id, .. }) if id == first_id
+        ));
+    }
+
+    #[test]
+    fn identical_display_labels_retain_distinct_session_ids() {
+        let [first_id, second_id] = ["20260101120001", "20260101120002"];
+        let rows = vec![
+            session_row(first_id, "Same title"),
+            session_row(second_id, "Same title"),
+        ];
+        let (choices, _) = list_choices(rows);
+        let sessions: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| match choice {
+                ListChoice::Session { id, label } => Some((id, label)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].1, sessions[1].1);
+        assert_eq!(sessions[0].0, first_id);
+        assert_eq!(sessions[1].0, second_id);
+    }
 
     #[test]
     fn action_menu_uses_daemon_capabilities() {

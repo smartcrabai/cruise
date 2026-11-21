@@ -111,6 +111,11 @@ impl DaemonClient {
         decode_response(response).await
     }
 
+    pub(crate) async fn batch_active(&self) -> Result<bool> {
+        let status: StatusResponse = self.get_json("status").await?;
+        Ok(status.batch_active)
+    }
+
     /// Connect to the registered daemon, starting it when needed and replacing an idle old version.
     pub(crate) async fn connect() -> Result<Self> {
         let registry = Registry::new()?;

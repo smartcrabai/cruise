@@ -278,7 +278,7 @@ A single `cruise run` respects the workspace mode already persisted on the sessi
 
 ## `cruise list` — phase → available actions
 
-The interactive menu changes with the session's phase:
+The top-level picker offers **New Session**, **Clean**, **Run All**, and **Quit**, even when there are no sessions. Selecting a session opens the phase-specific menu below:
 
 | Phase | Actions |
 |-------|---------|
