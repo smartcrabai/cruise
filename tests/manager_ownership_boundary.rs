@@ -26,8 +26,8 @@ fn session(root: &std::path::Path, id: &str, phase: SessionPhase, managed: bool)
 }
 
 #[test]
-fn managed_children_are_excluded_from_run_all_without_excluding_ordinary_sessions(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn managed_children_are_excluded_from_run_all_without_excluding_ordinary_sessions()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = TempDir::new()?;
     let manager = SessionManager::new(dir.path().into());
     for (id, phase, managed) in [
@@ -49,8 +49,8 @@ fn managed_children_are_excluded_from_run_all_without_excluding_ordinary_session
 }
 
 #[test]
-fn ordinary_mutation_boundaries_reject_owned_children_and_preserve_state(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn ordinary_mutation_boundaries_reject_owned_children_and_preserve_state()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = TempDir::new()?;
     let manager = SessionManager::new(dir.path().into());
     let child = session(dir.path(), "owned", SessionPhase::Suspended, true);
@@ -90,8 +90,8 @@ fn ordinary_mutation_boundaries_reject_owned_children_and_preserve_state(
 }
 
 #[test]
-fn reservation_marker_blocks_ordinary_create_delete_and_claim_even_without_state(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn reservation_marker_blocks_ordinary_create_delete_and_claim_even_without_state()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = TempDir::new()?;
     let manager = SessionManager::new(dir.path().into());
     let reserved = manager.sessions_dir().join("reserved");

@@ -698,7 +698,9 @@ mod tests {
         assert!(first.contains("exact same question"), "got: {first}");
         started_rx
             .recv_timeout(Duration::from_secs(5))
-            .expect("ask handler should start after the continuation is created");
+            .unwrap_or_else(|error| {
+                panic!("ask handler should start after the continuation is created: {error}")
+            });
         assert_eq!(ask.calls.load(Ordering::SeqCst), 1);
         assert!(invoke(&tool, json!({"question": "different?"})).is_err());
         assert_eq!(ask.calls.load(Ordering::SeqCst), 1);

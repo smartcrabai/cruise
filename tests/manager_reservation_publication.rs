@@ -1,5 +1,6 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -80,10 +81,10 @@ impl Fixture {
         let goal = json!({"id":"g","proposal":proposal,"status":"active","reason":null,
             "execution":{"anchor":anchor,"origin":origin,"workflow":workflow,"integrated_tip":sha,"attempts":[attempt],
             "paused_from":null,"paused_reason":null,"publication":null,"publication_history":[]}});
-        let key: String = Sha256::digest(common.to_string_lossy().as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let mut key = String::new();
+        for byte in Sha256::digest(common.to_string_lossy().as_bytes()) {
+            write!(&mut key, "{byte:02x}")?;
+        }
         let record = root.join("data/cruise/manager").join(format!("{key}.json"));
         fs::create_dir_all(record.parent().ok_or("record parent missing")?)?;
         fs::write(
