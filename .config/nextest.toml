@@ -26,3 +26,13 @@ test-group = "planning-spinner-pty"
 [[profile.default.overrides]]
 filter = "binary_id(=cruise::run_prompts_pty)"
 test-group = "run-prompts-pty"
+
+# Start the suites whose tests take 15-90 seconds on some CI platform first, so
+# they do not finish last.
+[[profile.default.overrides]]
+filter = """
+binary_id(=cruise::diff_cli) | binary_id(=cruise::branch_diff)
+| binary_id(=cruise::workflow_defaults_cli) | binary_id(=cruise::local_merge_application)
+| binary_id(=cruise::pr_review_fix_bdd) | binary_id(=cruise::plan_approve_cancel)
+"""
+priority = 100
