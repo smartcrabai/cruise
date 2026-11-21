@@ -74,6 +74,8 @@ jobs:
         run: node tests/webui/local-merge.mjs
       - name: Production workflow category browser test
         run: node tests/webui/workflow-categories.mjs
+      - name: Workflow flag buttons browser regression
+        run: node tests/webui/flag-buttons.mjs
       - name: Production notification browser test
         run: node tests/webui/notifications.mjs
       - name: Upload specification evidence

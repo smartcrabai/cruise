@@ -319,17 +319,37 @@ pub(crate) fn step_tree_vm(
     }
 }
 
-/// On/off selectors for declared flags; absent values select off.
+/// Effective values for declared flags; absent values are off.
 pub(crate) fn flag_rows(
     choices: &[crate::flags::FlagChoice],
     values: &crate::flags::FlagValues,
 ) -> Vec<super::view::FlagRowVm> {
-    choices
-        .iter()
-        .map(|choice| super::view::FlagRowVm {
-            name: choice.name.clone(),
-            description: choice.description.clone().unwrap_or_default(),
-            on: values.get(&choice.name) == Some(&true),
+    iter_flag_rows(choices, values).collect()
+}
+
+fn iter_flag_rows<'a>(
+    choices: &'a [crate::flags::FlagChoice],
+    values: &'a crate::flags::FlagValues,
+) -> impl Iterator<Item = super::view::FlagRowVm> + 'a {
+    choices.iter().map(move |choice| super::view::FlagRowVm {
+        name: choice.name.clone(),
+        description: choice.description.clone().unwrap_or_default(),
+        on: values.get(&choice.name) == Some(&true),
+    })
+}
+
+pub(crate) fn flag_toggle_rows(
+    choices: &[crate::flags::FlagChoice],
+    values: &crate::flags::FlagValues,
+) -> Vec<super::view::FlagToggleVm> {
+    iter_flag_rows(choices, values)
+        .map(|row| {
+            let key = format!("flag.{}", row.name);
+            let inverse = if row.on { "off" } else { "on" };
+            super::view::FlagToggleVm {
+                row,
+                toggle_vals: serde_json::json!({ key: inverse }).to_string(),
+            }
         })
         .collect()
 }
@@ -372,7 +392,7 @@ pub(crate) fn step_tree_html(
             let steps = crate::flags::skip_candidates(&defaults.steps, flags);
             let after_pr = crate::flags::skip_candidates(&defaults.after_pr_steps, flags);
             let mut vm = step_tree_vm(&steps, &after_pr, effective);
-            vm.flags = flag_rows(&defaults.flags, flags);
+            vm.flags = flag_toggle_rows(&defaults.flags, flags);
             vm
         }
         Err(_) => StepTreeVm {

@@ -126,11 +126,13 @@ fn step_tree() -> StepTreeVm {
             },
         ],
         empty: false,
-        flags: vec![FlagRowVm {
-            name: "deploy".to_string(),
-            description: "Deploy after merge".to_string(),
-            on: false,
-        }],
+        flags: super::pages::flag_toggle_rows(
+            &[crate::flags::FlagChoice {
+                name: "deploy".to_string(),
+                description: Some("Deploy after merge".to_string()),
+            }],
+            &crate::flags::FlagValues::default(),
+        ),
     }
 }
 

@@ -1,5 +1,5 @@
 export default function ConfigSelect(props) {
-  return <select id="config-path" name="configPath" class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-base md:text-sm text-gray-800 dark:text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50" hx-get="/webui/new/steps" hx-trigger="change" hx-target="#step-tree" hx-include="closest form">
+  return <select id="config-path" name="configPath" class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-base md:text-sm text-gray-800 dark:text-gray-200 focus:border-blue-500 outline-none disabled:opacity-50" hx-get="/webui/new/steps" hx-trigger="change" hx-target="#step-tree" hx-include="closest form" hx-sync="#step-tree:replace" hx-disable="#step-tree [data-flag-toggle], #step-tree input[name='runSteps'], [data-step-tree-commit]">
     {props.sentinels.map(option => <>
       {option.selected && <option value={option.value} selected>{option.label}</option>}
       {!option.selected && <option value={option.value}>{option.label}</option>}

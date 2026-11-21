@@ -79,6 +79,8 @@ export default function NewSession(props) {
         hx-include="#new-session-form"
         hx-target="this"
         hx-swap="innerHTML"
+        hx-sync="#step-tree:replace"
+        hx-disable="#step-tree [data-flag-toggle], #step-tree input[name='runSteps'], [data-step-tree-commit]"
       >{props.steps}</div>
 
       <div class="space-y-1.5">
@@ -133,13 +135,13 @@ export default function NewSession(props) {
       </div>
 
       <div class="flex flex-wrap gap-2">
-        <button type="button" hx-post="/webui/drafts" hx-include="closest form" hx-swap="none" class="px-5 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">
+        <button type="button" data-step-tree-commit hx-post="/webui/drafts" hx-include="closest form" hx-swap="none" class="px-5 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">
           Save draft
         </button>
-        <button type="button" hx-post="/webui/sessions/draft" hx-include="closest form" hx-target="#main" hx-swap="innerHTML" class="px-5 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">
+        <button type="button" data-step-tree-commit hx-post="/webui/sessions/draft" hx-include="closest form" hx-target="#main" hx-swap="innerHTML" class="px-5 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-200 dark:hover:bg-gray-800">
           Create draft
         </button>
-        <button type="submit" class="px-5 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">
+        <button type="submit" data-step-tree-commit class="px-5 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">
           Create &amp; plan
         </button>
       </div>
