@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -70,7 +71,35 @@ pub struct FrozenContract {
     pub workflow: crate::config::WorkflowConfig,
 }
 impl Proposal {
+    /// Validate the proposal's identifiers, criteria, task graph, and contract.
+    ///
+    /// # Errors
+    /// Returns an error if the proposal is incomplete or internally inconsistent.
     pub fn validate(&self) -> Result<()> {
+        fn visit<'a>(
+            id: &'a String,
+            tasks: &HashMap<&'a String, &'a Task>,
+            visiting: &mut HashSet<&'a String>,
+            done: &mut HashSet<&'a String>,
+        ) -> bool {
+            if done.contains(id) {
+                return true;
+            }
+            if !visiting.insert(id) {
+                return false;
+            }
+            let Some(task) = tasks.get(id) else {
+                return false;
+            };
+            for dep in &task.dependencies {
+                if !visit(dep, tasks, visiting, done) {
+                    return false;
+                }
+            }
+            visiting.remove(id);
+            done.insert(id);
+            true
+        }
         let invalid =
             |message: &str| CruiseError::Other(format!("invalid manager proposal: {message}"));
         if self.id.trim().is_empty()
@@ -111,30 +140,6 @@ impl Proposal {
             {
                 return Err(invalid("empty or duplicate task"));
             }
-        }
-        fn visit<'a>(
-            id: &'a String,
-            tasks: &HashMap<&'a String, &'a Task>,
-            visiting: &mut HashSet<&'a String>,
-            done: &mut HashSet<&'a String>,
-        ) -> bool {
-            if done.contains(id) {
-                return true;
-            }
-            if !visiting.insert(id) {
-                return false;
-            }
-            let Some(task) = tasks.get(id) else {
-                return false;
-            };
-            for dep in &task.dependencies {
-                if !visit(dep, tasks, visiting, done) {
-                    return false;
-                }
-            }
-            visiting.remove(id);
-            done.insert(id);
-            true
         }
         let mut visiting = HashSet::new();
         let mut done = HashSet::new();
@@ -363,7 +368,10 @@ fn verify_contract(cwd: &Path, repo: &Path, proposal: &Proposal) -> Result<()> {
 }
 fn record_path(repo: &Path) -> Result<PathBuf> {
     let digest = Sha256::digest(repo.to_string_lossy().as_bytes());
-    let key: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut key = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(key, "{byte:02x}");
+    }
     Ok(crate::paths::data_dir()?
         .join("manager")
         .join(format!("{key}.json")))
@@ -420,6 +428,10 @@ fn save(snapshot: &Snapshot) -> Result<()> {
     }
     result
 }
+/// Load the Manager state for the repository containing `cwd`.
+///
+/// # Errors
+/// Returns an error if the repository cannot be resolved or its state cannot be read.
 pub fn snapshot(cwd: &Path) -> Result<Snapshot> {
     let _guard = WRITER
         .lock()
@@ -639,6 +651,10 @@ pub(crate) fn resume_goal(cwd: &Path, goal_id: &str) -> Result<Goal> {
         Ok(goal.clone())
     })
 }
+/// Persist a user message in the repository's Manager conversation.
+///
+/// # Errors
+/// Returns an error for an empty message or if repository state cannot be updated.
 pub fn message(cwd: &Path, text: String) -> Result<Turn> {
     if text.trim().is_empty() {
         return Err(CruiseError::Other("message must not be empty".into()));
@@ -807,6 +823,9 @@ pub(crate) fn approve_corrective(
 
 /// Persist a validated preview. Identity and revision are assigned by the daemon,
 /// not by the provider. This does not authorize any execution.
+///
+/// # Errors
+/// Returns an error if the proposal is invalid or repository state cannot be updated.
 pub fn save_proposal(cwd: &Path, proposal: Proposal) -> Result<Proposal> {
     save_proposal_for_turn(cwd, proposal, None)
 }
@@ -844,6 +863,9 @@ pub(crate) fn save_proposal_for_turn(
 
 /// Reject new approvals while end-to-end Manager execution is unavailable.
 /// Previously approved proposals remain idempotent.
+///
+/// # Errors
+/// Returns an error if the proposal cannot be found or approved, or state cannot be read.
 pub fn approve(cwd: &Path, proposal_id: &str, revision: u64) -> Result<Goal> {
     let _guard = WRITER
         .lock()
