@@ -5,6 +5,12 @@
 <!-- sakoku-ignore-next-line -->
 [日本語](../ja/sessions.md) · [简体中文](../zh/sessions.md) · [Index](README.md)
 
+## Experimental Manager records
+
+`cruise manager` requires a local Git repository and interactive stdin and stdout. Records are stored under `$XDG_DATA_HOME/cruise/manager/` (normally `~/.local/share/cruise/manager/`), keyed by the canonical Git common directory, so linked worktrees share a record. Reconnecting displays saved messages and any proposal or goals. Conversation uses the configured interactive SDK and planning model from `builtin:tdd` defaults, not a command backend. A user turn is persisted before the provider call and remains interrupted if it does not complete. The SDK is requested to use read-only permissions in a scratch directory; this is not a hard sandbox.
+
+`/goals` refreshes the snapshot and `/exit` disconnects. `/make-goal` requests a validated proposal preview; its target branch must resolve to a local `origin` tracking ref, so fetch it first if necessary. `/approve` displays the proposal, including its executable checks, and requires typing `approve`. Approval registers one durable active Goal for the repository and target branch, authorizing its daemon coordinator to schedule eligible children asynchronously—not synchronously as part of the approval action. Each child starts from the exact integrated Goal tip pinned at dispatch; successful results integrate serially, then the combined exact SHA is verified before Cruise publishes or recovers the Goal's single PR/MR. Manager never merges: it waits for a human to merge the verified head into the approved target. `/pause GOAL` and `/resume GOAL` record Goal-scoped state, and `/answer` accepts a matching live child question or option prompt when one exists. `/resume GOAL TASK` requests continuation of the latest eligible failed or suspended child in its existing worktree. `/retry GOAL TASK` instead reserves a new attempt for an eligible previously failed or suspended child of an active Goal, or for a completed child of a blocked Goal when an integration conflict is safely established. Eligibility also depends on dependency, ownership, repository, and other safety checks. `/retry GOAL` requests a fresh verification for an eligible blocked Goal whose tasks are integrated, preserving prior evidence; it does not retry an uncertain publication. `/corrective GOAL TASK` prompts for human-authored instructions and saves a preview for an eligible definite failed check, without authorizing execution. `/approve-corrective GOAL` refreshes and displays the goal and preview, then requires typing `approve`. Approval applies only to that preview and integrated tip, adds the task, and preserves prior verification evidence and approved checks. A changed preview or tip requires fresh review. The execution path requires Git 2.38 or newer and an authenticated GitHub or GitLab `origin`.
+
 <a id="runtime-file-layout"></a>
 ## Runtime File Layout
 
@@ -85,6 +91,8 @@ The interactive picker stays open even when there are no sessions. The following
 - **Quit**, Esc, or Ctrl+C exits from the top-level picker. Cancelling a nested menu returns to the picker.
 
 The interactive session list shows a menu of actions depending on the session's phase:
+
+Manager-owned child sessions are an exception: their list controls offer only **View Diff** when available and **Back**. Supported child actions are controlled through Manager.
 
 | Phase | Available Actions |
 |-------|-------------------|
@@ -178,7 +186,7 @@ Each line is a relative path (file or directory). Absolute paths and `..` traver
 
 When `cruise list` or the WebUI session detail view loads a session, a session in the `Running` phase is checked for liveness. If the runner process is no longer alive, the session is automatically transitioned to the `Suspended` phase. This prevents sessions from being stuck in `Running` indefinitely after a crash or forced termination.
 
-Suspended sessions can be resumed from `cruise list` or the WebUI, or reset to Planned. The `run --all` command also picks up Suspended sessions alongside Planned ones.
+Ordinary suspended non-exec sessions can be resumed from `cruise list` or the WebUI, or reset to Planned. The `run --all` command also picks them up alongside Planned sessions. Suspended exec sessions can be resumed in the WebUI or with `cruise run <id>`, but cannot be reset to Planned and are excluded from `run --all`. Manager-owned children instead use the Manager controls described above.
 
 <a id="parallel-session-execution"></a>
 ## Parallel Session Execution

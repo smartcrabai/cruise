@@ -1125,7 +1125,7 @@ async fn git_stdout(
 }
 
 /// Stage all changes and commit them.
-async fn commit_changes(
+pub(crate) async fn commit_changes(
     worktree_path: &Path,
     build_message: impl FnOnce() -> Result<String>,
     cancel_token: Option<&CancellationToken>,

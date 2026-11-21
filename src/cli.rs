@@ -121,6 +121,8 @@ pub enum Commands {
     Tell(TellArgs),
     /// List and manage sessions interactively.
     List(ListArgs),
+    /// Discuss and manage a repository goal interactively.
+    Manager,
     /// Show the changes in a session branch and worktree.
     Diff(DiffArgs),
     /// Remove sessions with closed/merged PRs.

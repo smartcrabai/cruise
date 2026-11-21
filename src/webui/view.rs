@@ -145,9 +145,17 @@ pub(crate) struct SessionHeaderVm {
     pub(crate) pr_url: Option<String>,
     pub(crate) pr_is_link: bool,
     pub(crate) actions: SessionActionsVm,
+    pub(crate) managed: bool,
+    #[serde(flatten)]
+    pub(crate) activity: SessionHeaderActivityVm,
+    pub(crate) base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionHeaderActivityVm {
     pub(crate) busy: bool,
     pub(crate) awaiting_input: bool,
-    pub(crate) base_url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

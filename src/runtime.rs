@@ -1,8 +1,8 @@
 use crate::{
     app_config, backend, ci_followup, clean_cmd, cli, config_cmd, daemon, diff_cmd, docs_cmd,
-    draft_cmd, error, exec_cmd, host_sync, i18n, ledger_snapshot, list_cmd, plan_cmd, platform,
-    provider_install, run_cmd, ssh_cmd, telemetry, tell_cmd, tool_policy, update_cmd, usage_cmd,
-    workflow_cmd, workflow_doctor, workflow_generate, workflow_make, worktree_pr,
+    draft_cmd, error, exec_cmd, host_sync, i18n, ledger_snapshot, list_cmd, manager_cmd, plan_cmd,
+    platform, provider_install, run_cmd, ssh_cmd, telemetry, tell_cmd, tool_policy, update_cmd,
+    usage_cmd, workflow_cmd, workflow_doctor, workflow_generate, workflow_make, worktree_pr,
 };
 
 // Hooks run once per tool call, without constructing a runtime or telemetry.
@@ -111,6 +111,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::Tell(args)) => tell_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
+        Some(cli::Commands::Manager) => manager_cmd::run().await,
         Some(cli::Commands::Diff(args)) => diff_cmd::run(&args).await,
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args).await,
         Some(cli::Commands::Usage(args)) => usage_cmd::run(&args),

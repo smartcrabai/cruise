@@ -664,11 +664,13 @@ mod tests {
         struct WaitingAsk {
             answer: Mutex<std::sync::mpsc::Receiver<String>>,
             calls: std::sync::atomic::AtomicUsize,
+            started: std::sync::mpsc::Sender<()>,
         }
 
         impl AskHandler for WaitingAsk {
             fn ask_user(&self, _question: &str) -> crate::error::Result<String> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
+                let _ = self.started.send(());
                 self.answer
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -678,9 +680,11 @@ mod tests {
         }
 
         let (answer_tx, answer_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
         let ask = Arc::new(WaitingAsk {
             answer: Mutex::new(answer_rx),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            started: started_tx,
         });
         let continuation = Arc::new(AskUserContinuation::new(
             ask.clone(),
@@ -692,6 +696,11 @@ mod tests {
 
         let first = invoke(&tool, input.clone()).unwrap_or_else(|error| panic!("{error}"));
         assert!(first.contains("exact same question"), "got: {first}");
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|error| {
+                panic!("ask handler should start after the continuation is created: {error}")
+            });
         assert_eq!(ask.calls.load(Ordering::SeqCst), 1);
         assert!(invoke(&tool, json!({"question": "different?"})).is_err());
         assert_eq!(ask.calls.load(Ordering::SeqCst), 1);

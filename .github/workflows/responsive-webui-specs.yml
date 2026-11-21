@@ -78,6 +78,8 @@ jobs:
         run: node tests/webui/local-merge.mjs
       - name: Production workflow category browser test
         run: node tests/webui/workflow-categories.mjs
+      - name: Managed-child WebUI browser boundary
+        run: node tests/webui/managed-child.mjs
       - name: Workflow flag buttons browser regression
         run: node tests/webui/flag-buttons.mjs
       - name: Failed exec stays out of WebUI inventory

@@ -451,6 +451,9 @@ fn cleanup_new_execution_workspace(
     workspace: &crate::workspace::ExecutionWorkspace,
     repo_clone_created: bool,
 ) -> Result<()> {
+    if state.managed_child.is_some() {
+        return Ok(());
+    }
     if let crate::workspace::ExecutionWorkspace::Worktree { ctx, reused } = workspace
         && !*reused
         && let Err(error) = crate::worktree::cleanup_worktree(ctx)
@@ -897,7 +900,7 @@ impl ApplicationRuntime {
         let batch = usize::from(self.cancel_batch(None));
         let sessions = ids
             .iter()
-            .filter(|id| self.cancel_session(id.as_str()))
+            .filter(|id| self.cancel_session_with_pause(id.as_str(), false))
             .count();
         batch + sessions
     }
@@ -939,6 +942,99 @@ impl ApplicationRuntime {
         operation: OperationKind,
     ) -> Result<OperationClaim> {
         let session_id = session_id.into();
+        self.ensure_not_managed(&session_id)?;
+        self.try_begin_unchecked(session_id, operation)
+    }
+
+    /// Acquire a claim only when the persisted attempt has the expected owner.
+    pub(crate) fn try_begin_managed(
+        self: &Arc<Self>,
+        session_id: &str,
+        owner: &crate::session::ManagedChildOwner,
+        operation: OperationKind,
+    ) -> Result<OperationClaim> {
+        self.ensure_managed_owner(session_id, owner)?;
+        self.try_begin_unchecked(session_id.to_owned(), operation)
+    }
+
+    fn ensure_managed_owner(
+        &self,
+        session_id: &str,
+        owner: &crate::session::ManagedChildOwner,
+    ) -> Result<()> {
+        if self.manager.load(session_id)?.managed_child.as_ref() != Some(owner) {
+            return Err(CruiseError::Other(format!(
+                "session {session_id} has a different Manager owner"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn pause_managed(
+        &self,
+        session_id: &str,
+        owner: &crate::session::ManagedChildOwner,
+    ) -> Result<bool> {
+        self.ensure_managed_owner(session_id, owner)?;
+        Ok(self.cancel_session_with_pause(session_id, true))
+    }
+
+    pub(crate) fn respond_to_managed_ask(
+        &self,
+        session_id: &str,
+        owner: &crate::session::ManagedChildOwner,
+        request_id: &str,
+        answer: String,
+    ) -> Result<()> {
+        self.ensure_managed_owner(session_id, owner)?;
+        self.respond(
+            session_id,
+            request_id,
+            PendingKind::Ask,
+            PromptResponse::Ask(answer),
+        )
+    }
+
+    pub(crate) fn respond_to_managed_option(
+        &self,
+        session_id: &str,
+        owner: &crate::session::ManagedChildOwner,
+        request_id: &str,
+        result: OptionResult,
+    ) -> Result<()> {
+        self.ensure_managed_owner(session_id, owner)?;
+        self.respond(
+            session_id,
+            request_id,
+            PendingKind::Option,
+            PromptResponse::Option(result),
+        )
+    }
+
+    fn ensure_not_managed(&self, session_id: &str) -> Result<()> {
+        let session_dir = self.manager.sessions_dir().join(session_id);
+        if session_dir.join("manager-owner.json").exists() {
+            return Err(CruiseError::Other(format!(
+                "session {session_id} is owned by a Manager goal"
+            )));
+        }
+        let state_path = session_dir.join("state.json");
+        if !state_path.exists() {
+            return Ok(());
+        }
+        if self.manager.load(session_id)?.managed_child.is_some() {
+            return Err(CruiseError::Other(format!(
+                "session {session_id} is owned by a Manager goal"
+            )));
+        }
+        Ok(())
+    }
+
+    fn try_begin_unchecked(
+        self: &Arc<Self>,
+        session_id: String,
+        operation: OperationKind,
+    ) -> Result<OperationClaim> {
         let identity = self.next_identity.fetch_add(1, Ordering::Relaxed);
         let token = CancellationToken::new();
         let mut claims = self
@@ -1008,11 +1104,17 @@ impl ApplicationRuntime {
 
     /// Cancel only the currently owned operation for `session_id`.
     pub fn cancel_session(&self, session_id: &str) -> bool {
+        if self.ensure_not_managed(session_id).is_err() {
+            return false;
+        }
         self.cancel_session_with_pause(session_id, false)
     }
 
     /// Pause a prompt-driven operation so its root records a paused outcome.
     pub fn pause_session(&self, session_id: &str) -> bool {
+        if self.ensure_not_managed(session_id).is_err() {
+            return false;
+        }
         self.cancel_session_with_pause(session_id, true)
     }
 
@@ -1391,6 +1493,7 @@ impl ApplicationRuntime {
     /// Returns an error for an empty answer or a stale, unknown, or inactive
     /// prompt request.
     pub fn respond_to_ask(&self, session_id: &str, request_id: &str, answer: String) -> Result<()> {
+        self.ensure_not_managed(session_id)?;
         self.respond(
             session_id,
             request_id,
@@ -1411,6 +1514,7 @@ impl ApplicationRuntime {
         request_id: &str,
         result: OptionResult,
     ) -> Result<()> {
+        self.ensure_not_managed(session_id)?;
         self.respond(
             session_id,
             request_id,
@@ -2739,6 +2843,10 @@ impl CruiseApplication {
         Arc::clone(&self.runtime)
     }
 
+    pub(crate) fn managed_session_store(&self) -> &SessionManager {
+        &self.manager
+    }
+
     /// List persisted, non-execution sessions.
     ///
     /// # Errors
@@ -3410,6 +3518,7 @@ impl CruiseApplication {
         content: String,
         origin: crate::instruction_inbox::Origin,
     ) -> Result<crate::instruction_inbox::Receipt> {
+        self.runtime.ensure_not_managed(id)?;
         self.manager.load(id)?;
         crate::instruction_inbox::accept(
             &self.manager.sessions_dir(),
@@ -3513,11 +3622,17 @@ impl CruiseApplication {
 
     #[must_use]
     pub fn cancel_session(&self, id: &str) -> bool {
+        if self.runtime.ensure_not_managed(id).is_err() {
+            return false;
+        }
         self.runtime.cancel_session(id)
     }
 
     #[must_use]
     pub fn pause_session(&self, id: &str) -> bool {
+        if self.runtime.ensure_not_managed(id).is_err() {
+            return false;
+        }
         self.runtime.pause_session(id)
     }
     #[must_use]
@@ -3531,6 +3646,13 @@ impl CruiseApplication {
         reason = "central policy for session menu actions"
     )]
     pub fn capabilities(&self, state: &SessionState) -> Vec<SessionAction> {
+        if state.managed_child.is_some() {
+            return if state.worktree_branch.is_some() {
+                vec![SessionAction::ViewDiff]
+            } else {
+                Vec::new()
+            };
+        }
         let live_foreign_runner = matches!(
             &state.phase,
             SessionPhase::Planned | SessionPhase::Failed(_) | SessionPhase::Suspended
@@ -4026,6 +4148,10 @@ impl CruiseApplication {
         let mut skipped = std::collections::HashSet::new();
         let mut claims = Vec::new();
         for state in self.manager.list()? {
+            if state.managed_child.is_some() {
+                skipped.insert(state.id);
+                continue;
+            }
             match self.runtime.try_begin(&state.id, OperationKind::Mutate) {
                 Ok(claim) => claims.push(claim),
                 Err(CruiseError::Busy(_)) => {
@@ -4134,6 +4260,10 @@ impl CruiseApplication {
         log_sink: Option<Arc<dyn LogSink>>,
     ) -> Result<SessionState> {
         let id = claim.session_id().to_owned();
+        let state = self.manager.load(&id)?;
+        if state.managed_child.is_some() {
+            crate::manager_coordinator::validate_claimed_child(self, &claim, &state)?;
+        }
         let result = self
             .run_claimed(&id, &claim, request, Arc::clone(&sink), log_sink, false)
             .await;
@@ -4760,7 +4890,7 @@ impl CruiseApplication {
         *unresolved_failed_steps = execution_result.as_ref().is_ok_and(|failed| *failed > 0);
         let finalize = crate::telemetry::Operation::phase("finalize");
         let execution_result = execution_result.and_then(|failed| {
-            if setup.state.exec && failed > 0 {
+            if (setup.state.exec || setup.state.managed_child.is_some()) && failed > 0 {
                 Err(CruiseError::Other(format!(
                     "workflow completed with {failed} failed step(s)"
                 )))
@@ -4970,7 +5100,7 @@ fn prepare_run_workspace(
         match crate::workspace::prepare_execution_workspace(manager, state, workspace_mode) {
             Ok(workspace) => workspace,
             Err(error) => {
-                if workspace_mode == WorkspaceMode::Worktree {
+                if workspace_mode == WorkspaceMode::Worktree && state.managed_child.is_none() {
                     let _ = std::fs::remove_dir_all(manager.worktrees_dir().join(&state.id));
                 }
                 if repo_clone_created {

@@ -1,5 +1,9 @@
 # Responsive WebUI executable specifications
 
+## Managed-child browser boundary
+
+From the repository root, run `npm ci --prefix tests/webui --ignore-scripts`, `tests/webui/node_modules/.bin/playwright install chromium` (on Linux use `install --with-deps chromium`), `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, and `node tests/webui/managed-child.mjs`. The responsive WebUI CI job also runs this test. It starts the production server with disposable HOME/XDG session fixtures and uses authenticated Chromium to check the read-only child label, hidden actions, Run All count, ordinary-session control, and rejection of direct reset, delete, and Tell requests without changing the child state or plan. It does not start a manager or execute Run All. Screenshots go to `target/formal-reports/managed-child-browser/`, or `WEBUI_MANAGED_REPORT_DIR` if set. `WEBUI_BDD_BIN` selects another runtime.
+
 ## Planning answer keyboard browser coverage
 
 From the repository root, with Node 26.13.1 and Rust 1.99.1:

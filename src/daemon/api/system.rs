@@ -47,7 +47,8 @@ async fn status(State(state): State<WebState>) -> Response {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         pid: std::process::id(),
         started_at: record.started_at,
-        active_operations: runtime.active_operations(),
+        active_operations: runtime.active_operations()
+            + crate::manager_coordinator::active_operations(),
         batch_active: runtime.batch_active(),
         origin: record.origin,
     })

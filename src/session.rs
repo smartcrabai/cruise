@@ -98,6 +98,16 @@ pub struct LocalMergeIntent {
     pub token: String,
 }
 
+/// Identity of a manager-owned task attempt. All fields participate in ownership checks.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ManagedChildOwner {
+    pub goal_id: String,
+    pub task_id: String,
+    pub attempt: u32,
+    pub revision: u64,
+    pub base_sha: String,
+}
+
 /// Persisted state for a single session.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[expect(
@@ -107,6 +117,9 @@ pub struct LocalMergeIntent {
 pub struct SessionState {
     /// Session ID (format: `YYYYMMDDHHmmssNNN`, NNN = milliseconds).
     pub id: String,
+    /// Present only for children controlled by an approved Manager goal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_child: Option<ManagedChildOwner>,
     /// Path to the original repository (base directory).
     pub base_dir: PathBuf,
     /// Current phase of the session.
@@ -338,6 +351,7 @@ impl SessionState {
     pub fn new(id: String, base_dir: PathBuf, config: SessionConfigRef, input: String) -> Self {
         Self {
             id,
+            managed_child: None,
             base_dir,
             phase: SessionPhase::AwaitingApproval,
             config,
@@ -651,6 +665,131 @@ pub struct SessionManager {
     base: PathBuf,
 }
 
+// Build the proof outside the visible session namespace. A crash at any point
+// before publication leaves no ambiguous markerless session directory.
+fn publish_managed_reservation(
+    sessions: &std::path::Path,
+    destination: &std::path::Path,
+    owner: &ManagedChildOwner,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let staging_root = sessions
+        .parent()
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing sessions parent")
+        })?
+        .join("manager-reservation-staging");
+    std::fs::create_dir_all(&staging_root)?;
+    let staging = staging_root.join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir(&staging)?;
+    let result = (|| {
+        let bytes = serde_json::to_vec(owner).map_err(std::io::Error::other)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(staging.join("manager-owner.json"))?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        // Windows may reject moving a directory while a file inside it is open.
+        drop(file);
+        sync_reservation_directory(&staging)?;
+        rename_reservation_noreplace(&staging, destination)?;
+        sync_reservation_directory(sessions)?;
+        Ok(())
+    })();
+    // Only our randomly named staging directory is removed, never destination.
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn sync_reservation_directory(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+// As with update transactions, Windows has no portable directory fsync.
+// The marker itself is flushed and publication requests write-through below.
+#[cfg(not(unix))]
+fn sync_reservation_directory(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn rename_reservation_noreplace(
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let from = std::ffi::CString::new(from.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid staging path")
+    })?;
+    let to = std::ffi::CString::new(to.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid session path")
+    })?;
+    // Both calls guarantee that an existing destination, including an empty
+    // foreign directory, is never replaced.
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rename_reservation_noreplace(
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    let wide_path = |path: &std::path::Path| -> std::io::Result<Vec<u16>> {
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid reservation path",
+            ));
+        }
+        wide.push(0);
+        Ok(wide)
+    };
+    let from = wide_path(from)?;
+    let to = wide_path(to)?;
+    // Without MOVEFILE_REPLACE_EXISTING the destination must not exist.
+    let result = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn rename_reservation_noreplace(
+    _from: &std::path::Path,
+    _to: &std::path::Path,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "exclusive Manager reservation publication is unsupported on this platform",
+    ))
+}
+
 impl SessionManager {
     #[must_use]
     pub fn new(base: PathBuf) -> Self {
@@ -715,6 +854,12 @@ impl SessionManager {
     pub fn create(&self, state: &SessionState) -> Result<()> {
         validate_session_id(&state.id)?;
         let session_dir = self.sessions_dir().join(&state.id);
+        if session_dir.join("manager-owner.json").exists() {
+            return Err(CruiseError::Other(format!(
+                "session {} is reserved by a Manager goal",
+                state.id
+            )));
+        }
         std::fs::create_dir_all(&session_dir)?;
         self.save(state)?;
         Ok(())
@@ -734,6 +879,12 @@ impl SessionManager {
     ) -> Result<()> {
         validate_session_id(&state.id)?;
         let session_dir = self.sessions_dir().join(&state.id);
+        if session_dir.join("manager-owner.json").exists() {
+            return Err(CruiseError::Other(format!(
+                "session {} is reserved by a Manager goal",
+                state.id
+            )));
+        }
         std::fs::create_dir_all(&session_dir)?;
         let result = (|| {
             if state.config.is_snapshot() {
@@ -752,6 +903,79 @@ impl SessionManager {
             let _ = std::fs::remove_dir_all(&session_dir);
         }
         result
+    }
+
+    /// Publish a reserved Manager attempt only after its plan and snapshot exist.
+    /// An existing directory is recoverable only with the exact same owner marker.
+    pub(crate) fn create_managed_child(
+        &self,
+        state: &SessionState,
+        config: &crate::config::WorkflowConfig,
+        plan: &str,
+    ) -> Result<SessionState> {
+        validate_session_id(&state.id)?;
+        let owner = state
+            .managed_child
+            .as_ref()
+            .ok_or_else(|| CruiseError::Other("managed child requires an owner".into()))?;
+        if !state.config.is_snapshot() || plan.trim().is_empty() {
+            return Err(CruiseError::Other(
+                "managed child requires a workflow snapshot and plan".into(),
+            ));
+        }
+        if config.create_pr
+            || config.cleanup_after_pr
+            || config.force_exec
+            || !config.after_pr.is_empty()
+            || state.workspace_mode != WorkspaceMode::Worktree
+            || state.repo.is_some()
+            || state.pr_target.is_some()
+            || state.exec
+            || !state.flags.is_empty()
+            || !state.skipped_steps.is_empty()
+        {
+            return Err(CruiseError::Other(
+                "unsafe managed child execution settings".into(),
+            ));
+        }
+        let sessions = self.sessions_dir();
+        std::fs::create_dir_all(&sessions)?;
+        let dir = sessions.join(&state.id);
+        let marker = dir.join("manager-owner.json");
+        match publish_managed_reservation(&sessions, &dir, owner) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let saved: ManagedChildOwner =
+                    serde_json::from_slice(&std::fs::read(&marker).map_err(|_| {
+                        CruiseError::Other(format!(
+                            "session {} reservation has no valid owner marker",
+                            state.id
+                        ))
+                    })?)?;
+                if saved != *owner {
+                    return Err(CruiseError::Other(format!(
+                        "session {} belongs to another owner",
+                        state.id
+                    )));
+                }
+                if dir.join("state.json").exists() {
+                    let existing = self.load(&state.id)?;
+                    if existing.managed_child.as_ref() != Some(owner) {
+                        return Err(CruiseError::Other(format!(
+                            "session {} owner mismatch",
+                            state.id
+                        )));
+                    }
+                    return Ok(existing);
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let yaml = serialize_resolved_config(config)?;
+        write_snapshot_atomically(&snapshot_path(&sessions, &state.id), yaml.as_bytes())?;
+        write_snapshot_atomically(&state.plan_path(&sessions), plan.as_bytes())?;
+        self.save(state)?;
+        Ok(state.clone())
     }
 
     /// Load a session by ID.
@@ -997,7 +1221,9 @@ impl SessionManager {
             .list()?
             .into_iter()
             .filter(|s| {
-                matches!(s.phase, SessionPhase::Planned | SessionPhase::Suspended) && !s.exec
+                matches!(s.phase, SessionPhase::Planned | SessionPhase::Suspended)
+                    && !s.exec
+                    && s.managed_child.is_none()
             })
             .collect())
     }
@@ -1123,6 +1349,15 @@ impl SessionManager {
         validate_session_id(id)?;
         let session_dir = self.sessions_dir().join(id);
         if session_dir.exists() {
+            if session_dir.join("manager-owner.json").exists()
+                || self
+                    .load(id)
+                    .is_ok_and(|state| state.managed_child.is_some())
+            {
+                return Err(crate::error::CruiseError::Other(format!(
+                    "session {id} is owned by a Manager goal"
+                )));
+            }
             if let Ok(state) = self.load(id)
                 && let Some(conversation_id) = state.plan_conversation_id.as_deref()
             {
@@ -1175,7 +1410,7 @@ impl SessionManager {
         let mut report = CleanupReport::default();
 
         for session in sessions {
-            if skipped.contains(&session.id) {
+            if skipped.contains(&session.id) || session.managed_child.is_some() {
                 report.skipped += 1;
                 continue;
             }
@@ -1499,6 +1734,43 @@ mod tests {
     }
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn managed_reservation_publication_never_replaces_existing_directory() {
+        let temp = TempDir::new().unwrap_or_else(|e| panic!("create temporary directory: {e}"));
+        let sessions = temp.path().join("sessions");
+        std::fs::create_dir(&sessions).unwrap_or_else(|e| panic!("create sessions directory: {e}"));
+        let destination = sessions.join("child");
+        let owner = ManagedChildOwner {
+            goal_id: "goal".into(),
+            task_id: "task".into(),
+            attempt: 1,
+            revision: 1,
+            base_sha: "base".into(),
+        };
+        publish_managed_reservation(&sessions, &destination, &owner)
+            .unwrap_or_else(|e| panic!("publish reservation: {e}"));
+        let original = std::fs::read(destination.join("manager-owner.json"))
+            .unwrap_or_else(|e| panic!("read owner: {e}"));
+        let error = publish_managed_reservation(&sessions, &destination, &owner)
+            .err()
+            .unwrap_or_else(|| panic!("duplicate reservation must fail"));
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(destination.join("manager-owner.json"))
+                .unwrap_or_else(|e| panic!("read original owner: {e}")),
+            original
+        );
+
+        let foreign = sessions.join("foreign");
+        std::fs::create_dir(&foreign).unwrap_or_else(|e| panic!("create foreign directory: {e}"));
+        let error = publish_managed_reservation(&sessions, &foreign, &owner)
+            .err()
+            .unwrap_or_else(|| panic!("foreign reservation must fail"));
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(!foreign.join("manager-owner.json").exists());
+    }
 
     #[test]
     fn planned_issue_number_legacy_state_is_omitted_when_absent() {

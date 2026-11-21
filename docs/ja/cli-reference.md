@@ -3,6 +3,8 @@
 <a id="cli-reference"></a>
 # CLI リファレンス
 
+`cruise manager` は試験的な対話型クライアントです。提案を明示的に承認すると永続的な Goal が登録され、非同期実行が許可されます。Manager は検証後に 1 つの PR/MR を公開し、人間によるマージを待ちます。利用前に[Manager のゴールと実行](sessions.md#試験的な-manager-の記録)を参照してください。
+
 ```
 cruise [OPTIONS] [INPUT] [COMMAND]
 
@@ -12,6 +14,7 @@ Commands:
   run          Execute a planned session
   tell         Send an instruction to a running session
   list         List and manage sessions interactively
+  manager      Open the experimental repository-scoped Manager client
   clean        Remove sessions with closed/merged PRs
   usage        Summarize locally recorded token usage
   docs         Print embedded common or framework-specific E2E policy

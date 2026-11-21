@@ -52,7 +52,13 @@ pub async fn run(args: ListArgs) -> Result<()> {
             {
                 crate::display::print_bordered(&content, Some("plan.md"));
             }
-            let actions = available_session_actions(&details.capabilities);
+            let mut actions = available_session_actions(&details.capabilities);
+            if details.state.managed_child.is_some() {
+                eprintln!("Manager child (read-only). Use cruise manager for actions.");
+                actions.retain(|action| {
+                    matches!(action, SessionAction::ViewDiff | SessionAction::Back)
+                });
+            }
             crate::platform::reclaim_terminal_foreground();
             let prompt = list_text("cli.list.action_prompt", "Action:");
             let action = match inquire::Select::new(&prompt, actions).prompt() {

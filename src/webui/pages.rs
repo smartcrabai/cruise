@@ -575,6 +575,7 @@ pub(crate) fn run_all_vm(state: &WebState) -> RunAllVm {
         .list_sessions()
         .unwrap_or_default()
         .into_iter()
+        .filter(|session| session.managed_child.is_none())
         .map(|session| super::dto::session_dto(&state.application, session, false))
         .collect();
     let runnable = runnable_count(&sessions);

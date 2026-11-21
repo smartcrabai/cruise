@@ -1,5 +1,6 @@
 mod exec;
 mod list;
+mod manager;
 mod plan;
 mod run;
 pub(crate) mod sessions;
@@ -137,6 +138,12 @@ pub(crate) fn router(state: WebState) -> Router {
         .merge(run::routes())
         .merge(crate::daemon::events::routes())
         .fallback(not_found)
+        .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .with_state(state)
+}
+
+pub(crate) fn manager_router(state: WebState) -> Router {
+    manager::routes()
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state)
 }

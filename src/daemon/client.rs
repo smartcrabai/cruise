@@ -81,6 +81,36 @@ struct CancelResponse {
 }
 
 impl DaemonClient {
+    pub(crate) async fn manager_snapshot(&self, cwd: &str) -> Result<Value> {
+        let mut url = Url::parse(&self.origin)
+            .and_then(|base| base.join("api/manager/snapshot"))
+            .map_err(|error| CruiseError::Other(format!("invalid daemon API path: {error}")))?;
+        url.query_pairs_mut().append_pair("cwd", cwd);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|error| CruiseError::Other(format!("daemon request failed: {error}")))?;
+        decode_response(response).await
+    }
+
+    pub(crate) async fn manager_action(&self, body: &Value) -> Result<Value> {
+        let url = Url::parse(&self.origin)
+            .and_then(|base| base.join("api/manager/action"))
+            .map_err(|error| CruiseError::Other(format!("invalid daemon API path: {error}")))?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| CruiseError::Other(format!("daemon request failed: {error}")))?;
+        decode_response(response).await
+    }
+
     pub(crate) async fn batch_active(&self) -> Result<bool> {
         let status: StatusResponse = self.get_json("status").await?;
         Ok(status.batch_active)

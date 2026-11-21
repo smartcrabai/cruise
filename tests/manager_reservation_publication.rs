@@ -1,0 +1,196 @@
+#![cfg(any(target_os = "macos", target_os = "linux"))]
+
+use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+fn cli(home: &Path, args: &[&str]) -> std::io::Result<Output> {
+    Command::new(env!("CARGO_BIN_EXE_cruise"))
+        .current_dir(home)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("XDG_STATE_HOME", home.join("state"))
+        .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
+        .env_remove("CRUISE_CONFIG")
+        .env_remove("CRUISE_DAEMON_PORT")
+        .stdin(Stdio::null())
+        .args(args)
+        .output()
+}
+
+fn git(repo: &Path, args: &[&str]) -> TestResult<String> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+struct Fixture {
+    home: TempDir,
+    record: PathBuf,
+    session: PathBuf,
+    sha: String,
+}
+impl Fixture {
+    fn new() -> TestResult<Self> {
+        let home = TempDir::new()?;
+        let root = home.path();
+        let repo = root.join("repo");
+        fs::create_dir(&repo)?;
+        git(&repo, &["init", "-q"])?;
+        git(&repo, &["config", "user.name", "Test"])?;
+        git(&repo, &["config", "user.email", "test@example.test"])?;
+        fs::write(repo.join("file"), "base\n")?;
+        git(&repo, &["add", "file"])?;
+        git(&repo, &["commit", "-qm", "base"])?;
+        let sha = git(&repo, &["rev-parse", "HEAD"])?;
+        git(&repo, &["update-ref", "refs/heads/cruise/goal/g", &sha])?;
+        let origin = "https://github.com/example/project.git";
+        git(&repo, &["remote", "add", "origin", origin])?;
+        let anchor = repo.canonicalize()?;
+        let common = repo.join(".git").canonicalize()?;
+        let workflow: cruise::config::WorkflowConfig = serde_json::from_value(json!({
+            "create_pr":false, "cleanup_after_pr":false, "force_exec":false,
+            "steps":{"run":{"command":"sleep 30"}}
+        }))?;
+        let workflow = serde_json::to_value(workflow)?;
+        let proposal = json!({"id":"p","revision":1,"objective":"goal","target_branch":"main","target_sha":sha,
+            "exclusions":[],"criteria":[{"id":"c","description":"works"}],
+            "checks":[{"id":"check","criterion_ids":["c"],"argv":["true"]}],
+            "tasks":[{"id":"task","instructions":"work","dependencies":[]}],"workflow":"builtin:tdd",
+            "contract":{"anchor":anchor,"origin":origin,"forge_kind":"GitHub","forge_host":"github.com","forge_repository":"example/project","workflow":workflow}});
+        let attempt = json!({"task_id":"task","attempt":1,"session_id":"child","base_sha":sha,
+            "launch_started":false,"result_sha":null,"integrated":false,"integration_intent":null});
+        let goal = json!({"id":"g","proposal":proposal,"status":"active","reason":null,
+            "execution":{"anchor":anchor,"origin":origin,"workflow":workflow,"integrated_tip":sha,"attempts":[attempt],
+            "paused_from":null,"paused_reason":null,"publication":null,"publication_history":[]}});
+        let mut key = String::new();
+        for byte in Sha256::digest(common.to_string_lossy().as_bytes()) {
+            write!(&mut key, "{byte:02x}")?;
+        }
+        let record = root.join("data/cruise/manager").join(format!("{key}.json"));
+        fs::create_dir_all(record.parent().ok_or("record parent missing")?)?;
+        fs::write(
+            &record,
+            serde_json::to_vec(
+                &json!({"repository":common,"transcript":[],"proposal":null,"goals":[goal]}),
+            )?,
+        )?;
+        let session = root.join("data/cruise/sessions/child");
+        Ok(Self {
+            home,
+            record,
+            session,
+            sha,
+        })
+    }
+    fn owner(&self) -> Value {
+        json!({"goal_id":"g","task_id":"task","attempt":1,"revision":1,"base_sha":self.sha})
+    }
+    fn start(&self) -> TestResult {
+        let out = cli(self.home.path(), &["daemon", "start", "--port", "0"])?;
+        assert!(
+            out.status.success(),
+            "start: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(())
+    }
+    fn goal(&self) -> TestResult<Value> {
+        Ok(serde_json::from_slice::<Value>(&fs::read(&self.record)?)?["goals"][0].clone())
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = cli(self.home.path(), &["daemon", "stop", "--force"]);
+    }
+}
+async fn eventually(mut predicate: impl FnMut() -> TestResult<bool>) -> TestResult {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !predicate()? {
+        assert!(Instant::now() < deadline, "timed out waiting for daemon");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_reservation_recovers_from_prepublication_staging() -> TestResult {
+    let f = Fixture::new()?;
+    let abandoned = f
+        .home
+        .path()
+        .join("data/cruise/manager-reservation-staging/abandoned");
+    fs::create_dir_all(&abandoned)?;
+    fs::write(
+        abandoned.join("manager-owner.json"),
+        serde_json::to_vec(&f.owner())?,
+    )?;
+    f.start()?;
+    eventually(|| Ok(f.session.join("state.json").exists())).await?;
+    let actual: Value = serde_json::from_slice(&fs::read(f.session.join("manager-owner.json"))?)?;
+    assert_eq!(actual, f.owner());
+    assert_eq!(
+        f.goal()?["execution"]["attempts"]
+            .as_array()
+            .ok_or("attempts missing")?
+            .len(),
+        1
+    );
+    assert!(abandoned.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn existing_matching_owner_marker_is_recovered_without_new_attempt() -> TestResult {
+    let f = Fixture::new()?;
+    fs::create_dir_all(&f.session)?;
+    fs::write(
+        f.session.join("manager-owner.json"),
+        serde_json::to_vec(&f.owner())?,
+    )?;
+    f.start()?;
+    eventually(|| Ok(f.session.join("state.json").exists())).await?;
+    let actual: Value = serde_json::from_slice(&fs::read(f.session.join("manager-owner.json"))?)?;
+    assert_eq!(actual, f.owner());
+    assert_eq!(
+        f.goal()?["execution"]["attempts"]
+            .as_array()
+            .ok_or("attempts missing")?
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn foreign_markerless_directory_is_not_adopted_or_modified() -> TestResult {
+    let f = Fixture::new()?;
+    fs::create_dir_all(&f.session)?;
+    fs::write(f.session.join("foreign"), b"do not touch")?;
+    f.start()?;
+    eventually(|| Ok(f.goal()?["status"] == "blocked")).await?;
+    assert_eq!(fs::read(f.session.join("foreign"))?, b"do not touch");
+    assert!(!f.session.join("manager-owner.json").exists());
+    assert!(!f.session.join("state.json").exists());
+    assert_eq!(fs::read_dir(&f.session)?.count(), 1);
+    Ok(())
+}

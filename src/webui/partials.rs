@@ -67,21 +67,43 @@ pub(crate) fn header_vm(
 ) -> Result<SessionHeaderVm> {
     let runtime = state.application.runtime();
     let operation = runtime.active_operation(session_id).or(assumed);
-    let session = super::dto::session_dto(
-        &state.application,
-        state.application.reconcile_session(session_id)?,
-        true,
-    );
+    let session_state = state.application.reconcile_session(session_id)?;
+    let managed = session_state.managed_child.is_some();
+    let session = super::dto::session_dto(&state.application, session_state, true);
     let prompts = state.application.pending_prompts(session_id);
     let has_pending_prompt = !prompts.is_empty();
     let fixing = is_planning(operation) || session.fix_in_progress;
     let badge = PhaseBadgeVm::new(&session, fixing);
-    let actions = super::actions::session_actions(&session, operation, has_pending_prompt);
+    let mut actions = super::actions::session_actions(&session, operation, has_pending_prompt);
+    if managed {
+        actions.show_approve = false;
+        actions.show_publish_issue = false;
+        actions.show_fix = false;
+        actions.show_ask = false;
+        actions.show_verify = false;
+        actions.show_tell = false;
+        actions.show_create_worktree = false;
+        actions.show_run = false;
+        actions.show_create_pr = false;
+        actions.show_reset = false;
+        actions.show_discard = false;
+        actions.show_delete = false;
+        actions.show_cancel = false;
+        actions.show_generate_plan = false;
+        actions.show_merge_pr = false;
+        actions.show_stage_local_merge = false;
+        actions.show_merge_locally = false;
+    }
     let title = session
         .title
         .clone()
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| session.input.clone());
+    let title = if managed {
+        format!("{title} (Manager child, read-only)")
+    } else {
+        title
+    };
     let pr_is_link = session
         .pr_url
         .as_deref()
@@ -98,8 +120,11 @@ pub(crate) fn header_vm(
         pr_url: session.pr_url.clone(),
         pr_is_link,
         actions,
-        busy: operation.is_some(),
-        awaiting_input: session.awaiting_input,
+        managed,
+        activity: super::view::SessionHeaderActivityVm {
+            busy: operation.is_some(),
+            awaiting_input: session.awaiting_input,
+        },
         base_url: format!("/webui/sessions/{}", session.id),
     })
 }
@@ -116,9 +141,13 @@ pub(crate) fn header_html(
 /// The sidebar view model, with rows already rendered when `with_rows`.
 pub(crate) fn sidebar_vm(state: &WebState, selected_id: Option<&str>) -> Result<SidebarVm> {
     let runtime = state.application.runtime();
-    let mut sessions: Vec<super::dto::SessionDto> = state
-        .application
-        .list_sessions_with_exec()?
+    let session_states = state.application.list_sessions_with_exec()?;
+    let managed_ids: std::collections::HashSet<_> = session_states
+        .iter()
+        .filter(|s| s.managed_child.is_some())
+        .map(|s| s.id.clone())
+        .collect();
+    let mut sessions: Vec<super::dto::SessionDto> = session_states
         .into_iter()
         .filter(visible_in_sidebar)
         .map(|session| {
@@ -131,10 +160,27 @@ pub(crate) fn sidebar_vm(state: &WebState, selected_id: Option<&str>) -> Result<
                 session
             }
         })
-        .map(|session| super::dto::session_dto(&state.application, session, false))
+        .map(|session| {
+            let managed = session.managed_child.is_some();
+            let mut dto = super::dto::session_dto(&state.application, session, false);
+            if managed {
+                let title = dto
+                    .title
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(&dto.input);
+                dto.title = Some(format!("{title} (Manager child, read-only)"));
+            }
+            dto
+        })
         .collect();
     sort_sessions(&mut sessions);
-    let runnable = runnable_count(&sessions);
+    let runnable_sessions: Vec<_> = sessions
+        .iter()
+        .filter(|s| !managed_ids.contains(&s.id))
+        .cloned()
+        .collect();
+    let runnable = runnable_count(&runnable_sessions);
     let rows = sessions
         .iter()
         .map(|session| {

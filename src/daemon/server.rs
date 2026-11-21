@@ -29,6 +29,7 @@ pub(crate) struct WebState {
     pub(crate) login_nonces: Arc<Mutex<HashMap<String, Instant>>>,
     pub(crate) web_sessions: Arc<Mutex<HashSet<String>>>,
     pub(crate) control: Option<Arc<ControlGate>>,
+    pub(crate) manager_startup_error: Option<String>,
 }
 
 pub(crate) struct ControlGate {
@@ -66,6 +67,7 @@ impl WebState {
             login_nonces: Arc::new(Mutex::new(HashMap::new())),
             web_sessions: Arc::new(Mutex::new(HashSet::new())),
             control: None,
+            manager_startup_error: None,
         })
     }
 }
@@ -258,6 +260,8 @@ async fn run_instance(
             .as_secs(),
     };
     registry.write(&record)?;
+    // Hold ownership through recovery, before accepting requests.
+    state.manager_startup_error = manager_startup_error(&state.application).await;
     drop(lock);
     if daemon {
         crate::daemon::log_rotation::start(registry.log_path());
@@ -291,7 +295,7 @@ async fn run_instance(
             }
         }
     });
-    let result = serve(listener, state.clone(), signal).await;
+    let result = serve_reconciled(listener, state.clone(), signal).await;
     let cleanup = registry.remove_if_owned(&instance_id);
     result?;
     cleanup?;
@@ -299,7 +303,39 @@ async fn run_instance(
 }
 
 /// Serve the `WebUI` and daemon API until shutdown begins, then drain operations.
+#[cfg(test)]
 pub(crate) async fn serve<F>(
+    listener: tokio::net::TcpListener,
+    mut state: WebState,
+    signal: F,
+) -> Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    state.manager_startup_error = manager_startup_error(&state.application).await;
+    serve_reconciled(listener, state, signal).await
+}
+
+async fn manager_startup_error(application: &CruiseApplication) -> Option<String> {
+    let mut failures = Vec::new();
+    match crate::manager_coordinator::reconcile_applied(application).await {
+        Ok(errors) => failures.extend(errors),
+        Err(error) => failures.push(format!("effect recovery: {error}")),
+    }
+    match crate::manager::reconcile_startup() {
+        Ok(errors) => failures.extend(errors),
+        Err(error) => failures.push(format!("startup reconciliation: {error}")),
+    }
+    if failures.is_empty() {
+        None
+    } else {
+        let error = failures.join("; ");
+        eprintln!("warning: Manager scheduling disabled until daemon restart: {error}");
+        Some(error)
+    }
+}
+
+async fn serve_reconciled<F>(
     listener: tokio::net::TcpListener,
     state: WebState,
     signal: F,
@@ -314,20 +350,44 @@ where
         .ip()
         .is_loopback();
     let router = application_router(state.clone(), loopback);
-    axum::serve(listener, router)
+    let manager_stop = crate::cancellation::CancellationToken::new();
+    let shutdown_manager = manager_stop.clone();
+    let (manager_sink, manager_log_sink) = state.hub.sinks();
+    let manager_task = state.manager_startup_error.is_none().then(|| {
+        tokio::spawn(crate::manager_coordinator::run_daemon(
+            state.application.clone(),
+            manager_sink,
+            manager_log_sink,
+            manager_stop.clone(),
+        ))
+    });
+    let result = axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             signal.await;
+            crate::manager_coordinator::stop(&shutdown_manager);
             crate::daemon::shutdown::begin(&shutdown_state);
         })
-        .await
-        .map_err(|error| CruiseError::Other(error.to_string()))?;
+        .await;
+    crate::manager_coordinator::stop(&manager_stop);
+    // This is idempotent and also covers a server error before the signal.
+    let _ = state.application.runtime().begin_shutdown();
+    if let Some(manager_task) = manager_task {
+        manager_task.await.map_err(|error| {
+            CruiseError::Other(format!("Manager coordinator task failed: {error}"))
+        })?;
+    }
     crate::daemon::shutdown::wait_for_operations(&state.application).await;
+    result.map_err(|error| CruiseError::Other(error.to_string()))?;
     Ok(())
 }
 
 pub(crate) fn application_router(state: WebState, loopback: bool) -> axum::Router {
     crate::webui::router(state.clone())
         .layer(axum::middleware::from_fn(webui_security_headers))
+        .nest(
+            "/api/manager",
+            crate::daemon::api::manager_router(state.clone()),
+        )
         .nest("/api/v1", crate::daemon::api::router(state))
         .layer(axum::middleware::from_fn_with_state(
             crate::daemon::web_auth::HostGuard { loopback },
@@ -356,7 +416,8 @@ async fn webui_security_headers(
 
 pub(crate) fn signal_shutdown(state: &WebState) -> Option<usize> {
     let control = state.control.as_ref()?;
-    let active = state.application.runtime().begin_shutdown();
+    let active = state.application.runtime().begin_shutdown()
+        + crate::manager_coordinator::active_operations();
     if let Ok(mut sender) = control.sender.lock()
         && let Some(sender) = sender.take()
     {
