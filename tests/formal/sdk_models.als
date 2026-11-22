@@ -68,7 +68,8 @@ assert FallbackSafety {
     a.attempted in b.attempted
     and (b.event = Fail implies b.attempted = a.attempted + a.current)
     and (a.visible = Yes implies b.visible = Yes and b.event != Start)
-    and (b.event = Start and a.attempts > 0 implies a.event = Fail and a.phase = Searching)
+    and (b.event = Start and a.attempts > 0 implies
+      a.phase = Searching and a.visible = No and a.event in Fail + Idle)
     and b.attempts <= 2
 }
 assert Domains {

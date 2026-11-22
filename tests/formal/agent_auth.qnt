@@ -103,7 +103,7 @@ module agent_auth {
   run planningScopeTest = initWith({ ...ordinary, planning: true, anthropicFirst: fresh })
     .then(inspect(0)).then(decide).then(launch)
     .expect(s.read == Set(0) and not(s.workspace) and safety)
-  run dryRunTest = initWith(ordinary).then(inspect(1)).then(decide)
+  run dryRunTest = initWith({ ...ordinary, dry: true }).then(decide)
     .expect(s.phase == "dry" and s.read == Set() and safety)
   run planningDryRunTest = initWith({ ...ordinary, planning: true, dry: true }).then(decide)
     .expect(s.phase == "dry" and s.read == Set() and safety)

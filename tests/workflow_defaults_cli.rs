@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
@@ -118,7 +120,6 @@ fn write_model_workflow(project: &Path, model: Option<&str>) {
         .unwrap_or_else(|error| panic!("write model workflow: {error}"));
 }
 
-#[cfg(unix)]
 fn assert_missing_model_diagnostic(output: &Output, user_file: &Path) {
     assert!(
         !output.status.success(),

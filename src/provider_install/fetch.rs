@@ -303,15 +303,7 @@ mod tests {
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         let _writer = fs::OpenOptions::new().write(true).open(&binary).unwrap();
         let start = Instant::now();
-        assert!(
-            probe_with_timeout(
-                Provider::Jcode,
-                &binary,
-                "1.0.0",
-                Duration::from_millis(100)
-            )
-            .is_err()
-        );
+        assert!(probe_with_timeout(&binary, "1.0.0", Duration::from_millis(100)).is_err());
         assert!(start.elapsed() < Duration::from_secs(2));
     }
 

@@ -175,19 +175,25 @@ pub(crate) fn ensure_agents_authenticated(
     };
     let mut failures = Vec::new();
     for target in targets {
-        let (path, label, login) = match target {
+        let (path, label, login, api_key) = match target {
             CredentialTarget::JcodeAnthropic => (
                 crate::backend::jcode::resolve_source_home(cwd).join("auth.json"),
                 "jcode provider `claude`",
                 "jcode login claude",
+                "ANTHROPIC_API_KEY",
             ),
             CredentialTarget::JcodeOpenAi => (
                 crate::backend::jcode::resolve_source_home(cwd).join("openai-auth.json"),
                 "jcode provider `openai`",
                 "jcode login openai",
+                "OPENAI_API_KEY",
             ),
         };
-        if let Verdict::Expired(reason) = inspect_file(&path, target, now_ms) {
+        let api_key_present = config.env.get(api_key).map_or_else(
+            || std::env::var_os(api_key).is_some_and(|value| !value.is_empty()),
+            |value| !value.is_empty(),
+        );
+        if !api_key_present && let Verdict::Expired(reason) = inspect_file(&path, target, now_ms) {
             failures.push(format!(
                 "  - {label} ({}): {reason}; run `{login}`",
                 path.display()

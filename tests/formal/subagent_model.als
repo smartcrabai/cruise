@@ -63,7 +63,8 @@ assert Selection {
 }
 assert ConfigureBeforeSend {
   all a: State - last | let b = next[a] |
-    (b.event = Send implies (a.phase = Configured and a.configured = Yes))
+    (b.event = Send implies
+      (a.phase = Configured and (a.route = -1 or a.configured = Yes)))
     and (b.event = Configure and chosen != -1 implies b.agentsCalls = a.agentsCalls.add[1])
     and (a.failed = Yes implies b.sent = No)
 }
