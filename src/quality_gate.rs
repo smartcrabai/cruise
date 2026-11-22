@@ -14,6 +14,7 @@ pub(crate) struct ResolvedGate {
 pub(crate) struct QualityGateFailure {
     pub command: String,
     result: String,
+    /// Sanitized and bounded by the gate reader or error sanitizer.
     output: String,
 }
 
@@ -82,7 +83,7 @@ pub(crate) fn format_feedback(
     max_attempts: usize,
     artifacts_root: Option<&Path>,
 ) -> String {
-    let excerpt = crate::telemetry::stderr::sanitize(&failure.output).body;
+    let excerpt = crate::telemetry::stderr::excerpt_sanitized(&failure.output);
     let excerpt = if excerpt.is_empty() {
         "(no output)"
     } else {
@@ -115,9 +116,10 @@ fn write_gate_log(root: Option<&Path>, step: &str, attempt: usize, output: &str)
         })
         .collect();
     let name = format!("quality-gates/{slug}-{attempt}.log");
-    let sanitized =
-        crate::telemetry::stderr::sanitize_with_limit(output, crate::artifacts::MAX_ARTIFACT_SIZE)
-            .body;
+    let sanitized = crate::telemetry::stderr::excerpt_sanitized_with_limit(
+        output,
+        crate::artifacts::MAX_ARTIFACT_SIZE,
+    );
     crate::artifacts::write(root, &name, &sanitized).ok()?;
     Some(root.join(name).display().to_string())
 }

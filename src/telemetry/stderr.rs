@@ -99,6 +99,36 @@ pub(crate) fn sanitize_with_limit(input: &str, limit: usize) -> SanitizedStderr 
     }
 }
 
+/// Re-excerpt text that has already passed through the redactor.
+pub(crate) fn excerpt_sanitized(input: &str) -> String {
+    excerpt_sanitized_with_limit(input, MAX_STDERR_LOG_BYTES)
+}
+
+pub(crate) fn excerpt_sanitized_with_limit(input: &str, limit: usize) -> String {
+    if input.len() <= limit {
+        return input.to_owned();
+    }
+
+    let available = limit.saturating_sub(EXCERPT_MARKER.len());
+    let head_limit = if limit == MAX_STDERR_LOG_BYTES {
+        EXCERPT_HEAD_BYTES
+    } else {
+        available / 2
+    };
+    let tail_limit = if limit == MAX_STDERR_LOG_BYTES {
+        EXCERPT_TAIL_BYTES
+    } else {
+        available - head_limit
+    };
+    let mut body = String::with_capacity(
+        head_limit + prefix_by_bytes(EXCERPT_MARKER, limit).len() + tail_limit,
+    );
+    body.push_str(prefix_by_bytes(input, head_limit));
+    body.push_str(prefix_by_bytes(EXCERPT_MARKER, limit));
+    body.push_str(suffix_by_bytes(input, tail_limit));
+    body
+}
+
 #[derive(Default)]
 struct ScanState {
     in_private_key: bool,
@@ -1148,7 +1178,10 @@ fn suffix_by_bytes(text: &str, max_bytes: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_STDERR_LOG_BYTES, REDACTED, StreamSanitizer, sanitize};
+    use super::{
+        MAX_STDERR_LOG_BYTES, REDACTED, StreamSanitizer, excerpt_sanitized_with_limit, sanitize,
+        sanitize_with_limit,
+    };
 
     #[test]
     fn redacts_sensitive_headers_and_folded_values() {
@@ -1447,5 +1480,20 @@ mod tests {
         assert!(output.contains("TOKEN=[REDACTED]"));
         assert!(output.contains("[REDACTED PRIVATE KEY]"));
         assert!(output.contains("PASSWORD=[REDACTED]"));
+    }
+    #[test]
+    fn excerpting_sanitized_output_matches_sanitizing_it_again() {
+        let source = format!(
+            "Authorization: Bearer header-secret\nTOKEN=assignment-secret\nhttps://user:password@example.test/path?token=query-secret\n{}",
+            "safe diagnostic ".repeat(700)
+        );
+        let sanitized = sanitize_with_limit(&source, source.len() + 1).body;
+
+        for limit in [1024, MAX_STDERR_LOG_BYTES] {
+            assert_eq!(
+                excerpt_sanitized_with_limit(&sanitized, limit),
+                sanitize_with_limit(&sanitized, limit).body
+            );
+        }
     }
 }
