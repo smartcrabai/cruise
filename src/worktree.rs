@@ -683,7 +683,7 @@ fn cleanup_git_command(original_dir: &Path, common_git_dir: Option<&Path>) -> Co
 
 fn resolve_common_git_dir(worktree: &Path) -> Result<PathBuf> {
     let output = Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(worktree)
         .stdin(std::process::Stdio::null())
         .output()
@@ -697,17 +697,14 @@ fn resolve_common_git_dir(worktree: &Path) -> Result<PathBuf> {
     }
 
     let common_git_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    let common_git_dir = if common_git_dir.is_absolute() {
-        common_git_dir
-    } else {
-        worktree.join(common_git_dir)
-    };
-    fs::canonicalize(&common_git_dir).map_err(|error| {
-        CruiseError::WorktreeError(format!(
-            "failed to resolve git common directory for worktree {}: {error}",
-            worktree.display()
-        ))
-    })
+    if !common_git_dir.is_absolute() {
+        return Err(CruiseError::WorktreeError(format!(
+            "git returned a non-absolute common directory for worktree {}: {}",
+            worktree.display(),
+            common_git_dir.display()
+        )));
+    }
+    Ok(common_git_dir)
 }
 
 fn ensure_git_repo(dir: &Path) -> Result<()> {
