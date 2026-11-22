@@ -159,17 +159,22 @@ fn sanitize_line_content(
     output: &mut BoundedOutput,
 ) {
     let bytes = line.as_bytes();
+    let has_url_colon = bytes[index..].contains(&b':');
     let mut previous_key_byte = false;
     let mut previous_url_scheme_byte = false;
     let mut shell_quote = None;
     let mut shell_quote_escaped = false;
     while index < bytes.len() {
-        if let Some(end) = ansi_escape_end(bytes, index) {
+        if matches!(bytes[index], 0x1b | 0xc2)
+            && let Some(end) = ansi_escape_end(bytes, index)
+        {
             index = end;
             continue;
         }
 
-        if let Some(end) = private_key_start_end(line, index) {
+        if bytes[index] == b'-'
+            && let Some(end) = private_key_start_end(line, index)
+        {
             output.push_str(REDACTED_PRIVATE_KEY);
             if let Some(end_marker) = find_private_key_end(line, end) {
                 index = end_marker;
@@ -182,7 +187,10 @@ fn sanitize_line_content(
             continue;
         }
 
-        if let Some(url) = url_at(line, index, previous_url_scheme_byte) {
+        if has_url_colon
+            && bytes[index].is_ascii_alphabetic()
+            && let Some(url) = url_at(line, index, previous_url_scheme_byte)
+        {
             emit_url(line, &url, output);
             index = url.end;
             previous_key_byte = false;
@@ -190,7 +198,9 @@ fn sanitize_line_content(
             continue;
         }
 
-        if let Some((scheme_end, credential_end)) = bearer_or_basic(line, index) {
+        if bytes[index].eq_ignore_ascii_case(&b'b')
+            && let Some((scheme_end, credential_end)) = bearer_or_basic(line, index)
+        {
             emit_clean(&line[index..scheme_end], output);
             output.push(' ');
             output.push_str(REDACTED);
@@ -200,7 +210,13 @@ fn sanitize_line_content(
             continue;
         }
 
-        if !previous_key_byte && let Some(token_end) = known_token_end(line, index) {
+        if !previous_key_byte
+            && matches!(
+                bytes[index].to_ascii_lowercase(),
+                b'a' | b'e' | b'g' | b'h' | b'l' | b'n' | b'p' | b'r' | b's' | b'v' | b'x'
+            )
+            && let Some(token_end) = known_token_end(line, index)
+        {
             output.push_str(REDACTED);
             index = token_end;
             previous_key_byte = false;
@@ -208,7 +224,9 @@ fn sanitize_line_content(
             continue;
         }
 
-        if !previous_key_byte && let Some(assignment) = secret_assignment(line, index, shell_quote)
+        if !previous_key_byte
+            && (is_key_byte(bytes[index]) || bytes[index] == b'"')
+            && let Some(assignment) = secret_assignment(line, index, shell_quote)
         {
             emit_clean(&line[index..assignment.value_start], output);
             if let Some(open) = assignment.open_quote {
@@ -509,27 +527,28 @@ fn is_sensitive_segment(segment: &[u8]) -> bool {
 }
 
 fn is_machine_diagnostic_line(line: &str) -> bool {
-    [
-        b"CRUISE_CI_DIAGNOSTIC_V".as_slice(),
-        b"CRUISE_SYNC_BASE_DIAGNOSTIC_V",
-    ]
-    .iter()
-    .any(|marker| {
-        let mut cursor = 0;
-        while cursor < line.len() {
-            if visible_ascii_prefix(line, cursor, marker).is_some() {
-                return true;
-            }
-            if next_visible_char(line, &mut cursor).is_none() {
-                break;
-            }
+    let mut cursor = 0;
+    while let Some((character, source_index)) = next_visible_char(line, &mut cursor) {
+        if character.is_ascii()
+            && character.eq_ignore_ascii_case(&'C')
+            && [
+                b"CRUISE_CI_DIAGNOSTIC_V".as_slice(),
+                b"CRUISE_SYNC_BASE_DIAGNOSTIC_V",
+            ]
+            .iter()
+            .any(|marker| visible_ascii_prefix(line, source_index, marker).is_some())
+        {
+            return true;
         }
-        false
-    })
+    }
+    false
 }
 
 fn sensitive_header_colon(line: &str) -> Option<usize> {
     const MAX_HEADER_NAME_BYTES: usize = 256;
+    if !line.contains(':') {
+        return None;
+    }
     let mut cursor = skip_visible_horizontal_space(line, 0);
     let first_position = cursor;
     let (first, _) = next_visible_char(line, &mut cursor)?;
@@ -1129,7 +1148,7 @@ fn suffix_by_bytes(text: &str, max_bytes: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_STDERR_LOG_BYTES, REDACTED, sanitize};
+    use super::{MAX_STDERR_LOG_BYTES, REDACTED, StreamSanitizer, sanitize};
 
     #[test]
     fn redacts_sensitive_headers_and_folded_values() {
@@ -1404,5 +1423,29 @@ mod tests {
         assert!(result.body.contains("safe diagnostic"));
         assert!(result.body.contains("retained tail"));
         assert!(!result.body.contains("colored-marker-secret"));
+    }
+    #[test]
+    fn redacts_secrets_throughout_a_multi_megabyte_line() {
+        let padding = "x".repeat(700_000);
+        let input = format!(
+            "TOKEN=start-secret {padding} ghp_middle-secret {padding} -----BEGIN PRIVATE KEY-----private-key-body-----END PRIVATE KEY----- {padding} PASSWORD=end-secret"
+        );
+        let mut sanitizer = StreamSanitizer::new(input.len());
+        for chunk in input.as_bytes().chunks(8192) {
+            sanitizer.push(chunk);
+        }
+        let output = sanitizer.finish();
+
+        for secret in [
+            "start-secret",
+            "middle-secret",
+            "private-key-body",
+            "end-secret",
+        ] {
+            assert!(!output.contains(secret), "leaked {secret}");
+        }
+        assert!(output.contains("TOKEN=[REDACTED]"));
+        assert!(output.contains("[REDACTED PRIVATE KEY]"));
+        assert!(output.contains("PASSWORD=[REDACTED]"));
     }
 }
