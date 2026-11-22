@@ -12,9 +12,9 @@ use std::{
     time::Duration,
 };
 
-const V1: &[u8] = b"#!/bin/sh\nprintf '1.2.3 (Claude Code)\\n'\n";
-const V2: &[u8] = b"#!/bin/sh\nprintf '1.2.4 (Claude Code)\\n'\n";
-const WRONG_VERSION: &[u8] = b"#!/bin/sh\nprintf '9.9.9 (Claude Code)\\n'\n";
+const V1: &[u8] = b"#!/bin/sh\nprintf '{\"semver\":\"1.2.3\"}\\n'\n";
+const V2: &[u8] = b"#!/bin/sh\nprintf '{\"semver\":\"1.2.4\"}\\n'\n";
+const WRONG_VERSION: &[u8] = b"#!/bin/sh\nprintf '{\"semver\":\"9.9.9\"}\\n'\n";
 
 struct Server {
     base: Url,
@@ -79,9 +79,11 @@ fn fixture_release(version: &str, key: &'static str, body: &[u8]) -> Release {
         version: version.into(),
         target: Target {
             key,
-            url: format!("https://downloads.claude.ai/claude-code-releases/{version}/{key}/claude"),
+            url: format!(
+                "https://github.com/1jehuang/jcode/releases/download/v{version}/jcode-{key}.tar.gz"
+            ),
             archive: Archive::Raw,
-            entry: "claude".into(),
+            entry: "jcode".into(),
             digest: Digest::Sha256(crate::http_download::hex_digest(&Sha256::digest(body))),
         },
     }
@@ -95,7 +97,7 @@ fn install_fixture(
     selections: &AtomicUsize,
 ) -> Result<InstallOutcome> {
     install_in(
-        Provider::Claude,
+        Provider::Jcode,
         force,
         root,
         move |key| {
@@ -109,14 +111,14 @@ fn install_fixture(
 }
 
 fn paths(root: &Path) -> (PathBuf, PathBuf) {
-    let dir = root.join("providers/claude");
+    let dir = root.join("providers/jcode");
     let record = dir.join("install.json");
     let relative = record::read_record(&record).unwrap().relative_path;
     (dir.join(relative), record)
 }
 
 fn assert_no_staging(root: &Path) {
-    let dir = root.join("providers/claude");
+    let dir = root.join("providers/jcode");
     assert!(!fs::read_dir(dir).unwrap().any(|entry| {
         entry
             .unwrap()
@@ -129,7 +131,7 @@ fn assert_no_staging(root: &Path) {
 #[test]
 fn interrupted_staging_is_removed_on_next_install() {
     let temp = tempfile::tempdir().unwrap();
-    let dir = temp.path().join("providers/claude/.staging-interrupted");
+    let dir = temp.path().join("providers/jcode/.staging-interrupted");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("partial"), b"incomplete").unwrap();
     let server = Server::new(V1);
@@ -138,7 +140,7 @@ fn interrupted_staging_is_removed_on_next_install() {
         temp.path(),
         fixture_release(
             "1.2.3",
-            target::detect_target_key(Provider::Claude).unwrap(),
+            target::detect_target_key(Provider::Jcode).unwrap(),
             V1,
         ),
         &server,
@@ -154,7 +156,7 @@ fn interrupted_staging_is_removed_on_next_install() {
 fn latest_is_discovered_each_time_and_upgrade_force_and_repair_are_atomic() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let key = target::detect_target_key(Provider::Claude).unwrap();
+    let key = target::detect_target_key(Provider::Jcode).unwrap();
     let first_server = Server::new(V1);
     let second_server = Server::new(V2);
     let selections = AtomicUsize::new(0);
@@ -255,7 +257,7 @@ fn latest_is_discovered_each_time_and_upgrade_force_and_repair_are_atomic() {
 fn metadata_errors_and_malformed_releases_leave_active_install_untouched() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let key = target::detect_target_key(Provider::Claude).unwrap();
+    let key = target::detect_target_key(Provider::Jcode).unwrap();
     let server = Server::new(V1);
     let selections = AtomicUsize::new(0);
     install_fixture(
@@ -272,7 +274,7 @@ fn metadata_errors_and_malformed_releases_leave_active_install_untouched() {
 
     let selections = &selections;
     let metadata_error = install_in(
-        Provider::Claude,
+        Provider::Jcode,
         false,
         root,
         move |_| {
@@ -289,7 +291,7 @@ fn metadata_errors_and_malformed_releases_leave_active_install_untouched() {
         target: fixture_release("1.2.4", key, V1).target,
     };
     let malformed = install_in(
-        Provider::Claude,
+        Provider::Jcode,
         false,
         root,
         move |_| {
@@ -310,7 +312,7 @@ fn metadata_errors_and_malformed_releases_leave_active_install_untouched() {
 fn bad_digest_and_probe_preserve_previous_generation_and_record() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let key = target::detect_target_key(Provider::Claude).unwrap();
+    let key = target::detect_target_key(Provider::Jcode).unwrap();
     let good_server = Server::new(V1);
     let selections = AtomicUsize::new(0);
     install_fixture(
@@ -362,13 +364,13 @@ fn concurrent_installs_serialize_release_selection_and_publication() {
 
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let key = target::detect_target_key(Provider::Claude).unwrap();
+    let key = target::detect_target_key(Provider::Jcode).unwrap();
     let release = fixture_release("1.2.3", key, V1);
     let server = Server::new(V1);
     let selections = AtomicUsize::new(0);
     let install = || {
         install_in(
-            Provider::Claude,
+            Provider::Jcode,
             false,
             root,
             |key| {
@@ -376,7 +378,7 @@ fn concurrent_installs_serialize_release_selection_and_publication() {
                 assert_eq!(key, release.target.key);
                 let lock = fs::OpenOptions::new()
                     .write(true)
-                    .open(root.join("providers/claude/.install.lock"))
+                    .open(root.join("providers/jcode/.install.lock"))
                     .unwrap();
                 assert!(
                     lock.try_lock_exclusive().is_err(),
@@ -408,74 +410,4 @@ fn concurrent_installs_serialize_release_selection_and_publication() {
     assert_eq!(server.count(), 1);
     assert_eq!(fs::read(paths(root).0).unwrap(), V1);
     assert_no_staging(root);
-}
-
-#[test]
-fn production_claude_metadata_resolution_installs_through_loopback() {
-    let version = "1.2.3";
-    let key = target::detect_target_key(Provider::Claude).unwrap();
-    let checksum = crate::http_download::hex_digest(&Sha256::digest(V1));
-    let platform = serde_json::json!({
-        "binary": "claude",
-        "checksum": checksum,
-        "size": V1.len(),
-    });
-    let mut platforms = serde_json::Map::new();
-    platforms.insert(key.into(), platform);
-    let manifest = serde_json::to_vec(&serde_json::json!({
-        "version": version,
-        "platforms": platforms,
-    }))
-    .unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
-    let manifest_path = format!("/claude-code-releases/{version}/manifest.json");
-    let binary_path = format!("/claude-code-releases/{version}/{key}/claude");
-    let thread = thread::spawn(move || {
-        for _ in 0..3 {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut request = [0; 4096];
-            let n = stream.read(&mut request).unwrap();
-            let path = String::from_utf8_lossy(&request[..n])
-                .split_whitespace()
-                .nth(1)
-                .unwrap()
-                .to_owned();
-            let body = if path == "/claude-code-releases/stable" {
-                version.as_bytes()
-            } else if path == manifest_path {
-                manifest.as_slice()
-            } else if path == binary_path {
-                V1
-            } else {
-                panic!("unexpected metadata fixture route: {path}");
-            };
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            stream.write_all(body).unwrap();
-        }
-    });
-    let temp = tempfile::tempdir().unwrap();
-    let outcome = install_in(
-        Provider::Claude,
-        false,
-        temp.path(),
-        |key| release::latest_from(Provider::Claude, key, &base),
-        &[],
-        Some(&base),
-    )
-    .unwrap();
-    thread.join().unwrap();
-    assert!(matches!(
-        outcome,
-        InstallOutcome::Installed { version: installed } if installed == version
-    ));
-    assert_eq!(fs::read(paths(temp.path()).0).unwrap(), V1);
 }

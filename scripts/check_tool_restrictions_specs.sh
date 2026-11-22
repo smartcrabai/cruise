@@ -3,11 +3,6 @@
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT" || exit 1
-case "$(uname -s)-$(uname -m)" in
-  Darwin-arm64) OPENCODE_PACKAGE=cli-darwin-arm64 ;;
-  Linux-x86_64) OPENCODE_PACKAGE=cli-linux-x64-baseline ;;
-  *) echo 'BLOCKED: tool restriction specs require Darwin arm64 or Linux x64' >&2; exit 1 ;;
-esac
 mkdir -p target/formal-reports
 RUN=$(mktemp -d "$ROOT/target/formal-reports/tool-restrictions.XXXXXX")
 status=0
@@ -31,11 +26,6 @@ if [[ $status != 0 || ! -f target/formal-tools/env.sh ]]; then
 fi
 # shellcheck disable=SC1091
 source target/formal-tools/env.sh
-# Reuse the lockfile-pinned CLI packages and skip their postinstall downloader.
-run_check opencode-cli-setup npm ci --prefix tests/formal/opencode-cli --ignore-scripts
-OPENCODE="$ROOT/tests/formal/opencode-cli/node_modules/@opencode/$OPENCODE_PACKAGE/bin/opencode"
-# shellcheck disable=SC2016
-run_check opencode-cli-version bash -c 'version=$("$1" --version) && printf "%s\n" "$version" && [[ "$version" == "opencode v2.1.4" ]]' _ "$OPENCODE"
 Q="$ROOT/tests/formal/node_modules/.bin/quint"
 MODEL=tests/formal/tool_restrictions.qnt
 # shellcheck disable=SC2016
@@ -58,13 +48,10 @@ run_check receipt-validator-tests node --test scripts/formal/check_alloy_receipt
 run_check production-bdd cargo +1.99.1 test --locked --all-features --test tool_restrictions_bdd
 run_check bdd-negative-controls node scripts/formal/check_tool_restrictions_bdd_failures.cjs "$RUN"
 run_check production-cli-config cargo +1.99.1 test --locked --all-features --test tool_restrictions_cli --test tool_restrictions_config
-# Includes effective policy, matcher, all three SDK mappings, MCP engine
-# filtering, command admission, workflow defaults, calls and after-PR wiring.
+# Includes effective policy, matcher, Jcode mappings, MCP engine filtering,
+# command admission, workflow defaults, calls and after-PR wiring.
 run_check production-unit-contracts cargo +1.99.1 test --locked --all-features --lib
-run_check opencode-entrypoint-contracts cargo +1.99.1 test --locked --all-features --test opencode_sdk_cli --test opencode_runtime_contract --test opencode_state_contract
 run_check sdk-model-bdd cargo +1.99.1 test --locked --all-features --test sdk_model_bdd
-# These tests use an isolated local model server, not an account or paid provider.
-run_check opencode-real-cli env OPENCODE_REAL_CLI="$OPENCODE" cargo +1.99.1 test --locked --all-features --test opencode_real_cli -- --ignored --nocapture
 printf 'Aggregate exit status: %s\n' "$status" | tee -a "$RUN/results.log"
 echo "Tool restriction reports: $RUN"
 exit "$status"

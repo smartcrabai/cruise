@@ -30,7 +30,6 @@ target/formal-reports/tool-restrictions.7Dq5KE/
 | Java | `Temurin-25.0.5+8-LTS`, OpenJDK `25.0.5` |
 | Alloy | released CLI `6.2.0`, SHA256 `6b8c1cb5bc93bedfc7c61435c4e1ab6e688a242dc702a394628d9a9801edb78d` |
 | Alloy solver | explicitly selected `sat4j` |
-| OpenCode CLI | `opencode v2.1.4`, npm-lock-integrity-checked Darwin arm64 native package, postinstall disabled |
 
 ## Results
 
@@ -48,9 +47,6 @@ target/formal-reports/tool-restrictions.7Dq5KE/
 | Real pre-tool CLI integration tests | **8 passed** |
 | Real config/schema integration tests | **40 passed** |
 | Full production library tests | **1701 passed**, 0 failed, **4 existing subprocess-only probe entrypoints ignored** by the parent run |
-| Affected OpenCode runtime / SDK / state contracts | **5 + 33 + 6 passed**, none ignored |
-| Affected SDK-model Cucumber fixtures | **11 scenarios, 39 steps passed** |
-| Real pinned OpenCode CLI acceptance | **2 passed, none ignored**: actual explicit commit denial plus plugin turn/resume/cancellation, using local model servers |
 
 The four existing ignored library entrypoints are `backend::jcode::tests::launch_client_captured_environment_probe`, `pr_merge::tests::inspect_pr_missing_gh_child_probe`, `worktree_pr::tests::test_ensure_gh_available_missing_path_child_probe`, and `worktree_pr::tests::test_ensure_gh_available_nonzero_child_probe`. They are deliberate child-process probes, not missing specification runners. No new specification scenario or assertion is skipped. The parent library tests exercise their corresponding subprocess boundaries.
 

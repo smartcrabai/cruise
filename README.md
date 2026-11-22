@@ -6,7 +6,7 @@
 
 A YAML-driven coding-agent workflow orchestrator with the jcode SDK as its primary, default backend (`sdk: jcode`).
 
-Cruise drives agents through declarative workflows: plan → approve → write tests → implement → test → review → optionally open a PR and run after-PR automation. It handles variable passing between steps, conditional branching, and loop control. Claude and OpenCode SDK backends and custom CLI commands are also supported.
+Cruise drives agents through declarative workflows: plan → approve → write tests → implement → test → review → optionally open a PR and run after-PR automation. It handles variable passing between steps, conditional branching, and loop control. The jcode SDK is the only SDK backend; custom CLI commands such as `codex exec` are also supported.
 
 > **Note:** Cruise runs on macOS, Linux, and Windows (x86-64, `x86_64-pc-windows-msvc`). Development and testing happen primarily on macOS; Linux and Windows have been verified less extensively.
 

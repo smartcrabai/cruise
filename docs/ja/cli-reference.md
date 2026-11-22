@@ -69,7 +69,7 @@ v0.3.0 の分離 WebUI から更新する場合、旧 server が稼働中の間�
 <a id="cruise-install"></a>
 ## `cruise install`
 
-`cruise install <jcode|claude|opencode> [--force]` は provider の最新安定版 CLI をインストールします（`claude` は stable チャネル）。各呼び出しでリリースメタデータを確認し、同じバージョンの正常な管理対象インストールは再利用し、別バージョンなら更新します。`--force` は選択された最新バージョンを再ダウンロードします。`cruise install --status` は読み取り専用でオフライン動作し、最新かどうかを主張せず、記録されたインストール済みバージョンを表示します。provider CLI は環境変数による override、Cruise 管理インストール、PATH の順に解決されます。認証は各 provider が管理します。詳細は[管理対象プロバイダー CLI](installation.md#managed-provider-clis)を参照してください。
+`cruise install jcode [--force]` は managed jcode CLI をインストールまたは更新します。各呼び出しでリリースメタデータを確認し、同じバージョンの正常な managed installation は再利用し、別バージョンなら更新します。`--force` は最新バージョンを再ダウンロードします。`cruise install --status` は読み取り専用でオフライン動作し、記録されたインストール済みバージョンを表示します。jcode CLI は `CRUISE_JCODE_CLI_PATH`、Cruise 管理 installation、PATH の順に解決されます。認証は jcode provider が管理します。詳細は[管理対象 jcode CLI](installation.md#managed-provider-clis)を参照してください。
 
 <a id="cruise-docs-e2e"></a>
 ## `cruise docs e2e`
@@ -292,7 +292,7 @@ Arguments:
 Options:
   -c, --config <PATH>              Path to the workflow config file; use __builtin__ or builtin:<name> for a built-in workflow (see Config File Resolution)
       --instant                    Build a single-agent workflow without a workflow YAML (requires INPUT; conflicts with --config and --flag)
-      --sdk <NAME>                 Instant backend: jcode, claude, or opencode (requires --instant)
+      --sdk <NAME>                 Instant SDK backend: jcode only (requires --instant)
       --model <MODEL>              Instant model (requires --instant)
       --review                     Add a bounded review loop (requires --instant)
       --review-rounds <N>          Maximum review passes, at least 1 (requires --review; default: 2)
@@ -311,7 +311,7 @@ workflow のステップを現在の directory で直接実行します。plan �
 
 再開時は、`cruise run <id> --max-retries <N>` で上書きしない限り、最初に明示した `--max-retries` が使われます。どちらも指定しない場合はワークフローの既定値が使われます。`--rate-limit-retries` は実行ごとに適用されます。
 
-`--instant` は workflow YAML を解決せず、単一の implement step を持つ workflow をその場で組み立てて使います。指定しない場合、`cruise exec` は通常の設定解決を維持します。config file がない対話型 terminal では分類済み selector に組み込み workflow が表示され、非対話実行では `tdd` を自動選択します。instant には空白でない task が必要で、単一の implement step を含みます。workflow 既定値で command の pre-step を先頭に追加できます。workflow 既定値と環境 override は引き続き適用され、`CRUISE_SDK` / `CRUISE_MODEL` は `--sdk` / `--model` より優先されます。
+`--instant` は workflow YAML を解決せず、単一の implement step を持つ workflow をその場で組み立てて使います。指定しない場合、`cruise exec` は通常の設定解決を維持します。config file がない対話型 terminal では分類済み selector に組み込み workflow が表示され、非対話実行では `tdd` を自動選択します。instant には空白でない task が必要です。workflow 既定値で command の pre-step を先頭に追加できます。workflow 既定値と環境 override は引き続き適用され、`CRUISE_SDK`（受け付ける値は `jcode` のみ）と `CRUISE_MODEL` は `--sdk` / `--model` より優先されます。
 
 ```sh
 cruise exec --instant --sdk jcode --model my-model --review --review-rounds 2 \
@@ -467,19 +467,17 @@ others_category_name: Others
 
 `workflow_categories` は順序を持つ category map の tree です。各 category は `workflows` list と入れ子の category を含められます。項目には名前、または selector の説明を上書きする値を持つ単一 key map を指定します。`show_others_category` の既定値は `true`、`others_category_name` は `Others` です。これらは application `config.yaml` または `config.json` に置き、workflow file や `default.yaml` には置かないでください。照合と fallback の動作は[設定ファイルの解決](configuration.md#config-file-resolution)を参照してください。
 
-workflow と application settings は、`model` と `plan_model` 配列内の SDK 指定項目にも対応します。
+workflow と application settings は `model` / `plan_model` に文字列と `{model, disabled_during?}` object を含む配列を指定できます。
 
 ```yaml
 model:
   - openai/gpt-6.1-sol:medium
-  - sdk: claude
-    model: claude-sonnet-5-5:medium
+  - model: claude/claude-opus-4-6:high
+    disabled_during: ["mon-fri 01:00-04:00"]
   - openrouter/z-ai/glm-5.3-flash:high
 ```
 
-同等の JSON は `{"model":["openai/gpt-6.1-sol:medium",{"sdk":"claude","model":"claude-sonnet-5-5:medium"},"openrouter/z-ai/glm-5.3-flash:high"]}` です。文字列項目は workflow の実効 SDK を継承し、`sdk` も `command` もなければ既定で `jcode` になります。`openai/` や `openrouter/` などの provider prefix は model 参照であり、SDK 名ではありません。既存の `opencode` SDK 選択もサポートされます。
-
-object は空でない `model` と `sdk` または空でない `disabled_during` の少なくとも一方を必要とし、配列内でのみ使用できます。未知の key と明示的な null SDK は拒否されます。`sdk` を省略すると直前の項目の SDK ではなく workflow SDK を継承します。fallback の位置であっても object と `command` は併用できません。文字列だけの従来型 command 配列では、引き続き先頭 model だけが使われます。環境 model override は配列全体を置き換えます。能力検査は該当する全候補に適用されます。computer use には jcode が必要で、remote HTTP/SSE MCP は jcode を使えず、OpenCode は legacy SSE に対応しません。
+JSON でも同じ文字列配列と `{"model":"...","disabled_during":[...]}` object を使います。文字列は workflow の SDK を継承し、省略時は `jcode` です。`openai/` や `openrouter/` は SDK 名ではなく model provider です。object の `sdk` field は使用できず、`SDK-qualified model objects are unsupported; use a plain model string` という validation error になります。object は空でない `model` を必要とし、未知の key を拒否します。object と `command` は併用できません。文字列だけの command array は先頭 model のみ使います。環境 model override は配列全体を置き換えます。computer use には jcode が必要です。`mcp_servers` は stdio のみ対応し、HTTP/SSE entry は validation error です。
 
 <a id="candidate-unavailable-windows-disabled_during"></a>
 ## 候補を利用できない時間帯（`disabled_during`）
@@ -487,21 +485,19 @@ object は空でない `model` と `sdk` または空でない `disabled_during`
 `model` または `plan_model` 配列内で、候補ごとの利用不可時間帯を宣言できます。workflow、レイヤー化された `default.yaml`、application JSON/YAML 設定（`planModel` alias を含む）で利用できます。これはユーザーが管理する除外時間であり、価格連動 routing や provider preset ではありません。
 
 ```yaml
-sdk: opencode
 model:
-  - model: opencode-go/deepseek-v4.1-flash
+  - model: openai/gpt-5.5
     disabled_during: ["mon-fri 01:00-04:00", "mon-fri 06:00-10:00"]
-  - opencode-go/kimi-k2.6
+  - openai/gpt-5.4
 ```
 
 同じ時間帯を固定 `+09:00` offset で指定する例:
 
 ```yaml
-sdk: opencode
 model:
-  - model: opencode-go/deepseek-v4.1-flash
+  - model: openai/gpt-5.5
     disabled_during: ["mon-fri 10:00-13:00 +09:00", "mon-fri 15:00-19:00 +09:00"]
-  - opencode-go/kimi-k2.6
+  - openai/gpt-5.4
 ```
 
 時間帯の文法は `[days ]HH:MM-HH:MM[ offset]` です。曜日は大文字小文字を区別しない `mon`〜`sun`、カンマ区切り（`sat,sun`）、または末尾から先頭へ折り返す包含範囲（`mon,wed-fri`、`fri-mon`）です。曜日を省略すると毎日になります。時刻は時と分を 2 桁で指定します。開始は `00:00`〜`23:59`、終了は `00:01`〜`24:00` です。開始と終了が同じ指定は無効です。終日には `00:00-24:00` を使ってください。開始時刻を含み、終了時刻は含みません。終了時刻が開始時刻より前なら午前 0 時をまたぎ、曜日は **開始日** を示します。`fri 22:00-02:00` は土曜 01:00 を含みますが、日曜 01:00 は含みません。
@@ -510,7 +506,7 @@ offset の既定値は UTC です。`UTC`、`Z`、最大絶対値 `14:00` の固
 
 Cruise は各 prompt の開始時と retry 中の候補切り替え時に時間帯を確認します。streaming 中の turn を途中で中断することはありません。一致する時間帯があれば、retry policy／retry 予算とは独立して候補を除外します。全候補が無効時間帯または cooldown 中なら backend を起動せず prompt は失敗します。
 
-無効な候補も capability 検証の対象です。解決済み SDK と base model の両方が primary 候補と一致する場合に限り、override は workflow の配列と時間帯を継承します。SDK も一致している場合、effort だけを変えても継承は保たれます。それ以外の override は workflow list を継承しません。環境 model override は時間帯も含め、配列全体を置き換えます。
+無効な候補も capability 検証の対象です。override は base model が primary 候補と一致する場合に限り、workflow の配列と時間帯を継承します。それ以外の override は workflow list を継承しません。環境 model override は時間帯も含め、配列全体を置き換えます。
 
 <a id="cruise-clean"></a>
 ## `cruise clean`

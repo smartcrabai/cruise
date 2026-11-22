@@ -200,7 +200,7 @@ pub type PlanPersistFlag = Arc<AtomicBool>;
 /// inspects [`PlanningToolSet::plan_persisted`] after the turn ends to verify
 /// the agent actually persisted the plan instead of just talking about one.
 pub struct PlanningToolSet {
-    /// Tools to register with the SDK backend.
+    /// Tools to register with the jcode SDK backend.
     pub tools: Vec<CruiseTool>,
     /// Set once the plan has been persisted via `submit_plan` / `update_plan`.
     pub plan_persisted: PlanPersistFlag,

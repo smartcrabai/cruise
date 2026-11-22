@@ -4,7 +4,7 @@
 <a id="github-actions"></a>
 # cruise GitHub Action
 
-在 GitHub Issue 中提及 `@cruise`（可配置），即可让 cruise 在 GitHub Actions 中规划并实现任务；如果成功运行留下了分支提交且启用了自动创建 PR，Action 就会打开草稿 PR。这与 [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action) 的理念类似，但它通过 `sdk: jcode`（除非解析后的工作流选择了其他后端）驱动 cruise 自己的 plan -> implement -> optional PR 工作流；Action 会安装 `jcode` CLI 并为其配置凭证。默认配置无需额外设置即可使用 `sdk: jcode`，但 Action 不会强制指定后端：如果仓库配置设置了 `command:`、`sdk: claude` 或 `sdk: opencode`，仍以该设置为准，并且你需要自行提供该后端的 CLI 和凭证。
+在 GitHub Issue 中提及 `@cruise`（可配置），即可让 cruise 在 GitHub Actions 中规划并实现任务；如果成功运行留下了分支提交且启用了自动创建 PR，Action 就会打开草稿 PR。这与 [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action) 的理念类似，但它使用默认的 `sdk: jcode` 后端驱动 cruise 自己的 plan -> implement -> optional PR 工作流；Action 会安装 `jcode` CLI 并为其配置凭证。若仓库 workflow 使用 `command:`，则会运行外部 CLI。
 
 此 Action **不支持 PR 模式**：它只响应 `issues`（opened）和 `issue_comment`（created）事件。PR 上的评论始终会被忽略（PR 在 GitHub API 层面属于“issue”，但此 Action 会明确排除它们）。
 
@@ -109,7 +109,7 @@
 <a id="providers"></a>
 ## 提供方
 
-此 Action 会配置 cruise 的默认后端 `sdk: jcode`（见下文[执行方式](#sdk-jcode----how-execution-works)）；如果仓库配置指定了其他后端，则继续使用该后端。jcode 内置数十种提供方——每种都只需提供 API 密钥，可通过以下三种方式之一传入：
+此 Action 会配置 cruise 的默认后端 `sdk: jcode`（见下文[执行方式](#sdk-jcode----how-execution-works)）。如果仓库配置选择 `command:`，则必须确保 runner 环境中可以使用该外部 CLI。jcode 内置数十种提供方——每种都只需提供 API 密钥，可通过以下三种方式之一传入：
 
 - **专用输入项**——`anthropic_api_key` / `openai_api_key` 会注册为 jcode 的 `anthropic-api` / `openai-api` 凭证。
 - **`env`**——其他提供方的密钥（例如 `KIMI_API_KEY`、`GROQ_API_KEY`、`OPENROUTER_API_KEY`）会导出到运行环境中，由 jcode 从环境变量读取。
@@ -183,7 +183,7 @@ with:
 <a id="sdk-jcode----how-execution-works"></a>
 ## sdk: jcode -- 执行方式
 
-Cruise 根据仓库 workflow config 和适用的检出项目默认值解析后端。如果仓库 workflow config 设置了 `command:` 或 `sdk: claude`，则继续使用该配置；请提供相应后端自己的 CLI 和凭证。
+Cruise 根据仓库 workflow config 和适用的检出项目默认值解析后端。默认使用 `sdk: jcode`；如果仓库 config 设置 `command:`，则会运行外部 CLI。
 
 - **OpenAI 服务层级**：如果工作流和进程环境均未定义 `JCODE_OPENAI_SERVICE_TIER`，默认值为 `off`；显式设置的值会被保留。
 - **模型输入项**（`model` / `plan_model`）会覆盖对应的 Cruise 设置。每个实际的 jcode 提示都必须解析出有效的 Cruise 模型，格式为 `provider/model[:effort]` 或裸模型名。`model` 可来自 Action 输入项、仓库工作流或检出目录中的 `.cruise/default.yaml`；jcode 主目录默认模型和 `JCODE_MODEL` 不能替代它。`plan_model` 用于规划调用；未设置时回退到 `model`。可选的 effort 后缀支持 `low|medium|high|xhigh|max`，以及[SDK 模式](sdk.md#sdk-mode)中记录的别名。

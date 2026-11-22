@@ -29,10 +29,10 @@ try {
       config: { kind: 'inline_snapshot' }, input: 'Verify boundary', title: `Verify ${item.name}`,
       current_step: null, created_at: '2026-11-07T00:00:00Z', completed_at: null,
       worktree_path: null, worktree_branch: null }));
-    await writeFile(join(dir, 'config.yaml'), 'sdk: claude\nsteps:\n  harmless:\n    command: "true"\n');
+    await writeFile(join(dir, 'config.yaml'), 'sdk: jcode\nmodel: claude/claude-opus-4-5\nsteps:\n  harmless:\n    command: "true"\n');
     if (item.plan) await writeFile(join(dir, 'plan.md'), plan);
   }
-  // No credentials or Claude executable are available to the production runtime.
+  // No credentials or external agent executable are available to the production runtime.
   const env = { PATH: join(root, 'empty-bin'), HOME: root, XDG_CONFIG_HOME: join(root, 'config'),
     XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'),
     CRUISE_DISABLE_NOTIFICATIONS: '1', CRUISE_DISABLE_HERDR: '1', NO_COLOR: '1',
@@ -73,7 +73,7 @@ try {
   assert.equal((await post).status(), 200, 'Verify reaches production HTTP route');
   const errorToast = page.getByTestId('toast-detail');
   await errorToast.waitFor({ timeout: 60000 });
-  assert.equal(await errorToast.textContent(), 'claude is not installed: no managed install and no claude on PATH. Run `cruise …');
+  assert.equal(await errorToast.textContent(), 'jcode is not installed: no managed install and no jcode on PATH. Run `cruise in…');
   await page.screenshot({ path: join(output, 'provider-startup-failure.png'), fullPage: true });
   assert.equal(verifyPosts, 1, 'exactly one real Verify POST');
   assert.equal(await readFile(join(root, 'data/cruise/sessions', cases[0].id, 'plan.md'), 'utf8'), plan, 'failed Verify preserves the saved plan');

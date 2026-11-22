@@ -28,7 +28,7 @@ if [ "${1:-}" = --unhandled-reply ]; then
   fi
   [[ "$cid" =~ ^[0-9]+$ && "$issue" =~ ^[0-9]+$ ]] || exit 1
   # Allow the active run's 15-second poll interval to handle this comment.
-  sleep 20
+  /usr/bin/env sleep 20
   identity="$(gh api user --jq .login)" || identity=""
   reactions="$(gh api --paginate "repos/$REPO/issues/comments/$cid/reactions?per_page=100")" || reactions=""
   if [ -n "$identity" ] && [ -n "$reactions" ] && printf '%s' "$reactions" | jq -se --arg identity "$identity" 'any(.[][]; .content == "eyes" and .user.login == $identity)' >/dev/null; then
@@ -90,5 +90,5 @@ if [ "$mode" = sweep ]; then
   sweep
 else
   # Give cruise run time to open its inbox before the first poll.
-  while sleep 15; do sweep || true; done
+  while /usr/bin/env sleep 15; do sweep || true; done
 fi

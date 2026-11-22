@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SDK-qualified model contracts, using the repository's shared pinned toolchain.
+# Jcode-only ordered model fallback contracts using the shared pinned toolchain.
 # No credentials, external model calls, or locally installed agent CLIs required.
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

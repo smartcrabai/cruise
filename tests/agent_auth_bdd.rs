@@ -60,7 +60,6 @@ mod contracts {
                 .env("XDG_DATA_HOME", self.path("data"))
                 .env("XDG_STATE_HOME", self.path("state"))
                 .env("JCODE_HOME", self.path("jh"))
-                .env("CLAUDE_CONFIG_DIR", self.path("claude"))
                 .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
                 .env("CRUISE_UI_LANGUAGE", "en")
                 .env("CRUISE_DISABLE_HERDR", "1")
@@ -84,20 +83,19 @@ mod contracts {
     )]
     fn setup(w: &mut AuthWorld, credentials: String, selection: String) {
         w.root = Some(tempfile::tempdir().unwrap());
-        for dir in ["bin", "repo", "home", "jh", "claude"] {
+        for dir in ["bin", "repo", "home", "jh"] {
             std::fs::create_dir_all(w.path(dir)).unwrap();
         }
         cruise::test_support::init_git_repo(&w.path("repo"));
-        for sdk in ["jcode", "claude"] {
-            cruise::test_support::write_executable_script(
-                &w.path(&format!("bin/{sdk}")),
-                &format!(
-                    "#!/bin/sh\nprintf '%s\\n' '{sdk}' >> '{}'\nprintf 'AUTH_BDD_SDK_REFUSAL: API Error: 404 model not found\\n' >&2\nexit 73\n",
-                    w.path("dispatch").display()
-                ),
-            );
-        }
-        let refresh = if matches!(credentials.as_str(), "refreshable" | "expired-refresh") {
+        let sdk = "jcode";
+        cruise::test_support::write_executable_script(
+            &w.path(&format!("bin/{sdk}")),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' '{sdk}' >> '{}'\nprintf 'AUTH_BDD_SDK_REFUSAL: API Error: 404 model not found\\n' >&2\nexit 73\n",
+                w.path("dispatch").display()
+            ),
+        );
+        let refresh = if credentials == "refreshable" {
             json!(REFRESH)
         } else {
             serde_json::Value::Null
@@ -123,21 +121,7 @@ mod contracts {
                 .unwrap()
                 .push(openai);
         }
-        let mut claude =
-            json!({"claudeAiOauth":{"accessToken":ACCESS,"expiresAt":1,"refreshToken":refresh}});
-        if credentials == "expired-refresh" {
-            claude["claudeAiOauth"]["refreshTokenExpiresAt"] = json!(1);
-        }
-        if credentials == "future-access" {
-            claude["claudeAiOauth"]["expiresAt"] = json!(4_102_444_800_000_i64);
-            claude["claudeAiOauth"]["refreshToken"] = json!(REFRESH);
-            claude["claudeAiOauth"]["refreshTokenExpiresAt"] = json!(1);
-        }
-        for (name, value) in [
-            ("jh/auth.json", &jcode),
-            ("jh/openai-auth.json", &jcode),
-            ("claude/.credentials.json", &claude),
-        ] {
+        for (name, value) in [("jh/auth.json", &jcode), ("jh/openai-auth.json", &jcode)] {
             if credentials == "missing" {
                 continue;
             }
@@ -152,13 +136,12 @@ mod contracts {
             w.credentials.push((path, bytes));
         }
         let config = match selection.as_str() {
-            "claude" => "sdk: claude\nmodel: bdd-model\n".to_owned(),
             "planning-only" => "sdk: jcode\nmodel: openai-api/bdd-model\nplan_model: claude/bdd-planner\n".to_owned(),
             "execution-only" => "sdk: jcode\nmodel: claude/bdd-model\nplan_model: openai-api/bdd-planner\n".to_owned(),
-            "mixed" => "sdk: jcode\nmodel:\n  - openai-api/bdd-model\n  - sdk: claude\n    model: bdd-fallback\n".to_owned(),
-            "both-expired" => "sdk: jcode\nmodel:\n  - claude/bdd-main\n  - sdk: claude\n    model: bdd-fallback\n  - claude/bdd-main-duplicate-target\n  - sdk: claude\n    model: bdd-fallback-duplicate-target\n".to_owned(),
+            "mixed" => "sdk: jcode\nmodel:\n  - openai-api/bdd-model\n  - claude/bdd-fallback\n".to_owned(),
+            "both-expired" => "sdk: jcode\nmodel:\n  - claude/bdd-main\n  - openai/bdd-fallback\n  - claude/bdd-main-duplicate-target\n  - openai/bdd-fallback-duplicate-target\n".to_owned(),
             "openai" => "sdk: jcode\nmodel: openai/bdd-model\n".to_owned(),
-            "api-env" => "sdk: claude\nmodel: bdd-model\nenv:\n  ANTHROPIC_API_KEY: AUTH_BDD_API_SECRET_DO_NOT_PRINT\n".to_owned(),
+            "api-env" => "sdk: jcode\nmodel: claude/bdd-model\nenv:\n  ANTHROPIC_API_KEY: AUTH_BDD_API_SECRET_DO_NOT_PRINT\n".to_owned(),
             _ => "sdk: jcode\nmodel: claude/bdd-model\n".to_owned(),
         };
         let yaml = match selection.as_str() {
@@ -174,7 +157,7 @@ mod contracts {
     fn optout(w: &mut AuthWorld) {
         w.optout = true;
     }
-    #[given("Claude API authentication is present in the child environment")]
+    #[given("provider API authentication is present in the child environment")]
     fn api(w: &mut AuthWorld) {
         w.api = true;
     }
@@ -254,10 +237,10 @@ mod contracts {
     #[then("both expired providers have exactly one actionable login message")]
     fn both_expired(w: &mut AuthWorld) {
         let text = w.terminal();
-        for advice in ["run `jcode login claude`", "run `claude auth login`"] {
+        for advice in ["run `jcode login claude`", "run `jcode login openai`"] {
             assert_eq!(text.matches(advice).count(), 1, "{text}");
         }
-        for target in ["jcode provider `claude`", "claude CLI"] {
+        for target in ["jcode provider `claude`", "jcode provider `openai`"] {
             assert_eq!(text.matches(target).count(), 1, "{text}");
         }
     }
@@ -290,7 +273,7 @@ mod contracts {
                 "credential file changed"
             );
         }
-        for dir in ["jh", "claude"] {
+        for dir in ["jh"] {
             let files = std::fs::read_dir(w.path(dir))
                 .unwrap()
                 .map(|e| e.unwrap().path())

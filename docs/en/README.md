@@ -10,7 +10,7 @@
 
 Cruise is a YAML-based AI workflow orchestrator.
 
-Cruise semi-deterministically automates declarative workflows through planning → approval → test writing → implementation → testing → review → optional PR creation and after-PR-like tasks. It supports passing variables between steps, conditional branching, and loops. Built on Jcode, it uses very few resources. It also supports Claude and OpenCode SDK backends and custom CLI commands such as `codex exec`.
+Cruise semi-deterministically automates declarative workflows through planning → approval → test writing → implementation → testing → review → optional PR creation and after-PR-like tasks. It supports passing variables between steps, conditional branching, and loops. Built on Jcode, it uses very few resources. The jcode SDK is its only SDK backend; custom CLI commands such as `codex exec` are also supported.
 
 ## Documentation topics
 
@@ -21,7 +21,7 @@ All locale editions use the same topic filenames. Keep guide changes synchronize
 - [CLI reference](cli-reference.md) — commands, arguments, options, language settings, and notifications.
 - [Sessions](sessions.md) — lifecycle, workspace modes, isolation, recovery, and parallel execution.
 - [Configuration](configuration.md) — config resolution, defaults, settings, and prompt language.
-- [SDK](sdk.md) — backends, authentication, permissions, and tool restrictions.
+- [SDK](sdk.md) — jcode SDK authentication, permissions, and tool restrictions.
 - [Steps](steps.md) — step types, after-PR automation, and variables.
 - [Workflow control](workflow-control.md) — flow control, flags, conditions, groups, and workflow composition.
 - [Workflow examples](workflow-examples.md) — complete development flow and simple automatic commit flow.

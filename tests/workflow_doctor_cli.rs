@@ -129,7 +129,7 @@ fn reports_sdk_and_retry_errors_in_validation_order() {
         .collect();
     let sdk = messages
         .iter()
-        .position(|m| m.contains("sdk"))
+        .position(|message| message.to_ascii_lowercase().contains("unsupported sdk"))
         .unwrap_or_else(|| panic!("expected value missing from doctor report"));
     let retry = messages
         .iter()
@@ -159,7 +159,7 @@ fn reports_sdk_and_parallel_errors_in_validation_order() {
         .collect();
     let sdk = messages
         .iter()
-        .position(|m| m.contains("sdk"))
+        .position(|message| message.to_ascii_lowercase().contains("unsupported sdk"))
         .unwrap_or_else(|| panic!("expected value missing from doctor report"));
     let parallel = messages
         .iter()

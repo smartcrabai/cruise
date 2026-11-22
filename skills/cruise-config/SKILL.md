@@ -3,7 +3,7 @@ name: cruise-config
 description: Use when creating or editing a cruise YAML config file (cruise.yaml / .cruise.yaml). Covers inline and file-backed prompt steps (`prompt` / `prompt_file`), parallel prompt/command blocks, variables, flow control, groups, after-pr, and validation rules — full spec is split across reference docs.
 ---
 
-cruise is a YAML-driven coding-agent workflow orchestrator with the jcode SDK as its primary, default backend (`sdk: jcode`). Claude and OpenCode SDK backends and custom CLI commands are also supported. This skill documents the config file format.
+cruise is a YAML-driven coding-agent workflow orchestrator with the jcode SDK as its primary and only SDK backend (`sdk: jcode`); custom CLI commands remain available through `command:`. This skill documents the config file format.
 
 Workflow composition keeps string `workflow_call` references and supports required
 callee `inputs` with string-valued caller `with` mappings. See
@@ -56,7 +56,7 @@ In a non-interactive context (stdin/stdout is not a TTY), the highest-priority c
 Every actual jcode prompt must resolve to a Cruise model. If it does not,
 Cruise stops before starting jcode and creates the user-level `default.yaml`
 template only when no file exists. Replace its `model: null` with an available
-model reference; project defaults are never auto-created. Claude and external
+model reference; project defaults are never auto-created. External
 `command` backends retain their existing no-model behavior.
 
 ## Minimal config
@@ -70,7 +70,7 @@ steps:
     prompt: "{input}"
 ```
 
-Or with an SDK backend instead of an external command (see [references/sdk.md](references/sdk.md)) — `sdk: jcode` (the default; uses jcode-sdk and requires a compatible jcode CLI for its API bridge) or `sdk: claude` (drives the claude CLI in-process), or `sdk: opencode` (built-in Rust client for a locally managed OpenCode V2 CLI, with `provider/model#variant` references):
+Or with the only SDK backend instead of an external command (see [references/sdk.md](references/sdk.md)) — `sdk: jcode` (the default; uses jcode-sdk and requires a compatible jcode CLI for its API bridge):
 
 ```yaml
 sdk: jcode
@@ -79,13 +79,6 @@ steps:
     prompt: "{input}"
 ```
 
-```yaml
-sdk: claude
-model: claude-sonnet-4-6   # plain model reference ("provider/model[:effort]" under sdk: jcode)
-steps:
-  implement:
-    prompt: "{input}"
-```
 
 ## Reference docs
 
@@ -94,7 +87,7 @@ The full spec is split into the files below. Load only the sections you need.
 | Doc | Contents |
 |-----|----------|
 | [references/top-level.md](references/top-level.md) | Top-level structure, `command` and `{model}`, `sdk`, `description`, language settings (`languages.pr` / `languages.plan`, deprecated fields, and locale inference), `cleanup_after_pr`, workflow-only `create_pr`, `commit_message_template`, `pr_body_template`, `force_exec`, hot-reload, rate-limit retry |
-| [references/sdk.md](references/sdk.md) | SDK backends: jcode SDK (default, requires jcode CLI v0.88.0+), claude-agent-sdk, and OpenCode V2; model references, session tools, workflow-level MCP servers, and differences from command mode |
+| [references/sdk.md](references/sdk.md) | jcode SDK (default, requires jcode CLI v0.88.0+); model references, session tools, workflow-level MCP servers, and differences from command mode |
 | [references/steps.md](references/steps.md) | Step types and file-backed prompts: prompt, `prompt_file`, `output_file`, `quality_gates`, command, option, parallel, `github-review` (after-pr only); child restrictions, `instruction`, `timeout` |
 | [references/variables.md](references/variables.md) | Template variables: `{input}`, `{prev.*}`, `{plan}`, `{file:...}`, `{plan.language}`, `{pr.*}` |
 | [references/flow-control.md](references/flow-control.md) | `next` / `skip` / `when.exists` / `if.file-changed` / `if.head-changed` / `if.no-file-changes` / `if.fail` / `quality_gates` / `timeout` / migration from the removed `fail-if-no-file-changes` |
@@ -103,8 +96,6 @@ The full spec is split into the files below. Load only the sections you need.
 | [references/env-and-llm.md](references/env-and-llm.md) | Env-var merge/override rules, jcode OpenAI priority processing (`JCODE_OPENAI_SERVICE_TIER`), and SDK/command session-title generation |
 | [examples/full-flow.yaml](examples/full-flow.yaml) | Complete example: plan → approve → implement → test → review → PR → after-pr |
 | [examples/sdk-flow.yaml](examples/sdk-flow.yaml) | SDK-backend example: `sdk: jcode` with model references |
-| [examples/opencode-flow.yaml](examples/opencode-flow.yaml) | OpenCode V2 example: `sdk: opencode`, `provider/model#variant`, and permission boundaries |
-| [examples/claude-flow.yaml](examples/claude-flow.yaml) | SDK-backend example: `sdk: claude` with plain claude model names |
 | [examples/prompt-file.yaml](examples/prompt-file.yaml) | Prompt step example using an external `prompt_file` |
 | [examples/file-artifacts.yaml](../../examples/file-artifacts.yaml) | Save an initial prompt response and compare it in a later prompt with `{file:...}` |
 
@@ -112,7 +103,7 @@ The full spec is split into the files below. Load only the sections you need.
 
 After writing or editing a config, verify each of the following:
 
-1. **Required fields**: is `steps` present? `command` and `sdk` must not both be set (a validation error); when neither remains set in the resolved workflow after applicable `default.yaml` layers are applied, the default `jcode` backend runs. When `sdk` is set, is it `jcode`, `claude`, or `opencode`? (Any other value is a validation error.)
+1. **Required fields**: is `steps` present? `command` and `sdk` must not both be set (a validation error); when neither remains set in the resolved workflow after applicable `default.yaml` layers are applied, the default `jcode` backend runs. When `sdk` is set, is it `jcode`? (Any other value is a validation error.)
 2. **Step type uniqueness**: each executable step holds one of `prompt` / `prompt_file` / `command` / `option` / `parallel` (pure `group` and `workflow_call` call sites hold none of these). Parallel children must be prompt/command steps; apply the parent and child restrictions in [references/steps.md](references/steps.md#parallel-step). Use `prompt_file` for long prompts; relative paths are resolved relative to the configuration file (or the called workflow's directory).
 3. **Variable availability**: when referencing `{prev.*}`, does the previous step produce that output? `{plan}` is set by both `cruise run` and `cruise exec` (exec points it at an empty `plan.md` placeholder); `{pr.*}` is only available inside `after-pr`. Literal braces must be escaped Rust-`format!`-style (`{{` / `}}`) — an unescaped `{`/`}` that isn't a valid variable reference is a validation error, not passed through literally.
 4. **`next:` targets**: do referenced step names exist (no typos)?

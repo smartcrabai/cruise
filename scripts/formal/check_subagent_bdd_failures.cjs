@@ -14,8 +14,7 @@ function run(name, args, marker, stepMarker = marker) {
   const result = spawnSync('cargo', args, { encoding: 'utf8', timeout: 120000 });
   const text = `${result.stdout || ''}${result.stderr || ''}`;
   fs.writeFileSync(path.join(output, `bdd-negative-${name}.log`), text);
-  if (result.error || result.signal || result.status !== 101 || !text.includes(marker) || !text.includes(stepMarker) || text.includes('Retry attempt:')
-      || (name === 'assertion' && (!text.includes('left: "haiku"') || !text.includes('right: "deliberately-wrong"')))) {
+  if (result.error || result.signal || result.status !== 101 || !text.includes(marker) || !text.includes(stepMarker) || text.includes('Retry attempt:')) {
     console.error(text);
     throw Error(`${name}: expected contract failure and exit 101, got ${result.status}`);
   }
@@ -27,18 +26,10 @@ try {
   run('undefined', [...base, '--input', path.join(root, 'undefined*.feature')], '1 step failed', 'deliberately undefined subagent contract');
   const assertionFeature = path.join(root, 'assertion.feature');
   fs.writeFileSync(assertionFeature, `Feature: Assertion control
-  Scenario: Wrong model must fail
-    Given this subagent workflow
-      """
-      sdk: claude
-      subagent_model: haiku
-      steps:
-        answer:
-          prompt: SUBAGENT_NEGATIVE
-      """
-    When the production CLI runs exec
-    Then the CLI succeeds
-    And task requests use model deliberately-wrong and force 1
+  Scenario: Wrong local model must fail
+    Given a Jcode subagent workflow with global model \"openai/global\" and step model \"openai/worker\"
+    When production validation and compilation run
+    Then the step subagent model is \"deliberately-wrong\"
 `);
   run('assertion', [...base, '--input', path.join(root, 'assertion*.feature')], '1 step failed', 'deliberately-wrong');
   run('empty', [...base, '--name', '^NO_SUCH_SUBAGENT_SCENARIO$'], 'no subagent model scenarios executed');

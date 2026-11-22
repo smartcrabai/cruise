@@ -20,9 +20,9 @@ execution setup use the same production check.
 
 | Contract | Production | Quint / Alloy | Concrete executable checks |
 | --- | --- | --- | --- |
-| Stop only on expired access AND absent/expired refresh, equality expired, unknown passes | `src/agent_auth.rs::judge`, `inspect_file`, `judge_accounts` | `expired`, `unavailable`, `admission` / `Admission`; renewable, unknown, fresh-access and refresh-expiry witnesses | `agent_auth` injected-time unit matrix, `planning::auth_contract_tests`, Gherkin credential scenarios |
-| Only workflow-used SDK/provider candidates, planning and execution isolated | `src/config.rs::planning_model_candidates`, `execution_model_candidates`, `src/agent_auth.rs::ensure_agents_authenticated` | `selected`, `required`, `scopeSafety` / `ScopeSafety`; planning-isolation witnesses | Config candidate unit tests cover arrays, SDK qualification, step overrides, after-pr, groups, parallel children, fallback-chain replacement and disabled fallback; production Gherkin checks selection at CLI boundary |
-| Unknown file, unsupported provider, bare model, API auth pass | `inspect_file`, `claude_uses_other_auth`, target selection | Unknown account, unsupported candidate identity, alternative-auth bypass | Planning contracts cover missing/malformed/read-error files, missing fields, aliases, all six Claude process/workflow auth variables, empty-key rejection, opencode and API/bare providers; Gherkin reaches an observable SDK process boundary |
+| Reject only when all accounts for a selected provider are expired, equality expires, unknown passes | `src/agent_auth.rs::judge`, `inspect_file`, `judge_accounts` | `expired`, `unavailable`, `admission` / `Admission`; renewable, unknown and fresh-access witnesses | `agent_auth` injected-time unit matrix, `planning::auth_contract_tests`, Gherkin provider credential scenarios |
+| Only workflow-used provider/model candidates, planning and execution isolated | `src/config.rs::planning_model_candidates`, `execution_model_candidates`, `src/agent_auth.rs::ensure_agents_authenticated` | `selected`, `required`, `scopeSafety` / `ScopeSafety`; planning-isolation witnesses | Config candidate tests cover plain model strings, schedules, step overrides, after-pr, groups, parallel children and fallback-chain replacement; production Gherkin checks selection at the CLI boundary |
+| Unknown file, unsupported provider, bare model, API auth pass | `inspect_file`, target selection | Unknown account, unsupported candidate identity, alternative-auth bypass | Planning contracts cover missing/malformed/read-error files, missing fields, aliases, API-key providers and bare models; Gherkin reaches the jcode process boundary |
 | Reject before effects and aggregate all failed targets | Planning uses `src/planning.rs::run_plan_prompt_template`; CLI run calls `POST /api/v1/sessions/{id}/run` via `src/daemon/api/run.rs::start_run`, which synchronously invokes `src/application.rs::CruiseApplication::preflight_run_auth` before scheduling `run_with_log_sink`; exec creates its transient session in `src/application/exec.rs::CruiseApplication::start_exec`, then daemon run setup preflights in `src/application.rs::setup_run_blocking` before workspace creation and agent dispatch | `completeBeforeDecision`, `exactDiagnostics`, `effectGate` / `CompleteBeforeDecision`, `ExactDiagnostics`, `EffectGate`; all-targets rejection witness | Gherkin launches the real CLI client and checks no SDK dispatch/workspace; run preflight rejection is returned by the synchronous API request; `agent_auth_cli`; planning, run and UI setup unit contracts |
 | Command/opt-out/dry-run bypass, no dry-run effects | `ensure_agents_authenticated`, run dry-run guard, `src/plan_cmd.rs::run` early dry-run return | `bypass`, `effectGate`; named tests and witnesses | Gherkin and existing unit/CLI contracts, including opt-out values other than `1` |
 | Read-only files, no auth subprocess, no secrets in error/Debug/telemetry | `inspect_file`, refresh-presence deserializer, `src/error.rs` | Token bytes and file writes deliberately excluded, not a model-level security proof | Gherkin credential snapshots and secret assertions; planning no-auth-command sentinel, read-only tests, fixed error telemetry tests |
@@ -40,21 +40,22 @@ inspected, then a complete diagnostic set authorizes or rejects the workflow.
 Only authorization permits a launch. Dry runs finish without launch.
 Idle transitions pad shorter traces and allow bounded checking at every prefix.
 
-There are two representative supported targets: Claude CLI and one jcode OAuth
-provider, plus an unsupported/bare/API candidate. jcode Anthropic and OpenAI
-have the same account-aggregation policy and are tested separately in Rust.
-Claude has one account and jcode has two account slots. An empty, missing, or
-malformed pool is represented by unknown slots. More than two accounts are not
-proved by this model. Account expiry is quotiented into unknown, expired
-(`<= now`), and future (`> now`) at one fixed observation instant. Refresh
-presence and refresh expiry are independent inputs for Claude. jcode's two
-slots fix refresh expiry to unknown because its credential schemas contain no
-such field. Seconds/milliseconds,
-provider aliases, path resolution and environment string parsing are concrete
-checks, not modeled arithmetic or string operations.
+There are two representative supported targets: Jcode's Anthropic and OpenAI
+providers, plus an unsupported/bare/API candidate. Each provider has two account
+slots to abstract an account pool; missing, malformed or empty pools use unknown
+slots. More than two accounts are not proved by this model. Account expiry is
+quotiented into unknown, expired (`<= now`), and future (`> now`) at one fixed
+observation instant. Refresh presence is independent input; Jcode's credential
+schemas have no refresh-expiry timestamp, so both providers fix that value to
+unknown. Seconds/milliseconds, provider aliases, path resolution and environment
+string parsing are concrete checks, not modeled arithmetic or string operations.
 
 Candidate sets are arbitrary independently for planning/execution, after actual
-retry policy resolution. `otherAuth` means nonempty Claude alternative authentication in the environment applicable to the checked call: process or workflow environment for ordinary planning/execution, but process environment only for foreground CLI approval's SDK title generation. The opt-out boolean represents exact value `1`.
+retry policy resolution. `otherAuth` means a nonempty Anthropic API key in the
+environment applicable to the checked call: process or workflow environment for
+ordinary planning/execution, but process environment only for foreground CLI
+approval's title generation. The opt-out boolean represents exact value `1`.
+
 The `workspace` bit denotes permission to create an execution workspace after
 preflight, not every filesystem operation performed by session creation or
 planning. Failure may persist session error metadata, so rejection does not
@@ -139,4 +140,4 @@ exit statuses, CLI help, runtime versions, Quint test/simulation traces, Alloy
 counterexample is retained. Absence of a counterexample after a successful
 verification is normal. CI uploads evidence with `if: always()` for 14 days and
 fails if the report directory is missing. Local execution is not a claim of a
-completed hosted CI run. See `AGENT_AUTH_VERIFICATION.md` for observed results.
+completed hosted CI run.

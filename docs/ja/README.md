@@ -8,7 +8,7 @@
 
 Cruise は YAML ベースの AI ワークフローオーケストレーターです。
 
-Cruise は宣言型ワークフローに沿って計画 → 承認 → テスト作成 → 実装 → テスト → レビュー → 任意で PR 作成と after-PR のような処理を、半決定的に自動で進めます。ステップ間の変数の受け渡し、条件分岐、ループ制御が可能です。Jcodeをベースとしており、リソース消費もかなり小さくなっています。Claude・OpenCode の SDK バックエンドと任意の CLI コマンド（`codex exec` 等）にも対応します。
+Cruise は宣言型ワークフローに沿って計画 → 承認 → テスト作成 → 実装 → テスト → レビュー → 任意で PR 作成と after-PR のような処理を、半決定的に自動で進めます。ステップ間の変数の受け渡し、条件分岐、ループ制御が可能です。Jcode をベースとしており、リソース消費もかなり小さくなっています。SDK backend は jcode のみで、`codex exec` などの任意の CLI command にも対応します。
 
 ## ドキュメント
 
@@ -19,7 +19,7 @@ Cruise は宣言型ワークフローに沿って計画 → 承認 → テスト
 - [CLI リファレンス](cli-reference.md) — コマンド、引数、オプション、言語設定、通知。
 - [セッション管理](sessions.md) — ライフサイクル、workspace モード、分離、復旧、並行実行。
 - [設定](configuration.md) — 設定の解決、既定値、設定キー、プロンプト言語。
-- [SDK](sdk.md) — バックエンド、認証、アクセス許可、ツール制限。
+- [SDK](sdk.md) — jcode SDK の認証、permission、tool restriction。
 - [ステップ](steps.md) — ステップの種類、after-PR 自動化、変数。
 - [ワークフロー制御](workflow-control.md) — フロー制御、フラグ、条件、グループ、ワークフロー合成。
 - [ワークフロー例](workflow-examples.md) — 全開発フローとシンプルな自動 commit フロー。

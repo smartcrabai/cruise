@@ -276,102 +276,6 @@ mod tests {
     const VALID: &str = "command: [cat]\nsteps:\n  build:\n    command: echo hi\n";
     const BROKEN: &str = "steps: [";
 
-    async fn mixed_sdk_yaml_generation(
-        repair: bool,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let _lock = lock_process();
-        let tmp = TempDir::new()?;
-        let _home = set_fake_home(tmp.path());
-        let _path = crate::test_support::install_exiting_jcode_stub(tmp.path());
-        let _jcode_home = EnvGuard::set("JCODE_HOME", tmp.path().join("jcode-home"));
-        let _sdk = EnvGuard::remove("CRUISE_SDK");
-        let _model = EnvGuard::remove("CRUISE_MODEL");
-        let _plan_model = EnvGuard::remove("CRUISE_PLAN_MODEL");
-        let _subagent_model = EnvGuard::remove("CLAUDE_CODE_SUBAGENT_MODEL");
-        let _subagent_force = EnvGuard::remove("CLAUDE_CODE_SUBAGENT_MODEL_FORCE");
-        for (name, text) in [("valid", VALID), ("broken", BROKEN)] {
-            let frame = serde_json::json!({"type":"assistant","session_id":"mixed-yaml","message":{"role":"assistant","content":[{"type":"text","text":text}]}});
-            fs::write(tmp.path().join(name), format!("{frame}\n"))?;
-        }
-        let script = format!(
-            r#"#!/bin/sh
-case "$1" in --version) echo '2.0.0'; exit 0;; --cruise-exec-probe) exit 0;; esac
-d='{}'
-printf '%s\n' "$@" >> "$d/args"
-printf 'model=%s force=%s\n' "${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}" "${{CLAUDE_CODE_SUBAGENT_MODEL_FORCE-unset}}" >> "$d/subagent-env"
-read -r input
-printf '%s\n' "$input" >> "$d/prompts"
-if [ '{}' = true ] && [ ! -f "$d/attempted" ]; then
-  touch "$d/attempted"
-  cat "$d/broken"
-else
-  cat "$d/valid"
-fi
-printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_id":"mixed-yaml"}}'
-"#,
-            tmp.path().display(),
-            repair
-        );
-        write_executable_script(&tmp.path().join("claude"), &script);
-        // Prove the stream fixture works before parsing the new mixed syntax.
-        let control = WorkflowConfig::from_yaml(
-            "sdk: claude\nmodel: mixed-yaml-model\nsteps:\n  build:\n    command: echo hi\n",
-        )?;
-        let control_output = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            generate_yaml(&control, "legacy SDK control", tmp.path()),
-        )
-        .await??;
-        assert_eq!(control_output.trim_end(), VALID.trim_end());
-        for name in ["args", "prompts", "attempted", "subagent-env"] {
-            let path = tmp.path().join(name);
-            if path.exists() {
-                fs::remove_file(path)?;
-            }
-        }
-        let config = WorkflowConfig::from_yaml(
-            "sdk: jcode\nsubagent_model: {sdk: claude, model: haiku}\nplan_model: []\nmodel:\n  - sdk: claude\n    model: mixed-yaml-model\n  - unused/jcode\nsteps:\n  build:\n    command: echo hi\n",
-        )?;
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            generate_yaml(&config, "mixed SDK workflow", tmp.path()),
-        )
-        .await??;
-        assert_eq!(output.trim_end(), VALID.trim_end());
-        // Check the actual SDK subprocess, including every repair dispatch.
-        assert_eq!(
-            fs::read_to_string(tmp.path().join("subagent-env"))?,
-            "model=unset force=unset\n".repeat(if repair { 2 } else { 1 })
-        );
-        let args = fs::read_to_string(tmp.path().join("args"))?;
-        assert_eq!(
-            args.lines()
-                .filter(|line| *line == "mixed-yaml-model")
-                .count(),
-            if repair { 2 } else { 1 }
-        );
-        assert!(args.lines().any(|line| line == "--model"));
-        let prompts = fs::read_to_string(tmp.path().join("prompts"))?;
-        assert_eq!(prompts.lines().count(), if repair { 2 } else { 1 });
-        if repair {
-            assert!(prompts.contains("Previous attempt"));
-            assert!(prompts.contains(BROKEN));
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn mixed_sdk_generate_yaml_uses_first_claude_candidate_under_jcode()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        mixed_sdk_yaml_generation(false).await
-    }
-
-    #[tokio::test]
-    async fn mixed_sdk_generate_yaml_repair_preserves_first_claude_candidate()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        mixed_sdk_yaml_generation(true).await
-    }
-
     #[test]
     fn destination_path_local_and_user() {
         let _lock = lock_process();
@@ -478,7 +382,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"session_i
         // config validation: sdk and command are mutually exclusive
         assert!(
             check_generated_yaml(
-                "sdk: claude\ncommand: [cat]\nsteps:\n  a:\n    command: echo\n",
+                "sdk: jcode\ncommand: [cat]\nsteps:\n  a:\n    command: echo\n",
                 tmp.path()
             )
             .is_err()

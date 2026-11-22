@@ -1,11 +1,9 @@
 //! Reasoning effort tiers and the `model[:effort]` suffix split.
 
-/// Reasoning effort level forwarded to backends that support it.
+/// Reasoning effort level forwarded to the jcode backend.
 ///
-/// The five tiers are the ones a cruise `model[:effort]` reference has always
-/// accepted (`low`, `medium`, `high`, `xhigh`, `max`); each backend maps them to
-/// its own reasoning-effort knob (the `claude` CLI spells them as `--effort`
-/// values verbatim).
+/// The five tiers are the ones a Cruise `model[:effort]` reference has always
+/// accepted (`low`, `medium`, `high`, `xhigh`, `max`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffortLevel {
     Low,
@@ -32,11 +30,10 @@ impl EffortLevel {
 /// Every `:suffix` recognized on a model reference, paired with the effort tier
 /// it selects. Compared case-insensitively after trimming.
 ///
-/// Some recognized suffixes have no tier: Jcode and Claude strip them off the
-/// model id and leave effort unset, using their backend default. `OpenCode` rejects
-/// these tierless suffixes. `off` / `none` / `0` mean "no extended thinking",
-/// which is not an effort tier at all; `5` is only an alias spelling that cruise
-/// has never mapped to a tier.
+/// Some recognized suffixes have no tier: jcode strips them off the model id
+/// and leaves effort unset, using its backend default. `off` / `none` / `0` mean
+/// "no extended thinking", which is not an effort tier at all; `5` is only an
+/// alias spelling that Cruise has never mapped to a tier.
 const THINKING_SUFFIXES: &[(&str, Option<EffortLevel>)] = &[
     ("off", None),
     ("none", None),

@@ -1,13 +1,13 @@
-//! Abstraction over the UI mechanism used when an SDK agent asks the user a
-//! question mid-run (the `ask_user` custom tool).
+//! Abstraction over the UI mechanism used when a jcode SDK agent asks the user
+//! a question mid-run (the `ask_user` custom tool).
 //!
 //! Mirrors [`crate::option_handler::OptionHandler`]:
 //! - CLI: [`CliAskHandler`] using the reedline multiline prompt.
 //! - `WebUI`: a server-rendered browser handler using events + a channel.
 //!
-//! The handler is invoked from inside a [`crate::sdk_tools`] tool closure on an
-//! SDK backend worker thread. Implementations may therefore block (read stdin,
-//! wait on a channel) — they are never called on the async runtime thread.
+//! The handler is invoked from inside a [`crate::sdk_tools`] tool closure on the
+//! jcode SDK backend worker thread. Implementations may therefore block (read
+//! stdin, wait on a channel) -- they are never called on the async runtime thread.
 
 use crate::cancellation::CancellationToken;
 use crate::error::Result;

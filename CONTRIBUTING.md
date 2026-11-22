@@ -27,9 +27,8 @@ export CRUISE_PROMPT_EVAL_JUDGE_MODEL='provider/judge-model'
 cargo test --all-features --test prompt_eval -- --ignored --nocapture
 ```
 
-`CRUISE_PROMPT_EVAL_SDK` defaults to `jcode`; `claude` and `opencode` are
-also supported when their CLIs and credentials are configured locally. Model
-syntax depends on the selected SDK. Optional settings are:
+`CRUISE_PROMPT_EVAL_SDK` defaults to and only supports `jcode`. Model
+references use jcode syntax. Optional settings are:
 
 - `CRUISE_PROMPT_EVAL_BASE`: git ref to compare against the working tree.
   The ref is resolved to a commit and the base prompt templates are loaded

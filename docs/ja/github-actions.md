@@ -4,7 +4,7 @@
 <a id="github-actions"></a>
 # cruise GitHub Action
 
-設定可能な `@cruise` を GitHub Issue でメンションすると、GitHub Actions 内で Cruise が計画と実装を行います。成功した実行で branch commit が残り、自動 PR 作成が有効なら draft PR を開きます。[`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action) と発想は似ていますが、`sdk: jcode`（解決された workflow が別の backend を選んだ場合を除く）を通じて Cruise 独自の plan → implement → 任意 PR ワークフローを実行します。Action が `jcode` CLI をインストールし、認証情報も設定します。
+設定可能な `@cruise` を GitHub Issue でメンションすると、GitHub Actions 内で Cruise が計画と実装を行います。成功した実行で branch commit が残り、自動 PR 作成が有効なら draft PR を開きます。[`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action) と発想は似ていますが、既定の `sdk: jcode` を使って Cruise 独自の plan → implement → 任意 PR workflow を実行します。Action が `jcode` CLI をインストールし、認証情報も設定します。外部 CLI を使うには repository workflow で `command:` を指定します。
 
 この Action に **pull request モードはありません**。`issues`（opened）と `issue_comment`（created）イベントにのみ反応します。pull request 上のコメントは常に無視されます（GitHub API 上では PR も「issue」ですが、この Action は明示的に除外します）。
 
@@ -106,7 +106,7 @@
 <a id="providers"></a>
 ## プロバイダー
 
-この Action は既定の `sdk: jcode` backend を提供します（[実行の仕組み](#sdk-jcode----how-execution-works)を参照）。repository config が別の backend を指定している場合はその設定が維持されます。jcode には数十種類の provider があり、いずれも必要なのは API key です。指定方法は次の 3 つです。
+この Action は既定の `sdk: jcode` backend を提供します（[実行の仕組み](#sdk-jcode----how-execution-works)を参照）。repository config が `command:` を指定する場合は、runner 環境で外部 CLI を利用できるようにしてください。jcode には数十種類の provider があり、いずれも必要なのは API key です。指定方法は次の 3 つです。
 
 - **専用 input** — `anthropic_api_key` / `openai_api_key` は、jcode の `anthropic-api` / `openai-api` credential として登録されます。
 - **`env`** — その他の provider key（例: `KIMI_API_KEY`、`GROQ_API_KEY`、`OPENROUTER_API_KEY`）を実行環境に export すると、jcode が環境から取得します。
@@ -180,7 +180,7 @@ profile の key は `jcode provider add --api-key-stdin` に渡され、job の 
 <a id="sdk-jcode----how-execution-works"></a>
 ## sdk: jcode — 実行の仕組み
 
-Cruise は repository workflow config と、適用対象の checkout プロジェクト既定値から backend を解決します。repository workflow config に `command:` または `sdk: claude` があればその設定が維持されるため、その backend 用 CLI と credential を用意してください。
+Cruise は repository workflow config と適用対象の checkout project defaults から backend を解決します。通常は `sdk: jcode` を使い、repository config が `command:` を指定する場合は外部 CLI を起動します。
 
 - **OpenAI service tier** は workflow またはプロセス環境に `JCODE_OPENAI_SERVICE_TIER` が定義されていない場合、既定で `off` です。明示された値はそのまま尊重されます。
 - **Model input**（`model` / `plan_model`）は Cruise の対応設定を上書きします。実際の jcode prompt ごとに、`provider/model[:effort]` または bare-model 形式の有効な Cruise model が必要です。`model` は Action input、repository workflow、checkout の `.cruise/default.yaml` から設定できます。jcode home の既定 model と `JCODE_MODEL` は代わりになりません。計画呼び出しには `plan_model` が使われ、未設定なら `model` にフォールバックします。任意の effort 接尾辞では `low|medium|high|xhigh|max` と、[SDK モード](sdk.md#sdk-mode)に記載された alias が使えます。

@@ -38,6 +38,7 @@ Feature: Provider installation CLI contracts
       | --status --force   |
       | jcode --status     |
       | unknown            |
+      | claude             |
       | jcode claude       |
 
   Scenario: An invalid explicit override does not silently fall back to PATH

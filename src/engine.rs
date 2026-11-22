@@ -122,7 +122,7 @@ pub(crate) struct StepExecOutcome {
     pub failed: bool,
     /// True only when native squash merge requires base resynchronization.
     pub native_resync_required: bool,
-    /// Reason captured from a successful `skip_step` tool call (SDK mode only;
+    /// Reason captured from a successful `skip_step` tool call (jcode mode only;
     /// see [`crate::sdk_tools::skip_step_tool`]). `Some` means the agent
     /// explicitly declared that making no file changes this turn was
     /// deliberate, which disables `if.no-file-changes` `failed` / `retry` for
@@ -1542,10 +1542,10 @@ fn nfc_snapshot_key(step_name: &str) -> String {
 /// add tests) rather than the agent doing nothing.
 ///
 /// Detected in a prompt step's raw output (`vars.prev_output()`) by
-/// [`detect_no_changes_marker`]. Works with every prompt-step backend (command
-/// CLI and all three SDK modes) since it is plain text scanning with no tool support
-/// required -- see [`crate::sdk_tools::SKIP_STEP_TOOL`] for the SDK-only,
-/// schema-validated alternative.
+/// [`detect_no_changes_marker`]. Works with the command backend and the jcode
+/// SDK since it is plain text scanning with no tool support required -- see
+/// [`crate::sdk_tools::SKIP_STEP_TOOL`] for the jcode-only, schema-validated
+/// alternative.
 pub(crate) const NO_CHANGES_MARKER: &str = "NO_CHANGES_INTENTIONAL:";
 
 /// Scan `output` for a line beginning with [`NO_CHANGES_MARKER`] (leading
@@ -1744,9 +1744,8 @@ pub(crate) fn finish_instruction_lease<T>(
 /// [`crate::sdk_tools::skip_step_tool`]) is registered for this run: the
 /// caller passes `true` only for prompt steps that carry an
 /// `if.no-file-changes` condition. Keeping it opt-in per step keeps the tool
-/// set a step exposes to the model minimal, for a feature most steps never
-/// use. Ordinary run steps get no custom tools; the backend's own built-in
-/// tools do the file editing in SDK mode.
+/// set a step exposes to the model minimal. Ordinary run steps get no custom
+/// tools; the jcode SDK's built-in tools handle file editing.
 #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn run_prompt_step(
     vars: &mut VariableStore,
@@ -2917,74 +2916,6 @@ steps:
     }
 
     // -- execute_steps_with_dag: NodeRuntime wiring ----------------------------
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn tool_restrictions_filter_workflow_mcp_for_after_pr_backend_launch() {
-        let _process = lock_process();
-        let home = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let mut guards = set_fake_home(home.path());
-        let bin = home.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("mkdir: {error}"));
-        crate::test_support::write_executable_script(
-            &bin.join("claude"),
-            concat!(
-                "#!/bin/sh\n",
-                "while [ \"$#\" -gt 0 ]; do\n",
-                "  if [ \"$1\" = '--mcp-config' ]; then\n",
-                "    shift\n",
-                "    if [ -f \"$1\" ]; then cat \"$1\" > \"$CRUISE_TEST_MCP_CAPTURE\"; fi\n",
-                "  fi\n",
-                "  shift\n",
-                "done\n",
-                "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"policy-test\",\"result\":\"done\"}'\n",
-            ),
-        );
-        guards.push(crate::test_support::prepend_to_path(&bin));
-        let capture = home.path().join("mcp-capture.json");
-        let env = HashMap::from([(
-            "CRUISE_TEST_MCP_CAPTURE".to_string(),
-            capture.to_string_lossy().into_owned(),
-        )]);
-        let config = make_config(
-            "sdk: claude\ndisallowed_tools: [\"mcp:workflow_removed\"]\nmcp_servers:\n  retained:\n    command: echo\n  removed:\n    command: echo\n  workflow_removed:\n    command: echo\nsteps:\n  main:\n    prompt: main\nafter-pr:\n  review:\n    prompt: inspect\n    disallowed_tools: [\"mcp:removed\"]\n",
-        );
-        let compiled = crate::workflow::compile(config)
-            .unwrap_or_else(|error| panic!("{error}"))
-            .to_after_pr_compiled();
-        let StepKind::Prompt(step) = StepKind::try_from(compiled.steps["review"].clone())
-            .unwrap_or_else(|error| panic!("{error}"))
-        else {
-            panic!("expected prompt step");
-        };
-        let mut vars = VariableStore::new(String::new());
-        run_prompt_step(
-            &mut vars,
-            &compiled,
-            &step,
-            0,
-            &env,
-            None,
-            Some(home.path()),
-            PromptStepOutput::Console(None),
-            Some(Duration::from_secs(5)),
-            "review",
-            None,
-            false,
-            true,
-            None,
-            None,
-        )
-        .await
-        .unwrap_or_else(|error| panic!("prompt run: {error}"));
-        let servers: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(&capture).unwrap_or_else(|error| panic!("read MCP capture: {error}")),
-        )
-        .unwrap_or_else(|error| panic!("parse MCP capture: {error}"));
-        assert!(servers["mcpServers"].get("retained").is_some());
-        assert!(servers["mcpServers"].get("removed").is_none());
-        assert!(servers["mcpServers"].get("workflow_removed").is_none());
-    }
 
     #[tokio::test]
     async fn test_execute_steps_with_dag_writes_pre_execution_runtime_onto_next_node() {

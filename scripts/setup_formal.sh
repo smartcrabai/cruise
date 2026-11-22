@@ -54,7 +54,10 @@ java -XshowSettings:properties -version 2>&1 | grep -Eq 'java.runtime.version = 
 fetch 'https://github.com/AlloyTools/org.alloytools.alloy/releases/download/v6.2.0/org.alloytools.alloy.dist.jar' "$DOWNLOADS/alloy-6.2.0.jar" 6b8c1cb5bc93bedfc7c61435c4e1ab6e688a242dc702a394628d9a9801edb78d
 ln -sfn "$DOWNLOADS/alloy-6.2.0.jar" "$TOOLS/alloy-6.2.0.jar"
 # The lockfile overrides Quint's adm-zip to 0.6.1 to fix ZIP extraction advisories.
-npm ci --prefix "$ROOT/tests/formal" --ignore-scripts
+(
+  cd "$ROOT/tests/formal"
+  npm ci --ignore-scripts
+)
 [[ $("$ROOT/tests/formal/node_modules/.bin/quint" --version) == 0.33.0 ]]
 
 # Quint 0.33.0 otherwise fetches this distribution without verifying its checksum.

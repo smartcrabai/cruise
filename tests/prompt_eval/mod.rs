@@ -673,8 +673,10 @@ async fn deadline_covers_sequential_candidate_and_judge() {
 }
 pub async fn run() -> Result<()> {
     let sdk = std::env::var("CRUISE_PROMPT_EVAL_SDK").unwrap_or_else(|_| "jcode".into());
-    if !matches!(sdk.as_str(), "jcode" | "claude" | "opencode") {
-        return Err(format!("unsupported sdk {sdk}"));
+    if sdk != "jcode" {
+        return Err(format!(
+            "unsupported SDK \"{sdk}\"; only \"jcode\" is supported"
+        ));
     }
     let candidate = required("CRUISE_PROMPT_EVAL_MODEL")?;
     let judge = required("CRUISE_PROMPT_EVAL_JUDGE_MODEL")?;

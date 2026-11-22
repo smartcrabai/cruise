@@ -113,12 +113,14 @@ For PR review-fix permission filtering and bounded termination, see
 The `pr-review-fix-specs` CI job runs Quint, Alloy receipt checks and
 production-connected Gherkin.
 
-For task-scoped `subagent_model` selection, backend configuration and exclusions,
-see `SUBAGENT_MODEL.md` and run `bash scripts/check_subagent_model_specs.sh`.
-The dedicated `subagent-model-specs` PR job runs pinned Quint verification,
-Alloy assertions and witnesses with receipt validation, production Gherkin and
-Rust CLI/API regression tests. Local evidence is in
-`SUBAGENT_MODEL_VERIFICATION.md`.
+
+For ordered Jcode model fallback strings and scheduling, see `SDK_MODELS.md`
+and run `bash scripts/check_sdk_model_specs.sh`. The suite includes Quint,
+Alloy, production Cucumber, CLI configuration and fallback contracts.
+
+For Jcode-only task-scoped subagent model precedence and route setup, see
+`SUBAGENT_MODEL.md` and run `bash scripts/check_subagent_model_specs.sh`. The
+suite covers validation, jcode API-frame ordering, and no-send on setting failure.
 
 For per-prompt `disallowed_tools`, implicit git denials and MCP filtering, see
 `TOOL_RESTRICTIONS.md` and run `bash scripts/check_tool_restrictions_specs.sh`.
@@ -134,11 +136,6 @@ and htmx Gherkin, see `RESPONSIVE_WEBUI.md` and run
 `responsive-webui-specs.yml` workflow executes all checks and validates Alloy
 assertion and witness receipts.
 
-For OpenCode common effort resolution and replay-safe `provider.no-route`
-fallback, see `OPENCODE_EFFORT.md` and run
-`bash scripts/check_opencode_effort_specs.sh`. The dedicated native CI job runs
-Quint, Alloy receipt validation, real-Executor Cucumber, and affected Rust
-contracts using this directory's shared locked toolchain.
 
 For workflow-start OAuth authentication preflight, including bounded Quint and
 Alloy checks and production CLI Gherkin, see `AGENT_AUTH.md` and run
@@ -158,15 +155,6 @@ and production regression tests with the shared pins below.
 
 For workflow package install/recovery and collision models, see `WORKFLOW_PACKAGES.md` and run `mise exec node@26.13.1 -- bash scripts/check_workflow_packages_specs.sh`. The suite runs in the existing `workflow-flags-specs` CI job.
 
-For SDK-qualified model arrays, ordered cross-SDK fallback, resume ownership,
-and production-connected configuration/CLI Gherkin, see `SDK_MODELS.md` and run
-`bash scripts/check_sdk_model_specs.sh`. This suite has its own required native
-PR CI job and uses the same pinned formal toolchain and receipt validator.
-
-For the separate OpenCode V2 admission, retry and lifecycle specifications, see
-`OPENCODE.md` and run `bash scripts/check_opencode_specs.sh`. Both suites are
-required by the provider-native formal CI job. OpenCode execution evidence is
-recorded in `OPENCODE_VERIFICATION.md`.
 
 ## Quality-gate checkpoint abstraction (CP-09 through CP-11)
 

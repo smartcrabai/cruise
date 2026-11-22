@@ -95,7 +95,7 @@ command:                   # LLM invocation command (mutually exclusive with `sd
 # sdk: jcode              # Use jcode-sdk (the fallback only when neither
                           # `command` nor `sdk` remains set after applicable
                           # `default.yaml` layers; see SDK Mode)
-# sdk: claude             # Use claude-agent-sdk to drive the claude CLI
+# sdk: jcode is the only supported SDK value.
 
 description: |             # one-line summary shown next to the filename in selectors (optional)
   Team-shared review-heavy flow with auto-PR.
@@ -104,7 +104,7 @@ model: sonnet             # default model for all prompt steps (optional)
 # In SDK mode, arrays use the first model, then fall back in order.
 # model: [sonnet, opus, gpt-5.5]
 plan_model: opus          # model used for the built-in plan step (optional)
-# subagent_model: haiku   # SDK-only: one subagent model, string or {sdk: claude, model: haiku}
+# subagent_model: claude/claude-haiku-4-5 # Jcode only: one plain model string
 languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
   plan: English           # language used by built-in planning prompts
@@ -225,7 +225,7 @@ plan の承認後、cruise は raw task input の代わりに `cruise list` と 
 <a id="environment-variables"></a>
 ### 環境変数
 
-`CRUISE_JCODE_CLI_PATH`、`CRUISE_CLAUDE_CLI_PATH`、`CRUISE_OPENCODE_CLI_PATH` は Cruise process 環境から provider executable を選択します。workflow の設定 key ではなく、workflow `env:` からは指定できません。
+`CRUISE_JCODE_CLI_PATH` は Cruise process 環境から jcode executable を選択します。workflow の設定 key ではなく、workflow `env:` からは指定できません。
 
 環境変数は workflow と step の両方で設定できます。step-level 値は、その step についてだけ workflow-level 値を上書きします。parallel child には第3のレベルが加わり、workflow < parallel block < child の優先順位になります。値は template 変数置換に対応します。各 child は block より前の変数値を基準にそれぞれ解決します。
 
@@ -236,7 +236,7 @@ process-level 設定 override は workflow と default の解決後に適用さ�
 | `CRUISE_MODEL` | `model` | model |
 | `CRUISE_PLAN_MODEL` | `plan_model` | model |
 | `CRUISE_SUBAGENT_MODEL` | `subagent_model` | model entry |
-| `CRUISE_SDK` | `sdk` | text |
+| `CRUISE_SDK` | `sdk` | text（`jcode` のみ） |
 | `CRUISE_COMMAND` | `command` | JSON array |
 | `CRUISE_MAX_RETRIES` | `max_retries` | integer |
 | `CRUISE_INTERACTIVE_PLANNING` | `interactive_planning` | boolean |
@@ -342,13 +342,13 @@ prompt 言語は `plan` と `pr` を個別に解決します。workflow の `lan
 <a id="rate-limit-retry"></a>
 ## rate limit 時の retry
 
-SDK fallback policy がない場合、command の stderr に rate limit を示す文言または単独の `429` token（`429` を含むだけの別文字列は対象外）があると、cruise は同じ model を指数 backoff で再試行します。SDK backend では `usage limit`、`session limit`、`overloaded` も limit として扱います。
+Jcode SDK fallback policy がない場合、command の stderr に rate limit を示す文言または単独の `429` token（`429` を含むだけの別文字列は対象外）があると、cruise は同じ model を指数 backoff で再試行します。jcode SDK では `usage limit`、`session limit`、`overloaded` も limit として扱います。
 
 - 初回待機: 2秒
 - 最大待機: 60秒
 - 既定 retry 回数: 5（`--rate-limit-retries` で変更）
 
-SDK backend は、任意の `retry:` block または fallback entry を含む workflow-level model array を使った fallback policy にも対応します。明示的な `retry:` block で policy を設定できます。
+jcode SDK は、任意の `retry:` block または fallback entry を含む workflow-level model array を使った fallback policy にも対応します。明示的な `retry:` block で policy を設定できます。
 
 ```yaml
 retry:
@@ -363,4 +363,4 @@ retry:
       - provider-c/*
 ```
 
-SDK retry policy があると、429・5xx・429 以外の 4xx・ネットワーク障害のとき、待たずに次の fallback model へ切り替えます。使える fallback が無い場合だけ同じ model で再試行します。`retry:` を宣言すると、`model_fallback: false` や空の chain でもこの分類と backoff が有効になります。従来の動作（limit エラーだけを同じ model で再試行）を保つには、`retry:` block を省き、model を scalar にしてください。fallback entry を持つ workflow-level model array は model fallback を有効にします。`command:` backend は `retry:` を無視します。
+jcode SDK retry policy があると、429・5xx・429 以外の 4xx・ネットワーク障害のとき、待たずに次の fallback model へ切り替えます。使える fallback が無い場合だけ同じ model で再試行します。`retry:` を宣言すると、`model_fallback: false` や空の chain でもこの分類と backoff が有効になります。従来の動作（limit エラーだけを同じ model で再試行）を保つには、`retry:` block を省き、model を scalar にしてください。fallback entry を持つ workflow-level model array は model fallback を有効にします。`command:` backend は `retry:` を無視します。

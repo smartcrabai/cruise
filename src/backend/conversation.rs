@@ -95,13 +95,6 @@ pub(crate) fn cleanup(
                 CruiseError::Other(format!("could not clean jcode session home: {error}"))
             })
         }
-        Some("opencode") => {
-            super::opencode::cleanup_conversation(session_id, working_dir).map_err(|error| {
-                CruiseError::Other(format!("could not clean opencode conversation: {error}"))
-            })
-        }
-        // Claude does not have Cruise-owned retained conversation storage.
-        Some("claude") => Ok(()),
         Some(owner) => Err(CruiseError::Other(format!(
             "cannot clean conversation owned by unknown backend '{owner}'"
         ))),

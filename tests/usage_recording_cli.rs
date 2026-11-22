@@ -5,8 +5,7 @@
     reason = "isolated executable contract fixtures"
 )]
 
-//! Real executable contracts for local usage recording. The fake Claude CLI
-//! speaks stream-json, so no provider credentials or network are needed.
+//! Real executable contracts for local usage recording with jcode and command mode.
 
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
@@ -52,16 +51,6 @@ impl Fixture {
         cruise::dag::save_dag(&dag, &manager.dag_path(ID)).unwrap();
         let bin = root.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        cruise::test_support::write_executable_script(
-            &bin.join("claude"),
-            concat!(
-                "#!/bin/sh\nread -r user_frame\n",
-                "printf '%s\\n' '",
-                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"fake-session\"}\n",
-                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"PRIVATE_OUTPUT_SENTINEL_8321\"}]},\"session_id\":\"fake-session\"}\n",
-                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"fake-session\",\"result\":\"PRIVATE_OUTPUT_SENTINEL_8321\",\"usage\":{\"input_tokens\":999,\"output_tokens\":888},\"total_cost_usd\":9.0,\"modelUsage\":{\"actual-model\":{\"inputTokens\":12,\"outputTokens\":5,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":3,\"costUSD\":0.25}}}\n'\n"
-            ),
-        );
         Self { root, repo }
     }
 
@@ -76,7 +65,6 @@ impl Fixture {
         for (key, _) in std::env::vars_os() {
             let key_str = key.to_string_lossy();
             if key_str.starts_with("CRUISE_")
-                || key_str.starts_with("CLAUDE")
                 || key_str.starts_with("ANTHROPIC_")
                 || key_str.starts_with("JCODE_")
             {
@@ -145,81 +133,13 @@ fn assert_allowed_keys(value: &Value, allowed: &[&str]) {
     }
 }
 
-const CLAUDE_WORKFLOW: &str = "sdk: claude\nmodel: requested-model\nsteps:\n  answer:\n    prompt: PRIVATE_PROMPT_SENTINEL_9472\n";
-
-#[test]
-fn claude_sdk_run_appends_one_reported_record() {
-    let f = Fixture::new(CLAUDE_WORKFLOW);
-    f.successful_run(None);
-    let record = f.record();
-    assert_allowed_keys(
-        &record,
-        &[
-            "v",
-            "ts",
-            "session_id",
-            "step",
-            "purpose",
-            "backend",
-            "model",
-            "attempt",
-            "outcome",
-            "usage",
-        ],
-    );
-    assert_eq!(record["v"], 1);
-    assert_eq!(record["session_id"], ID);
-    assert_eq!(record["step"], "answer");
-    assert_eq!(record["purpose"], "workflow_step");
-    assert_eq!(record["backend"], "claude");
-    assert_eq!(record["model"], "requested-model");
-    assert_eq!(record["attempt"], 1);
-    assert_eq!(record["outcome"], "success");
-    let usage = &record["usage"];
-    assert_allowed_keys(
-        usage,
-        &[
-            "status",
-            "input_tokens",
-            "output_tokens",
-            "reasoning_tokens",
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-            "cost_usd",
-            "by_model",
-        ],
-    );
-    assert_eq!(usage["status"], "reported");
-    assert_eq!(usage["input_tokens"], 12);
-    assert_eq!(usage["output_tokens"], 5);
-    assert_eq!(usage["cache_read_input_tokens"], 0);
-    assert_eq!(usage["cache_creation_input_tokens"], 3);
-    assert_eq!(usage["cost_usd"], 0.25);
-    assert!(usage.get("reasoning_tokens").is_none());
-    let models = usage["by_model"].as_array().unwrap();
-    assert_eq!(models.len(), 1);
-    assert_allowed_keys(
-        &models[0],
-        &[
-            "model",
-            "input_tokens",
-            "output_tokens",
-            "reasoning_tokens",
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-            "cost_usd",
-        ],
-    );
-    assert_eq!(models[0]["model"], "actual-model");
-    assert_eq!(models[0]["input_tokens"], 12);
-    assert!(!f.repo.join("usage.ndjson").exists());
-    assert!(!f.path("data/cruise/usage.ndjson").exists());
-}
+const COMMAND_WORKFLOW: &str =
+    "command: [sh, -c, 'cat']\nsteps:\n  answer:\n    prompt: PRIVATE_PROMPT_SENTINEL_9472\n";
 
 #[test]
 fn usage_recording_disabled_by_env_writes_nothing() {
     for value in ["0", " false ", "FALSE"] {
-        let f = Fixture::new(CLAUDE_WORKFLOW);
+        let f = Fixture::new(COMMAND_WORKFLOW);
         f.successful_run(Some(value));
         assert!(
             !f.usage_path().exists(),
@@ -230,9 +150,7 @@ fn usage_recording_disabled_by_env_writes_nothing() {
 
 #[test]
 fn command_backend_run_appends_unavailable_record() {
-    let f = Fixture::new(
-        "command: [sh, -c, 'cat']\nsteps:\n  answer:\n    prompt: PRIVATE_PROMPT_SENTINEL_9472\n",
-    );
+    let f = Fixture::new(COMMAND_WORKFLOW);
     f.successful_run(None);
     let record = f.record();
     assert_allowed_keys(

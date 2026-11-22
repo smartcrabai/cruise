@@ -1,4 +1,4 @@
-//! Custom tool definitions (function calling) handed to an SDK backend.
+//! Custom tool definitions (function calling) handed to the jcode SDK backend.
 //!
 //! A [`CruiseTool`] pairs a JSON Schema with a synchronous handler; the backend
 //! adapts it to its own registration path. The tools themselves are built in

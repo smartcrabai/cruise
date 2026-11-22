@@ -119,25 +119,19 @@ fn rejects_invalid_instant_inputs() -> TestResult {
 }
 
 #[test]
-fn sdk_validation_preserves_unknown_and_removed_diagnostics() -> TestResult {
-    for (sdk, expected) in [
-        ("claude-cli", "unknown"),
-        ("seher", "no longer supported"),
-        ("pi", "no longer supported"),
-    ] {
+fn sdk_validation_rejects_removed_backends() -> TestResult {
+    for sdk in ["claude", "opencode"] {
         let output = run(&["exec", "--instant", "--dry-run", "--sdk", sdk, "task"])?;
         let diagnostic = text(&output);
         assert!(!output.status.success(), "{sdk}: {diagnostic}");
         assert!(
-            diagnostic.contains(sdk) && diagnostic.contains(expected),
+            diagnostic.contains(&format!("unsupported SDK \"{sdk}\"")),
             "{diagnostic}"
         );
-        if sdk != "claude-cli" {
-            assert!(
-                diagnostic.contains("claude"),
-                "migration guidance missing: {diagnostic}"
-            );
-        }
+        assert!(
+            diagnostic.contains("only \"jcode\" is supported"),
+            "{diagnostic}"
+        );
     }
     Ok(())
 }

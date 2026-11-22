@@ -22,37 +22,21 @@ use url::Url;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, clap::ValueEnum)]
 pub enum Provider {
     Jcode,
-    Claude,
-    #[value(name = "opencode")]
-    OpenCode,
 }
 impl Provider {
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Jcode => "jcode",
-            Self::Claude => "claude",
-            Self::OpenCode => "opencode",
-        }
+        "jcode"
     }
+
     #[must_use]
     pub fn binary_name(self) -> &'static str {
-        match (self, cfg!(windows)) {
-            (Self::Jcode, true) => "jcode.exe",
-            (Self::Claude, true) => "claude.exe",
-            (Self::OpenCode, true) => "opencode.exe",
-            (Self::Jcode, false) => "jcode",
-            (Self::Claude, false) => "claude",
-            (Self::OpenCode, false) => "opencode",
-        }
+        if cfg!(windows) { "jcode.exe" } else { "jcode" }
     }
+
     #[must_use]
     pub fn env_override(self) -> &'static str {
-        match self {
-            Self::Jcode => "CRUISE_JCODE_CLI_PATH",
-            Self::Claude => "CRUISE_CLAUDE_CLI_PATH",
-            Self::OpenCode => "CRUISE_OPENCODE_CLI_PATH",
-        }
+        "CRUISE_JCODE_CLI_PATH"
     }
 }
 impl std::fmt::Display for Provider {
@@ -66,17 +50,13 @@ pub enum InstallOutcome {
     AlreadyInstalled { version: String },
     Reinstalled { version: String, reason: String },
 }
-fn hosts(p: Provider) -> &'static [&'static str] {
-    match p {
-        Provider::Jcode => &[
-            "github.com",
-            "release-assets.githubusercontent.com",
-            "objects.githubusercontent.com",
-            "github-cloud.s3.amazonaws.com",
-        ],
-        Provider::Claude => &["downloads.claude.ai"],
-        Provider::OpenCode => &["registry.npmjs.org"],
-    }
+fn hosts(_provider: Provider) -> &'static [&'static str] {
+    &[
+        "github.com",
+        "release-assets.githubusercontent.com",
+        "objects.githubusercontent.com",
+        "github-cloud.s3.amazonaws.com",
+    ]
 }
 /// Install the latest stable provider build.
 ///
@@ -89,7 +69,7 @@ pub fn install(provider: Provider, force: bool) -> Result<InstallOutcome> {
             provider,
             force,
             &crate::paths::data_dir()?,
-            |key| release::latest(provider, key),
+            release::latest_jcode,
             hosts(provider),
             None,
         )
@@ -100,7 +80,7 @@ pub fn install(provider: Provider, force: bool) -> Result<InstallOutcome> {
             provider,
             force,
             &crate::paths::data_dir()?,
-            |key| release::latest(provider, key),
+            release::latest_jcode,
             hosts(provider),
         )
     }
@@ -180,7 +160,7 @@ pub(crate) fn install_in(
         fetch::fetch_and_verify(&selected.target, &binary, trust_hosts, source_base)?;
         #[cfg(not(test))]
         fetch::fetch_and_verify(&selected.target, &binary, trust_hosts)?;
-        fetch::probe(provider, &binary, &version)?;
+        fetch::probe(&binary, &version)?;
         let sha256 = record::sha256(&binary)?;
         let stamp = record::stamp(&binary)?;
         let generation = format!("{version}-{}", uuid::Uuid::new_v4());
@@ -290,41 +270,40 @@ pub(crate) fn status_in(
     target_key: impl Fn(Provider) -> Option<&'static str>,
 ) -> Vec<ProviderStatus> {
     let mut statuses = Vec::new();
-    for p in [Provider::Jcode, Provider::Claude, Provider::OpenCode] {
-        let dir = data_root.join("providers").join(p.as_str());
-        let rec = record::read_record(&dir.join("install.json"));
-        let key = target_key(p);
-        let (version, managed) = match &rec {
-            Ok(r) => (
-                Some(r.version.clone()),
-                Some(
-                    if key.is_some_and(|k| record::record_valid(p, k, &dir, r)) {
-                        ManagedState::Ready
-                    } else {
-                        ManagedState::Damaged
-                    },
-                ),
+    let p = Provider::Jcode;
+    let dir = data_root.join("providers").join(p.as_str());
+    let rec = record::read_record(&dir.join("install.json"));
+    let key = target_key(p);
+    let (version, managed) = match &rec {
+        Ok(r) => (
+            Some(r.version.clone()),
+            Some(
+                if key.is_some_and(|k| record::record_valid(p, k, &dir, r)) {
+                    ManagedState::Ready
+                } else {
+                    ManagedState::Damaged
+                },
             ),
-            Err(_) if dir.join("install.json").exists() => (None, Some(ManagedState::Damaged)),
-            Err(_) => (None, None),
-        };
-        let path = dirs
-            .iter()
-            .map(|d| d.join(p.binary_name()))
-            .find(|p| p.is_file());
-        let ov = env_override(p).filter(|s| !s.is_empty());
-        let effective =
-            resolve::resolve_in_impl(p, ov.as_deref(), data_root, dirs, key.unwrap_or(""), false)
-                .map(|resolved| resolved.source);
-        statuses.push(ProviderStatus {
-            provider: p,
-            version,
-            managed,
-            path,
-            override_env: ov.map(|value| value.to_string_lossy().into_owned()),
-            effective,
-        });
-    }
+        ),
+        Err(_) if dir.join("install.json").exists() => (None, Some(ManagedState::Damaged)),
+        Err(_) => (None, None),
+    };
+    let path = dirs
+        .iter()
+        .map(|d| d.join(p.binary_name()))
+        .find(|p| p.is_file());
+    let ov = env_override(p).filter(|s| !s.is_empty());
+    let effective =
+        resolve::resolve_in_impl(p, ov.as_deref(), data_root, dirs, key.unwrap_or(""), false)
+            .map(|resolved| resolved.source);
+    statuses.push(ProviderStatus {
+        provider: p,
+        version,
+        managed,
+        path,
+        override_env: ov.map(|value| value.to_string_lossy().into_owned()),
+        effective,
+    });
     statuses
 }
 fn print_status() -> Result<()> {
@@ -366,7 +345,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("absent");
         let statuses = status_in(&root, |_| None, &[], |_| None);
-        assert_eq!(statuses.len(), 3);
+        assert_eq!(statuses.len(), 1);
         assert!(
             statuses
                 .iter()
@@ -377,25 +356,34 @@ mod tests {
     #[test]
     fn status_reports_typed_sources_and_errors() {
         let temp = tempfile::tempdir().unwrap();
-        let path_bin = temp.path().join(Provider::Claude.binary_name());
-        fs::write(&path_bin, b"path").unwrap();
-        let statuses = status_in(
+        fs::write(temp.path().join(Provider::Jcode.binary_name()), b"path").unwrap();
+        let path_status = status_in(
             temp.path(),
-            |p| (p == Provider::Jcode).then(|| temp.path().join("missing").into_os_string()),
+            |_| None,
             &[temp.path().to_path_buf()],
             |_| Some("test"),
         );
-        assert!(statuses[0].override_env.is_some());
-        assert!(
-            matches!(&statuses[0].effective, Err(CruiseError::Other(message)) if message.contains("CRUISE_JCODE_CLI_PATH"))
+        assert_eq!(path_status[0].effective.as_ref().ok(), Some(&Source::Path));
+
+        let override_status = status_in(
+            temp.path(),
+            |provider| {
+                (provider == Provider::Jcode).then(|| temp.path().join("missing").into_os_string())
+            },
+            &[temp.path().to_path_buf()],
+            |_| Some("test"),
         );
-        assert_eq!(statuses[1].effective.as_ref().ok(), Some(&Source::Path));
-        assert!(statuses[1].managed.is_none());
+        assert_eq!(override_status.len(), 1);
+        assert!(override_status[0].override_env.is_some());
+        assert!(matches!(
+            &override_status[0].effective,
+            Err(CruiseError::Other(message)) if message.contains("CRUISE_JCODE_CLI_PATH")
+        ));
     }
     #[test]
     fn status_reports_recorded_old_version_as_ready() {
         let temp = tempfile::tempdir().unwrap();
-        let provider = Provider::Claude;
+        let provider = Provider::Jcode;
         let version = "0.0.1";
         let dir = temp.path().join("providers").join(provider.as_str());
         let version_dir = dir.join(version);
@@ -417,18 +405,18 @@ mod tests {
         let path = dir.join("install.json");
         record::write_record_atomic(&path, &rec).unwrap();
         let statuses = status_in(temp.path(), |_| None, &[], |_| Some("test"));
-        assert_eq!(statuses[1].version.as_deref(), Some(version));
-        assert_eq!(statuses[1].managed, Some(ManagedState::Ready));
-        assert_eq!(statuses[1].effective.as_ref().ok(), Some(&Source::Managed));
+        assert_eq!(statuses[0].version.as_deref(), Some(version));
+        assert_eq!(statuses[0].managed, Some(ManagedState::Ready));
+        assert_eq!(statuses[0].effective.as_ref().ok(), Some(&Source::Managed));
         fs::write(path, b"not json").unwrap();
         let statuses = status_in(temp.path(), |_| None, &[], |_| Some("test"));
-        assert_eq!(statuses[1].version, None);
-        assert_eq!(statuses[1].managed, Some(ManagedState::Damaged));
+        assert_eq!(statuses[0].version, None);
+        assert_eq!(statuses[0].managed, Some(ManagedState::Damaged));
     }
     #[test]
     fn record_accepts_legacy_and_generation_paths_but_rejects_unsafe_versions_and_paths() {
         let temp = tempfile::tempdir().unwrap();
-        let provider = Provider::Claude;
+        let provider = Provider::Jcode;
         let version = "2.1.250";
         let version_dir = temp.path().join(version);
         fs::create_dir(&version_dir).unwrap();
@@ -470,10 +458,10 @@ mod tests {
         rec.mtime_unix_nanos = prerelease_stamp.mtime_unix_nanos;
         assert!(record::record_valid(provider, "test", temp.path(), &rec));
         for (version, relative_path) in [
-            ("../outside", "../outside/claude"),
+            ("../outside", "../outside/jcode"),
             ("2.1.250", "../outside"),
             ("2.1.250", "/absolute/path"),
-            ("2.1.250", "2.1.250-../2.1.250/claude"),
+            ("2.1.250", "2.1.250-../2.1.250/jcode"),
         ] {
             rec.version = version.into();
             rec.relative_path = relative_path.into();
@@ -492,24 +480,24 @@ mod tests {
         let old = temp.path().join("old");
         let staging = temp.path().join(".staging-test");
         fs::create_dir(&old).unwrap();
-        fs::write(old.join("claude"), b"old").unwrap();
+        fs::write(old.join("jcode"), b"old").unwrap();
         fs::create_dir(&staging).unwrap();
-        fs::write(staging.join("claude"), b"new").unwrap();
+        fs::write(staging.join("jcode"), b"new").unwrap();
         let record_path = temp.path().join("install.json");
         fs::create_dir(&record_path).unwrap();
         let rec = record::InstallRecord {
             schema: 1,
-            provider: "claude".into(),
+            provider: "jcode".into(),
             version: "1.0".into(),
             target: "test".into(),
-            relative_path: "new/claude".into(),
+            relative_path: "new/jcode".into(),
             sha256: String::new(),
             len: 3,
             mtime_unix_nanos: 0,
             source_url: String::new(),
         };
         assert!(publish_install(temp.path(), &staging, &record_path, &rec).is_err());
-        assert_eq!(fs::read(old.join("claude")).unwrap(), b"old");
+        assert_eq!(fs::read(old.join("jcode")).unwrap(), b"old");
         assert!(!temp.path().join("new").exists());
         assert!(record_path.is_dir());
     }

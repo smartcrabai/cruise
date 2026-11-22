@@ -16,7 +16,6 @@ pub(crate) enum AuthScope {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CredentialTarget {
-    ClaudeCli,
     JcodeAnthropic,
     JcodeOpenAi,
 }
@@ -77,15 +76,6 @@ struct OpenAiAccount {
     refresh_token: bool,
 }
 
-#[derive(Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct ClaudeOAuth {
-    expires_at: Option<i64>,
-    #[serde(deserialize_with = "refresh_present")]
-    refresh_token: bool,
-    refresh_token_expires_at: Option<i64>,
-}
-
 fn refresh_present<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<bool, D::Error> {
@@ -95,8 +85,6 @@ fn refresh_present<'de, D: Deserializer<'de>>(
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct CredentialFile {
-    #[serde(rename = "claudeAiOauth")]
-    claude: Option<ClaudeOAuth>,
     anthropic_accounts: Option<Vec<AnthropicAccount>>,
     openai_accounts: Option<Vec<OpenAiAccount>>,
 }
@@ -109,16 +97,6 @@ fn inspect_file(path: &Path, target: CredentialTarget, now_ms: i64) -> Verdict {
         return Verdict::Unknown;
     };
     match target {
-        CredentialTarget::ClaudeCli => file.claude.map_or(Verdict::Unknown, |oauth| {
-            judge(
-                &OAuthExpiry {
-                    access_expires_ms: oauth.expires_at,
-                    has_refresh: oauth.refresh_token,
-                    refresh_expires_ms: oauth.refresh_token_expires_at,
-                },
-                now_ms,
-            )
-        }),
         CredentialTarget::JcodeAnthropic => judge_accounts(
             file.anthropic_accounts
                 .unwrap_or_default()
@@ -155,46 +133,6 @@ fn judge_accounts(accounts: impl Iterator<Item = OAuthExpiry>, now_ms: i64) -> V
     expired
 }
 
-fn claude_uses_other_auth(config: &WorkflowConfig) -> bool {
-    [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "CLAUDE_CODE_USE_FOUNDRY",
-    ]
-    .iter()
-    .any(|key| {
-        std::env::var_os(key).is_some_and(|value| !value.is_empty())
-            || config.env.get(*key).is_some_and(|value| !value.is_empty())
-    })
-}
-
-fn claude_config_dir(config: &WorkflowConfig, cwd: Option<&Path>) -> Option<std::path::PathBuf> {
-    let dir = if let Some(value) = config.env.get("CLAUDE_CONFIG_DIR") {
-        // Use the workflow template syntax, including escaped literal braces.
-        // Runtime variables are not available to this read-only startup check.
-        crate::variable::resolve_template_with_lookup(value, |name| {
-            Err(CruiseError::UndefinedVariable(name.to_string()))
-        })
-        .ok()?
-        .into()
-    } else {
-        std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(std::path::PathBuf::from)
-            .or_else(|| home::home_dir().map(|home| home.join(".claude")))?
-    };
-    if dir.is_absolute() {
-        Some(dir)
-    } else {
-        let base = cwd
-            .map_or_else(std::env::current_dir, |cwd| Ok(cwd.to_path_buf()))
-            .ok()?;
-        Some(base.join(dir))
-    }
-}
-
 pub(crate) fn ensure_agents_authenticated(
     config: &WorkflowConfig,
     scope: AuthScope,
@@ -214,21 +152,15 @@ pub(crate) fn ensure_agents_authenticated(
     };
     let mut targets = Vec::new();
     for candidate in candidates {
-        let target = match candidate.sdk {
-            Sdk::Claude => Some(CredentialTarget::ClaudeCli),
-            Sdk::Jcode => {
-                let provider = crate::backend::jcode::parse_model_ref(candidate.model.as_deref())
-                    .ok()
-                    .and_then(|(provider, _, _)| provider);
-                match provider.as_deref() {
-                    Some("claude" | "claude-oauth" | "claude-subprocess") => {
-                        Some(CredentialTarget::JcodeAnthropic)
-                    }
-                    Some("openai" | "openai-oauth") => Some(CredentialTarget::JcodeOpenAi),
-                    _ => None,
-                }
+        let provider = crate::backend::jcode::parse_model_ref(candidate.model.as_deref())
+            .ok()
+            .and_then(|(provider, _, _)| provider);
+        let target = match provider.as_deref() {
+            Some("claude" | "claude-oauth" | "claude-subprocess") => {
+                Some(CredentialTarget::JcodeAnthropic)
             }
-            Sdk::OpenCode => None,
+            Some("openai" | "openai-oauth") => Some(CredentialTarget::JcodeOpenAi),
+            _ => None,
         };
         if let Some(target) = target.filter(|target| !targets.contains(target)) {
             targets.push(target);
@@ -243,32 +175,25 @@ pub(crate) fn ensure_agents_authenticated(
     };
     let mut failures = Vec::new();
     for target in targets {
-        let (path, label, login) = match target {
-            CredentialTarget::ClaudeCli => {
-                if claude_uses_other_auth(config) {
-                    continue;
-                }
-                let Some(dir) = claude_config_dir(config, cwd) else {
-                    continue;
-                };
-                (
-                    dir.join(".credentials.json"),
-                    "claude CLI",
-                    "claude auth login",
-                )
-            }
+        let (path, label, login, api_key) = match target {
             CredentialTarget::JcodeAnthropic => (
                 crate::backend::jcode::resolve_source_home(cwd).join("auth.json"),
                 "jcode provider `claude`",
                 "jcode login claude",
+                "ANTHROPIC_API_KEY",
             ),
             CredentialTarget::JcodeOpenAi => (
                 crate::backend::jcode::resolve_source_home(cwd).join("openai-auth.json"),
                 "jcode provider `openai`",
                 "jcode login openai",
+                "OPENAI_API_KEY",
             ),
         };
-        if let Verdict::Expired(reason) = inspect_file(&path, target, now_ms) {
+        let api_key_present = config.env.get(api_key).map_or_else(
+            || std::env::var_os(api_key).is_some_and(|value| !value.is_empty()),
+            |value| !value.is_empty(),
+        );
+        if !api_key_present && let Verdict::Expired(reason) = inspect_file(&path, target, now_ms) {
             failures.push(format!(
                 "  - {label} ({}): {reason}; run `{login}`",
                 path.display()
@@ -294,12 +219,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
         let path = temp.path().join("credentials.json");
         for (field, target, prefix, suffix) in [
-            (
-                "refreshToken",
-                CredentialTarget::ClaudeCli,
-                r#"{"claudeAiOauth":{"expiresAt":1"#,
-                "}}",
-            ),
             (
                 "refresh",
                 CredentialTarget::JcodeAnthropic,
@@ -347,14 +266,7 @@ mod tests {
 
     #[test]
     fn backend_eligibility_preserves_executor_selection() {
-        for sdk in [
-            None,
-            Some("jcode"),
-            Some("claude"),
-            Some("opencode"),
-            Some("unsupported"),
-            Some(""),
-        ] {
+        for sdk in [None, Some("jcode"), Some("unsupported"), Some("")] {
             for command in [vec![], vec!["cat".to_string()]] {
                 let bypass = match sdk {
                     None => !command.is_empty(),
@@ -452,12 +364,5 @@ mod tests {
                 1
             );
         }
-        assert!(
-            inspect_file(
-                &temp.path().join("missing"),
-                CredentialTarget::ClaudeCli,
-                now
-            ) == Verdict::Unknown
-        );
     }
 }

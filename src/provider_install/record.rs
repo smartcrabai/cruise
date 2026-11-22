@@ -163,10 +163,10 @@ mod tests {
         let path = dir.path().join("install.json");
         let mut record = InstallRecord {
             schema: 1,
-            provider: "claude".into(),
+            provider: "jcode".into(),
             version: "old".into(),
             target: "test".into(),
-            relative_path: "old/claude".into(),
+            relative_path: "old/jcode".into(),
             sha256: "hash".into(),
             len: 1,
             mtime_unix_nanos: 1,

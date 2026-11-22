@@ -1,3 +1,3 @@
-Feature: Undefined SDK model steps cannot silently pass
+Feature: Undefined Jcode model steps cannot silently pass
   Scenario: Undefined contract is rejected by native fail_on_skipped
-    Given this deliberately undefined SDK model contract step
+    Then this deliberately undefined Jcode model contract step

@@ -93,7 +93,7 @@ command:                   # LLM invocation command (mutually exclusive with `sd
 # sdk: jcode              # Use jcode-sdk (the fallback only when neither
                           # `command` nor `sdk` remains set after applicable
                           # `default.yaml` layers; see SDK Mode)
-# sdk: claude             # Use claude-agent-sdk to drive the claude CLI
+# sdk: jcode is the only supported SDK value.
 
 description: |             # one-line summary shown next to the filename in selectors (optional)
   Team-shared review-heavy flow with auto-PR.
@@ -102,7 +102,7 @@ model: sonnet             # default model for all prompt steps (optional)
 # In SDK mode, arrays use the first model, then fall back in order.
 # model: [sonnet, opus, gpt-5.5]
 plan_model: opus          # model used for the built-in plan step (optional)
-# subagent_model: haiku   # SDK-only: one subagent model, string or {sdk: claude, model: haiku}
+# subagent_model: claude/claude-haiku-4-5 # Jcode only: one plain model string
 languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
   plan: English           # language used by built-in planning prompts
@@ -223,7 +223,7 @@ pr_body_template: |
 <a id="environment-variables"></a>
 ### 环境变量
 
-`CRUISE_JCODE_CLI_PATH`、`CRUISE_CLAUDE_CLI_PATH` 和 `CRUISE_OPENCODE_CLI_PATH` 通过 Cruise 进程环境指定提供商可执行文件。它们不是工作流配置键，不能通过工作流 `env:` 提供。
+`CRUISE_JCODE_CLI_PATH` 通过 Cruise 进程环境指定 jcode 可执行文件。它不是工作流配置键，不能通过工作流 `env:` 提供。
 
 环境变量可以在工作流级别和步骤级别设置。步骤级别的值会覆盖工作流级别的值，但仅对该步骤生效。并行子项还增加了第三层：工作流 < 并行块 < 子项。值支持模板变量替换；每个子项都基于进入该块前的变量解析自身的值。
 
@@ -234,7 +234,7 @@ pr_body_template: |
 | `CRUISE_MODEL` | `model` | 模型 |
 | `CRUISE_PLAN_MODEL` | `plan_model` | 模型 |
 | `CRUISE_SUBAGENT_MODEL` | `subagent_model` | 模型条目 |
-| `CRUISE_SDK` | `sdk` | 文本 |
+| `CRUISE_SDK` | `sdk` | 文本（仅 `jcode`） |
 | `CRUISE_COMMAND` | `command` | JSON 数组 |
 | `CRUISE_MAX_RETRIES` | `max_retries` | 整数 |
 | `CRUISE_INTERACTIVE_PLANNING` | `interactive_planning` | 布尔值 |
@@ -340,13 +340,13 @@ JSON 使用相同的键名和值类型，例如：
 <a id="rate-limit-retry"></a>
 ## 速率限制重试
 
-在没有 SDK 回退策略的情况下，如果命令的 stderr 包含表示速率限制的措辞，或包含独立的 `429` 标记（而非偶然出现的 `429` 子字符串），cruise 会采用指数退避，在同一模型上重试。SDK 后端还会将 `usage limit`、`session limit` 和 `overloaded` 视为限制：
+在没有 jcode SDK 回退策略的情况下，如果命令的 stderr 包含表示速率限制的措辞，或包含独立的 `429` 标记（而非偶然出现的 `429` 子字符串），cruise 会采用指数退避，在同一模型上重试。jcode SDK 还会将 `usage limit`、`session limit` 和 `overloaded` 视为限制：
 
 - 初始延迟：2 秒
 - 最大延迟：60 秒
 - 默认重试次数：5（可通过 `--rate-limit-retries` 覆盖）
 
-SDK 后端还支持通过可选的 `retry:` 块，或包含回退条目的工作流级模型数组来配置回退策略。显式的 `retry:` 块可用于配置该策略：
+jcode SDK 还支持通过可选的 `retry:` 块，或包含回退条目的工作流级模型数组来配置回退策略。显式的 `retry:` 块可用于配置该策略：
 
 ```yaml
 retry:
@@ -361,4 +361,4 @@ retry:
       - provider-c/*
 ```
 
-启用 SDK 重试策略后，遇到 429、5xx、除 429 以外的 4xx 或网络故障时，会立即切换到下一个回退模型；只有在没有可用回退项时才会在同一模型上重试。只要声明了 `retry:`，即使 `model_fallback: false` 或回退链为空，相关错误分类和退避仍然生效。要保留以往的行为，请省略 `retry:` 块并使用标量或未设置的模型字段。包含回退项的工作流级模型数组会启用模型回退。`command:` 后端始终使用以往的行为，并忽略 `retry:`。
+启用 jcode SDK 重试策略后，遇到 429、5xx、除 429 以外的 4xx 或网络故障时，会立即切换到下一个回退模型；只有在没有可用回退项时才会在同一模型上重试。只要声明了 `retry:`，即使 `model_fallback: false` 或回退链为空，相关错误分类和退避仍然生效。要保留以往的行为，请省略 `retry:` 块并使用标量或未设置的模型字段。包含回退项的工作流级模型数组会启用模型回退。`command:` 后端始终使用以往的行为，并忽略 `retry:`。

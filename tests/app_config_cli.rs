@@ -393,16 +393,14 @@ fn parallelism_update_preserves_workflow_categories_in_yaml_and_json() {
 }
 
 #[test]
-fn config_show_and_parallelism_update_preserve_mixed_sdk_candidates_in_both_formats() {
+fn config_show_and_parallelism_update_preserve_model_candidates_in_both_formats() {
     let expected_model = serde_json::json!([
         "openai/gpt-6.1-sol:medium",
-        {"sdk": "claude", "model": "claude-sonnet-5-5:medium"},
+        "claude/claude-opus-4-5:medium",
         "openrouter/z-ai/glm-5.3-flash:high"
     ]);
-    let expected_plan = serde_json::json!([
-        {"sdk": "claude", "model": "planning-primary:high"},
-        "openai/planning-fallback:medium"
-    ]);
+    let expected_plan =
+        serde_json::json!(["planning-primary:high", "openai/planning-fallback:medium"]);
     for extension in ["json", "yaml"] {
         let fixture = Fixture::new();
         let input = serde_json::json!({
@@ -459,7 +457,7 @@ fn config_show_and_parallelism_update_preserve_mixed_sdk_candidates_in_both_form
 
 #[cfg(unix)]
 #[test]
-fn command_workflow_rejects_inherited_app_sdk_fallback_before_spawning() {
+fn command_workflow_rejects_sdk_qualified_app_fallback_before_spawning() {
     for field in ["model", "plan_model"] {
         let fixture = Fixture::new();
         cruise::test_support::init_git_repo(&fixture.project);
@@ -486,8 +484,9 @@ fn command_workflow_rejects_inherited_app_sdk_fallback_before_spawning() {
         assert!(!output.status.success(), "{}", output_text(&output));
         let diagnostic = output_text(&output);
         assert!(
-            diagnostic.contains("command") && diagnostic.to_ascii_lowercase().contains("sdk"),
-            "composed {field} collision must identify command and SDK: {diagnostic}"
+            diagnostic
+                .contains("SDK-qualified model objects are unsupported; use a plain model string"),
+            "{field} must identify the rejected SDK-qualified model form: {diagnostic}"
         );
         assert!(!marker.exists(), "invalid composition spawned its command");
     }

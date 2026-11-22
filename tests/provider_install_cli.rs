@@ -33,17 +33,15 @@ fn status_is_offline_and_read_only_when_no_install_is_recorded() -> std::io::Res
     let temp = TempDir::new()?;
     let root = temp.path();
     fs::create_dir(root.join("bin"))?;
-    for provider in ["jcode", "claude", "opencode"] {
-        let path = root.join("bin").join(provider);
-        fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\necho invoked >> '{}'\n",
-                root.join("executed").display()
-            ),
-        )?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
-    }
+    let path = root.join("bin/jcode");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\necho invoked >> '{}'\n",
+            root.join("executed").display()
+        ),
+    )?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     let output = run(root, &["install", "--status"]);
     assert!(
         output.status.success(),
@@ -51,9 +49,7 @@ fn status_is_offline_and_read_only_when_no_install_is_recorded() -> std::io::Res
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for provider in ["jcode", "claude", "opencode"] {
-        assert!(stdout.contains(provider), "missing {provider}: {stdout}");
-    }
+    assert!(stdout.contains("jcode"), "missing jcode: {stdout}");
     for column in [
         "PROVIDER",
         "VERSION",
@@ -65,12 +61,12 @@ fn status_is_offline_and_read_only_when_no_install_is_recorded() -> std::io::Res
         assert!(stdout.contains(column), "missing {column}: {stdout}");
     }
     assert!(!stdout.contains("PINNED"), "{stdout}");
-    for line in stdout.lines().filter(|line| {
-        ["jcode", "claude", "opencode"].contains(&line.split_whitespace().next().unwrap_or(""))
-    }) {
-        assert_eq!(line.split_whitespace().nth(1), Some("-"), "{line}");
-        assert_eq!(line.split_whitespace().last(), Some("path"), "{line}");
-    }
+    let row = stdout
+        .lines()
+        .find(|line| line.split_whitespace().next() == Some("jcode"))
+        .unwrap_or_else(|| panic!("missing jcode row: {stdout}"));
+    assert_eq!(row.split_whitespace().nth(1), Some("-"), "{row}");
+    assert_eq!(row.split_whitespace().last(), Some("path"), "{row}");
     assert!(!root.join("data").exists());
     assert!(!root.join("executed").exists());
     Ok(())

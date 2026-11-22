@@ -59,7 +59,7 @@ pub enum StreamChunk {
 
 /// Buffers streamed token fragments and emits them as complete lines, so a
 /// line-oriented [`crate::step::prompt::StreamCallbacks::on_stdout`] sees the
-/// same shape from an SDK backend as from the command backend.
+/// same shape from the jcode SDK backend as from the command backend.
 pub(crate) struct LineBuffer {
     pending: String,
 }

@@ -33,7 +33,7 @@ When `output_file` is set, cruise saves the completed backend response in the se
 
 An `instruction` is a message shown to the user immediately before a step runs, not a system prompt. If `{input}` is empty, the message is used as a multiline input prompt and the submitted text becomes `{input}`; otherwise it is displayed without being sent to the LLM.
 
-Prompt steps are commit-guarded by default. SDK prompts also receive the implicit Git shell denials described under [Tool restrictions](sdk.md#tool-restrictions). `allow_commit: true` removes those denials and the guard, but not explicit `disallowed_tools`, and never grants broader permissions. Set it only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and all SDK backends (`jcode`, `claude`, and `opencode`), while command and option steps remain unaffected.
+Prompt steps are commit-guarded by default. SDK prompts also receive the implicit Git shell denials described under [Tool restrictions](sdk.md#tool-restrictions). `allow_commit: true` removes those denials and the guard, but not explicit `disallowed_tools`, and never grants broader permissions. Set it only when a prompt intentionally needs to create a commit or otherwise move Git `HEAD`; omitted and `false` values keep the guard enabled. The guard covers classic `command:` mode and `sdk: jcode`, while command and option steps remain unaffected.
 Set `allow_commit: true` on the actual prompt, not on a `group:` or `workflow_call:` invocation.
 
 For longer prompts, load the prompt body from a file with `prompt_file`:

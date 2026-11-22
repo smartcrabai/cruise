@@ -42,12 +42,6 @@ impl Fixture {
         init_git_repo(&repo);
         let this = Self { root, repo };
         fs::create_dir_all(this.path("bin")).unwrap_or_else(|error| panic!("{error}"));
-        for backend in ["claude", "opencode"] {
-            write_executable_script(
-                &this.path(&format!("bin/{backend}")),
-                "#!/bin/sh\nexit 91\n",
-            );
-        }
         write_executable_script(
             &this.path("bin/jcode"),
             &format!(
@@ -70,7 +64,7 @@ impl Fixture {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_cruise"));
         for (key, _) in std::env::vars_os() {
             let name = key.to_string_lossy();
-            if ["CRUISE_", "JCODE_", "CLAUDE", "ANTHROPIC_", "OPENAI_"]
+            if ["CRUISE_", "JCODE_", "ANTHROPIC_", "OPENAI_"]
                 .iter()
                 .any(|p| name.starts_with(p))
             {

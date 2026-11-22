@@ -14,9 +14,9 @@ return labels matching `[A-Za-z_][A-Za-z0-9_-]*`. Nonempty declarations are
 invalid in directly loaded roots, and `returns` is forbidden in user/project
 `default.yaml`. See [return labels](steps.md#workflow-call-return-labels).
 
-`model` and `plan_model` accept a single string or an ordered array mixing strings and `{sdk: claude, model: claude-sonnet-5-5:medium}` objects. Strings inherit the effective workflow SDK, defaulting to jcode. Objects override only their own candidate when `sdk` is present, otherwise they inherit that workflow SDK too. This also works in application `config.json` / `config.yaml` and layered `default.yaml`; `planModel` is an application-config alias. Objects are array-only, require a nonblank `model` and at least one of `sdk` or nonempty `disabled_during`, reject unknown keys and explicit null SDKs, and cannot coexist with `command` anywhere in either list. String-only command arrays retain first-entry behavior. Environment model overrides replace the whole list. See `sdk.md` for fallback precedence, SDK-owned resume IDs, capability validation across candidates, and full window semantics.
+`model` and `plan_model` accept a single string or an ordered array mixing strings and `{model, disabled_during?}` objects. String entries use the effective workflow SDK, defaulting to jcode. Objects may declare an unavailable-time schedule, but an `sdk` field is rejected with `SDK-qualified model objects are unsupported; use a plain model string`. This also works in application `config.json` / `config.yaml` and layered `default.yaml`; `planModel` is an application-config alias. Model objects are array-only, require a nonblank `model`, reject unknown keys, and cannot coexist with `command` anywhere in either list. String-only command arrays retain first-entry behavior. Environment model overrides replace the whole list. See `sdk.md` for fallback precedence and window semantics.
 
-`disabled_during` is a nonempty list of user-declared unavailable windows on `model` / `plan_model` array objects, for example `{model: provider/main, disabled_during: ["mon-fri 01:00-04:00"]}`. Grammar is `[days ]HH:MM-HH:MM[ offset]`: case-insensitive `mon`..`sun`, comma lists and inclusive wrapping ranges, daily when omitted. UTC is the default; `UTC`, `Z`, and fixed offsets up to `+14:00` / `-14:00` are supported, not IANA zones, local time, or DST. Windows are start-inclusive/end-exclusive; `24:00` is end-only, equal times are invalid, and `00:00-24:00` means all day. Overnight windows use their start weekday. These declarations exclude candidates independently of cooldown and retry budget, not by inspecting prices. They are checked at prompt startup and fallback switches, never by interrupting a stream; no usable candidates means an error. Matching SDK/base-model identities in retry chains share exclusions. A step model override inherits the workflow list and its windows only when its resolved SDK and base model both match the primary candidate; other overrides do not. `subagent_model`, step window fields, and windows on string-only retry-chain entries are unsupported; capability checks still include disabled candidates.
+`disabled_during` is a nonempty list of user-declared unavailable windows on `model` / `plan_model` array objects, for example `{model: provider/main, disabled_during: ["mon-fri 01:00-04:00"]}`. Grammar is `[days ]HH:MM-HH:MM[ offset]`: case-insensitive `mon`..`sun`, comma lists and inclusive wrapping ranges, daily when omitted. UTC is the default; `UTC`, `Z`, and fixed offsets up to `+14:00` / `-14:00` are supported, not IANA zones, local time, or DST. Windows are start-inclusive/end-exclusive; `24:00` is end-only, equal times are invalid, and `00:00-24:00` means all day. Overnight windows use their start weekday. These declarations exclude candidates independently of cooldown and retry budget, not by inspecting prices. They are checked at prompt startup and fallback switches, never by interrupting a stream; no usable candidates means an error. Retry chains remain string-only, and unavailable windows are shared by matching jcode base-model references. A step model override inherits the workflow list and its windows only when its base model matches the primary candidate; other overrides do not. `subagent_model`, step window fields, and windows on string-only retry-chain entries are unsupported; capability checks still include disabled candidates.
 
 ```yaml
 command:                  # LLM invocation command (array). Mutually exclusive with `sdk`.
@@ -28,8 +28,7 @@ command:                  # LLM invocation command (array). Mutually exclusive w
 # sdk: jcode              # Alternative backend: use jcode-sdk (the fallback
                           # when neither `command` nor `sdk` remains set in the
                           # resolved workflow after applicable `default.yaml` layers; see sdk.md).
-# sdk: claude             # Alternative backend: drive the claude CLI in-process
-                          # via claude-agent-sdk (see sdk.md).
+# sdk: jcode is the only supported SDK value.
 
 description: My workflow  # Optional: shown alongside the file name in config selectors
 
@@ -40,7 +39,7 @@ plan_model: opus          # Optional: model for the built-in plan step
                           # (in SDK mode, a "provider/model[:effort]" reference)
                           # In SDK mode, [primary, fallback, ...] is an implicit chain
 max_retries: 4           # Optional: global graph edge traversal ceiling (default: 3)
-# subagent_model: haiku   # SDK-only: one string or {sdk: claude, model: haiku}; no effort
+# subagent_model: haiku   # Jcode only: one plain model string
 interactive_planning: true # Optional: enable SDK plan tools (default: true)
 permission: full           # Optional: prompt permission read-only | edit | full (default: full)
 # disallowed_tools: [web, "shell:npm publish"] # Optional: SDK prompt deny list
@@ -80,11 +79,11 @@ create_pr: true           # Optional, workflow-only: automatically commit/push a
 force_exec: false         # Optional: execute direct plan entry points in place (default: false)
 
 ```
-`steps` is required. Setting both `command` and `sdk` is a validation error (an empty `command` array counts as "not set"); the `jcode` backend is used only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied. When `sdk` is set it must be `jcode`, `claude`, or `opencode` — any other value is a validation error. `steps` is held as an `IndexMap`, so declaration order is the execution order. When a group's `if.file-changed` target is outside the group, its `max_retries` requires one additional global loop-protection budget unit; the group example above uses `max_retries: 3` with a top-level `max_retries: 4`.
+`steps` is required. Setting both `command` and `sdk` is a validation error (an empty `command` array counts as "not set"); the `jcode` backend is used only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied. When `sdk` is set it must be `jcode`; any other value fails with `unsupported SDK "{value}"; only "jcode" is supported`, substituting the rejected value. `steps` is held as an `IndexMap`, so declaration order is the execution order. When a group's `if.file-changed` target is outside the group, its `max_retries` requires one additional global loop-protection budget unit; the group example above uses `max_retries: 3` with a top-level `max_retries: 4`.
 
 Unknown top-level keys are silently ignored, so obsolete fields from older
 configs (for example `worktree:` or `state:`) still load without error. Step
-configuration, `retry:` blocks, MCP server entries, and SDK-qualified objects
+configuration, `retry:` blocks, MCP server entries, and model-array objects
 inside model arrays reject unknown fields. A typo at the workflow level is
 accepted and has no effect, while the same typo inside these strict structures
 fails the load (see [steps.md](steps.md)).
@@ -178,28 +177,24 @@ does not, Cruise stops before starting jcode and creates the user-level
 template contains `model: null`; replace it with an available
 `provider/model[:effort]` reference or bare model. Cruise never creates a
 project defaults file, and it does not auto-create this template during draft,
-dry-run, workflow discovery, or non-jcode execution. See [SDK backends](sdk.md)
+dry-run, workflow discovery, or non-jcode execution. See [jcode SDK](sdk.md)
 for model precedence and recovery details.
 
-OpenCode accepts `provider/model[:effort]` or native `provider/model#variant`, never both suffixes together. Common tiers (`low`/`medium`/`high`/`xhigh`/`max`) and aliases (`min`/`minimal`/`1`, `med`/`2`, `3`, `4`) are case-insensitive, reserved trailing suffixes. Cruise validates effort against the live model catalog; unsupported/ambiguous effort, an unlisted model, or tierless `:off`/`:none`/`:0`/`:5` fails explicitly without fallback, not by guessing or downgrading. Unknown suffixes such as `:free`/`:2026` remain in the ID. Native variants and omitted models retain existing behavior, including OpenCode's configured default. This applies to workflow, planning, step, array, and resumed model selections. See [SDK details](sdk.md) and [the OpenCode example](../examples/opencode-flow.yaml).
 
 ## `command` vs `sdk`
 
-There are four prompt-execution backends:
+There are two prompt-execution modes:
 
 - `command:` — spawn an external CLI (e.g. `claude -p`) and write the prompt to its stdin.
-- `sdk: jcode` — use the jcode SDK; the fallback only when neither `command` nor `sdk` remains set in the resolved workflow after applicable `default.yaml` layers are applied. Requires jcode v0.88.0 or newer; Cruise validates the SDK handshake and required capabilities when it starts. `model` / `plan_model` / per-step `model` accept `"provider/model[:effort]"` or a bare model reference. See [sdk.md](sdk.md) for details.
-- `sdk: claude` — drive the `claude` CLI in-process via claude-agent-sdk. Model references are plain `claude --model` names with an optional `:effort` suffix; authentication is the claude CLI's own. See [sdk.md](sdk.md) for details.
-
-- `sdk: opencode` - use the built-in Rust V2 client with a locally managed OpenCode CLI. Install and authenticate that CLI separately. Models use `provider/model[:effort]` with catalog validation or native `provider/model#variant`; no V1 fallback or external server connection is provided. `computer_use: true` is unsupported. See [sdk.md](sdk.md).
+- `sdk: jcode` — use the jcode SDK; this is the fallback only when neither `command` nor `sdk` remains set after applicable `default.yaml` layers. Requires jcode v0.88.0 or newer; Cruise validates SDK handshake capabilities at startup. Model fields accept `"provider/model[:effort]"` or a bare model reference. See [sdk.md](sdk.md).
 
 ## `mcp_servers`
 
-`mcp_servers` is an optional top-level map of MCP server names to Claude Code server entries. It applies to every SDK prompt run, including workflow and `after-pr` steps, planning turns, session-title generation, and PR-description generation. It is not a per-step setting, but prompt `disallowed_tools: [mcp]` or `["mcp:<name>"]` can exclude workflow entries. User-level backend MCP configuration and Cruise's own tools are unaffected. A called workflow's own top-level value is ignored in favor of the caller's value.
+`mcp_servers` is an optional top-level map of MCP server names to jcode server entries. It applies to every jcode prompt run, including workflow and `after-pr` steps, planning turns, session-title generation, and PR-description generation. Only local stdio is supported; HTTP and SSE entries fail config validation. It is not a per-step setting, but prompt `disallowed_tools: [mcp]` or `["mcp:<name>"]` can exclude workflow entries. User-level jcode MCP configuration and Cruise's own tools are unaffected. A called workflow's own top-level value is ignored in favor of the caller's value.
 
-Stdio entries omit `type` or set `type: stdio`, and require a non-blank `command`. HTTP and SSE entries use `type: http` or `type: sse` and require an `http://` or `https://` URL. Every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, must support the transport: stdio supports all SDKs, Streamable HTTP requires Claude or OpenCode, and legacy SSE requires Claude. Changing the workflow SDK does not override SDK-qualified objects. Stdio entries cannot set `url` or provide non-empty `headers`; remote entries cannot set `command` or provide non-empty `args` or `env`. Names must use only ASCII letters, digits, `_`, or `-`, and `cruise` is reserved. Unknown entry keys are rejected. A non-empty map is invalid with `command:`.
+Stdio entries omit `type` or set `type: stdio`, and require a nonblank `command`. They cannot set `url` or provide non-empty `headers`. Names must use only ASCII letters, digits, `_`, or `-`; `cruise` is reserved. Unknown entry keys are rejected. A non-empty map is invalid with `command:`.
 
-Values are passed verbatim without Cruise `{variable}` substitution. jcode writes workflow servers into the private session copy of `$JCODE_HOME/mcp.json`, preserving the source and preferring workflow entries over same-named entries in that source file. jcode's later Claude Code and project-local config layers can override them; `${VAR}` and `${VAR:-default}` are expanded from the runtime environment, including workflow `env:` values. Claude receives workflow entries through a per-run private JSON file with mode `0600` on Unix (an owner-only ACL on Windows), passed by path via `--mcp-config`; Cruise's own in-process tools are passed separately as the SDK's inline `--mcp-config` value, and the user's Claude MCP config remains enabled. `${VAR}` expansion for the Claude backend is not guaranteed.
+Values are passed verbatim without Cruise `{variable}` substitution. jcode writes workflow servers into the private session copy of `$JCODE_HOME/mcp.json`, preserving the source and preferring workflow entries over same-named entries in that source file. jcode's later Claude Code and project-local config layers can override them; `${VAR}` and `${VAR:-default}` are expanded from the runtime environment, including workflow `env:` values.
 
 `computer_use` defaults to `false` and is supported only with the `jcode`
 backend. When enabled, it allows prompt turns to use jcode's macOS computer-use
@@ -258,19 +253,21 @@ Model used by the built-in plan step (driven by `cruise plan`). Falls back to `m
 
 ## `subagent_model`
 
-Optional default model for spawned agents on Claude/jcode prompt steps and
-planning's plan/fix/ask turns. Accepts one nonblank string or an object such as
-`{sdk: claude, model: haiku}`, never an array or fallback chain. Strings resolve
-against the workflow SDK (jcode when omitted); objects target only their named
-SDK's attempts. A step value overrides this default, and the resolved SDK must
-have an applicable model candidate. Recognized `:effort` suffixes, OpenCode
-subagent models, and `command:` backends are rejected.
+Optional default model for spawned agents on jcode prompt steps and
+planning's plan/fix/ask turns. Accepts one nonblank string, never an object,
+array, or fallback chain. A step value overrides this default; the model must
+be applicable to the jcode prompt.
 
-Layered `default.yaml` and the `CRUISE_SUBAGENT_MODEL` environment override
-support this field; application model defaults do not. Title generation, PR
-metadata, `workflow generate`, and `workflow make` do not use it. A called workflow's top-level
-value is ignored, but its step overrides survive. See [sdk.md](sdk.md) for
-Claude's forced model, jcode's swarm default, and fallback behavior.
+Jcode sets the session's swarm default using `Agents` with `swarm` before the
+prompt. A worker spawn with an explicit `model` wins over that default. This is
+not a forced model and does not use jcode's user-invoked `/subagent` model
+setting. Recognized `:effort` suffixes are rejected.
+
+Layered `default.yaml` and `CRUISE_SUBAGENT_MODEL` support this field;
+application model defaults do not. Title generation, PR metadata,
+`workflow generate`, and `workflow make` do not use it. A called workflow's
+top-level value is ignored, but its step overrides survive. See [sdk.md](sdk.md)
+for jcode's swarm default and fallback behavior.
 
 ## `description`
 
@@ -429,13 +426,13 @@ actions are skipped with a reason.
 
 ## Rate-limit retry
 
-Without a retry policy, cruise retries the same model with exponential backoff while its retry budget and delay permit. Command mode retries on HTTP 429 / rate-limit text in stderr; SDK backends retry any provider failure classified as a limit — HTTP 429, `rate limit` / `too many requests` text, `usage limit`, `session limit`, or `overloaded`. Both use the same schedule:
+Without a retry policy, cruise retries the same model with exponential backoff while its retry budget and delay permit. Command mode retries on HTTP 429 / rate-limit text in stderr; the jcode SDK retries provider failures classified as limits — HTTP 429, `rate limit` / `too many requests` text, `usage limit`, `session limit`, or `overloaded`. Both use the same schedule:
 
 - Initial delay: 2 seconds
 - Max delay: 60 seconds
 - Default retry count: 5 (override with `--rate-limit-retries`)
 
-The `retry:` block is accepted by configuration validation for any backend but affects retry behavior only for SDK backends. In SDK mode, declaring it,
+The `retry:` block is accepted by configuration validation for any backend but affects retry behavior only for the jcode SDK. In jcode mode, declaring it,
 or using a workflow-level model array with fallback entries, widens rate-limit
 handling into a fallback policy: 5xx, HTTP 4xx other than 429, 401, 403, 407,
 and 408, and network failures (including request-send transport errors and SDK setup timeouts before prompt acceptance) become retryable too,
@@ -478,10 +475,9 @@ enable switching. The
 wider classification and the new backoff schedule still apply, so omit the
 block entirely and use scalar or unset model fields to keep the historical
 behavior.
-For OpenCode, only network-class local V2 API setup/transport failures before prompt submission bypass the retry barrier; rate-limit, client, and server-class local responses do not.
 
 ```yaml
-retry:                    # Optional; accepted by validation for any backend, honored only by SDK backends
+retry:                    # Optional; accepted by validation for any backend, honored only by the jcode SDK
                           # Command mode ignores this block and keeps the historical rate-limit retry loop
   base_delay_ms: 500      # Backoff base (default 500); delay is min(base * 2^(attempt-1), 8s) with jitter
   max_delay_ms: 300000    # Waiting cap (default 300000). The computed backoff is already capped at 8s,

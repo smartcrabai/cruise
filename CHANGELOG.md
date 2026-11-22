@@ -4,6 +4,8 @@
 
 ### Breaking
 
+- Remove the `claude` and `opencode` SDK backends; configurations must use `sdk: jcode` or external `command:` mode. Workflow MCP servers now support only `stdio`; HTTP/SSE entries are no longer supported.
+
 - Require a fresh `cruise webui` login URL: it carries a single-use five-minute nonce, not the API token; successful login sets a separate in-memory browser session cookie, while bare-origin bookmarks still show a 401 page.
 - Replace separate CLI and WebUI execution with a per-user resident daemon. Session commands autostart it; workflow overrides and working directory apply per request, while process-level environment comes from the daemon.
 - Remove the terminal keyboard client. Bare `cruise` on a TTY opens `cruise list`; `cruise ssh <host>` without forwarded arguments runs remote `cruise list`.

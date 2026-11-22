@@ -49,20 +49,19 @@ Prompt and `prompt_file` steps can declare `quality_gates` to check successful w
 
 `subagent_model` overrides the workflow's spawned-agent model for a `prompt`
 or `prompt_file` step, including group steps, `after-pr`, `github-review`, and
-parallel prompt children. It takes one nonblank string or `{sdk, model}` object,
-not an array, and supports only Claude/jcode without recognized `:effort`
-suffixes. Strings inherit the workflow SDK, even when the step's model candidates
-include another SDK; only matching-SDK attempts receive the value. A value with
-no applicable candidate is rejected. Command/option steps, parallel wrappers,
-group call sites, `workflow_call` call sites, and `squash-merge` cannot set it.
+parallel prompt children. It accepts exactly one nonblank model string; object,
+array, and fallback-chain forms are invalid. Only jcode prompts support it,
+and recognized `:effort` suffixes are rejected. A value with no applicable
+model is rejected. Command/option steps, parallel wrappers, group call sites,
+`workflow_call` call sites, and `squash-merge` cannot set it.
 Called workflows retain per-step values but not their top-level default.
-See [sdk.md](sdk.md) for backend enforcement and scope.
+See [sdk.md](sdk.md) for jcode enforcement and scope.
 
 ```yaml
 steps:
   planning:
-    model: claude-opus-4-5     # Optional: per-step model override (jcode/Claude: "provider/model[:effort]"; OpenCode: "provider/model#variant")
-    # subagent_model: {sdk: claude, model: haiku} # Optional: Claude/jcode subagent override
+    model: claude/claude-opus-4-6:high # Optional: jcode provider/model[:effort]
+    # subagent_model: claude/claude-haiku-4-5 # Optional: one plain jcode model
     instruction: |             # Optional: message shown to the user before the step runs
       Describe the feature you want to build.
     prompt: |                  # Use either prompt or prompt_file
@@ -113,7 +112,7 @@ steps:
     prompt: "Fix the issue and commit the changes"
     allow_commit: true
 ```
-Omitting the field (or setting it to `false`) keeps the guard enabled; false values are omitted when configs are serialized. Setting it to `true` bypasses all commit-guard behavior and implicit Git shell denials for that prompt, but never widens `permission` or removes explicit `disallowed_tools`. This applies to prompt execution through classic `command:` prompts and `sdk: jcode` / `sdk: claude` / `sdk: opencode`, except that command backends do not enforce implicit shell denials. Command and option steps are unaffected. A guarded `HEAD` movement is reported as a commit-guard violation and the step fails, even when cruise can restore the original branch reference without touching the index or worktree. `allow_commit: true` is rejected on `group:` and `workflow_call:` call sites; configure the expanded prompt step instead.
+Omitting the field (or setting it to `false`) keeps the guard enabled; false values are omitted when configs are serialized. Setting it to `true` bypasses all commit-guard behavior and implicit Git shell denials for that prompt, but never widens `permission` or removes explicit `disallowed_tools`. This applies to prompt execution through classic `command:` prompts and `sdk: jcode`; `command:` backends do not enforce implicit shell denials. Command and option steps are unaffected. A guarded `HEAD` movement is reported as a commit-guard violation and the step fails, even when cruise can restore the original branch reference without touching the index or worktree. `allow_commit: true` is rejected on `group:` and `workflow_call:` call sites; configure the expanded prompt step instead.
 
 Unless `allow_commit: true`, SDK prompts deny `git commit`, `merge`, `rebase`,
 `cherry-pick`, `revert`, `am`, `pull`, `push`, `reset`, `switch`, `checkout -b`,

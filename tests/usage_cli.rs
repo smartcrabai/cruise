@@ -81,14 +81,14 @@ fn fixture_records() -> Vec<Value> {
         record(
             "one",
             "build",
-            "claude",
+            "jcode",
             Some("sonnet"),
             &json!({"status":"reported", "input_tokens":10, "output_tokens":4, "cost_usd":0.5}),
         ),
         record(
             "one",
             "build",
-            "claude",
+            "jcode",
             Some("sonnet"),
             &json!({"status":"reported", "input_tokens":20, "output_tokens":6, "cost_usd":0.25}),
         ),
@@ -130,8 +130,8 @@ fn usage_json_groups_by_step_backend_model() {
     assert_eq!(
         value,
         json!({"schema":1, "group_by":["step","backend","model"], "rows":[
-        {"step":"build", "backend":"claude", "model":"sonnet", "calls":2, "unavailable_calls":0, "reported_calls":2, "input_tokens":30, "output_tokens":10, "cache_read_input_tokens":null, "cache_creation_input_tokens":null, "reasoning_tokens":null, "total_tokens":40, "cost_usd":0.75},
         {"step":"build", "backend":"command", "model":null, "calls":1, "unavailable_calls":1, "reported_calls":0, "input_tokens":null, "output_tokens":null, "cache_read_input_tokens":null, "cache_creation_input_tokens":null, "reasoning_tokens":null, "total_tokens":null, "cost_usd":null},
+        {"step":"build", "backend":"jcode", "model":"sonnet", "calls":2, "unavailable_calls":0, "reported_calls":2, "input_tokens":30, "output_tokens":10, "cache_read_input_tokens":null, "cache_creation_input_tokens":null, "reasoning_tokens":null, "total_tokens":40, "cost_usd":0.75},
         {"step":"test", "backend":"jcode", "model":"model-b", "calls":1, "unavailable_calls":0, "reported_calls":1, "input_tokens":7, "output_tokens":3, "cache_read_input_tokens":null, "cache_creation_input_tokens":null, "reasoning_tokens":null, "total_tokens":10, "cost_usd":null}
     ], "malformed_lines":0, "unsupported_version_lines":0})
     );
@@ -259,7 +259,7 @@ fn summarize_propagates_read_errors() {
 #[test]
 fn summarize_by_model_expands_by_model_entries_and_preserves_totals() {
     let f = Fixture::new();
-    f.write_records(&[record("one", "build", "claude", Some("requested"), &json!({"status":"reported", "input_tokens":300, "by_model":[{"model":"haiku", "input_tokens":100}, {"model":"sonnet", "input_tokens":200}]}))]);
+    f.write_records(&[record("one", "build", "jcode", Some("requested"), &json!({"status":"reported", "input_tokens":300, "by_model":[{"model":"haiku", "input_tokens":100}, {"model":"sonnet", "input_tokens":200}]}))]);
     let value = f.json(&["--by", "model"]);
     let rows = value["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
@@ -297,7 +297,7 @@ fn expanded_null_model_is_default_and_record_null_stays_null() {
         record(
             "one",
             "expanded",
-            "claude",
+            "jcode",
             Some("requested"),
             &json!({"status":"reported", "by_model":[{"model":null, "input_tokens":5}]}),
         ),
@@ -306,7 +306,7 @@ fn expanded_null_model_is_default_and_record_null_stays_null() {
     let text = f.success(&[]);
     assert!(
         text.lines()
-            .any(|line| line.starts_with("expanded  claude  (default)  ")),
+            .any(|line| line.starts_with("expanded  jcode  (default)  ")),
         "{text}"
     );
     assert!(
@@ -320,7 +320,7 @@ fn expanded_null_model_is_default_and_record_null_stays_null() {
     let csv = f.success(&["--format", "csv"]);
     assert!(
         csv.lines()
-            .any(|line| line.starts_with("expanded,claude,(default),")),
+            .any(|line| line.starts_with("expanded,jcode,(default),")),
         "{csv}"
     );
     assert!(
@@ -338,7 +338,7 @@ fn summarize_unavailable_is_null_not_zero() {
         record(
             "one",
             "mixed",
-            "claude",
+            "jcode",
             None,
             &json!({"status":"reported", "input_tokens":10}),
         ),
@@ -369,9 +369,9 @@ fn summarize_unavailable_is_null_not_zero() {
 fn summarize_total_tokens_requires_both_input_and_output_per_record() {
     let f = Fixture::new();
     f.write_records(&[
-        record("one", "build", "claude", None, &json!({"status":"reported", "input_tokens":100})),
-        record("one", "build", "claude", None, &json!({"status":"reported", "input_tokens":10, "output_tokens":5, "cache_read_input_tokens":40, "cache_creation_input_tokens":30, "reasoning_tokens":20})),
-        record("one", "partial", "claude", None, &json!({"status":"reported", "input_tokens":100})),
+        record("one", "build", "jcode", None, &json!({"status":"reported", "input_tokens":100})),
+        record("one", "build", "jcode", None, &json!({"status":"reported", "input_tokens":10, "output_tokens":5, "cache_read_input_tokens":40, "cache_creation_input_tokens":30, "reasoning_tokens":20})),
+        record("one", "partial", "jcode", None, &json!({"status":"reported", "input_tokens":100})),
     ]);
     let value = f.json(&["--by", "step"]);
     assert_eq!(value["rows"][0]["input_tokens"], 110);

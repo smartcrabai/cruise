@@ -662,8 +662,6 @@ impl WorkflowDefaults {
 #[derive(Debug, PartialEq, Eq)]
 enum BackendClass {
     Jcode,
-    Claude,
-    Opencode,
     Command,
     Unsupported,
 }
@@ -671,8 +669,6 @@ enum BackendClass {
 fn classify_backend<'a>(sdk: Option<&'a str>, command: &[String]) -> (BackendClass, &'a str) {
     match sdk {
         Some("jcode") => (BackendClass::Jcode, "jcode"),
-        Some("claude") => (BackendClass::Claude, "claude"),
-        Some("opencode") => (BackendClass::Opencode, "opencode"),
         Some(other) => (BackendClass::Unsupported, other),
         None if command.is_empty() => (BackendClass::Jcode, "jcode"),
         None => (BackendClass::Command, "command"),
@@ -1002,10 +998,10 @@ mod tests {
     fn project_sdk_replaces_user_command_pair() {
         let env = env();
         write(&env.user_file, "command: [mytool, -p]\n");
-        write(&env.project_file, "sdk: claude\n");
+        write(&env.project_file, "sdk: jcode\n");
         let mut config = workflow("");
         applied(&env, &mut config);
-        assert_eq!(config.sdk.as_deref(), Some("claude"));
+        assert_eq!(config.sdk.as_deref(), Some("jcode"));
         assert_eq!(config.command.len(), 0);
     }
 
@@ -1069,7 +1065,7 @@ mod tests {
     }
 
     #[test]
-    fn subagent_model_defaults_conflict_with_different_backend() {
+    fn subagent_model_defaults_conflict_with_command_backend() {
         let env = env();
         write(
             &env.project_file,
@@ -1078,7 +1074,7 @@ mod tests {
         let defaults = WorkflowDefaults::load(Some(env.project.path()))
             .unwrap_or_else(|error| panic!("{error}"));
         let mut resolution = WorkflowConfigResolution::from_yaml(
-            "sdk: claude\nsteps:\n  inspect:\n    prompt: inspect\n",
+            "command: [echo]\nsteps:\n  inspect:\n    prompt: inspect\n",
         )
         .unwrap_or_else(|error| panic!("{error}"));
         match defaults.apply_to(&mut resolution) {
@@ -1099,11 +1095,11 @@ mod tests {
         );
         let config = applied_with_presence(
             &env,
-            "sdk: claude\nsubagent_model: haiku\nsteps:\n  inspect:\n    prompt: inspect\n",
+            "sdk: jcode\nsubagent_model: openai/haiku\nsteps:\n  inspect:\n    prompt: inspect\n",
         );
         assert_eq!(
             serde_json::to_value(&config).unwrap_or_else(|error| panic!("{error}"))["subagent_model"],
-            "haiku"
+            "openai/haiku"
         );
     }
 
@@ -1285,30 +1281,10 @@ mod tests {
     }
 
     #[test]
-    fn cruise_sdk_override_matching_defaults_does_not_avoid_backend_collision() {
-        let env = env();
-        write(&env.project_file, "sdk: jcode\nmodel: p/x\n");
-        let _sdk = EnvGuard::set("CRUISE_SDK", "jcode");
-        let mut config = workflow("sdk: claude");
-        let defaults =
-            WorkflowDefaults::load(Some(env.project.path())).unwrap_or_else(|e| panic!("{e:?}"));
-
-        match defaults.apply_to_materialized_config(&mut config) {
-            Err(CruiseError::InvalidStepConfig(message)) => {
-                assert!(message.contains("model"), "{message}");
-                assert!(message.contains("default.yaml"), "{message}");
-                assert!(message.contains("jcode"), "{message}");
-                assert!(message.contains("claude"), "{message}");
-            }
-            other => panic!("expected InvalidStepConfig, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn cruise_sdk_override_does_not_create_backend_collision() {
         let env = env();
         write(&env.project_file, "sdk: jcode\nmodel: p/x\n");
-        let _sdk = EnvGuard::set("CRUISE_SDK", "claude");
+        let _sdk = EnvGuard::set("CRUISE_SDK", "jcode");
         let mut config = workflow("sdk: jcode");
         let defaults =
             WorkflowDefaults::load(Some(env.project.path())).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1320,7 +1296,7 @@ mod tests {
             .apply_env_overrides()
             .unwrap_or_else(|e| panic!("{e:?}"));
 
-        assert_eq!(config.sdk.as_deref(), Some("claude"));
+        assert_eq!(config.sdk.as_deref(), Some("jcode"));
         assert_eq!(config.model, Some(ModelSpec::Single("p/x".into())));
     }
 
@@ -1329,7 +1305,7 @@ mod tests {
         let env = env();
         write(&env.project_file, "sdk: jcode\nmodel: p/x\n");
         let _model = EnvGuard::set("CRUISE_MODEL", "env/model");
-        let mut config = workflow("sdk: claude");
+        let mut config = workflow("command: [echo]");
         let defaults =
             WorkflowDefaults::load(Some(env.project.path())).unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -1338,7 +1314,7 @@ mod tests {
                 assert!(message.contains("model"), "{message}");
                 assert!(message.contains("default.yaml"), "{message}");
                 assert!(message.contains("jcode"), "{message}");
-                assert!(message.contains("claude"), "{message}");
+                assert!(message.contains("command"), "{message}");
             }
             other => panic!("expected InvalidStepConfig, got {other:?}"),
         }
@@ -1349,7 +1325,7 @@ mod tests {
         let env = env();
         write(&env.project_file, "sdk: jcode\nplan_model: p/y\n");
         let _plan_model = EnvGuard::set("CRUISE_PLAN_MODEL", "env/plan");
-        let mut config = workflow("sdk: claude");
+        let mut config = workflow("command: [echo]");
         let defaults =
             WorkflowDefaults::load(Some(env.project.path())).unwrap_or_else(|e| panic!("{e:?}"));
 
@@ -1358,7 +1334,7 @@ mod tests {
                 assert!(message.contains("plan_model"), "{message}");
                 assert!(message.contains("default.yaml"), "{message}");
                 assert!(message.contains("jcode"), "{message}");
-                assert!(message.contains("claude"), "{message}");
+                assert!(message.contains("command"), "{message}");
             }
             other => panic!("expected InvalidStepConfig, got {other:?}"),
         }
@@ -1456,17 +1432,17 @@ mod tests {
         write(&env.project_file, "sdk: jcode\ndisallowed_tools: [web]\n");
         let defaults =
             WorkflowDefaults::load(Some(env.project.path())).unwrap_or_else(|e| panic!("{e}"));
-        let mut inherited = workflow("sdk: claude");
+        let mut inherited = workflow("command: [echo]");
         let Err(error) = defaults.apply_to_materialized_config(&mut inherited) else {
             panic!("inherited restrictions must reject a backend mismatch");
         };
         let message = error.to_string();
-        for text in ["disallowed_tools", "default.yaml", "jcode", "claude"] {
+        for text in ["disallowed_tools", "default.yaml", "jcode", "command"] {
             assert!(message.contains(text), "{message}");
         }
         for extra in ["disallowed_tools: []", "disallowed_tools: [subagent]"] {
             let config =
-                applied_with_presence(&env, &workflow_yaml(&format!("sdk: claude\n{extra}")));
+                applied_with_presence(&env, &workflow_yaml(&format!("command: [echo]\n{extra}")));
             let value = serde_json::to_value(config).unwrap_or_else(|e| panic!("{e}"));
             assert!(value["disallowed_tools"].is_array());
         }
@@ -1484,9 +1460,9 @@ mod tests {
     #[test]
     fn defaults_sdk_fills_workflow_without_backend() {
         let env = env();
-        write(&env.project_file, "sdk: claude\n");
+        write(&env.project_file, "sdk: jcode\n");
         let mut config = workflow("");
         applied(&env, &mut config);
-        assert_eq!(config.sdk.as_deref(), Some("claude"));
+        assert_eq!(config.sdk.as_deref(), Some("jcode"));
     }
 }

@@ -1,4 +1,4 @@
-//! Shared, lossless SDK-qualified model selection.
+//! Jcode model selection and scheduled availability.
 use crate::config::{ModelEntry, ModelSpec};
 use serde::{Deserialize, Serialize};
 
@@ -6,27 +6,17 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum Sdk {
     Jcode,
-    Claude,
-    OpenCode,
 }
 
 impl Sdk {
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Jcode => "jcode",
-            Self::Claude => "claude",
-            Self::OpenCode => "opencode",
-        }
+        "jcode"
     }
+
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "jcode" => Some(Self::Jcode),
-            "claude" => Some(Self::Claude),
-            "opencode" => Some(Self::OpenCode),
-            _ => None,
-        }
+        (name == "jcode").then_some(Self::Jcode)
     }
 }
 impl std::fmt::Display for Sdk {
@@ -42,21 +32,15 @@ pub struct ModelCandidate {
 }
 pub type ModelCandidates = Vec<ModelCandidate>;
 
-/// Resolve a single entry against the original workflow SDK.
+/// Resolve a single entry against the workflow's jcode SDK.
 #[must_use]
 pub fn resolve_entry(entry: &ModelEntry, sdk: Sdk) -> ModelCandidate {
     ModelCandidate {
-        sdk: match entry {
-            ModelEntry::String(_) => sdk,
-            ModelEntry::SdkModel(entry) => {
-                entry.sdk.as_deref().and_then(Sdk::from_name).unwrap_or(sdk)
-            }
-        },
+        sdk,
         model: Some(entry.model().to_owned()),
     }
 }
-
-/// User-declared unavailability keyed by SDK and effort-independent model identity.
+/// User-declared unavailability keyed by jcode SDK and effort-independent model identity.
 #[derive(Default, Clone)]
 pub(crate) struct ModelAvailability {
     entries: Vec<(Sdk, String, ScheduledWindows)>,
@@ -79,13 +63,8 @@ pub(crate) fn availability(
                 if object.disabled_during.is_empty() {
                     continue;
                 }
-                let sdk = object
-                    .sdk
-                    .as_deref()
-                    .and_then(Sdk::from_name)
-                    .unwrap_or(base);
-                let model = crate::retry::ModelReferenceFormat::for_sdk(sdk)
-                    .split(&object.model)
+                let format = crate::retry::ModelReferenceFormat::for_sdk(base);
+                let model = crate::retry::ModelReferenceFormat::split(format, &object.model)
                     .0
                     .to_owned();
                 let windows = object
@@ -96,7 +75,7 @@ pub(crate) fn availability(
                             .map(|window| (raw.clone(), window))
                     })
                     .collect::<crate::error::Result<Vec<_>>>()?;
-                availability.entries.push((sdk, model, windows));
+                availability.entries.push((base, model, windows));
             }
         }
     }
@@ -106,7 +85,7 @@ pub(crate) fn availability(
 impl ModelAvailability {
     pub(crate) fn disabled_by(&self, sdk: Sdk, model: &str, unix_secs: i64) -> Option<&str> {
         let format = crate::retry::ModelReferenceFormat::for_sdk(sdk);
-        let base = format.split(model).0;
+        let base = crate::retry::ModelReferenceFormat::split(format, model).0;
         self.entries
             .iter()
             .filter(|(owner, candidate, _)| *owner == sdk && candidate == base)
@@ -130,19 +109,7 @@ pub struct SdkSessionId {
     pub id: String,
 }
 
-/// Collect owners only after explicit retry chains have replaced implicit tails.
-pub(crate) fn applicable_sdks(
-    config: &crate::config::WorkflowConfig,
-    candidates: &[ModelCandidate],
-    base_sdk: Sdk,
-) -> std::collections::HashSet<Sdk> {
-    crate::retry::effective_candidates(config.retry.as_ref(), candidates, base_sdk)
-        .into_iter()
-        .map(|candidate| candidate.sdk)
-        .collect()
-}
-
-/// Resolve strings against the original workflow SDK, never the preceding entry.
+/// Resolve strings against the workflow's jcode SDK, never the preceding entry.
 #[must_use]
 pub fn resolve_candidates(spec: Option<&ModelSpec>, sdk: Sdk) -> ModelCandidates {
     match spec {
@@ -158,7 +125,7 @@ pub fn resolve_candidates(spec: Option<&ModelSpec>, sdk: Sdk) -> ModelCandidates
     }
 }
 
-/// A matching step override retains the workflow chain only within the same SDK.
+/// A matching step override retains the workflow's model chain.
 #[must_use]
 pub fn select_step_model(
     workflow: Option<&ModelSpec>,
@@ -184,7 +151,8 @@ pub(crate) fn step_model_spec(
                 candidate.sdk == sdk
                     && candidate.model.as_deref().is_some_and(|primary| {
                         let format = crate::retry::ModelReferenceFormat::for_sdk(sdk);
-                        format.split(primary).0 == format.split(model).0
+                        crate::retry::ModelReferenceFormat::split(format, primary).0
+                            == crate::retry::ModelReferenceFormat::split(format, model).0
                     })
             }) =>
         {
@@ -208,111 +176,59 @@ mod tests {
 
     #[test]
     fn disabled_window_step_effort_override_preserves_object_and_fallbacks() {
-        for (sdk, primary, overridden) in [
-            (
-                Sdk::Jcode,
-                "test-window-step/model:low",
-                "test-window-step/model:high",
-            ),
-            (
-                Sdk::OpenCode,
-                "provider/test-window-step:free:low",
-                "provider/test-window-step:free:high",
-            ),
-            (
-                Sdk::OpenCode,
-                "provider/test-window-step:free#fast",
-                "provider/test-window-step:free#careful",
-            ),
-        ] {
-            let workflow: ModelSpec = serde_json::from_value(serde_json::json!([
-                {"model": primary, "disabled_during": ["00:00-24:00"]},
-                {"sdk": "claude", "model": "test-window-step/spare"}
-            ]))
-            .unwrap_or_else(|error| panic!("disabled_during fixture must deserialize: {error}"));
-            let selected = step_model_spec(Some(&workflow), Some(overridden), sdk)
-                .unwrap_or_else(|| panic!("matching base identity retains the workflow spec"));
-            let mut expected =
-                serde_json::to_value(&workflow).unwrap_or_else(|error| panic!("{error}"));
-            expected[0]["model"] = serde_json::json!(overridden);
-            assert_eq!(
-                serde_json::to_value(&selected).unwrap_or_else(|error| panic!("{error}")),
-                expected
-            );
-            let candidates = resolve_candidates(Some(&selected), sdk);
-            assert_eq!(candidates[0].sdk, sdk);
-            assert_eq!(candidates[0].model.as_deref(), Some(overridden));
-            assert_eq!(candidates[1].sdk, Sdk::Claude);
-        }
-    }
-
-    #[test]
-    fn disabled_window_same_base_cross_sdk_override_does_not_inherit() {
+        let primary = "test-window-step/model:low";
+        let overridden = "test-window-step/model:high";
         let workflow: ModelSpec = serde_json::from_value(serde_json::json!([
-            {"sdk": "claude", "model": "test-window-cross-sdk/model:low", "disabled_during": ["00:00-24:00"]},
-            "test-window-cross-sdk/spare"
+            {"model": primary, "disabled_during": ["00:00-24:00"]},
+            "test-window-step/spare"
         ]))
         .unwrap_or_else(|error| panic!("disabled_during fixture must deserialize: {error}"));
-        let overridden = "test-window-cross-sdk/model:high";
         let selected = step_model_spec(Some(&workflow), Some(overridden), Sdk::Jcode)
-            .unwrap_or_else(|| panic!("step override must select a standalone model"));
+            .unwrap_or_else(|| panic!("matching base identity retains the workflow spec"));
+        let mut expected =
+            serde_json::to_value(&workflow).unwrap_or_else(|error| panic!("{error}"));
+        expected[0]["model"] = serde_json::json!(overridden);
         assert_eq!(
             serde_json::to_value(&selected).unwrap_or_else(|error| panic!("{error}")),
-            serde_json::json!(overridden)
+            expected
         );
-        assert_eq!(
-            resolve_candidates(Some(&selected), Sdk::Jcode),
-            [ModelCandidate {
-                sdk: Sdk::Jcode,
-                model: Some(overridden.to_owned())
-            }]
-        );
+        let candidates = resolve_candidates(Some(&selected), Sdk::Jcode);
+        assert_eq!(candidates[0].sdk, Sdk::Jcode);
+        assert_eq!(candidates[0].model.as_deref(), Some(overridden));
+        assert_eq!(candidates[1].sdk, Sdk::Jcode);
+    }
+
+    #[test]
+    fn disabled_window_is_applied_to_the_single_sdk() {
+        let workflow: ModelSpec = serde_json::from_value(serde_json::json!([
+            {"model": "test-window-identity/model:low", "disabled_during": ["00:00-24:00"]},
+            "test-window-identity/spare"
+        ]))
+        .unwrap_or_else(|error| panic!("disabled_during fixture must deserialize: {error}"));
         let availability =
-            availability(Some(&selected), Sdk::Jcode).unwrap_or_else(|error| panic!("{error}"));
-        assert!(
-            availability
-                .disabled_by(Sdk::Jcode, overridden, 0)
-                .is_none()
+            availability(Some(&workflow), Sdk::Jcode).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            availability.disabled_by(Sdk::Jcode, "test-window-identity/model:high", 0),
+            Some("00:00-24:00")
         );
     }
 
     #[test]
-    fn resolve_entry_uses_workflow_sdk_for_strings_and_explicit_sdk_for_objects() {
+    fn resolve_entry_uses_the_workflow_sdk_for_every_entry() {
         let string = ModelEntry::String("worker".to_owned());
-        let object: ModelEntry = serde_yaml::from_str("{sdk: claude, model: haiku}")
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(
-            resolve_entry(&string, Sdk::Jcode),
-            ModelCandidate {
-                sdk: Sdk::Jcode,
-                model: Some("worker".to_owned())
-            }
-        );
-        assert_eq!(
-            resolve_entry(&string, Sdk::Claude),
-            ModelCandidate {
-                sdk: Sdk::Claude,
-                model: Some("worker".to_owned())
-            }
-        );
-        assert_eq!(
-            resolve_entry(&object, Sdk::Jcode),
-            ModelCandidate {
-                sdk: Sdk::Claude,
-                model: Some("haiku".to_owned())
-            }
-        );
-        let unknown = ModelEntry::SdkModel(crate::config::SdkModel {
-            sdk: Some("unknown".to_owned()),
-            model: " worker:free ".to_owned(),
-            disabled_during: Vec::new(),
+        let scheduled = ModelEntry::SdkModel(crate::config::SdkModel {
+            sdk: None,
+            model: "worker".to_owned(),
+            disabled_during: vec!["00:00-24:00".to_owned()],
         });
-        let string = ModelEntry::String(unknown.model().to_owned());
-        for sdk in [Sdk::Jcode, Sdk::Claude, Sdk::OpenCode] {
-            let candidate = resolve_entry(&unknown, sdk);
-            assert_eq!(candidate, resolve_entry(&string, sdk));
-            assert_eq!(candidate.sdk, sdk);
-            assert_eq!(candidate.model.as_deref(), Some(" worker:free "));
+        for entry in [&string, &scheduled] {
+            assert_eq!(
+                resolve_entry(entry, Sdk::Jcode),
+                ModelCandidate {
+                    sdk: Sdk::Jcode,
+                    model: Some("worker".to_owned())
+                }
+            );
         }
     }
 }

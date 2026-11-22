@@ -80,7 +80,6 @@ impl Fixture {
             if (name.starts_with("CRUISE_") && name != "CRUISE_GUARD_COMMON_DIR")
                 || name.starts_with("JCODE_")
                 || name.starts_with("OTEL_")
-                || name.starts_with("CLAUDE_")
                 || name.starts_with("ANTHROPIC_")
             {
                 command.env_remove(name.as_ref());
@@ -247,109 +246,106 @@ fn write_title_auth_fixture(repo: &std::path::Path, case: &str) {
     } else {
         serde_json::Value::Null
     };
-    let credentials = serde_json::json!({
-        "claudeAiOauth": {"expiresAt": access_deadline, "refreshToken": refresh},
-        "anthropic_accounts": [{"expires": access_deadline, "refresh": refresh}],
-    });
     if case != "unknown" {
-        for file in ["auth.json", ".credentials.json"] {
-            fs::write(inherited.join(file), credentials.to_string())
-                .unwrap_or_else(|e| panic!("{e}"));
-        }
+        fs::write(
+            inherited.join("auth.json"),
+            serde_json::json!({
+                "anthropic_accounts": [{"expires": access_deadline, "refresh": refresh}],
+            })
+            .to_string(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        fs::write(
+            workflow.join("auth.json"),
+            serde_json::json!({
+                "anthropic_accounts": [{
+                    "expires": if expired { 8_000_000_000_000_i64 } else { 1 },
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
     }
-    // Workflow env is not forwarded to title dispatch. Its opposite
-    // verdict must not override the inherited title credentials.
-    fs::write(
-        workflow.join(".credentials.json"),
-        serde_json::json!({
-            "claudeAiOauth": {"expiresAt": if expired { 8_000_000_000_000_i64 } else { 1 }},
-        })
-        .to_string(),
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
 }
 
 #[test]
 fn skip_planning_checks_inherited_title_auth_before_dispatch_and_approval() {
-    for sdk in ["jcode", "claude"] {
-        for case in [
-            "expired",
-            "usable",
-            "refreshable",
-            "unknown",
-            "command",
-            "dry-run",
-        ] {
-            let fixture = Fixture::new();
-            let repo = fixture.root.path().join("not-a-repository");
-            init_repo(&repo);
-            let bin = fixture.root.path().join("bin");
-            fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("{e}"));
-            let marker = fixture.root.path().join("title-dispatched");
-            write_script(
-                &bin.join(sdk),
-                &format!(
-                    "#!/bin/sh\nprintf invoked > '{}'\nexit 73\n",
-                    marker.display()
+    let sdk = "jcode";
+    for case in [
+        "expired",
+        "usable",
+        "refreshable",
+        "unknown",
+        "command",
+        "dry-run",
+    ] {
+        let fixture = Fixture::new();
+        let repo = fixture.root.path().join("not-a-repository");
+        init_repo(&repo);
+        let bin = fixture.root.path().join("bin");
+        fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("{e}"));
+        let marker = fixture.root.path().join("title-dispatched");
+        write_script(
+            &bin.join(sdk),
+            &format!(
+                "#!/bin/sh\nprintf invoked > '{}'\nexit 73\n",
+                marker.display()
+            ),
+        );
+        write_title_auth_fixture(&repo, case);
+        let workflow = repo.join("workflow-auth");
+        let backend = if case == "command" {
+            "command: [cat]".to_string()
+        } else {
+            format!("sdk: {sdk}")
+        };
+        fs::write(
+                fixture.root.path().join("workflow.yaml"),
+                format!(
+                    "{backend}\nmodel: claude/test-model\nenv:\n  JCODE_HOME: '{}'\nsteps:\n  work:\n    command: echo done\n",
+                    workflow.display(),
                 ),
-            );
-            write_title_auth_fixture(&repo, case);
-            let workflow = repo.join("workflow-auth");
-            let backend = if case == "command" {
-                "command: [cat]".to_string()
-            } else {
-                format!("sdk: {sdk}")
-            };
-            fs::write(fixture.root.path().join("workflow.yaml"), format!(
-                "{backend}\nmodel: claude/test-model\nenv:\n  CLAUDE_CONFIG_DIR: '{}'\nsteps:\n  work:\n    command: echo done\n",
-                workflow.display(),
-            )).unwrap_or_else(|e| panic!("{e}"));
-            let mut command = fixture.command();
-            command
-                .env("JCODE_HOME", "title-auth")
-                .env("CLAUDE_CONFIG_DIR", "title-auth")
-                .env(
-                    "PATH",
-                    std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
-                        &std::env::var_os("PATH").unwrap_or_default(),
-                    )))
-                    .unwrap_or_else(|e| panic!("{e}")),
-                )
-                .args(["plan", "--skip-planning", "--config"])
-                .arg(fixture.root.path().join("workflow.yaml"))
-                .arg("title authentication contract");
-            if case == "dry-run" {
-                command.arg("--dry-run");
-            }
-            let output = command.output().unwrap_or_else(|e| panic!("{e}"));
-            let text = text(&output);
-            assert_eq!(
-                output.status.success(),
-                case != "expired",
-                "{sdk}/{case}: {text}"
-            );
-            assert_eq!(
-                marker.exists(),
-                !matches!(case, "expired" | "command" | "dry-run"),
-                "{sdk}/{case}: {text}"
-            );
-            assert_eq!(
-                text.contains("agent authentication expired"),
-                case == "expired",
-                "{sdk}/{case}: {text}"
-            );
-            if case == "expired" {
-                let login = if sdk == "jcode" {
-                    "jcode login claude"
-                } else {
-                    "claude auth login"
-                };
-                assert!(text.contains(login), "{text}");
-            }
-            for state in fixture.manager.list().unwrap_or_else(|e| panic!("{e}")) {
-                if state.id != SESSION_ID && case == "expired" {
-                    assert_ne!(state.phase, SessionPhase::Planned);
-                }
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut command = fixture.command();
+        command
+            .env("JCODE_HOME", "title-auth")
+            .env(
+                "PATH",
+                std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+                    &std::env::var_os("PATH").unwrap_or_default(),
+                )))
+                .unwrap_or_else(|e| panic!("{e}")),
+            )
+            .args(["plan", "--skip-planning", "--config"])
+            .arg(fixture.root.path().join("workflow.yaml"))
+            .arg("title authentication contract");
+        if case == "dry-run" {
+            command.arg("--dry-run");
+        }
+        let output = command.output().unwrap_or_else(|e| panic!("{e}"));
+        let text = text(&output);
+        assert_eq!(
+            output.status.success(),
+            case != "expired",
+            "{sdk}/{case}: {text}"
+        );
+        assert_eq!(
+            marker.exists(),
+            !matches!(case, "expired" | "command" | "dry-run"),
+            "{sdk}/{case}: {text}"
+        );
+        assert_eq!(
+            text.contains("agent authentication expired"),
+            case == "expired",
+            "{sdk}/{case}: {text}"
+        );
+        if case == "expired" {
+            assert!(text.contains("jcode login claude"), "{text}");
+        }
+        for state in fixture.manager.list().unwrap_or_else(|e| panic!("{e}")) {
+            if state.id != SESSION_ID && case == "expired" {
+                assert_ne!(state.phase, SessionPhase::Planned);
             }
         }
     }

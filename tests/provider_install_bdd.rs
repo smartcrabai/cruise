@@ -60,18 +60,16 @@ mod contracts {
     fn setup(w: &mut InstallWorld) {
         w.root = Some(tempfile::tempdir().unwrap());
         fs::create_dir(w.root().join("bin")).unwrap();
-        for provider in ["jcode", "claude", "opencode"] {
-            let path = w.root().join("bin").join(provider);
-            fs::write(
-                &path,
-                format!(
-                    "#!/bin/sh\necho invoked >> '{}'\n",
-                    w.root().join("executed").display()
-                ),
-            )
-            .unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let path = w.root().join("bin/jcode");
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\necho invoked >> '{}'\n",
+                w.root().join("executed").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
     fn recorded_jcode(root: &Path, version: &str) {
         let dir = root.join("data/cruise/providers/jcode");
@@ -174,14 +172,12 @@ mod contracts {
         for value in ["VERSION", "EFFECTIVE"] {
             assert!(text.contains(value), "missing {value}: {text}");
         }
-        for provider in ["jcode", "claude", "opencode"] {
-            let row = text
-                .lines()
-                .find(|line| line.split_whitespace().next() == Some(provider))
-                .unwrap();
-            assert_eq!(row.split_whitespace().nth(1), Some("-"), "{row}");
-            assert_eq!(row.split_whitespace().last(), Some("path"), "{row}");
-        }
+        let row = text
+            .lines()
+            .find(|line| line.split_whitespace().next() == Some("jcode"))
+            .unwrap();
+        assert_eq!(row.split_whitespace().nth(1), Some("-"), "{row}");
+        assert_eq!(row.split_whitespace().last(), Some("path"), "{row}");
     }
     #[then("status reports the recorded older jcode version as managed")]
     fn older_version_is_managed(w: &mut InstallWorld) {

@@ -1,45 +1,45 @@
-// Workflow-start OAuth preflight, plan.md sections 0, 3.1, 3.2, 3.4.
-// Time is quotiented at a fixed observation instant: 0 unknown, 1 <= now,
-// 2 > now. Equality belongs to expired. Token bytes are intentionally absent.
-// Targets 0/1 = Claude CLI / a jcode OAuth provider, 2 = unsupported/bare/API.
-// Two jcode slots represent a nonempty account pool. An empty/malformed/missing
-// pool is represented by unknown slots. Anthropic/OpenAI share this contract.
-// jcode's schema has no refresh-expiry field, so its slots fix that to unknown.
+// Workflow-start jcode provider authentication preflight.
+// Access expiry: 0 unknown, 1 <= now, 2 > now. Equality is expired.
+// Target 0 is Anthropic; target 1 is OpenAI; target 2 is unsupported/bare/API.
+// Two account slots represent a provider pool; token bytes are excluded.
 module agent_auth {
-  type Account = { access: int, refresh: bool, refreshExpiry: int }
+  type Account = { access: int, refresh: bool }
   type Config = { planning: bool, sdk: bool, skip: bool, dry: bool,
     otherAuth: bool, plan: Set[int], execution: Set[int],
-    claude: Account, first: Account, second: Account }
+    anthropicFirst: Account, anthropicSecond: Account,
+    openaiFirst: Account, openaiSecond: Account }
   type State = { phase: str, read: Set[int], errors: Set[int], workspace: bool }
   var cfg: Config
   var s: State
 
-  pure val unknown = { access: 0, refresh: false, refreshExpiry: 0 }
-  pure val dead = { access: 1, refresh: false, refreshExpiry: 0 }
-  pure val renewable = { access: 1, refresh: true, refreshExpiry: 0 }
-  pure val fresh = { access: 2, refresh: false, refreshExpiry: 0 }
+  pure val unknown = { access: 0, refresh: false }
+  pure val dead = { access: 1, refresh: false }
+  pure val renewable = { access: 1, refresh: true }
+  pure val fresh = { access: 2, refresh: false }
   pure val ordinary = { planning: false, sdk: true, skip: false, dry: false,
     otherAuth: false, plan: Set(0), execution: Set(1),
-    claude: dead, first: dead, second: dead }
-  pure def expired(a: Account): bool =
-    a.access == 1 and (not(a.refresh) or a.refreshExpiry == 1)
+    anthropicFirst: dead, anthropicSecond: dead,
+    openaiFirst: dead, openaiSecond: dead }
+  pure def expired(a: Account): bool = a.access == 1 and not(a.refresh)
   pure def bypass(c: Config): bool = c.skip or not(c.sdk) or c.dry
   pure def selected(c: Config): Set[int] =
     (if (c.planning) c.plan else c.execution).intersect(Set(0, 1))
       .exclude(if (c.otherAuth) Set(0) else Set())
   pure def required(c: Config): Set[int] = if (bypass(c)) Set() else selected(c)
   pure def unavailable(c: Config): Set[int] = Set(0, 1).filter(t =>
-    if (t == 0) expired(c.claude) else expired(c.first) and expired(c.second))
+    if (t == 0) expired(c.anthropicFirst) and expired(c.anthropicSecond)
+    else expired(c.openaiFirst) and expired(c.openaiSecond))
   action initWith(c: Config): bool = all {
     cfg' = c, s' = { phase: "checking", read: Set(), errors: Set(), workspace: false } }
   action init = {
     nondet access0 = 0.to(2).oneOf()
     nondet refresh0 = Set(false, true).oneOf()
-    nondet expiry0 = 0.to(2).oneOf()
     nondet access1 = 0.to(2).oneOf()
     nondet refresh1 = Set(false, true).oneOf()
     nondet access2 = 0.to(2).oneOf()
     nondet refresh2 = Set(false, true).oneOf()
+    nondet access3 = 0.to(2).oneOf()
+    nondet refresh3 = Set(false, true).oneOf()
     nondet plan = Set(0, 1, 2).powerset().oneOf()
     nondet execution = Set(0, 1, 2).powerset().oneOf()
     nondet planning = Set(false, true).oneOf()
@@ -49,9 +49,10 @@ module agent_auth {
     nondet otherAuth = Set(false, true).oneOf()
     initWith({ planning: planning, sdk: sdk, skip: skip, dry: dry,
       otherAuth: otherAuth, plan: plan, execution: execution,
-      claude: { access: access0, refresh: refresh0, refreshExpiry: expiry0 },
-      first: { access: access1, refresh: refresh1, refreshExpiry: 0 },
-      second: { access: access2, refresh: refresh2, refreshExpiry: 0 } })
+      anthropicFirst: { access: access0, refresh: refresh0 },
+      anthropicSecond: { access: access1, refresh: refresh1 },
+      openaiFirst: { access: access2, refresh: refresh2 },
+      openaiSecond: { access: access3, refresh: refresh3 } })
   }
   action inspect(t: int): bool = all {
     s.phase == "checking", required(cfg).contains(t), not(s.read.contains(t)),
@@ -72,7 +73,6 @@ module agent_auth {
   action idle = all { cfg' = cfg, s' = s }
   action step = any { inspectNext, decide, launch, idle }
 
-  // These properties express the admission contract, not token parsing internals.
   val scopeSafety = s.read.subseteq(required(cfg))
   val exactDiagnostics = s.errors == s.read.intersect(unavailable(cfg))
   val completeBeforeDecision = s.phase != "checking" implies s.read == required(cfg)
@@ -92,15 +92,15 @@ module agent_auth {
 
   run rejectBeforeEffectTest = initWith(ordinary).then(inspect(1)).then(decide)
     .expect(s.phase == "rejected" and s.errors == Set(1) and not(s.workspace) and safety)
-  run renewableAccountTest = initWith({ ...ordinary, second: renewable })
+  run renewableAccountTest = initWith({ ...ordinary, openaiSecond: renewable })
     .then(inspect(1)).then(decide).then(launch)
     .expect(s.phase == "launched" and s.errors == Set() and safety)
-  run unknownAccountTest = initWith({ ...ordinary, second: unknown })
+  run unknownAccountTest = initWith({ ...ordinary, openaiSecond: unknown })
     .then(inspect(1)).then(decide).then(launch).expect(s.phase == "launched" and safety)
   run allTargetsReportedTest = initWith({ ...ordinary, execution: Set(0, 1, 2) })
     .then(inspect(1)).then(inspect(0)).then(decide)
     .expect(s.errors == Set(0, 1) and s.phase == "rejected" and safety)
-  run planningScopeTest = initWith({ ...ordinary, planning: true, claude: fresh })
+  run planningScopeTest = initWith({ ...ordinary, planning: true, anthropicFirst: fresh })
     .then(inspect(0)).then(decide).then(launch)
     .expect(s.read == Set(0) and not(s.workspace) and safety)
   run dryRunTest = initWith({ ...ordinary, dry: true }).then(decide)
@@ -115,10 +115,9 @@ module agent_auth {
     .then(launch).expect(s.read == Set() and s.phase == "launched" and safety)
   run alternativeAuthTest = initWith({ ...ordinary, execution: Set(0, 2), otherAuth: true })
     .then(decide).then(launch).expect(s.read == Set() and safety)
-  run expiryBoundaryTest = initWith({ ...ordinary, execution: Set(0),
-    claude: { access: 1, refresh: true, refreshExpiry: 1 } }).then(inspect(0)).then(decide)
-    .expect(s.phase == "rejected" and safety)
-  run freshAccessTest = initWith({ ...ordinary, execution: Set(0),
-    claude: { access: 2, refresh: true, refreshExpiry: 1 } }).then(inspect(0)).then(decide)
-    .then(launch).expect(s.phase == "launched" and safety)
+  run expiryBoundaryTest = initWith({ ...ordinary, execution: Set(0) })
+    .then(inspect(0)).then(decide).expect(s.phase == "rejected" and safety)
+  run freshAccessTest = initWith({ ...ordinary, execution: Set(0), anthropicFirst: fresh })
+    .then(inspect(0)).then(decide).then(launch)
+    .expect(s.phase == "launched" and safety)
 }

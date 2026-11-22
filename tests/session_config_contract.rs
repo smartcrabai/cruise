@@ -1033,32 +1033,32 @@ fn file_reference_reloader_reloads_when_only_project_defaults_change() {
     );
 }
 
-fn mixed_sdk_config_value() -> Value {
+fn jcode_config_value() -> Value {
     json!({
         "sdk": "jcode",
         "model": [
             "openai/gpt-6.1-sol:medium",
-            {"sdk": "claude", "model": "claude-sonnet-5-5:medium"},
+            "claude/claude-sonnet-5-5:medium",
             "openrouter/z-ai/glm-5.3-flash:high"
         ],
         "plan_model": [
-            {"sdk": "claude", "model": "shared-model:medium"},
+            "shared-model:medium",
             "shared-model:high",
-            {"sdk": "jcode", "model": "shared-model:medium"}
+            "shared-model:medium"
         ],
         "steps": {"shared": {"prompt": "preserve model candidates"}}
     })
 }
 
 #[test]
-fn mixed_sdk_session_snapshots_round_trip_candidate_shapes_and_order() {
+fn jcode_session_snapshots_round_trip_plain_candidate_shapes_and_order() {
     let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let manager = SessionManager::new(temp.path().join("data"));
-    let expected = mixed_sdk_config_value();
+    let expected = jcode_config_value();
     let config = WorkflowConfig::from_yaml(&expected.to_string())
-        .unwrap_or_else(|error| panic!("parse mixed SDK snapshot config: {error}"));
+        .unwrap_or_else(|error| panic!("parse Jcode snapshot config: {error}"));
     let yaml = cruise::session_config::serialize_resolved_config(&config)
-        .unwrap_or_else(|error| panic!("serialize mixed SDK snapshot: {error}"));
+        .unwrap_or_else(|error| panic!("serialize Jcode snapshot: {error}"));
 
     for (index, reference) in [
         inline_snapshot_ref(),
@@ -1072,13 +1072,13 @@ fn mixed_sdk_session_snapshots_round_trip_candidate_shapes_and_order() {
         write_state(&manager, &id, &state_value(&id, temp.path(), &reference));
         let snapshot = cruise::session_config::snapshot_path(&manager.sessions_dir(), &id);
         cruise::session_config::write_snapshot_atomically(&snapshot, yaml.as_bytes())
-            .unwrap_or_else(|error| panic!("write mixed SDK snapshot: {error}"));
+            .unwrap_or_else(|error| panic!("write Jcode snapshot: {error}"));
         let state = manager
             .load(&id)
             .unwrap_or_else(|error| panic!("load state: {error}"));
         let loaded = manager
             .load_config(&state)
-            .unwrap_or_else(|error| panic!("load mixed SDK snapshot: {error}"));
+            .unwrap_or_else(|error| panic!("load Jcode snapshot: {error}"));
         let actual = serde_json::to_value(&loaded)
             .unwrap_or_else(|error| panic!("serialize loaded snapshot: {error}"));
         for field in ["model", "plan_model"] {
@@ -1101,39 +1101,7 @@ fn mixed_sdk_session_snapshots_round_trip_candidate_shapes_and_order() {
 }
 
 #[test]
-fn mixed_sdk_conversation_keys_change_for_sdk_only_and_candidate_order_changes() {
-    let original = mixed_sdk_config_value();
-    let parse = |value: &Value| {
-        WorkflowConfig::from_yaml(&value.to_string())
-            .unwrap_or_else(|error| panic!("parse conversation config: {error}"))
-    };
-    let identity = "owner/repository::.cruise/review.yaml";
-    let key = plan_conversation_key(&parse(&original), identity);
-    assert_eq!(key, plan_conversation_key(&parse(&original), identity));
-    for field in ["model", "plan_model"] {
-        let mut sdk_changed = original.clone();
-        let object_index = usize::from(field == "model");
-        sdk_changed[field][object_index]["sdk"] = json!("jcode");
-        assert_ne!(
-            key,
-            plan_conversation_key(&parse(&sdk_changed), identity),
-            "changing only {field} candidate SDK must invalidate the conversation"
-        );
-        let mut reordered = original.clone();
-        reordered[field]
-            .as_array_mut()
-            .unwrap_or_else(|| panic!("{field} fixture must be an array"))
-            .swap(0, 1);
-        assert_ne!(
-            key,
-            plan_conversation_key(&parse(&reordered), identity),
-            "changing only {field} candidate order must invalidate the conversation"
-        );
-    }
-}
-
-#[test]
-fn mixed_sdk_live_reload_preserves_updated_compiled_candidate_lists() {
+fn jcode_live_reload_preserves_updated_compiled_candidate_lists() {
     let _env_lock = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1146,7 +1114,7 @@ fn mixed_sdk_live_reload_preserves_updated_compiled_candidate_lists() {
         temp.path().join("user-config").as_os_str(),
     );
     let workflow = temp.path().join("workflow.yaml");
-    let mut expected = mixed_sdk_config_value();
+    let mut expected = jcode_config_value();
     fs::write(&workflow, expected.to_string())
         .unwrap_or_else(|error| panic!("write workflow: {error}"));
     let reloader = config_reloader_for_reference(
@@ -1165,8 +1133,8 @@ fn mixed_sdk_live_reload_preserves_updated_compiled_candidate_lists() {
     );
     for revision in 1..=2 {
         if revision == 1 {
-            expected["model"][1]["sdk"] = json!("jcode");
-            expected["plan_model"][0]["sdk"] = json!("jcode");
+            expected["model"][1] = json!("claude/claude-sonnet-5-5:low");
+            expected["plan_model"][0] = json!("shared-model:low");
         } else {
             for field in ["model", "plan_model"] {
                 expected[field]
@@ -1182,7 +1150,7 @@ fn mixed_sdk_live_reload_preserves_updated_compiled_candidate_lists() {
         )
         .unwrap_or_else(|error| panic!("update live workflow: {error}"));
         let updated = reloader()
-            .unwrap_or_else(|error| panic!("reload mixed SDK workflow: {error}"))
+            .unwrap_or_else(|error| panic!("reload Jcode workflow: {error}"))
             .unwrap_or_else(|| panic!("candidate change did not trigger reload"));
         assert_eq!(
             serde_json::to_value(&updated.compiled.model)
@@ -1204,7 +1172,7 @@ fn mixed_sdk_live_reload_preserves_updated_compiled_candidate_lists() {
 }
 
 #[test]
-fn mixed_sdk_defaults_reload_propagates_complete_compiled_candidate_lists() {
+fn jcode_defaults_reload_propagates_complete_compiled_candidate_lists() {
     let _env_lock = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1243,15 +1211,15 @@ fn mixed_sdk_defaults_reload_propagates_complete_compiled_candidate_lists() {
             .unwrap_or_else(|error| panic!("check initial defaults config: {error}"))
             .is_none()
     );
-    let mut expected = mixed_sdk_config_value();
+    let mut expected = jcode_config_value();
     expected
         .as_object_mut()
         .unwrap_or_else(|| panic!("defaults fixture must be an object"))
         .remove("steps");
     fs::write(&defaults_path, expected.to_string())
-        .unwrap_or_else(|error| panic!("write mixed SDK defaults: {error}"));
+        .unwrap_or_else(|error| panic!("write Jcode defaults: {error}"));
     let updated = reloader()
-        .unwrap_or_else(|error| panic!("reload mixed SDK defaults: {error}"))
+        .unwrap_or_else(|error| panic!("reload Jcode defaults: {error}"))
         .unwrap_or_else(|| panic!("defaults candidate change did not reload"));
     assert_eq!(
         serde_json::to_value(&updated.compiled.model)

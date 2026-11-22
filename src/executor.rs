@@ -1,28 +1,12 @@
 //! Prompt-execution backend abstraction.
 //!
-//! Cruise drives prompts through one of four backends: an external `command`
-//! (the classic `claude -p` path), the official **jcode Rust SDK** (`sdk: jcode`,
-//! also the default when a workflow names neither `sdk` nor `command`), the
-//! **Claude SDK** (`sdk: claude`), or the built-in **`OpenCode` V2 client**
-//! (`sdk: opencode`). [`Executor`] hides that choice behind a
-//! single [`Executor::run`] call so that `planning.rs`, `engine.rs`, and the
-//! `WebUI` command layer don't need to branch on the backend.
+//! Cruise runs prompts through an external `command` or the official jcode
+//! Rust SDK (`sdk: jcode`, also the default when neither `sdk` nor `command`
+//! is set). [`Executor`] hides that choice behind one [`Executor::run`] call.
 //!
-//! Every backend reads the cruise `model` / `plan_model` / per-step `model`
-//! fields as a plain model reference:
-//!
-//! - `command` — the model name substituted into the command line.
-//! - `sdk: jcode` — a `provider/model[:effort]` reference driven through
-//!   `jcode-sdk`; see [`run_sdk`] and [`crate::backend::jcode`].
-//! - `sdk: claude` — a plain `claude --model` name with an optional `:effort`
-//!   suffix, driven in-process through `claude-agent-sdk` -- see
-//!   [`run_sdk`] and [`crate::backend::claude`].
-//! - `sdk: opencode` uses catalog-validated `provider/model[:effort]` or native
-//!   `provider/model#variant` references through the built-in `OpenCode` V2 client.
-//!   Effort and native variants cannot be combined. Recognized trailing effort
-//!   suffixes are reserved; embedded slashes and unknown colon suffixes in model
-//!   IDs are preserved. Omitted models use `OpenCode`'s configured default.
-
+//! The `model` / `plan_model` / per-step `model` fields are either a model name
+//! substituted into the command line, or a `provider/model[:effort]` reference
+//! for jcode; see [`run_sdk`] and [`crate::backend::jcode`].
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -31,8 +15,7 @@ use std::time::Duration;
 use futures::FutureExt as MapFutureExt;
 use opentelemetry::trace::FutureExt as OtelFutureExt;
 
-use crate::backend::claude::{ClaudeRunnerConfig, stream_agent as stream_claude_agent};
-use crate::backend::effort::{effort_from_suffix, split_thinking_suffix};
+use crate::backend::effort::split_thinking_suffix;
 use crate::backend::jcode::{self, JcodeRunnerConfig, stream_agent as stream_jcode_agent};
 use crate::backend::stream::{ChunkOutcome, ChunkReducer, Folded, LineBuffer, StreamChunk};
 use crate::backend::tool::CruiseTool;
@@ -44,7 +27,7 @@ use crate::retry::{self, Failure, FallbackEngine, RetryAction, RetryPolicy, Unav
 use crate::step::prompt::{PromptResult, StreamCallbacks, run_prompt_with_attempt_model};
 use crate::usage::{UsageAccumulator, UsageField, UsageScope, record_attempt};
 
-/// Callback invoked when an SDK backend reports its session identifier.
+/// Callback invoked when the jcode SDK reports its session identifier.
 pub type SessionIdCallback<'a> = dyn Fn(&SdkSessionId) -> Result<()> + Send + Sync + 'a;
 type StreamSessionIdCallback<'a> = dyn Fn(&str) -> Result<()> + Send + Sync + 'a;
 
@@ -53,27 +36,26 @@ type StreamSessionIdCallback<'a> = dyn Fn(&str) -> Result<()> + Send + Sync + 'a
 /// Built by the caller and handed to [`Executor::run`]. `model` retains the
 /// complete candidate list (select it with [`Executor::step_model`] or
 /// [`Executor::plan_model`]).
-/// `tools` and `resume` are honored by the SDK backends and ignored in command
+/// `tools` and `resume` are honored by the jcode SDK and ignored in command
 /// mode.
 pub struct PromptRun<'a> {
     /// Optional context for recording provider usage for each attempt.
     pub usage: Option<UsageScope<'a>>,
     /// The fully-resolved prompt text to send.
     pub prompt: &'a str,
-    /// Model name (command mode) or model reference (`sdk: jcode`,
-    /// `sdk: claude`).
+    /// Model name (command mode) or jcode model reference.
     pub model: Option<&'a ModelSpec>,
-    /// Applies only to attempts with a matching SDK. Rejected in command mode.
+    /// Applies only to the jcode SDK. Rejected in command mode.
     pub subagent_model: Option<&'a crate::config::ModelEntry>,
-    /// Maximum retries per prompt. SDK fallback policies also use this budget
-    /// for 4xx (except 429), 5xx and network failures and fallback switching.
+    /// Jcode fallback policies also use this budget for 4xx (except 429), 5xx
+    /// and network failures and fallback switching.
     pub max_retries: usize,
     /// Environment variables applied to the prompt run.
     ///
-    /// Command mode passes these to the spawned process; `sdk: jcode` and
-    /// `sdk: claude` pass them to the `jcode` / `claude` child process.
+    /// Command mode passes these to the spawned process; jcode passes them to
+    /// the jcode child process.
     pub env: &'a HashMap<String, String>,
-    /// MCP servers for the SDK backends; ignored in command mode, which
+    /// MCP servers for the jcode SDK; ignored in command mode, which
     /// `validate_mcp_servers` rejects.
     pub mcp_servers: &'a crate::config::McpServers,
     /// Callback invoked with human-readable progress notices: selected models,
@@ -85,24 +67,24 @@ pub struct PromptRun<'a> {
     pub working_dir: Option<&'a Path>,
     /// Streaming stdout/stderr callbacks.
     pub stream: Option<&'a StreamCallbacks<'a>>,
-    /// Custom tools to inject (SDK mode only).
+    /// Custom tools to inject (jcode SDK only).
     pub tools: Vec<CruiseTool>,
-    /// Called as soon as an SDK backend reports its session ID, before tools
+    /// Called as soon as the jcode backend reports its session ID, before tools
     /// can block waiting for user input.
     pub on_session_id: Option<&'a SessionIdCallback<'a>>,
-    /// Prior session id to resume (SDK mode only).
+    /// Prior session id to resume (jcode mode only).
     pub resume: Option<SdkSessionId>,
     /// Allow jcode's macOS desktop-control tool for this turn. This is jcode
     /// backend only and is validated by [`crate::config::validate_computer_use`].
     pub computer_use: bool,
     /// Agent permission mode for this run.
     pub permission: crate::config::PermissionMode,
-    /// SDK tool restrictions. Command mode rejects explicit restrictions and
+    /// Jcode SDK tool restrictions. Command mode rejects explicit restrictions and
     /// ignores implicit `allow_commit` rules, retaining the commit guard.
     pub tool_policy: crate::tool_policy::ToolPolicy,
 }
 
-/// Outcome of [`Executor::run`]: the prompt result plus, in SDK mode, the
+/// Outcome of [`Executor::run`]: the prompt result plus, in jcode mode, the
 /// backend session id (for a follow-up `resume`). `session_id` is `None` in
 /// command mode.
 #[derive(Debug, Clone)]
@@ -127,23 +109,14 @@ fn transition_notice(from_sdk: Sdk, from: Option<&str>, to_sdk: Sdk, to: &str) -
     }
 }
 
-fn validate_candidate(req: &PromptRun<'_>, sdk: Sdk) -> Result<()> {
-    if req.computer_use && sdk == Sdk::Claude {
-        return Err(CruiseError::InvalidStepConfig("Claude Code's computer use is only available in interactive sessions and cannot be enabled by cruise".to_owned()));
-    }
-    if req.computer_use && sdk != Sdk::Jcode {
-        return Err(CruiseError::InvalidStepConfig(format!(
-            "computer_use requires the jcode backend and is not supported by {sdk}"
-        )));
-    }
-    if sdk == Sdk::Jcode
-        && req
-            .mcp_servers
-            .values()
-            .any(|server| server.transport() != crate::config::McpTransport::Stdio)
+fn validate_candidate(req: &PromptRun<'_>) -> Result<()> {
+    if req
+        .mcp_servers
+        .values()
+        .any(|server| server.transport() != crate::config::McpTransport::Stdio)
     {
         return Err(CruiseError::InvalidStepConfig(
-            "jcode MCP servers support only stdio transport, not HTTP or SSE".to_owned(),
+            "jcode MCP servers support only stdio transport".to_owned(),
         ));
     }
     Ok(())
@@ -151,44 +124,24 @@ fn validate_candidate(req: &PromptRun<'_>, sdk: Sdk) -> Result<()> {
 
 /// Prompt-execution backend.
 ///
-/// The SDK backends' tools (which capture the [`AskHandler`]) are built by the
+/// The jcode SDK's tools (which capture the [`AskHandler`]) are built by the
 /// caller and passed via [`PromptRun::tools`], so the executor itself holds no
 /// handler.
 pub enum Executor {
-    /// Spawn an external command (the classic `claude -p` path).
+    /// Spawn an external command, such as `claude -p`.
     Command { command: Vec<String> },
-    /// Drive `jcode` through the official Rust SDK (`sdk: jcode`) in an
-    /// isolated runtime, exposing cruise's tools as session tools. See
-    /// [`run_sdk`].
+    /// Drive prompts through the official jcode Rust SDK (`sdk: jcode`).
     Jcode,
-    /// Drive the `claude` CLI in-process through `claude-agent-sdk`
-    /// (`sdk: claude`). See [`run_sdk`].
-    Claude,
-    /// Drive a locally owned `OpenCode` V2 server through the embedded client.
-    OpenCode,
-    /// An `sdk:` value cruise does not implement. [`Executor::run`] reports it;
-    /// no prompt is executed.
-    ///
-    /// Unreachable through cruise itself — every config is validated by
-    /// [`crate::config::validate_sdk`] before it reaches here — but
-    /// [`Executor::new`] is public and infallible, and a removed value like
-    /// `sdk: seher` must never be quietly read as some other backend.
+    /// An unsupported `sdk:` value. [`Executor::run`] reports it without
+    /// executing a prompt.
     Unsupported { sdk: String },
 }
 
 impl Executor {
-    fn sdk(&self) -> Sdk {
-        match self {
-            Self::Claude => Sdk::Claude,
-            Self::OpenCode => Sdk::OpenCode,
-            _ => Sdk::Jcode,
-        }
-    }
-
-    /// Select an ordinary step model without losing SDK-qualified fallbacks.
+    /// Select an ordinary step model.
     #[must_use]
     pub fn step_model(&self, step: Option<&str>, global: Option<&ModelSpec>) -> Option<ModelSpec> {
-        crate::model_selection::step_model_spec(global, step, self.sdk())
+        crate::model_selection::step_model_spec(global, step, Sdk::Jcode)
     }
 
     /// Prefer planning candidates, falling back to the ordinary model list.
@@ -196,23 +149,19 @@ impl Executor {
     pub fn plan_model(plan: Option<&ModelSpec>, global: Option<&ModelSpec>) -> Option<ModelSpec> {
         crate::model_selection::planning_spec(plan, global).cloned()
     }
+
     /// Build an executor from the workflow's backend selection.
     ///
-    /// `sdk: jcode` -> [`Executor::Jcode`]; `sdk: claude` -> [`Executor::Claude`];
-    /// `sdk: opencode` -> [`Executor::OpenCode`];
-    /// a `command` with no `sdk` -> [`Executor::Command`]; neither named ->
-    /// [`Executor::Jcode`], the default backend. Any other `sdk` value ->
-    /// [`Executor::Unsupported`], which fails at run time.
+    /// `sdk: jcode` selects [`Executor::Jcode`]; a `command` with no `sdk`
+    /// selects [`Executor::Command`]; neither selects jcode by default.
+    /// Any other `sdk` value selects [`Executor::Unsupported`].
     ///
     /// Mutual exclusivity between `sdk` and `command` is enforced earlier by
-    /// [`crate::config::validate_sdk`], which also rejects every `sdk` value
-    /// that would land in [`Executor::Unsupported`].
+    /// [`crate::config::validate_sdk`].
     #[must_use]
     pub fn new(sdk: Option<&str>, command: &[String]) -> Self {
         match sdk {
             Some("jcode") => Executor::Jcode,
-            Some("claude") => Executor::Claude,
-            Some("opencode") => Executor::OpenCode,
             Some(other) => Executor::Unsupported {
                 sdk: other.to_string(),
             },
@@ -223,31 +172,26 @@ impl Executor {
         }
     }
 
-    /// Whether this executor drives prompts through an agent backend (`Jcode`,
-    /// `Claude`, or `OpenCode`) rather than spawning an external `command`.
+    /// Whether this executor drives prompts through the jcode SDK.
     #[must_use]
     pub fn is_sdk(&self) -> bool {
-        matches!(
-            self,
-            Executor::Jcode | Executor::Claude | Executor::OpenCode
-        )
+        matches!(self, Executor::Jcode)
     }
 
     /// Execute one prompt on the selected backend.
     ///
     /// # Errors
     ///
-    /// Returns an error if the command fails to spawn / exits non-zero, if the
-    /// `jcode` run or the `claude` CLI run fails, or if `sdk` named a backend
-    /// cruise does not implement. A jcode request with no effective Cruise model
-    /// returns [`CruiseError::MissingJcodeModel`] before starting the backend.
+    /// Returns an error if the command fails to spawn or exits non-zero, the
+    /// jcode run fails, or `sdk` names an unsupported backend. A jcode request
+    /// with no effective Cruise model returns [`CruiseError::MissingJcodeModel`].
     pub fn run(&self, req: PromptRun<'_>) -> impl Future<Output = Result<PromptOutcome>> + Send {
         self.run_with_jcode_access(req, crate::backend::jcode::SandboxAccess::default())
     }
 
     /// Execute one prompt with host-trusted file access for the jcode sandbox.
     ///
-    /// Non-jcode backends do not receive filesystem grants; required Bubblewrap rejects them.
+    /// Required Bubblewrap is rejected for the command backend.
     pub(crate) fn run_with_jcode_access(
         &self,
         req: PromptRun<'_>,
@@ -261,9 +205,7 @@ impl Executor {
                 "agent",
                 &[("cruise.agent.backend", "unsupported")],
             ),
-            Executor::Jcode | Executor::Claude | Executor::OpenCode => {
-                crate::telemetry::Operation::start("agent", &[])
-            }
+            Executor::Jcode => crate::telemetry::Operation::start("agent", &[]),
         };
         self.run_inner(req, sandbox_access)
             .with_context(operation.context())
@@ -302,14 +244,10 @@ impl Executor {
 
         if let Some(model) = req.model {
             model.validate("model")?;
-            if matches!(self, Self::Command { .. }) && model.has_sdk_overrides() {
+            if matches!(self, Self::Command { .. }) && model.has_time_windows() {
                 return Err(CruiseError::InvalidStepConfig(
-                    if model.has_time_windows() {
-                        "`command` cannot be combined with `disabled_during` on `model` candidates; time windows require an SDK backend".to_owned()
-                    } else {
-                        "`command` cannot be combined with SDK-qualified model candidates"
-                            .to_owned()
-                    },
+                    "`command` cannot be combined with `disabled_during` on `model` candidates; time windows require the jcode SDK backend"
+                        .to_owned(),
                 ));
             }
         }
@@ -320,7 +258,7 @@ impl Executor {
                     "`command` cannot be combined with `subagent_model`".to_owned(),
                 ));
             }
-            crate::config::validate_subagent_model_entry(entry, self.sdk(), "subagent_model")?;
+            crate::config::validate_subagent_model_entry(entry, Sdk::Jcode, "subagent_model")?;
         }
 
         if self.is_sdk() {
@@ -330,15 +268,14 @@ impl Executor {
             {
                 return Err(CruiseError::Interrupted);
             }
-            let candidates = resolve_candidates(req.model, self.sdk());
+            let candidates = resolve_candidates(req.model, Sdk::Jcode);
             let primary = &candidates[0];
-            if primary.sdk == Sdk::Jcode
-                && let Ok((_, model, _)) = jcode::parse_model_ref(primary.model.as_deref())
+            if let Ok((_, model, _)) = jcode::parse_model_ref(primary.model.as_deref())
                 && model.is_none()
             {
                 return Err(crate::workflow_defaults::missing_jcode_model_error());
             }
-            validate_candidate(&req, primary.sdk)?;
+            validate_candidate(&req)?;
         }
 
         if req.permission != crate::config::PermissionMode::ReadOnly {
@@ -372,17 +309,15 @@ impl Executor {
             }
             Executor::Command { .. } if req.tool_policy.has_explicit() => {
                 Err(CruiseError::InvalidStepConfig(
-                    "disallowed_tools requires an SDK backend because a command CLI manages its own tools"
+                    "disallowed_tools requires the jcode SDK backend because a command CLI manages its own tools"
                         .to_string(),
                 ))
             }
             Executor::Command { command } => run_command(command, req).await,
-            Executor::Jcode | Executor::Claude | Executor::OpenCode => {
-                run_sdk(req, self.sdk(), sandbox_access).await
-            }
-            Executor::Unsupported { sdk } => Err(crate::error::CruiseError::InvalidStepConfig(
-                format!("unsupported `sdk` value '{sdk}'"),
-            )),
+            Executor::Jcode => run_sdk(req, sandbox_access).await,
+            Executor::Unsupported { sdk } => Err(CruiseError::InvalidStepConfig(format!(
+                "unsupported SDK \"{sdk}\"; only \"jcode\" is supported"
+            ))),
         }
     }
 }
@@ -466,9 +401,9 @@ async fn run_command(command: &[String], req: PromptRun<'_>) -> Result<PromptOut
 }
 
 /// Bridge a blocking `std::sync::mpsc::Receiver` of backend chunks (as returned
-/// by [`stream_claude_agent`] and [`stream_jcode_agent`]) into a
+/// by [`stream_jcode_agent`]) into a
 /// [`ChunkOutcome`], forwarding text deltas to `on_delta` line-buffered (the
-/// SDK backends emit token-level deltas; `StreamCallbacks::on_stdout` is
+/// The jcode SDK emits token-level deltas; `StreamCallbacks::on_stdout` is
 /// line-oriented like the command backend). Cancellation returns
 /// `Err(Interrupted)` only after the backend worker closes its stream following
 /// runtime shutdown, so a successor cannot overlap an interrupted attempt.
@@ -566,13 +501,7 @@ async fn stream_to_outcome(
     })
 }
 
-/// Build a [`ClaudeRunnerConfig`] straight from `req`. `model_ref` is the model
-/// this attempt runs on — the caller's plain `claude --model` name with an
-/// optional `:effort` suffix, or a fallback the retry policy switched
-/// to. Unset leaves `--model` off so the CLI picks its own default.
-///
-/// Built fresh per attempt because [`crate::backend::claude::stream_agent`]
-/// consumes the config.
+/// Resolve a provider installation using the workflow's environment and cwd.
 fn resolve_for_request(
     provider: crate::provider_install::Provider,
     req: &PromptRun<'_>,
@@ -583,46 +512,6 @@ fn resolve_for_request(
         .map(std::ffi::OsString::from)
         .or_else(|| std::env::var_os("PATH"));
     crate::provider_install::resolve::resolve_with_path(provider, path.as_deref(), req.working_dir)
-}
-
-fn build_claude_config(
-    req: &PromptRun<'_>,
-    model_ref: Option<&str>,
-    subagent_model: Option<&str>,
-) -> Result<ClaudeRunnerConfig> {
-    build_claude_config_with(req, model_ref, subagent_model, resolve_for_request)
-}
-
-fn build_claude_config_with(
-    req: &PromptRun<'_>,
-    model_ref: Option<&str>,
-    subagent_model: Option<&str>,
-    resolver: impl FnOnce(
-        crate::provider_install::Provider,
-        &PromptRun<'_>,
-    ) -> Result<crate::provider_install::Resolved>,
-) -> Result<ClaudeRunnerConfig> {
-    let installation = resolver(crate::provider_install::Provider::Claude, req)?;
-    let mut env = req.env.clone();
-    if installation.is_managed() && std::env::var_os("DISABLE_AUTOUPDATER").is_none() {
-        env.entry("DISABLE_AUTOUPDATER".to_string())
-            .or_insert_with(|| "1".to_string());
-    }
-    let (model, suffix) = split_thinking_suffix(model_ref.unwrap_or_default());
-    Ok(ClaudeRunnerConfig {
-        model: (!model.is_empty()).then(|| model.to_string()),
-        subagent_model: subagent_model.map(str::to_owned),
-        effort: suffix.and_then(effort_from_suffix),
-        cwd: req.working_dir.map(Path::to_path_buf),
-        resume_session_id: resume_for(req, Sdk::Claude),
-        tools: req.tools.clone(),
-        env,
-        mcp_servers: req.mcp_servers.clone(),
-        cancel: req.cancel_token.cloned(),
-        cli_path: installation.explicit_path(),
-        permission: req.permission,
-        tool_policy: req.tool_policy.clone(),
-    })
 }
 
 /// How one attempt of [`run_sdk_with_fallback`] failed. Keeps the failure text
@@ -681,7 +570,7 @@ enum AttemptCompletion {
     Retry(AttemptFailure),
     Barrier(AttemptFailure),
 }
-/// Run one prompt on an SDK backend, retrying through
+/// Run one prompt on the jcode SDK, retrying through
 /// [`crate::retry::FallbackEngine`].
 ///
 /// `start` opens a stream for the model reference the engine picked; it is
@@ -731,34 +620,13 @@ async fn run_sdk_with_fallback(
     let on_delta = req.stream.and_then(|s| s.on_stdout);
     let candidates = resolve_candidates(req.model, base_sdk);
     let primary = &candidates[0];
-    let effective = retry::effective_candidates(
-        policy.as_deref().map(retry::RetryPolicy::config),
-        &candidates,
-        base_sdk,
-    );
-    let has_jcode = effective
-        .iter()
-        .any(|candidate| candidate.sdk == Sdk::Jcode);
-    if isolated_jcode && has_jcode {
-        if !cfg!(all(target_os = "linux", feature = "jcode-bubblewrap")) {
-            return Err(CruiseError::InvalidStepConfig(
-                "Bubblewrap isolation requires a Linux build with the jcode-bubblewrap feature"
-                    .to_owned(),
-            ));
-        }
-        if effective
-            .iter()
-            .any(|candidate| candidate.sdk != Sdk::Jcode)
-        {
-            return Err(CruiseError::InvalidStepConfig(
-                "Bubblewrap isolation cannot run mixed SDK fallback candidates: Claude and OpenCode are unconfined"
-                    .to_owned(),
-            ));
-        }
+    if isolated_jcode && !cfg!(all(target_os = "linux", feature = "jcode-bubblewrap")) {
+        return Err(CruiseError::InvalidStepConfig(
+            "Bubblewrap isolation requires a Linux build with the jcode-bubblewrap feature"
+                .to_owned(),
+        ));
     }
-    for candidate in &effective {
-        validate_candidate(req, candidate.sdk)?;
-    }
+    validate_candidate(req)?;
     let mut engine = FallbackEngine::new_candidates(
         availability,
         policy,
@@ -768,9 +636,6 @@ async fn run_sdk_with_fallback(
         &candidates[1..],
         req.max_retries,
     );
-    for sdk in engine.candidate_sdks() {
-        validate_candidate(req, sdk)?;
-    }
     let mut model_reported = false;
     let startup_reason = engine.startup_reason().cloned();
     if engine.startup_blocked() {
@@ -801,7 +666,6 @@ async fn run_sdk_with_fallback(
         attempt_number += 1;
         let sdk = engine.sdk();
         let label = sdk.as_str();
-        validate_candidate(req, sdk)?;
         let model = engine.model().map(str::to_string);
         let attempt = crate::telemetry::Operation::attempt(attempt_number, label, model.as_deref());
         if let Some((from, to)) = startup_switch.take() {
@@ -1016,23 +880,10 @@ impl Drop for SdkAttemptGuard {
     }
 }
 
-fn validate_bubblewrap_sdk_candidate(candidate_sdk: Sdk) -> Result<()> {
-    if candidate_sdk != Sdk::Jcode {
-        return Err(CruiseError::InvalidStepConfig(format!(
-            "require_bubblewrap forbids the unconfined {} SDK candidate",
-            candidate_sdk.as_str()
-        )));
-    }
-    Ok(())
-}
-
 async fn run_sdk(
     req: PromptRun<'_>,
-    sdk: Sdk,
     sandbox_access: crate::backend::jcode::SandboxAccess,
 ) -> Result<PromptOutcome> {
-    use crate::backend::opencode::{OpenCodeRunnerConfig, stream_agent};
-
     let cancel = req
         .cancel_token
         .map_or_else(CancellationToken::new, CancellationToken::child_token);
@@ -1044,80 +895,37 @@ async fn run_sdk(
         cancel_token: Some(&cancel),
         ..req
     };
-    let subagent = req.subagent_model.map(|entry| resolve_entry(entry, sdk));
+    let subagent = req
+        .subagent_model
+        .map(|entry| resolve_entry(entry, Sdk::Jcode));
     let isolated_jcode =
         sandbox_access.require_bubblewrap || crate::backend::jcode::bubblewrap_requested();
     run_sdk_with_fallback(
         &req,
-        sdk,
+        Sdk::Jcode,
         retry::active_policy(),
         isolated_jcode,
-        |candidate_sdk, model_ref| {
-            if sandbox_access.require_bubblewrap {
-                if req
+        |_, model_ref| {
+            if sandbox_access.require_bubblewrap
+                && req
                     .cancel_token
                     .is_some_and(CancellationToken::is_cancelled)
-                {
-                    return Err(CruiseError::Interrupted);
-                }
-                validate_bubblewrap_sdk_candidate(candidate_sdk)?;
+            {
+                return Err(CruiseError::Interrupted);
             }
             let subagent_model = subagent
                 .as_ref()
-                .filter(|candidate| candidate.sdk == candidate_sdk)
                 .and_then(|candidate| candidate.model.as_deref());
-            match candidate_sdk {
-                Sdk::Jcode => Ok(stream_jcode_agent(
-                    build_jcode_config_with_access(
-                        &req,
-                        model_ref,
-                        subagent_model,
-                        &sandbox_access,
-                        resolve_for_request,
-                    )?,
-                    req.prompt.to_string(),
-                )),
-                Sdk::Claude => Ok(stream_claude_agent(
-                    build_claude_config(&req, model_ref, subagent_model)?,
-                    req.prompt.to_string(),
-                )),
-                Sdk::OpenCode => {
-                    let resolved =
-                        resolve_for_request(crate::provider_install::Provider::OpenCode, &req)?;
-                    let mut env = req.env.clone();
-                    if resolved.is_managed()
-                        && std::env::var_os("OPENCODE_DISABLE_AUTOUPDATE").is_none()
-                    {
-                        env.entry("OPENCODE_DISABLE_AUTOUPDATE".to_string())
-                            .or_insert_with(|| "1".to_string());
-                    }
-                    Ok(stream_agent(
-                        OpenCodeRunnerConfig {
-                            model_ref: model_ref.map(str::to_string),
-                            cwd: req.working_dir.map(Path::to_path_buf),
-                            resume_session_id: resume_for(&req, Sdk::OpenCode),
-                            tools: req.tools.clone(),
-                            env,
-                            mcp_servers: req.mcp_servers.clone(),
-                            permission: req.permission,
-                            cancel: req.cancel_token.cloned(),
-                            keep_session_home: req.resume.is_some()
-                                || req.on_session_id.is_some()
-                                || req.tools.iter().any(|tool| {
-                                    matches!(
-                                        tool.name.as_str(),
-                                        crate::sdk_tools::SUBMIT_PLAN_TOOL
-                                            | crate::sdk_tools::UPDATE_PLAN_TOOL
-                                    )
-                                }),
-                            cli_path: resolved.explicit_path(),
-                            computer_use: req.computer_use,
-                            tool_policy: req.tool_policy.clone(),
-                        },
-                        req.prompt.to_string(),
-                    ))
-                }
-            }
+            Ok(stream_jcode_agent(
+                build_jcode_config_with_access(
+                    &req,
+                    model_ref,
+                    subagent_model,
+                    &sandbox_access,
+                    resolve_for_request,
+                )?,
+                req.prompt.to_string(),
+            ))
         },
     )
     .await
@@ -1215,16 +1023,6 @@ mod tests {
         }
     }
 
-    fn build_claude_config(
-        req: &PromptRun<'_>,
-        model: Option<&str>,
-        subagent: Option<&str>,
-    ) -> Result<ClaudeRunnerConfig> {
-        super::build_claude_config_with(req, model, subagent, |provider, _| {
-            Ok(fixture_resolver(provider))
-        })
-    }
-
     fn build_jcode_config(
         req: &PromptRun<'_>,
         model: Option<&str>,
@@ -1245,69 +1043,6 @@ mod tests {
 
     fn fixture_model(model: Option<&str>) -> Option<&'static ModelSpec> {
         model.map(|model| &*Box::leak(Box::new(ModelSpec::Single(model.to_owned()))))
-    }
-
-    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
-    #[tokio::test]
-    async fn bubblewrap_rejects_mixed_sdk_fallbacks_before_start() {
-        let model: ModelSpec =
-            serde_yaml::from_str("[runtime/main, {sdk: claude, model: runtime/claude-fallback}]")
-                .unwrap_or_else(|error| panic!("{error}"));
-        let env = HashMap::new();
-        let mut req = base_req(&env);
-        req.model = Some(&model);
-        let mut started = false;
-        let result =
-            run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), true, |_, _| {
-                started = true;
-                Ok(canned(vec![StreamChunk::Done(String::new())]))
-            })
-            .await;
-        assert!(!started);
-        assert!(matches!(result, Err(CruiseError::InvalidStepConfig(_))));
-    }
-
-    #[tokio::test]
-    async fn bubblewrap_request_leaves_non_jcode_only_chain_unaffected() {
-        let model = ModelSpec::Single("runtime/claude-main".to_owned());
-        let env = HashMap::new();
-        let mut req = base_req(&env);
-        req.model = Some(&model);
-        let mut started = false;
-        let outcome =
-            run_sdk_with_fallback(&req, Sdk::Claude, Some(fast_policy(&[])), true, |sdk, _| {
-                assert_eq!(sdk, Sdk::Claude);
-                started = true;
-                Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
-            })
-            .await
-            .unwrap_or_else(|error| panic!("non-jcode request must remain unaffected: {error}"));
-        assert!(started);
-        assert_eq!(outcome.result.output, "ok");
-    }
-
-    #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
-    #[tokio::test]
-    async fn require_bubblewrap_rejects_claude_candidate_before_launcher() {
-        let model = ModelSpec::Single("runtime/claude-main".to_owned());
-        let env = HashMap::new();
-        let mut req = base_req(&env);
-        req.model = Some(&model);
-        let mut checked = false;
-        let mut started = false;
-        let result =
-            run_sdk_with_fallback(&req, Sdk::Claude, Some(fast_policy(&[])), true, |sdk, _| {
-                checked = true;
-                validate_bubblewrap_sdk_candidate(sdk)?;
-                started = true;
-                Ok(canned(vec![StreamChunk::Done(String::new())]))
-            })
-            .await;
-        assert!(
-            checked && !started,
-            "the selected Claude candidate must be rejected before launch"
-        );
-        assert!(matches!(result, Err(CruiseError::InvalidStepConfig(_))));
     }
 
     #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
@@ -1352,8 +1087,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mixed_sdk_attempts_preserve_order_resume_and_checkpoint_owner() {
-        let model: ModelSpec = serde_yaml::from_str("[runtime/order-first:high, {sdk: claude, model: runtime/order-middle:medium}, runtime/order-last:low]").unwrap_or_else(|error| panic!("{error}"));
+    async fn jcode_fallback_attempts_preserve_order_resume_and_checkpoint_owner() {
+        let model: ModelSpec = serde_yaml::from_str(
+            "[runtime/order-first:high, runtime/order-middle:medium, runtime/order-last:low]",
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         let env = HashMap::from([("SDK_ENV".to_owned(), "preserved".to_owned())]);
         let checkpoints = Mutex::new(Vec::new());
         let callback = |session: &SdkSessionId| {
@@ -1403,9 +1141,9 @@ mod tests {
                     Some("caller-session".to_owned())
                 ),
                 (
-                    Sdk::Claude,
+                    Sdk::Jcode,
                     Some("runtime/order-middle:medium".to_owned()),
-                    None
+                    Some("caller-session".to_owned())
                 ),
                 (
                     Sdk::Jcode,
@@ -1414,104 +1152,20 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(
+        assert!(
             checkpoints
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
-                .map(|id| id.sdk)
-                .collect::<Vec<_>>(),
-            [Sdk::Jcode, Sdk::Claude, Sdk::Jcode]
+                .all(|id| id.sdk == Sdk::Jcode)
         );
         assert_eq!(outcome.session_id.map(|id| id.sdk), Some(Sdk::Jcode));
     }
 
     #[tokio::test]
-    async fn explicit_chain_preflight_ignores_overridden_incompatible_tail() {
-        for (sdk, model, computer_use, remote) in [
-            (
-                Sdk::Jcode,
-                "[preflight/main:high, {sdk: claude, model: unreachable}]",
-                true,
-                false,
-            ),
-            (
-                Sdk::Claude,
-                "[preflight/main:high, {sdk: jcode, model: unreachable}]",
-                false,
-                true,
-            ),
-            (
-                Sdk::Claude,
-                "['', {sdk: jcode, model: unreachable}]",
-                false,
-                true,
-            ),
-        ] {
-            let model: ModelSpec = serde_yaml::from_str(model)
-                .unwrap_or_else(|error| panic!("invalid preflight model fixture: {error}"));
-            let env = HashMap::new();
-            let mut req = base_req(&env);
-            req.model = Some(&model);
-            req.computer_use = computer_use;
-            let servers =
-                serde_yaml::from_str("remote:\n  type: http\n  url: https://example.invalid/mcp\n")
-                    .unwrap_or_else(|error| panic!("invalid remote MCP fixture: {error}"));
-            if remote {
-                req.mcp_servers = &servers;
-            }
-            for entries in [
-                &[][..],
-                &["preflight/safe"][..],
-                &["preflight/main:low"][..],
-                &["provider/*"][..],
-            ] {
-                let result = run_sdk_with_fallback(
-                    &req,
-                    sdk,
-                    Some(fast_policy(&[("default", entries)])),
-                    false,
-                    |owner, _| {
-                        assert_eq!(owner, sdk);
-                        Ok(canned(vec![StreamChunk::Done("ok".into())]))
-                    },
-                )
-                .await;
-                assert!(
-                    result.is_ok(),
-                    "effective candidates must pass preflight: {result:?}"
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn fallback_capability_validation_checks_nonprimary_sdk_before_start() {
-        let model: ModelSpec = serde_yaml::from_str(
-            "[runtime/capability, {sdk: claude, model: runtime/capability-tail}]",
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
+    async fn direct_command_request_rejects_sdk_qualified_model_before_spawning() {
         let env = HashMap::new();
-        let mut req = base_req(&env);
-        req.model = Some(&model);
-        req.computer_use = true;
-        let mut started = false;
-        let result =
-            run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), false, |_, _| {
-                started = true;
-                Ok(canned(vec![StreamChunk::Done(String::new())]))
-            })
-            .await;
-        assert!(!started);
-        assert!(result.is_err_and(|error| error.to_string().to_lowercase().contains("claude")));
-    }
-
-    // -- Executor dispatch ----------------------------------------------------
-
-    #[tokio::test]
-    async fn direct_command_request_rejects_sdk_candidates_before_spawning() {
-        let env = HashMap::new();
-        let model: ModelSpec = serde_yaml::from_str("[legacy, {sdk: claude, model: fallback}]")
+        let model: ModelSpec = serde_yaml::from_str("[legacy, {sdk: jcode, model: fallback}]")
             .unwrap_or_else(|error| panic!("{error}"));
         let mut req = base_req(&env);
         req.model = Some(&model);
@@ -1524,9 +1178,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_request_rejects_unknown_candidate_sdk_before_spawning() {
+    async fn direct_request_rejects_unknown_sdk_qualified_model_before_spawning() {
         let env = HashMap::new();
-        let model: ModelSpec = serde_yaml::from_str("[{sdk: unknown, model: fallback}]")
+        let model: ModelSpec = serde_yaml::from_str("[{sdk: unsupported, model: fallback}]")
             .unwrap_or_else(|error| panic!("{error}"));
         let mut req = base_req(&env);
         req.model = Some(&model);
@@ -1542,62 +1196,29 @@ mod tests {
         }
     }
 
-    fn claude_executor() -> Executor {
-        Executor::Claude
-    }
-
     fn jcode_executor() -> Executor {
         Executor::Jcode
     }
 
     #[test]
     fn normalized_step_overrides_match_capability_selection() {
-        for (sdk, global, step, expected_len) in [
-            (
-                Sdk::Jcode,
-                "[provider/main:high, fallback]",
-                "provider/main:low",
-                2,
-            ),
-            (
-                Sdk::OpenCode,
-                "[provider/main#slow, fallback]",
-                "provider/main#fast",
-                2,
-            ),
-            (
-                Sdk::Jcode,
-                "[provider/main:high, fallback]",
-                "provider/other:low",
-                1,
-            ),
-            (
-                Sdk::Jcode,
-                "[{sdk: claude, model: provider/main:high}, fallback]",
-                "provider/main:low",
-                1,
-            ),
+        for (global, step, expected_len) in [
+            ("[provider/main:high, fallback]", "provider/main:low", 2),
+            ("[provider/main:high, fallback]", "provider/other:low", 1),
         ] {
             let global: ModelSpec = serde_yaml::from_str(global)
                 .unwrap_or_else(|error| panic!("invalid step model fixture: {error}"));
-            let executor = Executor::new(Some(sdk.as_str()), &[]);
+            let executor = Executor::new(Some("jcode"), &[]);
             let selected = executor
                 .step_model(Some(step), Some(&global))
                 .unwrap_or_else(|| panic!("step override must select a model"));
-            let execution = resolve_candidates(Some(&selected), sdk);
+            let execution = resolve_candidates(Some(&selected), Sdk::Jcode);
             let capability =
-                crate::model_selection::select_step_model(Some(&global), Some(step), sdk);
+                crate::model_selection::select_step_model(Some(&global), Some(step), Sdk::Jcode);
             assert_eq!(execution, capability);
             assert_eq!(execution.len(), expected_len);
             assert_eq!(execution[0].model.as_deref(), Some(step));
         }
-    }
-
-    #[test]
-    fn new_picks_claude_when_sdk_is_claude() {
-        let e = Executor::new(Some("claude"), &[]);
-        assert!(e.is_sdk());
-        assert!(matches!(e, Executor::Claude));
     }
 
     #[test]
@@ -1617,11 +1238,10 @@ mod tests {
         assert!(matches!(e, Executor::Jcode));
     }
 
-    /// A removed `sdk:` value must never resolve to a working backend: cruise
-    /// rejects it in `validate_sdk`, and this layer refuses to run it too.
+    /// Unsupported SDK values never resolve to a working backend.
     #[tokio::test]
-    async fn new_refuses_a_removed_sdk_value_instead_of_defaulting_to_jcode() {
-        let e = Executor::new(Some("seher"), &[]);
+    async fn new_refuses_an_unsupported_sdk_value_instead_of_defaulting_to_jcode() {
+        let e = Executor::new(Some("unsupported"), &[]);
         assert!(!e.is_sdk());
         assert!(matches!(e, Executor::Unsupported { .. }));
 
@@ -1651,7 +1271,7 @@ mod tests {
             panic!("an unsupported sdk must not execute a prompt");
         };
         assert!(
-            err.to_string().contains("seher"),
+            err.to_string().contains("unsupported"),
             "error should name the rejected value: {err}"
         );
     }
@@ -1664,23 +1284,6 @@ mod tests {
             Some(ModelSpec::Single("sonnet".to_string()))
         );
         assert_eq!(e.step_model(None, None), None);
-    }
-
-    #[test]
-    fn claude_model_passes_through_model_reference() {
-        // Claude mode passes model_or_mode straight through as a
-        // `claude --model` name.
-        let e = claude_executor();
-        assert_eq!(
-            e.step_model(Some("claude-sonnet-4-6:high"), fixture_model(Some("opus"))),
-            Some(ModelSpec::Single("claude-sonnet-4-6:high".to_string()))
-        );
-        assert_eq!(e.step_model(None, None), None);
-        assert_eq!(
-            Executor::plan_model(fixture_model(Some("claude-opus-4-6")), None),
-            Some(ModelSpec::Single("claude-opus-4-6".to_string()))
-        );
-        assert_eq!(Executor::plan_model(None, None), None);
     }
 
     #[test]
@@ -1798,7 +1401,7 @@ mod tests {
                     req.usage = Some(scope());
                     req.max_retries = 1;
                     let mut starts = 0;
-                    let result = run_with_fallback(&req, "claude", None, |_| {
+                    let result = run_with_fallback(&req, "jcode", None, |_| {
                         starts += 1;
                         let (tx, rx) = std::sync::mpsc::channel();
                         tx.send(usage()).unwrap_or_else(|error| panic!("{error}"));
@@ -1835,7 +1438,7 @@ mod tests {
                     let env = HashMap::new();
                     let mut req = base_req(&env);
                     req.usage = Some(scope());
-                    let result = run_with_fallback(&req, "claude", None, |_| {
+                    let result = run_with_fallback(&req, "jcode", None, |_| {
                         Err(CruiseError::Other("startup failed".into()))
                     })
                     .await;
@@ -1856,7 +1459,7 @@ mod tests {
                         let mut req = base_req(&env);
                         req.usage = Some(scope());
                         req.cancel_token = Some(&cancel);
-                        let result = run_with_fallback(&req, "claude", None, |_| {
+                        let result = run_with_fallback(&req, "jcode", None, |_| {
                             let (tx, rx) = std::sync::mpsc::channel();
                             let cancel = cancel.clone();
                             std::thread::spawn(move || {
@@ -1884,7 +1487,7 @@ mod tests {
                 runtime().block_on(async {
                     let env = HashMap::new();
                     let req = base_req(&env);
-                    let result = run_with_fallback(&req, "claude", None, |_| {
+                    let result = run_with_fallback(&req, "jcode", None, |_| {
                         let (tx, rx) = std::sync::mpsc::channel();
                         tx.send(usage()).unwrap_or_else(|error| panic!("{error}"));
                         tx.send(StreamChunk::Done("ok".into()))
@@ -1948,19 +1551,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn claude_backend_rejects_computer_use_before_running_a_prompt() {
-        let env = HashMap::new();
-        let mut req = base_req(&env);
-        req.computer_use = true;
-
-        let Err(error) = claude_executor().run(req).await else {
-            panic!("Claude backend must reject computer use");
-        };
-        assert!(matches!(error, CruiseError::InvalidStepConfig(_)));
-        assert!(error.to_string().contains("interactive sessions"));
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn command_backend_rejects_computer_use_without_spawning_the_command() {
@@ -2011,50 +1601,17 @@ mod tests {
         let _path = prepend_to_path(&process_bin);
         let _data = EnvGuard::set("XDG_DATA_HOME", temp.path().join("data"));
         let _jcode = EnvGuard::remove("CRUISE_JCODE_CLI_PATH");
-        let _claude = EnvGuard::remove("CRUISE_CLAUDE_CLI_PATH");
-        let _opencode = EnvGuard::remove("CRUISE_OPENCODE_CLI_PATH");
         let env = HashMap::from([("PATH".to_string(), "bin".to_string())]);
         let mut req = base_req(&env);
         let cwd = temp.path().join("child");
         req.working_dir = Some(&cwd);
-        for provider in [
-            crate::provider_install::Provider::Jcode,
-            crate::provider_install::Provider::Claude,
-            crate::provider_install::Provider::OpenCode,
-        ] {
-            let binary = child_bin.join(provider.binary_name());
-            std::fs::write(&binary, b"fixture").unwrap_or_else(|error| panic!("{error}"));
-            let resolved =
-                resolve_for_request(provider, &req).unwrap_or_else(|error| panic!("{error}"));
-            assert_eq!(resolved.source, crate::provider_install::Source::Path);
-            assert_eq!(resolved.program, binary);
-        }
-    }
-
-    #[test]
-    fn claude_managed_and_path_environment_wiring() {
-        let _lock = lock_process();
-        let _guard = EnvGuard::remove("DISABLE_AUTOUPDATER");
-        let env = HashMap::new();
-        let req = base_req(&env);
-        let managed = super::build_claude_config_with(&req, None, None, |_, _| {
-            Ok(crate::provider_install::Resolved {
-                program: "/fixture/claude".into(),
-                source: crate::provider_install::Source::Managed,
-            })
-        })
-        .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(
-            managed.env.get("DISABLE_AUTOUPDATER").map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(
-            managed.cli_path.as_deref(),
-            Some(Path::new("/fixture/claude"))
-        );
-        let path = build_claude_config(&req, None, None).unwrap_or_else(|error| panic!("{error}"));
-        assert!(!path.env.contains_key("DISABLE_AUTOUPDATER"));
-        assert!(path.cli_path.is_none());
+        let provider = crate::provider_install::Provider::Jcode;
+        let binary = child_bin.join(provider.binary_name());
+        std::fs::write(&binary, b"fixture").unwrap_or_else(|error| panic!("{error}"));
+        let resolved =
+            resolve_for_request(provider, &req).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(resolved.source, crate::provider_install::Source::Path);
+        assert_eq!(resolved.program, binary);
     }
 
     #[test]
@@ -2115,12 +1672,9 @@ mod tests {
     }
 
     #[test]
-    fn subagent_model_builders_forward_backend_settings() {
+    fn subagent_model_builder_forwards_jcode_settings() {
         let env = HashMap::new();
         let req = base_req(&env);
-        let claude = build_claude_config(&req, Some("sonnet"), Some("haiku"))
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(claude.subagent_model.as_deref(), Some("haiku"));
         let jcode = build_jcode_config(&req, Some("openai/main"), Some("openai/worker"))
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(jcode.subagent_provider.as_deref(), Some("openai"));
@@ -2196,86 +1750,9 @@ mod tests {
             false,
             crate::config::PermissionMode::Full,
         );
-        let claude =
-            build_claude_config(&req, None, None).unwrap_or_else(|error| panic!("{error}"));
         let jcode = build_jcode_config(&req, Some("test-provider/test-model"), None)
             .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(claude.tool_policy, req.tool_policy);
         assert_eq!(jcode.tool_policy, req.tool_policy);
-    }
-
-    // -- build_claude_config ---------------------------------------------------
-
-    #[test]
-    fn build_claude_config_splits_effort_suffix_off_the_model() {
-        let env = HashMap::new();
-        let mut req = base_req(&env);
-        req.model = fixture_model(Some("claude-sonnet-4-6:xhigh"));
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None)
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-6"));
-        assert_eq!(config.effort, Some(EffortLevel::XHigh));
-    }
-
-    #[test]
-    fn build_claude_config_leaves_model_unset_so_the_cli_picks_its_default() {
-        let env = HashMap::new();
-        let req = base_req(&env);
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None)
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(config.model, None);
-        assert_eq!(config.effort, None);
-    }
-
-    #[test]
-    fn build_claude_config_forwards_tools_env_working_dir_and_resume() {
-        let mut env = HashMap::new();
-        env.insert("FOO".to_string(), "bar".to_string());
-        let mut mcp_servers = crate::config::McpServers::new();
-        mcp_servers.insert(
-            "local_tool".to_string(),
-            crate::config::McpServerConfig {
-                command: Some("node".to_string()),
-                ..Default::default()
-            },
-        );
-        let tool = CruiseTool::new(
-            "echo",
-            "Echo",
-            serde_json::json!({"type": "object"}),
-            std::sync::Arc::new(|_| Ok(String::new())),
-        );
-        let dir = std::path::PathBuf::from("/tmp/cruise-claude-test");
-        let req = PromptRun {
-            usage: None,
-            prompt: "hi",
-            model: fixture_model(Some("claude-opus-4-6")),
-            subagent_model: None,
-            max_retries: 0,
-            env: &env,
-            mcp_servers: &mcp_servers,
-            on_notice: None,
-            cancel_token: None,
-            working_dir: Some(&dir),
-            stream: None,
-            tools: vec![tool],
-            on_session_id: None,
-            resume: Some(SdkSessionId {
-                sdk: Sdk::Claude,
-                id: "sess-1".to_string(),
-            }),
-            computer_use: false,
-            permission: crate::config::PermissionMode::Full,
-            tool_policy: crate::tool_policy::ToolPolicy::default(),
-        };
-        let config = build_claude_config(&req, req.model.and_then(ModelSpec::primary), None)
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(config.cwd, Some(dir));
-        assert_eq!(config.env.get("FOO").map(String::as_str), Some("bar"));
-        assert_eq!(config.resume_session_id.as_deref(), Some("sess-1"));
-        assert_eq!(config.tools.len(), 1);
-        assert_eq!(config.tools[0].name, "echo");
-        assert_eq!(config.mcp_servers, mcp_servers);
     }
 
     #[test]
@@ -2522,12 +1999,12 @@ mod tests {
     async fn retry_barrier_prevents_replay_without_an_output_sink() {
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model = fixture_model(Some("barrier/model:tag#precise"));
+        req.model = fixture_model(Some("barrier/model:high"));
         req.max_retries = 3;
         let mut attempts = 0;
         let result = run_with_fallback(
             &req,
-            "opencode",
+            "jcode",
             Some(fast_policy(&[("default", &["barrier/spare"])])),
             |_| {
                 attempts += 1;
@@ -2640,7 +2117,7 @@ mod tests {
         };
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model = fixture_model(Some("opencode-zen/muse-spark-1.3-contributor-free:xhigh"));
+        req.model = fixture_model(Some("test-notice/model:xhigh"));
         req.on_notice = Some(&on_notice);
         req.stream = Some(&stream);
 
@@ -2666,15 +2143,12 @@ mod tests {
                 .map(|session| session.id.as_str()),
             Some("session-1")
         );
-        assert_eq!(
-            recorded(&notices),
-            ["Model: opencode-zen/muse-spark-1.3-contributor-free:xhigh"]
-        );
+        assert_eq!(recorded(&notices), ["Model: test-notice/model:xhigh"]);
         assert_eq!(
             recorded(&events),
             [
                 "backend-start",
-                "Model: opencode-zen/muse-spark-1.3-contributor-free:xhigh",
+                "Model: test-notice/model:xhigh",
                 "assistant:assistant output"
             ]
         );
@@ -2682,7 +2156,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_model_notice_names_the_selected_sdk_backend() {
-        for backend in ["jcode", "claude"] {
+        for backend in ["jcode"] {
             let notices = recorder();
             let notices_sink = Arc::clone(&notices);
             let on_notice = move |msg: &str| record(&notices_sink, msg);
@@ -2858,21 +2332,18 @@ mod tests {
         let on_notice = move |msg: &str| record(&notices_sink, msg);
         let env = HashMap::new();
         let mut req = base_req(&env);
-        req.model = fixture_model(Some("opencode-zen/muse-spark-1.3-contributor-free:xhigh"));
+        req.model = fixture_model(Some("test-fallback/primary:xhigh"));
         req.max_retries = 1;
         req.on_notice = Some(&on_notice);
 
         let policy = fast_policy(&[(
-            "opencode-zen/muse-spark-1.3-contributor-free:xhigh",
-            &[
-                "openrouter/z-ai/glm-5.2:free:xhigh",
-                "provider/last-resort:free:xhigh",
-            ],
+            "test-fallback/primary:xhigh",
+            &["test-fallback/secondary:xhigh", "test-fallback/final:xhigh"],
         )]);
         let outcome = run_with_fallback(&req, "jcode", Some(policy), |model| {
             let model = model.unwrap_or_default();
             record(&models_sink, model);
-            if model == "provider/last-resort:free:xhigh" {
+            if model == "test-fallback/final:xhigh" {
                 Ok(canned(vec![StreamChunk::Done("ok".to_string())]))
             } else {
                 Ok(canned(vec![limit_chunk()]))
@@ -2893,19 +2364,16 @@ mod tests {
             5,
             "unexpected model lifecycle notices: {lifecycle:?}"
         );
-        assert_eq!(
-            lifecycle[0],
-            "Model: opencode-zen/muse-spark-1.3-contributor-free:xhigh"
-        );
+        assert_eq!(lifecycle[0], "Model: test-fallback/primary:xhigh");
         assert!(lifecycle[1].starts_with(
-            "Warning: Fallback: opencode-zen/muse-spark-1.3-contributor-free:xhigh -> \
-             openrouter/z-ai/glm-5.2:free:xhigh ("
+            "Warning: Fallback: test-fallback/primary:xhigh -> \
+             test-fallback/secondary:xhigh ("
         ));
-        assert_eq!(lifecycle[2], "Model: openrouter/z-ai/glm-5.2:free:xhigh");
+        assert_eq!(lifecycle[2], "Model: test-fallback/secondary:xhigh");
         assert!(lifecycle[3].starts_with(
-            "Warning: Fallback: openrouter/z-ai/glm-5.2:free:xhigh -> provider/last-resort:free:xhigh ("
+            "Warning: Fallback: test-fallback/secondary:xhigh -> test-fallback/final:xhigh ("
         ));
-        assert_eq!(lifecycle[4], "Model: provider/last-resort:free:xhigh");
+        assert_eq!(lifecycle[4], "Model: test-fallback/final:xhigh");
     }
 
     #[tokio::test]
@@ -3052,21 +2520,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_transport_and_setup_errors_switch_to_the_next_model() {
-        for (sdk, primary, spare, message) in [
-            (
-                "jcode",
-                "test-transient-http2/primary",
-                "test-transient-http2/spare",
-                "Error: command error: Internal: Failed to send request to OpenAI API: error sending request for url (https://chatgpt.com/backend-api/codex/responses): client error (SendRequest): http2 error: stream error received: unspecific protocol error detected",
-            ),
-            (
-                "opencode",
-                "test-opencode-setup/primary",
-                "test-opencode-setup/spare",
-                "Error: command error: OpenCode V2 setup timed out",
-            ),
-        ] {
+    async fn transient_transport_errors_switch_to_the_next_model() {
+        for (sdk, primary, spare, message) in [(
+            "jcode",
+            "test-transient-http2/primary",
+            "test-transient-http2/spare",
+            "Error: command error: Internal: Failed to send request to OpenAI API: error sending request for url (https://chatgpt.com/backend-api/codex/responses): client error (SendRequest): http2 error: stream error received: unspecific protocol error detected",
+        )] {
             let models = recorder();
             let models_sink = Arc::clone(&models);
             let env = HashMap::new();
@@ -3520,7 +2980,7 @@ mod tests {
 
         let Err(error) = run_with_fallback(
             &req,
-            "claude",
+            "jcode",
             Some(fast_policy(&[(
                 "test-executor-closed/primary",
                 &["test-executor-closed/spare"],
@@ -3538,7 +2998,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("claude stream closed before completion"),
+                .contains("jcode stream closed before completion"),
             "got: {error}"
         );
         assert_eq!(recorded(&models), ["test-executor-closed/primary"]);
@@ -3661,7 +3121,7 @@ mod tests {
             (
                 serde_json::json!([
                     {"model": "test-window-blocked/one", "disabled_during": ["00:00-24:00"]},
-                    {"sdk": "claude", "model": "test-window-blocked/two", "disabled_during": ["00:00-24:00"]}
+                    {"model": "test-window-blocked/two", "disabled_during": ["00:00-24:00"]}
                 ]),
                 Some(fast_policy(&[])),
             ),
@@ -3756,70 +3216,6 @@ mod tests {
         )
         .await
         .unwrap_or_else(|error| panic!("skipped chain identity was poisoned: {error}"));
-    }
-
-    #[tokio::test]
-    async fn disabled_window_chain_skips_opencode_native_variant_identity() {
-        let primary = "provider/test-window-native-primary";
-        let blocked = "provider/test-window-native-blocked:free";
-        let spare = "provider/test-window-native-spare";
-        let spec = disabled_window_spec(serde_json::json!([
-            primary, {"model": blocked, "disabled_during": ["00:00-24:00"]}
-        ]));
-        let env = HashMap::new();
-        let mut req = base_req(&env);
-        req.model = Some(&spec);
-        // README: a zero retry budget forbids switching after a backend 4xx.
-        req.max_retries = 1;
-        let mut attempts = Vec::new();
-        run_sdk_with_fallback(
-            &req,
-            Sdk::OpenCode,
-            Some(fast_policy(&[(
-                primary,
-                &["provider/test-window-native-blocked:free#fast", spare],
-            )])),
-            false,
-            |_, model| {
-                attempts.push(model.unwrap_or_default().to_owned());
-                if model == Some(primary) {
-                    Ok(canned(vec![StreamChunk::Error(
-                        "API Error: 404 model not found".to_owned(),
-                    )]))
-                } else {
-                    Ok(canned(vec![StreamChunk::Done("available".to_owned())]))
-                }
-            },
-        )
-        .await
-        .unwrap_or_else(|error| panic!("native variant fallback failed: {error}"));
-        assert_eq!(attempts, [primary, spare]);
-    }
-
-    #[tokio::test]
-    async fn disabled_window_identity_is_isolated_by_sdk() {
-        let model = "test-window-sdk/shared:high";
-        let spec = disabled_window_spec(serde_json::json!([
-            {"sdk": "jcode", "model": model, "disabled_during": ["00:00-24:00"]},
-            {"sdk": "claude", "model": model}
-        ]));
-        let env = HashMap::new();
-        let mut req = base_req(&env);
-        req.model = Some(&spec);
-        let mut attempts = Vec::new();
-        let result = run_sdk_with_fallback(
-            &req,
-            Sdk::Jcode,
-            Some(fast_policy(&[])),
-            false,
-            |sdk, selected| {
-                attempts.push((sdk, selected.map(str::to_owned)));
-                Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
-            },
-        )
-        .await;
-        result.unwrap_or_else(|error| panic!("another SDK must remain available: {error}"));
-        assert_eq!(attempts, [(Sdk::Claude, Some(model.to_owned()))]);
     }
 
     #[tokio::test]

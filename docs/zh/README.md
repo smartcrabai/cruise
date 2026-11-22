@@ -8,7 +8,7 @@
 
 Cruise 是一款基于 YAML 的 AI 工作流编排器。
 
-Cruise 依据声明式工作流，半确定性地自动推进规划 → 审批 → 编写测试 → 实现 → 测试 → 审查 → 可选地创建 PR 并执行类似 PR 后处理的任务。它支持在步骤间传递变量、条件分支和循环控制。Cruise 基于 Jcode 构建，资源占用很低。它还支持 Claude 和 OpenCode SDK 后端，以及自定义 CLI 命令（例如 `codex exec`）。
+Cruise 依据声明式工作流，半确定性地自动推进规划 → 审批 → 编写测试 → 实现 → 测试 → 审查 → 可选地创建 PR 并执行类似 PR 后处理的任务。它支持在步骤间传递变量、条件分支和循环控制。Cruise 基于 Jcode 构建，资源占用很低。它的唯一 SDK 后端是 jcode，也支持 `codex exec` 等自定义 CLI 命令。
 
 ## 文档索引
 
@@ -21,7 +21,7 @@ Cruise 依据声明式工作流，半确定性地自动推进规划 → 审批 �
 | [cli-reference.md](cli-reference.md) | 命令、参数、选项、语言设置和通知 |
 | [sessions.md](sessions.md) | 生命周期、工作区模式、隔离、恢复和并行执行 |
 | [configuration.md](configuration.md) | 配置解析、默认值、设置和 prompt 语言 |
-| [sdk.md](sdk.md) | 后端、身份验证、权限和工具限制 |
+| [sdk.md](sdk.md) | jcode SDK 身份验证、权限和工具限制 |
 | [steps.md](steps.md) | 步骤类型、PR 后自动化及变量 |
 | [workflow-control.md](workflow-control.md) | 流程控制、flags、条件、分组和 workflow 组合 |
 | [workflow-examples.md](workflow-examples.md) | 完整开发流程和简单的自动 commit 流程 |
