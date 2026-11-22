@@ -657,7 +657,7 @@ rm -f "$STUB_DIR/gh"
 NOGH_BIN="$TMP/nogh-bin"
 must mkdir -p "$NOGH_BIN"
 for _bin in sh env bash mkdir chmod cat; do
-  must ln -s "$(command -v "$_bin")" "$NOGH_BIN/$_bin"
+  must ln -s "$(type -P "$_bin")" "$NOGH_BIN/$_bin"
 done
 IDIR6="$TMP/install-nogh"
 mkdir -p "$IDIR6"
