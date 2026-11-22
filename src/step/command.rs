@@ -409,7 +409,8 @@ pub(crate) async fn run_gate_command<S: std::hash::BuildHasher>(
     })
 }
 const GATE_OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(5);
-const GATE_OUTPUT_FINISH_TIMEOUT: Duration = Duration::from_secs(30);
+// Sanitizing a multi-megabyte single line can take over 30s on loaded CI runners.
+const GATE_OUTPUT_FINISH_TIMEOUT: Duration = Duration::from_secs(60);
 
 async fn collect_gate_output(
     mut stdout: Option<tokio::task::JoinHandle<String>>,

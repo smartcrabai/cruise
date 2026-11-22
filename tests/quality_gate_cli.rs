@@ -230,7 +230,16 @@ fn large_output_preserves_both_ends_in_feedback_and_artifact() -> TestResult {
     let log = std::fs::read_to_string(f.home.join("gate-log-2"))?;
     assert!(log.len() <= 1024 * 1024);
     for output in [&retry, &log] {
-        assert!(output.contains("BEGIN_MARKER") && output.contains("END_MARKER"));
+        let head = &output[..output
+            .char_indices()
+            .nth(300)
+            .map_or(output.len(), |(i, _)| i)];
+        let tail = &output[output.char_indices().rev().nth(299).map_or(0, |(i, _)| i)..];
+        assert!(
+            output.contains("BEGIN_MARKER") && output.contains("END_MARKER"),
+            "markers missing from {} bytes; head: {head:?}; tail: {tail:?}",
+            output.len()
+        );
         assert!(output.contains("omitted"));
         assert!(!output.contains("hunter2"));
     }
