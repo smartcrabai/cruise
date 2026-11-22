@@ -15,7 +15,9 @@ use cruise::executor::{Executor, PromptRun};
 use cruise::test_support::{EnvGuard, lock_process, prepend_to_path, write_executable_script};
 use tempfile::TempDir;
 
-const RUN_LIMIT: Duration = Duration::from_secs(12);
+// Startup rejection plus cleanup can serially reach the product's 7s read, 5.8s reap,
+// and 1s bridge limits on a loaded runner.
+const RUN_LIMIT: Duration = Duration::from_secs(20);
 
 struct Fixture {
     root: TempDir,
@@ -107,7 +109,15 @@ impl Fixture {
         // wait forever before the fixture's emergency PID cleanup can run.
         runtime.shutdown_timeout(Duration::from_secs(1));
         result.unwrap_or_else(|error| {
-            panic!("OpenCode startup rejection exceeded bounded deadline: {error}")
+            let cli: Vec<_> = self
+                .pids()
+                .into_iter()
+                .map(|pid| (pid, alive(pid)))
+                .collect();
+            panic!(
+                "OpenCode startup rejection exceeded bounded deadline: {error}; \
+                 fake CLI (pid, alive): {cli:?}"
+            )
         })
     }
 }
