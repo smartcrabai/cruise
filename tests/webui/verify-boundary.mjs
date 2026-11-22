@@ -73,7 +73,7 @@ try {
   assert.equal((await post).status(), 200, 'Verify reaches production HTTP route');
   const errorToast = page.getByTestId('toast-detail');
   await errorToast.waitFor({ timeout: 60000 });
-  assert.equal(await errorToast.textContent(), 'claude is not installed: no managed install and no claude on PATH. Run `cruise …');
+  assert.equal(await errorToast.textContent(), 'jcode is not installed: no managed install and no jcode on PATH. Run `cruise in…');
   await page.screenshot({ path: join(output, 'provider-startup-failure.png'), fullPage: true });
   assert.equal(verifyPosts, 1, 'exactly one real Verify POST');
   assert.equal(await readFile(join(root, 'data/cruise/sessions', cases[0].id, 'plan.md'), 'utf8'), plan, 'failed Verify preserves the saved plan');
