@@ -111,7 +111,7 @@ async fn run(cli: cli::Cli) -> error::Result<()> {
         Some(cli::Commands::Run(args)) => run_cmd::run(args).await,
         Some(cli::Commands::Tell(args)) => tell_cmd::run(args).await,
         Some(cli::Commands::List(args)) => list_cmd::run(args).await,
-        Some(cli::Commands::Manager) => manager_cmd::run().await,
+        Some(cli::Commands::Manager(args)) => manager_cmd::run(args).await,
         Some(cli::Commands::Diff(args)) => diff_cmd::run(&args).await,
         Some(cli::Commands::Clean(args)) => clean_cmd::run(args).await,
         Some(cli::Commands::Usage(args)) => usage_cmd::run(&args),

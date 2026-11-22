@@ -121,8 +121,8 @@ pub enum Commands {
     Tell(TellArgs),
     /// List and manage sessions interactively.
     List(ListArgs),
-    /// Discuss and manage a repository goal interactively.
-    Manager,
+    /// Discuss and manage repository goals.
+    Manager(ManagerArgs),
     /// Show the changes in a session branch and worktree.
     Diff(DiffArgs),
     /// Remove sessions with closed/merged PRs.
@@ -154,6 +154,74 @@ pub enum Commands {
     /// Removed MCP bridge, kept so stale jcode registrations fail instead of planning.
     #[command(name = "mcp-bridge", hide = true, disable_help_flag = true)]
     McpBridge(LegacyMcpBridgeArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct ManagerArgs {
+    #[command(subcommand)]
+    pub command: Option<ManagerCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ManagerCommand {
+    /// Show the repository's Manager snapshot.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send a message to Manager.
+    Say {
+        text: Option<String>,
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Draft a goal proposal for review.
+    Propose {
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Review and approve a goal proposal.
+    Approve(ManagerApprovalArgs),
+    /// Pause a goal.
+    Pause { goal: String },
+    /// Resume a goal or continue an existing task attempt.
+    Resume { goal: String, task: Option<String> },
+    /// Retry a goal or start a fresh task attempt.
+    Retry { goal: String, task: Option<String> },
+    /// Answer a pending goal prompt.
+    Answer {
+        goal: String,
+        prompt: String,
+        #[arg(conflicts_with_all = ["choice", "option_text"])]
+        text: Option<String>,
+        #[arg(long, value_name = "LABEL")]
+        choice: Option<String>,
+        #[arg(long = "text", requires = "choice", value_name = "TEXT")]
+        option_text: Option<String>,
+    },
+    /// Preview a corrective task without authorizing it.
+    Corrective {
+        goal: String,
+        task: String,
+        #[arg(long, value_name = "TEXT")]
+        instructions: Option<String>,
+    },
+    /// Review and approve a corrective task preview.
+    ApproveCorrective {
+        goal: String,
+        #[command(flatten)]
+        approval: ManagerApprovalArgs,
+    },
+}
+
+#[derive(Parser, Debug)]
+pub struct ManagerApprovalArgs {
+    /// Require this exact revision.
+    #[arg(long, value_name = "N")]
+    pub revision: Option<u64>,
+    /// Explicitly approve without prompting. Requires --revision outside a terminal.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Parser, Debug)]

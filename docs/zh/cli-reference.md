@@ -3,7 +3,7 @@
 <a id="cli-reference"></a>
 # CLI 命令参考
 
-`cruise manager` 是实验性交互式客户端。明确批准提案会注册一个持久化 Goal 并授权异步执行；Manager 会验证并发布一个 PR/MR，然后等待人工合并。使用前请参阅 [Manager 目标与执行](sessions.md#实验性-manager-记录)。
+`cruise manager` 提供用于管理仓库目标的实验性单次执行命令。运行 `cruise manager --help` 查看子命令。明确批准提案会注册一个持久化 Goal 并授权异步执行；Manager 会验证并发布一个 PR/MR，然后等待人工合并。使用前请参阅 [Manager 目标与执行](sessions.md#实验性-manager-记录)。
 
 ```
 cruise [OPTIONS] [INPUT] [COMMAND]
@@ -14,7 +14,7 @@ Commands:
   run          Execute a planned session
   tell         Send an instruction to a running session
   list         List and manage sessions interactively
-  manager      Open the experimental repository-scoped Manager client
+  manager      Discuss and manage repository goals
   clean        Remove sessions with closed/merged PRs
   usage        Summarize locally recorded token usage
   docs         Print embedded common or framework-specific E2E policy

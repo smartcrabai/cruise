@@ -264,7 +264,7 @@ fn record_failed_child(
     failure: &str,
 ) -> Result<()> {
     let reason = format!(
-        "Managed child failure for task {} (session {}): {failure}. Preserve its worktree and logs. Next action: `/resume {} {}` resumes this child; `/retry {} {}` starts a fresh attempt.",
+        "Managed child failure for task {} (session {}): {failure}. Preserve its worktree and logs. Next action: `cruise manager resume {} {}` resumes this child; `cruise manager retry {} {}` starts a fresh attempt.",
         attempt.task_id, attempt.session_id, goal.id, attempt.task_id, goal.id, attempt.task_id,
     );
     if goal.reason.as_deref() == Some(reason.as_str()) {

@@ -14,8 +14,12 @@ use tempfile::TempDir;
 const TEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn cli(home: &Path, args: &[&str]) -> Output {
+    cli_in(home, home, args)
+}
+
+fn cli_in(home: &Path, cwd: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_cruise"))
-        .current_dir(home)
+        .current_dir(cwd)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
@@ -383,6 +387,60 @@ async fn wait_for_child_marker(fixture: &Fixture, instance: &Value) {
         child.phase,
         child.live_foreign_runner_pid()
     );
+}
+
+#[tokio::test]
+async fn manager_resume_task_continues_the_existing_child() {
+    let fixture = Fixture::new("active", false, false);
+    let instance = fixture.start().await;
+    let previous = fixture.sessions.load("child").unwrap();
+    let output = cli_in(
+        fixture.home.path(),
+        &fixture.repo,
+        &["manager", "resume", "g", "task"],
+    );
+    assert!(output.status.success(), "manager resume: {output:?}");
+    wait_for_child_marker(&fixture, &instance).await;
+    let snapshot = manager_snapshot(&fixture, &instance).await;
+    let attempts = snapshot["goals"][0]["execution"]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts.len(), 1, "{snapshot}");
+    assert_eq!(attempts[0]["session_id"], "child");
+    assert_eq!(
+        fixture.sessions.load("child").unwrap().worktree_path,
+        previous.worktree_path
+    );
+}
+
+#[tokio::test]
+async fn manager_retry_task_preserves_the_previous_child_and_reserves_a_fresh_attempt() {
+    let fixture = Fixture::new("active", false, false);
+    let instance = fixture.start().await;
+    let old_worktree = fixture
+        .sessions
+        .load("child")
+        .unwrap()
+        .worktree_path
+        .unwrap();
+    let marker = old_worktree.join("previous-attempt-evidence");
+    fs::write(&marker, "keep this evidence").unwrap();
+    let output = cli_in(
+        fixture.home.path(),
+        &fixture.repo,
+        &["manager", "retry", "g", "task"],
+    );
+    assert!(output.status.success(), "manager retry: {output:?}");
+    let snapshot = manager_snapshot(&fixture, &instance).await;
+    let attempts = snapshot["goals"][0]["execution"]["attempts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(attempts.len(), 2, "{snapshot}");
+    assert_eq!(attempts[0]["session_id"], "child");
+    assert_eq!(attempts[1]["task_id"], "task");
+    assert_eq!(attempts[1]["attempt"], 2);
+    assert_ne!(attempts[1]["session_id"].as_str().unwrap(), "child");
+    assert_eq!(fs::read_to_string(marker).unwrap(), "keep this evidence");
 }
 
 impl Drop for Fixture {
@@ -775,7 +833,7 @@ async fn failed_child_is_visible_and_independent_work_continues() {
     assert!(
         goal["reason"]
             .as_str()
-            .is_some_and(|reason| reason.contains("/resume g task")),
+            .is_some_and(|reason| reason.contains("`cruise manager resume g task`")),
         "{goal}"
     );
     let attempts = goal["execution"]["attempts"]

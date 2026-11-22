@@ -1,45 +1,27 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
-use std::fs;
+#[path = "support/manager_cli.rs"]
+mod support;
+
 use std::io::{Read, Write};
-use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use tempfile::TempDir;
+use support::Fixture;
 
-struct Fixture {
-    _root: TempDir,
-    repo: PathBuf,
-    home: PathBuf,
+const CONFIRM: &str = "Type approve to authorize this exact proposal";
+
+struct Terminal {
+    _master: Box<dyn portable_pty::MasterPty + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    writer: Box<dyn Write + Send>,
+    output: Arc<Mutex<Vec<u8>>>,
 }
 
-impl Fixture {
-    fn new() -> Self {
-        let root = TempDir::new().unwrap_or_else(|err| panic!("create fixture directory: {err}"));
-        let repo = root.path().join("repo");
-        let home = root.path().join("home");
-        fs::create_dir_all(&repo).unwrap_or_else(|err| panic!("create repository: {err}"));
-        fs::create_dir_all(&home).unwrap_or_else(|err| panic!("create home: {err}"));
-        assert!(
-            Command::new("git")
-                .args(["init", "-q"])
-                .current_dir(&repo)
-                .status()
-                .unwrap_or_else(|err| panic!("run git init: {err}"))
-                .success()
-        );
-        Self {
-            _root: root,
-            repo,
-            home,
-        }
-    }
-
-    fn start(&self) -> Terminal {
+impl Terminal {
+    fn spawn(fixture: &Fixture, args: &[&str]) -> Self {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 40,
@@ -48,25 +30,22 @@ impl Fixture {
                 pixel_height: 0,
             })
             .unwrap_or_else(|err| panic!("open PTY: {err}"));
-        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_cruise"));
-        for (name, _) in std::env::vars_os() {
-            cmd.env_remove(name);
+        let isolated = fixture.command();
+        let mut cmd = CommandBuilder::new(isolated.get_program());
+        cmd.env_clear();
+        for (name, value) in isolated.get_envs() {
+            if let Some(value) = value {
+                cmd.env(name, value);
+            }
         }
-        cmd.env("PATH", std::env::var_os("PATH").unwrap_or_default());
-        cmd.env("HOME", &self.home);
-        cmd.env("XDG_CONFIG_HOME", self.home.join("config"));
-        cmd.env("XDG_DATA_HOME", self.home.join("data"));
-        cmd.env("XDG_STATE_HOME", self.home.join("state"));
-        cmd.env("JCODE_HOME", self.home.join("jcode"));
-        cmd.env("GIT_TERMINAL_PROMPT", "0");
         cmd.env("TERM", "xterm-256color");
-        cmd.env("LANG", "en_US.UTF-8");
-        cmd.cwd(&self.repo);
+        cmd.cwd(&fixture.repo);
         cmd.arg("manager");
+        cmd.args(args);
         let child = pair
             .slave
             .spawn_command(cmd)
-            .unwrap_or_else(|err| panic!("spawn manager: {err}"));
+            .unwrap_or_else(|err| panic!("spawn manager approve: {err}"));
         drop(pair.slave);
         let mut reader = pair
             .master
@@ -84,96 +63,68 @@ impl Fixture {
                 if n == 0 {
                     break;
                 }
-                captured
-                    .lock()
-                    .unwrap_or_else(|err| panic!("lock captured output: {err}"))
-                    .extend_from_slice(&buf[..n]);
+                captured.lock().unwrap().extend_from_slice(&buf[..n]);
             }
         });
-        Terminal {
+        Self {
             _master: pair.master,
             child,
             writer,
             output,
         }
     }
-}
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = Command::new(env!("CARGO_BIN_EXE_cruise"))
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("HOME", &self.home)
-            .env("XDG_CONFIG_HOME", self.home.join("config"))
-            .env("XDG_DATA_HOME", self.home.join("data"))
-            .env("XDG_STATE_HOME", self.home.join("state"))
-            .env("JCODE_HOME", self.home.join("jcode"))
-            .current_dir(&self.repo)
-            .args(["daemon", "stop", "--force"])
-            .output();
+    fn output(&self) -> String {
+        String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
     }
-}
 
-struct Terminal {
-    _master: Box<dyn portable_pty::MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    writer: Box<dyn Write + Send>,
-    output: Arc<Mutex<Vec<u8>>>,
-}
+    fn status(&mut self) -> Option<portable_pty::ExitStatus> {
+        self.child
+            .try_wait()
+            .unwrap_or_else(|err| panic!("poll manager approve: {err}"))
+    }
 
-impl Terminal {
-    fn wait_for(&mut self, needle: &str, count: usize) {
+    fn wait_for_review(&mut self) -> String {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let text = String::from_utf8_lossy(
-                &self
-                    .output
-                    .lock()
-                    .unwrap_or_else(|err| panic!("lock terminal output: {err}")),
-            )
-            .into_owned();
-            if text.matches(needle).count() >= count {
-                return;
+            let text = self.output();
+            if let Some((review, prompt)) = text.split_once(CONFIRM) {
+                // Wait for the line editor, not just the message printed before it enters raw mode.
+                if prompt.contains("> ") {
+                    return review.to_owned();
+                }
             }
             assert!(
-                Instant::now() < deadline,
-                "timed out waiting for {needle:?}: {text}"
-            );
-            assert!(
-                self.child
-                    .try_wait()
-                    .unwrap_or_else(|err| panic!("poll manager: {err}"))
-                    .is_none(),
-                "manager exited before {needle:?}: {text}"
+                self.status().is_none() && Instant::now() < deadline,
+                "manager approve never reached the confirmation prompt: {text}"
             );
             thread::sleep(Duration::from_millis(25));
         }
     }
+
     fn send(&mut self, bytes: &[u8]) {
         self.writer
             .write_all(bytes)
-            .unwrap_or_else(|err| panic!("write to manager: {err}"));
-        self.writer
-            .flush()
-            .unwrap_or_else(|err| panic!("flush manager input: {err}"));
+            .unwrap_or_else(|err| panic!("write to manager approve: {err}"));
+        self.writer.flush().unwrap();
     }
-    fn finish(&mut self) {
+
+    fn finish(&mut self) -> portable_pty::ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if let Some(status) = self
-                .child
-                .try_wait()
-                .unwrap_or_else(|err| panic!("poll manager: {err}"))
-            {
-                assert!(status.success(), "manager exit: {status:?}");
-                return;
+            if let Some(status) = self.status() {
+                return status;
             }
-            assert!(Instant::now() < deadline, "manager did not exit");
+            assert!(
+                Instant::now() < deadline,
+                "manager approve did not exit: {}",
+                self.output()
+            );
             thread::sleep(Duration::from_millis(25));
         }
     }
 }
+
 impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -181,30 +132,94 @@ impl Drop for Terminal {
     }
 }
 
+fn assert_pending(fixture: &Fixture, reviewed: &cruise::manager::Proposal) {
+    let snapshot = fixture.snapshot();
+    assert_eq!(snapshot["proposal"]["id"], reviewed.id);
+    assert_eq!(snapshot["proposal"]["revision"], reviewed.revision);
+    assert_eq!(snapshot["goals"], serde_json::json!([]));
+}
+
 #[test]
-fn manager_terminal_disconnect_and_reconnect() {
+fn manager_terminal_requires_exact_confirmation() {
     let fixture = Fixture::new();
-    for _ in 0..2 {
-        let mut terminal = fixture.start();
-        terminal.wait_for("/goals", 1);
-        terminal.wait_for("> ", 1);
-        terminal.send(b"/help\r");
-        terminal.wait_for("/approve", 1);
-        terminal.wait_for("> ", 2);
-        terminal.send(b"/goals\r");
-        terminal.wait_for("> ", 3);
-        terminal.send(b"/exit\r");
-        terminal.finish();
+    let proposal = fixture.seed_proposal();
+
+    let mut declined = Terminal::spawn(&fixture, &["approve"]);
+    declined.wait_for_review();
+    declined.send(b"Approve\r");
+    declined.finish();
+    assert_pending(&fixture, &proposal);
+
+    let mut approved = Terminal::spawn(&fixture, &["approve"]);
+    let review = approved.wait_for_review();
+    for expected in [&proposal.id, &proposal.objective, &proposal.checks[0].id] {
+        assert!(review.contains(expected), "missing {expected:?}: {review}");
     }
-    let status = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(&fixture.repo)
-        .output()
-        .unwrap_or_else(|err| panic!("run git status: {err}"));
-    assert!(status.status.success());
     assert!(
-        status.stdout.is_empty(),
-        "manager interaction changed repository: {}",
-        String::from_utf8_lossy(&status.stdout)
+        review.contains("\"contract\""),
+        "missing frozen contract: {review}"
     );
+    assert_pending(&fixture, &proposal);
+    approved.send(b"approve\r");
+    let status = approved.finish();
+    assert!(status.success(), "approval failed: {}", approved.output());
+
+    let snapshot = fixture.snapshot();
+    let goals = snapshot["goals"].as_array().unwrap();
+    assert_eq!(goals.len(), 1, "{snapshot}");
+    assert_eq!(goals[0]["proposal"]["id"], proposal.id);
+    assert_eq!(goals[0]["proposal"]["revision"], proposal.revision);
+    assert!(snapshot["proposal"].is_null(), "{snapshot}");
+}
+
+#[test]
+fn manager_terminal_rejects_revision_replaced_during_confirmation() {
+    let fixture = Fixture::new();
+    let reviewed = fixture.seed_proposal();
+    let mut terminal = Terminal::spawn(&fixture, &["approve", "--revision", &reviewed.revision.to_string()]);
+    assert!(terminal.wait_for_review().contains(&reviewed.id));
+
+    let replacement = fixture.seed_proposal();
+    assert!(replacement.revision > reviewed.revision);
+    assert_pending(&fixture, &replacement);
+    terminal.send(b"approve\r");
+    let status = terminal.finish();
+    assert!(
+        !status.success(),
+        "stale approval succeeded: {}",
+        terminal.output()
+    );
+    assert_pending(&fixture, &replacement);
+}
+
+#[tokio::test]
+async fn manager_terminal_option_requires_the_menu() {
+    let fixture = Fixture::new();
+    let proposal = fixture.seed_option_proposal();
+    let goal = fixture.api(Some(serde_json::json!({
+        "type":"approve", "proposal_id":proposal.id, "revision":proposal.revision
+    }))).await;
+    let goal_id = goal["id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let request = loop {
+        let snapshot = fixture.api(None).await;
+        if let Some(prompt) = snapshot["prompts"].as_array().unwrap().iter()
+            .find(|entry| entry["goal_id"] == goal_id && entry["prompt"]["kind"] == "option")
+        {
+            break prompt["prompt"]["requestId"].as_str().unwrap().to_owned();
+        }
+        assert!(Instant::now() < deadline, "missing Option: {snapshot}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let mut scripted = Terminal::spawn(&fixture, &[
+        "answer", goal_id, &request, "--choice", "Provide a value", "--text", "value",
+    ]);
+    assert!(!scripted.finish().success());
+
+    let mut menu = Terminal::spawn(&fixture, &["answer", goal_id, &request]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !menu.output().contains("Provide a value") {
+        assert!(menu.status().is_none() && Instant::now() < deadline, "missing menu: {}", menu.output());
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
