@@ -56,6 +56,7 @@
 - WebUI offers Fix, Ask, and Verify for Planned sessions instead of a Replan action that silently ignored its feedback. `CruiseApplication::replan` now rejects feedback or questions, and planning requests reject user text their prompt cannot render. `cruise list` Replan is unchanged.
 
 - Retain quality-gate output when sanitizing large streams runs past the post-exit pipe-drain grace.
+- Speed up long-line output handling by gating redaction scans on candidate bytes and reusing sanitized output for feedback and artifacts.
 - Prevent detached Windows WebUI daemons from inheriting captured CLI output handles and blocking command completion.
 - Route pending CI without a known failure away from repair, preserve failed rollups at the wait deadline, wait for Actions suites before collecting complete failure details, and stop no-change fix loops.
 - Retry transient SDK transport failures and OpenCode setup timeouts before prompt submission through the existing model fallback policy, while retaining barriers for local OpenCode API rate-limit, client, and server-class failures.
