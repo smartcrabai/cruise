@@ -612,15 +612,30 @@ fn resolve_start_point(base_dir: &Path, base: &WorktreeBase) -> Result<Option<St
 
 /// Remove the worktree and delete its branch.
 ///
+/// If the original directory is gone, the common Git directory is resolved
+/// from the worktree itself and used to run cleanup outside that worktree.
+///
 /// # Errors
 ///
-/// Returns an error if the `git` process cannot be spawned or either cleanup command exits
-/// unsuccessfully.
+/// Returns an error if Git cannot be spawned, the common Git directory cannot
+/// be resolved, or either cleanup command exits unsuccessfully.
 pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
-    let output = Command::new("git")
+    let common_git_dir = if ctx.original_dir.is_dir() {
+        None
+    } else if ctx.path.exists() {
+        Some(resolve_common_git_dir(&ctx.path)?)
+    } else {
+        crate::status_eprintln!(
+            "warning: skipping workspace cleanup; base directory {} and worktree {} are both missing",
+            ctx.original_dir.display(),
+            ctx.path.display()
+        );
+        return Ok(());
+    };
+
+    let output = cleanup_git_command(&ctx.original_dir, common_git_dir.as_deref())
         .args(["worktree", "remove", "--force"])
         .arg(&ctx.path)
-        .current_dir(&ctx.original_dir)
         .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
@@ -637,9 +652,8 @@ pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
         return Ok(());
     }
 
-    let output = Command::new("git")
+    let output = cleanup_git_command(&ctx.original_dir, common_git_dir.as_deref())
         .args(["branch", "-D", &ctx.branch])
-        .current_dir(&ctx.original_dir)
         .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
@@ -652,6 +666,48 @@ pub fn cleanup_worktree(ctx: &WorktreeContext) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn cleanup_git_command(original_dir: &Path, common_git_dir: Option<&Path>) -> Command {
+    let mut command = Command::new("git");
+    if let Some(common_git_dir) = common_git_dir {
+        command
+            .arg("--git-dir")
+            .arg(common_git_dir)
+            .current_dir(common_git_dir);
+    } else {
+        command.current_dir(original_dir);
+    }
+    command
+}
+
+fn resolve_common_git_dir(worktree: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(worktree)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| CruiseError::WorktreeError(format!("failed to run git: {e}")))?;
+    if !output.status.success() {
+        return Err(CruiseError::WorktreeError(format!(
+            "failed to resolve git common directory for worktree {}: {}",
+            worktree.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let common_git_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let common_git_dir = if common_git_dir.is_absolute() {
+        common_git_dir
+    } else {
+        worktree.join(common_git_dir)
+    };
+    fs::canonicalize(&common_git_dir).map_err(|error| {
+        CruiseError::WorktreeError(format!(
+            "failed to resolve git common directory for worktree {}: {error}",
+            worktree.display()
+        ))
+    })
 }
 
 fn ensure_git_repo(dir: &Path) -> Result<()> {

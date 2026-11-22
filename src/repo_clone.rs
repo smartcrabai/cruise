@@ -174,8 +174,9 @@ pub async fn ensure_repo_session_workspace_cancelled(
 /// Returns an error if removing the worktree, branch, clone, or temporary
 /// worktree directory fails.
 pub fn cleanup_session_workspace(manager: &SessionManager, session: &SessionState) -> Result<()> {
+    let clone_path = manager.clones_dir().join(&session.id);
     if let Some(ctx) = session.worktree_context() {
-        if ctx.original_dir.is_dir() {
+        if ctx.original_dir.is_dir() || clone_path.is_dir() {
             crate::worktree::cleanup_worktree(&ctx)?;
         }
         if ctx.path.exists() {
@@ -183,7 +184,6 @@ pub fn cleanup_session_workspace(manager: &SessionManager, session: &SessionStat
         }
     }
 
-    let clone_path = manager.clones_dir().join(&session.id);
     if clone_path.exists() {
         std::fs::remove_dir_all(&clone_path)?;
     }

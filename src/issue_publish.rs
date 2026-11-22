@@ -195,16 +195,30 @@ pub fn publish_plan_issue_and_delete(
         }
     }
 
-    if session.repo.is_some() {
-        let _ = crate::repo_clone::cleanup_session_workspace(manager, &session);
-    } else if let Some(ctx) = session.worktree_context()
-        && let Err(e) = crate::worktree::cleanup_worktree(&ctx)
-    {
-        eprintln!("warning: failed to remove worktree for {}: {e}", session.id);
-    }
+    cleanup_published_session_workspace(manager, &session);
     manager.delete(&session.id)?;
 
     Ok(PublishedIssue { url, repo })
+}
+
+fn cleanup_published_session_workspace(manager: &SessionManager, session: &SessionState) {
+    if session.repo.is_some() {
+        let _ = crate::repo_clone::cleanup_session_workspace(manager, session);
+        return;
+    }
+
+    let (Some(path), Some(branch)) = (&session.worktree_path, &session.worktree_branch) else {
+        return;
+    };
+    let ctx = crate::worktree::WorktreeContext {
+        path: path.clone(),
+        branch: branch.clone(),
+        original_dir: session.base_dir.clone(),
+        owns_branch: session.pr_target.is_none(),
+    };
+    if let Err(e) = crate::worktree::cleanup_worktree(&ctx) {
+        eprintln!("warning: failed to remove worktree for {}: {e}", session.id);
+    }
 }
 
 #[cfg(test)]

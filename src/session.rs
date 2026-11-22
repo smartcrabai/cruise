@@ -4991,6 +4991,96 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(String::from_utf8_lossy(&branches.stdout).trim(), "");
     }
+
+    #[test]
+    fn cleanup_session_worktree_uses_repository_when_base_worktree_is_removed() {
+        let _lock = crate::test_support::lock_process();
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error:?}"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap_or_else(|error| panic!("{error:?}"));
+        crate::test_support::init_git_repo(&repo);
+
+        let base_dir = temp.path().join("base-worktree");
+        let base_dir_arg = base_dir
+            .to_str()
+            .unwrap_or_else(|| panic!("base worktree path must be UTF-8"));
+        crate::test_support::run_git_ok(&repo, &["worktree", "add", "--detach", base_dir_arg]);
+
+        let (worktree, _) = crate::worktree::setup_session_worktree(
+            &base_dir,
+            "cleanup-missing-base",
+            "task",
+            &temp.path().join("worktrees"),
+            None,
+            &crate::worktree::WorktreeBase::default(),
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        let manager = SessionManager::new(temp.path().join("data"));
+        let mut session = SessionState::new(
+            "cleanup-missing-base".to_string(),
+            base_dir.clone(),
+            SessionConfigRef::File {
+                path: PathBuf::from("cruise.yaml"),
+            },
+            "task".to_string(),
+        );
+        session.workspace_mode = WorkspaceMode::Worktree;
+        session.worktree_path = Some(worktree.path.clone());
+        session.worktree_branch = Some(worktree.branch.clone());
+        manager
+            .create(&session)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+
+        crate::test_support::run_git_ok(&repo, &["worktree", "remove", "--force", base_dir_arg]);
+        assert!(!base_dir.exists());
+
+        manager
+            .cleanup_session_workspace(&session)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        manager
+            .delete(&session.id)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+
+        assert!(!worktree.path.exists());
+        let branches = std::process::Command::new("git")
+            .args(["branch", "--list", worktree.branch.as_str()])
+            .current_dir(&repo)
+            .output()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert!(branches.status.success());
+        assert_eq!(String::from_utf8_lossy(&branches.stdout).trim(), "");
+        assert!(!manager.sessions_dir().join(&session.id).exists());
+    }
+
+    #[test]
+    fn cleanup_session_workspace_skips_when_base_and_worktree_are_missing() {
+        let temp = TempDir::new().unwrap_or_else(|error| panic!("{error:?}"));
+        let manager = SessionManager::new(temp.path().join("data"));
+        let id = "cleanup-no-workspace";
+        let mut session = SessionState::new(
+            id.to_string(),
+            temp.path().join("missing-base"),
+            SessionConfigRef::File {
+                path: PathBuf::from("cruise.yaml"),
+            },
+            "task".to_string(),
+        );
+        session.workspace_mode = WorkspaceMode::Worktree;
+        session.worktree_path = Some(temp.path().join("missing-worktree"));
+        session.worktree_branch = Some("cruise/cleanup-no-workspace".to_string());
+        manager
+            .create(&session)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+
+        manager
+            .cleanup_session_workspace(&session)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        manager
+            .delete(id)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+
+        assert!(!manager.sessions_dir().join(id).exists());
+    }
     #[test]
     fn test_input_as_plan_accepts_image_only_session() {
         let mut state = SessionState::new_draft(
