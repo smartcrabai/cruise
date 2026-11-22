@@ -1,4 +1,4 @@
-//! Retryable-failure handling for the SDK backends (`sdk: jcode`, `sdk: claude`, `sdk: opencode`).
+//! Retryable-failure handling for the jcode SDK backend.
 //!
 //! `FallbackEngine` decides, after a failed turn, whether to retry and how.
 //! It runs in one of two modes, selected by whether the workflow declares an
@@ -41,56 +41,35 @@ pub(crate) const DEFAULT_CHAIN_KEY: &str = "default";
 /// Suffix marking a chain key or entry as a provider wildcard (`anthropic/*`).
 pub(crate) const WILDCARD_SUFFIX: &str = "/*";
 
-/// Backend-selected model syntax, never inferred from a display label.
+/// Backend-selected model syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ModelReferenceFormat {
-    /// Existing jcode and Claude `model:effort` references.
     LegacyEffort,
-    /// `OpenCode` `provider/model:effort` or `provider/model#variant` references.
-    OpenCode,
 }
 
-/// Keep common effort distinct from native variants until backend resolution.
+/// Reasoning effort suffix on a model reference.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ModelSuffix<'a> {
     Effort(&'a str),
-    Variant(&'a str),
 }
 
 impl ModelReferenceFormat {
-    pub(crate) fn for_sdk(sdk: crate::model_selection::Sdk) -> Self {
-        match sdk {
-            crate::model_selection::Sdk::OpenCode => Self::OpenCode,
-            _ => Self::LegacyEffort,
-        }
+    pub(crate) fn for_sdk(_sdk: crate::model_selection::Sdk) -> Self {
+        Self::LegacyEffort
     }
 
-    pub(crate) fn split(self, model: &str) -> (&str, Option<ModelSuffix<'_>>) {
-        match self {
+    pub(crate) fn split(format: Self, model: &str) -> (&str, Option<ModelSuffix<'_>>) {
+        match format {
             Self::LegacyEffort => {
                 let (base, effort) = split_thinking_suffix(model);
                 (base, effort.map(ModelSuffix::Effort))
             }
-            Self::OpenCode => {
-                if let Some((base, variant)) = model.split_once('#') {
-                    (
-                        split_thinking_suffix(base).0,
-                        Some(ModelSuffix::Variant(variant)),
-                    )
-                } else {
-                    let (base, effort) = split_thinking_suffix(model);
-                    (base, effort.map(ModelSuffix::Effort))
-                }
-            }
         }
     }
 
-    fn suffix(self, suffix: ModelSuffix<'_>) -> String {
-        match (self, suffix) {
-            (_, ModelSuffix::Effort(value)) | (Self::LegacyEffort, ModelSuffix::Variant(value)) => {
-                format!(":{value}")
-            }
-            (Self::OpenCode, ModelSuffix::Variant(value)) => format!("#{value}"),
+    fn suffix(format: Self, suffix: ModelSuffix<'_>) -> String {
+        match (format, suffix) {
+            (Self::LegacyEffort, ModelSuffix::Effort(value)) => format!(":{value}"),
         }
     }
 }
@@ -249,24 +228,14 @@ impl RetryPolicy {
         Self { config }
     }
 
-    pub(crate) fn config(&self) -> &RetryConfig {
-        &self.config
-    }
-
     /// Mark `model` as recently failed, so later turns prefer its fallbacks.
     ///
     /// Keyed by the effort-stripped reference: `provider/m:high` and
     /// `provider/m:low` are the same model behind the same quota.
     #[cfg(test)]
     fn start_cooldown(format: ModelReferenceFormat, model: &str) {
-        let sdk = if format == ModelReferenceFormat::OpenCode {
-            crate::model_selection::Sdk::OpenCode
-        } else {
-            crate::model_selection::Sdk::Jcode
-        };
-        Self::start_sdk_cooldown(format, sdk, model);
+        Self::start_sdk_cooldown(format, crate::model_selection::Sdk::Jcode, model);
     }
-
     fn start_sdk_cooldown(
         _format: ModelReferenceFormat,
         sdk: crate::model_selection::Sdk,
@@ -277,7 +246,11 @@ impl RetryPolicy {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         map.insert(
-            (format, sdk, format.split(model).0.to_string()),
+            (
+                format,
+                sdk,
+                ModelReferenceFormat::split(format, model).0.to_string(),
+            ),
             Instant::now() + MODEL_COOLDOWN,
         );
     }
@@ -286,14 +259,8 @@ impl RetryPolicy {
     /// goes.
     #[cfg(test)]
     fn is_cooling(format: ModelReferenceFormat, model: &str) -> bool {
-        let sdk = if format == ModelReferenceFormat::OpenCode {
-            crate::model_selection::Sdk::OpenCode
-        } else {
-            crate::model_selection::Sdk::Jcode
-        };
-        Self::is_sdk_cooling(format, sdk, model)
+        Self::is_sdk_cooling(format, crate::model_selection::Sdk::Jcode, model)
     }
-
     fn is_sdk_cooling(
         _format: ModelReferenceFormat,
         sdk: crate::model_selection::Sdk,
@@ -305,7 +272,11 @@ impl RetryPolicy {
             .unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
         map.retain(|_, until| *until > now);
-        map.contains_key(&(format, sdk, format.split(model).0.to_string()))
+        map.contains_key(&(
+            format,
+            sdk,
+            ModelReferenceFormat::split(format, model).0.to_string(),
+        ))
     }
 }
 
@@ -496,29 +467,8 @@ fn is_model_missing(head: &str) -> bool {
         .any(|marker| head.contains(marker))
 }
 
-/// Only the structured `OpenCode` execution diagnostic identifies a missing route.
-/// Authentication and invalid requests must not inherit missing-model overrides.
-fn is_opencode_no_route(head: &str) -> bool {
-    head.starts_with("opencode model execution failed [provider.no-route]:")
-}
-
-fn is_no_route_permanent(head: &str) -> bool {
-    ["401", "403", "407"]
-        .iter()
-        .any(|code| has_status_code(head, code))
-        || NON_RETRYABLE_LIMIT_MARKERS
-            .iter()
-            .chain(
-                PERMANENT_MARKERS
-                    .iter()
-                    .filter(|marker| **marker != "not found"),
-            )
-            .any(|marker| head.contains(marker))
-}
-
 /// The provider's own error text: everything before the child-process stderr
-/// tail the SDK backends append (`\njcode stderr:\n…`,
-/// `\nclaude stderr:\n…`; see [`crate::backend::jcode`]).
+/// tail the jcode backend appends (`\njcode stderr:\n…`).
 ///
 /// Up to 64 lines of arbitrary child logging travel in that tail, including
 /// lines about other models and other turns, so it must never decide *which
@@ -532,9 +482,8 @@ fn provider_head(lower: &str) -> &str {
 }
 
 /// The provider limit wordings: the command backend's
-/// [`crate::step::command::is_rate_limited`] — so the SDK backends retry
-/// exactly what `command:` retries — plus the subscription-window phrasings the
-/// SDK providers add.
+/// [`crate::step::command::is_rate_limited`] — so the jcode SDK retries
+/// exactly what `command:` retries — plus its subscription-window phrasings.
 fn is_limit_wording(lower: &str) -> bool {
     crate::step::command::is_rate_limited(lower)
         || lower.contains("usage limit")
@@ -544,7 +493,7 @@ fn is_limit_wording(lower: &str) -> bool {
 /// Whether a backend must report `text` as a retryable
 /// [`crate::backend::stream::StreamChunk::Limit`] rather than a plain error.
 ///
-/// The single definition behind both SDK backends' limit classification: the
+/// The single definition behind the jcode SDK's limit classification: the
 /// limit wordings, plus the `overloaded` capacity refusal provider runtimes
 /// report in place of a 5xx. A permanent failure never qualifies, however
 /// limit-like the rest of the text reads.
@@ -559,7 +508,7 @@ pub(crate) fn is_limit_message(text: &str) -> bool {
 /// HTTP status code and must never be retried.
 ///
 /// Unifies the command backend's [`crate::step::command::is_rate_limited`] and
-/// the SDK backends' limit wordings ([`is_limit_message`]), and extends them
+/// the jcode SDK's limit wordings ([`is_limit_message`]), and extends them
 /// with the 5xx, network and 4xx conditions the fallback engine also retries.
 /// The per-status rules, authoritative for this module:
 ///
@@ -620,11 +569,7 @@ pub(crate) fn is_auth_failure(text: &str) -> bool {
 fn classify_retryable_lower(lower: &str) -> Option<RetryClass> {
     let client_status = first_client_status_code(lower);
     let head = provider_head(lower);
-    let no_route = is_opencode_no_route(head);
-    if no_route && is_no_route_permanent(head) {
-        return None;
-    }
-    let model_missing = is_model_missing(head) || no_route;
+    let model_missing = is_model_missing(head);
     if is_permanent(lower) && client_status.is_none() && !model_missing {
         return None;
     }
@@ -821,7 +766,7 @@ fn explicit_chain<'a>(
     model
         .and_then(|raw| {
             config.fallback_chains.get(raw).or_else(|| {
-                let base = format.split(raw).0;
+                let base = ModelReferenceFormat::split(format, raw).0;
                 config.fallback_chains.get(base).or_else(|| {
                     base.split_once('/').and_then(|(provider, _)| {
                         config
@@ -860,10 +805,10 @@ pub(crate) fn chain_for_formats(
     model: Option<&str>,
     same_sdk: bool,
 ) -> VecDeque<String> {
-    let base = model.map(|m| format.split(m).0);
+    let base = model.map(|m| ModelReferenceFormat::split(format, m).0);
     let effort = model
-        .and_then(|m| format.split(m).1)
-        .map(|suffix| entry_format.suffix(suffix));
+        .and_then(|m| ModelReferenceFormat::split(format, m).1)
+        .map(|suffix| ModelReferenceFormat::suffix(entry_format, suffix));
     let entries = explicit_chain(format, config, model);
 
     let mut chain: VecDeque<String> = VecDeque::new();
@@ -871,11 +816,11 @@ pub(crate) fn chain_for_formats(
         let Some(candidate) = expand_entry(entry, base, effort.as_deref()) else {
             continue;
         };
-        let candidate_base = entry_format.split(&candidate).0;
+        let candidate_base = ModelReferenceFormat::split(entry_format, &candidate).0;
         if (same_sdk && Some(candidate_base) == base)
-            || chain
-                .iter()
-                .any(|existing| entry_format.split(existing).0 == candidate_base)
+            || chain.iter().any(|existing| {
+                ModelReferenceFormat::split(entry_format, existing).0 == candidate_base
+            })
         {
             continue;
         }
@@ -923,7 +868,10 @@ pub(crate) fn effective_candidates(
     } else {
         let mut seen = std::collections::HashSet::new();
         if let Some(model) = primary.model.as_deref() {
-            seen.insert((primary.sdk, format.split(model).0.to_owned()));
+            seen.insert((
+                primary.sdk,
+                ModelReferenceFormat::split(format, model).0.to_owned(),
+            ));
         }
         result.extend(
             candidates
@@ -933,10 +881,12 @@ pub(crate) fn effective_candidates(
                     candidate.model.as_deref().is_some_and(|model| {
                         seen.insert((
                             candidate.sdk,
-                            ModelReferenceFormat::for_sdk(candidate.sdk)
-                                .split(model)
-                                .0
-                                .to_owned(),
+                            ModelReferenceFormat::split(
+                                ModelReferenceFormat::for_sdk(candidate.sdk),
+                                model,
+                            )
+                            .0
+                            .to_owned(),
                         ))
                     })
                 })
@@ -1004,21 +954,15 @@ impl FallbackEngine {
     #[must_use]
     #[cfg(test)]
     pub(crate) fn new(
-        format: ModelReferenceFormat,
         policy: Option<Arc<RetryPolicy>>,
         model_ref: Option<&str>,
         max_retries: usize,
     ) -> Self {
-        let sdk = if format == ModelReferenceFormat::OpenCode {
-            crate::model_selection::Sdk::OpenCode
-        } else {
-            crate::model_selection::Sdk::Jcode
-        };
         Self::new_candidates(
             ModelAvailability::default(),
             policy,
-            sdk,
-            sdk,
+            crate::model_selection::Sdk::Jcode,
+            crate::model_selection::Sdk::Jcode,
             model_ref,
             &[],
             max_retries,
@@ -1099,10 +1043,6 @@ impl FallbackEngine {
 
     pub(crate) fn sdk(&self) -> crate::model_selection::Sdk {
         self.sdk
-    }
-
-    pub(crate) fn candidate_sdks(&self) -> impl Iterator<Item = crate::model_selection::Sdk> + '_ {
-        std::iter::once(self.sdk).chain(self.chain.iter().map(|(sdk, _)| *sdk))
     }
 
     /// The availability-driven `(from, to)` replacement made at construction, if
@@ -1349,218 +1289,6 @@ mod tests {
     }
 
     #[test]
-    fn opencode_common_effort_chain_precedence_and_wildcards() {
-        let format = ModelReferenceFormat::OpenCode;
-        let mut config = policy(&[
-            ("source/team/model:free:max", &["exact/*"]),
-            ("source/team/model:free", &["base/*"]),
-            ("source/*", &["provider/*"]),
-            ("default", &["default/*"]),
-        ]);
-        for (key, expected) in [
-            ("source/team/model:free:max", "exact/team/model:free:max"),
-            ("source/team/model:free", "base/team/model:free:max"),
-            ("source/*", "provider/team/model:free:max"),
-            ("default", "default/team/model:free:max"),
-        ] {
-            assert_eq!(
-                chain_for(format, &config, Some("source/team/model:free:max")),
-                [expected],
-                "chain selected before removing {key}"
-            );
-            config.fallback_chains.remove(key);
-        }
-        for (source, target) in [
-            (format, format),
-            (format, ModelReferenceFormat::LegacyEffort),
-            (ModelReferenceFormat::LegacyEffort, format),
-        ] {
-            assert_eq!(
-                chain_for_formats(
-                    source,
-                    target,
-                    &policy(&[("default", &["other/*"])]),
-                    Some("source/team/model:2026:MED"),
-                    false,
-                ),
-                ["other/team/model:2026:MED"],
-                "common effort must not become a native variant"
-            );
-        }
-    }
-
-    #[test]
-    fn opencode_common_effort_and_native_variants_share_only_same_sdk_identity() {
-        let candidates = [
-            (Sdk::OpenCode, "effort-identity/main:high"),
-            (Sdk::OpenCode, "effort-identity/main#max"),
-            (Sdk::Jcode, "effort-identity/main:low"),
-            (Sdk::OpenCode, "effort-identity/spare:high"),
-            (Sdk::OpenCode, "effort-identity/spare:max"),
-            (Sdk::OpenCode, "effort-identity/spare#max"),
-        ]
-        .map(|(sdk, model)| ModelCandidate {
-            sdk,
-            model: Some(model.into()),
-        });
-        let mut engine = FallbackEngine::new_candidates(
-            ModelAvailability::default(),
-            Some(Arc::new(RetryPolicy::new(policy(&[])))),
-            Sdk::OpenCode,
-            Sdk::OpenCode,
-            Some("effort-identity/main:max"),
-            &candidates,
-            1,
-        );
-        let failure = Failure::Failed("HTTP 422 request refused");
-        for (sdk, model) in [
-            (Sdk::Jcode, "effort-identity/main:low"),
-            (Sdk::OpenCode, "effort-identity/spare:high"),
-        ] {
-            let (action, _) = engine.next_with_class(failure, false);
-            assert!(
-                matches!(action, RetryAction::Switch { ref to, .. } if to == model),
-                "{action:?}"
-            );
-            assert_eq!(engine.sdk(), sdk);
-            assert_eq!(engine.model(), Some(model));
-        }
-        assert_eq!(
-            engine.next_with_class(failure, false).0,
-            RetryAction::GiveUp
-        );
-    }
-
-    #[test]
-    fn opencode_no_route_classification_is_header_scoped_and_narrow() {
-        for body in [
-            "Model unavailable: provider/model",
-            "not found",
-            "no matching route",
-        ] {
-            let message = format!("OpenCode model execution failed [provider.no-route]: {body}");
-            assert_eq!(classify_retryable(&message), Some(RetryClass::ModelMissing));
-        }
-        for message in [
-            "Model unavailable: provider/model",
-            "OpenCode model execution failed [provider.auth]: Model unavailable: provider/model",
-            "OpenCode model execution failed [provider.api]: Model unavailable: provider/model",
-            "Other model execution failed [provider.no-route]: Model unavailable: provider/model",
-            "prefix OpenCode model execution failed [provider.no-route]: Model unavailable",
-            "OpenCode model execution failed [provider.no-route-extra]: Model unavailable",
-            "execution failed\nopencode stderr:\nOpenCode model execution failed [provider.no-route]: Model unavailable",
-        ] {
-            assert_eq!(classify_retryable(message), None, "for {message}");
-        }
-        // Even generic missing-model markers must not bypass this header's auth guard.
-        for body in [
-            "HTTP 401 model not found",
-            "HTTP 403 unknown model",
-            "HTTP 407 model_not_supported",
-            "authentication failed: model not found",
-            "permission denied: unknown model",
-            "invalid_request_error: model not found",
-        ] {
-            let message = format!("OpenCode model execution failed [provider.no-route]: {body}");
-            assert_eq!(classify_retryable(&message), None, "for {message}");
-        }
-        for (status, expected) in [
-            ("429 Too Many Requests", RetryClass::RateLimit),
-            ("408 Request Timeout", RetryClass::Network),
-            ("500 Internal Server Error", RetryClass::ServerError),
-            ("503 Service Unavailable", RetryClass::ServerError),
-        ] {
-            let message = format!(
-                "OpenCode model execution failed [provider.no-route]: HTTP {status}: Model unavailable"
-            );
-            assert_eq!(
-                classify_retryable(&message),
-                Some(expected),
-                "for {message}"
-            );
-        }
-    }
-
-    #[test]
-    fn opencode_no_route_switches_immediately_and_cools_all_effort_variants() {
-        let format = ModelReferenceFormat::OpenCode;
-        let config = policy(&[("no-route-cool/main", &["no-route-cool/spare:max"])]);
-        let mut first = FallbackEngine::new(
-            format,
-            Some(Arc::new(RetryPolicy::new(config.clone()))),
-            Some("no-route-cool/main:max"),
-            1,
-        );
-        let message = "OpenCode model execution failed [provider.no-route]: Model unavailable: no-route-cool/main";
-        let (action, class) = first.next_with_class(Failure::Failed(message), false);
-        assert_eq!(class, Some(RetryClass::ModelMissing));
-        let RetryAction::Switch {
-            from, to, attempt, ..
-        } = action
-        else {
-            panic!("expected immediate switch, got {action:?}");
-        };
-        assert_eq!(from.as_deref(), Some("no-route-cool/main:max"));
-        assert_eq!(to, "no-route-cool/spare:max");
-        assert_eq!(attempt, 1);
-        for suffix in [":high", ":max", "#max"] {
-            assert!(RetryPolicy::is_cooling(
-                format,
-                &format!("no-route-cool/main{suffix}")
-            ));
-        }
-        assert!(!RetryPolicy::is_sdk_cooling(
-            format,
-            Sdk::Jcode,
-            "no-route-cool/main:max"
-        ));
-        let later = FallbackEngine::new(
-            format,
-            Some(Arc::new(RetryPolicy::new(config))),
-            Some("no-route-cool/main#max"),
-            1,
-        );
-        assert_eq!(later.model(), Some("no-route-cool/spare:max"));
-    }
-
-    #[test]
-    fn opencode_no_route_does_not_switch_without_policy_budget_or_replay_safety() {
-        let message =
-            "OpenCode model execution failed [provider.no-route]: Model unavailable: primary";
-        for case in [
-            "no-policy",
-            "disabled",
-            "no-candidate",
-            "zero-budget",
-            "visible-output",
-        ] {
-            let primary = format!("no-route-exclusion-{case}/main:max");
-            let mut config = policy(&[("default", &["no-route-exclusion/spare"])]);
-            if case == "disabled" {
-                config.model_fallback = false;
-            }
-            if case == "no-candidate" {
-                config.fallback_chains.clear();
-            }
-            let mut engine = FallbackEngine::new(
-                ModelReferenceFormat::OpenCode,
-                (case != "no-policy").then(|| Arc::new(RetryPolicy::new(config))),
-                Some(&primary),
-                if case == "zero-budget" { 0 } else { 2 },
-            );
-            let failure = Failure::Failed(message);
-            assert_eq!(failure.message(), message);
-            let (action, class) = engine.next_with_class(failure, case == "visible-output");
-            assert_eq!(action, RetryAction::GiveUp, "for {case}");
-            assert_eq!(engine.model(), Some(primary.as_str()), "for {case}");
-            assert_eq!(
-                class,
-                (case != "no-policy").then_some(RetryClass::ModelMissing)
-            );
-        }
-    }
-
-    #[test]
     fn explicit_chain_lookup_precedence_includes_present_empty_entries() {
         let mut config = policy(&[
             ("provider/main:high", &[]),
@@ -1593,53 +1321,14 @@ mod tests {
     }
 
     #[test]
-    fn mixed_sdk_normalization_uses_candidate_owner_not_workflow() {
-        // Recognized effort suffixes are reserved, so literal colon IDs paired
-        // with native variants use unknown suffixes instead of :low/:high.
-        let candidates = [
-            (Sdk::Jcode, "normalize/jcode:low"),
-            (Sdk::Jcode, "normalize/jcode:high"),
-            (Sdk::Claude, "normalize/claude:low"),
-            (Sdk::Claude, "normalize/claude:high"),
-            (Sdk::OpenCode, "normalize/open:free#fast"),
-            (Sdk::OpenCode, "normalize/open:free#slow"),
-            (Sdk::OpenCode, "normalize/open:2026#fast"),
-        ]
-        .map(|(sdk, model)| ModelCandidate {
-            sdk,
-            model: Some(model.into()),
-        });
-        for workflow in [Sdk::OpenCode, Sdk::Jcode] {
-            let engine = FallbackEngine::new_candidates(
-                ModelAvailability::default(),
-                Some(Arc::new(RetryPolicy::new(policy(&[])))),
-                Sdk::Claude,
-                workflow,
-                Some("normalize/primary"),
-                &candidates,
-                1,
-            );
-            assert_eq!(
-                engine.chain.iter().cloned().collect::<Vec<_>>(),
-                vec![
-                    (Sdk::Jcode, "normalize/jcode:low".into()),
-                    (Sdk::Claude, "normalize/claude:low".into()),
-                    (Sdk::OpenCode, "normalize/open:free#fast".into()),
-                    (Sdk::OpenCode, "normalize/open:2026#fast".into()),
-                ]
-            );
-        }
-    }
-
-    #[test]
-    fn cooldown_identity_survives_workflow_sdk_changes() {
+    fn cooldown_identity_survives_effort_changes() {
         let policy = Some(Arc::new(RetryPolicy::new(policy(&[]))));
         let mut first = FallbackEngine::new_candidates(
             ModelAvailability::default(),
             policy.clone(),
             Sdk::Jcode,
-            Sdk::OpenCode,
-            Some("cross-workflow/cooldown:high"),
+            Sdk::Jcode,
+            Some("cooldown/model:high"),
             &[],
             1,
         );
@@ -1653,8 +1342,8 @@ mod tests {
             ModelAvailability::default(),
             policy,
             Sdk::Jcode,
-            Sdk::Claude,
-            Some("cross-workflow/cooldown:low"),
+            Sdk::Jcode,
+            Some("cooldown/model:low"),
             &[],
             1,
         );
@@ -1662,88 +1351,10 @@ mod tests {
     }
 
     #[test]
-    fn qualified_primary_keys_and_string_entries_use_their_own_syntax() {
-        for key in [
-            "qualified/main:free#fast",
-            "qualified/main:free",
-            "qualified/*",
-            "default",
-        ] {
-            let config = policy(&[(key, &["entry/other:high", "entry/other:low"])]);
-            let engine = FallbackEngine::new_candidates(
-                ModelAvailability::default(),
-                Some(Arc::new(RetryPolicy::new(config))),
-                Sdk::OpenCode,
-                Sdk::Claude,
-                Some("qualified/main:free#fast"),
-                &[],
-                1,
-            );
-            assert_eq!(
-                engine.chain.iter().cloned().collect::<Vec<_>>(),
-                vec![(Sdk::Claude, "entry/other:high".into())]
-            );
-        }
-    }
-
-    #[test]
-    fn mixed_sdk_identity_keeps_same_name_and_isolates_cooldowns() {
-        let model = "test-sdk-identity/shared";
-        let candidates = [
-            ModelCandidate {
-                sdk: Sdk::Claude,
-                model: Some(format!("{model}:low")),
-            },
-            ModelCandidate {
-                sdk: Sdk::Jcode,
-                model: Some(format!("{model}:high")),
-            },
-        ];
-        let policy = Some(Arc::new(RetryPolicy::new(policy(&[]))));
-        let mut engine = FallbackEngine::new_candidates(
-            ModelAvailability::default(),
-            policy.clone(),
-            Sdk::Jcode,
-            Sdk::Jcode,
-            Some(model),
-            &candidates,
-            1,
-        );
-        assert!(matches!(
-            engine
-                .next_with_class(Failure::Failed("404 model not found"), false)
-                .0,
-            RetryAction::Switch { .. }
-        ));
-        assert_eq!(engine.sdk(), Sdk::Claude);
-        assert_eq!(engine.model(), Some("test-sdk-identity/shared:low"));
-        assert!(RetryPolicy::is_sdk_cooling(
-            ModelReferenceFormat::LegacyEffort,
-            Sdk::Jcode,
-            model
-        ));
-        assert!(!RetryPolicy::is_sdk_cooling(
-            ModelReferenceFormat::LegacyEffort,
-            Sdk::Claude,
-            model
-        ));
-        let later = FallbackEngine::new_candidates(
-            ModelAvailability::default(),
-            policy,
-            Sdk::Claude,
-            Sdk::Claude,
-            Some(model),
-            &[],
-            1,
-        );
-        assert!(!later.startup_blocked());
-    }
-
-    #[test]
     fn implicit_chains_are_call_local_and_explicit_matches_override_every_tail() {
-        let primary = "test-sdk-scopes/primary:high";
+        let primary = "test-model-scopes/primary:high";
         let exec = [ModelCandidate {
-            sdk: Sdk::Claude,
+            sdk: Sdk::Jcode,
             model: Some("exec-tail".to_owned()),
         }];
         let plan = [ModelCandidate {
@@ -1751,10 +1362,7 @@ mod tests {
             model: Some("plan-tail".to_owned()),
         }];
         let default = Some(Arc::new(RetryPolicy::new(policy(&[]))));
-        for (tail, expected_sdk, expected_model) in [
-            (&exec, Sdk::Claude, "exec-tail"),
-            (&plan, Sdk::Jcode, "plan-tail"),
-        ] {
+        for (tail, expected_model) in [(&exec, "exec-tail"), (&plan, "plan-tail")] {
             let mut engine = FallbackEngine::new_candidates(
                 ModelAvailability::default(),
                 default.clone(),
@@ -1772,13 +1380,13 @@ mod tests {
             ));
             assert_eq!(
                 (engine.sdk(), engine.model()),
-                (expected_sdk, Some(expected_model))
+                (Sdk::Jcode, Some(expected_model))
             );
         }
         for key in [
             primary,
-            "test-sdk-scopes/primary",
-            "test-sdk-scopes/*",
+            "test-model-scopes/primary",
+            "test-model-scopes/*",
             DEFAULT_CHAIN_KEY,
         ] {
             let explicit = Some(Arc::new(RetryPolicy::new(policy(&[(
@@ -1788,7 +1396,7 @@ mod tests {
             let mut engine = FallbackEngine::new_candidates(
                 ModelAvailability::default(),
                 explicit,
-                Sdk::Claude,
+                Sdk::Jcode,
                 Sdk::Jcode,
                 Some(primary),
                 &exec,
@@ -1870,7 +1478,6 @@ mod tests {
 
     fn engine(config: RetryConfig, model: &str, max_retries: usize) -> FallbackEngine {
         FallbackEngine::new(
-            ModelReferenceFormat::LegacyEffort,
             Some(Arc::new(RetryPolicy::new(config))),
             Some(model),
             max_retries,
@@ -1902,10 +1509,6 @@ mod tests {
             ("request timed out", RetryClass::Network),
             (
                 "Error: command error: Internal: Failed to send request to OpenAI API: error sending request for url (https://chatgpt.com/backend-api/codex/responses): client error (SendRequest): http2 error: stream error received: unspecific protocol error detected",
-                RetryClass::Network,
-            ),
-            (
-                "Error: command error: OpenCode V2 setup timed out",
                 RetryClass::Network,
             ),
         ] {
@@ -2257,64 +1860,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_opencode_chain_preserves_nested_colon_ids_and_variants() {
-        let config = policy(&[
-            ("default", &["fallback/default"]),
-            ("source/*", &["wildcard/*"]),
-            ("source/team/model:free", &["base/*"]),
-            (
-                "source/team/model:free#fast",
-                &[
-                    "source/team/model:free#slow",
-                    "exact/*",
-                    "exact/team/model:free#slow",
-                    "exact/team/model:2026#fast",
-                ],
-            ),
-        ]);
-        let format = ModelReferenceFormat::OpenCode;
-        assert_eq!(
-            chain_for(format, &config, Some("source/team/model:free#fast")),
-            ["exact/team/model:free#fast", "exact/team/model:2026#fast"]
-        );
-        assert_eq!(
-            chain_for(format, &config, Some("source/team/model:free#slow")),
-            ["base/team/model:free#slow"]
-        );
-        assert_eq!(
-            chain_for(format, &config, Some("source/other/id:free#fast")),
-            ["wildcard/other/id:free#fast"]
-        );
-        assert_eq!(chain_for(format, &config, None), ["fallback/default"]);
-    }
-
-    #[test]
-    fn retry_opencode_cooldowns_separate_formats_and_preserve_colons() {
-        let format = ModelReferenceFormat::OpenCode;
-        RetryPolicy::start_cooldown(format, "test-opencode-cool/team/model:free#fast");
-        assert!(RetryPolicy::is_cooling(
-            format,
-            "test-opencode-cool/team/model:free#slow"
-        ));
-        assert!(!RetryPolicy::is_cooling(
-            format,
-            "test-opencode-cool/team/model:2026#fast"
-        ));
-        assert!(!RetryPolicy::is_cooling(
-            ModelReferenceFormat::LegacyEffort,
-            "test-opencode-cool/team/model:free#fast"
-        ));
-        let config = policy(&[("default", &["replacement/*"])]);
-        let engine = FallbackEngine::new(
-            format,
-            Some(Arc::new(RetryPolicy::new(config))),
-            Some("test-opencode-cool/team/model:free#slow"),
-            1,
-        );
-        assert_eq!(engine.model(), Some("replacement/team/model:free#slow"));
-    }
-
-    #[test]
     fn retry_chain_drops_same_model_effort_variants() {
         let config = policy(&[(
             "test-effort/primary",
@@ -2460,12 +2005,7 @@ mod tests {
 
     #[test]
     fn retry_without_a_policy_keeps_the_legacy_same_model_backoff() {
-        let mut engine = FallbackEngine::new(
-            ModelReferenceFormat::LegacyEffort,
-            None,
-            Some("test-e/only"),
-            2,
-        );
+        let mut engine = FallbackEngine::new(None, Some("test-e/only"), 2);
 
         // Non-limit failures stayed permanent before the fallback engine.
         assert_eq!(
@@ -2879,12 +2419,7 @@ mod tests {
 
     #[test]
     fn retry_client_error_without_a_policy_fails_the_run() {
-        let mut engine = FallbackEngine::new(
-            ModelReferenceFormat::LegacyEffort,
-            None,
-            Some("test-client-none/only"),
-            3,
-        );
+        let mut engine = FallbackEngine::new(None, Some("test-client-none/only"), 3);
 
         assert_eq!(
             engine
@@ -2963,24 +2498,14 @@ mod tests {
             "test-h/primary",
             &["test-h/spare"],
         )])));
-        let mut first = FallbackEngine::new(
-            ModelReferenceFormat::LegacyEffort,
-            Some(Arc::clone(&shared)),
-            Some("test-h/primary"),
-            1,
-        );
+        let mut first = FallbackEngine::new(Some(Arc::clone(&shared)), Some("test-h/primary"), 1);
         assert!(matches!(
             first.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Switch { .. }
         ));
 
         // The next turn of the same run starts on the spare, and says so.
-        let mut second = FallbackEngine::new(
-            ModelReferenceFormat::LegacyEffort,
-            Some(shared),
-            Some("test-h/primary"),
-            1,
-        );
+        let mut second = FallbackEngine::new(Some(shared), Some("test-h/primary"), 1);
         assert_eq!(second.model(), Some("test-h/spare"));
         assert_eq!(
             second.take_startup_switch(),
@@ -3019,12 +2544,7 @@ mod tests {
     fn retry_cooldowns_are_shared_across_policies_in_one_process() {
         let config = policy(&[("test-j/primary", &["test-j/spare"])]);
         let mine = Arc::new(RetryPolicy::new(config.clone()));
-        let mut engine = FallbackEngine::new(
-            ModelReferenceFormat::LegacyEffort,
-            Some(mine),
-            Some("test-j/primary"),
-            1,
-        );
+        let mut engine = FallbackEngine::new(Some(mine), Some("test-j/primary"), 1);
         assert!(matches!(
             engine.next_with_class(Failure::Limited("429"), false).0,
             RetryAction::Switch { .. }
@@ -3032,12 +2552,7 @@ mod tests {
 
         // A later policy in the same process still skips the failed model.
         let theirs = Arc::new(RetryPolicy::new(config));
-        let mut other = FallbackEngine::new(
-            ModelReferenceFormat::LegacyEffort,
-            Some(theirs),
-            Some("test-j/primary"),
-            1,
-        );
+        let mut other = FallbackEngine::new(Some(theirs), Some("test-j/primary"), 1);
         assert_eq!(other.model(), Some("test-j/spare"));
         assert_eq!(
             other.take_startup_switch(),
@@ -3052,7 +2567,6 @@ mod tests {
 
         let config = policy(&[("test-blocked/primary", &["test-blocked/spare"])]);
         let engine = FallbackEngine::new(
-            ModelReferenceFormat::LegacyEffort,
             Some(Arc::new(RetryPolicy::new(config))),
             Some("test-blocked/primary"),
             1,
@@ -3117,12 +2631,7 @@ mod tests {
 
     #[test]
     fn retry_undispatchable_model_without_a_policy_fails_the_run() {
-        let mut engine = FallbackEngine::new(
-            ModelReferenceFormat::LegacyEffort,
-            None,
-            Some("test-m/primary"),
-            3,
-        );
+        let mut engine = FallbackEngine::new(None, Some("test-m/primary"), 3);
         assert_eq!(
             engine
                 .next_with_class(Failure::Unusable("invalid model reference"), false)

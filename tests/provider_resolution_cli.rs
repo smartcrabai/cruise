@@ -90,9 +90,7 @@ impl Fixture {
             .env("XDG_CONFIG_HOME", self.root.path().join("config"))
             .env("XDG_STATE_HOME", self.root.path().join("state"))
             .env("PATH", &self.path)
-            .env_remove(OVERRIDE)
-            .env_remove("CRUISE_CLAUDE_CLI_PATH")
-            .env_remove("CRUISE_OPENCODE_CLI_PATH");
+            .env_remove(OVERRIDE);
         if let Some(value) = value {
             command.env(OVERRIDE, value);
         }

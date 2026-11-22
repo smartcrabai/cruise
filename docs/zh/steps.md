@@ -31,7 +31,7 @@ steps:
 
 `instruction` 是步骤运行前显示给用户的消息，不是系统提示。如果 `{input}` 为空，这条消息会作为多行输入提示，用户提交的文字将成为 `{input}`；否则只会显示消息，不会将其发送给 LLM。
 
-默认情况下，提示步骤受提交保护。SDK 提示还会应用[工具限制](sdk.md#tool-restrictions)中描述的隐式 Git shell 拒绝规则；`allow_commit: true` 会移除这些拒绝规则和提交保护，但不会移除显式的 `disallowed_tools`，也不会授予更广泛的权限。只有提示确实需要创建提交或以其他方式移动 Git `HEAD` 时才设置 `allow_commit: true`；省略该值或设为 `false` 都会保留保护。此保护适用于传统的 `command:` 模式及所有 SDK 后端（`jcode`、`claude` 和 `opencode`），而 command 和 option 步骤不受影响。
+默认情况下，提示步骤受提交保护。SDK 提示还会应用[工具限制](sdk.md#tool-restrictions)中描述的隐式 Git shell 拒绝规则；`allow_commit: true` 会移除这些拒绝规则和提交保护，但不会移除显式的 `disallowed_tools`，也不会授予更广泛的权限。只有提示确实需要创建提交或以其他方式移动 Git `HEAD` 时才设置 `allow_commit: true`；省略该值或设为 `false` 都会保留保护。此保护适用于传统的 `command:` 模式和 `sdk: jcode`，而 command 和 option 步骤不受影响。
 
 应将 `allow_commit: true` 设置在实际提示步骤上，而不是 `group:` 或 `workflow_call:` 调用处。
 

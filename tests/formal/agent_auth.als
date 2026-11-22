@@ -1,5 +1,4 @@
-// Same finite abstraction as agent_auth.qnt, 9 ordered states = 8 transitions.
-// Expiry compares to one observation instant, including equality in Past.
+// Jcode provider preflight abstraction. Nine ordered states = eight transitions.
 module agent_auth
 open util/ordering[State]
 abstract sig Bool {}
@@ -7,28 +6,27 @@ one sig Yes, No extends Bool {}
 abstract sig Time {}
 one sig Unknown, Past, Future extends Time {}
 abstract sig Target {}
-one sig Claude, Jcode, Unsupported extends Target {}
+one sig Anthropic, OpenAI, Unsupported extends Target {}
 abstract sig Phase {}
 one sig Checking, Authorized, Rejected, Dry, Launched extends Phase {}
-abstract sig Account { access, refreshExpiry: one Time, refresh: one Bool }
-one sig ClaudeAccount, FirstAccount, SecondAccount extends Account {}
-// Neither jcode OAuth file supplies a refresh-expiry timestamp.
-fact CredentialSchema { (FirstAccount + SecondAccount).refreshExpiry = Unknown }
+abstract sig Account { access: one Time, refresh: one Bool }
+one sig AnthropicFirst, AnthropicSecond, OpenAIFirst, OpenAISecond extends Account {}
 one sig Config {
   planning, sdk, skip, dry, otherAuth: one Bool,
   planCandidates, executionCandidates: set Target
 }
 sig State { phase: one Phase, read, errors: set Target, workspace: one Bool }
-pred expired[a: Account] { a.access = Past and (a.refresh = No or a.refreshExpiry = Past) }
+pred expired[a: Account] { a.access = Past and a.refresh = No }
 pred bypass { Config.skip = Yes or Config.sdk = No or Config.dry = Yes }
 fun selected: set Target {
   ((Config.planning = Yes => Config.planCandidates else Config.executionCandidates)
-    & (Claude + Jcode)) - (Config.otherAuth = Yes => Claude else none)
+    & (Anthropic + OpenAI)) - (Config.otherAuth = Yes => Anthropic else none)
 }
 fun required: set Target { bypass => none else selected }
 fun unavailable: set Target {
-  { t: Claude + Jcode | (t = Claude and expired[ClaudeAccount])
-    or (t = Jcode and expired[FirstAccount] and expired[SecondAccount]) }
+  { t: Anthropic + OpenAI |
+    (t = Anthropic and expired[AnthropicFirst] and expired[AnthropicSecond])
+    or (t = OpenAI and expired[OpenAIFirst] and expired[OpenAISecond]) }
 }
 pred initial[a: State] { a.phase = Checking and no a.read and no a.errors and a.workspace = No }
 pred inspect[a,b: State] {
@@ -73,69 +71,77 @@ assert EffectGate {
     a.phase = Rejected implies a.workspace = No
   }
 }
-// A denied trace must actually read both expired targets and aggregate both.
 pred AllTargetsRejected {
   Config.planning = No and Config.sdk = Yes and Config.skip = No and Config.dry = No
-  Config.otherAuth = No and Config.executionCandidates = Target
-  expired[ClaudeAccount] and expired[FirstAccount] and expired[SecondAccount]
-  last.phase = Rejected and last.read = Claude + Jcode and last.errors = Claude + Jcode
+  Config.otherAuth = No and Config.executionCandidates = Anthropic + OpenAI + Unsupported
+  expired[AnthropicFirst] and expired[AnthropicSecond]
+  expired[OpenAIFirst] and expired[OpenAISecond]
+  last.phase = Rejected and last.read = Anthropic + OpenAI and last.errors = Anthropic + OpenAI
 }
-// One renewable account suffices, despite another account being dead.
 pred RenewableAccountLaunch {
-  required = Jcode and expired[FirstAccount]
-  SecondAccount.access = Past and SecondAccount.refresh = Yes and SecondAccount.refreshExpiry = Unknown
-  last.phase = Launched and last.read = Jcode and no last.errors
+  required = OpenAI and expired[OpenAIFirst]
+  OpenAISecond.access = Past and OpenAISecond.refresh = Yes
+  last.phase = Launched and last.read = OpenAI and no last.errors
 }
 pred UnknownAccountLaunch {
-  required = Jcode and expired[FirstAccount] and SecondAccount.access = Unknown
+  required = OpenAI and expired[OpenAIFirst] and OpenAISecond.access = Unknown
   last.phase = Launched and no last.errors
 }
 pred PlanningIsolation {
   Config.planning = Yes and Config.sdk = Yes and Config.skip = No and Config.otherAuth = No
-  Config.planCandidates = Claude and Config.executionCandidates = Jcode
-  ClaudeAccount.access = Future and expired[FirstAccount] and expired[SecondAccount]
-  last.phase = Launched and last.read = Claude and last.workspace = No
+  Config.planCandidates = Anthropic and Config.executionCandidates = OpenAI
+  AnthropicFirst.access = Future and expired[AnthropicSecond]
+  last.phase = Launched and last.read = Anthropic and last.workspace = No
 }
 pred DryWithoutReads {
-  Config.planning = No and Config.dry = Yes and Config.executionCandidates = Target
-  expired[ClaudeAccount] and expired[FirstAccount] and expired[SecondAccount]
+  Config.planning = No and Config.dry = Yes and Config.executionCandidates = Anthropic + OpenAI + Unsupported
+  expired[AnthropicFirst] and expired[AnthropicSecond]
+  expired[OpenAIFirst] and expired[OpenAISecond]
   last.phase = Dry and no last.read and last.workspace = No
 }
 pred PlanningDryWithoutReads {
-  Config.planning = Yes and Config.dry = Yes and Config.planCandidates = Target
-  expired[ClaudeAccount] and expired[FirstAccount] and expired[SecondAccount]
+  Config.planning = Yes and Config.dry = Yes
+  Config.planCandidates = Anthropic + OpenAI + Unsupported
+  expired[AnthropicFirst] and expired[AnthropicSecond]
+  expired[OpenAIFirst] and expired[OpenAISecond]
   last.phase = Dry and no last.read and last.workspace = No
 }
 pred OptOutLaunch {
-  Config.skip = Yes and Config.dry = No and Config.executionCandidates = Target
-  expired[ClaudeAccount] and expired[FirstAccount] and expired[SecondAccount]
+  Config.skip = Yes and Config.dry = No
+  Config.executionCandidates = Anthropic + OpenAI + Unsupported
+  expired[AnthropicFirst] and expired[AnthropicSecond]
+  expired[OpenAIFirst] and expired[OpenAISecond]
   last.phase = Launched and no last.read
 }
 pred CommandLaunch {
   Config.sdk = No and Config.skip = No and Config.dry = No
-  Config.planning = No and Config.executionCandidates = Target
-  expired[ClaudeAccount] and expired[FirstAccount] and expired[SecondAccount]
+  Config.planning = No and Config.executionCandidates = Anthropic + OpenAI + Unsupported
+  expired[AnthropicFirst] and expired[AnthropicSecond]
+  expired[OpenAIFirst] and expired[OpenAISecond]
   last.phase = Launched and no last.read
 }
 pred UnsupportedLaunch {
   Config.sdk = Yes and Config.skip = No and Config.dry = No and Config.otherAuth = No
   Config.planning = No and Config.executionCandidates = Unsupported
-  expired[ClaudeAccount] and expired[FirstAccount] and expired[SecondAccount]
+  expired[AnthropicFirst] and expired[AnthropicSecond]
+  expired[OpenAIFirst] and expired[OpenAISecond]
   last.phase = Launched and no last.read
 }
 pred AlternativeAuthLaunch {
   Config.planning = No and Config.sdk = Yes and Config.skip = No and Config.dry = No
-  Config.otherAuth = Yes and Config.executionCandidates = Claude + Unsupported
-  expired[ClaudeAccount] and last.phase = Launched and no last.read
+  Config.otherAuth = Yes and Config.executionCandidates = Anthropic + Unsupported
+  expired[AnthropicFirst] and expired[AnthropicSecond]
+  last.phase = Launched and no last.read
 }
-pred RefreshExpiryRejected {
-  required = Claude and ClaudeAccount.access = Past
-  ClaudeAccount.refresh = Yes and ClaudeAccount.refreshExpiry = Past
-  last.phase = Rejected and last.errors = Claude
+pred ExpiryBoundaryRejected {
+  required = Anthropic
+  AnthropicFirst.access = Past and AnthropicFirst.refresh = No
+  AnthropicSecond.access = Past and AnthropicSecond.refresh = No
+  last.phase = Rejected and last.errors = Anthropic
 }
 pred FreshAccessLaunch {
-  required = Claude and ClaudeAccount.access = Future
-  ClaudeAccount.refresh = Yes and ClaudeAccount.refreshExpiry = Past
+  required = Anthropic and AnthropicFirst.access = Future
+  expired[AnthropicSecond]
   last.phase = Launched and no last.errors
 }
 check ScopeSafety for 9 State expect 0
@@ -153,5 +159,5 @@ run OptOutLaunch for 9 State expect 1
 run CommandLaunch for 9 State expect 1
 run UnsupportedLaunch for 9 State expect 1
 run AlternativeAuthLaunch for 9 State expect 1
-run RefreshExpiryRejected for 9 State expect 1
+run ExpiryBoundaryRejected for 9 State expect 1
 run FreshAccessLaunch for 9 State expect 1

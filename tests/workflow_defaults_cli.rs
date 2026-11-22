@@ -119,22 +119,6 @@ fn write_model_workflow(project: &Path, model: Option<&str>) {
 }
 
 #[cfg(unix)]
-fn install_claude_marker(command: &mut Command, home: &Path, marker: &Path) {
-    let bin = home.join("bin");
-    std::fs::create_dir_all(&bin).unwrap_or_else(|error| panic!("{error}"));
-    let executable = bin.join("claude");
-    let response = r#"{"type":"result","subtype":"success","is_error":false,"session_id":"test-session","result":"ok"}"#;
-    cruise::test_support::write_executable_script(
-        &executable,
-        &format!(
-            "#!/bin/sh\nread -r _user_frame\nprintf started >> {}\nprintf '%s\\n' '{}'\n",
-            sh_quote(marker),
-            response
-        ),
-    );
-    prepend_command_path(command, &bin);
-}
-
 fn assert_missing_model_diagnostic(output: &Output, user_file: &Path) {
     assert!(
         !output.status.success(),
@@ -588,33 +572,6 @@ fn command_backend_without_a_model_executes_without_creating_user_defaults() {
     assert!(output.status.success(), "{}", text(&output));
     assert!(text(&output).contains("command-ran"));
     assert!(!home.path().join("config/cruise/default.yaml").exists());
-    assert!(!project.path().join(".cruise/default.yaml").exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn claude_backend_without_a_model_executes_without_creating_user_defaults() {
-    let home = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let project = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    std::fs::write(
-        project.path().join("workflow.yaml"),
-        workflow_for_jcode(Some("claude")),
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
-    cruise::test_support::init_git_repo(project.path());
-    let user_file = home.path().join("config/cruise/default.yaml");
-    let marker = home.path().join("claude-started");
-    let mut command = cruise(home.path(), project.path());
-    install_claude_marker(&mut command, home.path(), &marker);
-
-    let output = command
-        .args(["exec", "--config", "workflow.yaml"])
-        .output()
-        .unwrap_or_else(|error| panic!("run Claude backend: {error}"));
-
-    assert!(output.status.success(), "{}", text(&output));
-    assert!(marker.is_file(), "Claude prompt should be executed");
-    assert!(!user_file.exists());
     assert!(!project.path().join(".cruise/default.yaml").exists());
 }
 

@@ -1,4 +1,4 @@
-// Production WebUI, real Quint, and a deterministic Claude process boundary.
+// Production WebUI, real Quint, and a deterministic command boundary.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
@@ -18,14 +18,13 @@ try {
     config: { kind: 'inline_snapshot' }, input: 'Verify the saved plan', title: 'Verify browser fixture',
     current_step: null, created_at: '2026-11-07T00:00:00Z', completed_at: null,
     worktree_path: null, worktree_branch: null }));
-  await writeFile(join(dir, 'config.yaml'), 'sdk: claude\nmodel: fixture-model\nsteps:\n  harmless:\n    command: "true"\n');
+  await writeFile(join(dir, 'config.yaml'), 'command: [fake-agent]\nsteps:\n  harmless:\n    command: "true"\n');
   await writeFile(join(dir, 'plan.md'), plan);
   const spec = '```quint\nthis is not valid quint\n```';
-  const assistant = text => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] }, session_id: 'fixture' });
-  const first = `${assistant(spec)}\n${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'fixture', result: spec })}`;
-  const second = `${assistant('FIXTURE_INTERPRETATION')}\n${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'fixture', result: 'FIXTURE_INTERPRETATION' })}`;
-  const callLog = join(root, 'provider-calls');
-  await writeFile(join(bin, 'claude'), `#!/bin/sh\nread -r frame\nprintf '%s\\n' "$frame" >> '${callLog}'\nif [ "$(wc -l < '${callLog}' | tr -d ' ')" = 1 ]; then\n  printf '%s\\n' '${first}'\nelse\n  printf '%s\\n' '${second}'\nfi\n`, { mode: 0o755 });
+  const first = spec;
+  const second = 'FIXTURE_INTERPRETATION';
+  const callLog = join(root, 'agent-calls');
+  await writeFile(join(bin, 'fake-agent'), `#!/bin/sh\ncat >/dev/null\nprintf 'call\\n' >> '${callLog}'\nif [ "$(wc -l < '${callLog}' | tr -d ' ')" = 1 ]; then\n  printf '%s\\n' '${first}'\nelse\n  printf '%s\\n' '${second}'\nfi\n`, { mode: 0o755 });
   const env = { PATH: `${bin}:${resolve('tests/formal/node_modules/.bin')}:${process.env.PATH}`, HOME: root,
     XDG_CONFIG_HOME: join(root, 'config'), XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'),
     CRUISE_DISABLE_NOTIFICATIONS: '1', CRUISE_DISABLE_HERDR: '1', NO_COLOR: '1' };

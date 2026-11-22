@@ -1,7 +1,4 @@
-use super::{
-    Provider,
-    release::{Archive, Digest, Target},
-};
+use super::release::{Archive, Digest, Target};
 use crate::{
     error::{CruiseError, Result},
     http_download::{
@@ -9,7 +6,7 @@ use crate::{
         open_response,
     },
 };
-use sha2::{Digest as _, Sha256, Sha512};
+use sha2::{Digest as _, Sha256};
 use std::{
     fs,
     io::{Read, Write},
@@ -21,28 +18,6 @@ use url::Url;
 const LIMIT: u64 = 512 * 1024 * 1024;
 fn err(s: impl Into<String>) -> CruiseError {
     CruiseError::Other(s.into())
-}
-fn b64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::new();
-    for chunk in bytes.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8)
-            | u32::from(chunk.get(2).copied().unwrap_or(0));
-        s.push(ALPHABET[((n >> 18) & 63) as usize] as char);
-        s.push(ALPHABET[((n >> 12) & 63) as usize] as char);
-        s.push(if chunk.len() > 1 {
-            ALPHABET[((n >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        s.push(if chunk.len() > 2 {
-            ALPHABET[(n & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    s
 }
 
 pub(crate) fn fetch_and_verify(
@@ -103,7 +78,6 @@ pub(crate) fn fetch_and_verify(
     let mut archive = fs::File::create(&archive_path)?;
     let mut reader = response.into_body().into_reader();
     let mut sha256 = Sha256::new();
-    let mut sha512 = Sha512::new();
     let mut size = 0u64;
     let mut buf = vec![0u8; 65536];
     loop {
@@ -116,30 +90,18 @@ pub(crate) fn fetch_and_verify(
             .filter(|n| *n <= LIMIT)
             .ok_or_else(|| err("provider download exceeds size limit"))?;
         sha256.update(&buf[..n]);
-        sha512.update(&buf[..n]);
         archive.write_all(&buf[..n])?;
     }
     if expected_len.is_some_and(|n| n != size) {
         return Err(err("provider download Content-Length mismatch"));
     }
     drop(archive);
-    match &target.digest {
-        Digest::Sha256(expected) => {
-            let actual = crate::http_download::hex_digest(&sha256.finalize());
-            if actual.as_str() != expected.as_str() {
-                return Err(err(format!(
-                    "provider SHA256 mismatch: expected {expected}, actual {actual}"
-                )));
-            }
-        }
-        Digest::Sha512Sri(expected) => {
-            let actual = format!("sha512-{}", b64(&sha512.finalize()));
-            if actual.as_str() != expected.as_str() {
-                return Err(err(format!(
-                    "provider SHA512 mismatch: expected {expected}, actual {actual}"
-                )));
-            }
-        }
+    let Digest::Sha256(expected) = &target.digest;
+    let actual = crate::http_download::hex_digest(&sha256.finalize());
+    if actual.as_str() != expected.as_str() {
+        return Err(err(format!(
+            "provider SHA256 mismatch: expected {expected}, actual {actual}"
+        )));
     }
     extract_archive(target, dest, &archive_path)?;
     #[cfg(unix)]
@@ -155,7 +117,7 @@ fn extract_archive(target: &Target, dest: &Path, archive_path: &Path) -> Result<
         Archive::Raw => {
             fs::rename(archive_path, dest)?;
         }
-        Archive::TarGz { root } => {
+        Archive::TarGz => {
             let decoder = flate2::read::GzDecoder::new(fs::File::open(archive_path)?);
             let mut tar = tar::Archive::new(decoder);
             let mut found = false;
@@ -176,24 +138,13 @@ fn extract_archive(target: &Target, dest: &Path, archive_path: &Path) -> Result<
                     std::str::from_utf8(&raw_path).map_err(|_| err("archive path is not UTF-8"))?;
                 let normalized = normalize_archive_path(raw_path, ty.is_dir())?;
                 let path = Path::new(&normalized);
-                if let Some(root) = root
-                    && !path.starts_with(root)
-                {
-                    return Err(err("archive entry outside root"));
-                }
                 let length = entry.size();
                 total = total
                     .checked_add(length)
                     .filter(|n| *n <= LIMIT)
                     .ok_or_else(|| err("archive exceeds size limit"))?;
                 let expected = Path::new(&target.entry);
-                let opencode_metadata = root == Some("package")
-                    && matches!(
-                        target.entry.as_str(),
-                        "package/bin/opencode" | "package/bin/opencode.exe"
-                    )
-                    && path == Path::new("package/package.json");
-                if ty.is_file() && path != expected && !opencode_metadata {
+                if ty.is_file() && path != expected {
                     return Err(err("unexpected archive entry"));
                 }
                 if ty.is_dir() && !expected.starts_with(path) {
@@ -216,8 +167,8 @@ fn extract_archive(target: &Target, dest: &Path, archive_path: &Path) -> Result<
     }
     Ok(())
 }
-pub(crate) fn probe(provider: Provider, binary: &Path, expected: &str) -> Result<()> {
-    probe_with_timeout(provider, binary, expected, Duration::from_secs(30))
+pub(crate) fn probe(binary: &Path, expected: &str) -> Result<()> {
+    probe_with_timeout(binary, expected, Duration::from_secs(30))
 }
 
 #[cfg(target_os = "linux")]
@@ -230,25 +181,10 @@ fn executable_busy(_error: &std::io::Error) -> bool {
     false
 }
 
-fn probe_with_timeout(
-    provider: Provider,
-    binary: &Path,
-    expected: &str,
-    timeout: Duration,
-) -> Result<()> {
+fn probe_with_timeout(binary: &Path, expected: &str, timeout: Duration) -> Result<()> {
     let mut cmd = Command::new(binary);
-    match provider {
-        Provider::Jcode => {
-            cmd.args(["version", "--json"])
-                .env("JCODE_NO_AUTO_UPDATE", "1");
-        }
-        Provider::Claude => {
-            cmd.arg("--version").env("DISABLE_AUTOUPDATER", "1");
-        }
-        Provider::OpenCode => {
-            cmd.arg("--version").env("OPENCODE_DISABLE_AUTOUPDATE", "1");
-        }
-    }
+    cmd.args(["version", "--json"])
+        .env("JCODE_NO_AUTO_UPDATE", "1");
     cmd.stdout(Stdio::piped()).stderr(Stdio::null());
     let deadline = Instant::now() + timeout;
     let mut child = loop {
@@ -315,16 +251,14 @@ fn probe_with_timeout(
             }
         })??;
     let text = String::from_utf8_lossy(&output);
-    let version = match provider {
-        Provider::Jcode => serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v.get("semver").and_then(|v| v.as_str()).map(str::to_owned)),
-        Provider::Claude => text.split_whitespace().next().map(str::to_owned),
-        Provider::OpenCode => text
-            .split_whitespace()
-            .last()
-            .map(|v| v.trim_start_matches('v').to_owned()),
-    };
+    let version = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("semver")
+                .and_then(|version| version.as_str())
+                .map(str::to_owned)
+        });
     if version.as_deref() != Some(expected) {
         return Err(err(format!(
             "provider version mismatch: expected {expected}, got {}",
@@ -347,15 +281,14 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("tool");
-        fs::write(&binary, b"#!/bin/sh\necho '2.1.250 (Claude Code)'\n").unwrap();
+        fs::write(&binary, b"#!/bin/sh\nprintf '{\"semver\":\"1.0.0\"}\\n'\n").unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         let writer = fs::OpenOptions::new().write(true).open(&binary).unwrap();
         let release = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));
             drop(writer);
         });
-        let result =
-            probe_with_timeout(Provider::Claude, &binary, "2.1.250", Duration::from_secs(2));
+        let result = probe_with_timeout(&binary, "1.0.0", Duration::from_secs(2));
         release.join().unwrap();
         result.unwrap();
     }
@@ -372,9 +305,9 @@ mod tests {
         let start = Instant::now();
         assert!(
             probe_with_timeout(
-                Provider::Claude,
+                Provider::Jcode,
                 &binary,
-                "2.1.250",
+                "1.0.0",
                 Duration::from_millis(100)
             )
             .is_err()
@@ -389,7 +322,7 @@ mod tests {
         let file = fs::File::create(&archive).unwrap();
         let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         let mut tar = tar::Builder::new(encoder);
-        for name in ["package/bin/opencode", "package/extra"] {
+        for name in ["jcode-linux-x86_64", "extra"] {
             let mut header = tar::Header::new_gnu();
             header.set_size(1);
             header.set_mode(0o755);
@@ -400,10 +333,8 @@ mod tests {
         let target = Target {
             key: "test",
             url: "https://example.com/test".into(),
-            archive: Archive::TarGz {
-                root: Some("package"),
-            },
-            entry: "package/bin/opencode".into(),
+            archive: Archive::TarGz,
+            entry: "jcode-linux-x86_64".into(),
             digest: Digest::Sha256("unused".into()),
         };
         assert!(
@@ -412,38 +343,6 @@ mod tests {
                 .to_string()
                 .contains("unexpected archive entry")
         );
-    }
-
-    #[test]
-    fn sha512_mismatch_rejects_download() {
-        let body = b"payload";
-        let sri = format!("sha512-{}", b64(&Sha512::digest(b"other")));
-        let target = Target {
-            key: "test",
-            url: "https://example.com/test".into(),
-            archive: Archive::Raw,
-            entry: "test".into(),
-            digest: Digest::Sha512Sri(sri),
-        };
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 1024];
-            let _ = stream.read(&mut request);
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            stream.write_all(body).unwrap();
-        });
-        let dir = tempfile::tempdir().unwrap();
-        let error =
-            fetch_and_verify(&target, &dir.path().join("binary"), &[], Some(&base)).unwrap_err();
-        assert!(error.to_string().contains("SHA512 mismatch"));
-        server.join().unwrap();
     }
 
     #[test]
@@ -477,54 +376,15 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("probe");
-        fs::write(&binary, b"#!/bin/sh\nsleep 2 &\nprintf '1.0.0\\n'\n").unwrap();
+        fs::write(
+            &binary,
+            b"#!/bin/sh\nsleep 2 &\nprintf '{\"semver\":\"1.0.0\"}\\n'\n",
+        )
+        .unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         let start = Instant::now();
-        let result = probe_with_timeout(
-            Provider::Claude,
-            &binary,
-            "1.0.0",
-            Duration::from_millis(100),
-        );
+        let result = probe_with_timeout(&binary, "1.0.0", Duration::from_millis(100));
         assert!(result.unwrap_err().to_string().contains("timed out"));
         assert!(start.elapsed() < Duration::from_secs(1));
-    }
-
-    #[test]
-    fn verified_raw_download_and_probe() {
-        let body = b"#!/bin/sh\nprintf '2.1.250 (Claude Code)\\n'\n";
-        let hash = crate::http_download::hex_digest(&Sha256::digest(body));
-        let target = Target {
-            key: "test",
-            url: "https://downloads.claude.ai/test?token=fixture".into(),
-            archive: Archive::Raw,
-            entry: "claude".into(),
-            digest: Digest::Sha256(hash),
-        };
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = Url::parse(&format!(
-            "http://{}/ignored/prefix",
-            listener.local_addr().unwrap()
-        ))
-        .unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 2048];
-            let n = stream.read(&mut request).unwrap();
-            assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /test?token=fixture "));
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            stream.write_all(body).unwrap();
-        });
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("claude");
-        fetch_and_verify(&target, &dest, &[], Some(&base)).unwrap();
-        probe(Provider::Claude, &dest, "2.1.250").unwrap();
-        assert!(probe(Provider::Claude, &dest, "wrong").is_err());
-        server.join().unwrap();
     }
 }

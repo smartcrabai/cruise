@@ -53,8 +53,7 @@ run_check alloy-receipt node scripts/formal/check_alloy_receipt.cjs tests/formal
 run_check receipt-validator-tests node --test scripts/formal/check_alloy_receipt.test.cjs
 run_check subagent-bdd cargo +1.99.1 test --locked --all-features --test subagent_model_bdd
 run_check bdd-negative-controls node scripts/formal/check_subagent_bdd_failures.cjs "$RUN"
-# Includes Claude env at the actual subprocess boundary and jcode API frames,
-# plus defaults, groups, parallel children, workflow-call and review wiring.
+# Jcode API-frame tests cover route setup before prompt and no-send after failures.
 run_check subagent-cli cargo +1.99.1 test --locked --all-features --test sdk_model_execution_cli --test subagent_model_jcode_cli
 run_check subagent-unit-contracts cargo +1.99.1 test --locked --all-features --lib
 printf 'Aggregate exit status: %s\n' "$status" | tee -a "$RUN/results.log"

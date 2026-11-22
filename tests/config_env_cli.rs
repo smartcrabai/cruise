@@ -189,6 +189,32 @@ fn conflicting_sdk_and_command_env_fail_before_execution() {
 }
 
 #[test]
+fn removed_sdk_environment_values_report_only_jcode_is_supported() {
+    for sdk in ["claude", concat!("open", "code")] {
+        let fixture = Fixture::new();
+        std::fs::write(
+            fixture.project.join("workflow.yaml"),
+            "sdk: jcode\nmodel: claude/claude-opus-4-5\nsteps:\n  main:\n    prompt: inspect\n",
+        )
+        .unwrap_or_else(|error| panic!("write workflow: {error}"));
+        let output = fixture
+            .command()
+            .env("CRUISE_SDK", sdk)
+            .args(["exec", "--dry-run", "--config", "workflow.yaml"])
+            .output()
+            .unwrap_or_else(|error| panic!("run exec: {error}"));
+        let diagnostic = text(&output);
+        assert!(!output.status.success(), "{diagnostic}");
+        assert!(
+            diagnostic.contains(&format!(
+                "unsupported SDK \"{sdk}\"; only \"jcode\" is supported"
+            )),
+            "{diagnostic}"
+        );
+    }
+}
+
+#[test]
 fn invalid_count_override_fails_with_variable_name() {
     let fixture = Fixture::new();
     let output = fixture

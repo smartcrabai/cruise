@@ -29,10 +29,10 @@ try {
       config: { kind: 'inline_snapshot' }, input: 'Verify boundary', title: `Verify ${item.name}`,
       current_step: null, created_at: '2026-11-07T00:00:00Z', completed_at: null,
       worktree_path: null, worktree_branch: null }));
-    await writeFile(join(dir, 'config.yaml'), 'sdk: claude\nsteps:\n  harmless:\n    command: "true"\n');
+    await writeFile(join(dir, 'config.yaml'), 'sdk: jcode\nmodel: claude/claude-opus-4-5\nsteps:\n  harmless:\n    command: "true"\n');
     if (item.plan) await writeFile(join(dir, 'plan.md'), plan);
   }
-  // No credentials or Claude executable are available to the production runtime.
+  // No credentials or external agent executable are available to the production runtime.
   const env = { PATH: join(root, 'empty-bin'), HOME: root, XDG_CONFIG_HOME: join(root, 'config'),
     XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'),
     CRUISE_DISABLE_NOTIFICATIONS: '1', CRUISE_DISABLE_HERDR: '1', NO_COLOR: '1',

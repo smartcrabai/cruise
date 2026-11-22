@@ -32,8 +32,8 @@
     },
     "sdk": {
       "type": "string",
-      "enum": ["jcode", "claude", "opencode"],
-      "description": "SDK backend to drive prompt execution instead of `command`. Mutually exclusive with `command`; omitting both selects `jcode` only if neither `command` nor `sdk` is set by applicable `default.yaml` layers. `sdk: jcode` uses the official jcode Rust SDK and requires jcode CLI v0.88.0 or newer; Cruise validates the API handshake and required capabilities at runtime. `sdk: claude` uses claude-agent-sdk. `sdk: opencode` uses a built-in Rust client and a locally managed OpenCode V2 CLI, with no external server or V1 fallback. jcode/Claude model references support `provider/model[:effort]` or a bare model; OpenCode uses catalog-validated `provider/model[:effort]` or native `provider/model#variant`, which cannot be combined. Recognized trailing effort suffixes are reserved; embedded slashes and unknown colon suffixes in model IDs are preserved. Omitted models use OpenCode's configured default."
+      "enum": ["jcode"],
+      "description": "The only supported SDK backend; mutually exclusive with `command`. When omitted, applicable defaults select the backend, falling back to `jcode`. The jcode SDK uses the official Rust SDK and requires jcode CLI v0.88.0 or newer. Jcode prompts require an effective model reference."
     },
     "mcp_servers": {
       "type": "object",
@@ -44,7 +44,7 @@
       "additionalProperties": {
         "$ref": "#/$defs/McpServerConfig"
       },
-      "description": "Workflow-level MCP servers available to every SDK prompt run. Rejected with the command backend. Every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, must support the transport: stdio supports all SDKs, Streamable HTTP requires Claude or OpenCode, and legacy SSE requires Claude. Changing the workflow SDK does not override SDK-qualified objects."
+      "description": "Workflow-level stdio MCP servers for jcode prompt runs. Rejected with the command backend; HTTP and SSE transports are unsupported."
     },
     "model": {
       "oneOf": [
@@ -58,7 +58,7 @@
           }
         }
       ],
-      "description": "Default model to use for all steps. Each actual jcode prompt must resolve to a model from its step-level or workflow/default settings; a missing model is an execution error. OpenCode uses catalog-validated provider/model[:effort] or native provider/model#variant, which cannot be combined. Recognized trailing effort suffixes are reserved; embedded slashes and unknown colon suffixes in model IDs are preserved. OpenCode uses its configured default when omitted. Claude and command backends retain their existing no-model behavior. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
+      "description": "Default model for prompt steps. Every jcode prompt must resolve to an effective model. References use `provider/model[:effort]` or a bare model; recognized effort suffixes are reserved, while embedded slashes and unknown colon suffixes remain part of the model ID. In jcode mode, arrays use the first entry as primary and remaining entries as fallbacks; command mode uses only the first entry."
     },
     "plan_model": {
       "oneOf": [
@@ -72,15 +72,15 @@
           }
         }
       ],
-      "description": "Model to use for plan generation steps; falls back to `model`. A jcode planning prompt must resolve to a model. In SDK mode, an array uses its first entry as the primary model and the remaining entries as fallbacks; the command backend uses only the first entry."
+      "description": "Model for plan-generation prompts; falls back to `model`. Jcode planning requires an effective model. Jcode arrays use the first entry as primary and remaining entries as fallbacks; command mode uses only the first entry."
     },
     "subagent_model": {
       "$ref": "#/$defs/SubagentModelEntry",
-      "description": "Default subagent model for workflow prompt steps and planning (plan/fix/ask). Step values override it. Strings inherit the workflow SDK (default jcode); objects apply only to matching SDK candidates. Only jcode and Claude are supported, not command backends. One nonblank model only, with no arrays, fallback chain, or recognized :effort suffix. Excludes title generation, PR metadata, and workflow generate."
+      "description": "Default subagent model for jcode workflow prompt steps and planning. Plain model strings only; step values override it. One nonblank model with no arrays, fallback chain, or recognized `:effort` suffix."
     },
     "interactive_planning": {
       "type": "boolean",
-      "description": "Whether SDK-mode planning uses session tools to ask questions and submit or revise the plan instead of writing `plan.md` directly. Default: true. Applies to SDK backends, including the default `jcode`; it has no effect with a `command` backend, which always uses file-based planning."
+      "description": "Whether jcode planning uses session tools to ask questions and submit or revise the plan instead of writing `plan.md` directly. Default: true. Has no effect with a `command` backend, which always uses file-based planning."
     },
     "pr_language": {
       "type": "string",
@@ -162,7 +162,7 @@
     },
     "computer_use": {
       "type": "boolean",
-      "description": "Allow prompt turns to use jcode's macOS desktop-control tool. Default: false; no effect on Linux. Every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, must use jcode, with no command backend. Claude and OpenCode candidates are incompatible; changing only the workflow SDK does not override SDK-qualified objects."
+      "description": "Allow jcode prompt turns to use the macOS desktop-control tool. Default: false; no effect on Linux. Unsupported with the command backend."
     },
     "flags": {
       "type": "object",
@@ -176,7 +176,7 @@
     },
     "retry": {
       "$ref": "#/$defs/RetryConfig",
-      "description": "Retryable-failure policy for the SDK backends. Optional: without it, only provider rate limits are retried on the same model, unless a workflow-level model array with fallback entries supplies an implicit policy."
+      "description": "Retryable-failure policy for the jcode SDK. Without it, only provider rate limits retry on the same model, unless a model array supplies fallback entries."
     }
   },
   "$defs": {
@@ -186,34 +186,23 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["model"],
-          "anyOf": [{ "required": ["sdk"] }, { "required": ["disabled_during"] }],
+          "required": ["model", "disabled_during"],
           "properties": {
-            "sdk": { "type": "string", "enum": ["jcode", "claude", "opencode"] },
             "model": { "type": "string", "minLength": 1, "pattern": "\\S" },
             "disabled_during": {
               "type": "array",
               "minItems": 1,
               "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
-              "description": "User-declared unavailable windows: [days ]HH:MM-HH:MM[ offset]. Days are case-insensitive mon..sun, comma lists or inclusive ranges (including fri-mon); omitted days mean daily. Offset defaults to UTC; UTC, Z, and fixed +/-HH:MM offsets up to 14:00 are supported, not IANA zones or DST. Intervals are start-inclusive and end-exclusive; starts are 00:00..23:59, ends are 00:01..24:00, equal endpoints are invalid, and overnight days refer to the start day. Runtime parsing is authoritative. SDK backend only; omitted sdk inherits the workflow SDK."
+              "description": "Jcode scheduling-only availability windows. Runtime parsing is authoritative."
             }
           }
         }
       ]
     },
     "SubagentModelEntry": {
-      "oneOf": [
-        { "type": "string", "minLength": 1, "pattern": "\\S" },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["sdk", "model"],
-          "properties": {
-            "sdk": { "type": "string", "enum": ["jcode", "claude"] },
-            "model": { "type": "string", "minLength": 1, "pattern": "\\S" }
-          }
-        }
-      ]
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
     },
     "FlagConfig": {
       "type": "object",
@@ -235,7 +224,7 @@
         },
         "subagent_model": {
           "$ref": "#/$defs/SubagentModelEntry",
-          "description": "Override the workflow subagent model for this prompt step. Strings inherit the workflow SDK, not a fallback candidate's SDK. Only matching jcode or Claude attempts receive it; recognized :effort suffixes are rejected."
+          "description": "Plain Jcode subagent model string override for this prompt step; recognized `:effort` suffixes are rejected."
         },
         "prompt": {
           "type": "string",
@@ -969,11 +958,13 @@
     "McpServerConfig": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["command"],
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["stdio", "http", "sse"],
-          "description": "MCP transport. Defaults to stdio when omitted."
+          "enum": ["stdio"],
+          "default": "stdio",
+          "description": "Only stdio is supported."
         },
         "command": {
           "type": "string",
@@ -989,63 +980,12 @@
           "type": "object",
           "additionalProperties": { "type": "string" }
         },
-        "url": {
-          "type": "string",
-          "pattern": "^https?://",
-          "description": "HTTP or SSE MCP server URL."
-        },
         "headers": {
           "type": "object",
+          "maxProperties": 0,
           "additionalProperties": { "type": "string" }
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "anyOf": [
-              {
-                "properties": { "type": { "const": "stdio" } },
-                "required": ["type"]
-              },
-              { "not": { "required": ["type"] } }
-            ]
-          },
-          "then": {
-            "required": ["command"],
-            "not": {
-              "anyOf": [
-                { "required": ["url"] },
-                {
-                  "properties": { "headers": { "minProperties": 1 } },
-                  "required": ["headers"]
-                }
-              ]
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": { "type": { "enum": ["http", "sse"] } },
-            "required": ["type"]
-          },
-          "then": {
-            "required": ["url"],
-            "not": {
-              "anyOf": [
-                { "required": ["command"] },
-                {
-                  "properties": { "args": { "minItems": 1 } },
-                  "required": ["args"]
-                },
-                {
-                  "properties": { "env": { "minProperties": 1 } },
-                  "required": ["env"]
-                }
-              ]
-            }
-          }
-        }
-      ]
+      }
     }
   }
 }

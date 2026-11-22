@@ -31,7 +31,7 @@ steps:
 
 `instruction` は step 実行直前にユーザーへ表示する message であり、system prompt ではありません。`{input}` が空の場合、message は複数行入力 prompt として使われ、送信されたテキストが `{input}` になります。それ以外の場合は表示されるだけで LLM には送られません。
 
-prompt step は既定で commit guard の対象です。SDK prompt には [`tool restrictions`](sdk.md#tool-restrictions) で説明する暗黙の Git shell 拒否も適用されます。`allow_commit: true` はこれらと guard を解除しますが、明示的な `disallowed_tools` は解除せず、権限を広げません。prompt が意図的に commit を作成する、または Git `HEAD` を動かす必要がある場合に限り `allow_commit: true` を設定してください。省略時および `false` では guard が有効です。guard は従来の `command:` mode とすべての SDK backend（`jcode`、`claude`、`opencode`）を対象とします。command/option step には影響しません。
+prompt step は既定で commit guard の対象です。SDK prompt には [`tool restrictions`](sdk.md#tool-restrictions) で説明する暗黙の Git shell 拒否も適用されます。`allow_commit: true` はこれらと guard を解除しますが、明示的な `disallowed_tools` は解除せず、権限を広げません。prompt が意図的に commit を作成する、または Git `HEAD` を動かす必要がある場合に限り `allow_commit: true` を設定してください。省略時および `false` では guard が有効です。guard は従来の `command:` mode と `sdk: jcode` を対象とします。command/option step には影響しません。
 
 `allow_commit: true` は `group:` や `workflow_call:` 呼び出しではなく、実際の prompt に設定してください。
 

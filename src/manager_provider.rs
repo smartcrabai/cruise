@@ -100,7 +100,7 @@ async fn prompt(cwd: &Path, snapshot: &Snapshot, instruction: &str) -> Result<St
     crate::config::validate_config(&config)?;
     let executor = Executor::new(config.sdk.as_deref(), &config.command);
     if !executor.is_sdk() {
-        return Err(CruiseError::Other("Manager conversation requires an interactive SDK backend, not command. Configure sdk and a planning model in project or user workflow defaults.".into()));
+        return Err(CruiseError::Other("Manager conversation requires an interactive jcode SDK backend, not command. Configure `sdk: jcode` and a planning model in project or user workflow defaults.".into()));
     }
     let scratch = Scratch::new()?;
     // Resolved workflow configuration may contain credentials. It is human review

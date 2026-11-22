@@ -1,4 +1,3 @@
-use crate::model_selection::applicable_sdks;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -182,34 +181,23 @@ pub struct WorkflowConfig {
     ///   `:effort` suffix. Every actual jcode prompt requires an effective
     ///   Cruise model; an unset value is an error, not a fallback to jcode's
     ///   configured default.
-    /// - `"claude"` — drives the `claude` CLI in-process through
-    ///   `claude-agent-sdk`. `model` / `plan_model` / per-step `model` are
-    ///   plain `claude --model` names with an optional `:effort` suffix (unset
-    ///   lets the CLI pick its default).
+    /// - `"jcode"` — drives prompts through the official `jcode-sdk`.
     ///
-    /// - `"opencode"`: drives a locally managed `OpenCode` V2 CLI through the
-    ///   built-in Rust client. Models use catalog-validated `provider/model[:effort]`
-    ///   or native `provider/model#variant`, which cannot be combined. Recognized
-    ///   trailing effort suffixes are reserved; embedded slashes and unknown colon
-    ///   suffixes in model IDs are preserved. Unset models use `OpenCode`'s default.
-    ///
-    /// Omitting both `sdk` and `command` runs prompts on `jcode`, the default
-    /// backend.
+    /// Omitting both `sdk` and `command` also runs prompts on `jcode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdk: Option<String>,
 
     /// Default model for prompt steps (e.g. "sonnet"). Per-step model overrides this.
-    /// In SDK mode, a list uses its first entry as the primary model and the
+    /// In jcode mode, a list uses its first entry as the primary model and the
     /// remaining entries as an implicit fallback chain; command mode uses only
     /// the first entry.
     pub model: Option<ModelSpec>,
 
-    /// Subagent model for Claude or jcode. Strings resolve in the workflow SDK;
-    /// `{sdk, model}` limits the override to that SDK. Effort suffixes are unsupported.
+    /// Subagent model; plain model strings resolve in the jcode backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<ModelEntry>,
 
-    /// Model to use for the built-in plan step (falls back to `model`). In SDK
+    /// Model to use for the built-in plan step (falls back to `model`). In jcode
     /// mode, a list uses its first entry as the primary model and the remaining
     /// entries as an implicit fallback chain; command mode uses only the first
     /// entry.
@@ -309,19 +297,18 @@ pub struct WorkflowConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// Retryable-failure policy for the SDK backends. Optional: with no
-    /// explicit `retry:` block or workflow-level model array with fallback
-    /// entries, cruise keeps its historical behavior (same-model retries of
-    /// provider rate limits only).
+    /// Retryable-failure policy for the jcode SDK. Optional: with no explicit
+    /// `retry:` block or workflow-level model array with fallback entries,
+    /// cruise keeps its historical behavior (same-model retries of provider
+    /// rate limits only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
     /// Time limits for planning-time formal verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formal_verify: Option<FormalVerifyConfig>,
 
-    /// MCP servers made available to every SDK prompt run (`sdk: jcode`, the
-    /// default backend, `sdk: claude`, and `sdk: opencode`). Rejected with a
-    /// `command` backend. `OpenCode` supports stdio and Streamable HTTP, not SSE.
+    /// MCP servers made available to jcode prompt runs. Rejected with the
+    /// `command` backend.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub mcp_servers: McpServers,
 
@@ -355,7 +342,8 @@ pub enum ModelEntry {
     SdkModel(SdkModel),
 }
 
-/// An explicit SDK override for a single candidate.
+/// Scheduled model entry. The optional `sdk` field remains only so validation
+/// can clearly reject SDK-qualified objects from older configs.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SdkModel {
@@ -458,20 +446,24 @@ impl ModelSpec {
         }
     }
 
-    /// Validate explicit SDK objects without tightening legacy string inputs.
+    /// Validate scheduled model objects; SDK-qualified objects are unsupported.
     ///
     /// # Errors
     ///
-    /// Returns an error for unsupported SDKs or blank object model values.
+    /// Returns an error for SDK-qualified objects, blank models, or invalid
+    /// `disabled_during` windows.
     pub fn validate(&self, field: &str) -> crate::error::Result<()> {
         if let Self::Multiple(entries) = self {
             for (index, entry) in entries.iter().enumerate() {
                 if let ModelEntry::SdkModel(entry) = entry {
-                    if let Some(sdk) = &entry.sdk {
-                        validate_sdk_name(sdk, &format!("{field}[{index}].sdk"))?;
-                    } else if entry.disabled_during.is_empty() {
+                    if entry.sdk.is_some() {
                         return Err(crate::error::CruiseError::InvalidStepConfig(format!(
-                            "`{field}[{index}]` object must set `sdk` or `disabled_during`; use a plain string otherwise"
+                            "`{field}[{index}]`: SDK-qualified model objects are unsupported; use a plain model string"
+                        )));
+                    }
+                    if entry.disabled_during.is_empty() {
+                        return Err(crate::error::CruiseError::InvalidStepConfig(format!(
+                            "`{field}[{index}]` object must set `disabled_during`; use a plain string otherwise"
                         )));
                     }
                     if entry.model.trim().is_empty() {
@@ -490,11 +482,6 @@ impl ModelSpec {
             }
         }
         Ok(())
-    }
-
-    #[must_use]
-    pub fn has_sdk_overrides(&self) -> bool {
-        matches!(self, Self::Multiple(entries) if entries.iter().any(|entry| matches!(entry, ModelEntry::SdkModel(_))))
     }
 
     #[must_use]
@@ -839,8 +826,8 @@ fn default_max_delay_ms() -> u64 {
     300_000
 }
 
-/// How the SDK backends handle a retryable failure (rate limit, 4xx other than
-/// 429, 5xx, network).
+/// How the jcode SDK handles retryable failures (rate limit, 4xx other than
+/// 429, 5xx, and network failures).
 ///
 /// Opt-in: declaring `retry:`, or using a workflow-level model array with
 /// fallback entries, enables the fallback engine in [`crate::retry`]. The
@@ -888,7 +875,7 @@ impl Default for RetryConfig {
 /// order and gives deterministic output for backend configuration.
 pub type McpServers = IndexMap<String, McpServerConfig>;
 
-/// MCP transport accepted by the Claude Code server configuration shape.
+/// MCP transport named in workflow configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum McpTransport {
@@ -897,7 +884,7 @@ pub enum McpTransport {
     Sse,
 }
 
-/// One MCP server, in the Claude Code `mcpServers` entry shape.
+/// One MCP server as represented in workflow configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerConfig {
@@ -1657,12 +1644,11 @@ fn validate_mcp_servers(config: &WorkflowConfig) -> crate::error::Result<()> {
     }
     if config.sdk.is_none() && !config.command.is_empty() {
         return Err(CruiseError::InvalidStepConfig(
-            "`mcp_servers` requires an SDK backend (`sdk: jcode`, `sdk: claude`, `sdk: opencode`, or neither `sdk` nor `command`); the command backend cannot receive MCP servers".to_string(),
+            "`mcp_servers` requires the jcode SDK backend; the command backend cannot receive MCP servers"
+                .to_string(),
         ));
     }
 
-    let sdks = candidate_sdks(config);
-    let uses_jcode = sdks.contains(&crate::model_selection::Sdk::Jcode);
     for (name, server) in &config.mcp_servers {
         if name.is_empty()
             || !name
@@ -1679,69 +1665,31 @@ fn validate_mcp_servers(config: &WorkflowConfig) -> crate::error::Result<()> {
             ));
         }
 
-        match server.transport() {
-            McpTransport::Stdio => {
-                if server
-                    .command
-                    .as_deref()
-                    .is_none_or(|command| command.trim().is_empty())
-                {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` with type `stdio` requires a non-blank `command`"
-                    )));
-                }
-                if server.url.is_some() {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` uses `url` with the stdio transport; set `type: http` or `type: sse` for URL-based servers"
-                    )));
-                }
-                if !server.headers.is_empty() {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` uses `headers`, which are only allowed for `http` or `sse` transports"
-                    )));
-                }
-            }
-            McpTransport::Http | McpTransport::Sse => {
-                let Some(url) = server.url.as_deref() else {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` with type `{}` requires a `url` starting with `http://` or `https://`",
-                        transport_name(server.transport())
-                    )));
-                };
-                if !url.starts_with("http://") && !url.starts_with("https://") {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` URL must start with http:// or https://"
-                    )));
-                }
-                if server.command.is_some() {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` with a remote transport cannot set `command`"
-                    )));
-                }
-                if !server.args.is_empty() {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` with a remote transport cannot set `args`"
-                    )));
-                }
-                if !server.env.is_empty() {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` with a remote transport cannot set `env`"
-                    )));
-                }
-                if sdks.contains(&crate::model_selection::Sdk::OpenCode)
-                    && server.transport() == McpTransport::Sse
-                {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` uses type `sse`, which the OpenCode V2 backend does not support; use stdio (all SDKs) or Streamable HTTP (`type: http`, Claude/OpenCode only), or ensure every effective applicable candidate uses Claude for SSE. Changing the workflow SDK does not override SDK-qualified objects or authoritative retry-chain candidates"
-                    )));
-                }
-                if uses_jcode {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "`mcp_servers.{name}` uses type `{}`, which the jcode backend does not support (stdio only); every effective applicable candidate must support the transport: stdio supports all SDKs, HTTP requires Claude/OpenCode, and SSE requires Claude. Changing the workflow SDK does not override SDK-qualified objects or authoritative retry-chain candidates",
-                        transport_name(server.transport())
-                    )));
-                }
-            }
+        let transport = server.transport();
+        if transport != McpTransport::Stdio {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "`mcp_servers.{name}` uses unsupported `{}` transport; only stdio is supported",
+                transport_name(transport)
+            )));
+        }
+        if server
+            .command
+            .as_deref()
+            .is_none_or(|command| command.trim().is_empty())
+        {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "`mcp_servers.{name}` with type `stdio` requires a non-blank `command`"
+            )));
+        }
+        if server.url.is_some() {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "`mcp_servers.{name}` uses `url` with the stdio transport; only stdio servers are supported"
+            )));
+        }
+        if !server.headers.is_empty() {
+            return Err(CruiseError::InvalidStepConfig(format!(
+                "`mcp_servers.{name}` uses `headers`, which are only allowed for HTTP/SSE transports that are not supported"
+            )));
         }
     }
     Ok(())
@@ -2146,7 +2094,7 @@ pub(crate) fn validate_parallel_step(name: &str, step: &StepConfig) -> crate::er
 }
 
 /// Validate the optional retry policy: usable delays, and fallback-chain keys
-/// and entries that name a model the SDK backends can actually dispatch.
+/// and entries that name a model the jcode backend can dispatch.
 ///
 /// # Errors
 ///
@@ -2206,43 +2154,17 @@ fn is_model_pattern(value: &str) -> bool {
 }
 
 /// SDK values accepted by [`validate_sdk`].
-const SUPPORTED_SDKS: &[&str] = &["jcode", "claude", "opencode"];
-
-/// SDK values cruise used to accept, each with the migration its config needs.
-///
-/// Rejected with their own message rather than the generic "unknown `sdk`
-/// value" one: these backends are gone, and the `model` / `plan_model` values
-/// that went with them were lookup keys rather than model references, so a
-/// config carrying either needs both edits.
-const REMOVED_SDKS: &[(&str, &str)] = &[
-    (
-        "seher",
-        "remove `sdk:` to use the workflow's `command` or the backend from applicable `default.yaml` layers (falling back to `jcode` only when none is selected), or set `sdk: claude`; \
-         replace `model:` / `plan_model:` mode keys (`build` / `plan`) with model values accepted by the selected backend",
-    ),
-    (
-        "pi",
-        "remove `sdk:` to use the workflow's `command` or the backend from applicable `default.yaml` layers (falling back to `jcode` only when none is selected), or set `sdk: claude`; \
-         express `model:` / `plan_model:` in the selected backend's model syntax",
-    ),
-];
+const SUPPORTED_SDKS: &[&str] = &["jcode"];
 
 /// Validate the top-level execution backend selection.
 ///
-/// - both `command` and `sdk` set -> ambiguous, rejected.
-/// - neither set -> accepted: prompts run on the default `jcode` backend (see
-///   [`crate::executor::Executor::new`]). Each actual jcode prompt must still
-///   resolve to an explicit Cruise model at execution time.
-/// - `sdk` set to a [`REMOVED_SDKS`] value -> rejected, naming the migration.
-/// - `sdk` set to any other value outside [`SUPPORTED_SDKS`] -> rejected.
-///
-/// An empty `command` list counts as "not specified" so that `sdk`-only configs
-/// (where `command` defaults to `[]`) are accepted.
+/// Both `command` and `sdk` set is ambiguous and rejected; neither set defaults
+/// to `jcode`.
 ///
 /// # Errors
 ///
-/// Returns an error if both `command` and `sdk` are set, or if `sdk` is set to
-/// a removed or otherwise unsupported value.
+/// Returns an error if both `command` and `sdk` are set, or if `sdk` is not
+/// `jcode`.
 pub fn validate_sdk(config: &WorkflowConfig) -> crate::error::Result<()> {
     use crate::error::CruiseError;
     for (field, spec) in [
@@ -2251,20 +2173,14 @@ pub fn validate_sdk(config: &WorkflowConfig) -> crate::error::Result<()> {
     ] {
         if let Some(spec) = spec {
             spec.validate(field)?;
-            if !config.command.is_empty() && spec.has_sdk_overrides() {
-                if spec.has_time_windows() {
-                    return Err(CruiseError::InvalidStepConfig(format!(
-                        "`command` cannot be combined with `disabled_during` on `{field}` candidates; time windows require an SDK backend"
-                    )));
-                }
+            if !config.command.is_empty() && spec.has_time_windows() {
                 return Err(CruiseError::InvalidStepConfig(format!(
-                    "`command` cannot be combined with SDK-qualified `{field}` candidates"
+                    "`command` cannot be combined with `disabled_during` on `{field}` candidates; time windows require the jcode SDK backend"
                 )));
             }
         }
     }
-    let has_command = !config.command.is_empty();
-    match (has_command, config.sdk.as_deref()) {
+    match (!config.command.is_empty(), config.sdk.as_deref()) {
         (true, Some(_)) => Err(CruiseError::InvalidStepConfig(
             "`sdk` and `command` are mutually exclusive; specify only one".to_string(),
         )),
@@ -2273,22 +2189,16 @@ pub fn validate_sdk(config: &WorkflowConfig) -> crate::error::Result<()> {
     }
 }
 
-/// Validate SDK names using the same compatibility and migration rules everywhere.
+/// Validate an SDK name. Only `jcode` is supported.
 ///
 /// # Errors
 ///
-/// Returns an error with migration guidance for removed or unsupported SDKs.
-pub fn validate_sdk_name(sdk: &str, field: &str) -> crate::error::Result<()> {
+/// Returns an error when `sdk` is not `jcode`.
+pub fn validate_sdk_name(sdk: &str, _field: &str) -> crate::error::Result<()> {
     use crate::error::CruiseError;
-    if let Some((_, migration)) = REMOVED_SDKS.iter().find(|(name, _)| *name == sdk) {
-        return Err(CruiseError::InvalidStepConfig(format!(
-            "`{field}: {sdk}` is no longer supported: {migration}"
-        )));
-    }
     if !SUPPORTED_SDKS.contains(&sdk) {
         return Err(CruiseError::InvalidStepConfig(format!(
-            "unknown `{field}` value '{sdk}'; expected one of: {}",
-            SUPPORTED_SDKS.join(", ")
+            "unsupported SDK \"{sdk}\"; only \"jcode\" is supported"
         )));
     }
     Ok(())
@@ -2301,26 +2211,9 @@ pub fn validate_sdk_name(sdk: &str, field: &str) -> crate::error::Result<()> {
 /// Returns an error when computer use is requested for an unsupported backend
 /// or is configured on a non-prompt step.
 pub fn validate_computer_use(config: &WorkflowConfig) -> crate::error::Result<()> {
-    use crate::model_selection::{Sdk, resolve_candidates, select_step_model};
-    let sdk = Sdk::from_name(config.sdk.as_deref().unwrap_or("jcode")).unwrap_or(Sdk::Jcode);
-    let is_jcode = config.command.is_empty();
-    if config.computer_use()
-        && (!is_jcode
-            || [
-                config.model.as_ref(),
-                crate::model_selection::planning_spec(
-                    config.plan_model.as_ref(),
-                    config.model.as_ref(),
-                ),
-            ]
-            .into_iter()
-            .any(|spec| {
-                applicable_sdks(config, &resolve_candidates(spec, sdk), sdk)
-                    .iter()
-                    .any(|candidate| *candidate != Sdk::Jcode)
-            }))
-    {
-        return Err(computer_use_backend_error(config, None));
+    let command_backend = !config.command.is_empty();
+    if config.computer_use() && command_backend {
+        return Err(computer_use_backend_error(None));
     }
 
     for (name, step) in config
@@ -2329,33 +2222,15 @@ pub fn validate_computer_use(config: &WorkflowConfig) -> crate::error::Result<()
         .chain(&config.after_pr)
         .chain(config.groups.values().flat_map(|group| &group.steps))
     {
-        if step.computer_use.unwrap_or(config.computer_use())
-            && (!is_jcode
-                || applicable_sdks(
-                    config,
-                    &select_step_model(config.model.as_ref(), step.model.as_deref(), sdk),
-                    sdk,
-                )
-                .iter()
-                .any(|candidate| *candidate != Sdk::Jcode))
-        {
-            return Err(computer_use_backend_error(config, Some(name)));
+        if step.computer_use.unwrap_or(config.computer_use()) && command_backend {
+            return Err(computer_use_backend_error(Some(name)));
         }
         validate_computer_use_step(name, step)?;
         if let Some(children) = &step.parallel {
             for (child_name, child) in children {
                 let path = format!("{name}/{child_name}");
-                if child.computer_use.unwrap_or(config.computer_use())
-                    && (!is_jcode
-                        || applicable_sdks(
-                            config,
-                            &select_step_model(config.model.as_ref(), child.model.as_deref(), sdk),
-                            sdk,
-                        )
-                        .iter()
-                        .any(|candidate| *candidate != Sdk::Jcode))
-                {
-                    return Err(computer_use_backend_error(config, Some(&path)));
+                if child.computer_use.unwrap_or(config.computer_use()) && command_backend {
+                    return Err(computer_use_backend_error(Some(&path)));
                 }
                 validate_computer_use_step(&path, child)?;
             }
@@ -2419,16 +2294,6 @@ pub(crate) fn execution_model_candidates(
         collect_step(config, step, sdk, &mut candidates);
     }
     candidates
-}
-
-fn candidate_sdks(
-    config: &WorkflowConfig,
-) -> std::collections::HashSet<crate::model_selection::Sdk> {
-    planning_model_candidates(config)
-        .into_iter()
-        .chain(execution_model_candidates(config))
-        .map(|candidate| candidate.sdk)
-        .collect()
 }
 
 /// Validate explicit restriction placement, MCP references, and SDK support.
@@ -2557,52 +2422,28 @@ fn validate_permission(config: &WorkflowConfig) -> crate::error::Result<()> {
     Ok(())
 }
 
-fn computer_use_backend_error(
-    config: &WorkflowConfig,
-    step_name: Option<&str>,
-) -> crate::error::CruiseError {
+fn computer_use_backend_error(step_name: Option<&str>) -> crate::error::CruiseError {
     let subject = step_name.map_or_else(
         || "workflow computer_use".to_string(),
         |name| format!("step '{name}' computer_use"),
     );
-    if config.sdk.as_deref() == Some("claude") {
-        crate::error::CruiseError::InvalidStepConfig(format!(
-            "{subject} is unsupported: Claude Code's computer use is only available in interactive sessions and cannot be enabled by cruise. Remove the computer_use key or ensure every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, uses the jcode backend with no `command:` setting. Changing only the workflow SDK does not override SDK-qualified objects"
-        ))
-    } else if config.sdk.as_deref() == Some("opencode") {
-        crate::error::CruiseError::InvalidStepConfig(format!(
-            "{subject} is unsupported: the OpenCode V2 backend does not support computer_use. Remove the computer_use key or set it to false, or ensure every effective applicable candidate, including SDK-qualified objects and authoritative retry-chain entries, uses the jcode backend with no `command:` setting. Changing only the workflow SDK does not override SDK-qualified objects"
-        ))
-    } else {
-        crate::error::CruiseError::InvalidStepConfig(format!(
-            "{subject} is unsupported: computer use requires the jcode backend for every effective applicable model candidate, including SDK-qualified objects and authoritative retry-chain entries, with no command backend. Claude and OpenCode candidates cannot enable it. Changing only the workflow SDK does not override SDK-qualified objects"
-        ))
-    }
+    crate::error::CruiseError::InvalidStepConfig(format!(
+        "{subject} is unsupported: computer_use requires the jcode backend and cannot be used with the command backend"
+    ))
 }
 
-/// Validate a single subagent override and return its resolved SDK.
+/// Validate a single subagent override.
 pub(crate) fn validate_subagent_model_entry(
     entry: &ModelEntry,
     base: crate::model_selection::Sdk,
     field: &str,
 ) -> crate::error::Result<crate::model_selection::Sdk> {
     use crate::error::CruiseError;
-    use crate::model_selection::{Sdk, resolve_entry};
-    if let ModelEntry::SdkModel(entry) = entry {
-        let sdk = entry.sdk.as_deref().ok_or_else(|| {
-            CruiseError::InvalidStepConfig(format!("`{field}.sdk` is required in object form"))
-        })?;
-        if !entry.disabled_during.is_empty() {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "`{field}` does not support `disabled_during`"
-            )));
-        }
-        if !SUPPORTED_SDKS.contains(&sdk) && !REMOVED_SDKS.iter().any(|(name, _)| *name == sdk) {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "unknown `{field}.sdk` value '{sdk}'; expected one of: jcode, claude"
-            )));
-        }
-        validate_sdk_name(sdk, &format!("{field}.sdk"))?;
+    use crate::model_selection::resolve_entry;
+    if matches!(entry, ModelEntry::SdkModel(_)) {
+        return Err(CruiseError::InvalidStepConfig(format!(
+            "{field}: SDK-qualified model objects are unsupported; use a plain model string"
+        )));
     }
     let candidate = resolve_entry(entry, base);
     let model = candidate.model.as_deref().unwrap_or_default();
@@ -2610,24 +2451,19 @@ pub(crate) fn validate_subagent_model_entry(
     if model.trim().is_empty() {
         return Err(invalid("model must not be blank"));
     }
-    if candidate.sdk == Sdk::OpenCode {
-        return Err(invalid("subagent_model only supports claude / jcode"));
-    }
     if crate::backend::effort::split_thinking_suffix(model)
         .1
         .is_some()
     {
         return Err(invalid("effort suffixes are not supported"));
     }
-    if candidate.sdk == Sdk::Jcode {
-        let (_, model, _) = crate::backend::jcode::parse_model_ref(Some(model)).map_err(|_| {
-            invalid(&format!(
-                "invalid model reference '{model}' for `sdk: jcode`: expected 'provider/model' or 'model'; effort suffixes are not supported"
-            ))
-        })?;
-        if model.is_none() {
-            return Err(invalid("jcode requires a model"));
-        }
+    let (_, model, _) = crate::backend::jcode::parse_model_ref(Some(model)).map_err(|_| {
+        invalid(&format!(
+            "invalid model reference '{model}' for `sdk: jcode`: expected 'provider/model' or 'model'; effort suffixes are not supported"
+        ))
+    })?;
+    if model.is_none() {
+        return Err(invalid("jcode requires a model"));
     }
     Ok(candidate.sdk)
 }
@@ -2635,7 +2471,7 @@ pub(crate) fn validate_subagent_model_entry(
 fn validate_subagent_model(config: &WorkflowConfig) -> crate::error::Result<()> {
     use crate::error::CruiseError;
     use crate::model_selection::Sdk;
-    let sdk = Sdk::from_name(config.sdk.as_deref().unwrap_or("jcode")).unwrap_or(Sdk::Jcode);
+    let sdk = Sdk::Jcode;
     let command_backend = !config.command.is_empty();
     let validate_entry = |entry: &ModelEntry, field: &str| {
         if command_backend {
@@ -2646,12 +2482,7 @@ fn validate_subagent_model(config: &WorkflowConfig) -> crate::error::Result<()> 
         validate_subagent_model_entry(entry, sdk, field)
     };
     if let Some(entry) = &config.subagent_model {
-        let owner = validate_entry(entry, "subagent_model")?;
-        if !candidate_sdks(config).contains(&owner) {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "subagent_model SDK {owner} does not apply to any model candidate"
-            )));
-        }
+        validate_entry(entry, "subagent_model")?;
     }
     for (name, step) in config
         .steps
@@ -2659,44 +2490,23 @@ fn validate_subagent_model(config: &WorkflowConfig) -> crate::error::Result<()> 
         .chain(&config.after_pr)
         .chain(config.groups.values().flat_map(|group| &group.steps))
     {
-        check_subagent_model_step(config, name, step, sdk, &validate_entry)?;
+        check_subagent_model_step(name, step, &validate_entry)?;
     }
     Ok(())
 }
 
 fn check_subagent_model_step(
-    config: &WorkflowConfig,
     name: &str,
     step: &StepConfig,
-    sdk: crate::model_selection::Sdk,
     validate_entry: &impl Fn(&ModelEntry, &str) -> crate::error::Result<crate::model_selection::Sdk>,
 ) -> crate::error::Result<()> {
-    use crate::error::CruiseError;
-    use crate::model_selection::select_step_model;
     if let Some(entry) = &step.subagent_model {
         validate_subagent_model_step(name, step)?;
-        let owner = validate_entry(entry, &format!("step '{name}' subagent_model"))?;
-        if !applicable_sdks(
-            config,
-            &select_step_model(config.model.as_ref(), step.model.as_deref(), sdk),
-            sdk,
-        )
-        .contains(&owner)
-        {
-            return Err(CruiseError::InvalidStepConfig(format!(
-                "step '{name}' subagent_model SDK {owner} does not apply to any model candidate"
-            )));
-        }
+        validate_entry(entry, &format!("step '{name}' subagent_model"))?;
     }
     if let Some(children) = &step.parallel {
         for (child_name, child) in children {
-            check_subagent_model_step(
-                config,
-                &format!("{name}/{child_name}"),
-                child,
-                sdk,
-                validate_entry,
-            )?;
+            check_subagent_model_step(&format!("{name}/{child_name}"), child, validate_entry)?;
         }
     }
     Ok(())
@@ -3453,63 +3263,11 @@ steps:
     }
 
     #[test]
-    fn validate_config_rejects_computer_use_on_claude_workflow() {
-        assert_computer_use_validation_error(
-            "sdk: claude\ncomputer_use: true\nsteps:\n  review:\n    prompt: inspect\n",
-            &["computer_use", "interactive"],
-        );
-    }
-
-    #[test]
-    fn validate_config_rejects_computer_use_on_claude_prompt_step_by_name() {
-        assert_computer_use_validation_error(
-            "sdk: claude\nsteps:\n  desktop-check:\n    prompt: inspect\n    computer_use: true\n",
-            &["desktop-check", "computer_use", "interactive"],
-        );
-    }
-
-    #[test]
-    fn validate_config_rejects_computer_use_on_claude_after_pr_step() {
-        assert_computer_use_validation_error(
-            "sdk: claude\nsteps:\n  main:\n    prompt: main\nafter-pr:\n  publish-check:\n    prompt: inspect\n    computer_use: true\n",
-            &["publish-check", "computer_use"],
-        );
-    }
-
-    #[test]
-    fn validate_config_rejects_computer_use_on_claude_group_inner_step() {
-        assert_computer_use_validation_error(
-            "sdk: claude\ngroups:\n  review:\n    steps:\n      desktop-check:\n        prompt: inspect\n        computer_use: true\nsteps:\n  run-review:\n    group: review\n",
-            &["desktop-check", "computer_use"],
-        );
-    }
-
-    #[test]
-    fn validate_config_rejects_computer_use_on_claude_parallel_prompt_child() {
-        assert_computer_use_validation_error(
-            "sdk: claude\nsteps:\n  checks:\n    parallel:\n      desktop-check:\n        prompt: inspect\n        computer_use: true\n",
-            &["desktop-check", "computer_use"],
-        );
-    }
-
-    #[test]
     fn validate_config_rejects_computer_use_on_command_backend() {
         assert_computer_use_validation_error(
             "command: [custom-agent]\ncomputer_use: true\nsteps:\n  review:\n    prompt: inspect\n",
-            &["computer use", "jcode backend"],
+            &["computer_use", "jcode backend"],
         );
-    }
-
-    #[test]
-    fn validate_config_accepts_explicit_false_for_claude_at_both_levels() {
-        let config = WorkflowConfig::from_yaml(
-            "sdk: claude\ncomputer_use: false\nsteps:\n  review:\n    prompt: inspect\n    computer_use: false\n",
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-
-        assert!(!config.computer_use);
-        assert_eq!(config.steps["review"].computer_use, Some(false));
-        assert!(validate_config(&config).is_ok());
     }
 
     #[test]
@@ -3589,39 +3347,6 @@ steps:
             Some(Some(true))
         );
         assert!(validate_config(&config).is_ok());
-    }
-
-    #[test]
-    fn configured_claude_backend_after_environment_overrides_rejects_computer_use() {
-        let _process = lock_process();
-        let _guards = clear_all_override_envs();
-        let _sdk = EnvGuard::set("CRUISE_SDK", "claude");
-        let mut config = WorkflowConfig::from_yaml(
-            "computer_use: true\nsteps:\n  review:\n    prompt: inspect\n",
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-
-        config
-            .apply_env_overrides()
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(config.sdk.as_deref(), Some("claude"));
-        assert_computer_use_validation_error_for_config(&config, &["computer_use", "interactive"]);
-    }
-
-    fn assert_computer_use_validation_error_for_config(
-        config: &WorkflowConfig,
-        fragments: &[&str],
-    ) {
-        let Err(error) = validate_config(config) else {
-            panic!("computer_use config should be rejected after env overrides");
-        };
-        let message = error.to_string();
-        for fragment in fragments {
-            assert!(
-                message.contains(fragment),
-                "expected error to contain {fragment:?}, got: {message}"
-            );
-        }
     }
 
     #[test]
@@ -5449,8 +5174,8 @@ steps:
         let required = schema["required"]
             .as_array()
             .unwrap_or_else(|| panic!("schema must have a 'required' array"));
-        // `command` is no longer unconditionally required: an `sdk`-backed config
-        // omits it. Only `steps` is always required.
+        // `command` is optional: a jcode SDK-backed config omits it.
+        // Only `steps` is always required.
         assert!(
             required.iter().any(|v| v.as_str() == Some("steps")),
             "'steps' must be in required"
@@ -5458,6 +5183,10 @@ steps:
         assert!(
             schema["properties"].get("sdk").is_some(),
             "schema must expose an 'sdk' property"
+        );
+        assert_eq!(
+            schema["properties"]["sdk"]["enum"],
+            serde_json::json!(["jcode"])
         );
     }
 
@@ -5520,79 +5249,30 @@ steps:
         let props = def_properties(schema, "McpServerConfig");
         assert_has_fields(
             props,
-            &["type", "command", "args", "env", "url", "headers"],
+            &["type", "command", "args", "env", "headers"],
             "McpServerConfig",
         );
         assert_eq!(server["additionalProperties"].as_bool(), Some(false));
-        let transports = server["properties"]["type"]["enum"]
-            .as_array()
-            .unwrap_or_else(|| panic!("McpServerConfig.type must define an enum"));
-        for transport in ["stdio", "http", "sse"] {
-            assert!(
-                transports
-                    .iter()
-                    .any(|value| value.as_str() == Some(transport)),
-                "McpServerConfig.type must include {transport}"
-            );
-        }
+        assert_eq!(server["required"], serde_json::json!(["command"]));
+        assert_eq!(
+            server["properties"]["type"]["enum"],
+            serde_json::json!(["stdio"])
+        );
+        assert_eq!(server["properties"]["headers"]["maxProperties"], 0);
+        assert!(server["properties"].get("url").is_none());
     }
 
     #[test]
-    fn test_schema_mcp_stdio_condition_covers_omitted_and_explicit_type() {
+    fn test_schema_mcp_stdio_requires_command_and_rejects_remote_fields() {
         let schema = load_schema();
-        let all_of = schema["$defs"]["McpServerConfig"]["allOf"]
-            .as_array()
-            .unwrap_or_else(|| panic!("McpServerConfig.allOf must be an array"));
-        assert_eq!(all_of.len(), 2);
+        let server = &schema["$defs"]["McpServerConfig"];
+        assert_eq!(server["required"], serde_json::json!(["command"]));
         assert_eq!(
-            all_of[0]["if"]["anyOf"],
-            serde_json::json!([
-                {
-                    "properties": { "type": { "const": "stdio" } },
-                    "required": ["type"]
-                },
-                { "not": { "required": ["type"] } }
-            ])
+            server["properties"]["type"]["enum"],
+            serde_json::json!(["stdio"])
         );
-        assert_eq!(
-            all_of[0]["then"]["required"],
-            serde_json::json!(["command"])
-        );
-        assert_eq!(
-            all_of[0]["then"]["not"]["anyOf"],
-            serde_json::json!([
-                { "required": ["url"] },
-                {
-                    "properties": { "headers": { "minProperties": 1 } },
-                    "required": ["headers"]
-                }
-            ])
-        );
-        assert_eq!(
-            all_of[1],
-            serde_json::json!({
-                "if": {
-                    "properties": { "type": { "enum": ["http", "sse"] } },
-                    "required": ["type"]
-                },
-                "then": {
-                    "required": ["url"],
-                    "not": {
-                        "anyOf": [
-                            { "required": ["command"] },
-                            {
-                                "properties": { "args": { "minItems": 1 } },
-                                "required": ["args"]
-                            },
-                            {
-                                "properties": { "env": { "minProperties": 1 } },
-                                "required": ["env"]
-                            }
-                        ]
-                    }
-                }
-            })
-        );
+        assert!(server["properties"].get("url").is_none());
+        assert_eq!(server["properties"]["headers"]["maxProperties"], 0);
     }
 
     #[test]
@@ -5727,7 +5407,7 @@ steps:
             .as_str()
             .unwrap_or_else(|| panic!("computer_use schema description must be a string"))
             .to_lowercase();
-        for required_term in ["false", "jcode", "macos", "claude", "command"] {
+        for required_term in ["false", "jcode", "macos", "command"] {
             assert!(
                 description.contains(required_term),
                 "computer_use schema description must mention {required_term}"
@@ -5940,6 +5620,15 @@ steps:
                 "{field} array items must share the mixed-entry definition"
             );
             assert_oneof_types(&schema["$defs"]["ModelEntry"], &["string", "object"], field);
+            let schedule = schema["$defs"]["ModelEntry"]["oneOf"]
+                .as_array()
+                .and_then(|variants| variants.iter().find(|variant| variant["type"] == "object"))
+                .unwrap_or_else(|| panic!("scheduled model object schema is missing"));
+            assert!(schedule["properties"].get("sdk").is_none());
+            assert_eq!(
+                schedule["required"],
+                serde_json::json!(["model", "disabled_during"])
+            );
         }
     }
 
@@ -6238,55 +5927,21 @@ steps:
     }
 
     #[test]
-    fn test_sdk_claude_field_parses() {
-        let yaml = r"
-sdk: claude
-model: claude-opus-4-6
-steps:
-  s1:
-    prompt: hi
-";
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(config.sdk, Some("claude".to_string()));
-        assert_eq!(
-            config.model,
-            Some(ModelSpec::Single("claude-opus-4-6".to_string()))
-        );
-    }
-
-    /// The removed backends must not be silently remapped onto a surviving one;
-    /// they are rejected with the migration the config needs.
-    #[test]
-    fn test_validate_sdk_rejects_removed_values_with_migration_guidance() {
-        for removed in ["seher", "pi"] {
+    fn test_validate_sdk_rejects_removed_values() {
+        for removed in ["claude", "opencode"] {
             let yaml = format!("sdk: {removed}\nsteps:\n  s1:\n    prompt: hi\n");
-            let config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("{e:?}"));
-            let result = validate_sdk(&config);
-            assert!(result.is_err(), "`sdk: {removed}` must be rejected");
-            let msg = err_string(result);
+            let config = WorkflowConfig::from_yaml(&yaml).unwrap_or_else(|error| panic!("{error}"));
+            let message = err_string(validate_sdk(&config));
             assert!(
-                msg.contains(removed) && msg.contains("no longer supported"),
-                "error must name the removed value, got: {msg}"
+                message.contains(&format!("unsupported SDK \"{removed}\"")),
+                "error must name the unsupported SDK, got: {message}"
             );
             assert!(
-                msg.contains("jcode") && msg.contains("claude"),
-                "error must name the backends to migrate to, got: {msg}"
+                message.contains("only \"jcode\" is supported"),
+                "error must give the supported SDK, got: {message}"
             );
         }
     }
-
-    #[test]
-    fn test_validate_sdk_ok_claude() {
-        let yaml = r"
-sdk: claude
-steps:
-  s1:
-    prompt: hi
-";
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(validate_sdk(&config).is_ok(), "sdk: claude should be valid");
-    }
-
     #[test]
     fn test_validate_sdk_ok_jcode() {
         let yaml = r"
@@ -6410,7 +6065,7 @@ steps:
         .map(|(k, v)| EnvGuard::set(k, v))
         .collect();
         let mut config = WorkflowConfig::from_yaml(
-            "sdk: claude\nmax_retries: 5\ndisallowed_tools: [web]\nsteps:\n  s1:\n    prompt: hi\n",
+            "sdk: jcode\nmax_retries: 5\ndisallowed_tools: [web]\nsteps:\n  s1:\n    prompt: hi\n",
         )
         .unwrap_or_else(|error| panic!("{error:?}"));
         config
@@ -7042,36 +6697,18 @@ steps:
     }
 
     #[test]
-    fn test_apply_env_overrides_cruise_sdk_claude() {
+    fn test_apply_env_overrides_rejects_removed_sdk() {
         let _lock = lock_process();
         let _guards = clear_all_override_envs();
         let _sdk = EnvGuard::set("CRUISE_SDK", "claude");
-
-        // Given: config has command set (the default case when loaded from YAML)
         let mut config =
-            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|e| panic!("{e:?}"));
-        assert_ne!(
-            config.command,
-            [] as [String; 0],
-            "precondition: command is set"
-        );
-
-        // When: CRUISE_SDK=claude env var is applied
+            WorkflowConfig::from_yaml(MINIMAL_YAML).unwrap_or_else(|error| panic!("{error:?}"));
         config
             .apply_env_overrides()
-            .unwrap_or_else(|e| panic!("{e:?}"));
-
-        // Then: sdk is set to "claude", command is cleared, and validate_sdk passes
-        assert_eq!(config.sdk, Some("claude".to_string()));
-        assert_eq!(
-            config.command,
-            [] as [String; 0],
-            "command must be cleared when sdk is set via env"
-        );
-        assert!(
-            validate_sdk(&config).is_ok(),
-            "validate_sdk must accept 'claude' after env override"
-        );
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let message = err_string(validate_sdk(&config));
+        assert!(message.contains("unsupported SDK \"claude\""), "{message}");
+        assert!(message.contains("only \"jcode\" is supported"), "{message}");
     }
 
     // --- top-level `max_retries` field ---
@@ -7248,20 +6885,15 @@ steps:
     }
 
     #[test]
-    fn test_mcp_stdio_and_remote_entries_parse_without_rewriting_values() {
+    fn test_mcp_stdio_entries_parse_without_rewriting_values() {
         let yaml = r#"
-sdk: claude
+sdk: jcode
 mcp_servers:
   local_tool:
     command: node
     args: ["server.js", "{input}"]
     env:
       TOKEN: "${TOKEN:-literal}"
-  remote_tool:
-    type: http
-    url: https://example.test/mcp
-    headers:
-      Authorization: "Bearer {secret}"
 steps:
   s1:
     prompt: hi
@@ -7296,21 +6928,6 @@ steps:
             stdio_with_env["env"]["SEARCH_ROOT"].as_str(),
             Some("./docs")
         );
-
-        let mut headers = IndexMap::new();
-        headers.insert("Authorization".to_string(), "token".to_string());
-        let remote = McpServerConfig {
-            transport: Some(McpTransport::Http),
-            url: Some("https://example.test/mcp".to_string()),
-            headers,
-            ..Default::default()
-        }
-        .to_backend_json();
-        assert_eq!(remote["type"].as_str(), Some("http"));
-        assert_eq!(remote["url"].as_str(), Some("https://example.test/mcp"));
-        assert_eq!(remote["headers"]["Authorization"].as_str(), Some("token"));
-        assert!(remote.get("args").is_none());
-        assert!(remote.get("env").is_none());
     }
 
     #[test]
@@ -7327,15 +6944,12 @@ steps:
     #[test]
     fn test_mcp_servers_round_trip_through_yaml() {
         let yaml = r"
-sdk: claude
+sdk: jcode
 mcp_servers:
   local_tool:
     type: stdio
     command: node
     args: [server.js]
-  remote_tool:
-    type: sse
-    url: https://example.test/events
 steps:
   s1:
     prompt: hi
@@ -7387,7 +7001,7 @@ steps:
     fn test_mcp_servers_reject_reserved_cruise_name() {
         assert_mcp_validation_error(
             r"
-sdk: claude
+sdk: jcode
 mcp_servers:
   cruise:
     command: node
@@ -7403,7 +7017,7 @@ steps:
     fn test_mcp_servers_reject_empty_name() {
         assert_mcp_validation_error(
             r#"
-sdk: claude
+sdk: jcode
 mcp_servers:
   "":
     command: node
@@ -7419,7 +7033,7 @@ steps:
     fn test_mcp_servers_reject_names_outside_allowed_characters() {
         assert_mcp_validation_error(
             r"
-sdk: claude
+sdk: jcode
 mcp_servers:
   bad.name:
     command: node
@@ -7435,7 +7049,7 @@ steps:
     fn test_mcp_stdio_rejects_missing_command() {
         assert_mcp_validation_error(
             r"
-sdk: claude
+sdk: jcode
 mcp_servers:
   local_tool: {}
 steps:
@@ -7450,7 +7064,7 @@ steps:
     fn test_mcp_stdio_requires_nonblank_command() {
         assert_mcp_validation_error(
             r#"
-sdk: claude
+sdk: jcode
 mcp_servers:
   local_tool:
     command: "  "
@@ -7466,7 +7080,7 @@ steps:
     fn test_mcp_stdio_rejects_url_and_hints_transport_type() {
         assert_mcp_validation_error(
             r"
-sdk: claude
+sdk: jcode
 mcp_servers:
   local_tool:
     command: node
@@ -7475,7 +7089,7 @@ steps:
   s1:
     prompt: hi
 ",
-            "type: http",
+            "url",
         );
     }
 
@@ -7483,7 +7097,7 @@ steps:
     fn test_mcp_stdio_rejects_headers() {
         assert_mcp_validation_error(
             r"
-sdk: claude
+sdk: jcode
 mcp_servers:
   local_tool:
     command: node
@@ -7498,9 +7112,9 @@ steps:
     }
 
     #[test]
-    fn test_mcp_empty_incompatible_collections_are_accepted() {
+    fn test_mcp_empty_optional_stdio_collections_are_accepted() {
         let yaml = r"
-sdk: claude
+sdk: jcode
 mcp_servers:
   implicit_stdio:
     command: node
@@ -7513,16 +7127,6 @@ mcp_servers:
     args: []
     env: {}
     headers: {}
-  http_tool:
-    type: http
-    url: https://example.test/mcp
-    args: []
-    env: {}
-  sse_tool:
-    type: sse
-    url: https://example.test/events
-    args: []
-    env: {}
 steps:
   s1:
     prompt: hi
@@ -7535,7 +7139,7 @@ steps:
     fn test_explicit_mcp_stdio_rejects_url_and_nonempty_headers() {
         assert_mcp_validation_error(
             r"
-sdk: claude
+sdk: jcode
 mcp_servers:
   local_tool:
     type: stdio
@@ -7549,7 +7153,7 @@ steps:
         );
         assert_mcp_validation_error(
             r"
-sdk: claude
+sdk: jcode
 mcp_servers:
   local_tool:
     type: stdio
@@ -7561,118 +7165,6 @@ steps:
     prompt: hi
 ",
             "headers",
-        );
-    }
-
-    #[test]
-    fn test_mcp_http_requires_url() {
-        assert_mcp_validation_error(
-            r"
-sdk: claude
-mcp_servers:
-  remote_tool:
-    type: http
-steps:
-  s1:
-    prompt: hi
-",
-            "url",
-        );
-    }
-
-    #[test]
-    fn test_mcp_remote_url_must_use_http_or_https() {
-        assert_mcp_validation_error(
-            r"
-sdk: claude
-mcp_servers:
-  remote_tool:
-    type: sse
-    url: ftp://example.test/events
-steps:
-  s1:
-    prompt: hi
-",
-            "http:// or https://",
-        );
-    }
-
-    #[test]
-    fn test_mcp_http_rejects_command() {
-        assert_mcp_validation_error(
-            r"
-sdk: claude
-mcp_servers:
-  remote_tool:
-    type: http
-    url: https://example.test/mcp
-    command: node
-steps:
-  s1:
-    prompt: hi
-",
-            "command",
-        );
-    }
-
-    #[test]
-    fn test_mcp_http_rejects_args() {
-        assert_mcp_validation_error(
-            r"
-sdk: claude
-mcp_servers:
-  remote_tool:
-    type: http
-    url: https://example.test/mcp
-    args: [server.js]
-steps:
-  s1:
-    prompt: hi
-",
-            "args",
-        );
-    }
-
-    #[test]
-    fn test_mcp_http_rejects_env() {
-        assert_mcp_validation_error(
-            r"
-sdk: claude
-mcp_servers:
-  remote_tool:
-    type: http
-    url: https://example.test/mcp
-    env:
-      TOKEN: value
-steps:
-  s1:
-    prompt: hi
-",
-            "env",
-        );
-    }
-
-    #[test]
-    fn model_candidate_scopes_preserve_arrays_and_sdk_qualified_entries() {
-        use crate::model_selection::Sdk;
-        let config = WorkflowConfig::from_yaml(
-            "sdk: claude\nmodel: [run-main, {sdk: jcode, model: openai/run-tail}, run-last]\nplan_model: [plan-main, {sdk: opencode, model: plan-tail}, plan-last]\nsteps: {}\n",
-        ).unwrap_or_else(|error| panic!("{error:?}"));
-        assert_candidate_values(
-            planning_model_candidates(&config),
-            &[
-                (Sdk::Claude, Some("plan-main")),
-                (Sdk::OpenCode, Some("plan-tail")),
-                (Sdk::Claude, Some("plan-last")),
-            ],
-        );
-        assert_candidate_values(
-            execution_model_candidates(&config),
-            &[
-                (Sdk::Claude, Some("run-main")),
-                (Sdk::Jcode, Some("openai/run-tail")),
-                (Sdk::Claude, Some("run-last")),
-            ],
         );
     }
 
@@ -7696,13 +7188,13 @@ steps:
         use crate::model_selection::Sdk;
         for planning in ["", "plan_model: []\n"] {
             let config = WorkflowConfig::from_yaml(&format!(
-                "model: [claude/main, {{sdk: claude, model: sonnet}}]\n{planning}steps:\n  run:\n    prompt: hi\n    model: execution-only\n",
+                "model: [claude/main, claude/sonnet]\n{planning}steps:\n  run:\n    prompt: hi\n    model: execution-only\n",
             )).unwrap_or_else(|error| panic!("{error:?}"));
             assert_candidate_values(
                 planning_model_candidates(&config),
                 &[
                     (Sdk::Jcode, Some("claude/main")),
-                    (Sdk::Claude, Some("sonnet")),
+                    (Sdk::Jcode, Some("claude/sonnet")),
                 ],
             );
         }
@@ -7770,7 +7262,7 @@ groups:
     fn execution_model_candidates_respect_disabled_fallback_for_step_overrides() {
         use crate::model_selection::Sdk;
         let config = WorkflowConfig::from_yaml(
-            "sdk: jcode\nmodel: [openai/main, {sdk: claude, model: sonnet}]\nretry:\n  model_fallback: false\nsteps:\n  run:\n    prompt: hi\n    model: openai/main:high\n",
+            "sdk: jcode\nmodel: [openai/main, claude/sonnet]\nretry:\n  model_fallback: false\nsteps:\n  run:\n    prompt: hi\n    model: openai/main:high\n",
         ).unwrap_or_else(|error| panic!("{error:?}"));
         assert_candidate_values(
             execution_model_candidates(&config),
@@ -7787,8 +7279,8 @@ groups:
         let config = WorkflowConfig::from_yaml(
             r"
 sdk: jcode
-model: [openai/run, {sdk: claude, model: unreachable-run}]
-plan_model: [openai/plan, {sdk: opencode, model: unreachable-plan}]
+model: [openai/run, claude/unreachable-run]
+plan_model: [openai/plan, claude/unreachable-plan]
 retry:
   fallback_chains:
     openai/run: [claude/run-fallback]
@@ -7820,23 +7312,12 @@ steps:
     }
 
     #[test]
-    fn empty_authoritative_chain_excludes_implicit_mcp_owners() {
-        let config = WorkflowConfig::from_yaml("sdk: claude\nmodel: [claude-main, {sdk: jcode, model: unreachable}]\nretry:\n  fallback_chains:\n    default: []\nmcp_servers:\n  remote:\n    type: http\n    url: https://example.invalid/mcp\nsteps:\n  answer:\n    prompt: answer\n").unwrap_or_else(|error| panic!("parse workflow with empty authoritative fallback chain: {error}"));
-        // Empty explicit chains remain invalid retry configuration, but they
-        // must not resurrect the implicit tail during capability collection.
-        assert!(validate_retry(&config).is_err());
-        validate_mcp_servers(&config).unwrap_or_else(|error| {
-            panic!("implicit fallback owners must not reject remote MCP servers: {error}")
-        });
-    }
-
-    #[test]
     fn test_mcp_remote_transports_are_rejected_by_jcode() {
         for transport in ["http", "sse"] {
             let yaml = format!(
                 "sdk: jcode\nmcp_servers:\n  remote_tool:\n    type: {transport}\n    url: https://example.test/mcp\nsteps:\n  s1:\n    prompt: hi\n"
             );
-            assert_mcp_validation_error(&yaml, "jcode backend does not support");
+            assert_mcp_validation_error(&yaml, "only stdio is supported");
         }
     }
 
@@ -7852,30 +7333,8 @@ steps:
   s1:
     prompt: hi
 ",
-            "jcode backend does not support",
+            "only stdio is supported",
         );
-    }
-
-    #[test]
-    fn test_mcp_http_and_sse_are_accepted_by_claude_backend() {
-        let yaml = r"
-sdk: claude
-mcp_servers:
-  http_tool:
-    type: http
-    url: https://example.test/mcp
-    headers:
-      Authorization: token
-  sse_tool:
-    type: sse
-    url: https://example.test/events
-steps:
-  s1:
-    prompt: hi
-";
-        let config = WorkflowConfig::from_yaml(yaml).unwrap_or_else(|error| panic!("{error:?}"));
-        assert_workflow_has_mcp_servers(&config);
-        assert!(validate_config(&config).is_ok());
     }
 
     #[test]
@@ -7892,7 +7351,7 @@ steps:
     fn test_mcp_servers_survive_sdk_environment_override() {
         let _lock = lock_process();
         let _guards = clear_all_override_envs();
-        let _sdk = EnvGuard::set("CRUISE_SDK", "claude");
+        let _sdk = EnvGuard::set("CRUISE_SDK", "jcode");
         let mut config = WorkflowConfig::from_yaml(
             "command: [echo]\nmcp_servers:\n  local_tool:\n    command: node\nsteps:\n  s1:\n    prompt: hi\n",
         )
@@ -7900,7 +7359,7 @@ steps:
         config
             .apply_env_overrides()
             .unwrap_or_else(|error| panic!("{error:?}"));
-        assert_eq!(config.sdk.as_deref(), Some("claude"));
+        assert_eq!(config.sdk.as_deref(), Some("jcode"));
         assert_eq!(config.command, Vec::<String>::new());
         assert_workflow_has_mcp_servers(&config);
         assert!(validate_config(&config).is_ok());
@@ -8640,27 +8099,17 @@ steps:
     }
 
     #[test]
-    fn test_subagent_model_string_and_object_round_trip() {
-        for (entry, expected) in [
-            ("haiku", serde_json::json!("haiku")),
-            (
-                "{sdk: claude, model: haiku}",
-                serde_json::json!({"sdk": "claude", "model": "haiku"}),
-            ),
-        ] {
-            assert_subagent_retained(
-                &format!("sdk: claude\nsubagent_model: {entry}\nsteps:\n  run:\n    prompt: hi\n"),
-                "/subagent_model",
-                expected.clone(),
-            );
-            assert_subagent_retained(
-                &format!(
-                    "sdk: claude\nsteps:\n  run:\n    prompt: hi\n    subagent_model: {entry}\n"
-                ),
-                "/steps/run/subagent_model",
-                expected,
-            );
-        }
+    fn test_subagent_model_string_round_trip() {
+        assert_subagent_retained(
+            "sdk: jcode\nsubagent_model: openai/haiku\nsteps:\n  run:\n    prompt: hi\n",
+            "/subagent_model",
+            serde_json::json!("openai/haiku"),
+        );
+        assert_subagent_retained(
+            "sdk: jcode\nsteps:\n  run:\n    prompt: hi\n    subagent_model: openai/haiku\n",
+            "/steps/run/subagent_model",
+            serde_json::json!("openai/haiku"),
+        );
     }
 
     #[test]
@@ -8712,77 +8161,44 @@ steps:
     }
 
     #[test]
-    fn test_subagent_model_rejects_opencode_sdk() {
-        for (sdk, entry) in [
-            ("opencode", "haiku"),
-            ("jcode", "{sdk: opencode, model: haiku}"),
-        ] {
-            assert_subagent_invalid_in_workflow_and_step(sdk, entry, &["claude", "jcode"]);
-        }
-    }
-
-    #[test]
-    fn test_subagent_model_rejects_unknown_sdk() {
-        for message in assert_subagent_invalid_in_workflow_and_step(
-            "jcode",
-            "{sdk: nonexistent, model: haiku}",
-            &[
-                "subagent_model.sdk",
-                "nonexistent",
-                "expected one of:",
+    fn test_subagent_model_rejects_sdk_qualified_objects() {
+        for sdk in ["claude", "opencode", "jcode", "nonexistent"] {
+            let entry = format!("{{sdk: {sdk}, model: openai/haiku}}");
+            for message in assert_subagent_invalid_in_workflow_and_step(
                 "jcode",
-                "claude",
-            ],
-        ) {
-            assert!(!message.contains("opencode"), "{message}");
-        }
-        let message = validate_sdk_name("nonexistent", "model[0].sdk")
-            .err()
-            .unwrap_or_else(|| panic!("unknown main-model SDK must fail"))
-            .to_string();
-        assert!(message.contains("opencode"), "{message}");
-        for (sdk, migration) in REMOVED_SDKS {
-            assert_subagent_invalid_in_workflow_and_step(
-                "jcode",
-                &format!("{{sdk: {sdk}, model: haiku}}"),
-                &["no longer supported", migration],
-            );
+                &entry,
+                &["SDK-qualified model objects are unsupported; use a plain model string"],
+            ) {
+                assert!(message.contains("subagent_model"), "{message}");
+            }
         }
     }
 
     #[test]
     fn test_subagent_model_rejects_blank_models() {
-        for (sdk, entry) in [
-            ("claude", "'   '"),
-            ("claude", "{sdk: claude, model: '   '}"),
-            ("jcode", "{sdk: jcode, model: ''}"),
-        ] {
-            assert_subagent_invalid_in_workflow_and_step(sdk, entry, &[]);
+        for entry in ["'   '", "''"] {
+            assert_subagent_invalid_in_workflow_and_step("jcode", entry, &[]);
         }
     }
 
     #[test]
     fn test_subagent_model_rejects_recognized_effort_suffix() {
-        for (sdk, entry) in [("claude", "haiku:high"), ("jcode", "openai/model:high")] {
-            assert_subagent_invalid_in_workflow_and_step(sdk, entry, &[]);
-        }
+        assert_subagent_invalid_in_workflow_and_step("jcode", "openai/model:high", &[]);
     }
 
     #[test]
     fn test_subagent_model_rejects_malformed_jcode_refs() {
-        for entry in ["'provider/'", "{sdk: jcode, model: 'provider/'}"] {
-            for message in assert_subagent_invalid_in_workflow_and_step(
-                "jcode",
-                entry,
-                &[
-                    "invalid model reference 'provider/'",
-                    "sdk: jcode",
-                    "expected 'provider/model' or 'model'",
-                    "effort suffixes are not supported",
-                ],
-            ) {
-                assert!(!message.contains("[:effort]"), "{message}");
-            }
+        for message in assert_subagent_invalid_in_workflow_and_step(
+            "jcode",
+            "'provider/'",
+            &[
+                "invalid model reference 'provider/'",
+                "sdk: jcode",
+                "expected 'provider/model' or 'model'",
+                "effort suffixes are not supported",
+            ],
+        ) {
+            assert!(!message.contains("[:effort]"), "{message}");
         }
         let message = crate::backend::jcode::parse_model_ref(Some("provider/"))
             .err()
@@ -8825,17 +8241,17 @@ steps:
         ] {
             assert_subagent_invalid(
                 &format!(
-                    "sdk: claude\ngroups:\n  checks:\n    steps:\n      inner:\n        prompt: hi\nsteps:\n  run:\n    {body}\n    subagent_model: haiku\n"
+                    "sdk: jcode\ngroups:\n  checks:\n    steps:\n      inner:\n        prompt: hi\nsteps:\n  run:\n    {body}\n    subagent_model: haiku\n"
                 ),
                 &[],
             );
         }
         assert_subagent_invalid(
-            "sdk: claude\nflags: {merge: {}}\nsteps:\n  run:\n    prompt: hi\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n    subagent_model: haiku\n",
+            "sdk: jcode\nflags: {merge: {}}\nsteps:\n  run:\n    prompt: hi\nafter-pr:\n  merge:\n    squash-merge: true\n    flag: merge\n    subagent_model: haiku\n",
             &[],
         );
         assert_subagent_invalid(
-            "sdk: claude\nsteps:\n  checks:\n    parallel:\n      child:\n        command: echo\n        subagent_model: haiku\n",
+            "sdk: jcode\nsteps:\n  checks:\n    parallel:\n      child:\n        command: echo\n        subagent_model: haiku\n",
             &[],
         );
     }
@@ -8857,7 +8273,7 @@ steps:
             ),
         ] {
             assert_subagent_retained(
-                &format!("sdk: claude\n{yaml}"),
+                &format!("sdk: jcode\n{yaml}"),
                 pointer,
                 serde_json::json!("haiku"),
             );
@@ -8865,46 +8281,19 @@ steps:
     }
 
     #[test]
-    fn test_subagent_model_requires_applicable_sdk() {
-        assert_subagent_invalid(
-            "sdk: jcode\nsubagent_model: {sdk: claude, model: haiku}\nsteps:\n  run:\n    prompt: hi\n",
-            &["claude"],
-        );
-        assert_subagent_invalid(
-            "sdk: jcode\nsteps:\n  run:\n    prompt: hi\n    subagent_model: {sdk: claude, model: haiku}\n",
-            &["claude"],
-        );
-    }
-
-    #[test]
-    fn test_subagent_model_fallback_sdk_is_applicable() {
-        let entry = serde_json::json!({"sdk": "claude", "model": "haiku"});
-        assert_subagent_retained(
-            "sdk: opencode\nmodel: [main, {sdk: claude, model: sonnet}]\nsubagent_model: {sdk: claude, model: haiku}\nsteps:\n  run:\n    prompt: hi\n",
-            "/subagent_model",
-            entry.clone(),
-        );
-        assert_subagent_retained(
-            "sdk: opencode\nmodel: [main, {sdk: claude, model: sonnet}]\nsteps:\n  run:\n    prompt: hi\n    subagent_model: {sdk: claude, model: haiku}\n",
-            "/steps/run/subagent_model",
-            entry,
-        );
-    }
-
-    #[test]
     fn test_subagent_model_planning_only_candidate_accepts_workflow_entry() {
         assert_subagent_retained(
-            "sdk: jcode\nplan_model: [{sdk: claude, model: sonnet}]\nsubagent_model: {sdk: claude, model: haiku}\nsteps:\n  run:\n    prompt: hi\n",
+            "sdk: jcode\nplan_model: openai/sonnet\nsubagent_model: openai/haiku\nsteps:\n  run:\n    prompt: hi\n",
             "/subagent_model",
-            serde_json::json!({"sdk": "claude", "model": "haiku"}),
+            serde_json::json!("openai/haiku"),
         );
     }
-
     #[test]
-    fn test_subagent_model_planning_only_candidate_rejects_step_entry() {
-        assert_subagent_invalid(
-            "sdk: jcode\nplan_model: [{sdk: claude, model: sonnet}]\nsteps:\n  run:\n    prompt: hi\n    subagent_model: {sdk: claude, model: haiku}\n",
-            &["claude"],
+    fn test_subagent_model_step_override_with_planning_model() {
+        assert_subagent_retained(
+            "sdk: jcode\nplan_model: openai/sonnet\nsteps:\n  run:\n    prompt: hi\n    subagent_model: openai/haiku\n",
+            "/steps/run/subagent_model",
+            serde_json::json!("openai/haiku"),
         );
     }
 
@@ -8920,7 +8309,7 @@ steps:
     #[test]
     fn test_subagent_model_prompt_file_is_allowed() {
         assert_subagent_retained(
-            "sdk: claude\nsteps:\n  run:\n    prompt_file: prompt.md\n    subagent_model: haiku\n",
+            "sdk: jcode\nsteps:\n  run:\n    prompt_file: prompt.md\n    subagent_model: haiku\n",
             "/steps/run/subagent_model",
             serde_json::json!("haiku"),
         );
@@ -8929,7 +8318,7 @@ steps:
     #[test]
     fn test_subagent_model_github_review_is_allowed() {
         assert_subagent_retained(
-            "sdk: claude\nsteps:\n  run:\n    prompt: hi\nafter-pr:\n  review:\n    github-review:\n      bots: [reviewbot]\n    prompt: fix\n    timeout: 30m\n    subagent_model: haiku\n",
+            "sdk: jcode\nsteps:\n  run:\n    prompt: hi\nafter-pr:\n  review:\n    github-review:\n      bots: [reviewbot]\n    prompt: fix\n    timeout: 30m\n    subagent_model: haiku\n",
             "/after-pr/review/subagent_model",
             serde_json::json!("haiku"),
         );
@@ -8943,16 +8332,8 @@ steps:
             "steps:\n  checks:\n    parallel:\n      inner:\n        prompt: hi\n        subagent_model: '   '\n",
             "steps:\n  run:\n    prompt: hi\nafter-pr:\n  checks:\n    parallel:\n      inner:\n        prompt: hi\n        subagent_model: '   '\n",
         ] {
-            assert_subagent_invalid(&format!("sdk: claude\n{body}"), &[]);
+            assert_subagent_invalid(&format!("sdk: jcode\n{body}"), &[]);
         }
-    }
-
-    #[test]
-    fn test_subagent_model_step_model_override_can_remove_fallback_applicability() {
-        assert_subagent_invalid(
-            "sdk: jcode\nmodel: [openai/main, {sdk: claude, model: sonnet}]\nsteps:\n  run:\n    prompt: hi\n    model: openai/other\n    subagent_model: {sdk: claude, model: haiku}\n",
-            &["claude"],
-        );
     }
 
     #[test]
@@ -9080,12 +8461,10 @@ steps:
     }
 
     #[test]
-    fn test_permission_sdk_backends_accept_restricted_modes() {
-        for sdk in ["claude", "jcode"] {
-            assert_permission_valid(&format!(
-                "sdk: {sdk}\npermission: read-only\nsteps:\n  a:\n    prompt: hi\n  b:\n    prompt: hi\n    permission: edit\n"
-            ));
-        }
+    fn test_permission_jcode_backend_accepts_restricted_modes() {
+        assert_permission_valid(
+            "sdk: jcode\npermission: read-only\nsteps:\n  a:\n    prompt: hi\n  b:\n    prompt: hi\n    permission: edit\n",
+        );
     }
 
     #[test]

@@ -2280,7 +2280,7 @@ async fn prepare_plan(
         request.interactive.is_enabled() && crate::planning::sdk_plan_tools_enabled(&config);
     if request.grill && !planning_interactive {
         return Err(CruiseError::Other(
-            "grill requires an interactive SDK backend with interactive planning enabled"
+            "grill requires the interactive jcode SDK backend with interactive planning enabled"
                 .to_string(),
         ));
     }
@@ -8457,7 +8457,7 @@ esac
     }
 
     #[test]
-    fn mixed_sdk_checkpoints_defer_cleanup_until_terminal_restoration() {
+    fn jcode_checkpoints_defer_cleanup_until_terminal_restoration() {
         use crate::model_selection::{Sdk, SdkSessionId};
         for outcome in ["success", "failure", "cancel"] {
             let tmp = tempfile::tempdir()
@@ -8506,10 +8506,10 @@ esac
                 Arc::clone(&context.cleanup),
             );
             checkpoint(&SdkSessionId {
-                sdk: Sdk::Claude,
-                id: "claude".into(),
+                sdk: Sdk::Jcode,
+                id: "foreign".into(),
             })
-            .unwrap_or_else(|error| panic!("checkpoint Claude conversation: {error}"));
+            .unwrap_or_else(|error| panic!("checkpoint foreign Jcode conversation: {error}"));
             assert_eq!(
                 std::fs::read_to_string(home.join("history"))
                     .unwrap_or_else(|error| panic!("read original conversation history: {error}")),
@@ -8556,71 +8556,6 @@ esac
             drop(context);
             assert!(home.exists(), "final saved conversation must survive");
             assert!(!obsolete.exists(), "only obsolete storage is removed");
-        }
-    }
-
-    #[test]
-    fn failed_and_cancelled_plans_preserve_opencode_checkpoint_owner() {
-        for cancelled in [false, true] {
-            let tmp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
-            let manager = SessionManager::new(tmp.path().join("data"));
-            let state = crate::test_support::make_session("20261023000003", tmp.path());
-            manager
-                .create(&state)
-                .unwrap_or_else(|error| panic!("{error}"));
-            let runtime = Arc::new(ApplicationRuntime::new(manager.clone()));
-            let claim = runtime
-                .try_begin(&state.id, OperationKind::Generate)
-                .unwrap_or_else(|error| panic!("claim saved-plan test plan: {error}"));
-            let sink = |_: ApplicationEvent| Ok(());
-            let mut context = start_plan_context(
-                &manager,
-                &state.id,
-                OperationKind::Generate,
-                claim,
-                &sink,
-                None,
-            )
-            .unwrap_or_else(|error| panic!("{error}"));
-            let checkpoint = plan_checkpoint_callback(
-                manager.clone(),
-                state.id.clone(),
-                "checkpoint-key".to_string(),
-                None,
-                context.claim.token(),
-                Arc::clone(&context.cleanup),
-            );
-            checkpoint(&crate::model_selection::SdkSessionId {
-                sdk: crate::model_selection::Sdk::OpenCode,
-                id: "ses_preserved".to_owned(),
-            })
-            .unwrap_or_else(|error| panic!("{error}"));
-            let result = if cancelled {
-                context.claim.token().cancel();
-                cancel_plan(&manager, &state.id, &sink, &mut context)
-            } else {
-                fail_plan(
-                    &manager,
-                    &state.id,
-                    OperationKind::Generate,
-                    &sink,
-                    &mut context,
-                    CruiseError::Other("test failure".to_string()),
-                )
-            };
-            assert!(result.is_err());
-            let saved = manager
-                .load(&state.id)
-                .unwrap_or_else(|error| panic!("{error}"));
-            assert_eq!(saved.plan_conversation_backend.as_deref(), Some("opencode"));
-            assert_eq!(saved.plan_conversation_id.as_deref(), Some("ses_preserved"));
-            assert_eq!(
-                saved.plan_conversation_key.as_deref(),
-                Some("checkpoint-key")
-            );
-            assert_eq!(saved.plan_conversation_home, None);
-            assert_eq!(saved.phase, state.phase);
-            assert_eq!(saved.plan_error.is_some(), !cancelled);
         }
     }
 

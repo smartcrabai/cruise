@@ -57,7 +57,6 @@ impl Fixture {
             .env_remove("CRUISE_CONFIG")
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("ANTHROPIC_AUTH_TOKEN")
-            .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
     }
 
     fn write_command_config(&self, control: &Path) -> PathBuf {

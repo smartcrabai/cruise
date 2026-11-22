@@ -47,10 +47,10 @@ fn scheduled_candidates_survive_app_defaults_resolution_compile_and_after_pr() {
             let env = ResolutionEnv::new();
             let model = serde_json::json!([
                 {"model": "exec/main:high", "disabled_during": ["Mon-Fri 01:00-04:00", "06:00-10:00 +09:00"]},
-                {"sdk": "claude", "model": "exec/tail", "disabled_during": ["00:00-24:00"]}
+                {"model": "exec/tail", "disabled_during": ["00:00-24:00"]}
             ]);
             let plan_model = serde_json::json!([
-                {"sdk": "claude", "model": "plan/main", "disabled_during": ["fri 22:00-02:00 -05:30"]},
+                {"model": "plan/main", "disabled_during": ["fri 22:00-02:00 -05:30"]},
                 {"model": "plan/tail", "disabled_during": ["sat,sun 00:00-24:00"]}
             ]);
             let input = serde_json::json!({"model": model, "planModel": plan_model});
@@ -134,13 +134,10 @@ fn compile_and_after_pr_keep_distinct_exec_and_plan_candidate_lists() {
     let _env = ResolutionEnv::new();
     let model = serde_json::json!([
         "shared/model:medium",
-        {"sdk": "claude", "model": "exec/fallback:high"},
+        "exec/fallback:high",
         "openrouter/z-ai/glm-5.3-flash:high"
     ]);
-    let plan_model = serde_json::json!([
-        "shared/model:medium",
-        {"sdk": "claude", "model": "plan/fallback:high"}
-    ]);
+    let plan_model = serde_json::json!(["shared/model:medium", "plan/fallback:high"]);
     let yaml = format!(
         "model: {model}\nplan_model: {plan_model}\nsteps:\n  main:\n    prompt: execute\nafter_pr:\n  review:\n    prompt: review\n"
     );
@@ -160,13 +157,10 @@ fn app_config_json_and_yaml_candidates_survive_runtime_resolution_and_compile() 
         let env = ResolutionEnv::new();
         let model = serde_json::json!([
             "openai/gpt-6.1-sol:medium",
-            {"sdk": "claude", "model": "claude-sonnet-5-5:medium"},
+            "claude/claude-sonnet-5-5:medium",
             "openrouter/z-ai/glm-5.3-flash:high"
         ]);
-        let plan_model = serde_json::json!([
-            {"sdk": "claude", "model": "planning-primary:high"},
-            "planning/fallback:medium"
-        ]);
+        let plan_model = serde_json::json!(["planning-primary:high", "planning/fallback:medium"]);
         let path = env
             .temp
             .path()
@@ -189,16 +183,15 @@ fn app_config_json_and_yaml_candidates_survive_runtime_resolution_and_compile() 
 #[test]
 fn mixed_candidates_follow_workflow_then_defaults_then_app_precedence() {
     let env = ResolutionEnv::new();
-    let app_model = serde_json::json!([{"sdk": "claude", "model": "app-model"}]);
-    let app_plan = serde_json::json!([{"sdk": "claude", "model": "app-plan"}]);
+    let app_model = serde_json::json!(["app-model"]);
+    let app_plan = serde_json::json!(["app-plan"]);
     env.write_app_config(
         &serde_json::json!({"model": app_model, "plan_model": app_plan}).to_string(),
     );
     let defaults_dir = env.temp.path().join("project/.cruise");
     std::fs::create_dir_all(&defaults_dir)
         .unwrap_or_else(|error| panic!("create defaults directory: {error}"));
-    let default_model =
-        serde_json::json!(["default-primary", {"sdk": "claude", "model": "default-tail"}]);
+    let default_model = serde_json::json!(["default-primary", "default-tail"]);
     std::fs::write(
         defaults_dir.join("default.yaml"),
         format!("model: {default_model}\n"),
@@ -218,8 +211,7 @@ fn mixed_candidates_follow_workflow_then_defaults_then_app_precedence() {
     assert_eq!(model_value(&inherited.model), default_model);
     assert_eq!(model_value(&inherited.plan_model), app_plan);
 
-    let workflow_model =
-        serde_json::json!([{"sdk": "claude", "model": "workflow-primary"}, "workflow-tail"]);
+    let workflow_model = serde_json::json!(["workflow-primary", "workflow-tail"]);
     let explicit = resolve_workflow_calls_with_defaults(
         WorkflowConfig::from_yaml(&format!(
             "model: {workflow_model}\nsteps:\n  main:\n    prompt: execute\n"
@@ -239,7 +231,7 @@ fn environment_model_overrides_replace_whole_mixed_lists_without_stale_fallbacks
     let _model = EnvGuard::set("CRUISE_MODEL", "env/execution:high");
     let _plan = EnvGuard::set("CRUISE_PLAN_MODEL", "env/planning:medium");
     let resolved = resolve(
-        "model: [old/primary, {sdk: claude, model: old/fallback}]\nplan_model: [old/plan, {sdk: claude, model: old/plan-fallback}]\nsteps:\n  main:\n    prompt: execute\n",
+        "model: [old/primary, old/fallback]\nplan_model: [old/plan, old/plan-fallback]\nsteps:\n  main:\n    prompt: execute\n",
     );
     assert_eq!(
         model_value(&resolved.model),

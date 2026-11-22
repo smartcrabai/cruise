@@ -70,7 +70,7 @@ When a client finds a daemon from another Cruise version, it restarts it automat
 <a id="cruise-install"></a>
 ## `cruise install`
 
-`cruise install <jcode|claude|opencode> [--force]` installs the provider's latest stable CLI release (`claude` uses its stable channel). Each invocation checks release metadata, reuses a healthy managed installation at that version, and updates an installation at another version; `--force` downloads the selected latest version again. `cruise install --status` is read-only and offline: it reports the recorded installed version without claiming it is latest. Provider CLIs are resolved in this order: environment-variable override, Cruise-managed installation, then PATH. Authentication remains provider-managed. See [Managed provider CLIs](installation.md#managed-provider-clis) for details.
+`cruise install jcode [--force]` installs or updates the managed jcode CLI. Each invocation checks upstream release metadata, reuses a healthy installation at the selected version, and updates another version; `--force` downloads the selected latest version again. `cruise install --status` is read-only and offline: it reports the recorded installed version without claiming it is latest. The jcode CLI is resolved from `CRUISE_JCODE_CLI_PATH`, a healthy Cruise-managed installation, then PATH. Authentication remains provider-managed. See [Managed jcode CLI](installation.md#managed-provider-clis) for details.
 
 <a id="cruise-docs-e2e"></a>
 ## `cruise docs e2e`
@@ -294,7 +294,7 @@ Arguments:
 Options:
   -c, --config <PATH>              Path to the workflow config file; use __builtin__ or builtin:<name> for a built-in workflow (see Config File Resolution)
       --instant                    Build a single-agent workflow without a workflow YAML (requires INPUT; conflicts with --config and --flag)
-      --sdk <NAME>                 Instant backend: jcode, claude, or opencode (requires --instant)
+      --sdk <NAME>                 Instant SDK backend: jcode only (requires --instant)
       --model <MODEL>              Instant model (requires --instant)
       --review                     Add a bounded review loop (requires --instant)
       --review-rounds <N>          Maximum review passes, at least 1 (requires --review; default: 2)
@@ -312,7 +312,7 @@ Recovery starts at the first unresolved failed step, or at the saved checkpoint 
 
 Resume uses the original explicit `--max-retries` unless you override it with `cruise run <id> --max-retries <N>`. If neither was supplied, the workflow default applies. `--rate-limit-retries` still applies per attempt.
 
-`--instant` builds a workflow with one implement step in memory without resolving workflow YAML. Without it, `cruise exec` retains normal config resolution. With no config file, an interactive terminal offers built-in workflows in a categorized selector, while non-interactive execution selects `tdd` automatically. Instant requires a nonblank task. Workflow defaults can prepend command pre-steps; workflow defaults and environment overrides still apply, and `CRUISE_SDK` / `CRUISE_MODEL` take precedence over `--sdk` / `--model`.
+`--instant` builds a workflow with one implement step in memory without resolving workflow YAML. Without it, `cruise exec` retains normal config resolution. With no config file, an interactive terminal offers built-in workflows in a categorized selector, while non-interactive execution selects `tdd` automatically. Instant requires a nonblank task. Workflow defaults can prepend command pre-steps; workflow defaults and environment overrides still apply, and `CRUISE_SDK` (which only accepts `jcode`) / `CRUISE_MODEL` take precedence over `--sdk` / `--model`.
 
 ```sh
 cruise exec --instant --sdk jcode --model my-model --review --review-rounds 2 \
@@ -476,19 +476,17 @@ others_category_name: Others
 
 `workflow_categories` is an ordered tree of category maps. Each category may contain a `workflows` list and nested categories. Entries are names or single-key maps whose value overrides the selector description. `show_others_category` defaults to `true`, and `others_category_name` defaults to `Others`. These settings belong in application `config.yaml` or `config.json`, not workflow files or `default.yaml`. See [config file resolution](configuration.md#config-file-resolution) for matching and fallback behavior.
 
-Both workflow and application settings support SDK-qualified entries in `model` and `plan_model` arrays:
+Workflow and application settings support `model` and `plan_model` arrays of strings and `{model, disabled_during?}` objects:
 
 ```yaml
 model:
   - openai/gpt-6.1-sol:medium
-  - sdk: claude
-    model: claude-sonnet-5-5:medium
+  - model: claude/claude-opus-4-6:high
+    disabled_during: ["mon-fri 01:00-04:00"]
   - openrouter/z-ai/glm-5.3-flash:high
 ```
 
-The equivalent JSON is `{"model":["openai/gpt-6.1-sol:medium",{"sdk":"claude","model":"claude-sonnet-5-5:medium"},"openrouter/z-ai/glm-5.3-flash:high"]}`. String entries inherit the workflow's effective SDK, defaulting to `jcode` when neither `sdk` nor `command` is set. Provider prefixes such as `openai/` and `openrouter/` are model references, not SDK names. Existing `opencode` SDK selection is also supported.
-
-Objects require a nonblank `model` and at least one of `sdk` or nonempty `disabled_during`, and are allowed only inside arrays. Unknown keys and explicit null SDKs are rejected. An omitted `sdk` inherits the workflow SDK, not the previous entry's SDK. Objects cannot be combined with `command`, even in a fallback position. Legacy string-only command arrays still use their first model. Environment model overrides replace the entire list. Capability checks apply to all applicable candidates. Computer use requires jcode; remote HTTP/SSE MCP cannot use jcode, and OpenCode does not support legacy SSE.
+The equivalent JSON uses the same array of strings and `{"model":"...","disabled_during":[...]}` objects. String entries use the workflow SDK, defaulting to `jcode`; provider prefixes such as `openai/` and `openrouter/` identify model providers, not SDKs. An object may declare unavailable windows but cannot select an SDK. Any object containing `sdk` fails with `SDK-qualified model objects are unsupported; use a plain model string`. Objects require a nonblank `model` and reject unknown keys. Model objects cannot be combined with `command`; string-only command arrays use their first model. `CRUISE_MODEL` and `CRUISE_PLAN_MODEL` replace the entire list. Computer use requires jcode; `mcp_servers` supports only stdio, and HTTP/SSE entries fail validation.
 
 <a id="candidate-unavailable-windows-disabled_during"></a>
 ## Candidate unavailable windows (`disabled_during`)
@@ -496,21 +494,19 @@ Objects require a nonblank `model` and at least one of `sdk` or nonempty `disabl
 Declare unavailable times per candidate in `model` or `plan_model` arrays. This works in workflows, layered `default.yaml`, and application JSON/YAML settings (including the `planModel` alias). These are user-maintained exclusions, not price-aware routing or provider presets.
 
 ```yaml
-sdk: opencode
 model:
-  - model: opencode-go/deepseek-v4.1-flash
+  - model: openai/gpt-5.5
     disabled_during: ["mon-fri 01:00-04:00", "mon-fri 06:00-10:00"]
-  - opencode-go/kimi-k2.6
+  - openai/gpt-5.4
 ```
 
 The same windows expressed with a fixed `+09:00` offset are:
 
 ```yaml
-sdk: opencode
 model:
-  - model: opencode-go/deepseek-v4.1-flash
+  - model: openai/gpt-5.5
     disabled_during: ["mon-fri 10:00-13:00 +09:00", "mon-fri 15:00-19:00 +09:00"]
-  - opencode-go/kimi-k2.6
+  - openai/gpt-5.4
 ```
 
 Window grammar is `[days ]HH:MM-HH:MM[ offset]`. Days are case-insensitive `mon` through `sun`, comma lists (`sat,sun`), or inclusive, wrapping ranges (`mon,wed-fri`, `fri-mon`). Omitted days mean every day. Times use two-digit hours and minutes: starts are `00:00` through `23:59`, ends are `00:01` through `24:00`. Equal endpoints are invalid; use `00:00-24:00` for all day. Intervals include their start and exclude their end. When the end is earlier than the start, the window crosses midnight and weekdays identify the **start day**: `fri 22:00-02:00` includes Saturday at 01:00, not Sunday at 01:00.
@@ -519,7 +515,7 @@ Offsets default to UTC and accept `UTC`, `Z`, or fixed `+HH:MM` / `-HH:MM` value
 
 Cruise checks windows at each prompt start and when switching candidates during retries. It never interrupts an already-streaming turn. A matching window excludes the candidate independently of retry policy or retry budget. If every candidate is disabled or cooling down, the prompt fails without starting a backend.
 
-Capability validation also covers disabled candidates. An override inherits the workflow list and its windows only when its resolved SDK and base model both match the primary candidate. If the SDK also matches, changing only effort preserves inheritance. Other overrides do not inherit the workflow list. Environment model overrides replace the entire list, including its windows.
+Capability validation also covers disabled candidates. An override inherits the workflow list and its windows only when its base model matches the primary candidate. Other overrides do not inherit the workflow list. Environment model overrides replace the entire list, including its windows.
 
 <a id="cruise-clean"></a>
 ## `cruise clean`

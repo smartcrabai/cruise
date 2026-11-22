@@ -14,7 +14,7 @@ fn candidate_schema_accepts_schedules_without_duplicating_runtime_grammar() {
     for field in ["model", "plan_model"] {
         for candidate in [
             json!({"model": "provider/main", "disabled_during": ["00:00-24:00"]}),
-            json!({"sdk": "claude", "model": "main", "disabled_during": ["Mon-Fri 01:00-04:00 +09:00"]}),
+            json!({"model": "main", "disabled_during": ["Mon-Fri 01:00-04:00 +09:00"]}),
             json!({"model": "main", "disabled_during": ["invalid runtime grammar"]}),
         ] {
             let mut workflow = json!({"steps": {"main": {"prompt": "hi"}}});
@@ -31,7 +31,7 @@ fn candidate_schema_rejects_empty_untyped_and_null_schedules() {
         for candidate in [
             json!({"model": "main"}),
             json!({"model": "main", "disabled_during": []}),
-            json!({"sdk": "claude", "model": "main", "disabled_during": []}),
+            json!({"sdk": "claude", "model": "main", "disabled_during": ["Mon-Fri 01:00-04:00 +09:00"]}),
             json!({"model": "main", "disabled_during": [""]}),
             json!({"model": "main", "disabled_during": ["   "]}),
             json!({"model": "main", "disabled_during": [null]}),
@@ -46,7 +46,7 @@ fn candidate_schema_rejects_empty_untyped_and_null_schedules() {
 }
 
 #[test]
-fn subagent_schema_still_rejects_schedules_and_missing_sdk_at_both_levels() {
+fn subagent_schema_rejects_model_objects_and_schedules_at_both_levels() {
     let validator = validator();
     for step_level in [false, true] {
         for entry in [

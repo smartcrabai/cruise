@@ -1,6 +1,7 @@
-Feature: Workflow-scoped read-only agent OAuth preflight
+Feature: Workflow-scoped read-only jcode provider authentication preflight
   # Non-dry-run session commands use the CLI client and resident daemon; run rejection occurs synchronously at POST /api/v1/sessions/{id}/run.
-  # plan.md sections 0, 3.1-3.4, 4 and 6. Only the final SDK process is a refusal fixture.
+  # Only the final jcode process is a refusal fixture.
+
   Scenario Outline: Expired access without refresh rejects every production entrypoint
     Given isolated expired credentials and a <selection> workflow
     When the CLI client invokes <entry>
@@ -11,7 +12,6 @@ Feature: Workflow-scoped read-only agent OAuth preflight
       | plan  | jcode     |
       | exec  | jcode     |
       | run   | jcode     |
-      | exec  | claude    |
       | plan  | openai    |
       | exec  | mixed     |
       | plan  | planning-only |
@@ -21,12 +21,6 @@ Feature: Workflow-scoped read-only agent OAuth preflight
       | exec  | after-pr  |
       | plan  | fallback  |
 
-  Scenario: An expired refresh token rejects even when its secret is present
-    Given isolated expired-refresh credentials and a claude workflow
-    When the CLI client invokes exec
-    Then expired authentication stops before SDK dispatch and workspace creation
-    And credentials remain byte identical without locks and secrets stay private
-
   Scenario Outline: Refreshable and unknown credentials pass to real dispatch
     Given isolated <credentials> credentials and a <selection> workflow
     When the CLI client invokes <entry>
@@ -35,16 +29,14 @@ Feature: Workflow-scoped read-only agent OAuth preflight
     Examples:
       | credentials | selection | entry |
       | refreshable | jcode     | exec  |
-      | refreshable | claude    | plan  |
       | missing     | jcode     | plan  |
-      | malformed   | claude    | exec  |
+      | malformed   | jcode     | exec  |
       | multi-renewable | jcode | exec  |
       | multi-unknown   | jcode | plan  |
       | multi-renewable | openai | plan |
       | multi-unknown   | openai | exec |
-      | future-access   | claude | exec |
 
-  Scenario: All expired SDK targets are aggregated and duplicate candidates produce one login message per target
+  Scenario: Expired jcode provider targets are aggregated and duplicates produce one message per provider
     Given isolated expired credentials and a both-expired workflow
     When the CLI client invokes exec
     Then expired authentication stops before SDK dispatch and workspace creation
@@ -70,14 +62,14 @@ Feature: Workflow-scoped read-only agent OAuth preflight
     Then preflight passes to the observable refusing SDK boundary
     And credentials remain byte identical without locks and secrets stay private
 
-  Scenario: Process API credentials bypass Claude OAuth files
-    Given isolated expired credentials and a claude workflow
-    And Claude API authentication is present in the child environment
+  Scenario: Process API credentials bypass expired provider OAuth tokens
+    Given isolated expired credentials and a jcode workflow
+    And provider API authentication is present in the child environment
     When the CLI client invokes exec
     Then preflight passes to the observable refusing SDK boundary
     And credentials remain byte identical without locks and secrets stay private
 
-  Scenario: Workflow API credentials bypass Claude OAuth files
+  Scenario: Workflow API credentials bypass expired provider OAuth tokens
     Given isolated expired credentials and a api-env workflow
     When the CLI client invokes plan
     Then preflight passes to the observable refusing SDK boundary

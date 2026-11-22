@@ -18,28 +18,12 @@ async fn auth_planning_checks_only_planning_candidates() {
 }
 
 #[tokio::test]
-async fn auth_claude_default_home_credentials_are_checked() {
-    let _lock = lock_process();
-    let fixture = Credentials::new();
-    let _config_dir = EnvGuard::remove("CLAUDE_CONFIG_DIR");
-    let claude_dir = fixture.dir.path().join(".claude");
-    std::fs::create_dir_all(&claude_dir).unwrap_or_else(|e| panic!("{e}"));
-    std::fs::write(
-        claude_dir.join(".credentials.json"),
-        json!({"claudeAiOauth": {"expiresAt": EXPIRED}}).to_string(),
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    assert_expired(&fixture.plan("sdk: claude").await);
-}
-
-#[tokio::test]
 async fn auth_credential_read_error_is_unknown() {
     let _lock = lock_process();
     let fixture = Credentials::new();
     // A directory cannot be read as JSON, even when tests run as root.
-    std::fs::create_dir(fixture.dir.path().join(".credentials.json"))
-        .unwrap_or_else(|e| panic!("{e}"));
-    assert_allowed(&fixture.plan("sdk: claude").await);
+    std::fs::create_dir(fixture.dir.path().join("auth.json")).unwrap_or_else(|e| panic!("{e}"));
+    assert_allowed(&fixture.plan("sdk: jcode\nmodel: claude/x").await);
 }
 use super::*;
 use crate::cancellation::CancellationToken;
@@ -51,79 +35,7 @@ use tempfile::TempDir;
 const EXPIRED: i64 = 1_700_000_000_000;
 const FUTURE: i64 = 8_000_000_000_000;
 
-#[tokio::test]
-async fn auth_workflow_claude_directory_overrides_inherited_credentials() {
-    let _lock = lock_process();
-    let fixture = Credentials::new();
-    let selected = fixture.dir.path().join("selected{literal}");
-    std::fs::create_dir_all(&selected).unwrap_or_else(|e| panic!("{e}"));
-    for (workflow_expiry, inherited_expiry) in [(FUTURE, EXPIRED), (EXPIRED, FUTURE)] {
-        fixture.write(
-            ".credentials.json",
-            &json!({"claudeAiOauth": {"expiresAt": inherited_expiry}}),
-        );
-        std::fs::write(
-            selected.join(".credentials.json"),
-            json!({"claudeAiOauth": {"expiresAt": workflow_expiry}}).to_string(),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-        for directory in [
-            "selected{{literal}}".to_string(),
-            selected
-                .to_string_lossy()
-                .replace('{', "{{")
-                .replace('}', "}}"),
-        ] {
-            let yaml = format!("sdk: claude\nenv:\n  CLAUDE_CONFIG_DIR: '{directory}'");
-            let error = fixture.plan(&yaml).await;
-            if workflow_expiry == EXPIRED {
-                assert_expired(&error);
-            } else {
-                assert_allowed(&error);
-            }
-            let config =
-                WorkflowConfig::from_yaml(&format!("{yaml}\nsteps:\n  work:\n    prompt: test\n"))
-                    .unwrap_or_else(|e| panic!("{e}"));
-            let execution = crate::agent_auth::ensure_agents_authenticated(
-                &config,
-                crate::agent_auth::AuthScope::Execution,
-                Some(fixture.dir.path()),
-            );
-            assert_eq!(execution.is_err(), workflow_expiry == EXPIRED);
-        }
-    }
-    fixture.write(
-        ".credentials.json",
-        &json!({"claudeAiOauth": {"expiresAt": EXPIRED}}),
-    );
-    let config = WorkflowConfig::from_yaml(
-        "sdk: claude\nenv:\n  CLAUDE_CONFIG_DIR: '{prev.output}'\nsteps:\n  work:\n    prompt: test\n",
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    for scope in [
-        crate::agent_auth::AuthScope::Planning,
-        crate::agent_auth::AuthScope::Execution,
-    ] {
-        assert!(
-            crate::agent_auth::ensure_agents_authenticated(
-                &config,
-                scope,
-                Some(fixture.dir.path()),
-            )
-            .is_ok()
-        );
-    }
-}
-
-const AUTH_ENV: &[&str] = &[
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    "CLAUDE_CODE_USE_FOUNDRY",
-    "CRUISE_SKIP_AGENT_AUTH_CHECK",
-];
+const AUTH_ENV: &[&str] = &["ANTHROPIC_API_KEY", "CRUISE_SKIP_AGENT_AUTH_CHECK"];
 
 struct Credentials {
     dir: TempDir,
@@ -137,7 +49,6 @@ impl Credentials {
         let mut env = set_fake_home(dir.path());
         env.extend(AUTH_ENV.iter().map(|key| EnvGuard::remove(key)));
         env.push(EnvGuard::set("JCODE_HOME", dir.path()));
-        env.push(EnvGuard::set("CLAUDE_CONFIG_DIR", dir.path()));
         #[cfg(unix)]
         {
             let bin = dir.path().join("bin");
@@ -146,12 +57,10 @@ impl Credentials {
                 "AUTH_CONTRACT_MARKER",
                 dir.path().join("cli-invoked"),
             ));
-            for cli in ["claude", "jcode", "opencode"] {
-                crate::test_support::write_executable_script(
-                    &bin.join(cli),
-                    "#!/bin/sh\n: > \"$AUTH_CONTRACT_MARKER\"\nexit 97\n",
-                );
-            }
+            crate::test_support::write_executable_script(
+                &bin.join("jcode"),
+                "#!/bin/sh\n: > \"$AUTH_CONTRACT_MARKER\"\nexit 97\n",
+            );
             env.push(crate::test_support::prepend_to_path(&bin));
         }
         Self { dir, _env: env }
@@ -221,133 +130,48 @@ fn assert_expired(error: &CruiseError) {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn auth_preflight_does_not_launch_auth_commands() {
+async fn auth_preflight_does_not_launch_jcode_cli() {
     let _lock = lock_process();
     let fixture = Credentials::new();
     fixture.write(
-        ".credentials.json",
-        &json!({"claudeAiOauth": {"expiresAt": EXPIRED, "refreshToken": "refresh-secret"}}),
+        "auth.json",
+        &json!({"anthropic_accounts": [{"expires": EXPIRED, "refresh": "refresh-secret"}]}),
     );
-    assert_allowed(&fixture.plan("sdk: claude").await);
+    assert_allowed(&fixture.plan("sdk: jcode\nmodel: claude/x").await);
     assert!(
         !fixture.dir.path().join("cli-invoked").exists(),
         "auth preflight must read credentials, not invoke an external CLI"
     );
 }
 
-macro_rules! claude_case {
-    ($name:ident, $oauth:expr, $blocked:expr) => {
-        #[tokio::test]
-        async fn $name() {
-            let _lock = lock_process();
-            let fixture = Credentials::new();
-            fixture.write(".credentials.json", &json!({"claudeAiOauth": $oauth}));
-            let error = fixture.plan("sdk: claude\nmodel: sonnet").await;
-            if $blocked { assert_expired(&error); } else { assert_allowed(&error); }
-        }
-    };
-}
-
-claude_case!(
-    auth_valid_access_is_allowed,
-    json!({"expiresAt": FUTURE}),
-    false
-);
-claude_case!(
-    auth_expired_access_with_refresh_is_allowed,
-    json!({"expiresAt": EXPIRED, "refreshToken": "refresh-secret"}),
-    false
-);
-claude_case!(
-    auth_expired_access_without_refresh_is_rejected,
-    json!({"expiresAt": EXPIRED}),
-    true
-);
-claude_case!(
-    auth_expired_refresh_is_rejected,
-    json!({"expiresAt": EXPIRED, "refreshToken": "refresh-secret", "refreshTokenExpiresAt": EXPIRED}),
-    true
-);
-claude_case!(
-    auth_valid_access_with_expired_refresh_is_allowed,
-    json!({"expiresAt": FUTURE, "refreshToken": "refresh-secret", "refreshTokenExpiresAt": EXPIRED}),
-    false
-);
-claude_case!(
-    auth_missing_expiry_is_unknown,
-    json!({"refreshToken": "refresh-secret"}),
-    false
-);
-claude_case!(
-    auth_seconds_expiry_is_normalized,
-    json!({"expiresAt": FUTURE / 1000}),
-    false
-);
-claude_case!(
-    auth_empty_refresh_is_not_refreshable,
-    json!({"expiresAt": EXPIRED, "refreshToken": ""}),
-    true
-);
-
 #[tokio::test]
 async fn auth_missing_file_is_unknown() {
     let _lock = lock_process();
     let fixture = Credentials::new();
-    assert_allowed(&fixture.plan("sdk: claude").await);
+    assert_allowed(&fixture.plan("sdk: jcode\nmodel: claude/x").await);
 }
 
 #[tokio::test]
 async fn auth_malformed_json_is_unknown() {
     let _lock = lock_process();
     let fixture = Credentials::new();
-    std::fs::write(fixture.dir.path().join(".credentials.json"), "{broken")
+    std::fs::write(fixture.dir.path().join("auth.json"), "{broken")
         .unwrap_or_else(|e| panic!("{e}"));
-    assert_allowed(&fixture.plan("sdk: claude").await);
+    assert_allowed(&fixture.plan("sdk: jcode\nmodel: claude/x").await);
 }
 
 #[tokio::test]
-async fn auth_claude_process_api_auth_bypasses_oauth() {
+async fn auth_empty_api_key_does_not_bypass_expired_jcode_claude_provider() {
     let _lock = lock_process();
     let fixture = Credentials::new();
     fixture.write(
-        ".credentials.json",
-        &json!({"claudeAiOauth": {"expiresAt": EXPIRED}}),
-    );
-    for key in &AUTH_ENV[..6] {
-        let _api = EnvGuard::set(key, "fixture-api-secret");
-        assert_allowed(&fixture.plan("sdk: claude").await);
-    }
-}
-
-#[tokio::test]
-async fn auth_claude_workflow_api_auth_bypasses_oauth() {
-    let _lock = lock_process();
-    let fixture = Credentials::new();
-    fixture.write(
-        ".credentials.json",
-        &json!({"claudeAiOauth": {"expiresAt": EXPIRED}}),
-    );
-    for key in &AUTH_ENV[..6] {
-        assert_allowed(
-            &fixture
-                .plan(&format!("sdk: claude\nenv:\n  {key}: fixture-api-secret"))
-                .await,
-        );
-    }
-}
-
-#[tokio::test]
-async fn auth_empty_api_key_does_not_bypass_expired_oauth() {
-    let _lock = lock_process();
-    let fixture = Credentials::new();
-    fixture.write(
-        ".credentials.json",
-        &json!({"claudeAiOauth": {"expiresAt": EXPIRED}}),
+        "auth.json",
+        &json!({"anthropic_accounts": [{"expires": EXPIRED}]}),
     );
     let _api = EnvGuard::set("ANTHROPIC_API_KEY", "");
     assert_expired(
         &fixture
-            .plan("sdk: claude\nenv:\n  ANTHROPIC_API_KEY: ''")
+            .plan("sdk: jcode\nmodel: claude/x\nenv:\n  ANTHROPIC_API_KEY: ''")
             .await,
     );
 }
@@ -471,17 +295,6 @@ async fn auth_command_backend_does_not_inspect_jcode_credentials() {
 }
 
 #[tokio::test]
-async fn auth_opencode_is_skipped() {
-    let _lock = lock_process();
-    let fixture = Credentials::new();
-    fixture.write(
-        "auth.json",
-        &json!({"anthropic_accounts": [{"expires": EXPIRED}]}),
-    );
-    assert_allowed(&fixture.plan("sdk: opencode\nmodel: claude/x").await);
-}
-
-#[tokio::test]
 async fn auth_opt_out_one_bypasses_expired_credentials() {
     let _lock = lock_process();
     let fixture = Credentials::new();
@@ -509,16 +322,19 @@ async fn auth_opt_out_other_values_do_not_bypass() {
 async fn auth_error_aggregates_expired_targets_and_remediation() {
     let _lock = lock_process();
     let fixture = Credentials::new();
-    let claude = json!({"claudeAiOauth": {"expiresAt": EXPIRED, "accessToken": "access-secret", "refreshToken": "refresh-secret", "refreshTokenExpiresAt": EXPIRED}});
+    let claude =
+        json!({"anthropic_accounts": [{"expires": EXPIRED, "access_token": "access-secret"}]});
     let jcode =
         json!({"openai_accounts": [{"expires_at": EXPIRED, "access_token": "openai-secret"}]});
-    fixture.write(".credentials.json", &claude);
+    fixture.write("auth.json", &claude);
     fixture.write("openai-auth.json", &jcode);
-    let error = fixture.plan("sdk: jcode\nplan_model:\n  - {sdk: claude, model: sonnet}\n  - {sdk: jcode, model: openai/x}").await;
+    let error = fixture
+        .plan("sdk: jcode\nplan_model: [claude/sonnet, openai/x]")
+        .await;
     assert_expired(&error);
     let message = error.to_string();
     for fragment in [
-        "claude auth login",
+        "jcode login claude",
         "jcode login openai",
         "CRUISE_SKIP_AGENT_AUTH_CHECK=1",
     ] {
@@ -534,13 +350,10 @@ async fn auth_error_does_not_expose_credentials() {
     let _lock = lock_process();
     let fixture = Credentials::new();
     fixture.write(
-        ".credentials.json",
-        &json!({"claudeAiOauth": {
-            "expiresAt": EXPIRED, "accessToken": "access-secret",
-            "refreshToken": "refresh-secret", "refreshTokenExpiresAt": EXPIRED
-        }}),
+        "auth.json",
+        &json!({"anthropic_accounts": [{"expires": EXPIRED, "access_token": "access-secret", "refreshToken": "refresh-secret"}]}),
     );
-    let error = fixture.plan("sdk: claude").await;
+    let error = fixture.plan("sdk: jcode\nmodel: claude/x").await;
     assert_expired(&error);
     for secret in ["access-secret", "refresh-secret"] {
         assert!(

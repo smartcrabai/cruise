@@ -467,8 +467,8 @@ pub struct PlanArgs {
     pub no_force_exec: bool,
 
     /// "Grill me" planning: interview you one question at a time until the design
-    /// is fully pinned down, then write the plan. Requires the SDK backend and an
-    /// interactive terminal (errors otherwise). Conflicts with `--skip-planning`.
+    /// is fully pinned down, then write the plan. Requires the jcode SDK backend
+    /// and an interactive terminal (errors otherwise). Conflicts with `--skip-planning`.
     #[arg(long, conflicts_with = "skip_planning")]
     pub grill: bool,
 

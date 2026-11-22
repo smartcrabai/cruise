@@ -44,7 +44,11 @@ fn command(home: &Path) -> Command {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("CRUISE_DISABLE_NOTIFICATIONS", "1")
-        .env("CRUISE_SDK", "claude")
+        .env(
+            "CRUISE_COMMAND",
+            serde_json::to_string(&[home.join("bin/manager-agent")])
+                .unwrap_or_else(|error| panic!("serialize command: {error}")),
+        )
         .stdin(Stdio::null());
     c
 }
@@ -101,9 +105,11 @@ fn setup_corrective_fixture() -> (TempDir, PathBuf, Value) {
     let home = root.path();
     fs::create_dir_all(home.join("config/cruise"))
         .unwrap_or_else(|error| panic!("operation failed: {error}"));
+    let default_command = serde_json::to_string(&[home.join("bin/manager-agent")])
+        .unwrap_or_else(|error| panic!("serialize command: {error}"));
     fs::write(
         home.join("config/cruise/default.yaml"),
-        "check_base_ci: false\n",
+        format!("command: {default_command}\ncheck_base_ci: false\n"),
     )
     .unwrap_or_else(|error| panic!("operation failed: {error}"));
     let bin = home.join("bin");
@@ -118,11 +124,13 @@ fn setup_corrective_fixture() -> (TempDir, PathBuf, Value) {
     .unwrap_or_else(|error| panic!("operation failed: {error}"));
     fs::set_permissions(bin.join("cruise"), fs::Permissions::from_mode(0o700))
         .unwrap_or_else(|error| panic!("operation failed: {error}"));
-    fs::write(bin.join("claude"), r#"#!/bin/sh
-read -r frame
+    fs::write(
+        bin.join("manager-agent"),
+        r#"#!/bin/sh
+frame=$(cat)
 id=${PWD##*/}
-cat "$HOME/data/cruise/sessions/$id/manager-owner.json" >> "$HOME/sdk-owners"
-printf '\n' >> "$HOME/sdk-owners"
+cat "$HOME/data/cruise/sessions/$id/manager-owner.json" >> "$HOME/agent-calls"
+printf '\n' >> "$HOME/agent-calls"
 case "$(cat "$HOME/data/cruise/sessions/$id/manager-owner.json")" in
   *'"task_id":"fixed"'*) task=fixed ;;
   *) task=original ;;
@@ -131,16 +139,17 @@ case "$frame" in
   *'write tests only'*) echo test > "$task-test" ;;
   *'implement production code'*) echo fixed > "$task-implementation" ;;
 esac
-case "$frame" in
-  *'<consolidated-worklist>'*) result='## Ledger Records\n```text\niteration: 1\n\n```' ;;
-  *) result='NO_CHANGES_INTENTIONAL: fixture completed' ;;
-esac
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"fixture"}'
-printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"fixture"}\n' "$result"
-printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixture","result":"%s"}\n' "$result"
-"#).unwrap_or_else(|error| panic!("operation failed: {error}"));
-    fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o700))
-        .unwrap_or_else(|error| panic!("operation failed: {error}"));
+if [ -n "${CRUISE_TDD_LEDGER_PLAN-}" ]; then
+  result=$(printf '%s\n' '## Ledger Records' '```text' 'iteration: 1' '' '```')
+else
+  result='NO_CHANGES_INTENTIONAL: fixture completed'
+fi
+printf '%s\n' "$result"
+"#,
+    )
+    .unwrap_or_else(|error| panic!("write command agent: {error}"));
+    fs::set_permissions(bin.join("manager-agent"), fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("set agent permissions: {error}"));
     let repo = home.join("repo");
     fs::create_dir(&repo).unwrap_or_else(|error| panic!("operation failed: {error}"));
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -165,7 +174,6 @@ printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixt
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_DATA_HOME", home.join("data"))
         .env("XDG_STATE_HOME", home.join("state"))
-        .env("CRUISE_SDK", "claude")
         .env("CORRECTIVE_REPO", &repo)
         .env("CORRECTIVE_OUTPUT", &output)
         .args(["--exact", "corrective_preview_fixture", "--nocapture"])
@@ -376,7 +384,7 @@ async fn verify_corrective_completion(
                 json!([publication])
             );
             assert!(
-                fs::read_to_string(home.join("sdk-owners"))
+                fs::read_to_string(home.join("agent-calls"))
                     .unwrap_or_else(|error| panic!("operation failed: {error}"))
                     .contains("\"task_id\":\"fixed\"")
             );
@@ -384,8 +392,8 @@ async fn verify_corrective_completion(
         }
         assert!(
             goal["status"] != "blocked" && Instant::now() < deadline,
-            "corrective lifecycle failed: goal={goal} sdk={} daemon={} gates={}",
-            fs::read_to_string(home.join("sdk-owners")).unwrap_or_default(),
+            "corrective lifecycle failed: goal={goal} agent-calls={} daemon={} gates={}",
+            fs::read_to_string(home.join("agent-calls")).unwrap_or_default(),
             fs::read_to_string(home.join("state/cruise/daemon/daemon.log")).unwrap_or_default(),
             fs::read_to_string(home.join("gate-errors")).unwrap_or_default()
         );

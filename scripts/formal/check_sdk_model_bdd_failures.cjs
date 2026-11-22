@@ -1,5 +1,5 @@
-// Exercise the real SDK Cucumber runner, not just feature parsing. A compiler,
-// platform, timeout or fixture-launch failure cannot satisfy these controls.
+// Exercise the Jcode model Cucumber runner, not just feature parsing.
+// A compiler, platform, timeout or fixture-launch failure cannot satisfy these controls.
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -7,8 +7,8 @@ const output = process.argv[2];
 if (!output) throw Error('Usage: check_sdk_model_bdd_failures.cjs report-directory');
 fs.mkdirSync(output, { recursive: true });
 for (const [name, marker] of [
-  ['undefined', 'this deliberately undefined SDK model contract step'],
-  ['assertion', 'SDK subprocesses ran in order jcode claude jcode'],
+  ['undefined', 'this deliberately undefined Jcode model contract step'],
+  ['assertion', 'deliberately wrong Jcode model candidate order'],
 ]) {
   const args = ['+1.99.1', 'test', '--locked', '--all-features', '--test',
     'sdk_model_bdd', '--', '--color', 'never', '--input',

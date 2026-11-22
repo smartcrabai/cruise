@@ -22,7 +22,6 @@ fn cli_plan_entrypoint_continues_with_notification_opt_out_enabled() {
             if (name.starts_with("CRUISE_") && name != "CRUISE_GUARD_COMMON_DIR")
                 || name.starts_with("JCODE_")
                 || name.starts_with("OTEL_")
-                || name.starts_with("CLAUDE_")
                 || name.starts_with("ANTHROPIC_")
             {
                 command.env_remove(name.as_ref());
@@ -167,7 +166,6 @@ impl WebhookFixture {
             if (name.starts_with("CRUISE_") && name != "CRUISE_GUARD_COMMON_DIR")
                 || name.starts_with("JCODE_")
                 || name.starts_with("OTEL_")
-                || name.starts_with("CLAUDE_")
                 || name.starts_with("ANTHROPIC_")
             {
                 command.env_remove(name.as_ref());

@@ -69,7 +69,7 @@ session 命令（`plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`l
 <a id="cruise-install"></a>
 ## `cruise install`
 
-`cruise install <jcode|claude|opencode> [--force]` 会安装 provider 的最新稳定版 CLI（`claude` 使用 stable channel）。每次调用都会查询发布元数据，复用版本相同且状态正常的托管安装，并更新其他版本；`--force` 会重新下载所选的最新版本。`cruise install --status` 为只读、离线操作，仅报告记录的已安装版本，不声称它是最新版本。Provider CLI 按环境变量覆盖项、Cruise 托管安装、PATH 的顺序解析。身份验证由各 provider 管理。详情请参阅[托管的 provider CLI](installation.md#managed-provider-clis)。
+`cruise install jcode [--force]` 会安装或更新托管的 jcode CLI。每次调用都会检查上游发布元数据，复用版本相同且状态正常的安装，并更新其他版本；`--force` 会重新下载所选的最新版本。`cruise install --status` 为只读、离线操作，只报告记录的已安装版本。jcode CLI 按 `CRUISE_JCODE_CLI_PATH`、Cruise 托管安装、PATH 的顺序解析。身份验证由 jcode provider 管理。详情请参阅[托管的 jcode CLI](installation.md#managed-provider-clis)。
 
 <a id="cruise-docs-e2e"></a>
 ## `cruise docs e2e`
@@ -292,7 +292,7 @@ Arguments:
 Options:
   -c, --config <PATH>              Path to the workflow config file; use __builtin__ or builtin:<name> for a built-in workflow (see Config File Resolution)
       --instant                    Build a single-agent workflow without a workflow YAML (requires INPUT; conflicts with --config and --flag)
-      --sdk <NAME>                 Instant backend: jcode, claude, or opencode (requires --instant)
+      --sdk <NAME>                 Instant SDK backend: jcode only (requires --instant)
       --model <MODEL>              Instant model (requires --instant)
       --review                     Add a bounded review loop (requires --instant)
       --review-rounds <N>          Maximum review passes, at least 1 (requires --review; default: 2)
@@ -311,7 +311,7 @@ Options:
 
 恢复时会沿用最初显式指定的 `--max-retries`，除非通过 `cruise run <id> --max-retries <N>` 覆盖。如果两次都未指定，则使用工作流默认值。`--rate-limit-retries` 仍按每次运行单独设置。
 
-`--instant` 会在内存中组装一个包含单个 implement step 的 workflow，不解析 workflow YAML。未指定时，`cruise exec` 仍使用常规配置解析。没有配置文件时，交互式终端会在分类选择器中提供内置 workflow；非交互执行会自动选择 `tdd`。Instant 要求非空白任务。Workflow 默认值可以在开头插入 command pre-steps；workflow 默认值和环境变量覆盖仍然生效，且 `CRUISE_SDK` / `CRUISE_MODEL` 优先于 `--sdk` / `--model`。
+`--instant` 会在内存中组装一个包含单个 implement step 的 workflow，不解析 workflow YAML。未指定时，`cruise exec` 仍使用常规配置解析。没有配置文件时，交互式终端会在分类选择器中提供内置 workflow；非交互执行会自动选择 `tdd`。Instant 要求非空白任务。Workflow 默认值可以在开头插入 command pre-steps；workflow 默认值和环境变量覆盖仍然生效，且 `CRUISE_SDK`（仅接受 `jcode`）和 `CRUISE_MODEL` 优先于 `--sdk` / `--model`。
 
 ```sh
 cruise exec --instant --sdk jcode --model my-model --review --review-rounds 2 \
@@ -476,19 +476,17 @@ others_category_name: Others
 
 `workflow_categories` 是有序的类别映射树。每个类别都可以包含 `workflows` 列表和嵌套类别。条目可以是名称，也可以是单键映射，其值会覆盖选择器中的说明。`show_others_category` 默认值为 `true`，`others_category_name` 默认值为 `Others`。这些设置应放在应用级 `config.yaml` 或 `config.json` 中，而不是 workflow 文件或 `default.yaml` 中。有关匹配和回退行为，请参阅[配置文件解析](configuration.md#config-file-resolution)。
 
-Workflow 和应用设置都支持在 `model` 和 `plan_model` 数组中使用带 SDK 的条目：
+workflow 和应用设置都支持 `model` / `plan_model` 中的字符串，以及 `{model, disabled_during?}` object：
 
 ```yaml
 model:
   - openai/gpt-6.1-sol:medium
-  - sdk: claude
-    model: claude-sonnet-5-5:medium
+  - model: claude/claude-opus-4-6:high
+    disabled_during: ["mon-fri 01:00-04:00"]
   - openrouter/z-ai/glm-5.3-flash:high
 ```
 
-对应的 JSON 为 `{"model":["openai/gpt-6.1-sol:medium",{"sdk":"claude","model":"claude-sonnet-5-5:medium"},"openrouter/z-ai/glm-5.3-flash:high"]}`。字符串会继承 workflow 的有效 SDK；若未设置 `sdk` 或 `command`，默认使用 `jcode`。`openai/` 和 `openrouter/` 等 provider 前缀是模型引用，不是 SDK 名称。也支持现有的 `opencode` SDK 选择。
-
-对象必须包含非空白 `model`，并且至少包含 `sdk` 或非空的 `disabled_during`；对象只能出现在数组中。不接受未知键和显式的 null SDK。省略 `sdk` 时会继承 workflow SDK，而不是前一条目的 SDK。对象不能与 `command` 组合使用，即使是在 fallback 位置也不行。仅含字符串的旧版 command 数组仍只使用第一个模型。环境模型覆盖会替换整个列表。能力检查会覆盖所有适用候选项：computer use 要求 jcode；远程 HTTP/SSE MCP 不能使用 jcode；OpenCode 不支持旧版 SSE。
+JSON 使用相同的字符串数组和 `{"model":"...","disabled_during":[...]}` object。字符串继承 workflow 的有效 SDK；省略时默认为 `jcode`。`openai/` 和 `openrouter/` 等 provider 前缀是模型引用，不是 SDK 名称。Object 可以声明不可用时间，但不能选择 SDK；包含 `sdk` 的 object 会报错：`SDK-qualified model objects are unsupported; use a plain model string`。Object 必须包含非空白 `model`，并拒绝未知键。Object 不能与 `command` 组合使用。仅含字符串的 command 数组仍只使用第一个模型。环境模型覆盖会替换整个列表。Computer use 要求 jcode；`mcp_servers` 只支持 stdio，HTTP/SSE 条目会导致验证错误。
 
 <a id="candidate-unavailable-windows-disabled_during"></a>
 ## 候选模型不可用时间窗口（`disabled_during`）
@@ -496,21 +494,19 @@ model:
 可在 `model` 或 `plan_model` 数组中为每个候选模型声明不可用时间。该功能适用于 workflow、分层的 `default.yaml` 和应用 JSON/YAML 设置（包括 `planModel` 别名）。这些是由用户维护的排除规则，不是按价格路由，也不是 provider 预设。
 
 ```yaml
-sdk: opencode
 model:
-  - model: opencode-go/deepseek-v4.1-flash
+  - model: openai/gpt-5.5
     disabled_during: ["mon-fri 01:00-04:00", "mon-fri 06:00-10:00"]
-  - opencode-go/kimi-k2.6
+  - openai/gpt-5.4
 ```
 
 将相同窗口表示为固定的 `+09:00` 偏移量：
 
 ```yaml
-sdk: opencode
 model:
-  - model: opencode-go/deepseek-v4.1-flash
+  - model: openai/gpt-5.5
     disabled_during: ["mon-fri 10:00-13:00 +09:00", "mon-fri 15:00-19:00 +09:00"]
-  - opencode-go/kimi-k2.6
+  - openai/gpt-5.4
 ```
 
 窗口语法为 `[days ]HH:MM-HH:MM[ offset]`。星期名称 `mon` 至 `sun` 不区分大小写；支持逗号列表（`sat,sun`）以及包含端点且可跨周回绕的范围（`mon,wed-fri`、`fri-mon`）。省略星期表示每天。时间使用两位数的小时和分钟：开始时间范围为 `00:00` 至 `23:59`，结束时间范围为 `00:01` 至 `24:00`。开始和结束相同为无效值；若要表示全天，请使用 `00:00-24:00`。时间段包含开始时刻，但不包含结束时刻。结束时间早于开始时间时，窗口会跨越午夜，星期表示**开始日**：`fri 22:00-02:00` 包含星期六 01:00，但不包含星期日 01:00。
@@ -519,7 +515,7 @@ model:
 
 Cruise 会在每次 prompt 开始时以及重试期间切换候选项时检查窗口。它不会中断已经开始输出的 turn。只要与窗口匹配，无论重试策略或重试预算如何，该候选项都会被排除。如果所有候选项都处于禁用窗口或冷却状态，prompt 会失败，且不会启动后端。
 
-能力验证仍会检查禁用候选项。只有解析后的 SDK 和基础模型都与主候选项匹配时，覆盖值才会继承 workflow 列表及其窗口。若 SDK 也匹配，只更改 effort 会保留继承关系。其他覆盖值不会继承 workflow 列表。环境模型覆盖会替换整个列表，包括其中的窗口。
+能力验证仍会检查禁用候选项。覆盖值只有在基础模型与主候选项匹配时才会继承 workflow 列表及其窗口。其他覆盖值不会继承 workflow 列表。环境模型覆盖会替换整个列表，包括其中的窗口。
 
 <a id="cruise-clean"></a>
 ## `cruise clean`

@@ -27,7 +27,6 @@ Template variables (e.g. `{input}`) can be used inside `env:` values.
 
 **SDK mode**: top-level and per-step `env:` values are passed to SDK prompt execution. Command steps receive `env:` in their child process (see [sdk.md](sdk.md)).
 
-For `sdk: opencode`, workflow and step environment overrides are merged with the inherited OS environment before setting the V2 shell environment, preserving `PATH` and the commit guard. OpenCode's server authentication secret is not exposed to shell tools. Existing OpenCode configuration/authentication is retained; malformed JSONC in `OPENCODE_CONFIG_CONTENT` is an error, not silently discarded. No new `CRUISE_OPENCODE_*` connection setting is needed. `CRUISE_SDK=opencode` selects this backend through the normal override API.
 
 ## OpenAI priority processing with jcode
 
@@ -37,7 +36,7 @@ For `sdk: jcode`, `JCODE_OPENAI_SERVICE_TIER` controls the OpenAI service tier. 
 
 Process-level configuration overrides apply after workflow and defaults layers. See the [CLI skill's full table](../../cruise-cli/SKILL.md#process-environment-overrides) for all supported variables and their keys. Names normally derive from `CRUISE_` plus the uppercase key path with dots and hyphens replaced by underscores; the language child names below are exceptions, not aliases.
 
-Values are trimmed and blanks ignored. Booleans accept only `true`, `false`, `1`, or `0`; integers use unsigned decimal digits. Models are literal single models unless they begin with `[` or `{`, in which case they are JSON in the field's normal shape. Model arrays enable fallback as in YAML. Composite fields require JSON, not YAML flow syntax; `null` clears an optional field and `[]` clears a list where supported. Parent `CRUISE_RETRY` and `CRUISE_LANGUAGES` apply before their child overrides. `CRUISE_SDK` clears `command`, `CRUISE_COMMAND` clears `sdk`, and setting both nonblank is an error. Invalid values identify the variable and undergo normal validation.
+Values are trimmed and blanks ignored. Booleans accept only `true`, `false`, `1`, or `0`; integers use unsigned decimal digits. Models are literal single references unless they begin with `[` or `{`, in which case they are JSON in the field's normal shape. Model arrays enable fallback as in YAML; objects may declare `disabled_during`, but SDK-qualified model objects fail with `SDK-qualified model objects are unsupported; use a plain model string`. Composite fields require JSON, not YAML flow syntax; `null` clears an optional field and `[]` clears a list where supported. Parent `CRUISE_RETRY` and `CRUISE_LANGUAGES` apply before their child overrides. `CRUISE_SDK` clears `command` and accepts only `jcode`; `CRUISE_COMMAND` clears `sdk`, and setting both nonblank is an error. Invalid values identify the variable and undergo normal validation.
 
 CLI flags and saved session cleanup overrides win where applicable. `CRUISE_RUN_ALL_PARALLELISM` changes the effective app setting for WebUI run-all without persisting it, not CLI `run --all` (`--parallelism`). File-backed sessions reapply overrides when reloaded; snapshot sessions retain their creation-time configuration. Named or secret-bearing `env`, `mcp_servers`, and `pre_steps`, workflow structure (`steps`, `groups`, `after-pr`, `inputs`, `returns`, `description`, `flags`), `create_pr`, and deprecated `pr_language` / `plan_language` are excluded. Process runtime switches are separate from configuration overrides.
 
@@ -52,7 +51,7 @@ then the first non-empty variable among `LC_ALL`, `LC_MESSAGES`, `LANG`, and `LA
 
 After plan approval, cruise sets a concise session title of at most 80 characters for `cruise list` and the WebUI sidebar:
 
-- **SDK mode** (`sdk: jcode`, `sdk: claude`, `sdk: opencode`, or the default jcode backend) makes a separate title-generation request only on the foreground `cruise plan` approval path (interactive **Approve/Execute now** and non-TTY auto-approval), using `plan_model` then `model`. If jcode has no effective model, approval fails and is not saved. Other title-generation failures fall back to `plan.md` metadata: the first heading, or the first content line with list markers stripped.
+- **SDK mode** (`sdk: jcode` or the default jcode backend) makes a separate title-generation request only on the foreground `cruise plan` approval path (interactive **Approve/Execute now** and non-TTY auto-approval), using `plan_model` then `model`. If jcode has no effective model, approval fails and is not saved. Other title-generation failures fall back to `plan.md` metadata: the first heading, or the first content line with list markers stripped.
 - **Command mode** derives the title from the first heading or first non-empty line of `plan.md`; it makes no separate title-generation call.
 - `cruise list` **Approve**, WebUI approval, and background `cruise --plan` planning completion use the `plan.md` metadata fallback directly: first heading, else first content line with list markers stripped. Background `cruise --plan … --skip-planning` also derives the title directly from `plan.md` and makes no model call.
 

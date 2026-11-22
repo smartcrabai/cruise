@@ -97,7 +97,7 @@ command:                   # LLM invocation command (mutually exclusive with `sd
 # sdk: jcode              # Use jcode-sdk (the fallback only when neither
                           # `command` nor `sdk` remains set after applicable
                           # `default.yaml` layers; see SDK Mode)
-# sdk: claude             # Use claude-agent-sdk to drive the claude CLI
+# sdk: jcode is the only supported SDK value.
 
 description: |             # one-line summary shown next to the filename in selectors (optional)
   Team-shared review-heavy flow with auto-PR.
@@ -106,7 +106,7 @@ model: sonnet             # default model for all prompt steps (optional)
 # In SDK mode, arrays use the first model, then fall back in order.
 # model: [sonnet, opus, gpt-5.5]
 plan_model: opus          # model used for the built-in plan step (optional)
-# subagent_model: haiku   # SDK-only: one subagent model, string or {sdk: claude, model: haiku}
+# subagent_model: claude/claude-haiku-4-5 # Jcode only: one plain model string
 languages:                # prompt languages (optional; defaults to English)
   pr: English             # language for auto-generated PR title/body
   plan: English           # language used by built-in planning prompts
@@ -241,7 +241,7 @@ After plan approval, cruise generates a concise session title (up to 80 characte
 <a id="environment-variables"></a>
 ### Environment Variables
 
-`CRUISE_JCODE_CLI_PATH`, `CRUISE_CLAUDE_CLI_PATH`, and `CRUISE_OPENCODE_CLI_PATH` select provider executables from the Cruise process environment. They are not workflow configuration keys and cannot be supplied through workflow `env:`.
+`CRUISE_JCODE_CLI_PATH` selects the jcode executable from the Cruise process environment. It is not a workflow configuration key and cannot be supplied through workflow `env:`.
 
 Environment variables can be set at workflow and step level. Step-level values override workflow-level values for that step only. Parallel children add a third level: workflow < parallel block < child. Values support template variable substitution; each child resolves its own values against the variables from before the block.
 
@@ -252,7 +252,7 @@ Process-level configuration overrides apply after workflow and defaults resoluti
 | `CRUISE_MODEL` | `model` | model |
 | `CRUISE_PLAN_MODEL` | `plan_model` | model |
 | `CRUISE_SUBAGENT_MODEL` | `subagent_model` | model entry |
-| `CRUISE_SDK` | `sdk` | text |
+| `CRUISE_SDK` | `sdk` | text (`jcode` only) |
 | `CRUISE_COMMAND` | `command` | JSON array |
 | `CRUISE_MAX_RETRIES` | `max_retries` | integer |
 | `CRUISE_INTERACTIVE_PLANNING` | `interactive_planning` | boolean |
@@ -358,16 +358,16 @@ During `cruise run`, the config file is checked for changes between steps. If th
 <a id="rate-limit-retry"></a>
 ## Rate Limit Retry
 
-Without an SDK fallback policy, cruise retries the same model with exponential
+Without a jcode SDK fallback policy, cruise retries the same model with exponential
 backoff when command stderr contains rate-limit wording or a standalone `429`
-token (not incidental `429` substrings). SDK backends also treat `usage limit`,
+token (not incidental `429` substrings). The jcode SDK also treats `usage limit`,
 `session limit`, and `overloaded` as limits:
 
 - Initial delay: 2 seconds
 - Maximum delay: 60 seconds
 - Default retry count: 5 (override with `--rate-limit-retries`)
 
-The SDK backends additionally support a fallback policy through an optional
+The jcode SDK additionally supports a fallback policy through an optional
 `retry:` block or a workflow-level model array with fallback entries. An
 explicit `retry:` block can configure the policy:
 
@@ -384,4 +384,4 @@ retry:
       - provider-c/*
 ```
 
-With an SDK retry policy, a 429, 5xx, other 4xx, or network failure switches to the next fallback immediately; the same model is retried only when no usable fallback remains. Declaring `retry:` enables this classification and backoff even with `model_fallback: false` or empty chains. To keep historical behavior, omit `retry:` and use scalar or unset model fields. Workflow-level model arrays with fallback entries enable model fallback. The `command:` backend retains historical behavior and ignores `retry:`.
+With a jcode retry policy, a 429, 5xx, other 4xx, or network failure switches to the next fallback immediately; the same model is retried only when no usable fallback remains. Declaring `retry:` enables this classification and backoff even with `model_fallback: false` or empty chains. To keep historical behavior, omit `retry:` and use scalar or unset model fields. Workflow-level model arrays with fallback entries enable model fallback. The `command:` backend retains historical behavior and ignores `retry:`.

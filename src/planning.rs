@@ -90,19 +90,18 @@ pub fn setup_plan_vars(
     vars
 }
 
-/// Whether SDK-mode planning should drive the plan through the interactive
+/// Whether jcode-mode planning should drive the plan through the interactive
 /// custom tools (`submit_plan` / `update_plan` / `ask_user`).
 ///
-/// True only when the config selects an SDK backend *and* `interactive_planning`
-/// is left enabled. "Selects an SDK backend" is asked of [`Executor`], not of
-/// `config.sdk` alone: a config that names neither `sdk:` nor `command:` runs on
-/// the default `jcode` backend, and that default must reach the same tool-based
-/// planning flow as an explicit `sdk: jcode`.
+/// True only when the config selects the jcode SDK backend and
+/// `interactive_planning` is left enabled. Backend selection is asked of
+/// [`Executor`], not of `config.sdk` alone: a config that names neither `sdk:`
+/// nor `command:` runs on the default `jcode` backend, and that default must
+/// reach the same tool-based planning flow as an explicit `sdk: jcode`.
 ///
-/// Deliberately independent of *which* SDK: all three SDK backends support custom
-/// tools, so this only selects between the tool-based and the file-writing
-/// planning flow. When false the planning turns fall back to the file-writing
-/// (`command`-style) templates and register no custom tools.
+/// The jcode SDK supports custom tools, so this selects between the tool-based
+/// and the file-writing planning flow. When false, planning uses the
+/// file-writing (`command`-style) templates and registers no custom tools.
 #[must_use]
 pub fn sdk_plan_tools_enabled(config: &WorkflowConfig) -> bool {
     Executor::new(config.sdk.as_deref(), &config.command).is_sdk() && config.interactive_planning()
@@ -164,20 +163,20 @@ pub enum PlanProgress {
 
 /// Backend-stable context for a plan-related prompt.
 ///
-/// Bundles the workflow config, the interactive UI handler (used by the SDK
+/// Bundles the workflow config, the interactive UI handler (used by the jcode
 /// `ask_user` tool), the session plan path (target of `submit_plan` /
 /// `update_plan`), and execution settings. Built once per planning session and
 /// reused across the plan / fix / ask turns.
 pub struct PlanPromptCtx<'a> {
     /// Cruise session associated with this planning prompt.
     pub usage_session_id: Option<&'a str>,
-    /// Workflow configuration (selects command vs SDK backend, model refs).
+    /// Workflow configuration (selects command vs jcode SDK backend, model refs).
     pub config: &'a WorkflowConfig,
-    /// UI handler backing the SDK `ask_user` tool (CLI or `WebUI`).
+    /// UI handler backing the jcode `ask_user` tool (CLI or `WebUI`).
     pub ask: Arc<dyn AskHandler>,
-    /// Session `plan.md` path (where SDK plan tools read/write).
+    /// Session `plan.md` path (where jcode plan tools read/write).
     pub plan_path: &'a Path,
-    /// Whether the user can be reached interactively (controls which SDK tools
+    /// Whether the user can be reached interactively (controls which jcode tools
     /// are registered). Non-TTY runs pass `false`.
     pub interactive: bool,
     /// Explicit policy for transient planning progress output.
@@ -186,7 +185,7 @@ pub struct PlanPromptCtx<'a> {
     pub rate_limit_retries: usize,
     /// Working directory for the command / agent.
     pub working_dir: Option<&'a Path>,
-    /// Called when an SDK backend reports its session identity.
+    /// Called when the jcode backend reports its session identity.
     pub on_session_id: Option<&'a crate::executor::SessionIdCallback<'a>>,
     /// Additional destination for model and fallback notices, separate from
     /// the terminal output used by this planning layer.
@@ -248,11 +247,11 @@ impl AskHandler for PlanningAskHandler {
 
 /// Resolve and execute a plan-related prompt template on the configured backend.
 ///
-/// In SDK mode, when `register_plan_tools` is true the planning tools
+/// In jcode mode, when `register_plan_tools` is true the planning tools
 /// (`ask_user` / `submit_plan` / `update_plan`) are injected so the agent can
 /// write the plan. Read-only turns (the "Ask about the plan" flow) pass `false`
 /// so no plan-writing tool is available and the saved plan cannot be mutated;
-/// the agent answers from the plan it reads with the backend's built-in tools.
+/// the agent answers from the plan it reads with jcode's built-in tools.
 ///
 /// `resume` carries the backend session id forward, so the plan/fix/ask turns
 /// share one conversation. Command mode leaves `resume` untouched.
@@ -547,15 +546,15 @@ pub fn write_input_as_plan(plan_path: &Path, input: &str) -> Result<String> {
     Ok(content)
 }
 
-/// Recover a planning conversation only when its SDK ownership is unambiguous.
-/// Legacy IDs with no owner may use a recorded jcode home or a jcode-only
-/// candidate list. Other legacy backends cannot safely claim a jcode-era ID.
+/// Recover a saved planning conversation when its configuration still matches.
+/// Legacy sessions without owner metadata use the only supported backend:
+/// `jcode`.
 #[must_use]
 pub fn saved_plan_session(
     session: &crate::session::SessionState,
     config: &WorkflowConfig,
 ) -> Option<crate::model_selection::SdkSessionId> {
-    use crate::model_selection::{Sdk, SdkSessionId, resolve_candidates};
+    use crate::model_selection::{Sdk, SdkSessionId};
 
     if !sdk_plan_tools_enabled(config) {
         return None;
@@ -567,21 +566,10 @@ pub fn saved_plan_session(
     if session.plan_conversation_key.as_deref() != Some(key.as_str()) {
         return None;
     }
-    let base = Sdk::from_name(config.sdk.as_deref().unwrap_or("jcode"))?;
-    let candidates = resolve_candidates(
-        crate::model_selection::planning_spec(config.plan_model.as_ref(), config.model.as_ref()),
-        base,
-    );
-    let sdks = crate::model_selection::applicable_sdks(config, &candidates, base);
     let sdk = match session.plan_conversation_backend.as_deref() {
         Some(owner) => Sdk::from_name(owner)?,
-        None if session.plan_conversation_home.is_some() => Sdk::Jcode,
-        None if sdks.iter().all(|sdk| *sdk == Sdk::Jcode) => Sdk::Jcode,
-        None => return None,
+        None => Sdk::Jcode,
     };
-    if !sdks.contains(&sdk) {
-        return None;
-    }
     Some(SdkSessionId {
         sdk,
         id: session.plan_conversation_id.clone()?,
@@ -784,18 +772,6 @@ mod tests {
     #[test]
     fn templates_select_sdk_variants_with_sdk() {
         let config = config_with(Some("jcode"), None);
-        assert_eq!(plan_template(&config), PLAN_PROMPT_TEMPLATE_SDK);
-        assert_eq!(fix_plan_template(&config), FIX_PLAN_PROMPT_TEMPLATE_SDK);
-        assert_eq!(ask_plan_template(&config), ASK_PLAN_PROMPT_TEMPLATE_SDK);
-    }
-
-    #[test]
-    fn templates_select_sdk_variants_with_claude() {
-        // Template selection is driven off "an SDK backend is selected", not the
-        // SDK kind, so `sdk: claude` picks the same tool-based templates as
-        // `sdk: jcode`.
-        let config = config_with(Some("claude"), None);
-        assert!(sdk_plan_tools_enabled(&config));
         assert_eq!(plan_template(&config), PLAN_PROMPT_TEMPLATE_SDK);
         assert_eq!(fix_plan_template(&config), FIX_PLAN_PROMPT_TEMPLATE_SDK);
         assert_eq!(ask_plan_template(&config), ASK_PLAN_PROMPT_TEMPLATE_SDK);

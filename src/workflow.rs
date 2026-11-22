@@ -163,9 +163,8 @@ fn list_skippable_step_map(
 #[derive(Debug, Clone)]
 pub struct CompiledWorkflow {
     pub command: Vec<String>,
-    /// SDK backend (`"jcode"`, `"claude"`, or `"opencode"`) for agent prompts
-    /// instead of via `command`. Mutually exclusive with a non-empty `command`;
-    /// with both unset, prompts run on the default `jcode` backend.
+    /// Optional `jcode` SDK backend for agent prompts.
+    /// With `command` unset, prompts use the default `jcode` backend.
     pub sdk: Option<String>,
     pub model: Option<crate::config::ModelSpec>,
     pub subagent_model: Option<crate::config::ModelEntry>,
@@ -464,7 +463,7 @@ mod tests {
     #[test]
     fn subagent_model_default_survives_compile_and_after_pr() {
         let workflow = compiled(
-            "sdk: claude\nsubagent_model: haiku\nsteps:\n  main:\n    prompt: main\nafter-pr:\n  review:\n    prompt: review\n",
+            "sdk: jcode\nsubagent_model: haiku\nsteps:\n  main:\n    prompt: main\nafter-pr:\n  review:\n    prompt: review\n",
         );
         let expected = Some(crate::config::ModelEntry::String("haiku".to_owned()));
         assert_eq!(workflow.subagent_model, expected);
@@ -474,12 +473,12 @@ mod tests {
     #[test]
     fn subagent_model_survives_group_expansion() {
         let workflow = compiled(
-            "sdk: jcode\nmodel: [openai/main, {sdk: claude, model: sonnet}]\nsubagent_model: openai/default\ngroups:\n  review:\n    steps:\n      inspect:\n        prompt: inspect\n        subagent_model: {sdk: claude, model: haiku}\n      plain:\n        prompt: plain\nsteps:\n  run:\n    group: review\nafter-pr:\n  publish:\n    group: review\n  summary:\n    prompt: summarize\n    subagent_model: openai/summary\n",
+            "sdk: jcode\nmodel: [openai/main, claude/sonnet]\nsubagent_model: openai/default\ngroups:\n  review:\n    steps:\n      inspect:\n        prompt: inspect\n        subagent_model: openai/haiku\n      plain:\n        prompt: plain\nsteps:\n  run:\n    group: review\nafter-pr:\n  publish:\n    group: review\n  summary:\n    prompt: summarize\n    subagent_model: openai/summary\n",
         );
         let steps = serde_json::to_value(&workflow.steps).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             steps["run/inspect"]["subagent_model"],
-            serde_json::json!({"sdk": "claude", "model": "haiku"})
+            serde_json::json!("openai/haiku")
         );
         assert!(steps["run/plain"].get("subagent_model").is_none());
     }
@@ -487,13 +486,13 @@ mod tests {
     #[test]
     fn subagent_model_survives_after_pr_compilation() {
         let workflow = compiled(
-            "sdk: jcode\nmodel: [openai/main, {sdk: claude, model: sonnet}]\nsubagent_model: openai/default\ngroups:\n  review:\n    steps:\n      inspect:\n        prompt: inspect\n        subagent_model: {sdk: claude, model: haiku}\n      plain:\n        prompt: plain\nsteps:\n  run:\n    prompt: run\nafter-pr:\n  publish:\n    group: review\n  summary:\n    prompt: summarize\n    subagent_model: openai/summary\n",
+            "sdk: jcode\nmodel: [openai/main, claude/sonnet]\nsubagent_model: openai/default\ngroups:\n  review:\n    steps:\n      inspect:\n        prompt: inspect\n        subagent_model: openai/haiku\n      plain:\n        prompt: plain\nsteps:\n  run:\n    prompt: run\nafter-pr:\n  publish:\n    group: review\n  summary:\n    prompt: summarize\n    subagent_model: openai/summary\n",
         );
         let after = workflow.to_after_pr_compiled();
         let steps = serde_json::to_value(&after.steps).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             steps["publish/inspect"]["subagent_model"],
-            serde_json::json!({"sdk": "claude", "model": "haiku"})
+            serde_json::json!("openai/haiku")
         );
         assert!(steps["publish/plain"].get("subagent_model").is_none());
         assert_eq!(steps["summary"]["subagent_model"], "openai/summary");
@@ -554,7 +553,7 @@ after-pr:
     fn test_compile_carries_mcp_servers() {
         let workflow = compiled(
             r"
-sdk: claude
+sdk: jcode
 mcp_servers:
   local_tool:
     command: node
@@ -575,7 +574,7 @@ steps:
     fn test_after_pr_compiled_preserves_mcp_servers() {
         let workflow = compiled(
             r"
-sdk: claude
+sdk: jcode
 mcp_servers:
   local_tool:
     command: node

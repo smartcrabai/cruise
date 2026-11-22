@@ -5,13 +5,11 @@
 
 - [`gh` CLI](https://cli.github.com/) — GitHub の worktree セッションで自動 PR 作成（既定）、PR に基づくクリーンアップ、または明示的に有効化したワークフロー内マージを使う場合に必要です。GitLab リポジトリでは `glab` を使用します。`create_pr: false` のローカル worktree ワークフローには forge CLI は不要ですが、`--repo` ではリポジトリへのアクセスとクローンのため `gh`/`glab` が必要です。
 - [`glab` CLI](https://gitlab.com/gitlab-org/cli) — GitLab リポジトリでは `gh` の代わりに必要です（merge request の作成、クリーンアップ、issue の公開、明示的に有効化したネイティブ同期 squash merge）。forge はホスト名（`github.com` / `gitlab.com`）から判定されます。セルフマネージドホストでは `CRUISE_FORGE=github|gitlab` を設定し、`owner/repo` 形式の `--repo` ロケーターでは `GITLAB_HOST` も設定します。`--repo` は `owner/repo`、ネストされた `group/sub/project`（`CRUISE_FORGE=gitlab` の場合）、または完全な URL を受け付けます。GitLab では `{pr.number}` / `{pr.url}` は merge request を指し、issue 公開時に `@cruise run` コメントを投稿するオプションは使用できません。
-- [`jcode` CLI](https://github.com/1jehuang/jcode) — 既定の SDK バックエンド（`sdk: jcode`）で必要です。インストール後に `jcode login <provider>` でサインインしてください。SDK 実行では、別のワークフロー SDK の下にある SDK 指定配列項目も含め、実行または計画の有効な候補が jcode を使う場合にインストールしてください。
-- [`claude` CLI](https://code.claude.com/docs/en/quickstart) — 実行または計画の有効な候補が claude を使う場合に必要です（SDK 指定配列項目を含む）。Cruise はプロセス内で claude を実行します。モデル名の `:effort` 接尾辞は `claude --effort` に対応するため、このフラグのない CLI ではステップが `unknown option '--effort'` で失敗します。認証は Claude 独自のもので、`jcode login` とは無関係です。
-- V2 API 対応の `opencode` CLI — 実行または計画の有効な候補が opencode を使う場合に必要です（SDK 指定配列項目を含む）。Cruise はローカルで起動・停止し、既存の OpenCode プロバイダー設定と認証を使用します。V1 はサポートされません。
+- [`jcode` CLI](https://github.com/1jehuang/jcode) — 既定の SDK backend（`sdk: jcode`）で必要です。インストール後に `jcode login <provider>` でサインインしてください。ワークフローで jcode SDK を使う場合にインストールします。
 - `cruise ssh` 用に、ローカルの `PATH` 上に OpenSSH クライアント（`ssh`）が必要です。
 - Windows では [Git for Windows](https://gitforwindows.org/)（`PATH` 上の `git`）が必要です。
-- SSH 接続先には、互換性のある `cruise` と選択したワークフローに必要な通常の前提条件（必要に応じて `gh`、`jcode`、`claude`、`opencode` CLI など）が必要です。ワークフローはリモートホストで実行され、認証、設定、セッション、worktree、クローンもそのホストが管理します。
-- たとえば `cruise ssh <host> -- install jcode` のようにして、接続先に管理対象プロバイダーをインストールできます。
+- SSH 接続先には、互換性のある `cruise` と、選択したワークフローに必要な通常の前提条件（必要に応じて `gh` や `jcode` など）が必要です。ワークフローはリモートホストで実行され、認証、設定、セッション、worktree、クローンもそのホストが管理します。
+- たとえば `cruise ssh <host> -- install jcode` のようにして、接続先に管理対象 jcode CLI をインストールできます。
 
 <a id="installation"></a>
 ## インストール
@@ -86,17 +84,16 @@ docker exec cruise cruise plan "implement the feature"
 `docker run --rm --env-file .env cruise:latest plan "implement the feature"` のような one-shot container は foreground では動作します。終了後に container と daemon も停止するため、background の `--plan` や detached work には one-shot container を使わないでください。credential と process-level 環境変数は `--env-file` または `-e` で service container に渡してください。
 
 <a id="managed-provider-clis"></a>
-### 管理対象プロバイダー CLI
+### 管理対象 jcode CLI
 
-ワークフローで必要なプロバイダーだけをインストールしてください。
+Cruise が管理する jcode CLI をインストール、または状態を確認します。
 
 ```sh
 cruise install jcode
-cruise install claude
-cruise install opencode
 cruise install --status
 cruise install jcode --force
 ```
-`cruise install <provider>` は、provider の最新安定版リリースメタデータを呼び出しごとに確認します（`claude` は stable チャネルを使用）。選択されたバージョンと一致する正常な管理対象インストールがあれば再利用し、別バージョンなら更新します。`--force` は選択された最新バージョンを再ダウンロードします。
 
-provider のインストールにはリリースメタデータと配布ファイルへのネットワークアクセスが必要で、上流の変更が互換性に影響する場合があります。ダウンロードは配布元が提供するチェックサムで検証しますが、独立した署名ではありません。`cruise install --status` はオフラインで動作し、最新かどうかを主張せず、記録されたインストール済みバージョンを表示します。管理ランタイムの検証も Cruise ビルドの固定バージョンではなく、記録されたインストール済みバージョンを基準にします。
+各インストール時に jcode の最新安定版リリース情報を確認します。選択されたバージョンと一致する正常な管理対象インストールがあれば再利用し、別バージョンなら更新します。`--force` は選択された最新バージョンを再ダウンロードします。
+
+インストールにはリリースメタデータと配布ファイルへのネットワークアクセスが必要で、上流の変更が互換性に影響する場合があります。ダウンロードは配布元が提供するチェックサムで検証しますが、独立した署名ではありません。`cruise install --status` はオフラインで動作し、最新かどうかを主張せず、記録されたインストール済みバージョンを表示します。管理ランタイムの検証も Cruise ビルドの固定バージョンではなく、記録されたインストール済みバージョンを基準にします。

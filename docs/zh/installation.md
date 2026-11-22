@@ -5,13 +5,11 @@
 
 - [`gh` CLI](https://cli.github.com/) —— 启用自动创建 PR（默认设置）时，GitHub worktree 会话、基于 PR 的清理或显式启用的 workflow 合并都需要它。GitLab 仓库使用 `glab`。设置了 `create_pr: false` 的本地 worktree workflow 不需要 forge CLI，但 `--repo` 仍需要 `gh`/`glab` 来访问并克隆仓库。
 - [`glab` CLI](https://gitlab.com/gitlab-org/cli) —— GitLab 仓库需要用它代替 `gh`（用于创建合并请求、清理、发布 issue，以及显式启用的原生同步 squash 合并）。系统根据主机名（`github.com` / `gitlab.com`）检测 forge；对于自托管主机，设置 `CRUISE_FORGE=github|gitlab`；对于 `owner/repo` 格式的 `--repo` 定位符，还需设置 `GITLAB_HOST`。`--repo` 接受 `owner/repo`、嵌套的 `group/sub/project`（需 `CRUISE_FORGE=gitlab`）或完整 URL。在 GitLab 上，`{pr.number}` / `{pr.url}` 指的是合并请求；发布 issue 时的“发布 `@cruise run` 评论”选项不可用。
-- [`jcode` CLI](https://github.com/1jehuang/jcode) —— 默认 SDK 后端（`sdk: jcode`）所必需；安装后使用 `jcode login <provider>` 登录。若某个有效的执行或规划候选项使用 jcode（包括其他 workflow SDK 下标记为 SDK 的数组项），则 SDK 执行需要安装 jcode。
-- [`claude` CLI](https://code.claude.com/docs/en/quickstart) —— 只要某个有效的执行或规划候选项使用 claude（包括标记为 SDK 的数组项），就必须安装。Cruise 在进程内驱动它。模型名的 `:effort` 后缀会映射到 `claude --effort`，因此不支持该参数的 CLI 会以 `unknown option '--effort'` 使步骤失败。其认证由 Claude CLI 自行处理，与 `jcode login` 无关。
-- `opencode` CLI（V2 API）—— 只要某个有效的执行或规划候选项使用 opencode（包括标记为 SDK 的数组项），就必须安装。Cruise 会在本地启动和停止它，并使用现有的 OpenCode provider 配置与认证。不支持 V1。
+- [`jcode` CLI](https://github.com/1jehuang/jcode) —— 默认 SDK 后端（`sdk: jcode`）所必需；安装后使用 `jcode login <provider>` 登录。工作流使用 jcode SDK 时需要安装。
 - 若要使用 `cruise ssh`，本地 `PATH` 中必须有 OpenSSH 客户端（`ssh`）。
 - Windows 需要 [Git for Windows](https://gitforwindows.org/)（`git` 必须位于 `PATH` 中）。
-- SSH 目标主机上必须有兼容版本的 `cruise` 及所选 workflow 的常规前置条件，包括所需的 `gh`、`jcode`、`claude` 或 `opencode` CLI。workflow 由远端主机执行，远端主机负责其认证、配置、会话、worktree 和克隆副本。
-- 例如，可在目标主机上安装托管 provider：`cruise ssh <host> -- install jcode`。
+- SSH 目标主机上必须有兼容版本的 `cruise` 及所选工作流所需的常规前置条件，例如需要时安装 `gh` 和 `jcode`。工作流由远端主机执行，远端主机负责其认证、配置、会话、worktree 和克隆副本。
+- 例如，可在目标主机上安装托管 jcode CLI：`cruise ssh <host> -- install jcode`。
 
 <a id="installation"></a>
 ## 安装
@@ -86,17 +84,16 @@ docker exec cruise cruise plan "implement the feature"
 一次性容器（例如 `docker run --rm --env-file .env cruise:latest plan "implement the feature"`）可在前台正常运行。命令结束后容器会停止，daemon 也随之停止，因此不要用一次性容器执行后台 `--plan` 或 detached work。请通过 `--env-file` 或 `-e` 将凭据和进程级环境变量提供给 service container。
 
 <a id="managed-provider-clis"></a>
-### 托管的 provider CLI
+### 托管的 jcode CLI
 
-只安装 workflow 所需的 provider：
+安装由 Cruise 管理的 jcode CLI，或检查其状态：
 
 ```sh
 cruise install jcode
-cruise install claude
-cruise install opencode
 cruise install --status
 cruise install jcode --force
 ```
-每次调用 `cruise install <provider>` 都会查询该 provider 最新稳定版的发布元数据（`claude` 使用 stable channel）。若托管安装已是该版本且状态正常，则会复用；若为其他版本，则会更新。`--force` 会重新下载所选的最新版本。
+
+每次安装都会查询 jcode 最新稳定版的发布元数据。若托管安装已是所选版本且状态正常，则会复用；若为其他版本，则会更新。`--force` 会重新下载所选的最新版本。
 
 安装需要联网访问发布元数据和下载文件，上游变更可能影响兼容性。下载文件会使用发布者提供的校验和进行验证，但这不是独立签名。`cruise install --status` 可离线运行，只报告记录的已安装版本，不声称该版本是最新的。托管运行时也根据记录的实际安装版本进行验证，而非依据 Cruise 构建固定的版本。

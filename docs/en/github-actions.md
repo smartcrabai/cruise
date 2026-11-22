@@ -6,7 +6,7 @@
 <a id="github-actions"></a>
 # cruise GitHub Action
 
-Mention `@cruise` (configurable) on a GitHub Issue to have cruise plan and implement inside GitHub Actions, and open a draft PR when the successful run leaves branch commits and automatic PR creation is enabled -- similar in spirit to [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action), but driving cruise's own plan -> implement -> optional PR workflow through `sdk: jcode` unless the resolved workflow selects another backend -- the action installs the `jcode` CLI and provisions its credentials for you.
+Mention `@cruise` (configurable) on a GitHub Issue to have cruise plan and implement inside GitHub Actions, and open a draft PR when the successful run leaves branch commits and automatic PR creation is enabled -- similar in spirit to [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action), but driving cruise's own plan -> implement -> optional PR workflow through its default `sdk: jcode` backend; the action installs the `jcode` CLI and provisions its credentials for you. Use `command:` in the repository workflow to run an external CLI instead.
 
 This action has **no pull-request mode**: it only reacts to `issues` (opened) and `issue_comment` (created) events. A comment made on a pull request is always ignored (PRs are "issues" at the GitHub API level, but this action explicitly excludes them).
 
@@ -113,7 +113,7 @@ While a `run` job is active, it checks authorized issue comments. Accepted or re
 <a id="providers"></a>
 ## Providers
 
-This action provisions cruise's default `sdk: jcode` backend (see [below](#sdk-jcode----how-execution-works)); a repository config that names another backend keeps it. jcode ships several dozen providers -- each one just needs its API key, supplied one of three ways:
+This action provisions cruise's default `sdk: jcode` backend (see [below](#sdk-jcode----how-execution-works)). If the repository config selects `command:`, that external CLI must be available in the runner environment. jcode ships several dozen providers -- each one just needs its API key, supplied one of three ways:
 
 - **Dedicated inputs** -- `anthropic_api_key` / `openai_api_key` are registered as jcode `anthropic-api` / `openai-api` credentials.
 - **`env`** -- any other provider's key (e.g. `KIMI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`) is exported into the run, where jcode picks it up from the environment.
@@ -187,7 +187,7 @@ The identifiers in this table are for CLI credential provisioning; `jcode login 
 <a id="sdk-jcode----how-execution-works"></a>
 ## sdk: jcode -- how execution works
 
-Cruise resolves the backend from the repository workflow config and applicable checkout project defaults. A repository workflow config that sets `command:` or `sdk: claude` remains in effect; provide that backend's own CLI and credentials if needed.
+Cruise uses `sdk: jcode` unless the repository workflow selects `command:` to run an external CLI. The action installs the jcode CLI and provisions its credentials for the SDK backend.
 
 - **OpenAI service tier** defaults to `off` when neither the workflow nor process environment defines `JCODE_OPENAI_SERVICE_TIER`; an explicit value is respected.
 - **Model inputs** (`model` / `plan_model`) override the corresponding Cruise settings. Every actual jcode prompt requires an effective Cruise model in `provider/model[:effort]` or bare-model form. `model` may come from the action input, repository workflow, or checkout `.cruise/default.yaml`; the jcode home default and `JCODE_MODEL` do not substitute. `plan_model` is used for planning calls and otherwise falls back to `model`. The optional effort suffix supports `low|medium|high|xhigh|max` and aliases documented in [SDK mode](sdk.md#sdk-mode).

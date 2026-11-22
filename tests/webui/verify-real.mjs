@@ -1,4 +1,4 @@
-// Real Claude provider, production runtime and real formal checker. No provider stubs.
+// Real Anthropic provider, production runtime and real formal checker. No provider stubs.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
@@ -24,7 +24,7 @@ try {
       config: { kind: 'inline_snapshot' }, input: 'Verify the counter requirements', title: `Verify ${phase}`,
       current_step: null, created_at: '2026-11-07T00:00:00Z', completed_at: null,
       worktree_path: null, worktree_branch: null }));
-    await writeFile(join(dir, 'config.yaml'), `sdk: claude\nmodel: ${process.env.WEBUI_VERIFY_MODEL || 'haiku'}\nsteps:\n  harmless:\n    command: "true"\n`);
+    await writeFile(join(dir, 'config.yaml'), `sdk: jcode\nmodel: ${process.env.WEBUI_VERIFY_MODEL || 'claude/claude-opus-4-5'}\nsteps:\n  harmless:\n    command: "true"\n`);
     await writeFile(join(dir, 'plan.md'), plan);
   }
   const env = { ...process.env, PATH: `${resolve('tests/formal/node_modules/.bin')}:${process.env.PATH}`,

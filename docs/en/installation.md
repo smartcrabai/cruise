@@ -7,13 +7,11 @@
 
 - [`gh` CLI](https://cli.github.com/) — required for GitHub worktree sessions when automatic PR creation is enabled (the default), PR-backed cleanup, or an explicitly enabled workflow merge. Use `glab` for GitLab repositories. Eligible fresh runs with a supported origin also need the corresponding CLI for the default base-CI check unless `check_base_ci: false` disables it. `--repo` requires the forge CLI to access and clone the repository.
 - [`glab` CLI](https://gitlab.com/gitlab-org/cli) — required instead of `gh` for GitLab repositories (merge request creation, cleanup, issue publishing, and explicitly enabled native synchronous squash merge). The forge is detected from the host (`github.com` / `gitlab.com`). For self-managed hosts, set `CRUISE_FORGE=github|gitlab`; for `owner/repo`-style `--repo` locators, also set `GITLAB_HOST`. `--repo` accepts `owner/repo`, nested `group/sub/project` (with `CRUISE_FORGE=gitlab`), or a full URL. On GitLab, `{pr.number}` / `{pr.url}` refer to the merge request, and the option to post an `@cruise run` comment when publishing issues is unavailable.
-- [`jcode` CLI](https://github.com/1jehuang/jcode) — required by the default SDK backend (`sdk: jcode`); sign in with `jcode login <provider>` after installing. For SDK execution, install jcode whenever an effective execution or planning candidate uses it, including SDK-qualified array entries under another workflow SDK.
-- [`claude` CLI](https://code.claude.com/docs/en/quickstart) — required whenever an effective execution or planning candidate uses claude, including SDK-qualified array entries. Cruise drives it in-process. A model name's `:effort` suffix maps to `claude --effort`, so a CLI without that flag fails the step with `unknown option '--effort'`. Authentication is Claude's own and unrelated to `jcode login`.
-- `opencode` CLI with the V2 API — required whenever an effective execution or planning candidate uses opencode, including SDK-qualified array entries. Cruise starts and stops it locally and uses your existing OpenCode provider configuration and authentication. V1 is not supported.
+- [`jcode` CLI](https://github.com/1jehuang/jcode) — required by the default SDK backend (`sdk: jcode`); sign in with `jcode login <provider>` after installing. Install it whenever a workflow uses the jcode SDK.
 - An OpenSSH client (`ssh`) on the local `PATH` for `cruise ssh`.
 - On Windows, [Git for Windows](https://gitforwindows.org/) (`git` on `PATH`) is required.
-- The SSH destination needs a compatible `cruise` and the usual prerequisites for the selected workflow, such as `gh`, `jcode`, `claude`, or `opencode` when required. The workflow runs on the remote host, which owns its authentication, configuration, sessions, worktrees, and clones.
-- Install a managed provider on the destination, for example with `cruise ssh <host> -- install jcode`.
+- The SSH destination needs a compatible `cruise` and the usual prerequisites for the selected workflow, such as `gh` and `jcode` when required. The workflow runs on the remote host, which owns its authentication, configuration, sessions, worktrees, and clones.
+- Install the managed jcode CLI on the destination, for example with `cruise ssh <host> -- install jcode`.
 
 <a id="installation"></a>
 ## Installation
@@ -88,17 +86,16 @@ docker exec cruise cruise plan "implement the feature"
 A one-shot `docker run --rm --env-file .env cruise:latest plan "implement the feature"` works in the foreground. Do not use a one-shot container for background `--plan` or detached work: when its command ends, the container stops the daemon. Supply credentials and process-level environment to the service container with `--env-file` or `-e`.
 
 <a id="managed-provider-clis"></a>
-### Managed provider CLIs
+### Managed jcode CLI
 
-Install only the providers your workflows need:
+Install or inspect the jcode CLI managed by Cruise:
 
 ```sh
 cruise install jcode
-cruise install claude
-cruise install opencode
 cruise install --status
 cruise install jcode --force
 ```
-Each `cruise install <provider>` invocation checks that provider's latest stable release metadata (`claude` uses its stable channel). Cruise reuses a healthy managed installation at the selected version and updates an installation at another version. `--force` downloads the selected latest version again.
+
+Each install invocation checks jcode's latest stable release metadata. Cruise reuses a healthy managed installation at the selected version and updates an installation at another version; `--force` downloads the selected latest version again.
 
 Provider installation requires network access to release metadata and downloads, and upstream changes may affect compatibility. Downloads are verified with publisher-supplied checksums, not independent signatures. `cruise install --status` works offline and reports the recorded installed version without claiming it is latest. Managed-runtime validation uses the version recorded for the installation, not a version pinned by the Cruise build.

@@ -113,10 +113,11 @@ fn save_dispatch_preview_fixture() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn setup_agents(home: &Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let default_command = serde_json::to_string(&[home.join("inert-agent")])?;
     fs::create_dir_all(home.join("config/cruise"))?;
     fs::write(
         home.join("config/cruise/default.yaml"),
-        "check_base_ci: false\n",
+        format!("command: {default_command}\ncheck_base_ci: false\n"),
     )?;
     let bin = home.join("bin");
     fs::create_dir(&bin)?;
@@ -128,11 +129,11 @@ fn setup_agents(home: &Path) -> Result<std::path::PathBuf, Box<dyn std::error::E
         ),
     )?;
     fs::set_permissions(bin.join("cruise"), fs::Permissions::from_mode(0o700))?;
-    let sdk = bin.join("claude");
+    let agent = home.join("inert-agent");
     fs::write(
-        &sdk,
+        &agent,
         r#"#!/bin/sh
-read -r frame
+frame=$(cat)
 id=${PWD##*/}
 owner="$HOME/data/cruise/sessions/$id/manager-owner.json"
 case "$(cat "$owner")" in
@@ -141,7 +142,7 @@ case "$(cat "$owner")" in
   *'"task_id":"c"'*) task=c ;;
   *) echo "unknown owner $owner" >&2; exit 1 ;;
 esac
-printf '%s\n' "$task" >> "$HOME/sdk-calls"
+printf '%s\n' "$task" >> "$HOME/agent-calls"
 if [ "$task" = a ]; then
   while [ ! -f "$HOME/release-a" ]; do /bin/sleep 0.1; done
 fi
@@ -152,16 +153,15 @@ case "$frame" in
   *'write tests only'*) printf '%s\n' "$task test" > "${task}-test" ;;
   *'implement production code'*) printf '%s\n' "$task implementation" > "${task}-implementation" ;;
 esac
-case "$frame" in
-  *'<consolidated-worklist>'*) result='## Ledger Records\n```text\niteration: 1\n\n```' ;;
-  *) result='NO_CHANGES_INTENTIONAL: fixture completed' ;;
-esac
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"fixture"}'
-printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"fixture"}\n' "$result"
-printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fixture","result":"%s"}\n' "$result"
+if [ -n "${CRUISE_TDD_LEDGER_PLAN-}" ]; then
+  result=$(printf '%s\n' '## Ledger Records' '```text' 'iteration: 1' '' '```')
+else
+  result='NO_CHANGES_INTENTIONAL: fixture completed'
+fi
+printf '%s\n' "$result"
 "#,
     )?;
-    fs::set_permissions(&sdk, fs::Permissions::from_mode(0o700))?;
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o700))?;
     Ok(bin)
 }
 
@@ -214,8 +214,6 @@ fn save_preview(home: &Path, bin: &Path, repo: &Path) -> Result<Value, Box<dyn s
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let output = fixture
         .args(["--exact", "save_dispatch_preview_fixture", "--nocapture"])
-        .env_remove("CRUISE_COMMAND")
-        .env("CRUISE_SDK", "claude")
         .env("PATH", &path)
         .env("DISPATCH_PREVIEW_REPO", repo)
         .env("DISPATCH_PREVIEW_OUTPUT", &output_path)
@@ -234,8 +232,6 @@ fn start_daemon(home: &Path, bin: &Path) -> Result<(), Box<dyn std::error::Error
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_cruise"));
     isolated(&mut daemon, home)?;
     let started = daemon
-        .env_remove("CRUISE_COMMAND")
-        .env("CRUISE_SDK", "claude")
         .env("PATH", &path)
         .current_dir(home)
         .stdin(Stdio::null())
@@ -333,11 +329,11 @@ async fn dependent_child_starts_from_integrated_prerequisite_sha()
         }
         assert!(
             Instant::now() < deadline,
-            "dependency did not dispatch: status={} reason={} attempts={} sdk={} daemon={} gate-errors={}",
+            "dependency did not dispatch: status={} reason={} attempts={} agent-calls={} daemon={} gate-errors={}",
             goal["status"],
             goal["reason"],
             goal["execution"]["attempts"],
-            fs::read_to_string(home.join("sdk-calls")).unwrap_or_default(),
+            fs::read_to_string(home.join("agent-calls")).unwrap_or_default(),
             fs::read_to_string(home.join("state/cruise/daemon/daemon.log")).unwrap_or_default(),
             fs::read_to_string(home.join("gate-errors")).unwrap_or_default()
         );

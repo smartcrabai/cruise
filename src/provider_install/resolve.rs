@@ -302,7 +302,7 @@ mod tests {
 
         for (field, value) in [
             ("schema", serde_json::json!(2)),
-            ("provider", serde_json::json!("claude")),
+            ("provider", serde_json::json!("unsupported")),
             ("version", serde_json::json!("not-a-version")),
             ("target", serde_json::json!("wrong-target")),
             ("relative_path", serde_json::json!("../escape")),
@@ -330,13 +330,13 @@ mod tests {
     fn missing_or_directory_path_is_not_a_binary() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("bin");
-        fs::create_dir_all(path.join(Provider::Claude.binary_name())).unwrap();
-        let err = resolve_in(Provider::Claude, None, root.path(), &[path], "darwin-arm64")
+        fs::create_dir_all(path.join(Provider::Jcode.binary_name())).unwrap();
+        let err = resolve_in(Provider::Jcode, None, root.path(), &[path], "linux-x86_64")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("claude is not installed"));
-        assert!(err.contains("cruise install claude"));
-        assert!(err.contains("CRUISE_CLAUDE_CLI_PATH"));
+        assert!(err.contains("jcode is not installed"));
+        assert!(err.contains("cruise install jcode"));
+        assert!(err.contains("CRUISE_JCODE_CLI_PATH"));
     }
 
     #[test]

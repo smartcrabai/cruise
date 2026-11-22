@@ -45,51 +45,21 @@ pub fn target_key_for(
     musl: bool,
     avx2: bool,
 ) -> Result<&'static str> {
-    use Provider::{Claude, Jcode, OpenCode};
     let key = match (provider, os, arch, musl, avx2) {
-        (Jcode, "linux", "x86_64", false, _) => Some("linux-x86_64"),
-        (Jcode, "linux", "aarch64", false, _) => Some("linux-aarch64"),
-        (Jcode, "macos", "x86_64", _, _) => Some("macos-x86_64"),
-        (Jcode, "macos", "aarch64", _, _) => Some("macos-aarch64"),
-        (Jcode, "windows", "x86_64", _, _) => Some("windows-x86_64"),
-        (Jcode, "windows", "aarch64", _, _) => Some("windows-aarch64"),
-        (Claude, "macos", "x86_64", _, _) | (OpenCode, "macos", "x86_64", _, true) => {
-            Some("darwin-x64")
-        }
-        (Claude | OpenCode, "macos", "aarch64", _, _) => Some("darwin-arm64"),
-        (Claude, "linux", "x86_64", false, _) | (OpenCode, "linux", "x86_64", false, true) => {
-            Some("linux-x64")
-        }
-        (Claude, "linux", "x86_64", true, _) | (OpenCode, "linux", "x86_64", true, true) => {
-            Some("linux-x64-musl")
-        }
-        (Claude | OpenCode, "linux", "aarch64", false, _) => Some("linux-arm64"),
-        (Claude | OpenCode, "linux", "aarch64", true, _) => Some("linux-arm64-musl"),
-        (Claude, "windows", "x86_64", _, _) => Some("win32-x64"),
-        (Claude, "windows", "aarch64", _, _) => Some("win32-arm64"),
-        (OpenCode, "macos", "x86_64", _, false) => Some("darwin-x64-baseline"),
-        (OpenCode, "linux", "x86_64", false, false) => Some("linux-x64-baseline"),
-        (OpenCode, "linux", "x86_64", true, false) => Some("linux-x64-baseline-musl"),
-        (OpenCode, "windows", "aarch64", _, _) => Some("windows-arm64"),
-        (OpenCode, "windows", "x86_64", _, true) => Some("windows-x64"),
-        (OpenCode, "windows", "x86_64", _, false) => Some("windows-x64-baseline"),
+        (Provider::Jcode, "linux", "x86_64", false, _) => Some("linux-x86_64"),
+        (Provider::Jcode, "linux", "aarch64", false, _) => Some("linux-aarch64"),
+        (Provider::Jcode, "macos", "x86_64", _, _) => Some("macos-x86_64"),
+        (Provider::Jcode, "macos", "aarch64", _, _) => Some("macos-aarch64"),
+        (Provider::Jcode, "windows", "x86_64", _, _) => Some("windows-x86_64"),
+        (Provider::Jcode, "windows", "aarch64", _, _) => Some("windows-aarch64"),
         _ => None,
     };
     key.ok_or_else(|| {
         CruiseError::Other(format!(
-            "no {} build for {os}-{arch}; set {} or install {} on PATH",
-            name(provider),
+            "no {provider} build for {os}-{arch}; set {} or install {provider} on PATH",
             provider.env_override(),
-            name(provider)
         ))
     })
-}
-fn name(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Jcode => "jcode",
-        Provider::Claude => "claude",
-        Provider::OpenCode => "opencode",
-    }
 }
 
 #[cfg(test)]
@@ -107,75 +77,54 @@ mod tests {
     }
     #[test]
     fn expected_target_mappings() {
-        use Provider::{Claude, Jcode, OpenCode};
         let cases = [
-            (Jcode, "linux", "x86_64", false, true, "linux-x86_64"),
-            (Jcode, "linux", "aarch64", false, false, "linux-aarch64"),
-            (Jcode, "macos", "x86_64", false, false, "macos-x86_64"),
-            (Jcode, "macos", "aarch64", false, false, "macos-aarch64"),
-            (Jcode, "windows", "x86_64", false, true, "windows-x86_64"),
-            (Jcode, "windows", "aarch64", false, false, "windows-aarch64"),
-            (Claude, "linux", "x86_64", false, false, "linux-x64"),
-            (Claude, "linux", "aarch64", false, false, "linux-arm64"),
-            (Claude, "linux", "x86_64", true, true, "linux-x64-musl"),
-            (Claude, "linux", "aarch64", true, false, "linux-arm64-musl"),
-            (Claude, "macos", "x86_64", false, true, "darwin-x64"),
-            (Claude, "macos", "aarch64", false, false, "darwin-arm64"),
-            (Claude, "windows", "x86_64", false, true, "win32-x64"),
-            (Claude, "windows", "aarch64", false, false, "win32-arm64"),
-            (OpenCode, "linux", "x86_64", false, true, "linux-x64"),
             (
-                OpenCode,
+                Provider::Jcode,
                 "linux",
                 "x86_64",
                 false,
-                false,
-                "linux-x64-baseline",
-            ),
-            (OpenCode, "linux", "x86_64", true, true, "linux-x64-musl"),
-            (
-                OpenCode,
-                "linux",
-                "x86_64",
                 true,
-                false,
-                "linux-x64-baseline-musl",
+                "linux-x86_64",
             ),
-            (OpenCode, "linux", "aarch64", false, false, "linux-arm64"),
             (
-                OpenCode,
+                Provider::Jcode,
                 "linux",
                 "aarch64",
-                true,
                 false,
-                "linux-arm64-musl",
+                false,
+                "linux-aarch64",
             ),
-            (OpenCode, "macos", "x86_64", false, true, "darwin-x64"),
             (
-                OpenCode,
+                Provider::Jcode,
                 "macos",
                 "x86_64",
                 false,
                 false,
-                "darwin-x64-baseline",
+                "macos-x86_64",
             ),
-            (OpenCode, "macos", "aarch64", false, false, "darwin-arm64"),
-            (OpenCode, "windows", "x86_64", false, true, "windows-x64"),
             (
-                OpenCode,
+                Provider::Jcode,
+                "macos",
+                "aarch64",
+                false,
+                false,
+                "macos-aarch64",
+            ),
+            (
+                Provider::Jcode,
                 "windows",
                 "x86_64",
                 false,
-                false,
-                "windows-x64-baseline",
+                true,
+                "windows-x86_64",
             ),
             (
-                OpenCode,
+                Provider::Jcode,
                 "windows",
                 "aarch64",
                 false,
                 false,
-                "windows-arm64",
+                "windows-aarch64",
             ),
         ];
         for (provider, os, arch, musl, avx2, expected) in cases {
@@ -184,11 +133,11 @@ mod tests {
                 expected
             );
         }
-        let error = target_key_for(Jcode, "linux", "x86_64", true, true)
+        let error = target_key_for(Provider::Jcode, "linux", "x86_64", true, true)
             .unwrap_err()
             .to_string();
         assert!(error.contains("no jcode build for linux-x86_64"));
         assert!(error.contains("CRUISE_JCODE_CLI_PATH"));
-        assert!(target_key_for(Claude, "freebsd", "x86_64", false, true).is_err());
+        assert!(target_key_for(Provider::Jcode, "freebsd", "x86_64", false, true).is_err());
     }
 }
