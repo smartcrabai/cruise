@@ -2153,6 +2153,8 @@ mod tests {
         let _lock = crate::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|error| panic!("create temp dir: {error}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
+        // Git for Windows reads its global config from HOME, not USERPROFILE.
+        let _git_home = crate::test_support::EnvGuard::set("HOME", tmp.path());
         let _inherited_nosystem = crate::test_support::EnvGuard::remove("GIT_CONFIG_NOSYSTEM");
         let _inherited_global = crate::test_support::EnvGuard::remove("GIT_CONFIG_GLOBAL");
         std::fs::write(
@@ -2193,6 +2195,8 @@ mod tests {
         let _lock = crate::test_support::lock_process();
         let tmp = TempDir::new().unwrap_or_else(|error| panic!("create temp dir: {error}"));
         let _home = crate::test_support::set_fake_home(tmp.path());
+        // Git for Windows reads its global config from HOME, not USERPROFILE.
+        let _git_home = crate::test_support::EnvGuard::set("HOME", tmp.path());
         let _nosystem = crate::test_support::EnvGuard::set("GIT_CONFIG_NOSYSTEM", "1");
         let _inherited_global = crate::test_support::EnvGuard::remove("GIT_CONFIG_GLOBAL");
         let repo = tmp.path().join("repo");

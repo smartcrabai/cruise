@@ -139,10 +139,18 @@ pub(super) fn refresh_ahead(
     if !needs_refresh(store, &path) {
         return Ok(());
     }
-    let Err(detail) = run_auth_test(config, source_home, store) else {
-        return Ok(());
-    };
     let provider = store.login_provider();
+    let detail = match run_auth_test(config, source_home, store) {
+        Ok(None) => return Ok(()),
+        Ok(Some(detail)) => detail,
+        // jcode never reported a refresh outcome; let the runtime try instead.
+        Err(error) => {
+            eprintln!(
+                "cruise: warning: could not refresh jcode provider `{provider}` ahead of expiry: {error}"
+            );
+            return Ok(());
+        }
+    };
     match remaining_ms(store, &path) {
         Some(remaining) if remaining < MIN_LAUNCH_VALIDITY_MS => Err(format!(
             "jcode provider `{provider}` authentication expired and could not be refreshed: {detail}; run `jcode login {provider}`"
@@ -172,12 +180,13 @@ fn remaining_ms(store: OAuthStore, path: &Path) -> Option<i64> {
 }
 
 /// Force a refresh through jcode itself against the user's home, so jcode
-/// persists it to the real store under its own lock. Returns the failure detail.
+/// persists it to the real store under its own lock. `Ok(Some(detail))` is a
+/// refresh jcode reported as failed; `Err` means no refresh outcome was seen.
 fn run_auth_test(
     config: &JcodeRunnerConfig,
     source_home: &Path,
     store: OAuthStore,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<Option<String>, String> {
     let binary = config
         .binary
         .clone()
@@ -240,10 +249,11 @@ fn run_auth_test(
         .filter_map(|reader| reader.join().ok())
         .collect();
     if status.success() {
-        Ok(())
+        Ok(None)
     } else {
-        Err(refresh_failure_detail(&output)
-            .unwrap_or_else(|| format!("jcode auth-test exited with {status}")))
+        refresh_failure_detail(&output)
+            .map(Some)
+            .ok_or_else(|| format!("jcode auth-test exited with {status}"))
     }
 }
 
