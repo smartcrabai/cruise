@@ -46,7 +46,10 @@ pub(crate) fn is_idle() -> bool {
 
 struct TurnGuard(PathBuf);
 impl TurnGuard {
-    fn acquire(repo: PathBuf) -> Result<Self> {
+    /// Persist the user turn and publish its id under one `BUSY` lock, so a
+    /// concurrent snapshot never sees the saved turn without its active id.
+    /// Lock order matches `snapshot_with_active_turn`: `BUSY`, then the record writer.
+    fn start(repo: PathBuf, persist: impl FnOnce() -> Result<Turn>) -> Result<(Self, Turn)> {
         let mut busy = BUSY
             .get_or_init(Default::default)
             .lock()
@@ -59,14 +62,9 @@ impl TurnGuard {
                 "a manager conversation turn is already running for this repository".into(),
             ));
         }
-        busy.insert(repo.clone(), String::new());
-        Ok(Self(repo))
-    }
-    fn set_turn(&self, id: &str) {
-        BUSY.get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(self.0.clone(), id.to_owned());
+        let turn = persist()?;
+        busy.insert(repo.clone(), turn.id.clone());
+        Ok((Self(repo), turn))
     }
 }
 impl Drop for TurnGuard {
@@ -168,9 +166,8 @@ async fn prompt(cwd: &Path, snapshot: &Snapshot, instruction: &str) -> Result<St
 
 pub(crate) fn message(cwd: &Path, text: String) -> Result<Turn> {
     let initial = crate::manager::snapshot(cwd)?;
-    let guard = TurnGuard::acquire(initial.repository)?;
-    let user = crate::manager::message(cwd, text)?;
-    guard.set_turn(&user.id);
+    let (guard, user) =
+        TurnGuard::start(initial.repository, || crate::manager::message(cwd, text))?;
     let cwd = cwd.to_owned();
     let id = user.id.clone();
     tokio::spawn(async move {
@@ -212,9 +209,9 @@ struct Draft {
 
 pub(crate) fn propose(cwd: &Path) -> Result<Turn> {
     let snapshot = crate::manager::snapshot(cwd)?;
-    let guard = TurnGuard::acquire(snapshot.repository)?;
-    let turn = crate::manager::message(cwd, "/make-goal".into())?;
-    guard.set_turn(&turn.id);
+    let (guard, turn) = TurnGuard::start(snapshot.repository, || {
+        crate::manager::message(cwd, "/make-goal".into())
+    })?;
     let cwd = cwd.to_owned();
     let id = turn.id.clone();
     tokio::spawn(async move {
