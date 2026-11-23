@@ -28,8 +28,10 @@ module jcode_bubblewrap {
       launchOK: launch, helloOK: hello, editable: canEdit, sandboxed: false,
       roWriteCap: false, editWriteCap: false, roAttempt: false,
       editAttempt: false, pending: 0, result: 0, fallback: false }, "hostPrep") }
-  action prepFailure = all { s.phase == 1, not(s.platformOK),
-    record({ ...s, phase: 5, pending: 2 }, "prepFailure") }
+  action fallbackUnconfined = all { s.phase == 1, not(s.platformOK),
+    record({ ...s, phase: 2, ownerGen: s.gen, runtime: true, proxy: true,
+      sandboxed: false, roWriteCap: false, editWriteCap: false,
+      fallback: true }, "fallbackUnconfined") }
   action launch = all { s.phase == 1, s.platformOK, s.launchOK,
     record({ ...s, phase: 2, ownerGen: s.gen, runtime: true, proxy: true,
       sandboxed: true, roWriteCap: false, editWriteCap: s.editable }, "launch") }
@@ -68,7 +70,7 @@ module jcode_bubblewrap {
     nondet staleGen = Set(0, 1, 2).oneOf()
     any { hostPrep(true, true, true, true), hostPrep(true, true, true, false),
       hostPrep(false, true, true, true), hostPrep(true, false, true, true),
-      hostPrep(true, true, false, true), prepFailure, launch, launchFailure,
+      hostPrep(true, true, false, true), fallbackUnconfined, launch, launchFailure,
       connect, helloFailure, cancel, turn, finishTurn(true), finishTurn(false),
       abortTurn, attemptROWrite, attemptEditWrite, staleTeardown(staleGen),
       reap, terminal }
@@ -81,15 +83,21 @@ module jcode_bubblewrap {
     0.to(2).contains(s.ownerGen), 0.to(3).contains(s.pending),
     0.to(3).contains(s.result), 0.to(2).contains(s.turns),
     s.runtime == s.proxy, s.turns <= s.gen,
-    s.runtime implies (s.ownerGen == s.gen and s.sandboxed),
-    s.runtime implies (not(s.roWriteCap) and (s.editWriteCap == s.editable)),
+    s.runtime implies (s.ownerGen == s.gen and (s.sandboxed != s.fallback)),
+    not(s.sandboxed and s.fallback),
+    s.runtime implies (not(s.roWriteCap)
+      and (s.editWriteCap == (s.editable and s.sandboxed))),
     not(s.runtime) implies (not(s.roWriteCap) and not(s.editWriteCap)),
-    not(s.fallback),
-    event == "turn" implies (before.phase == 3 and before.platformOK
-      and before.launchOK and before.helloOK and before.runtime and before.proxy
-      and before.sandboxed and before.pending == 0 and s.turns == before.turns + 1),
+    s.sandboxed implies (s.platformOK and s.launchOK),
+    event == "turn" implies (before.phase == 3 and before.helloOK
+      and before.runtime and before.proxy and before.pending == 0
+      and ((before.sandboxed and before.platformOK and before.launchOK
+        and not(before.fallback))
+        or (before.fallback and not(before.platformOK)
+          and not(before.sandboxed)))
+      and s.turns == before.turns + 1),
     event != "turn" implies s.turns == before.turns,
-    Set("prepFailure", "launchFailure", "helloFailure", "cancel")
+    Set("launchFailure", "helloFailure", "cancel")
       .contains(event) implies (s.turns == before.turns and s.phase == 5),
     event == "staleTeardown" implies (s == before and s.runtime
       and s.ownerGen == before.ownerGen),
@@ -106,9 +114,11 @@ module jcode_bubblewrap {
   run successTest = init.then(hostPrep(true, true, true, true)).then(launch)
     .then(connect).then(turn).then(finishTurn(true)).then(reap).then(terminal)
     .expect(s.result == 1 and s.turns == 1 and safety)
-  run platformFailureTest = init.then(hostPrep(false, true, true, true))
-    .then(prepFailure).then(reap).then(terminal)
-    .expect(s.result == 2 and s.turns == 0 and not(s.runtime) and not(s.fallback) and safety)
+  run platformUnavailableFallbackTest = init.then(hostPrep(false, true, true, true))
+    .then(fallbackUnconfined).then(connect).then(turn).then(finishTurn(true))
+    .then(reap).then(terminal)
+    .expect(s.result == 1 and s.turns == 1 and s.fallback and not(s.sandboxed)
+      and not(s.runtime) and safety)
   run launchFailureTest = init.then(hostPrep(true, false, true, true))
     .then(launchFailure).then(reap).then(terminal)
     .expect(s.result == 2 and s.turns == 0 and not(s.runtime) and not(s.fallback) and safety)

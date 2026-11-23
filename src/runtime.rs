@@ -351,19 +351,29 @@ fn text_from_env(name: &str) -> error::Result<String> {
         .ok_or_else(|| error::CruiseError::Other(format!("missing or invalid {name}")))
 }
 
+/// Verify a staged CI repair with the daemon's trusted script inside
+/// Bubblewrap. Without Bubblewrap or a configured script, warn and allow the
+/// commit: CI verifies the pushed head. A verifier that runs and fails blocks it.
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "jcode-bubblewrap")),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the Linux Bubblewrap verifier is fallible; ci_followup::finish takes one signature"
+    )
+)]
 fn run_approved_ci_verifier(candidate: &std::path::Path) -> error::Result<()> {
     #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+    if backend::jcode::bubblewrap_available()
+        && let Some(script) =
+            std::env::var_os("CRUISE_CI_VERIFY_SCRIPT").filter(|value| !value.is_empty())
     {
-        let script = path_from_env("CRUISE_CI_VERIFY_SCRIPT")?;
         let worktree = std::env::current_dir()?.canonicalize()?;
-        backend::jcode::verify_ci_snapshot(candidate, &worktree, &script)
-            .map_err(error::CruiseError::Other)
+        return backend::jcode::verify_ci_snapshot(candidate, &worktree, script.as_ref())
+            .map_err(error::CruiseError::Other);
     }
-    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
-    {
-        let _ = candidate;
-        Err(error::CruiseError::Other(
-            "automatic CI fix commits require the Linux jcode-bubblewrap verifier".into(),
-        ))
-    }
+    let _ = candidate;
+    eprintln!(
+        "Warning: skipping host verification of the CI repair (requires Bubblewrap and CRUISE_CI_VERIFY_SCRIPT); CI verifies the pushed head"
+    );
+    Ok(())
 }

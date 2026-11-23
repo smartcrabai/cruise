@@ -20,6 +20,7 @@
 ### Changed
 
 - Stop prompting for workflow flags on `cruise run`; saved session values and explicit `-f/--flag` assignments now control execution. `exec` and `force_exec` still prompt before creating a transient session.
+- Relax Bubblewrap isolation requests: `require_bubblewrap: true` and `CRUISE_JCODE_BUBBLEWRAP=1` use isolation when available; otherwise Cruise warns and runs unconfined. CI repair commits use the host verifier when Bubblewrap and `CRUISE_CI_VERIFY_SCRIPT` are available; otherwise Cruise warns, commits and pushes without host verification, and relies on CI for the pushed head. A configured verifier failure still blocks the commit.
 - Breaking change: the built-in `browser_e2e` and `app_e2e` flags are removed without aliases and replaced by `e2e`. TDD's former `browser-e2e` / `app-e2e` steps become one `e2e` step; refactor's browser/app E2E steps are consolidated into `prepare-e2e` and `e2e-final-check`. Saved sessions that enabled `browser_e2e` or `app_e2e` now run without E2E; re-enable it with `cruise run <id> -f e2e`.
 - Split the README into English, Japanese, and Simplified Chinese documentation under `docs/en/`, `docs/ja/`, and `docs/zh/`.
 - Resolve managed provider installs to each provider's latest stable release, skipping healthy matches and reporting recorded installed versions in offline status.
@@ -38,7 +39,7 @@
 - Check GitHub and GitLab base-branch CI before fresh workflow runs by default; opt out with `check_base_ci: false` in `default.yaml`.
 - Prompt steps can declare ordered `quality_gates` commands that verify successful work and retry the step with sanitized failure feedback within the existing edge budget.
 - Add the `if.head-changed` step condition, which routes to a target when a step completes successfully with a different Git `HEAD` OID; untracked, ignored, and uncommitted changes do not count.
-- Configure a trusted `CRUISE_CI_VERIFY_SCRIPT` outside the worktree on Linux `jcode-bubblewrap` builds to verify the exact staged repair before an automatic CI fix commit and scoped push.
+- Allow an optional trusted `CRUISE_CI_VERIFY_SCRIPT` outside the worktree to verify the exact staged repair before an automatic CI fix commit and scoped push when Bubblewrap is available; otherwise Cruise warns and relies on CI for the pushed head.
 - Add `cruise docs e2e [<framework>]` to read the common E2E policy and available framework IDs or one embedded policy offline. New policies include `browser-extension`, `slint`, `flutter`, and `fyne`.
 - Add `cruise daemon start|stop|restart|status|serve` and `CRUISE_DAEMON_PORT` for resident daemon lifecycle and port configuration.
 - Start Docker images as a foreground daemon on port 8484 by default, and document long-lived service-container use.
@@ -51,10 +52,16 @@
 ### Fixed
 
 - Clean up session worktrees from their shared Git directory when the recorded base directory has been removed, and allow session deletion when both paths are gone.
-
+- Refresh jcode `openai` and `claude` OAuth logins in the user's jcode home before launching a private runtime once less than two hours remain, serialized across Cruise processes, and copy back any refresh a private runtime still performed. jcode replaced the shared login link with a private copy on refresh, so the rotated refresh token was lost and later attempts failed with `refresh_token_reused`. An expired login that cannot be refreshed now fails before launch with a `jcode login` hint.
+- Allow host Git operations such as after-PR base sync when global or system configuration has exactly the `filter.lfs.*` settings `git lfs install` writes. Other filters, merge drivers, and any filter from repository configuration are still rejected.
+- Collect GitHub Actions job logs for CI repair evidence as the plain-text download GitHub serves, passing `--allow-escape-sequences` to current `gh` releases. The host previously parsed the response as a ZIP archive, so every failed check reported an incomplete log and CI repair could neither commit nor retry.
+- Keep the end of each CI job log in repair evidence, splitting the evidence budget evenly across failed jobs, and stop treating a shortened log as incomplete evidence. Large logs, such as Windows test runs, previously blocked every automatic CI repair commit and retry; only a job log the host cannot fetch still does.
+- Keep a reported cancelled Actions or GitLab job, such as a matrix job stopped by fail-fast or a job-level timeout, in CI repair evidence instead of marking the evidence incomplete. Retries still select only failed jobs.
+- Accept CI repair evidence when the `wait-ci` diagnostic lists only its first ten failing checks, provided every failing check run on the head is an Actions job the host enumerated and no commit status failed. More than ten failing checks previously always blocked automatic CI repair.
+- Retry the built-in `wait-ci` GitHub and GitLab CI status query up to five times, 15 seconds apart and within the wait deadline, after a network error, HTTP 408, 429, or 5xx. One transient failure previously ended the after-PR workflow with `api_error`; other HTTP errors still fail immediately.
 - Fix the built-in GitHub `wait-ci` details GraphQL query, which had an unbalanced brace and failed on every CI failure, so failed check names reach the CI diagnostic, span attributes, and CI repair evidence again instead of an empty truncated list.
 - Stop reporting a step failure as unresolved when the next `skip: prev.success` recovery step runs because of it, so recovered after-PR workflows (base-sync conflict or CI repair) no longer end as `failed` with `error.type=step_failed`. The failed step span still records the failure.
-- Stop unverified or stale built-in CI repairs before publication. Only a verified repair or eligible one-time same-head retry returns to the CI wait.
+- Stop stale built-in CI repairs before publication and block a repair when a configured host verifier fails. When no host verifier can run, publication proceeds with a warning and relies on CI for the pushed head.
 - Resume fatal after-PR failures from their separate graph checkpoint, preserving retry counts and avoiding repeated main-workflow and PR-publication effects. Legacy sessions without the stage marker retain their previous after-PR restart behavior.
 - Prevent stack overflow while reporting early CLI workflow failures, including missing-model diagnostics, when after-PR steps are configured.
 - Native GitHub squash merges check current-base ancestry and route confirmed behind/diverged or conflicting pull requests through bounded base-sync recovery. Only native `ResyncRequired` routing starts a fresh after-PR pass budget: reset `budgeted_traversals` for every edge except `squash-merge` → `if.fail` target and clear group retry counts, preserving edge traversal history. The resync edge remains capped at `max_retries`, while generic `if.fail` retains shared budgets. Worst case: up to `max_retries` resyncs, each pass allowing up to `max_retries - 1` CI-fix iterations; zero retry budget permits no resync. Other readiness failures and GitLab behavior are unchanged.

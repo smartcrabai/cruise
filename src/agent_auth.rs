@@ -33,7 +33,7 @@ enum Verdict {
     Expired(&'static str),
 }
 
-fn normalize_ms(value: i64) -> i64 {
+pub(crate) fn normalize_ms(value: i64) -> i64 {
     if value < 100_000_000_000 {
         value.saturating_mul(1000)
     } else {
@@ -152,16 +152,14 @@ pub(crate) fn ensure_agents_authenticated(
     };
     let mut targets = Vec::new();
     for candidate in candidates {
-        let provider = crate::backend::jcode::parse_model_ref(candidate.model.as_deref())
+        let target = crate::backend::jcode::parse_model_ref(candidate.model.as_deref())
             .ok()
-            .and_then(|(provider, _, _)| provider);
-        let target = match provider.as_deref() {
-            Some("claude" | "claude-oauth" | "claude-subprocess") => {
-                Some(CredentialTarget::JcodeAnthropic)
-            }
-            Some("openai" | "openai-oauth") => Some(CredentialTarget::JcodeOpenAi),
-            _ => None,
-        };
+            .and_then(|(provider, _, _)| provider)
+            .and_then(|provider| crate::backend::jcode::OAuthStore::for_provider(&provider))
+            .map(|store| match store {
+                crate::backend::jcode::OAuthStore::Anthropic => CredentialTarget::JcodeAnthropic,
+                crate::backend::jcode::OAuthStore::OpenAi => CredentialTarget::JcodeOpenAi,
+            });
         if let Some(target) = target.filter(|target| !targets.contains(target)) {
             targets.push(target);
         }
@@ -177,13 +175,15 @@ pub(crate) fn ensure_agents_authenticated(
     for target in targets {
         let (path, label, login, api_key) = match target {
             CredentialTarget::JcodeAnthropic => (
-                crate::backend::jcode::resolve_source_home(cwd).join("auth.json"),
+                crate::backend::jcode::resolve_source_home(cwd)
+                    .join(crate::backend::jcode::OAuthStore::Anthropic.file_name()),
                 "jcode provider `claude`",
                 "jcode login claude",
                 "ANTHROPIC_API_KEY",
             ),
             CredentialTarget::JcodeOpenAi => (
-                crate::backend::jcode::resolve_source_home(cwd).join("openai-auth.json"),
+                crate::backend::jcode::resolve_source_home(cwd)
+                    .join(crate::backend::jcode::OAuthStore::OpenAi.file_name()),
                 "jcode provider `openai`",
                 "jcode login openai",
                 "OPENAI_API_KEY",

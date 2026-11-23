@@ -528,7 +528,8 @@ pub struct StepConfig {
     /// Per-prompt override for the workflow-level computer-use setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer_use: Option<bool>,
-    /// Require Linux jcode Bubblewrap for this prompt or github-review step.
+    /// Request Linux jcode Bubblewrap for this prompt or github-review step;
+    /// runs unconfined with a warning when Bubblewrap is unavailable.
     /// False values are omitted when serialized.
     #[serde(default, skip_serializing_if = "is_false")]
     pub require_bubblewrap: bool,

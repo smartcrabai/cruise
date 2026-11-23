@@ -24,13 +24,14 @@ node scripts/formal/verify_quint.cjs tests/formal/node_modules/.bin/quint \
   target/formal-reports/jcode-bubblewrap/counterexample.itf.json
 ```
 
-The `jcode-bubblewrap` feature makes Bubblewrap available in Linux builds.
-Ordinary jcode attempts remain unchanged unless the daemon starts with
-`CRUISE_JCODE_BUBBLEWRAP=1`; workflow `require_bubblewrap: true` always requires
-isolation, regardless of that environment variable. An isolation request fails
-when unsupported or when launch fails; it never falls back to an unsandboxed
-attempt. With Bubblewrap 0.11.1 and jcode v1.0.1, run the real CLI regression
-with a synthetic model (no provider credentials):
+The `jcode-bubblewrap` feature enables Bubblewrap on Linux builds. Ordinary
+jcode attempts are unchanged unless the daemon starts with
+`CRUISE_JCODE_BUBBLEWRAP=1`; workflow `require_bubblewrap: true` also requests
+isolation. If Bubblewrap is unavailable on the host, Cruise warns and runs
+without isolation. Once a probe succeeds, a later Bubblewrap launch failure is
+an attempt failure and does not retry unconfined. The `command:` backend runs
+unconfined with a warning. With
+Bubblewrap 0.11.1 and jcode v1.0.1, run the real CLI regression
 
 ```sh
 JCODE_REAL_CLI=/absolute/path/to/jcode \

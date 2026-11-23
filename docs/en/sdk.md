@@ -16,6 +16,8 @@ Before agents start, Cruise checks applicable explicit jcode Claude and OpenAI O
 
 This expiration preflight does not prove authentication will succeed. To bypass a false positive, set the process environment variable `CRUISE_SKIP_AGENT_AUTH_CHECK=1`; only the exact value `1` opts out.
 
+For explicit jcode `openai` and `claude` models, Cruise refreshes the login in the user's jcode home before each attempt once less than two hours remain, so private per-attempt runtimes never rotate the shared refresh token themselves. If that refresh fails and the access token expires within ten minutes, the attempt fails with a `jcode login` hint.
+
 ```yaml
 sdk: jcode        # Explicitly select jcode. If omitted, it is the fallback only
                   # when neither `command` nor `sdk` remains set in the resolved
@@ -139,7 +141,7 @@ matching commands targeting temporary or unrelated repositories.
 
 MCP restrictions filter only workflow-provided entries before backend launch. User-level backend MCP configuration and Cruise's own session tools remain enabled. In jcode, `JCODE_HOOKS_DISABLED` in workflow or process environment disables the shell gate, and hook execution failures are fail-open. These controls are defense in depth, not a sandbox; the prompt warning, reference-transaction hook, and CAS rollback remain.
 
-Bubblewrap is available only in Linux builds compiled with the `jcode-bubblewrap` feature. Ordinary jcode attempts use it only when the daemon is started with `CRUISE_JCODE_BUBBLEWRAP=1`; leaving this unset preserves legacy behavior. Workflow `require_bubblewrap: true` always requests isolation, independently of the daemon environment. If isolation is requested but unsupported or its launch fails, the attempt fails rather than falling back. Each isolated attempt gets its own daemon and read-only Git metadata. `git status`, `git diff`, and `git log` still work (`GIT_OPTIONAL_LOCKS=0`); staging, commits, and pushes belong to host steps. Index replacement on the host is visible on the next attempt, not through an already-bound index file. This is not a shared `jcode serve` connection.
+Bubblewrap isolation is available only in Linux builds compiled with the `jcode-bubblewrap` feature. Ordinary jcode attempts request it only when the daemon is started with `CRUISE_JCODE_BUBBLEWRAP=1`; workflow `require_bubblewrap: true` requests it regardless of that environment variable. Cruise probes availability once per process. If the build lacks the feature, the host is not Linux, or the probe fails, a requested attempt runs unconfined with a warning. The `command:` backend is allowed and runs unconfined with a warning. A launch failure after a successful probe still fails the attempt. Each isolated attempt gets its own daemon and read-only Git metadata. `git status`, `git diff`, and `git log` still work (`GIT_OPTIONAL_LOCKS=0`); staging, commits, and pushes belong to host steps. Index replacement on the host is visible on the next attempt, not through an already-bound index file. This is not a shared `jcode serve` connection.
 
 
 <a id="tool-less-non-interactive-planning"></a>

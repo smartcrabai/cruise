@@ -1877,6 +1877,7 @@ pub(crate) async fn run_prompt_step(
             let mut access = crate::backend::jcode::SandboxAccess {
                 read_only: permission == crate::config::PermissionMode::ReadOnly,
                 require_bubblewrap,
+                isolate: false,
                 inputs: Vec::with_capacity(3),
                 output_file: None,
             };
@@ -5004,7 +5005,7 @@ steps:
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn require_bubblewrap_rejects_command_backend_before_sentinel_spawn() {
+    async fn require_bubblewrap_runs_command_backend_unconfined() {
         let repo = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
         let yaml = r#"
 command: [sh, -c, "touch prompt-spawned"]
@@ -5012,14 +5013,10 @@ steps:
   protected:
     prompt: "Write the requested fix."
     require_bubblewrap: true
-    if:
-      fail: recover
   next:
     command: "touch next-effect"
-  recover:
-    command: "touch recover-effect"
 "#;
-        let result = run_config_inner(
+        run_config_inner(
             yaml,
             "task",
             None,
@@ -5031,18 +5028,11 @@ steps:
             &NoOpOptionHandler,
             &[],
         )
-        .await;
+        .await
+        .unwrap_or_else(|error| panic!("requested isolation must not block command: {error}"));
 
-        let Err(error) = result else {
-            panic!("expected terminal InvalidStepConfig, got Ok");
-        };
-        let CruiseError::InvalidStepConfig(message) = error else {
-            panic!("expected InvalidStepConfig, got {error:?}");
-        };
-        assert!(message.contains("command backend"), "{message}");
-        assert!(!repo.path().join("prompt-spawned").exists());
-        assert!(!repo.path().join("next-effect").exists());
-        assert!(!repo.path().join("recover-effect").exists());
+        assert!(repo.path().join("prompt-spawned").exists());
+        assert!(repo.path().join("next-effect").exists());
     }
 
     #[cfg(unix)]

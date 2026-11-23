@@ -1133,9 +1133,10 @@ if [ "${WAIT_CI_GH_DETAIL_FAILURE-0}" = 1 ] && [ "$query_kind" = details ]; then
   printf 'fake GitHub details response failed\n' >&2
   exit 95
 fi
-if [ "${WAIT_CI_GH_API_FAILURE-0}" = 1 ]; then
+if [ "${WAIT_CI_GH_API_FAILURE-0}" = 1 ] || [ "$count" -le "${WAIT_CI_GH_TRANSIENT_FAILURES-0}" ]; then
   case "${WAIT_CI_GH_API_ERROR_KIND-}" in
     http) printf 'HTTP 502: Bad Gateway (https://api.github.com/graphql)\n' >&2 ;;
+    auth) printf 'HTTP 401: Bad credentials (https://api.github.com/graphql)\n' >&2 ;;
     *) printf 'fake GitHub API failure\n' >&2 ;;
   esac
   exit 95
@@ -1242,12 +1243,28 @@ fi
         self.run_with_api_error(command, responses, false, "detail")
     }
 
+    /// The first summary query fails with a network error; later ones use `responses`.
+    fn run_transient_then(&self, command: &str, responses: &[serde_json::Value]) -> Output {
+        self.run_fixture(command, responses, false, "network", 1)
+    }
+
     fn run_with_api_error(
         &self,
         command: &str,
         responses: &[serde_json::Value],
         timeout: bool,
         api_error: &str,
+    ) -> Output {
+        self.run_fixture(command, responses, timeout, api_error, 0)
+    }
+
+    fn run_fixture(
+        &self,
+        command: &str,
+        responses: &[serde_json::Value],
+        timeout: bool,
+        api_error: &str,
+        transient_failures: usize,
     ) -> Output {
         let _ = std::fs::remove_file(&self.gh_count);
         let _ = std::fs::remove_file(&self.gh_detail_count);
@@ -1282,7 +1299,7 @@ fi
             .env("WAIT_CI_TIMEOUT", if timeout { "1" } else { "0" })
             .env(
                 "WAIT_CI_GH_API_FAILURE",
-                if api_error == "http" || api_error == "network" {
+                if transient_failures == 0 && matches!(api_error, "http" | "network" | "auth") {
                     "1"
                 } else {
                     "0"
@@ -1293,6 +1310,10 @@ fi
                 if api_error == "detail" { "1" } else { "0" },
             )
             .env("WAIT_CI_GH_API_ERROR_KIND", api_error)
+            .env(
+                "WAIT_CI_GH_TRANSIENT_FAILURES",
+                transient_failures.to_string(),
+            )
             .output()
             .unwrap_or_else(|error| panic!("run builtin wait-ci command: {error}"));
         assert_wait_ci_internal_calls(&output, &self.internal_calls, &self.ci_capture);
@@ -1985,7 +2006,8 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
         String::from_utf8_lossy(&output.stderr)
             .contains("HTTP 502: Bad Gateway (https://api.github.com/graphql)\n")
     );
-    assert_eq!(fixture.gh_calls(), 1);
+    // A 5xx is transient: the query is retried until the attempt cap.
+    assert_eq!(fixture.gh_calls(), 5);
 
     let fixture = GithubWaitCiFixture::new();
     let output = fixture.run_network_error(&command);
@@ -1993,7 +2015,33 @@ fn builtin_github_wait_ci_pins_local_head_and_waits_for_registered_checks() {
     assert!(!output.status.success(), "{terminal}");
     assert_eq!(wait_ci_reason(&output), "api_error");
     assert_eq!(wait_ci_payload(&output)["truncated"], false);
-    assert_eq!(fixture.gh_calls(), 1);
+    assert_eq!(fixture.gh_calls(), 5);
+
+    let fixture = GithubWaitCiFixture::new();
+    let output = fixture.run_with_api_error(&command, &[], false, "auth");
+    let terminal = text(&output);
+    assert!(!output.status.success(), "{terminal}");
+    assert_eq!(wait_ci_reason(&output), "api_error");
+    assert_eq!(
+        fixture.gh_calls(),
+        1,
+        "authentication failures are not retried"
+    );
+
+    let fixture = GithubWaitCiFixture::new();
+    let output = fixture.run_transient_then(
+        &command,
+        &[
+            serde_json::Value::Null,
+            serde_json::json!({"errors": [{"message": "query rejected"}]}),
+        ],
+    );
+    let terminal = text(&output);
+    assert!(!output.status.success(), "{terminal}");
+    assert!(terminal.contains("(attempt 1); retrying"), "{terminal}");
+    // The retried query reached GraphQL validation instead of ending as an API error.
+    assert_eq!(wait_ci_reason(&output), "graphql_error", "{terminal}");
+    assert_eq!(fixture.gh_calls(), 2);
 
     for (state, check_count) in [(None, 0), (Some("SUCCESS"), 0)] {
         let fixture = GithubWaitCiFixture::new();

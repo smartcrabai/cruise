@@ -14,6 +14,8 @@ agent 起動前に、Cruise は該当する明示的な jcode Claude / OpenAI OA
 
 これは有効期限の事前検査であり、認証成功の証明ではありません。誤検知を回避するには process 環境変数 `CRUISE_SKIP_AGENT_AUTH_CHECK=1` を設定してください。正確な値 `1` のみが回避し、`true` や空白付き値では回避されません。
 
+jcode の `openai` と `claude` を明示した model では、残り有効期限が2時間を切ると、Cruise は各 attempt の前にユーザーの jcode home で login を refresh します。これにより、attempt ごとの private runtime が共有 refresh token を自分で回転させることはありません。refresh に失敗し、access token が10分以内に期限切れになる場合、attempt は `jcode login` の案内付きで失敗します。
+
 ```yaml
 sdk: jcode        # Explicitly select jcode. If omitted, it is the fallback only
                   # when neither `command` nor `sdk` remains set in the resolved
@@ -112,7 +114,7 @@ git update-ref             git config core.hooksPath  git -c core.hooksPath=
 
 MCP 制限が filter するのは backend 起動前の workflow 提供 entry のみです。user-level backend MCP 設定と Cruise 独自 session tool は有効なままです。jcode では workflow または process 環境変数 `JCODE_HOOKS_DISABLED` で shell gate を無効化でき、hook の実行失敗時も fail-open になります。これらの制御は多層防御であり sandbox ではありません。prompt warning、reference-transaction hook、CAS rollback も引き続き適用されます。
 
-Bubblewrap は `jcode-bubblewrap` feature を有効にした Linux build でのみ利用できます。通常の jcode 試行では、daemon の起動時に `CRUISE_JCODE_BUBBLEWRAP=1` を設定すると isolation が有効になります。未設定なら従来の動作を維持します。workflow の `require_bubblewrap: true` は daemon の環境変数に関係なく常に isolation を要求します。要求時に未対応、または起動に失敗した場合、通常実行へ fallback せず試行は失敗します。各試行は専用 daemon を起動し、Git metadata を読み取り専用にします。`GIT_OPTIONAL_LOCKS=0` で `git status` / `git diff` / `git log` は使用可能。stage、commit、push はホストが行います。ホスト側で index を置換した場合、変更が見えるのは次の試行です。共有 `jcode serve` には接続しません。
+Bubblewrap による隔離は `jcode-bubblewrap` feature を有効にした Linux build でのみ利用できます。通常の jcode 試行は daemon 起動時に `CRUISE_JCODE_BUBBLEWRAP=1` が設定された場合に要求し、workflow の `require_bubblewrap: true` はこの環境変数に関係なく要求します。Cruise は process ごとに一度、利用可否を probe します。feature がない build、Linux 以外の host、または probe の失敗時、要求された attempt は隔離なしで実行され warning が表示されます。`command:` backend も許可され、隔離なしで実行され warning が表示されます。probe 成功後に実際の起動が失敗した場合は attempt が失敗します。隔離された各 attempt は専用 daemon を起動し、Git metadata を読み取り専用にします。`GIT_OPTIONAL_LOCKS=0` で `git status` / `git diff` / `git log` は使用可能。stage、commit、push はホストが行います。ホスト側で index を置換した場合、変更が見えるのは次の attempt です。共有 `jcode serve` には接続しません。
 
 
 <a id="tool-less-non-interactive-planning"></a>

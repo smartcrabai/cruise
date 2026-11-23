@@ -25,7 +25,7 @@ const VERSION: u32 = 1;
 const MAX_DIAGNOSTIC: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 const MAX_LOG: usize = 128 * 1024;
-const MAX_LOG_ARCHIVE: usize = 8 * 1024 * 1024;
+const MAX_LOG_DOWNLOAD: usize = 8 * 1024 * 1024;
 const MAX_EVIDENCE: usize = 768 * 1024;
 const MAX_CHECKS: usize = 256;
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -88,7 +88,7 @@ pub(crate) fn evidence(
             origin_push_url: context.push_url.clone(),
             source_branch: context.source_branch.clone(),
             baseline_clean,
-            complete: complete && !diagnostic.payload.truncated,
+            complete,
             checks,
         };
         let mut text = format!(
@@ -103,13 +103,13 @@ pub(crate) fn evidence(
         for check in &inventory.checks {
             write!(
                 &mut text,
-                "## [{}] {} — {}\n\nRun: {}\nJob: {}\nLog complete: {}\n{}\n\n",
+                "## [{}] {} — {}\n\nRun: {}\nJob: {}\nLog available: {}\n{}\n\n",
                 check.selection,
                 safe_text(&check.name, 160),
                 safe_text(&check.state, 80),
                 check.run_id.as_str(),
                 check.job_id.as_str(),
-                check.log_complete,
+                check.log_available,
                 check
                     .note
                     .as_deref()
@@ -146,7 +146,8 @@ pub(crate) fn evidence(
 
 /// Apply a strict agent decision. A retry is revalidated against live provider
 /// state and the per-head guard; a commit requires a clean captured baseline
-/// and a trusted verifier that passes on the exact tree being committed.
+/// and a `verify` pass on the exact tree being committed (the runtime verifier
+/// may skip with a warning when no trusted sandboxed verifier is available).
 pub(crate) fn finish(
     cwd: &Path,
     plan: &Path,
@@ -794,7 +795,9 @@ struct Check {
     run_id: String,
     job_id: String,
     retry_key: String,
-    log_complete: bool,
+    /// Whether the host fetched this job's log; it may be shortened to its end.
+    #[serde(alias = "log_complete")]
+    log_available: bool,
     note: Option<String>,
 }
 
@@ -812,7 +815,8 @@ fn collect_github_evidence(
     context: &Context,
     diagnostic: &DiagnosticPayload,
 ) -> Result<(Vec<Check>, String, bool)> {
-    let mut complete = !diagnostic.truncated;
+    // A truncated diagnostic is reconciled below against the head's check runs.
+    let mut complete = true;
     let mut run_ids = BTreeSet::new();
     let mut hinted_jobs: HashMap<String, BTreeSet<String>> = HashMap::new();
     for item in &diagnostic.checks {
@@ -831,7 +835,8 @@ fn collect_github_evidence(
         complete = false;
     }
     let mut checks = Vec::new();
-    let mut logs = String::new();
+    let mut job_logs = Vec::new();
+    let mut seen_jobs = BTreeSet::new();
     for run_id in run_ids {
         let run = github_run(context, &run_id)?;
         if !github_run_failed(&run) {
@@ -846,14 +851,18 @@ fn collect_github_evidence(
                 complete = false;
                 continue;
             };
+            seen_jobs.insert(job_id.clone());
             let state = github_job_state(&job);
-            if !failed_state(state) {
+            let hinted = hinted_jobs
+                .get(&run_id)
+                .is_some_and(|ids| ids.contains(&job_id));
+            // A cancelled job wait-ci reported (fail-fast, or a job-level timeout)
+            // stays in the evidence; retries still accept only failed jobs.
+            let reported = hinted || diagnostic.truncated;
+            if !(failed_state(state) || (reported && cancelled_state(state))) {
                 continue;
             }
-            if hinted_jobs
-                .get(&run_id)
-                .is_some_and(|ids| ids.contains(&job_id))
-            {
+            if hinted {
                 matched_hints.insert(job_id.clone());
             }
             let name = job
@@ -862,15 +871,9 @@ fn collect_github_evidence(
                 .map(|name| safe_text(name, 160))
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| "unnamed Actions job".into());
-            let (log, log_complete) =
-                if let Ok((log, complete_log)) = github_log(context, &run_id, &job_id) {
-                    (log, complete_log)
-                } else {
-                    complete = false;
-                    ("[Actions job log unavailable]".into(), false)
-                };
-            let log_complete = log_complete && append_log(&mut logs, &name, &log, !log_complete);
-            complete &= log_complete;
+            let log = github_log(context, &run_id, &job_id).ok();
+            complete &= log.is_some();
+            job_logs.push(log);
             checks.push(Check {
                 selection: 0,
                 name,
@@ -878,9 +881,8 @@ fn collect_github_evidence(
                 run_id: run_id.clone(),
                 retry_key: retry_key(context),
                 job_id,
-                log_complete,
-                note: (!log_complete)
-                    .then(|| "host could not collect a complete bounded log".into()),
+                log_available: false,
+                note: None,
             });
         }
         if hinted_jobs
@@ -890,11 +892,65 @@ fn collect_github_evidence(
             complete = false;
         }
     }
-    if checks.is_empty() {
+    if checks.is_empty()
+        || (diagnostic.truncated && complete && !github_head_failures_seen(context, &seen_jobs)?)
+    {
         complete = false;
     }
     assign_selections(&mut checks)?;
+    let logs = render_logs(&mut checks, job_logs);
     Ok((checks, logs, complete))
+}
+
+/// Whether every failing check on the head is an Actions job the host already
+/// enumerated. Confirms an inventory whose wait-step diagnostic listed only the
+/// first failing checks; any failing commit status has no collectable log.
+fn github_head_failures_seen(context: &Context, seen_jobs: &BTreeSet<String>) -> Result<bool> {
+    let repository = &context.target.repository;
+    let head = &context.head;
+    let runs = provider_json(
+        &context.root,
+        "gh",
+        &context.target,
+        &format!("repos/{repository}/commits/{head}/check-runs?filter=latest&per_page=100"),
+    )?;
+    let Some(check_runs) = runs.get("check_runs").and_then(Value::as_array) else {
+        return Ok(false);
+    };
+    if runs.get("total_count").and_then(Value::as_u64) != Some(check_runs.len() as u64)
+        || check_runs.len() >= 100
+    {
+        return Ok(false);
+    }
+    let status = provider_json(
+        &context.root,
+        "gh",
+        &context.target,
+        &format!("repos/{repository}/commits/{head}/status?per_page=100"),
+    )?;
+    let Some(statuses) = status.get("statuses").and_then(Value::as_array) else {
+        return Ok(false);
+    };
+    if statuses.len() >= 100
+        || statuses.iter().any(|status| {
+            matches!(
+                status.get("state").and_then(Value::as_str),
+                Some("failure" | "error")
+            )
+        })
+    {
+        return Ok(false);
+    }
+    Ok(check_runs.iter().all(|run| {
+        // Match wait-ci: a concluded run that did not pass counts as failing.
+        run.get("conclusion")
+            .and_then(Value::as_str)
+            .is_none_or(|conclusion| matches!(conclusion, "success" | "neutral" | "skipped"))
+            || run
+                .get("id")
+                .and_then(numeric_id)
+                .is_some_and(|id| seen_jobs.contains(&id))
+    }))
 }
 
 fn github_run(context: &Context, run_id: &str) -> Result<Value> {
@@ -956,7 +1012,7 @@ fn github_job_state(job: &Value) -> &str {
         .unwrap_or("unknown")
 }
 
-fn github_log(context: &Context, run_id: &str, job_id: &str) -> Result<(String, bool)> {
+fn github_log(context: &Context, run_id: &str, job_id: &str) -> Result<String> {
     if !valid_id(run_id) || !valid_id(job_id) {
         return Err(CruiseError::Other("invalid Actions job identity".into()));
     }
@@ -964,40 +1020,36 @@ fn github_log(context: &Context, run_id: &str, job_id: &str) -> Result<(String, 
         "repos/{}/actions/jobs/{job_id}/logs",
         context.target.repository
     );
-    let args = vec![
+    let mut args = vec![
         "api".into(),
         "--hostname".into(),
         context.target.host.clone(),
         "--method".into(),
         "GET".into(),
+        // Job logs are plain text with ANSI color; current gh refuses to print
+        // them without this flag, while gh releases before it reject the flag.
+        "--allow-escape-sequences".into(),
         endpoint,
     ];
-    let output = run_capped(&context.root, "gh", &args, MAX_LOG_ARCHIVE)?;
+    let mut output = run_capped(&context.root, "gh", &args, MAX_LOG_DOWNLOAD)?;
+    if !output.status.success() && !output.truncated {
+        args.retain(|arg| arg != "--allow-escape-sequences");
+        output = run_capped(&context.root, "gh", &args, MAX_LOG_DOWNLOAD)?;
+    }
     if output.truncated {
-        return Ok((
-            "[GitHub job log archive exceeded the host limit]".into(),
-            false,
+        return Err(CruiseError::Other(
+            "GitHub job log exceeded the host limit".into(),
         ));
     }
     if !output.status.success() {
         return Err(command_error("gh", output.status));
     }
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(output.stdout))
-        .map_err(|error| CruiseError::Other(format!("invalid GitHub job log archive: {error}")))?;
-    if archive.len() != 1 {
-        return Ok(("[GitHub job log archive was incomplete]".into(), false));
-    }
-    let file = archive
-        .by_index(0)
-        .map_err(|error| CruiseError::Other(format!("invalid GitHub job log entry: {error}")))?;
-    if file.is_dir() {
-        return Ok(("[GitHub job log archive omitted its log]".into(), false));
-    }
-    let mut bytes = Vec::new();
-    file.take((MAX_LOG + 1) as u64).read_to_end(&mut bytes)?;
-    let complete = bytes.len() <= MAX_LOG;
-    bytes.truncate(MAX_LOG);
-    Ok((String::from_utf8_lossy(&bytes).into_owned(), complete))
+    // GitHub serves a job log as a plain-text download, not an archive.
+    let bytes = output
+        .stdout
+        .strip_prefix("\u{feff}".as_bytes())
+        .unwrap_or(&output.stdout);
+    Ok(String::from_utf8_lossy(bytes).into_owned())
 }
 
 fn collect_gitlab_evidence(
@@ -1031,7 +1083,7 @@ fn collect_gitlab_evidence(
     let pipeline = gitlab_pipeline(context, pipeline_id)?;
     let jobs = gitlab_jobs(context, pipeline_id)?;
     let mut checks = Vec::new();
-    let mut logs = String::new();
+    let mut job_logs = Vec::new();
     let mut matched_hints = BTreeSet::new();
     for job in jobs {
         let Some(job_id) = job.get("id").and_then(numeric_id) else {
@@ -1042,10 +1094,11 @@ fn collect_gitlab_evidence(
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        if !failed_state(state) {
+        let hinted = hinted_jobs.contains(&job_id);
+        if !(failed_state(state) || (hinted && cancelled_state(state))) {
             continue;
         }
-        if hinted_jobs.contains(&job_id) {
+        if hinted {
             matched_hints.insert(job_id.clone());
         }
         let name = job
@@ -1054,14 +1107,9 @@ fn collect_gitlab_evidence(
             .map(|name| safe_text(name, 160))
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "unnamed GitLab job".into());
-        let (log, log_complete) = if let Ok((log, complete_log)) = gitlab_log(context, &job_id) {
-            (log, complete_log)
-        } else {
-            complete = false;
-            ("[GitLab job trace unavailable]".into(), false)
-        };
-        let log_complete = log_complete && append_log(&mut logs, &name, &log, !log_complete);
-        complete &= log_complete;
+        let log = gitlab_log(context, &job_id).ok();
+        complete &= log.is_some();
+        job_logs.push(log);
         checks.push(Check {
             selection: 0,
             name,
@@ -1069,14 +1117,15 @@ fn collect_gitlab_evidence(
             run_id: pipeline_id.to_string(),
             retry_key: retry_key(context),
             job_id,
-            log_complete,
-            note: (!log_complete).then(|| "host could not collect a complete bounded log".into()),
+            log_available: false,
+            note: None,
         });
     }
     if !hinted_jobs.is_subset(&matched_hints) || !pipeline_failed(&pipeline) || checks.is_empty() {
         complete = false;
     }
     assign_selections(&mut checks)?;
+    let logs = render_logs(&mut checks, job_logs);
     Ok((checks, logs, complete))
 }
 
@@ -1188,7 +1237,7 @@ fn gitlab_jobs(context: &Context, pipeline_id: &str) -> Result<Vec<Value>> {
     Ok(jobs.clone())
 }
 
-fn gitlab_log(context: &Context, job_id: &str) -> Result<(String, bool)> {
+fn gitlab_log(context: &Context, job_id: &str) -> Result<String> {
     if !valid_id(job_id) {
         return Err(CruiseError::Other("invalid GitLab job ID".into()));
     }
@@ -1201,14 +1250,16 @@ fn gitlab_log(context: &Context, job_id: &str) -> Result<(String, bool)> {
         "GET".into(),
         endpoint,
     ];
-    let output = run_capped(&context.root, "glab", &args, MAX_LOG)?;
+    let output = run_capped(&context.root, "glab", &args, MAX_LOG_DOWNLOAD)?;
+    if output.truncated {
+        return Err(CruiseError::Other(
+            "GitLab job trace exceeded the host limit".into(),
+        ));
+    }
     if !output.status.success() {
         return Err(command_error("glab", output.status));
     }
-    Ok((
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        !output.truncated,
-    ))
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn assign_selections(checks: &mut [Check]) -> Result<()> {
@@ -1222,26 +1273,44 @@ fn assign_selections(checks: &mut [Check]) -> Result<()> {
     Ok(())
 }
 
-fn append_log(logs: &mut String, name: &str, text: &str, incomplete: bool) -> bool {
-    let remaining = (MAX_EVIDENCE / 2).saturating_sub(logs.len());
-    let clean = text
-        .chars()
-        .filter(|character| !character.is_control() || *character == '\n' || *character == '\t')
-        .collect::<String>();
-    let heading = format!("### {}\n\n```text\n", safe_text(name, 160));
-    let footer = "\n```\n\n";
-    if remaining <= heading.len() + footer.len() {
-        return false;
+/// Render each fetched job log within an equal share of the evidence budget,
+/// keeping its end, where jobs report failures. A shortened log still counts
+/// as evidence; the check notes how much of it was kept.
+fn render_logs(checks: &mut [Check], logs: Vec<Option<String>>) -> String {
+    let share = (MAX_EVIDENCE / 2 / logs.len().max(1)).min(MAX_LOG);
+    let mut rendered = String::new();
+    for (check, log) in checks.iter_mut().zip(logs) {
+        let heading = format!("### {}\n\n```text\n", safe_text(&check.name, 160));
+        let footer = "\n```\n\n";
+        let Some(log) = log else {
+            check.note = Some("host could not collect this job log".into());
+            rendered.push_str(&heading);
+            rendered.push_str("[job log unavailable]");
+            rendered.push_str(footer);
+            continue;
+        };
+        check.log_available = true;
+        let clean = log
+            .chars()
+            .filter(|character| !character.is_control() || *character == '\n' || *character == '\t')
+            .collect::<String>();
+        let room = share.saturating_sub(heading.len() + footer.len());
+        let mut start = clean.len().saturating_sub(room);
+        while !clean.is_char_boundary(start) {
+            start += 1;
+        }
+        if start > 0 {
+            check.note = Some(format!(
+                "log shortened to its last {} of {} bytes",
+                clean.len() - start,
+                clean.len()
+            ));
+        }
+        rendered.push_str(&heading);
+        rendered.push_str(&clean[start..]);
+        rendered.push_str(footer);
     }
-    let max_body = remaining - heading.len() - footer.len();
-    let mut end = clean.len().min(max_body);
-    while !clean.is_char_boundary(end) {
-        end -= 1;
-    }
-    logs.push_str(&heading);
-    logs.push_str(&clean[..end]);
-    logs.push_str(footer);
-    !incomplete && end == clean.len()
+    rendered
 }
 
 fn cap_text(text: &mut String, limit: usize) -> bool {
@@ -1272,6 +1341,13 @@ fn failed_state(state: &str) -> bool {
     matches!(
         state.to_ascii_lowercase().as_str(),
         "failure" | "failed" | "timed_out" | "timeout"
+    )
+}
+
+fn cancelled_state(state: &str) -> bool {
+    matches!(
+        state.to_ascii_lowercase().as_str(),
+        "cancelled" | "canceled"
     )
 }
 
@@ -1374,9 +1450,9 @@ fn retry_selected(context: &Context, inventory: &Inventory, selection: u32) -> R
         .iter()
         .find(|check| check.selection == selection)
         .ok_or_else(|| CruiseError::Other("retry selection is not in host inventory".into()))?;
-    if !check.log_complete || !failed_state(&check.state) {
+    if !check.log_available || !failed_state(&check.state) {
         return Err(CruiseError::Other(
-            "retry requires a complete log for a terminal failing job".into(),
+            "retry requires the log of a terminal failing job".into(),
         ));
     }
     validate_current_job(context, check)?;
@@ -2299,19 +2375,6 @@ exec "$CRUISE_TEST_REAL_GIT" "${args[@]}"
             fs::write(&actions, "").unwrap_or_else(|error| panic!("{error}"));
             let pushes = temp.path().join("pushes.log");
             fs::write(&pushes, "").unwrap_or_else(|error| panic!("{error}"));
-            let log_zip = temp.path().join("job-log.zip");
-            let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-            archive
-                .start_file("200.txt", zip::write::SimpleFileOptions::default())
-                .unwrap_or_else(|error| panic!("zip start failed: {error}"));
-            archive
-                .write_all(b"test log\n")
-                .unwrap_or_else(|error| panic!("zip write failed: {error}"));
-            let log_bytes = archive
-                .finish()
-                .unwrap_or_else(|error| panic!("zip finish failed: {error}"))
-                .into_inner();
-            fs::write(&log_zip, log_bytes).unwrap_or_else(|error| panic!("{error}"));
             let gh = bin.join("gh");
             fs::write(&gh, r#"#!/bin/sh
 case "$*" in
@@ -2322,8 +2385,13 @@ case "$*" in
     h=$(cat "$CRUISE_TEST_API_HEAD")
     printf '{"id":100,"repository":{"full_name":"o/r"},"head_repository":{"full_name":"o/r"},"head_branch":"feature","head_sha":"%s","status":"completed","conclusion":"failure"}\n' "$h" ;;
   "api --hostname github.com --method GET repos/o/r/actions/runs/100/jobs?per_page=100")
-    printf '{"total_count":1,"jobs":[{"id":200,"name":"tests","status":"completed","conclusion":"failure"}]}\n' ;;
-  "api --hostname github.com --method GET repos/o/r/actions/jobs/200/logs") cat "$CRUISE_TEST_LOG_ZIP" ;;
+    printf '{"total_count":2,"jobs":[{"id":200,"name":"tests","status":"completed","conclusion":"failure"},{"id":201,"name":"tests (macos)","status":"completed","conclusion":"cancelled"}]}\n' ;;
+  "api --hostname github.com --method GET --allow-escape-sequences repos/o/r/actions/jobs/200/logs") printf '\357\273\277test log\n' ;;
+  "api --hostname github.com --method GET --allow-escape-sequences repos/o/r/actions/jobs/201/logs") printf 'cancelled log\n' ;;
+  "api --hostname github.com --method GET repos/o/r/commits/"*"/check-runs?filter=latest&per_page=100")
+    printf '{"total_count":3,"check_runs":[{"id":200,"conclusion":"failure"},{"id":201,"conclusion":"cancelled"},{"id":%s,"conclusion":"action_required"}]}\n' "${CRUISE_TEST_EXTRA_FAILED_CHECK:-202}" ;;
+  "api --hostname github.com --method GET repos/o/r/commits/"*"/status?per_page=100")
+    printf '{"state":"failure","total_count":0,"statuses":[]}\n' ;;
   "run rerun 100 --repo github.com/o/r --job 200") echo "$*" >> "$CRUISE_TEST_ACTIONS" ;;
   *) echo "unexpected gh invocation: $*" >&2; exit 1 ;;
 esac
@@ -2348,7 +2416,6 @@ esac
                 EnvGuard::set("CRUISE_TEST_API_HEAD", &api_head_file),
                 EnvGuard::set("CRUISE_TEST_REAL_GIT", &real_git),
                 EnvGuard::set("CRUISE_TEST_BARE", &bare),
-                EnvGuard::set("CRUISE_TEST_LOG_ZIP", &log_zip),
                 EnvGuard::set("CRUISE_TEST_ACTIONS", &actions),
                 EnvGuard::set("CRUISE_TEST_PUSHES", &pushes),
                 crate::test_support::prepend_to_path(&bin),
@@ -2405,6 +2472,105 @@ esac
                 .trim()
                 .to_string()
         }
+    }
+
+    #[test]
+    fn evidence_includes_plain_text_github_job_log() {
+        let fixture = Fixture::new();
+        fixture.evidence();
+        let evidence = fs::read_to_string(fixture.artifacts.join(EVIDENCE))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            evidence.contains("Complete inventory: `true`"),
+            "{evidence}"
+        );
+        assert!(evidence.contains("Log available: true"), "{evidence}");
+        assert!(evidence.contains("\ntest log\n"), "{evidence}");
+        assert!(!evidence.contains('\u{feff}'), "{evidence}");
+    }
+
+    #[test]
+    fn cancelled_fail_fast_job_keeps_evidence_complete() {
+        let fixture = Fixture::new();
+        super::evidence(
+            &fixture.root,
+            &fixture.plan,
+            "42",
+            "https://github.com/o/r/pull/42",
+            r#"{"provider":"github","payload":{"checks":[{"run_id":"100","job_id":"200"},{"run_id":"100","job_id":"201"}],"truncated":false}}"#,
+        )
+        .unwrap_or_else(|error| panic!("evidence failed: {error}"));
+        let evidence = fs::read_to_string(fixture.artifacts.join(EVIDENCE))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            evidence.contains("Complete inventory: `true`"),
+            "{evidence}"
+        );
+        assert!(evidence.contains("tests (macos) — cancelled"), "{evidence}");
+    }
+
+    fn truncated_evidence(fixture: &Fixture) -> String {
+        super::evidence(
+            &fixture.root,
+            &fixture.plan,
+            "42",
+            "https://github.com/o/r/pull/42",
+            r#"{"provider":"github","payload":{"checks":[{"run_id":"100","job_id":"200"}],"truncated":true}}"#,
+        )
+        .unwrap_or_else(|error| panic!("evidence failed: {error}"));
+        fs::read_to_string(fixture.artifacts.join(EVIDENCE))
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    #[test]
+    fn truncated_diagnostic_is_complete_when_head_failures_were_enumerated() {
+        let fixture = Fixture::new();
+        // Every failing check run on the head is a job the host enumerated.
+        let _passing = EnvGuard::set("CRUISE_TEST_EXTRA_FAILED_CHECK", "200");
+        let evidence = truncated_evidence(&fixture);
+        assert!(
+            evidence.contains("Complete inventory: `true`"),
+            "{evidence}"
+        );
+    }
+
+    #[test]
+    fn truncated_diagnostic_stays_incomplete_with_an_unlisted_failure() {
+        let fixture = Fixture::new();
+        let evidence = truncated_evidence(&fixture);
+        assert!(
+            evidence.contains("Complete inventory: `false`"),
+            "{evidence}"
+        );
+    }
+
+    #[test]
+    fn long_logs_keep_their_end_and_still_count_as_evidence() {
+        let check = |name: &str| super::Check {
+            selection: 1,
+            name: name.into(),
+            state: "failure".into(),
+            run_id: "1".into(),
+            job_id: "2".into(),
+            retry_key: String::new(),
+            log_available: false,
+            note: None,
+        };
+        let mut checks = vec![check("long"), check("missing")];
+        let long = format!("{}\nerror: the real failure\n", "noise ".repeat(MAX_LOG));
+        let rendered = super::render_logs(&mut checks, vec![Some(long), None]);
+        assert!(rendered.contains("error: the real failure"));
+        assert!(rendered.len() <= MAX_EVIDENCE / 2);
+        assert!(checks[0].log_available);
+        assert!(
+            checks[0]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.starts_with("log shortened to its last")),
+            "{:?}",
+            checks[0].note
+        );
+        assert!(!checks[1].log_available);
     }
 
     #[test]
