@@ -4,9 +4,10 @@ export default function SessionHeader(props) {
   return (
     <header id={`session-header-${props.id}`} class="px-4 pt-4 md:px-6 md:pt-6 pb-4 border-b border-gray-200 dark:border-gray-800 space-y-3">
       <div class="flex flex-wrap items-center gap-3">
-        <h2 class="text-lg font-semibold font-mono min-w-0 break-all text-gray-900 dark:text-gray-100">{props.title}</h2>
+        <h2 class="text-lg font-semibold font-mono min-w-0 break-all text-gray-900 dark:text-gray-100">{props.managed ? `${props.title} (${props.t.manager.child_read_only})` : props.title}</h2>
         <PhaseBadge badge={props.badge} t={props.t} />
       </div>
+      {props.managerUrl && <a href={props.managerUrl} class="text-sm text-blue-700 dark:text-blue-400 hover:underline">{props.t.manager.open_in_manager}</a>}
       {props.currentStep && <div class="text-sm text-gray-500 dark:text-gray-400">Step: <span class="font-medium text-gray-800 dark:text-gray-200">{props.currentStep}</span></div>}
       {props.input && <p class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words">{props.input}</p>}
       {props.prIsLink && <a href={props.prUrl} target="_blank" rel="noopener noreferrer" class="break-all text-blue-600 dark:text-blue-400 hover:text-blue-500">{props.prUrl}</a>}

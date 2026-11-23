@@ -22,6 +22,24 @@ pub(crate) static CONTROL: Mutex<()> = Mutex::new(());
 static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 type ResumeRequest = (std::path::PathBuf, String, String, u32, OperationClaim);
 static RESUMES: Mutex<(bool, Vec<ResumeRequest>)> = Mutex::new((false, Vec::new()));
+
+#[cfg(test)]
+pub(crate) fn accept_resume_requests_without_dispatch() -> impl Drop {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            *RESUMES
+                .lock()
+                .unwrap_or_else(|e| panic!("restore test resume queue: {e}")) = (false, Vec::new());
+        }
+    }
+    let mut resumes = RESUMES
+        .lock()
+        .unwrap_or_else(|e| panic!("initialize test resume queue: {e}"));
+    assert!(!resumes.0 && resumes.1.is_empty());
+    resumes.0 = true;
+    Restore
+}
 static ACTIVE_COORDINATORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static PUBLICATIONS: std::sync::LazyLock<
     Mutex<std::collections::HashMap<String, (uuid::Uuid, crate::cancellation::CancellationToken)>>,

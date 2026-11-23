@@ -12,6 +12,7 @@ pub(crate) mod dag_mermaid;
 pub(crate) mod dto;
 pub(crate) mod events;
 pub(crate) mod handlers;
+mod manager;
 pub(crate) mod markdown;
 pub(crate) mod ops;
 pub(crate) mod pages;
@@ -96,6 +97,7 @@ pub(crate) fn router(state: WebState) -> Router {
         .route("/sessions/{id}", get(pages::session))
         .route("/new", get(pages::new_session))
         .route("/run-all", get(pages::run_all))
+        .merge(manager::routes())
         .route("/static/app.css", get(app_css))
         .route("/webui/events", get(sse))
         .route("/webui/sidebar", get(handlers::sidebar))

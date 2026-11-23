@@ -80,7 +80,7 @@ impl From<Vec<(String, String)>> for Fields {
     }
 }
 
-type Form = axum::extract::Form<Vec<(String, String)>>;
+pub(super) type Form = axum::extract::Form<Vec<(String, String)>>;
 type Params = Query<Vec<(String, String)>>;
 
 fn html(body: String) -> Response {

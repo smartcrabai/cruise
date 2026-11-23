@@ -146,6 +146,7 @@ pub(crate) struct SessionHeaderVm {
     pub(crate) pr_is_link: bool,
     pub(crate) actions: SessionActionsVm,
     pub(crate) managed: bool,
+    pub(crate) manager_url: Option<String>,
     #[serde(flatten)]
     pub(crate) activity: SessionHeaderActivityVm,
     pub(crate) base_url: String,
