@@ -1609,12 +1609,65 @@ pub(crate) fn host_git_command() -> std::process::Command {
     command
 }
 
+/// The settings `git lfs install` writes. From global or system configuration,
+/// which a workspace cannot write, they run only the user's own git-lfs.
+const GIT_LFS_FILTER_DEFAULTS: &[(&str, &str)] = &[
+    ("filter.lfs.clean", "git-lfs clean -- %f"),
+    ("filter.lfs.smudge", "git-lfs smudge -- %f"),
+    ("filter.lfs.process", "git-lfs filter-process"),
+    ("filter.lfs.required", "true"),
+];
+
 pub(crate) fn ensure_host_git_safety(cwd: &Path) -> Result<()> {
-    reject_host_git_config(
-        cwd,
-        r"^(filter\.|merge\..*\.driver$)",
-        "could not rule out external Git filters or merge drivers",
-    )
+    let output = host_git_command()
+        .current_dir(cwd)
+        .args([
+            "config",
+            "--includes",
+            "--show-scope",
+            "--null",
+            "--get-regexp",
+            r"^(filter\.|merge\..*\.driver$)",
+        ])
+        .output()?;
+    let safe = output.stderr.is_empty()
+        && match output.status.code() {
+            Some(1) => output.stdout.is_empty(),
+            Some(0) => only_user_git_lfs_filters(&output.stdout),
+            _ => false,
+        };
+    if safe {
+        Ok(())
+    } else {
+        Err(CruiseError::Other(
+            "could not rule out external Git filters or merge drivers".into(),
+        ))
+    }
+}
+
+/// Whether every `scope NUL key LF value NUL` entry is a git-lfs default from
+/// user-level configuration. Includes report the scope of the including file.
+fn only_user_git_lfs_filters(entries: &[u8]) -> bool {
+    let Some(entries) = std::str::from_utf8(entries)
+        .ok()
+        .and_then(|text| text.strip_suffix('\0'))
+    else {
+        return false;
+    };
+    let mut fields = entries.split('\0');
+    while let Some(scope) = fields.next() {
+        let Some(entry) = fields.next() else {
+            return false;
+        };
+        if !matches!(scope, "global" | "system")
+            || !entry
+                .split_once('\n')
+                .is_some_and(|setting| GIT_LFS_FILTER_DEFAULTS.contains(&setting))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) fn sync_review_head(cwd: &Path) -> Result<()> {
@@ -2131,6 +2184,54 @@ mod tests {
         assert!(
             ensure_host_git_safety(tmp.path()).is_ok(),
             "the same config must pass when global and system config are disabled"
+        );
+    }
+
+    #[test]
+    fn host_git_safety_allows_only_user_level_git_lfs_defaults() {
+        const LFS: &str = "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n\trequired = true\n";
+        let _lock = crate::test_support::lock_process();
+        let tmp = TempDir::new().unwrap_or_else(|error| panic!("create temp dir: {error}"));
+        let _home = crate::test_support::set_fake_home(tmp.path());
+        let _nosystem = crate::test_support::EnvGuard::set("GIT_CONFIG_NOSYSTEM", "1");
+        let _inherited_global = crate::test_support::EnvGuard::remove("GIT_CONFIG_GLOBAL");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap_or_else(|error| panic!("create repo: {error}"));
+        crate::test_support::init_git_repo(&repo);
+        let global = tmp.path().join(".gitconfig");
+        let write = |path: &std::path::Path, contents: &str| {
+            std::fs::write(path, contents)
+                .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+        };
+
+        write(&global, LFS);
+        assert!(
+            ensure_host_git_safety(&repo).is_ok(),
+            "`git lfs install` defaults in user config must pass"
+        );
+
+        write(
+            &global,
+            &LFS.replace("git-lfs filter-process", "sh -c 'git-lfs filter-process'"),
+        );
+        assert!(
+            ensure_host_git_safety(&repo).is_err(),
+            "a changed git-lfs filter command must be rejected"
+        );
+
+        write(&global, "");
+        let included = tmp.path().join("lfs.gitconfig");
+        write(&included, LFS);
+        let status = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["config", "--local", "include.path"])
+            .arg(&included)
+            .status()
+            .unwrap_or_else(|error| panic!("run git config: {error}"));
+        assert!(status.success(), "git config include.path failed");
+        assert!(
+            ensure_host_git_safety(&repo).is_err(),
+            "repository config must not supply filters, even through an include"
         );
     }
 

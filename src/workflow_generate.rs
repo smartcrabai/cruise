@@ -77,6 +77,7 @@ async fn run_prompt_with_usage(
             crate::backend::jcode::SandboxAccess {
                 read_only: true,
                 require_bubblewrap: false,
+                isolate: false,
                 inputs: Vec::new(),
                 output_file: None,
             }

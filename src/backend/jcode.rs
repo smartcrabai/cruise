@@ -1,9 +1,9 @@
 //! `sdk: jcode` backend, implemented through the official Rust SDK.
 //!
-//! Each prompt attempt launches an isolated jcode runtime with that prompt's
-//! environment. Its session home is private to the Cruise conversation, so
-//! concurrent conversations never contend for the user's daemon socket or
-//! mutable home files. Session homes live below the effective ambient
+//! Each prompt attempt launches a private jcode runtime, using Bubblewrap
+//! isolation when requested and available. Its session home is private to the
+//! Cruise conversation; concurrent conversations never contend for the user's daemon
+//! socket or mutable home files. Session homes live below the effective ambient
 //! `JCODE_HOME` (or `~/.jcode`) and are reused by session id for follow-up turns.
 //!
 //! The SDK is blocking and thread-based. [`stream_agent`] runs it on a worker
@@ -33,6 +33,9 @@ use crate::backend::tool::CruiseTool;
 use crate::cancellation::CancellationToken;
 use crate::error::{CruiseError, Result};
 use crate::provider_install::release::JCODE_MIN_VERSION;
+
+mod credential_sync;
+pub(crate) use credential_sync::OAuthStore;
 
 #[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
 mod linux;
@@ -107,6 +110,17 @@ pub(crate) fn bubblewrap_requested() -> bool {
     std::env::var(JCODE_BUBBLEWRAP_ENV).is_ok_and(|value| value == "1")
 }
 
+#[cfg(all(target_os = "linux", feature = "jcode-bubblewrap"))]
+pub(crate) fn bubblewrap_available() -> bool {
+    static AVAILABLE: LazyLock<bool> = LazyLock::new(linux_sandbox::probe_available);
+    *AVAILABLE
+}
+
+#[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+pub(crate) fn bubblewrap_available() -> bool {
+    false
+}
+
 struct MaterializedExternalCredential {
     original_canonical_path: String,
     copy_canonical_path: String,
@@ -147,8 +161,10 @@ pub(crate) struct JcodeRunnerConfig {
 )]
 pub(crate) struct SandboxAccess {
     pub(crate) read_only: bool,
-    /// The caller requires a real Linux Bubblewrap attempt and jcode-only SDK candidates.
+    /// The caller requests Bubblewrap isolation.
     pub(crate) require_bubblewrap: bool,
+    /// Effective isolation after checking runtime Bubblewrap availability.
+    pub(crate) isolate: bool,
     pub(crate) inputs: Vec<PathBuf>,
     pub(crate) output_file: Option<PathBuf>,
 }
@@ -202,15 +218,7 @@ fn run_attempt(
     prompt: &str,
     tx: &SyncSender<StreamChunk>,
 ) -> std::result::Result<StreamChunk, String> {
-    let sandbox_attempt = config.sandbox_access.require_bubblewrap || bubblewrap_requested();
-    if sandbox_attempt && !cfg!(all(target_os = "linux", feature = "jcode-bubblewrap")) {
-        return Err(if cfg!(target_os = "linux") {
-            "Bubblewrap jcode isolation is not available in this build"
-        } else {
-            "Bubblewrap jcode isolation is only available on Linux"
-        }
-        .into());
-    }
+    let sandbox_attempt = config.sandbox_access.isolate;
     let source_home = resolve_source_home(config.cwd.as_deref());
     let session_key = config.resume_session_id.as_deref().map_or_else(
         || uuid::Uuid::new_v4().simple().to_string(),
@@ -221,6 +229,7 @@ fn run_attempt(
     let _guard = lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    credential_sync::refresh_ahead(config, &source_home)?;
     let mut failure_recorded = false;
     let mut home = prepare_session_home(
         source_home,
@@ -312,7 +321,14 @@ impl Runtime {
         if let Some(sandbox) = self.sandbox {
             return sandbox.stop();
         }
-        clear_private_daemon(&home.storage_home).map_err(|error| error.to_string())
+        let stopped = clear_private_daemon(&home.storage_home).map_err(|error| error.to_string());
+        // Only a stopped runtime has finished writing its private stores.
+        if let Err(error) =
+            credential_sync::reclaim_rotated_credentials(&home.source_home, &home.storage_home)
+        {
+            eprintln!("cruise: warning: could not persist a rotated jcode login: {error}");
+        }
+        stopped
     }
 }
 
@@ -1268,6 +1284,14 @@ fn prepare_session_home(
     }
 
     if !isolated {
+        // Relinking discards a resumed home's private store, which may hold the
+        // only valid rotation if a previous attempt ended before reclaiming it.
+        if !fresh
+            && let Err(error) =
+                credential_sync::reclaim_rotated_credentials(&source_home, &storage_home)
+        {
+            eprintln!("cruise: warning: could not persist a rotated jcode login: {error}");
+        }
         let linked_credentials = jcode_sdk::inherit_credentials(&source_home, &storage_home)
             .map_err(|error| error.to_string())?;
         copy_private_model_catalog_caches(&source_home, &storage_home)

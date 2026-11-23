@@ -14,6 +14,8 @@
 
 这是过期预检，并不能证明身份验证会成功。要绕过误报，请设置进程环境变量 `CRUISE_SKIP_AGENT_AUTH_CHECK=1`；只有精确值 `1` 才会跳过检查。
 
+对于显式指定 jcode `openai` 和 `claude` 的模型，当剩余有效期不足两小时时，Cruise 会在每次尝试前于用户的 jcode home 中刷新登录，因此每次尝试的私有运行时不会自行轮换共享的刷新令牌。如果刷新失败且访问令牌将在十分钟内过期，该尝试会失败并提示使用 `jcode login`。
+
 ```yaml
 sdk: jcode        # Explicitly select jcode. If omitted, it is the fallback only
                   # when neither `command` nor `sdk` remains set in the resolved
@@ -111,7 +113,7 @@ git update-ref             git config core.hooksPath  git -c core.hooksPath=
 
 MCP 限制仅在后端启动前筛选由工作流提供的条目。后端的用户级 MCP 配置和 Cruise 自身的会话工具仍保持启用。在 jcode 中，工作流或进程环境中的 `JCODE_HOOKS_DISABLED` 会禁用 shell 检查关卡，钩子执行失败时也会放行。这些控制属于纵深防御，并非沙箱；提示警告、reference-transaction 钩子和 CAS 回滚仍然保留。
 
-只有使用 `jcode-bubblewrap` feature 编译的 Linux 构建才提供 Bubblewrap。普通 jcode 尝试仅在 daemon 启动时设置 `CRUISE_JCODE_BUBBLEWRAP=1` 才会启用隔离；未设置时保持原有行为。工作流中的 `require_bubblewrap: true` 始终请求隔离，不受该环境变量影响。如果请求的隔离不可用或启动失败，该尝试会报错，而不会回退到未隔离运行。每次隔离尝试都会启动独立 daemon，并以只读方式挂载 Git 元数据。`GIT_OPTIONAL_LOCKS=0` 允许 `git status`、`git diff` 和 `git log`；暂存、提交和推送由宿主执行。宿主替换索引后，下次尝试才能看到新索引。此模式不连接共享的 `jcode serve`。
+只有使用 `jcode-bubblewrap` feature 编译的 Linux 构建才提供 Bubblewrap 隔离。普通 jcode 尝试仅在守护进程启动时设置 `CRUISE_JCODE_BUBBLEWRAP=1` 才会请求隔离；工作流中的 `require_bubblewrap: true` 无论该环境变量如何设置都会请求隔离。Cruise 每个进程只探测一次可用性。如果构建未启用该 feature、宿主不是 Linux，或探测失败，请求隔离的尝试会在未隔离的情况下运行，并显示以 `Bubblewrap isolation unavailable; running without isolation` 开头的警告。Claude/OpenCode 非 jcode 回退候选项和 `command:` 后端均获准运行，会在未隔离的情况下运行并显示警告。成功探测后 Bubblewrap 启动失败，仍会使本次尝试失败。每次隔离尝试都会启动独立 daemon，并以只读方式挂载 Git 元数据。`GIT_OPTIONAL_LOCKS=0` 允许 `git status`、`git diff` 和 `git log`；暂存、提交和推送由宿主执行。宿主替换索引后，下次尝试才能看到新索引。此模式不连接共享的 `jcode serve`。
 
 
 <a id="tool-less-non-interactive-planning"></a>

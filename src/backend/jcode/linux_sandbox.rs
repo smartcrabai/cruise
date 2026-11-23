@@ -472,6 +472,31 @@ fn ensure_absent(path: &Path, description: &str) -> Result<(), String> {
     }
 }
 
+pub(super) fn probe_available() -> bool {
+    let Ok((bwrap, disable_nested_userns)) = find_bwrap() else {
+        return false;
+    };
+    let Some(true_binary) = [Path::new("/usr/bin/true"), Path::new("/bin/true")]
+        .into_iter()
+        .find(|path| path.is_file())
+    else {
+        return false;
+    };
+    let mut command = Command::new(bwrap);
+    command.args(["--unshare-user", "--unshare-pid"]);
+    if disable_nested_userns {
+        command.arg("--disable-userns");
+    }
+    command
+        .args(["--ro-bind", "/", "/", "--"])
+        .arg(true_binary)
+        .env_clear()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 fn find_bwrap() -> Result<(PathBuf, bool), String> {
     let bwrap = [Path::new("/usr/bin/bwrap"), Path::new("/bin/bwrap")]
         .into_iter()

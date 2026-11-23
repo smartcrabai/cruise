@@ -191,7 +191,7 @@ impl Executor {
 
     /// Execute one prompt with host-trusted file access for the jcode sandbox.
     ///
-    /// Required Bubblewrap is rejected for the command backend.
+    /// Requested Bubblewrap isolation warns and runs unconfined when unavailable.
     pub(crate) fn run_with_jcode_access(
         &self,
         req: PromptRun<'_>,
@@ -222,24 +222,14 @@ impl Executor {
     ) -> Result<PromptOutcome> {
         const GUARD: &str = "read-only";
 
-        if sandbox_access.require_bubblewrap {
-            if req
+        let isolation_requested =
+            sandbox_access.require_bubblewrap || crate::backend::jcode::bubblewrap_requested();
+        if isolation_requested
+            && req
                 .cancel_token
                 .is_some_and(CancellationToken::is_cancelled)
-            {
-                return Err(CruiseError::Interrupted);
-            }
-            if !self.is_sdk() {
-                return Err(CruiseError::InvalidStepConfig(
-                    "require_bubblewrap cannot use the command backend".to_owned(),
-                ));
-            }
-            if !cfg!(all(target_os = "linux", feature = "jcode-bubblewrap")) {
-                return Err(CruiseError::InvalidStepConfig(
-                    "require_bubblewrap requires a Linux build with the jcode-bubblewrap feature"
-                        .to_owned(),
-                ));
-            }
+        {
+            return Err(CruiseError::Interrupted);
         }
 
         if let Some(model) = req.model {
@@ -277,6 +267,16 @@ impl Executor {
             }
             validate_candidate(&req)?;
         }
+        let bubblewrap_available =
+            isolation_requested && self.is_sdk() && crate::backend::jcode::bubblewrap_available();
+        let isolated_jcode = resolve_bubblewrap_isolation(
+            isolation_requested,
+            bubblewrap_available,
+            matches!(self, Self::Command { .. }),
+            req.on_notice,
+        );
+        let mut sandbox_access = sandbox_access;
+        sandbox_access.isolate = isolated_jcode;
 
         if req.permission != crate::config::PermissionMode::ReadOnly {
             return self.dispatch(req, sandbox_access).await;
@@ -341,6 +341,40 @@ fn notify_model_notice(
     match model.filter(|model| !model.is_empty()) {
         Some(selected) => cb(&format!("Model: {selected}")),
         None => cb(&format!("Model: default model ({backend})")),
+    }
+}
+fn emit_bubblewrap_warning(on_notice: Option<&(dyn Fn(&str) + Send + Sync)>, message: &str) {
+    if let Some(cb) = on_notice {
+        cb(&format!("Warning: Fallback: {message}"));
+    } else {
+        eprintln!("cruise: warning: {message}");
+    }
+}
+
+fn resolve_bubblewrap_isolation(
+    requested: bool,
+    available: bool,
+    command_backend: bool,
+    on_notice: Option<&(dyn Fn(&str) + Send + Sync)>,
+) -> bool {
+    if !requested {
+        return false;
+    }
+    if command_backend {
+        emit_bubblewrap_warning(
+            on_notice,
+            "Bubblewrap isolation unavailable; running command backend without isolation",
+        );
+        return false;
+    }
+    if available {
+        true
+    } else {
+        emit_bubblewrap_warning(
+            on_notice,
+            "Bubblewrap isolation unavailable; running without isolation",
+        );
+        false
     }
 }
 
@@ -599,7 +633,6 @@ async fn run_with_fallback(
         req,
         Sdk::from_name(label).unwrap_or(Sdk::Jcode),
         policy,
-        false,
         |_, model| start(model),
     )
     .await
@@ -613,19 +646,12 @@ async fn run_sdk_with_fallback(
     req: &PromptRun<'_>,
     base_sdk: Sdk,
     policy: Option<Arc<RetryPolicy>>,
-    isolated_jcode: bool,
     mut start: impl FnMut(Sdk, Option<&str>) -> Result<std::sync::mpsc::Receiver<StreamChunk>>,
 ) -> Result<PromptOutcome> {
     let availability = crate::model_selection::availability(req.model, base_sdk)?;
     let on_delta = req.stream.and_then(|s| s.on_stdout);
     let candidates = resolve_candidates(req.model, base_sdk);
     let primary = &candidates[0];
-    if isolated_jcode && !cfg!(all(target_os = "linux", feature = "jcode-bubblewrap")) {
-        return Err(CruiseError::InvalidStepConfig(
-            "Bubblewrap isolation requires a Linux build with the jcode-bubblewrap feature"
-                .to_owned(),
-        ));
-    }
     validate_candidate(req)?;
     let mut engine = FallbackEngine::new_candidates(
         availability,
@@ -898,36 +924,28 @@ async fn run_sdk(
     let subagent = req
         .subagent_model
         .map(|entry| resolve_entry(entry, Sdk::Jcode));
-    let isolated_jcode =
-        sandbox_access.require_bubblewrap || crate::backend::jcode::bubblewrap_requested();
-    run_sdk_with_fallback(
-        &req,
-        Sdk::Jcode,
-        retry::active_policy(),
-        isolated_jcode,
-        |_, model_ref| {
-            if sandbox_access.require_bubblewrap
-                && req
-                    .cancel_token
-                    .is_some_and(CancellationToken::is_cancelled)
-            {
-                return Err(CruiseError::Interrupted);
-            }
-            let subagent_model = subagent
-                .as_ref()
-                .and_then(|candidate| candidate.model.as_deref());
-            Ok(stream_jcode_agent(
-                build_jcode_config_with_access(
-                    &req,
-                    model_ref,
-                    subagent_model,
-                    &sandbox_access,
-                    resolve_for_request,
-                )?,
-                req.prompt.to_string(),
-            ))
-        },
-    )
+    run_sdk_with_fallback(&req, Sdk::Jcode, retry::active_policy(), |_, model_ref| {
+        if sandbox_access.require_bubblewrap
+            && req
+                .cancel_token
+                .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(CruiseError::Interrupted);
+        }
+        let subagent_model = subagent
+            .as_ref()
+            .and_then(|candidate| candidate.model.as_deref());
+        Ok(stream_jcode_agent(
+            build_jcode_config_with_access(
+                &req,
+                model_ref,
+                subagent_model,
+                &sandbox_access,
+                resolve_for_request,
+            )?,
+            req.prompt.to_string(),
+        ))
+    })
     .await
 }
 
@@ -1045,45 +1063,78 @@ mod tests {
         model.map(|model| &*Box::leak(Box::new(ModelSpec::Single(model.to_owned()))))
     }
 
-    #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
+    #[cfg(unix)]
     #[tokio::test]
-    async fn require_bubblewrap_rejects_jcode_on_an_unconfined_build() {
+    async fn require_bubblewrap_runs_command_backend_unconfined_with_warning() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let marker = temp.path().join("command-ran");
         let env = HashMap::new();
-        let result = Executor::Jcode
-            .run_with_jcode_access(
-                base_req(&env),
-                crate::backend::jcode::SandboxAccess {
-                    require_bubblewrap: true,
-                    ..Default::default()
-                },
-            )
-            .await;
+        let notices = Mutex::new(Vec::new());
+        let notice = |message: &str| {
+            notices
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(message.to_owned());
+        };
+        let mut req = base_req(&env);
+        req.on_notice = Some(&notice);
+        let outcome = Executor::Command {
+            command: vec!["touch".to_owned(), marker.to_string_lossy().into_owned()],
+        }
+        .run_with_jcode_access(
+            req,
+            crate::backend::jcode::SandboxAccess {
+                require_bubblewrap: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("command backend must run unconfined: {error}"));
+        assert!(marker.exists());
+        assert_eq!(outcome.result.output, "");
         assert!(
-            matches!(result, Err(CruiseError::InvalidStepConfig(message))
-                if message.contains("requires a Linux build with the jcode-bubblewrap feature"))
+            notices
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|message| message.contains(
+                    "Warning: Fallback: Bubblewrap isolation unavailable; running command backend without isolation"
+                ))
         );
     }
 
     #[cfg(not(all(target_os = "linux", feature = "jcode-bubblewrap")))]
-    #[tokio::test]
-    async fn bubblewrap_request_rejects_jcode_on_an_unconfined_build() {
-        let model = ModelSpec::Single("runtime/jcode-main".to_owned());
-        let env = HashMap::new();
-        let mut req = base_req(&env);
-        req.model = Some(&model);
-        let mut started = false;
-        let result =
-            run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), true, |_, _| {
-                started = true;
-                Ok(canned(vec![StreamChunk::Done("unexpected".to_owned())]))
-            })
-            .await;
-        assert!(!started);
-        assert!(matches!(
-            result,
-            Err(CruiseError::InvalidStepConfig(message))
-                if message.contains("requires a Linux build with the jcode-bubblewrap feature")
+    #[test]
+    fn bubblewrap_availability_is_false_without_linux_feature() {
+        assert!(!crate::backend::jcode::bubblewrap_available());
+    }
+    #[test]
+    fn unavailable_bubblewrap_runs_unconfined_with_warning() {
+        let notices = Mutex::new(Vec::new());
+        let notice = |message: &str| {
+            notices
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(message.to_owned());
+        };
+        assert!(!super::resolve_bubblewrap_isolation(
+            true,
+            false,
+            false,
+            Some(&notice)
         ));
+        assert!(super::resolve_bubblewrap_isolation(
+            true,
+            true,
+            false,
+            Some(&notice)
+        ));
+        assert_eq!(
+            *notices
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["Warning: Fallback: Bubblewrap isolation unavailable; running without isolation"]
+        );
     }
 
     #[tokio::test]
@@ -1110,12 +1161,8 @@ mod tests {
         });
         req.on_session_id = Some(&callback);
         let mut attempts = Vec::new();
-        let outcome = run_sdk_with_fallback(
-            &req,
-            Sdk::Jcode,
-            Some(fast_policy(&[])),
-            false,
-            |sdk, model| {
+        let outcome =
+            run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |sdk, model| {
                 attempts.push((sdk, model.map(str::to_owned), resume_for(&req, sdk)));
                 let id = format!("attempt-{}", attempts.len());
                 let (ready, _rx) = std::sync::mpsc::channel();
@@ -1128,10 +1175,9 @@ mod tests {
                     StreamChunk::SessionReady { id, ready },
                     terminal,
                 ]))
-            },
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             attempts,
             vec![
@@ -1621,6 +1667,7 @@ mod tests {
         let access = crate::backend::jcode::SandboxAccess {
             read_only: true,
             require_bubblewrap: true,
+            isolate: true,
             inputs: vec![Path::new("/trusted/input").to_path_buf()],
             output_file: Some(Path::new("/trusted/output").to_path_buf()),
         };
@@ -1634,6 +1681,7 @@ mod tests {
         .unwrap_or_else(|error| panic!("{error}"));
         assert!(config.sandbox_access.read_only);
         assert!(config.sandbox_access.require_bubblewrap);
+        assert!(config.sandbox_access.isolate);
         assert_eq!(
             config.sandbox_access.inputs,
             vec![Path::new("/trusted/input").to_path_buf()]
@@ -3025,16 +3073,10 @@ mod tests {
         req.model = Some(&spec);
         req.on_notice = Some(&on_notice);
         let mut attempts = Vec::new();
-        run_sdk_with_fallback(
-            &req,
-            Sdk::Jcode,
-            Some(fast_policy(&[])),
-            false,
-            |sdk, model| {
-                attempts.push((sdk, model.map(str::to_owned)));
-                Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
-            },
-        )
+        run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |sdk, model| {
+            attempts.push((sdk, model.map(str::to_owned)));
+            Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
+        })
         .await
         .unwrap_or_else(|error| panic!("startup skip failed: {error}"));
         assert_eq!(attempts, [(Sdk::Jcode, Some(spare.to_owned()))]);
@@ -3058,16 +3100,10 @@ mod tests {
         let unrestricted = ModelSpec::Single(primary.to_owned());
         req.model = Some(&unrestricted);
         attempts.clear();
-        run_sdk_with_fallback(
-            &req,
-            Sdk::Jcode,
-            Some(fast_policy(&[])),
-            false,
-            |sdk, model| {
-                attempts.push((sdk, model.map(str::to_owned)));
-                Ok(canned(vec![StreamChunk::Done("restored".to_owned())]))
-            },
-        )
+        run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |sdk, model| {
+            attempts.push((sdk, model.map(str::to_owned)));
+            Ok(canned(vec![StreamChunk::Done("restored".to_owned())]))
+        })
         .await
         .unwrap_or_else(|error| panic!("window must not register cooldown: {error}"));
         assert_eq!(attempts, [(Sdk::Jcode, Some(primary.to_owned()))]);
@@ -3094,11 +3130,10 @@ mod tests {
         let mut req = base_req(&env);
         req.model = Some(&spec);
         req.on_notice = Some(&on_notice);
-        let result =
-            run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), false, |_, _| {
-                panic!("mixed unavailable candidates must never launch a backend")
-            })
-            .await;
+        let result = run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |_, _| {
+            panic!("mixed unavailable candidates must never launch a backend")
+        })
+        .await;
         let error = match result {
             Err(error) => error.to_string(),
             Ok(_) => panic!("mixed unavailable candidates must fail"),
@@ -3140,7 +3175,7 @@ mod tests {
             let mut req = base_req(&env);
             req.model = Some(&spec);
             req.on_notice = Some(&on_notice);
-            let result = run_sdk_with_fallback(&req, Sdk::Jcode, policy, false, |_, _| {
+            let result = run_sdk_with_fallback(&req, Sdk::Jcode, policy, |_, _| {
                 panic!("disabled candidates must never launch a backend")
             })
             .await;
@@ -3185,7 +3220,6 @@ mod tests {
                     spare,
                 ],
             )])),
-            false,
             |_, model| {
                 let model = model.unwrap_or_default().to_owned();
                 attempts.push(model.clone());
@@ -3204,16 +3238,10 @@ mod tests {
         assert_eq!(attempts, [primary, spare, spare]);
         let unrestricted = ModelSpec::Single(blocked.to_owned());
         req.model = Some(&unrestricted);
-        run_sdk_with_fallback(
-            &req,
-            Sdk::Jcode,
-            Some(fast_policy(&[])),
-            false,
-            |_, model| {
-                assert_eq!(model, Some(blocked));
-                Ok(canned(vec![StreamChunk::Done("available".to_owned())]))
-            },
-        )
+        run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |_, model| {
+            assert_eq!(model, Some(blocked));
+            Ok(canned(vec![StreamChunk::Done("available".to_owned())]))
+        })
         .await
         .unwrap_or_else(|error| panic!("skipped chain identity was poisoned: {error}"));
     }
@@ -3237,16 +3265,10 @@ mod tests {
         let mut req = base_req(&env);
         req.model = Some(&selected);
         let mut attempts = Vec::new();
-        run_sdk_with_fallback(
-            &req,
-            Sdk::Jcode,
-            Some(fast_policy(&[])),
-            false,
-            |_, model| {
-                attempts.push(model.unwrap_or_default().to_owned());
-                Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
-            },
-        )
+        run_sdk_with_fallback(&req, Sdk::Jcode, Some(fast_policy(&[])), |_, model| {
+            attempts.push(model.unwrap_or_default().to_owned());
+            Ok(canned(vec![StreamChunk::Done("ok".to_owned())]))
+        })
         .await
         .unwrap_or_else(|error| panic!("effort override lost availability: {error}"));
         assert_eq!(attempts, ["test-window-step-runtime/spare"]);

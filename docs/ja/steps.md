@@ -169,11 +169,11 @@ after-pr:
 
 `after-pr` の prompt step にも同じ既定の commit guard が適用されます。HEAD を進める必要がある after-PR prompt には個別に `allow_commit: true` を設定してください。
 
-組み込みの PR 後 prompt には commit、push、forge 操作を禁止します。ホストが検証した競合解消を commit し、対象 PR/MR の branch にだけ push します。CI 修復は現在の HEAD の証拠に基づき、修復ツリーを検証して公開・再確認するか、session 内で同じ HEAD の対象ジョブを一度だけ再試行するか、マージせず停止します。native merge は準備状態を独立に確認します。
+組み込みの PR 後 prompt には commit、push、forge 操作を禁止します。ホストが検証した競合解消を commit し、対象 PR/MR の branch にだけ push します。CI 修復は現在の HEAD の証拠に基づき、ホスト verifier が実行可能な場合は正確な stage 済み修復を公開前に検証します。実行できない場合は Cruise が warning を表示し、ホスト検証なしで公開して push 先 HEAD の CI に依拠します。その後 CI を再確認し、session 内で同じ HEAD の対象ジョブを一度だけ再試行するか、マージせず停止します。native merge は準備状態を独立に確認します。
 
-`require_bubblewrap: true` は prompt / GitHub review step に Linux jcode の実際の隔離を要求します。組み込みの競合解消・CI 修復・レビューに適用し、fallback でも隔離されない backend は起動しません。
+`require_bubblewrap: true` と daemon 環境変数 `CRUISE_JCODE_BUBBLEWRAP=1` は、利用可能な場合に Linux jcode Bubblewrap による隔離を要求します。Cruise は process ごとに一度、利用可否を probe します。`jcode-bubblewrap` feature がない build、Linux 以外の host、または probe の失敗時、step は隔離なしで実行され、`Bubblewrap isolation unavailable; running without isolation` で始まる warning が表示されます。Claude/OpenCode の非 jcode fallback candidate と `command:` backend も拒否されず、隔離なしで実行され warning が表示されます。probe 成功後に Bubblewrap の起動が失敗した場合は attempt が失敗します。組み込みの競合解消・CI 修復・レビュー prompt は `require_bubblewrap: true` を維持するため、可能な場合に隔離されます。
 
-CI 修復の自動 commit には Linux の `jcode-bubblewrap` build が必要です。daemon 環境の `CRUISE_CI_VERIFY_SCRIPT` に worktree 外の信頼済み shell script の絶対パスを指定します。ハードリンク不可、group/other 書き込み不可。合否判定は候補ツリー内の script に任せません。読み取り専用の `/candidate` と書き込み可能な専用 `/tmp` を使い、ネットワークも継承資格情報も使えません。script 未設定・失敗、非対応ツリー（symlink や submodule など）では公開しません。保存済み session は元の workflow を保持します。
+CI 修復の自動 commit では、Bubblewrap が利用可能で `CRUISE_CI_VERIFY_SCRIPT` が設定されている場合、ホストが正確な stage 済み修復を commit 前に検証します。そうでなければ Cruise は warning を表示し、ホスト検証なしで commit / push して、push 先 HEAD の CI に依拠します。設定された verifier が失敗した場合は commit を停止します。`CRUISE_CI_VERIFY_SCRIPT` には daemon 環境から worktree 外にある信頼済み shell script の絶対 path を指定します。ハードリンク不可、group/other 書き込み不可。合否判定は候補ツリー内の script に任せません。script は読み取り専用の `/candidate` と書き込み可能な専用 `/tmp` を使い、ネットワークも継承資格情報も使えません。非対応ツリー（symlink や submodule など）は公開しません。保存済み session は元の workflow を保持します。
 
 GitLab の merged-results pipeline が一時マージ SHA 上で動く場合は、再試行・自動修復を許可しません。source HEAD の証拠が必要です。
 

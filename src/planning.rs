@@ -362,6 +362,7 @@ async fn run_plan_prompt_template_with_conversation(
             let mut access = crate::backend::jcode::SandboxAccess {
                 read_only: true,
                 require_bubblewrap: false,
+                isolate: false,
                 inputs: Vec::with_capacity(2),
                 output_file: None,
             };
