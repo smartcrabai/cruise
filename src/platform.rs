@@ -72,7 +72,7 @@ pub(crate) fn shell_command() -> (&'static str, &'static str) {
     }
 }
 
-/// The running Cruise executable, quoted as one word for [`shell_command`].
+/// The running Cruise executable as one word for [`shell_command`].
 ///
 /// Built-in steps invoke Cruise through this instead of a `cruise` found on
 /// `PATH`, which may be a different version than the process running them.
@@ -81,21 +81,54 @@ pub(crate) fn shell_command() -> (&'static str, &'static str) {
 ///
 /// Returns an error when the executable path cannot be determined or quoted.
 pub(crate) fn quoted_current_exe() -> crate::error::Result<String> {
-    let exe = std::env::current_exe()?;
-    let path = exe.to_str().ok_or_else(|| {
+    shell_word(&std::env::current_exe()?)
+}
+
+/// `path` as one word for [`shell_command`].
+pub(crate) fn shell_word(path: &std::path::Path) -> crate::error::Result<String> {
+    let unusable = || {
         crate::error::CruiseError::Other(format!(
-            "Cruise executable path is not UTF-8: {}",
-            exe.display()
+            "cannot pass {} to the step shell",
+            path.display()
         ))
-    })?;
+    };
     #[cfg(unix)]
     {
-        Ok(format!("'{}'", path.replace('\'', r"'\''")))
+        let text = path.to_str().ok_or_else(unusable)?;
+        Ok(format!("'{}'", text.replace('\'', r"'\''")))
     }
     #[cfg(windows)]
     {
-        // Windows paths cannot contain `"`, so one pair quotes the whole path.
-        Ok(format!("\"{path}\""))
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        // cmd.exe receives the step through Rust's `\"` argument escaping, so a
+        // quoted path cannot survive; fall back to the 8.3 name, which has no spaces.
+        let plain = |text: &str| {
+            !text.is_empty()
+                && !text
+                    .chars()
+                    .any(|c| c.is_whitespace() || "\"&|<>^()%!,;=".contains(c))
+        };
+        if let Some(text) = path.to_str().filter(|text| plain(text)) {
+            return Ok(text.to_owned());
+        }
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        // SAFETY: `wide` is NUL-terminated; a null buffer of length 0 asks for the size.
+        let size = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+        if size == 0 {
+            return Err(unusable());
+        }
+        let mut short = vec![0u16; size as usize];
+        // SAFETY: `short` holds `size` UTF-16 units, the size reported above.
+        let len = unsafe { GetShortPathNameW(wide.as_ptr(), short.as_mut_ptr(), size) };
+        if len == 0 || len >= size {
+            return Err(unusable());
+        }
+        short.truncate(len as usize);
+        String::from_utf16(&short)
+            .ok()
+            .filter(|text| plain(text))
+            .ok_or_else(unusable)
     }
 }
 
