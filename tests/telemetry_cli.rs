@@ -1110,8 +1110,14 @@ fn builtin_wait_ci_command(name: &str) -> String {
     let mut variables = cruise::variable::VariableStore::new(String::new());
     variables.set_named_value("pr.number", "42".to_owned());
     variables.set_named_value("pr.url", "https://github.com/owner/repo/pull/42".to_owned());
+    // Route internal calls to the PATH stub instead of this test binary.
     variables
-        .resolve(&command.as_slice().join("\n"))
+        .resolve(
+            &command
+                .as_slice()
+                .join("\n")
+                .replace("{cruise.bin}", "cruise"),
+        )
         .unwrap_or_else(|error| panic!("resolve {name} wait-ci command: {error}"))
 }
 fn builtin_wait_ci_fixture(
