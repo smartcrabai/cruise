@@ -386,11 +386,22 @@ mod local_merge_regression_tests {
     #[cfg(unix)]
     #[test]
     fn rejecting_hook_clears_intent_and_retry_commits_once() -> TestResult {
+        use crate::test_support::{EnvGuard, lock_process};
         use std::os::unix::fs::PermissionsExt;
+        // The hook must run regardless of the caller's Git config: count 0 drops inherited
+        // `GIT_CONFIG_*` pairs, and a repository-local hooksPath wins over global/system ones.
+        let _lock = lock_process();
+        let _count = EnvGuard::set("GIT_CONFIG_COUNT", "0");
+        let _parameters = EnvGuard::remove("GIT_CONFIG_PARAMETERS");
         let mut f = Fixture::new()?;
         f.branch_change()?;
         let parent = f.head()?;
-        let hook = f.state.base_dir.join(".git/hooks/pre-commit");
+        let hooks = f.state.base_dir.join(".git/hooks");
+        run_git_ok(
+            &f.state.base_dir,
+            &["config", "core.hooksPath", &hooks.to_string_lossy()],
+        );
+        let hook = hooks.join("pre-commit");
         fs::write(&hook, "#!/bin/sh\nexit 1\n")?;
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))?;
         let durable = RefCell::new(None);
