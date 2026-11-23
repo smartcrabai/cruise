@@ -218,7 +218,6 @@ async fn installed_jcode_runs_in_real_bubblewrap_with_only_model_network_access(
     assert_version(&bwrap, "0.11.1");
 
     let fixture = Fixture::new(&jcode);
-    fixture.install_cruise_capture_shim();
     fixture.create_linked_repositories();
     let secret = fixture.write_dummy_secret();
     let metadata = fixture.git_metadata();
@@ -264,7 +263,6 @@ struct Fixture {
     xdg_data: PathBuf,
     xdg_state: PathBuf,
     xdg_cache: PathBuf,
-    host_bin: PathBuf,
     jcode_home: PathBuf,
     main_source: PathBuf,
     repo: PathBuf,
@@ -287,7 +285,6 @@ impl Fixture {
         let xdg_cache = path.join("xdg/cache");
         let jcode_home = home.join("jcode");
         let main_source = path.join("main-source");
-        let host_bin = path.join("host-bin");
         let repo = path.join("linked-main");
         let nested_source = path.join("nested-source");
         let nested_repo = repo.join("nested");
@@ -299,7 +296,6 @@ impl Fixture {
             &xdg_cache,
             &jcode_home,
             &main_source,
-            &host_bin,
             &nested_source,
         ] {
             fs::create_dir_all(directory)
@@ -309,7 +305,6 @@ impl Fixture {
             root,
             home,
             xdg_config,
-            host_bin,
             xdg_data,
             xdg_state,
             xdg_cache,
@@ -350,46 +345,6 @@ impl Fixture {
             .env("GIT_CONFIG_COUNT", "0")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("NO_COLOR", "1");
-    }
-
-    fn path_with_host_tools(&self) -> std::ffi::OsString {
-        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = vec![self.host_bin.clone()];
-        paths.extend(std::env::split_paths(&inherited_path));
-        std::env::join_paths(paths).unwrap_or_else(|error| panic!("build host-tool PATH: {error}"))
-    }
-
-    fn install_cruise_capture_shim(&self) {
-        let shim = self.host_bin.join("cruise");
-        let capture = self.root.path().join("tdd-capture");
-        let real_cruise = shell_quote(Path::new(env!("CARGO_BIN_EXE_cruise")));
-        let capture_analysis = shell_quote(&capture.join("analysis"));
-        let capture_invocation = shell_quote(&capture.join("invocation.txt"));
-        let capture_ledger = shell_quote(&capture.join("cruise-findings-ledger.md"));
-        let capture_apply_output = shell_quote(&capture.join("analysis/apply-output.md"));
-        let script = format!(
-            r#"#!/bin/sh
-set -u
-{real_cruise} "$@"
-status=$?
-if [ "$status" -ne 0 ]; then
-  exit "$status"
-fi
-if [ "$#" -ge 2 ] && [ "$1" = "internal" ] && [ "$2" = "tdd-ledger-snapshot" ]; then
-  plan=${{CRUISE_TDD_LEDGER_PLAN:?missing TDD ledger plan}}
-  session_dir=$(dirname "$plan")
-  mkdir -p {capture_analysis} || exit $?
-  printf '%s\n' "$@" >> {capture_invocation} || exit $?
-  cp "$session_dir/artifacts/cruise-findings-ledger.md" {capture_ledger} || exit $?
-  cp "$session_dir/artifacts/analysis/apply-output.md" {capture_apply_output} || exit $?
-fi
-exit "$status"
-"#
-        );
-        fs::write(&shim, script)
-            .unwrap_or_else(|error| panic!("write host Cruise capture shim: {error}"));
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700))
-            .unwrap_or_else(|error| panic!("make host Cruise capture shim executable: {error}"));
     }
 
     fn create_linked_repositories(&self) {
@@ -767,10 +722,14 @@ impl<'a> CruiseDaemon<'a> {
 
     fn start_with_jcode_home(fixture: &'a Fixture, jcode_home: &Path) -> Self {
         let mut command = fixture.command(&fixture.repo);
-        command
-            .env("JCODE_HOME", jcode_home)
-            .env("PATH", fixture.path_with_host_tools())
-            .args(["daemon", "start", "--host", "127.0.0.1", "--port", "0"]);
+        command.env("JCODE_HOME", jcode_home).args([
+            "daemon",
+            "start",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+        ]);
         let output = run_command(
             &mut command,
             "start isolated Cruise daemon",
@@ -1223,6 +1182,12 @@ fn run_builtin_tdd(fixture: &Fixture, model: &Arc<ModelFixture>) {
     .unwrap_or_else(|error| panic!("write isolated Cruise model config: {error}"));
 
     let capture_dir = fixture.root.path().join("tdd-capture");
+    let capture_done = Arc::new(AtomicBool::new(false));
+    let capture = capture_tdd_ledger(
+        fixture.xdg_data.join("cruise/sessions"),
+        capture_dir.clone(),
+        Arc::clone(&capture_done),
+    );
     let head_before = git_output(&fixture.repo, &["rev-parse", "HEAD"], &fixture.home);
     let request_offset = model
         .requests
@@ -1249,6 +1214,10 @@ fn run_builtin_tdd(fixture: &Fixture, model: &Arc<ModelFixture>) {
         "run complete builtin:tdd graph",
         COMMAND_TIMEOUT,
     );
+    capture_done.store(true, Ordering::SeqCst);
+    capture
+        .join()
+        .unwrap_or_else(|_| panic!("TDD ledger capture thread panicked"));
     assert_output_success("complete builtin:tdd graph", &output);
 
     assert_eq!(
@@ -1304,14 +1273,39 @@ fn assert_tdd_full_graph(requests: &[Value]) {
     }
 }
 
+/// The TDD gate runs the daemon's own executable inside the session, and a
+/// successful exec removes that session, so copy the host-written ledger while
+/// the run is still in progress.
+fn capture_tdd_ledger(
+    sessions: PathBuf,
+    capture: PathBuf,
+    done: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while !done.load(Ordering::SeqCst) {
+            for entry in fs::read_dir(&sessions).into_iter().flatten().flatten() {
+                let artifacts = entry.path().join("artifacts");
+                let (Ok(ledger), Ok(apply)) = (
+                    fs::read_to_string(artifacts.join("cruise-findings-ledger.md")),
+                    fs::read_to_string(artifacts.join("analysis/apply-output.md")),
+                ) else {
+                    continue;
+                };
+                if ledger.lines().any(|line| line.starts_with("snapshot: ")) {
+                    fs::create_dir_all(capture.join("analysis"))
+                        .unwrap_or_else(|error| panic!("create TDD capture: {error}"));
+                    fs::write(capture.join("cruise-findings-ledger.md"), ledger)
+                        .unwrap_or_else(|error| panic!("capture TDD ledger: {error}"));
+                    fs::write(capture.join("analysis/apply-output.md"), apply)
+                        .unwrap_or_else(|error| panic!("capture TDD apply output: {error}"));
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    })
+}
+
 fn assert_tdd_host_artifacts(fixture: &Fixture, capture_dir: &Path, head_before: &str) {
-    let invocation_path = capture_dir.join("invocation.txt");
-    assert_eq!(
-        fs::read_to_string(&invocation_path)
-            .unwrap_or_else(|error| panic!("read real TDD host gate invocation: {error}")),
-        "internal\ntdd-ledger-snapshot\n",
-        "the host capture shim did not forward the exact TDD snapshot command"
-    );
     let apply_output_path = capture_dir.join("analysis/apply-output.md");
     let apply_output = fs::read_to_string(&apply_output_path)
         .unwrap_or_else(|error| panic!("read TDD apply output {apply_output_path:?}: {error}"));

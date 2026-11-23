@@ -405,7 +405,7 @@ groups:
         env:
           CRUISE_TDD_LEDGER_PLAN: '{plan}'
         quality_gates:
-          - command: cruise internal tdd-ledger-snapshot
+          - command: '{cruise.bin} internal tdd-ledger-snapshot'
             timeout: 2m
 steps:
   write-test-first:

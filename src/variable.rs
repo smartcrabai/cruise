@@ -324,6 +324,7 @@ impl VariableStore {
                 .prev_success
                 .map(|b| b.to_string())
                 .ok_or_else(|| CruiseError::UndefinedVariable("prev.success".to_string())),
+            "cruise.bin" => crate::platform::quoted_current_exe(),
             other => match self.named.get(other) {
                 Some(NamedVariable::FilePath(path)) => Ok(path.to_string_lossy().to_string()),
                 Some(NamedVariable::Value(val)) => Ok(val.clone()),

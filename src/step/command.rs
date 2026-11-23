@@ -868,6 +868,31 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
+    async fn windows_command_runs_cruise_bin_style_path_with_spaces() {
+        let root = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let dir = root.path().join("a b");
+        std::fs::create_dir(&dir).unwrap_or_else(|e| panic!("{e}"));
+        let tool = dir.join("tool.cmd");
+        std::fs::write(&tool, "@echo %~1>\"%~dp0out.txt\"\r\n").unwrap_or_else(|e| panic!("{e}"));
+        let word = crate::platform::shell_word(&tool).unwrap_or_else(|e| panic!("{e:?}"));
+        let result = run_command(
+            &format!("{word} x"),
+            0,
+            &HashMap::new(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(result.success, "{}", result.stderr);
+        let out = std::fs::read_to_string(dir.join("out.txt")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(out.trim_end(), "x");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
     async fn cancelled_windows_command_kills_descendants_and_closes_pipes() {
         let _lock = crate::test_support::lock_process();
         crate::console_mode::set_quiet(true);

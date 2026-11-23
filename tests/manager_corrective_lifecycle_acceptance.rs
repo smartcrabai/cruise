@@ -114,12 +114,10 @@ fn setup_corrective_fixture() -> (TempDir, PathBuf, Value) {
     .unwrap_or_else(|error| panic!("operation failed: {error}"));
     let bin = home.join("bin");
     fs::create_dir(&bin).unwrap_or_else(|error| panic!("operation failed: {error}"));
+    // Gates must run the daemon's own executable, never this stale PATH one.
     fs::write(
         bin.join("cruise"),
-        format!(
-            "#!/bin/sh\n'{}' \"$@\" 2>>\"$HOME/gate-errors\"\n",
-            env!("CARGO_BIN_EXE_cruise")
-        ),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/stale-cruise\"\nexit 97\n",
     )
     .unwrap_or_else(|error| panic!("operation failed: {error}"));
     fs::set_permissions(bin.join("cruise"), fs::Permissions::from_mode(0o700))
@@ -392,10 +390,10 @@ async fn verify_corrective_completion(
         }
         assert!(
             goal["status"] != "blocked" && Instant::now() < deadline,
-            "corrective lifecycle failed: goal={goal} agent-calls={} daemon={} gates={}",
+            "corrective lifecycle failed: goal={goal} agent-calls={} daemon={} stale-cruise={}",
             fs::read_to_string(home.join("agent-calls")).unwrap_or_default(),
             fs::read_to_string(home.join("state/cruise/daemon/daemon.log")).unwrap_or_default(),
-            fs::read_to_string(home.join("gate-errors")).unwrap_or_default()
+            fs::read_to_string(home.join("stale-cruise")).unwrap_or_default()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

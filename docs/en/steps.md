@@ -228,6 +228,7 @@ Commit and PR templates use a separate [allowed vocabulary](configuration.md#com
 | `{pr.number}` | Pull request number, available after a PR has been created |
 | `{pr.url}` | Pull request URL, available after a PR has been created |
 | `{pr.language}` | Effective language used for PR title/body generation (from `CRUISE_LANGUAGE_PR`, `languages.pr`, the legacy field, locale inference, or the default) |
+| `{cruise.bin}` | Path of the running Cruise executable, as one word for the step shell (single-quoted for `sh`; on Windows a path without spaces, using the 8.3 short name when needed). Built-in steps call `{cruise.bin} internal ...` so they never run a different `cruise` version found on `PATH` |
 
 > **Note:** `{model}` is **not** a template variable -- it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `prompt_file`, `instruction`, or `command` step fields.
 
