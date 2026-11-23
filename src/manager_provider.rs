@@ -26,6 +26,17 @@ pub(crate) fn active_turn(repo: &Path) -> Option<String> {
         .cloned()
 }
 
+pub(crate) fn snapshot_with_active_turn(cwd: &Path) -> Result<(Snapshot, Option<String>)> {
+    let repo = crate::manager::repository(cwd)?;
+    let busy = BUSY
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let snapshot = crate::manager::snapshot_for_repository(repo)?;
+    let active = busy.get(&snapshot.repository).cloned();
+    Ok((snapshot, active))
+}
+
 pub(crate) fn is_idle() -> bool {
     BUSY.get_or_init(Default::default)
         .lock()

@@ -32,8 +32,8 @@ async fn snapshot(
 }
 
 pub(crate) fn enriched_snapshot(state: &WebState, cwd: &Path) -> Result<Value> {
-    let mut snapshot = crate::manager::snapshot(cwd)?;
-    if let Some(id) = crate::manager_provider::active_turn(&snapshot.repository)
+    let (mut snapshot, active) = crate::manager_provider::snapshot_with_active_turn(cwd)?;
+    if let Some(id) = active
         && let Some(turn) = snapshot
             .transcript
             .iter_mut()

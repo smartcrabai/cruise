@@ -5,9 +5,13 @@
 
 ## 实验性 Manager 记录
 
-`cruise manager` 需要本地 Git 仓库以及交互式标准输入和输出。记录保存在 `$XDG_DATA_HOME/cruise/manager/`（通常为 `~/.local/share/cruise/manager/`），以规范化的 Git 公共目录为键，因此关联工作树共享同一记录。重新连接时会显示已保存的消息以及任何提案或目标。对话使用从 `builtin:tdd` 默认配置解析出的交互式 SDK 和规划模型，不支持 command 后端。用户输入在调用提供商之前保存，如果调用未完成则保留为中断状态。SDK 被要求在临时目录中使用只读权限，但这不是严格的沙箱。
+`cruise manager` 需要本地 Git 仓库。记录保存在 `$XDG_DATA_HOME/cruise/manager/`（通常为 `~/.local/share/cruise/manager/`），以规范化的 Git 公共目录为键，因此关联工作树共享同一记录。运行 `cruise manager status` 时会显示已保存的消息以及任何提案或目标。对话使用从 `builtin:tdd` 默认配置解析出的交互式 SDK 和规划模型，不支持 command 后端。用户输入在调用提供商之前保存，如果调用未完成则保留为中断状态。SDK 被要求在临时目录中使用只读权限，但这不是严格的沙箱。
 
-`/goals` 刷新快照，`/exit` 断开连接。`/make-goal` 请求经过验证的提案预览；目标分支必须能解析为本地 `origin` 跟踪引用，必要时请先 fetch。`/approve` 显示包含可执行检查的提案并要求输入 `approve`。批准会为该仓库和目标分支注册一个持久化的活动 Goal，并授权守护进程协调器异步调度符合条件的子会话；审批操作本身不会同步启动执行。每个子会话在分派时固定到精确的已集成 Goal tip；成功结果按顺序集成，随后先验证合并后的精确 SHA，再由 Cruise 发布或恢复该 Goal 唯一的 PR/MR。Manager 不会合并；它会等待人工将经过验证的 head 合并到已批准的目标分支。`/pause GOAL` 和 `/resume GOAL` 记录目标状态，`/answer` 可回答匹配的活动子会话问题或选项提示；`/retry GOAL TASK` 在满足安全等条件时，可为活动目标中之前失败或暂停的子会话，或阻塞目标中已安全确认存在集成冲突的已完成子会话预留新的尝试。此外还需通过依赖关系、所有权、仓库等检查。`/resume GOAL TASK` 在原工作树中继续符合条件的子会话。`/retry GOAL` 可为所有任务均已集成且符合条件的阻塞目标重新运行验证，并保留先前证据；它不会重试结果不确定的发布。`/corrective GOAL TASK` 提示输入人工编写的指令，为符合条件且已确定失败的检查保存修正预览，此时不会授权执行。`/approve-corrective GOAL` 会刷新并显示目标和预览，要求输入 `approve`。批准仅适用于该预览及集成后的 tip，会添加任务并保留先前的验证证据和已批准的检查。预览或 tip 发生变化时需要重新审查。执行需要 Git 2.38 或更高版本，以及经过身份验证的 GitHub 或 GitLab `origin`。
+运行 `cruise manager` 或 `cruise manager status` 查看仓库快照；脚本可为 `status` 加上 `--json`。`cruise manager say [TEXT]` 省略文本参数时，从终端读取多行输入，或从管道读取标准输入。`say` 和 `propose` 默认等待完成；指定 `--no-wait` 会输出轮次 ID 并立即退出。按 Ctrl-C 只会停止等待，守护进程仍会继续处理该轮次。
+
+`cruise manager propose` 请求经过验证的提案预览；目标分支必须能解析为本地 `origin` 跟踪引用，必要时请先 fetch。`cruise manager approve` 显示包含可执行检查的提案及其契约。在终端中未指定 `--yes` 时，必须准确输入 `approve` 来确认。非交互式批准必须同时指定 `--yes` 和 `--revision N`；指定的版本号必须与审查过的提案匹配。批准会为该仓库和目标分支注册一个持久化的活动 Goal，并授权守护进程协调器异步调度符合条件的子会话；审批操作本身不会同步启动执行。每个子会话在分派时固定到精确的已集成 Goal tip；成功结果按顺序集成，随后先验证合并后的精确 SHA，再由 Cruise 发布或恢复该 Goal 唯一的 PR/MR。Manager 不会合并；它会等待人工将经过验证的 head 合并到已批准的目标分支。`cruise manager pause GOAL` 和 `cruise manager resume GOAL` 记录目标状态，`cruise manager answer` 可回答匹配的活动子会话问题或选项提示；`cruise manager retry GOAL TASK` 在满足安全等条件时，可为活动目标中之前失败或暂停的子会话，或阻塞目标中已安全确认存在集成冲突的已完成子会话预留新的尝试。此外还需通过依赖关系、所有权、仓库等检查。`cruise manager resume GOAL TASK` 在原工作树中继续符合条件的子会话。`cruise manager retry GOAL` 可为所有任务均已集成且符合条件的阻塞目标重新运行验证，并保留先前证据；它不会重试结果不确定的发布。`cruise manager corrective GOAL TASK` 提示输入人工编写的指令，为符合条件且已确定失败的检查保存修正预览，此时不会授权执行。`cruise manager approve-corrective GOAL` 会刷新并显示目标和预览，并遵循与 `cruise manager approve` 相同的确认和版本规则。批准仅适用于该预览及集成后的 tip，会添加任务并保留先前的验证证据和已批准的检查。预览或 tip 发生变化时需要重新审查。执行需要 Git 2.38 或更高版本，以及经过身份验证的 GitHub 或 GitLab `origin`。
+
+回答开放式问题时，使用 `cruise manager answer GOAL PROMPT TEXT`，或在终端中输入多行文本。对于选项提示，标准输入为终端时使用菜单。标准输入不是终端时，必须用 `--choice LABEL` 指定完全匹配的标签，并且仅在选项需要文本输入时提供 `--text TEXT`。纠正任务说明可通过 `--instructions TEXT`、终端提示或管道传入。
 
 在 WebUI 侧边栏中选择 **Manager**，从列表选择仓库，或输入守护进程所在主机上的本地 Git 工作区路径，然后点击 **打开仓库**。只能打开已有 Manager 记录的仓库。仅打开工作区不会创建记录或启动任务。WebUI 与 CLI 共享对话、提案和目标。可以在仓库页面发送消息并请求生成提案。请检查目标提交、任务及可执行的检查，然后明确确认所显示的修订版本，以授权执行。页面会自动刷新，并根据当前状态提供暂停或恢复目标、继续或重试任务、重试验证、预览和批准修正任务，以及回复待处理的 Ask 或 Option 提示等操作。仅预览修正任务不会授权执行。Manager 的子会话页面仍为只读。只有当 Cruise 找到包含该子会话目标的可读 Manager 记录时，才会显示 **在 Manager 中打开** 链接，用于返回仓库的 Manager 页面。
 
@@ -102,6 +106,8 @@ WebUI 的 Directory 来源提供 **Exec** 按钮，启用 `force_exec` 时则显
 | **PR Failed** | Create PR, Open PR*, Reset to Planned, Delete, Back |
 | **Completed** | Open PR*, Merge PR*, Stage local merge**, Merge locally & cleanup**, Reset to Planned, Delete, Back |
 
+对于 Manager 管理的子会话，列表仅提供 **View Diff**（如可用）和 **Back**。请使用 `cruise manager` 子命令操作这些子会话。
+
 `cruise list` 不提供 Verify，这与它目前不提供 Ask 的情况一致。
 
 * 仅当会话有 PR URL 时才会显示 Open PR 和 Merge PR。只有当运行中会话的 runner 仍处于活动状态时，才会显示 Tell。
@@ -181,9 +187,11 @@ secrets/config.yaml
 
 当 `cruise list` 或 WebUI 会话详情视图加载会话时，会检查处于 `Running` 阶段的会话是否仍然存活。如果 runner 进程已不再运行，会话会自动转换为 `Suspended` 阶段。这样可防止进程崩溃或被强制终止后，会话无限期停留在 `Running` 状态。
 
-可从 `cruise list` 或 WebUI 恢复 `Suspended` 会话，也可以将其重置为 Planned。`run --all` 命令也会像处理 Planned 会话一样处理 Suspended 会话。
+可从 `cruise list` 或 WebUI 恢复普通 `Suspended` 会话，也可以将其重置为 Planned。`run --all` 命令也会像处理 Planned 会话一样处理 Suspended 会话。
 
 <a id="parallel-session-execution"></a>
+如需恢复 Manager 管理的子会话，请使用上文所述的 `cruise manager` 子命令。
+
 ## 并行会话执行
 
 Run All 可以在同一工作进程中从失败步骤开始，自动重试符合条件的失败。可在 WebUI 设置中设置非负上限，或运行 `cruise config --set-auto-requeue-max-attempts <N>`。默认值为 `0`，即禁用重试。未分类的命令错误、符合条件的提供方错误以及无文件更改错误可能会重试；取消、配置、身份验证和授权错误不会重试。每次尝试仍会正常显示失败通知。包含失败步骤的已完成运行不会被重新归类为失败。

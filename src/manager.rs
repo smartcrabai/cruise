@@ -237,7 +237,7 @@ pub struct Snapshot {
     pub goals: Vec<Goal>,
 }
 
-fn repository(cwd: &Path) -> Result<PathBuf> {
+pub(crate) fn repository(cwd: &Path) -> Result<PathBuf> {
     let cwd = cwd.canonicalize()?;
     let output = Command::new("git")
         .arg("-C")
@@ -437,10 +437,14 @@ fn save(snapshot: &Snapshot) -> Result<()> {
 /// # Errors
 /// Returns an error if the repository cannot be resolved or its state cannot be read.
 pub fn snapshot(cwd: &Path) -> Result<Snapshot> {
+    snapshot_for_repository(repository(cwd)?)
+}
+
+pub(crate) fn snapshot_for_repository(repo: PathBuf) -> Result<Snapshot> {
     let _guard = WRITER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    load(repository(cwd)?)
+    load(repo)
 }
 
 /// Read every record as one consistent scheduling inventory. A single corrupt
@@ -788,12 +792,16 @@ pub(crate) fn preview_corrective(
                 "invalid corrective task or dependencies".into(),
             ));
         }
-        let revision = match &goal.execution.corrective_preview {
-            Some(previous) => previous.revision.checked_add(1).ok_or_else(|| {
-                CruiseError::Other("corrective preview revision exhausted".into())
-            })?,
-            None => 1,
-        };
+        let revision = goal
+            .execution
+            .corrective_preview
+            .iter()
+            .chain(&goal.execution.corrective_approvals)
+            .map(|preview| preview.revision)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| CruiseError::Other("corrective preview revision exhausted".into()))?;
         let preview = CorrectivePreview {
             id: uuid::Uuid::new_v4().to_string(),
             revision,
@@ -877,11 +885,16 @@ pub(crate) fn save_proposal_for_turn(
     let mut snapshot = load(repository(cwd)?)?;
     proposal.workflow = "builtin:tdd".into();
     proposal.contract = Some(freeze_contract(cwd, &snapshot.repository)?);
-    proposal.id = uuid::Uuid::new_v4().to_string();
+    proposal.id = turn_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
     proposal.revision = snapshot
         .proposal
-        .as_ref()
-        .map_or(1, |p| p.revision.saturating_add(1));
+        .iter()
+        .chain(snapshot.goals.iter().map(|goal| &goal.proposal))
+        .map(|proposal| proposal.revision)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| CruiseError::Other("proposal revision exhausted".into()))?;
     proposal.validate()?;
     verify_contract(cwd, &snapshot.repository, &proposal)?;
     snapshot.proposal = Some(proposal.clone());
