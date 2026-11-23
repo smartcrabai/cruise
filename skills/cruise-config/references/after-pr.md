@@ -95,7 +95,9 @@ timed-out jobs). If diagnostics are empty or truncated, it queries the
 provider directly. It reproduces the corresponding CI commands, fixes all
 genuine in-scope failures in one pass, and runs relevant formatters, linters,
 and tests before committing. Unrelated or flaky jobs are rerun once or
-reported clearly; a repair with no file changes does not loop. Changed fixes
+reported clearly; a repair with no file changes does not loop. When the repair
+decides to wait, the run stops unmerged; running the session again checks CI
+on the current head instead of reusing that decision. Changed fixes
 still route through base synchronization, push, and another CI wait. New
 expanded IDs are `follow-up/pr-ready`, etc. The native `squash-merge` remains
 the final direct root step, never inside the callee. Existing session

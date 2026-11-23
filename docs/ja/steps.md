@@ -169,7 +169,7 @@ after-pr:
 
 `after-pr` の prompt step にも同じ既定の commit guard が適用されます。HEAD を進める必要がある after-PR prompt には個別に `allow_commit: true` を設定してください。
 
-組み込みの PR 後 prompt には commit、push、forge 操作を禁止します。ホストが検証した競合解消を commit し、対象 PR/MR の branch にだけ push します。CI 修復は現在の HEAD の証拠に基づき、ホスト verifier が実行可能な場合は正確な stage 済み修復を公開前に検証します。実行できない場合は Cruise が warning を表示し、ホスト検証なしで公開して push 先 HEAD の CI に依拠します。その後 CI を再確認し、session 内で同じ HEAD の対象ジョブを一度だけ再試行するか、マージせず停止します。native merge は準備状態を独立に確認します。
+組み込みの PR 後 prompt には commit、push、forge 操作を禁止します。ホストが検証した競合解消を commit し、対象 PR/MR の branch にだけ push します。CI 修復は現在の HEAD の証拠に基づき、ホスト verifier が実行可能な場合は正確な stage 済み修復を公開前に検証します。実行できない場合は Cruise が warning を表示し、ホスト検証なしで公開して push 先 HEAD の CI に依拠します。その後 CI を再確認し、session 内で同じ HEAD の対象ジョブを一度だけ再試行するか、マージせず停止します。停止した session を再実行すると、前回の判定を使い回さず現在の HEAD の CI を再確認します。native merge は準備状態を独立に確認します。
 
 `require_bubblewrap: true` と daemon 環境変数 `CRUISE_JCODE_BUBBLEWRAP=1` は、利用可能な場合に Linux jcode Bubblewrap による隔離を要求します。Cruise は process ごとに一度、利用可否を probe します。`jcode-bubblewrap` feature がない build、Linux 以外の host、または probe の失敗時、step は隔離なしで実行され warning が表示されます。`command:` backend も拒否されず、隔離なしで実行され warning が表示されます。probe 成功後に Bubblewrap の起動が失敗した場合は attempt が失敗します。組み込みの競合解消・CI 修復・レビュー prompt は `require_bubblewrap: true` を維持するため、可能な場合に隔離されます。
 
