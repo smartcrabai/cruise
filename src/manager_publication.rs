@@ -175,7 +175,7 @@ fn matches_request(pr: &PullRequest, repo: &str, goal: &Goal, p: &Publication) -
 /// A corrective preview is meaningful only after a definite failed approved
 /// check, before any push or PR creation. Interrupted or dirty checks require
 /// recovery instead of treating their outcome as a task specification.
-pub(crate) fn corrective_tip(goal: &Goal) -> Result<String> {
+pub(crate) fn corrective_tip(goal: &Goal) -> Result<&str> {
     if goal.status != GoalStatus::Blocked {
         return Err(error("Goal is not blocked by a failed verification"));
     }
@@ -229,7 +229,40 @@ pub(crate) fn corrective_tip(goal: &Goal) -> Result<String> {
     {
         return Err(error("no definite failed approved check evidence"));
     }
-    Ok(p.tip.clone())
+    Ok(p.tip.as_str())
+}
+
+pub(crate) fn validate_verification_retry(goal: &Goal) -> Result<()> {
+    if goal.status != GoalStatus::Blocked {
+        return Err(error("Goal is not blocked"));
+    }
+    crate::manager_coordinator::validate_execution_contract(goal)?;
+    if goal.proposal.tasks.iter().any(|task| {
+        !goal.execution.attempts.iter().any(|attempt| {
+            attempt.task_id == task.id && attempt.integrated && attempt.result_sha.is_some()
+        })
+    }) {
+        return Err(error("Goal has tasks that are not integrated"));
+    }
+    let publication = goal
+        .execution
+        .publication
+        .as_ref()
+        .ok_or_else(|| error("Goal has no verification attempt"))?;
+    if goal.execution.integrated_tip.as_deref() != Some(publication.tip.as_str()) {
+        return Err(error(
+            "verification tip differs from the integrated Goal tip",
+        ));
+    }
+    if !matches!(
+        publication.phase,
+        Phase::WorktreeIntent | Phase::Ready | Phase::CheckIntent
+    ) {
+        return Err(error(
+            "publication may have occurred; resolve its state instead of retrying verification",
+        ));
+    }
+    Ok(())
 }
 
 /// Start a fresh verification only on an explicit user request. Never use this
@@ -237,35 +270,7 @@ pub(crate) fn corrective_tip(goal: &Goal) -> Result<String> {
 /// attached to the Goal and are not overwritten.
 pub(crate) fn retry_verification(cwd: &Path, id: &str) -> Result<()> {
     manager::update_goal(cwd, id, |goal| {
-        if goal.status != GoalStatus::Blocked {
-            return Err(error("Goal is not blocked"));
-        }
-        crate::manager_coordinator::validate_execution_contract(goal)?;
-        if goal.proposal.tasks.iter().any(|task| {
-            !goal.execution.attempts.iter().any(|attempt| {
-                attempt.task_id == task.id && attempt.integrated && attempt.result_sha.is_some()
-            })
-        }) {
-            return Err(error("Goal has tasks that are not integrated"));
-        }
-        let publication = goal
-            .execution
-            .publication
-            .as_ref()
-            .ok_or_else(|| error("Goal has no verification attempt"))?;
-        if goal.execution.integrated_tip.as_deref() != Some(publication.tip.as_str()) {
-            return Err(error(
-                "verification tip differs from the integrated Goal tip",
-            ));
-        }
-        if !matches!(
-            publication.phase,
-            Phase::WorktreeIntent | Phase::Ready | Phase::CheckIntent
-        ) {
-            return Err(error(
-                "publication may have occurred; resolve its state instead of retrying verification",
-            ));
-        }
+        validate_verification_retry(goal)?;
         let publication = goal
             .execution
             .publication

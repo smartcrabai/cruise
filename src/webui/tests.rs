@@ -1,5 +1,7 @@
 //! Router and template contract tests.
 
+mod manager;
+
 use std::collections::BTreeMap;
 
 use axum::body::Body;

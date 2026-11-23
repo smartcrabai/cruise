@@ -294,6 +294,10 @@ fn permanent_anchor(cwd: &Path, repo: &Path) -> Result<PathBuf> {
     Ok(anchor)
 }
 
+pub(crate) fn checkout_for(repository: &Path) -> Result<PathBuf> {
+    permanent_anchor(repository, repository)
+}
+
 fn freeze_contract(cwd: &Path, repo: &Path) -> Result<FrozenContract> {
     let anchor = permanent_anchor(cwd, repo)?;
     let origin = git_text(&anchor, &["remote", "get-url", "origin"])?;
@@ -447,6 +451,15 @@ pub(crate) fn snapshot_for_repository(repo: PathBuf) -> Result<Snapshot> {
 /// record makes the inventory unusable: otherwise its owned children could be
 /// omitted from the daemon-wide concurrency count.
 pub(crate) fn snapshots() -> Result<Vec<Snapshot>> {
+    inventory(false)
+}
+
+/// Read valid persisted records without letting an unrelated record hide them.
+pub(crate) fn readable_snapshots() -> Result<Vec<Snapshot>> {
+    inventory(true)
+}
+
+fn inventory(skip_invalid: bool) -> Result<Vec<Snapshot>> {
     let _guard = WRITER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -458,7 +471,17 @@ pub(crate) fn snapshots() -> Result<Vec<Snapshot>> {
     };
     let mut paths = Vec::new();
     for entry in entries {
-        let path = entry?.path();
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(error) if skip_invalid => {
+                eprintln!(
+                    "warning: cannot read Manager entry in {}: {error}",
+                    directory.display()
+                );
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if path.extension().and_then(|s| s.to_str()) == Some("json") {
             paths.push(path);
         }
@@ -466,22 +489,35 @@ pub(crate) fn snapshots() -> Result<Vec<Snapshot>> {
     paths.sort();
     let mut snapshots = Vec::with_capacity(paths.len());
     for path in paths {
-        let bytes = std::fs::read(&path)?;
-        let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|error| {
-            CruiseError::Other(format!(
-                "corrupt manager record {}: {error}",
-                path.display()
-            ))
-        })?;
-        if record_path(&snapshot.repository)? != path {
-            return Err(CruiseError::Other(format!(
-                "Manager record identity does not match {}",
-                path.display()
-            )));
+        match read_inventory_record(&path) {
+            Ok(snapshot) => snapshots.push(snapshot),
+            Err(error) if skip_invalid => {
+                eprintln!(
+                    "warning: skipping Manager record {}: {error}",
+                    path.display()
+                );
+            }
+            Err(error) => return Err(error),
         }
-        snapshots.push(snapshot);
     }
     Ok(snapshots)
+}
+
+fn read_inventory_record(path: &Path) -> Result<Snapshot> {
+    let bytes = std::fs::read(path)?;
+    let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|error| {
+        CruiseError::Other(format!(
+            "corrupt manager record {}: {error}",
+            path.display()
+        ))
+    })?;
+    if record_path(&snapshot.repository)? != path {
+        return Err(CruiseError::Other(format!(
+            "Manager record identity does not match {}",
+            path.display()
+        )));
+    }
+    Ok(snapshot)
 }
 
 /// Validate execution states before the coordinator can continue them.
@@ -770,7 +806,7 @@ pub(crate) fn preview_corrective(
             id: uuid::Uuid::new_v4().to_string(),
             revision,
             goal_id: goal.id.clone(),
-            integrated_tip: tip,
+            integrated_tip: tip.to_owned(),
             task,
         };
         goal.execution.corrective_preview = Some(preview.clone());
@@ -806,7 +842,7 @@ pub(crate) fn approve_corrective(
             })
             .ok_or_else(|| CruiseError::Busy("stale or unknown corrective preview".into()))?
             .clone();
-        if crate::manager_publication::corrective_tip(goal)? != preview.integrated_tip {
+        if crate::manager_publication::corrective_tip(goal)? != preview.integrated_tip.as_str() {
             return Err(CruiseError::Busy(
                 "Goal tip changed; refresh before corrective review".into(),
             ));

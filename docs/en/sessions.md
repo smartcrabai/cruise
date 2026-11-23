@@ -15,6 +15,8 @@ Run `cruise manager` or `cruise manager status` to inspect the repository snapsh
 
 For an Ask prompt, supply `cruise manager answer GOAL PROMPT TEXT` or enter multiline text interactively. For an Option prompt, terminal stdin uses the menu. Non-terminal stdin requires an exact `--choice LABEL` and `--text TEXT` only for choices that require text input. Supply corrective instructions with `--instructions TEXT`, via the terminal prompt, or through piped stdin.
 
+In the WebUI, select **Manager** in the sidebar and choose a repository, or use **Open repository** with a local Git checkout path on the daemon host. Opening a repository requires both an existing Manager record and an accessible main Git checkout on the daemon host, even if you enter a linked worktree path. Opening a checkout does not create a record or start work. The WebUI and CLI share the same conversation, proposals, and goals. Send messages and request a proposal from the repository page. Review the target commit, tasks, and executable checks, then explicitly confirm the displayed revision to authorize execution. The page updates automatically and shows eligible controls for pausing or resuming a goal, resuming or retrying a task, retrying verification, previewing and approving a corrective task, and answering pending Ask or Option prompts. Corrective previews do not authorize execution. Manager-owned child session pages remain read-only. **Open in Manager** returns to the repository’s Manager page and appears only when Cruise finds a readable Manager record containing the child’s Goal.
+
 <a id="runtime-file-layout"></a>
 ## Runtime File Layout
 
@@ -96,7 +98,7 @@ The interactive picker stays open even when there are no sessions. The following
 
 The interactive session list shows a menu of actions depending on the session's phase:
 
-Manager-owned child sessions are an exception: their list controls offer only **View Diff** when available and **Back**. Supported child actions are available through `cruise manager` subcommands.
+Manager-owned child sessions are an exception: their terminal list controls offer only **View Diff** when available and **Back**. Their WebUI session pages are read-only. They link back via **Open in Manager** only when Cruise finds a readable Manager record containing the child’s Goal. Use the Manager page or `cruise manager` subcommands for supported child actions.
 
 | Phase | Available Actions |
 |-------|-------------------|

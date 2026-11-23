@@ -123,6 +123,23 @@
     }
   }
 
+  const submittedManagerDrafts = new WeakMap();
+  document.addEventListener("htmx:before:request", (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.hasAttribute("data-manager-reset-composer")) return;
+    const textarea = form.querySelector("textarea");
+    if (textarea) submittedManagerDrafts.set(event.detail.ctx, { textarea, value: textarea.value });
+  });
+  document.addEventListener("htmx:after:request", (event) => {
+    const ctx = event.detail.ctx;
+    const submission = submittedManagerDrafts.get(ctx);
+    if (!submission) return;
+    submittedManagerDrafts.delete(ctx);
+    if (ctx.response.raw.ok && submission.textarea.value === submission.value) {
+      submission.textarea.value = "";
+    }
+  });
+
   function errorMessage(error) {
     return error instanceof Error ? error.message : String(error);
   }
@@ -297,6 +314,23 @@
       if (editor) {
         const id = editor.getAttribute("data-clear-editor");
         document.getElementById(`editor-${id}`)?.replaceChildren();
+        return;
+      }
+
+      const review = target.closest("[data-manager-review]");
+      if (review) {
+        const source = document.getElementById(review.getAttribute("data-manager-review"));
+        const host = document.getElementById("manager-review-host");
+        if (!(source instanceof HTMLTemplateElement) || !host || host.firstElementChild) return;
+
+        // Keep the reviewed values outside the polling target until the user confirms.
+        host.append(source.content.cloneNode(true));
+        const modal = host.querySelector("dialog");
+        modal.addEventListener("close", () => modal.remove(), { once: true });
+        modal.querySelector("[data-manager-close]").addEventListener("click", () => modal.close());
+        modal.querySelector("[data-manager-confirm]").addEventListener("htmx:after:request", () => modal.close());
+        htmx.process(modal);
+        modal.showModal();
         return;
       }
 

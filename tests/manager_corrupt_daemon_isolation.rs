@@ -107,6 +107,7 @@ async fn corrupt_manager_record_does_not_disable_ordinary_daemon_service()
     );
     assert_eq!(serde_json::from_slice::<Value>(&cli.stdout)?, listed);
 
+    let mut disabled_response = None;
     for action in [
         json!({"type":"message", "text":"hello"}),
         json!({"type":"propose"}),
@@ -128,6 +129,15 @@ async fn corrupt_manager_record_does_not_disable_ordinary_daemon_service()
             StatusCode::SERVICE_UNAVAILABLE,
             "action: {action}"
         );
+        let body: Value = response.json().await?;
+        let error = body["error"].as_str().ok_or("missing startup error")?;
+        assert!(
+            error.starts_with("Manager disabled after startup recovery failure: "),
+            "{body}"
+        );
+        assert!(error.contains("corrupt manager record"), "{body}");
+        assert_eq!(body, json!({"error": error}));
+        assert_eq!(&body, disabled_response.get_or_insert_with(|| body.clone()));
     }
     assert_eq!(fs::read(record)?, corrupt);
     Ok(())

@@ -69,6 +69,10 @@ pub(crate) fn header_vm(
     let operation = runtime.active_operation(session_id).or(assumed);
     let session_state = state.application.reconcile_session(session_id)?;
     let managed = session_state.managed_child.is_some();
+    let manager_url = session_state
+        .managed_child
+        .as_ref()
+        .and_then(|owner| super::manager::goal_url(&owner.goal_id));
     let session = super::dto::session_dto(&state.application, session_state, true);
     let prompts = state.application.pending_prompts(session_id);
     let has_pending_prompt = !prompts.is_empty();
@@ -99,11 +103,6 @@ pub(crate) fn header_vm(
         .clone()
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| session.input.clone());
-    let title = if managed {
-        format!("{title} (Manager child, read-only)")
-    } else {
-        title
-    };
     let pr_is_link = session
         .pr_url
         .as_deref()
@@ -121,6 +120,7 @@ pub(crate) fn header_vm(
         pr_is_link,
         actions,
         managed,
+        manager_url,
         activity: super::view::SessionHeaderActivityVm {
             busy: operation.is_some(),
             awaiting_input: session.awaiting_input,
@@ -409,6 +409,9 @@ pub(crate) fn diff_tab_html(state: &WebState, session_id: &str) -> Result<String
 }
 
 pub(crate) fn ask_panel_html(state: &WebState, session_id: &str) -> Result<String> {
+    if is_managed_child(state, session_id) {
+        return Ok(String::new());
+    }
     let prompt = state
         .application
         .pending_prompts(session_id)
@@ -432,7 +435,14 @@ pub(crate) fn option_dialog_html(
     prompt: &str,
     choices: &[crate::application::OptionChoicePayload],
 ) -> Result<String> {
-    let session_title = state.application.read_session(session_id).ok().map_or_else(
+    let session = state.application.read_session(session_id).ok();
+    if session
+        .as_ref()
+        .is_some_and(|session| session.managed_child.is_some())
+    {
+        return Ok(String::new());
+    }
+    let session_title = session.map_or_else(
         || session_id.to_string(),
         |state| truncate(state.input_or_title(), 80),
     );
@@ -461,6 +471,13 @@ pub(crate) fn option_dialog_html(
         submit_url: format!("/webui/sessions/{session_id}/option"),
     };
     state.templates.render("option-dialog", &vm)
+}
+
+fn is_managed_child(state: &WebState, session_id: &str) -> bool {
+    state
+        .application
+        .read_session(session_id)
+        .is_ok_and(|session| session.managed_child.is_some())
 }
 
 fn option_vals(request_id: &str, next_step: Option<&str>) -> String {
@@ -650,6 +667,11 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
             request_id,
             question,
         } => {
+            if is_managed_child(state, session_id) {
+                out.push(SseMessage::Html(header_and_row(state, session_id, None)?));
+                out.extend(notify(state, ToastKind::InputRequired, question));
+                return Ok(out);
+            }
             let vm = AskPanelVm {
                 session_id: session_id.clone(),
                 request_id: request_id.clone(),
@@ -677,6 +699,11 @@ fn try_for_event(state: &WebState, event: &ApplicationEvent) -> Result<Vec<SseMe
             choices,
         } => {
             let dialog = option_dialog_html(state, session_id, request_id, prompt, choices)?;
+            if dialog.is_empty() {
+                out.push(SseMessage::Html(header_and_row(state, session_id, None)?));
+                out.extend(notify(state, ToastKind::InputRequired, prompt));
+                return Ok(out);
+            }
             let input = session_input(state, session_id);
             let mut html = targeted("#dialogs", "beforeend", &dialog);
             html.push_str(&sse_toast(

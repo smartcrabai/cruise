@@ -175,7 +175,69 @@ pub(crate) fn all() -> Vec<(&'static str, Value)> {
     fixtures.extend(new_session_fixtures());
     fixtures.extend(form_fixtures());
     fixtures.extend(run_all_fixtures());
+    fixtures.extend(manager_fixtures());
     fixtures
+}
+
+fn manager_fixtures() -> Vec<(&'static str, Value)> {
+    let key = "cmVwbw";
+    let repository = "/tmp/repo/.git";
+    let task =
+        json!({"id": "implement", "instructions": "Implement the feature", "dependencies": []});
+    let proposal = json!({
+        "id": "proposal", "revision": "2", "objective": "Deliver the feature",
+        "target_branch": "main", "target_sha": "abc123", "workflow": "builtin:tdd",
+        "contract": {"anchor": "/tmp/repo", "forge_kind": "GitHub", "forge_host": "github.com", "forge_repository": "example/repo"},
+        "criteria": [{"id": "usable", "description": "Feature is usable"}],
+        "checks": [{"id": "check", "argv": ["cargo", "test"], "criterion_ids": ["usable"]}],
+        "tasks": [task], "exclusions": ["Unrelated work"],
+    });
+    let goal = json!({
+        "id": "goal", "status": "active", "reason": "A task needs attention", "proposal": proposal,
+        "execution": {
+            "integrated_tip": "abc123", "can_retry_verification": false, "can_preview_corrective": false,
+            "publication": null, "corrective_preview": null,
+            "attempts": [{"task_id": "implement", "attempt": 1, "session_id": "child", "integrated": false,
+                "child_state": {"phase": "Failed", "failure": "Command failed"}, "can_resume": true, "can_retry": true}],
+        },
+    });
+    let prompt = json!({"requestId": "request", "sessionId": "child", "kind": "option", "question": "Choose an action", "choices": [
+        {"kind": "textInput", "label": "Enter details", "nextStep": "review"},
+        {"kind": "selector", "label": "Finish", "nextStep": null},
+    ]});
+    vec![
+        (
+            "manager-list",
+            json!({"records": [{"repository": repository, "url": format!("/manager/{key}"), "counts": [{"status": "active", "count": 1}], "pending": true, "running": false}], "error": null}),
+        ),
+        (
+            "manager-page",
+            json!({"key": key, "repository": repository, "region": RawHtml::new("<p>Conversation</p>")}),
+        ),
+        (
+            "manager-region",
+            json!({"key": key, "snapshot": {
+                "transcript": [{"id": "turn", "role": "user", "text": "Hello", "status": "completed"}],
+                "running": false, "proposal": proposal, "goals": [goal], "prompts": [{"goal_id": "goal", "prompt": prompt}],
+            }}),
+        ),
+        ("components/manager-goal", json!({"key": key, "goal": goal})),
+        (
+            "components/manager-task-list",
+            json!({"tasks": [
+                task,
+                {"id": "verify", "instructions": "Verify the feature", "dependencies": ["implement"]},
+            ]}),
+        ),
+        (
+            "components/manager-prompt",
+            json!({"key": key, "goalId": "goal", "prompt": prompt}),
+        ),
+        (
+            "components/manager-review",
+            json!({"corrective": true, "dialogId": "review", "url": format!("/webui/manager/{key}/approve-corrective"), "goalId": "goal", "previewId": "preview", "revision": "2", "objective": "Improve checks", "instructions": "Correct the failed check", "target": "abc123"}),
+        ),
+    ]
 }
 
 fn shell_fixtures() -> Vec<(&'static str, Value)> {
@@ -231,6 +293,7 @@ fn shell_fixtures() -> Vec<(&'static str, Value)> {
                 pr_is_link: true,
                 actions: actions(),
                 managed: false,
+                manager_url: None,
                 activity: super::view::SessionHeaderActivityVm {
                     busy: true,
                     awaiting_input: true,

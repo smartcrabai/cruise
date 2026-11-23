@@ -1,5 +1,22 @@
 # Responsive WebUI executable specifications
 
+## Manager browser workflow
+
+From the repository root, install the pinned Playwright package and Chromium, build the production daemon, then run:
+
+```sh
+npm ci --prefix tests/webui --ignore-scripts
+tests/webui/node_modules/.bin/playwright install chromium
+cargo +1.99.1 build --locked --all-features --bin cruise-runtime
+node tests/webui/manager.mjs
+```
+
+On Linux, use `playwright install --with-deps chromium` if Chromium system dependencies are missing. `WEBUI_BDD_BIN` selects a prebuilt runtime. The scenario uses authenticated Chromium, the production WebUI and coordinator, disposable HOME/XDG directories, and a local Git repository. It seeds the Manager conversation and frozen proposal, then checks repository navigation, explicit approval with the displayed proposal ID and revision, live arrival and submission of an actual managed Option with text input, the failed attempt rendered after the answer, and navigation from the read-only child back to its Manager repository. The local command workflow deliberately fails before publication. The managed Option flow does not require an SDK provider. The later conversation submission runs without provider credentials and checks that the new turn is saved as interrupted. The scenario uses no mocked HTTP responses or remote Git operations. This exercises the Option path rather than Ask: a managed child starts with its approved plan as input, so a command-backed prompt does not trigger an instruction Ask.
+
+The approval test also cancels the dialog and verifies that neither a request nor a Goal is created before reopening and explicitly confirming. Screenshots for the list, proposal, approval dialog, filled Option answer, and failed attempt go under `target/formal-reports/manager-browser/` by default. Set `WEBUI_MANAGER_REPORT_DIR` to use another directory.
+
+To exercise the distinct Ask path, run `WEBUI_MANAGER_BROWSER_ASK=1 cargo +1.99.1 test --locked --all-features --lib manager_answer_keeps_live_ask_pending_until_valid_reply` after the same Playwright setup. The Rust fixture starts the production HTTP router on loopback and registers an owned Ask with the real application runtime, without invoking a model. Chromium submits a whitespace-only reply through the form, checks the visible rejection, and then submits a valid reply. Rust verifies delivery to the waiting task. The Ask screenshots are `ask-blank-rejected.png` and `ask-answer.png` in the same report directory. The responsive WebUI GitHub Actions workflow runs both Manager browser scenarios and uploads the screenshots. Without the opt-in variable, the Rust test still runs its ordinary in-process router assertions.
+
 ## Managed-child browser boundary
 
 From the repository root, run `npm ci --prefix tests/webui --ignore-scripts`, `tests/webui/node_modules/.bin/playwright install chromium` (on Linux use `install --with-deps chromium`), `cargo +1.99.1 build --locked --all-features --bin cruise-runtime`, and `node tests/webui/managed-child.mjs`. The responsive WebUI CI job also runs this test. It starts the production server with disposable HOME/XDG session fixtures and uses authenticated Chromium to check the read-only child label, hidden actions, Run All count, ordinary-session control, and rejection of direct reset, delete, and Tell requests without changing the child state or plan. It does not start a manager or execute Run All. Screenshots go to `target/formal-reports/managed-child-browser/`, or `WEBUI_MANAGED_REPORT_DIR` if set. `WEBUI_BDD_BIN` selects another runtime.

@@ -156,7 +156,7 @@ pub(crate) async fn run_all(UiState(state): UiState, headers: HeaderMap) -> Resp
     })
 }
 
-fn render<F>(build: F) -> Response
+pub(super) fn render<F>(build: F) -> Response
 where
     F: FnOnce() -> Result<Response>,
 {

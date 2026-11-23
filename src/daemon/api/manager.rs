@@ -1,4 +1,5 @@
 use crate::daemon::server::WebState;
+use crate::error::Result;
 use axum::{
     Router,
     extract::{Query, State},
@@ -7,7 +8,8 @@ use axum::{
     routing::{get, post},
 };
 use serde::Deserialize;
-use std::path::PathBuf;
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 
 pub(super) fn routes() -> Router<WebState> {
     Router::new()
@@ -22,68 +24,63 @@ async fn snapshot(
     State(state): State<WebState>,
     Query(request): Query<SnapshotRequest>,
 ) -> Response {
-    match tokio::task::spawn_blocking(move || -> crate::error::Result<serde_json::Value> {
-        let (mut snapshot, active) =
-            crate::manager_provider::snapshot_with_active_turn(&request.cwd)?;
-        if let Some(id) = active
-            && let Some(turn) = snapshot
-                .transcript
-                .iter_mut()
-                .find(|turn| turn.id == id && turn.status == "interrupted")
-        {
-            turn.status = "running".into();
-        }
-        let mut prompts = Vec::new();
-        for goal in &snapshot.goals {
-            for prompt in
-                crate::manager_coordinator::prompts(&state.application, &request.cwd, &goal.id)?
-            {
-                prompts.push(serde_json::json!({"goal_id": goal.id, "prompt": prompt}));
-            }
-        }
-        let mut value = serde_json::to_value(&snapshot)?;
-        if let Some(goals) = value["goals"].as_array_mut() {
-            for (goal_value, goal) in goals.iter_mut().zip(&snapshot.goals) {
-                if let Some(attempts) = goal_value["execution"]["attempts"].as_array_mut() {
-                    for (attempt_value, attempt) in
-                        attempts.iter_mut().zip(&goal.execution.attempts)
-                    {
-                        attempt_value["child_state"] =
-                            match state.application.read_session(&attempt.session_id) {
-                                Ok(child) => {
-                                    let failure = match &child.phase {
-                                        crate::session::SessionPhase::Failed(message)
-                                        | crate::session::SessionPhase::PrFailed(message) => {
-                                            Some(message.clone())
-                                        }
-                                        _ => None,
-                                    };
-                                    serde_json::json!({
-                                        "phase": child.phase.label(),
-                                        "failure": failure,
-                                    })
-                                }
-                                Err(error) => serde_json::json!({
-                                    "phase": "Unavailable",
-                                    "failure": format!(
-                                        "Could not inspect child {}: {error}",
-                                        attempt.session_id
-                                    ),
-                                }),
-                            };
-                    }
-                }
-            }
-        }
-        value["prompts"] = serde_json::Value::Array(prompts);
-        Ok(value)
-    })
-    .await
-    {
+    match tokio::task::spawn_blocking(move || enriched_snapshot(&state, &request.cwd)).await {
         Ok(Ok(snapshot)) => axum::Json(snapshot).into_response(),
         Ok(Err(error)) => super::map_error(&error),
         Err(error) => super::error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
+}
+
+pub(crate) fn enriched_snapshot(state: &WebState, cwd: &Path) -> Result<Value> {
+    let (mut snapshot, active) = crate::manager_provider::snapshot_with_active_turn(cwd)?;
+    if let Some(id) = active
+        && let Some(turn) = snapshot
+            .transcript
+            .iter_mut()
+            .find(|turn| turn.id == id && turn.status == "interrupted")
+    {
+        turn.status = "running".into();
+    }
+    let mut prompts = Vec::new();
+    for goal in &snapshot.goals {
+        for prompt in crate::manager_coordinator::prompts(&state.application, cwd, &goal.id)? {
+            prompts.push(serde_json::json!({"goal_id": goal.id, "prompt": prompt}));
+        }
+    }
+    let mut value = serde_json::to_value(&snapshot)?;
+    if let Some(goals) = value["goals"].as_array_mut() {
+        for (goal_value, goal) in goals.iter_mut().zip(&snapshot.goals) {
+            if let Some(attempts) = goal_value["execution"]["attempts"].as_array_mut() {
+                for (attempt_value, attempt) in attempts.iter_mut().zip(&goal.execution.attempts) {
+                    attempt_value["child_state"] =
+                        match state.application.read_session(&attempt.session_id) {
+                            Ok(child) => {
+                                let failure = match &child.phase {
+                                    crate::session::SessionPhase::Failed(message)
+                                    | crate::session::SessionPhase::PrFailed(message) => {
+                                        Some(message.clone())
+                                    }
+                                    _ => None,
+                                };
+                                serde_json::json!({
+                                    "phase": child.phase.label(),
+                                    "failure": failure,
+                                })
+                            }
+                            Err(error) => serde_json::json!({
+                                "phase": "Unavailable",
+                                "failure": format!(
+                                    "Could not inspect child {}: {error}",
+                                    attempt.session_id
+                                ),
+                            }),
+                        };
+                }
+            }
+        }
+    }
+    value["prompts"] = serde_json::Value::Array(prompts);
+    Ok(value)
 }
 
 #[derive(Deserialize)]
@@ -93,7 +90,7 @@ struct ActionRequest {
 }
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum Action {
+pub(crate) enum Action {
     Message {
         text: String,
     },
@@ -142,238 +139,103 @@ async fn action(
     State(state): State<WebState>,
     axum::Json(request): axum::Json<ActionRequest>,
 ) -> Response {
-    if let Some(error) = &state.manager_startup_error {
-        return super::error_response(
+    match tokio::task::spawn_blocking(move || dispatch_action(&state, &request.cwd, request.action))
+        .await
+    {
+        Ok(Ok((status, value))) => (status, axum::Json(value)).into_response(),
+        Ok(Err(error)) => super::map_error(&error),
+        Err(error) => super::error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+pub(crate) fn startup_action_error(state: &WebState) -> Option<(StatusCode, String)> {
+    state.manager_startup_error.as_ref().map(|error| {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
-            &format!("Manager disabled after startup recovery failure: {error}"),
-        );
-    }
-    match request.action {
-        Action::Message { text } => match crate::manager_provider::message(&request.cwd, text) {
-            Ok(turn) => (StatusCode::ACCEPTED, axum::Json(turn)).into_response(),
-            Err(error) => super::map_error(&error),
-        },
-        Action::Propose => match crate::manager_provider::propose(&request.cwd) {
-            Ok(turn) => (StatusCode::ACCEPTED, axum::Json(turn)).into_response(),
-            Err(error) => super::map_error(&error),
-        },
-        Action::PreviewCorrective {
-            goal_id,
-            expected_tip,
-            task,
-        } => {
-            match tokio::task::spawn_blocking(move || {
-                crate::manager::preview_corrective(&request.cwd, &goal_id, &expected_tip, task)
-            })
-            .await
-            {
-                Ok(Ok(preview)) => (StatusCode::ACCEPTED, axum::Json(preview)).into_response(),
-                Ok(Err(error)) => super::map_error(&error),
-                Err(error) => {
-                    super::error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
-                }
-            }
-        }
-        Action::Approve {
-            proposal_id,
-            revision,
-        } => {
-            match tokio::task::spawn_blocking(move || {
-                crate::manager::approve(&request.cwd, &proposal_id, revision)
-            })
-            .await
-            {
-                Ok(Ok(goal)) => {
-                    crate::manager_coordinator::wake();
-                    (StatusCode::ACCEPTED, axum::Json(goal)).into_response()
-                }
-                Ok(Err(error)) => super::map_error(&error),
-                Err(error) => {
-                    super::error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
-                }
-            }
-        }
-        Action::ApproveCorrective {
-            goal_id,
-            preview_id,
-            revision,
-        } => {
-            match tokio::task::spawn_blocking(move || {
-                crate::manager::approve_corrective(&request.cwd, &goal_id, &preview_id, revision)
-            })
-            .await
-            {
-                Ok(Ok(goal)) => {
-                    crate::manager_coordinator::wake();
-                    (StatusCode::ACCEPTED, axum::Json(goal)).into_response()
-                }
-                Ok(Err(error)) => super::map_error(&error),
-                Err(error) => {
-                    super::error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
-                }
-            }
-        }
-        other => {
-            action_control(
-                state,
-                ActionRequest {
-                    cwd: request.cwd,
-                    action: other,
-                },
-            )
-            .await
-        }
-    }
+            format!("Manager disabled after startup recovery failure: {error}"),
+        )
+    })
 }
 
-async fn action_control(state: WebState, request: ActionRequest) -> Response {
-    match request.action {
-        Action::Pause { goal_id } => {
-            match tokio::task::spawn_blocking(move || {
-                crate::manager_coordinator::pause(&state.application, &request.cwd, &goal_id)
-            })
-            .await
-            {
-                Ok(Ok(goal)) => (StatusCode::ACCEPTED, axum::Json(goal)).into_response(),
-                Ok(Err(error)) => super::map_error(&error),
-                Err(error) => {
-                    super::error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
-                }
+pub(crate) fn dispatch_action(
+    state: &WebState,
+    cwd: &Path,
+    action: Action,
+) -> Result<(StatusCode, Value)> {
+    use crate::{manager, manager_coordinator as coordinator, manager_provider as provider};
+
+    if let Some((status, message)) = startup_action_error(state) {
+        return Ok((status, json!({"error": message})));
+    }
+    let value =
+        match action {
+            Action::Message { text } => serde_json::to_value(provider::message(cwd, text)?)?,
+            Action::Propose => serde_json::to_value(provider::propose(cwd)?)?,
+            Action::PreviewCorrective {
+                goal_id,
+                expected_tip,
+                task,
+            } => serde_json::to_value(manager::preview_corrective(
+                cwd,
+                &goal_id,
+                &expected_tip,
+                task,
+            )?)?,
+            Action::Approve {
+                proposal_id,
+                revision,
+            } => {
+                let goal = manager::approve(cwd, &proposal_id, revision)?;
+                coordinator::wake();
+                serde_json::to_value(goal)?
             }
-        }
-        Action::Resume { goal_id } => {
-            match tokio::task::spawn_blocking(move || {
-                crate::manager_coordinator::resume(&request.cwd, &goal_id)
-            })
-            .await
-            {
-                Ok(Ok(goal)) => {
-                    crate::manager_coordinator::wake();
-                    (StatusCode::ACCEPTED, axum::Json(goal)).into_response()
-                }
-                Ok(Err(error)) => super::map_error(&error),
-                Err(error) => {
-                    super::error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
-                }
+            Action::ApproveCorrective {
+                goal_id,
+                preview_id,
+                revision,
+            } => {
+                let goal = manager::approve_corrective(cwd, &goal_id, &preview_id, revision)?;
+                coordinator::wake();
+                serde_json::to_value(goal)?
             }
-        }
-        Action::ResumeTask { goal_id, task_id } => {
-            match tokio::task::spawn_blocking(move || {
-                crate::manager_coordinator::resume_task(
-                    &state.application,
-                    &request.cwd,
-                    &goal_id,
-                    &task_id,
-                )
-            })
-            .await
-            {
-                Ok(Ok(goal)) => (StatusCode::ACCEPTED, axum::Json(goal)).into_response(),
-                Ok(Err(error)) => super::map_error(&error),
-                Err(error) => {
-                    super::error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
-                }
+            Action::Pause { goal_id } => {
+                serde_json::to_value(coordinator::pause(&state.application, cwd, &goal_id)?)?
             }
-        }
-        Action::Retry { goal_id, task_id } => {
-            match tokio::task::spawn_blocking(move || {
-                if let Some(task_id) = task_id {
-                    crate::manager_coordinator::retry_task(
-                        &state.application,
-                        &request.cwd,
-                        &goal_id,
-                        &task_id,
-                    )
+            Action::Resume { goal_id } => {
+                let goal = coordinator::resume(cwd, &goal_id)?;
+                coordinator::wake();
+                serde_json::to_value(goal)?
+            }
+            Action::ResumeTask { goal_id, task_id } => serde_json::to_value(
+                coordinator::resume_task(&state.application, cwd, &goal_id, &task_id)?,
+            )?,
+            Action::Retry { goal_id, task_id } => {
+                let goal = if let Some(task_id) = task_id {
+                    coordinator::retry_task(&state.application, cwd, &goal_id, &task_id)?
                 } else {
-                    crate::manager_coordinator::retry_verification(&request.cwd, &goal_id)
-                }
-            })
-            .await
-            {
-                Ok(Ok(goal)) => {
-                    crate::manager_coordinator::wake();
-                    (StatusCode::ACCEPTED, axum::Json(goal)).into_response()
-                }
-                Ok(Err(error)) => super::map_error(&error),
-                Err(error) => {
-                    super::error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
-                }
+                    coordinator::retry_verification(cwd, &goal_id)?
+                };
+                coordinator::wake();
+                serde_json::to_value(goal)?
             }
-        }
-        other => {
-            action_answer(
-                state,
-                ActionRequest {
-                    cwd: request.cwd,
-                    action: other,
-                },
-            )
-            .await
-        }
-    }
-}
-
-async fn action_answer(state: WebState, request: ActionRequest) -> Response {
-    match request.action {
-        Action::AnswerOption {
-            goal_id,
-            prompt_id,
-            option,
-        } => {
-            match tokio::task::spawn_blocking(move || {
-                crate::manager_coordinator::answer_option(
-                    &state.application,
-                    &request.cwd,
-                    &goal_id,
-                    &prompt_id,
-                    option,
-                )
-            })
-            .await
-            {
-                Ok(Ok(())) => (
-                    StatusCode::ACCEPTED,
-                    axum::Json(serde_json::json!({"accepted": true})),
-                )
-                    .into_response(),
-                Ok(Err(error)) => super::map_error(&error),
-                Err(error) => {
-                    super::error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
-                }
+            Action::Answer {
+                goal_id,
+                prompt_id,
+                answer,
+            } => {
+                coordinator::answer(&state.application, cwd, &goal_id, &prompt_id, answer)?;
+                json!({"accepted": true})
             }
-        }
-        Action::Answer {
-            goal_id,
-            prompt_id,
-            answer,
-        } => {
-            match tokio::task::spawn_blocking(move || {
-                crate::manager_coordinator::answer(
-                    &state.application,
-                    &request.cwd,
-                    &goal_id,
-                    &prompt_id,
-                    answer,
-                )
-            })
-            .await
-            {
-                Ok(Ok(())) => (
-                    StatusCode::ACCEPTED,
-                    axum::Json(serde_json::json!({"accepted": true})),
-                )
-                    .into_response(),
-                Ok(Err(error)) => super::map_error(&error),
-                Err(error) => {
-                    super::error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
-                }
+            Action::AnswerOption {
+                goal_id,
+                prompt_id,
+                option,
+            } => {
+                coordinator::answer_option(&state.application, cwd, &goal_id, &prompt_id, option)?;
+                json!({"accepted": true})
             }
-        }
-        _ => super::error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "unexpected manager action",
-        ),
-    }
+        };
+    Ok((StatusCode::ACCEPTED, value))
 }
 
 #[cfg(test)]
