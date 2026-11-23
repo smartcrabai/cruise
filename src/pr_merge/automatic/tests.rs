@@ -590,6 +590,8 @@ async fn run_github_with_timing(
     .await
 }
 
+/// `timeout` counts only readiness poll waits, not provider subprocess time, so
+/// outcomes do not depend on runner speed.
 async fn run_github_with_head_mismatch_grace(
     fixture: &Fixture,
     cancel_token: Option<&crate::cancellation::CancellationToken>,
@@ -604,7 +606,7 @@ async fn run_github_with_head_mismatch_grace(
         &reference,
         &request,
         &fixture.head,
-        timeout,
+        super::ReadinessClock::poll_waits(timeout),
         poll_interval,
         head_mismatch_grace,
     )
@@ -1532,20 +1534,30 @@ async fn github_repeated_unknown_times_out_without_merging() {
     let mut unknown = github_status(&fixture.head);
     unknown["data"]["repository"]["pullRequest"]["mergeable"] = json!("UNKNOWN");
     fixture.configure_github(&github_open_identity(&fixture.head), &unknown, &json!([]));
+    let url = "https://github.com/acme/service/pull/7";
+    let request = fixture.request(url, None);
+    let reference = super::parse_provider_ref(url).unwrap_or_else(|error| panic!("{error}"));
 
-    let result = run_github_with_timing(
-        &fixture,
-        None,
-        Duration::from_millis(500),
-        Duration::from_millis(5),
-    )
-    .await;
+    for clock in [
+        super::ReadinessClock::wall(Duration::from_millis(25)),
+        super::ReadinessClock::poll_waits(Duration::from_millis(25)),
+    ] {
+        let result = super::perform_github_with_timing(
+            &reference,
+            &request,
+            &fixture.head,
+            clock,
+            Duration::from_millis(5),
+            super::GITHUB_HEAD_MISMATCH_GRACE,
+        )
+        .await;
 
-    let reason = match result {
-        Err(AutoSquashError::Rejected(reason)) => reason,
-        other => panic!("expected bounded readiness timeout, got {other:?}"),
-    };
-    assert!(reason.starts_with("GitHub readiness timed out"), "{reason}");
+        let reason = match result {
+            Err(AutoSquashError::Rejected(reason)) => reason,
+            other => panic!("expected bounded readiness timeout, got {other:?}"),
+        };
+        assert!(reason.starts_with("GitHub readiness timed out"), "{reason}");
+    }
     assert_eq!(fixture.effect_lines(), Vec::<String>::new());
 }
 

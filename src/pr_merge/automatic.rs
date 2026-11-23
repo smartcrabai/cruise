@@ -1950,18 +1950,76 @@ async fn perform_github(
         reference,
         request,
         expected_head,
-        GITHUB_READINESS_TIMEOUT,
+        ReadinessClock::wall(GITHUB_READINESS_TIMEOUT),
         GITHUB_READINESS_POLL_INTERVAL,
         GITHUB_HEAD_MISMATCH_GRACE,
     )
     .await
 }
 
+/// Spends the GitHub readiness budget. Production spends it in wall-clock time.
+/// Tests spend it only on poll waits, so slow provider subprocesses on a loaded
+/// runner cannot exhaust it.
+struct ReadinessClock {
+    timeout: Duration,
+    started: tokio::time::Instant,
+    #[cfg(test)]
+    poll_waits: Option<Duration>,
+}
+
+impl ReadinessClock {
+    fn wall(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            started: tokio::time::Instant::now(),
+            #[cfg(test)]
+            poll_waits: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn poll_waits(timeout: Duration) -> Self {
+        Self {
+            poll_waits: Some(Duration::ZERO),
+            ..Self::wall(timeout)
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(waited) = self.poll_waits {
+            return waited;
+        }
+        self.started.elapsed()
+    }
+
+    fn remaining(&self) -> Duration {
+        self.timeout.saturating_sub(self.elapsed())
+    }
+
+    /// Runs `future` within the remaining budget; `None` once the budget runs out.
+    async fn within<F: Future>(&self, future: F) -> Option<F::Output> {
+        #[cfg(test)]
+        if self.poll_waits.is_some() {
+            return Some(future.await);
+        }
+        tokio::time::timeout(self.remaining(), future).await.ok()
+    }
+
+    async fn sleep(&mut self, wait: Duration) {
+        tokio::time::sleep(wait).await;
+        #[cfg(test)]
+        if let Some(waited) = &mut self.poll_waits {
+            *waited += wait;
+        }
+    }
+}
+
 async fn poll_github_readiness(
     reference: &ProviderRef,
     request: &AutoSquashRequest<'_>,
     expected_head: &str,
-    deadline: tokio::time::Instant,
+    clock: &ReadinessClock,
     head_mismatch: bool,
     check_base_ancestry: bool,
     observation: &mut GitHubReadinessObservation,
@@ -1969,7 +2027,7 @@ async fn poll_github_readiness(
     let attempt = tokio::select! {
         biased;
         () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
-        attempt = tokio::time::timeout_at(deadline, async {
+        attempt = clock.within(async {
             if local_head(request).await? != expected_head {
                 return Err(AutoSquashError::Rejected(
                     "local HEAD changed before the merge request".to_string(),
@@ -1986,26 +2044,26 @@ async fn poll_github_readiness(
         }) => attempt,
     };
     match attempt {
-        Ok(readiness) => readiness,
-        Err(_) => Err(observation.deadline_error(head_mismatch)),
+        Some(readiness) => readiness,
+        None => Err(observation.deadline_error(head_mismatch)),
     }
 }
 
 async fn wait_for_github_readiness_poll(
     request: &AutoSquashRequest<'_>,
     expected_head: &str,
-    deadline: tokio::time::Instant,
+    clock: &mut ReadinessClock,
     poll_interval: Duration,
     head_mismatch_grace: Duration,
-    head_mismatch_since: Option<tokio::time::Instant>,
+    head_mismatch_since: Option<Duration>,
     observation: &GitHubReadinessObservation,
 ) -> Result<(), AutoSquashError> {
     let pending_head = tokio::select! {
         biased;
         () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
-        result = tokio::time::timeout_at(deadline, local_head(request)) => match result {
-            Ok(result) => result?,
-            Err(_) => return Err(observation.deadline_error(head_mismatch_since.is_some())),
+        result = clock.within(local_head(request)) => match result {
+            Some(result) => result?,
+            None => return Err(observation.deadline_error(head_mismatch_since.is_some())),
         },
     };
     if pending_head != expected_head {
@@ -2013,34 +2071,35 @@ async fn wait_for_github_readiness_poll(
             "local HEAD changed while GitHub readiness was pending".to_string(),
         ));
     }
-    let now = tokio::time::Instant::now();
-    let remaining = deadline.saturating_duration_since(now);
+    let elapsed = clock.elapsed();
+    let remaining = clock.timeout.saturating_sub(elapsed);
     if remaining.is_zero() {
         return Err(observation.deadline_error(head_mismatch_since.is_some()));
     }
     let grace_remaining = head_mismatch_since.map_or(Duration::MAX, |started| {
-        head_mismatch_grace.saturating_sub(now.duration_since(started))
+        head_mismatch_grace.saturating_sub(elapsed.saturating_sub(started))
     });
     let wait = poll_interval.min(remaining).min(grace_remaining);
     tokio::select! {
         biased;
         () = wait_for_cancel(request.cancel_token) => return Err(AutoSquashError::Cancelled),
-        () = tokio::time::sleep(wait) => {}
+        () = clock.sleep(wait) => {}
     }
-    if tokio::time::Instant::now() >= deadline {
+    if clock.remaining().is_zero() {
         return Err(observation.deadline_error(head_mismatch_since.is_some()));
     }
     Ok(())
 }
 
 fn record_github_head_mismatch(
-    head_mismatch_since: &mut Option<tokio::time::Instant>,
+    head_mismatch_since: &mut Option<Duration>,
     head_mismatch_grace: Duration,
+    clock: &ReadinessClock,
     observation: &GitHubReadinessObservation,
 ) -> Result<(), AutoSquashError> {
-    let now = tokio::time::Instant::now();
+    let now = clock.elapsed();
     let started = *head_mismatch_since.get_or_insert(now);
-    if now.duration_since(started) >= head_mismatch_grace {
+    if now.saturating_sub(started) >= head_mismatch_grace {
         return Err(observation.deadline_error(true));
     }
     Ok(())
@@ -2050,11 +2109,10 @@ async fn perform_github_with_timing(
     reference: &ProviderRef,
     request: &AutoSquashRequest<'_>,
     expected_head: &str,
-    readiness_timeout: Duration,
+    mut clock: ReadinessClock,
     poll_interval: Duration,
     head_mismatch_grace: Duration,
 ) -> Result<AutoSquashOutcome, AutoSquashError> {
-    let deadline = tokio::time::Instant::now() + readiness_timeout;
     let mut observation = GitHubReadinessObservation::new();
     let mut head_mismatch_since = None;
     let mut ready_observations = 0u8;
@@ -2067,7 +2125,7 @@ async fn perform_github_with_timing(
             reference,
             request,
             expected_head,
-            deadline,
+            &clock,
             head_mismatch_since.is_some(),
             check_base_ancestry,
             &mut observation,
@@ -2095,6 +2153,7 @@ async fn perform_github_with_timing(
                 record_github_head_mismatch(
                     &mut head_mismatch_since,
                     head_mismatch_grace,
+                    &clock,
                     &observation,
                 )?;
             }
@@ -2105,7 +2164,7 @@ async fn perform_github_with_timing(
         wait_for_github_readiness_poll(
             request,
             expected_head,
-            deadline,
+            &mut clock,
             poll_interval,
             head_mismatch_grace,
             head_mismatch_since,
