@@ -666,13 +666,122 @@ async fn manager_corrective_review_requires_the_integrated_tip_and_current_previ
     check_corrective_approval(&harness, &repo, &blocked, &preview, &base, task_id).await;
 }
 
+fn save_retry_preview(repo: &Path, blocked: &Goal) -> manager::CorrectivePreview {
+    manager::preview_corrective(
+        repo,
+        &blocked.id,
+        &blocked.proposal.target_sha,
+        Task {
+            id: "repair-verification".into(),
+            instructions: "Repair the failed verification".into(),
+            dependencies: vec![blocked.proposal.tasks[0].id.clone()],
+        },
+    )
+    .unwrap_or_else(|e| panic!("save corrective preview: {e}"))
+}
+
+fn retry_blocked_verification(repo: &Path, blocked: &Goal) {
+    crate::manager_publication::retry_verification(repo, &blocked.id)
+        .unwrap_or_else(|e| panic!("retry verification: {e}"));
+}
+
+fn restore_failed_verification(repo: &Path, blocked: &Goal) {
+    // Represent the next failed verification at the same tip, without replacing
+    // any history written by the retry under test.
+    manager::update_goal(repo, &blocked.id, |goal| {
+        goal.status = GoalStatus::Blocked;
+        goal.reason.clone_from(&blocked.reason);
+        goal.execution
+            .publication
+            .clone_from(&blocked.execution.publication);
+        Ok(())
+    })
+    .unwrap_or_else(|e| panic!("seed second failed verification: {e}"));
+}
+
+fn assert_stale_retry_preview(repo: &Path, preview: &manager::CorrectivePreview) {
+    let before = serde_json::json!(snapshot(repo).goals[0]);
+    let result = manager::approve_corrective(repo, &preview.goal_id, &preview.id, preview.revision);
+    assert!(
+        matches!(&result, Err(crate::error::CruiseError::Busy(message))
+            if message.contains("stale or unknown corrective preview")),
+        "expected stale preview conflict, got {result:?}"
+    );
+    assert_eq!(serde_json::json!(snapshot(repo).goals[0]), before);
+}
+
+#[test]
+fn manager_retry_rejected_leaves_corrective_preview_and_goal_unchanged() {
+    let harness = harness();
+    let _data = isolate_records(&harness);
+    let repo = repository(&harness);
+    let blocked = blocked_verification(&repo);
+    save_retry_preview(&repo, &blocked);
+    manager::update_goal(&repo, &blocked.id, |goal| {
+        goal.status = GoalStatus::Paused;
+        Ok(())
+    })
+    .unwrap_or_else(|e| panic!("pause seeded goal: {e}"));
+    let before = serde_json::json!(snapshot(&repo).goals[0]);
+    assert!(crate::manager_publication::retry_verification(&repo, &blocked.id).is_err());
+    assert_eq!(serde_json::json!(snapshot(&repo).goals[0]), before);
+}
+
+#[test]
+fn manager_retry_corrective_preview_cannot_be_approved_even_after_same_tip_fails() {
+    let harness = harness();
+    let _data = isolate_records(&harness);
+    let repo = repository(&harness);
+    let blocked = blocked_verification(&repo);
+    let preview = save_retry_preview(&repo, &blocked);
+    retry_blocked_verification(&repo, &blocked);
+    restore_failed_verification(&repo, &blocked);
+    assert_stale_retry_preview(&repo, &preview);
+}
+
+#[test]
+fn manager_retry_corrective_preview_advances_revision_and_allows_fresh_approval() {
+    let harness = harness();
+    let _data = isolate_records(&harness);
+    let repo = repository(&harness);
+    let blocked = blocked_verification(&repo);
+    let discarded = save_retry_preview(&repo, &blocked);
+    retry_blocked_verification(&repo, &blocked);
+    restore_failed_verification(&repo, &blocked);
+    let fresh = save_retry_preview(&repo, &blocked);
+    assert_ne!(fresh.id, discarded.id);
+    assert_eq!(fresh.revision, discarded.revision + 1);
+    assert_stale_retry_preview(&repo, &discarded);
+    let approved = manager::approve_corrective(&repo, &blocked.id, &fresh.id, fresh.revision)
+        .unwrap_or_else(|e| panic!("approve fresh corrective preview: {e}"));
+    let mut tasks = blocked.proposal.tasks;
+    tasks.push(fresh.task.clone());
+    assert_eq!(
+        serde_json::json!(approved.proposal.tasks),
+        serde_json::json!(tasks)
+    );
+    assert_eq!(
+        serde_json::json!(approved.execution.corrective_approvals),
+        serde_json::json!([fresh])
+    );
+    assert_stale_retry_preview(&repo, &discarded);
+}
+
 #[tokio::test]
 async fn manager_retry_distinguishes_task_from_verification_scope() {
     let harness = harness();
     let _data = isolate_records(&harness);
     let repo = repository(&harness);
     let blocked = blocked_verification(&repo);
-    let uri = format!("/webui/manager/{}/retry", key(&repo));
+    let preview = save_retry_preview(&repo, &blocked);
+    let key = key(&repo);
+    let uri = format!("/webui/manager/{key}/retry");
+    let page = format!("/manager/{key}");
+    let dialog = format!("manager-approve-corrective-{}", preview.id);
+    let heading = "Corrective task preview";
+    let (status, _, html) = get(&harness, &page, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains(&dialog) && html.contains(heading), "{html}");
     let (status, ct, html) = submit(
         &harness,
         &uri,
@@ -691,7 +800,19 @@ async fn manager_retry_distinguishes_task_from_verification_scope() {
     let persisted = &snapshot(&repo).goals[0];
     assert_eq!(persisted.status, GoalStatus::Active);
     assert!(persisted.execution.publication.is_none());
-    assert_eq!(persisted.execution.publication_history.len(), 1);
+    assert_eq!(
+        serde_json::json!(persisted.execution.publication_history),
+        serde_json::json!([blocked.execution.publication])
+    );
+    let (status, _, html) = get(&harness, &page, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(
+        !html.contains(&dialog)
+            && !html.contains(heading)
+            && !html.contains(&preview.task.instructions),
+        "discarded corrective preview is still visible: {html}"
+    );
+    assert_stale_retry_preview(&repo, &preview);
 }
 
 #[tokio::test]

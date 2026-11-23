@@ -31,8 +31,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: manager-specs
+          cmd-format: rustup run 1.99.1 {0}
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Run executable specifications
+      - name: Run Quint, Alloy, Manager Gherkin, CLI and WebUI checks
         run: bash scripts/check_manager_specs.sh
       - name: Upload specification evidence
         if: always()

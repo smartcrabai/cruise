@@ -5,19 +5,19 @@
 // tip changes, or liveness.
 // Production: manager::approve, manager::preview_corrective,
 // manager::approve_corrective, manager_coordinator::reserve_and_claim,
-// manager_coordinator::retry_verification and manager_publication::reconcile_inner.
+// manager_publication::retry_verification and manager_publication::reconcile_inner.
 module manager {
   type State = { proposalRev: int, approved: bool, approvedRev: int, tasks: Set[int],
     reserved: Set[int], running: Set[int], integrated: Set[int], verifying: bool,
     checksPassed: bool, blocked: bool, preview: int, previews: int, published: bool,
-    merged: bool, paused: bool }
+    merged: bool, paused: bool, discarded: Set[int], publicationHistory: int }
   var s: State
   var previous: State
   var event: str
   pure val initial: State = { proposalRev: 0, approved: false, approvedRev: -1,
     tasks: Set(0, 1), reserved: Set(), running: Set(), integrated: Set(), verifying: false,
     checksPassed: false, blocked: false, preview: 0, previews: 0, published: false,
-    merged: false, paused: false }
+    merged: false, paused: false, discarded: Set(), publicationHistory: 0 }
   action init = all { s' = initial, previous' = initial, event' = "init" }
   action record(n: State, e: str): bool = all { previous' = s, s' = n, event' = e }
   // A new preview replaces the reviewed one until a proposal is approved.
@@ -48,9 +48,14 @@ module manager {
     record({ ...s, checksPassed: true }, "checks") }
   action failChecks = all { not(s.paused), s.verifying, not(s.checksPassed),
     record({ ...s, verifying: false, blocked: true }, "failChecks") }
-  // `cruise manager retry GOAL`: fresh verification of a blocked, fully integrated Goal.
-  action retryVerification = all { not(s.paused), s.blocked, s.integrated == s.tasks,
-    record({ ...s, blocked: false, verifying: true }, "retryVerify") }
+  // A failed check abstracts an eligible publication phase at the integrated tip.
+  // The model combines clearing the current publication with starting the next verification.
+  val retryEligible = not(s.paused) and s.blocked and s.integrated == s.tasks
+  action retryVerification = all { retryEligible,
+    record({ ...s, blocked: false, verifying: true, preview: 0,
+      publicationHistory: s.publicationHistory + 1,
+      discarded: if (s.preview > 0) s.discarded.union(Set(s.preview)) else s.discarded }, "retryVerify") }
+  action rejectRetry = all { not(retryEligible), record(s, "rejectRetry") }
   // `cruise manager corrective`: saving a preview never authorizes the task.
   action previewCorrective = all { not(s.paused), s.blocked, not(s.tasks.contains(2)),
     s.previews < 2,
@@ -67,7 +72,7 @@ module manager {
   action idle = record(s, "idle")
   action step = any { editProposal, approve(0), approve(1), approve(2), reserve(0), reserve(1),
     reserve(2), launch(0), launch(1), launch(2), integrate(0), integrate(1), integrate(2), verify,
-    passChecks, failChecks, retryVerification, previewCorrective, approveCorrective(1),
+    passChecks, failChecks, retryVerification, rejectRetry, previewCorrective, approveCorrective(1),
     approveCorrective(2), publish, merge, pause, resume, idle }
 
   val authority = not(s.approved) implies s.reserved == Set() and s.running == Set()
@@ -85,8 +90,22 @@ module manager {
     s.merged implies s.published,
   }
   val correctiveAuthority = all {
-    // Like production, retrying verification keeps an unapproved preview; it
-    // stays unusable until the Goal is blocked again.
+    // Revisions stand in for the full identity of the saved preview record.
+    event == "retryVerify" implies all {
+      s.preview == 0, s.previews == previous.previews, not(s.blocked), s.verifying,
+      s.publicationHistory == previous.publicationHistory + 1,
+      s.tasks == previous.tasks, s.integrated == previous.integrated,
+      s.reserved == previous.reserved, s.running == previous.running,
+      s.discarded == (if (previous.preview > 0) previous.discarded.union(Set(previous.preview))
+        else previous.discarded),
+    },
+    event != "retryVerify" implies s.discarded == previous.discarded
+      and s.publicationHistory == previous.publicationHistory,
+    event == "rejectRetry" implies s == previous,
+    not(s.discarded.contains(s.preview)),
+    event == "approveCorrective" implies not(previous.discarded.contains(previous.preview)),
+    event == "preview" implies s.preview == s.previews and s.previews == previous.previews + 1
+      and s.discarded.forall(r => r < s.preview),
     s.preview > 0 implies not(s.tasks.contains(2)),
     event == "approveCorrective" implies previous.blocked,
     event == "preview" implies s.tasks == previous.tasks and s.reserved == previous.reserved,
@@ -114,7 +133,7 @@ module manager {
   run retryVerificationTest = init.then(approve(0)).then(reserve(0)).then(launch(0))
     .then(integrate(0)).then(reserve(1)).then(launch(1)).then(integrate(1)).then(verify)
     .then(failChecks).then(retryVerification).then(passChecks).then(publish)
-    .expect(s.published and safety)
+    .expect(s.published and s.publicationHistory == 1 and s.discarded == Set() and safety)
   run correctiveApprovalTest = init.then(approve(0)).then(reserve(0)).then(launch(0))
     .then(integrate(0)).then(reserve(1)).then(launch(1)).then(integrate(1)).then(verify)
     .then(failChecks).then(previewCorrective)
@@ -126,4 +145,17 @@ module manager {
   run correctivePreviewDoesNotAuthorizeTest = init.then(approve(0)).then(reserve(0)).then(launch(0))
     .then(integrate(0)).then(reserve(1)).then(launch(1)).then(integrate(1)).then(verify)
     .then(failChecks).then(previewCorrective).then(reserve(2)).fail()
+  run discardedCorrectiveTest = init.then(approve(0)).then(reserve(0)).then(launch(0))
+    .then(integrate(0)).then(reserve(1)).then(launch(1)).then(integrate(1)).then(verify)
+    .then(failChecks).then(previewCorrective).then(retryVerification).then(failChecks)
+    .then(approveCorrective(1)).fail()
+  run freshCorrectiveAfterRetryTest = init.then(approve(0)).then(reserve(0)).then(launch(0))
+    .then(integrate(0)).then(reserve(1)).then(launch(1)).then(integrate(1)).then(verify)
+    .then(failChecks).then(previewCorrective).then(retryVerification).then(failChecks)
+    .then(previewCorrective).then(approveCorrective(2))
+    .expect(s.tasks.contains(2) and s.discarded == Set(1) and s.publicationHistory == 1 and safety)
+  run rejectedRetryPreservesPreviewTest = init.then(approve(0)).then(reserve(0)).then(launch(0))
+    .then(integrate(0)).then(reserve(1)).then(launch(1)).then(integrate(1)).then(verify)
+    .then(failChecks).then(previewCorrective).then(pause).then(rejectRetry)
+    .expect(s.preview == 1 and s.discarded == Set() and s.publicationHistory == 0 and safety)
 }

@@ -199,6 +199,9 @@ pub struct GoalExecution {
     /// Immutable audit trail of explicitly approved additive tasks.
     #[serde(default)]
     pub corrective_approvals: Vec<CorrectivePreview>,
+    /// Audit trail of unapproved previews discarded by an explicit verification retry.
+    #[serde(default)]
+    pub corrective_discarded: Vec<CorrectivePreview>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -797,6 +800,7 @@ pub(crate) fn preview_corrective(
             .corrective_preview
             .iter()
             .chain(&goal.execution.corrective_approvals)
+            .chain(&goal.execution.corrective_discarded)
             .map(|preview| preview.revision)
             .max()
             .unwrap_or(0)

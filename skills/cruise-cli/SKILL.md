@@ -69,7 +69,7 @@ Run it inside a local Git checkout (`cruise manager` requires one); every subcom
 | `pause <GOAL>` / `resume <GOAL>` | Pause or restore Goal-scoped scheduling. |
 | `resume <GOAL> <TASK>` | Continue the task's latest failed or suspended child in its existing worktree. |
 | `retry <GOAL> <TASK>` | Reserve a fresh attempt for an eligible failed/suspended child, or a completed child of a Goal blocked by a safely established integration conflict. |
-| `retry <GOAL>` | Re-verify a blocked Goal whose tasks are all integrated, keeping prior evidence. Does not retry an uncertain publication. |
+| `retry <GOAL>` | Re-verify a blocked Goal whose tasks are all integrated, keeping prior evidence. Discards any unapproved corrective preview into the Goal's audit history so it can no longer be approved. Does not retry an uncertain publication. |
 | `answer <GOAL> <PROMPT> [TEXT]` | Answer a child's Ask prompt (TEXT or a terminal prompt; blank is rejected). |
 | `answer <GOAL> <PROMPT> --choice LABEL [--text TEXT]` | Answer a child's Option prompt outside a terminal with the exact label; `--text` only for text-input choices. On a terminal, Option prompts use the menu and `--choice` is rejected. |
 | `corrective <GOAL> <TASK> [--instructions TEXT]` | After a definite failed check on a blocked Goal, save a corrective task preview (instructions from the flag, terminal, or piped stdin). Authorizes nothing. |
@@ -90,7 +90,7 @@ Constraints and gotchas:
 - Conversation and children resolve `builtin:tdd` with user/project `default.yaml` and the **daemon** environment; Manager requests do not forward client `CRUISE_*` overrides. Conversation needs `sdk: jcode` (not `command:`) and a planning model. Each proposal freezes the child workflow with automatic PR creation, after-PR steps, `after_pr`/`merge` flags, post-PR cleanup, and `force_exec` removed; project workflow YAML does not customize children. See the **cruise-config** skill.
 - Execution requires Git 2.38+ and an authenticated GitHub or GitLab `origin` (fetch and push URLs must match).
 - Manager-owned child sessions are read-only elsewhere: `cruise list` offers only **View Diff** (when available) and **Back**, and their WebUI pages are read-only with **Open in Manager**. Answer their Ask/Option prompts with `cruise manager answer` or the Manager page, not `cruise run`.
-- A failed check blocks the Goal (`status` shows `reason`). Choose `retry <GOAL>` for a flaky check, or `corrective` + `approve-corrective` to add a fix task. Failed children name the exact `resume`/`retry` command in the Goal reason.
+- A failed check blocks the Goal (`status` shows `reason`). Choose `retry <GOAL>` for a flaky check, or `corrective` + `approve-corrective` to add a fix task. If verification fails again after a retry, create a fresh corrective preview rather than approving a discarded one. Failed children name the exact `resume`/`retry` command in the Goal reason.
 - New conversation turns and proposals need the daemon to reach the SDK provider. The WebUI **Manager** page opens only repositories with an existing record and an accessible main checkout on the daemon host.
 
 ## Which command do I want?

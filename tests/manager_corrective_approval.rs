@@ -69,8 +69,14 @@ fn repository(home: &Path) -> Result<(std::path::PathBuf, String), Box<dyn std::
 }
 
 fn seed_failed_goal(home: &Path) -> Result<(PathBuf, String, Value), Box<dyn std::error::Error>> {
+    seed_legacy_failed_goal(home, false)
+}
+
+fn seed_legacy_failed_goal(
+    home: &Path,
+    with_preview: bool,
+) -> Result<(PathBuf, String, Value), Box<dyn std::error::Error>> {
     let (repo, sha) = repository(home)?;
-    let common = repo.join(".git").canonicalize()?;
     let anchor = repo.canonicalize()?;
     let origin = "https://github.com/example/project.git";
     let workflow: cruise::config::WorkflowConfig = serde_json::from_value(json!({"steps":{}}))?;
@@ -83,8 +89,20 @@ fn seed_failed_goal(home: &Path) -> Result<(PathBuf, String, Value), Box<dyn std
     let evidence = json!({"check_id":"check","verified_tip":sha,"argv":["false"],"exit_code":1,"cancelled":false,"stdout_log":"out","stderr_log":"err","state_error":null});
     let publication = json!({"tip":sha,"worktree":home.join("verification"),"branch":"cruise/goal/g","phase":"Ready","checks":[evidence],"pending_check":null,"request":null,"forge_kind":"GitHub","forge_host":"github.com","forge_repository":"example/project"});
     let attempts = json!([{"task_id":"task","attempt":1,"session_id":"s","base_sha":sha,"launch_started":true,"resume_pending":false,"resume_starting":false,"result_sha":sha,"finalization_intent":null,"integrated":true,"integration_intent":null}]);
-    let goal = json!({"id":"g","proposal":proposal,"status":"blocked","reason":"failed",
+    let mut goal = json!({"id":"g","proposal":proposal,"status":"blocked","reason":"failed",
         "execution":{"anchor":anchor,"origin":origin,"workflow":workflow,"integrated_tip":sha,"attempts":attempts,"paused_from":null,"paused_reason":null,"publication":publication,"publication_history":[]}});
+    if with_preview {
+        goal["execution"]["corrective_preview"] = json!({
+            "id":"legacy-preview", "revision":1, "goal_id":"g", "integrated_tip":sha,
+            "task":{"id":"fix","instructions":"Repair the check","dependencies":["task"]}
+        });
+    }
+    write_goal(home, &repo, &goal)?;
+    Ok((repo, sha, goal))
+}
+
+fn write_goal(home: &Path, repo: &Path, goal: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    let common = repo.join(".git").canonicalize()?;
     let mut key = String::new();
     for byte in Sha256::digest(common.to_string_lossy().as_bytes()) {
         write!(key, "{byte:02x}")?;
@@ -97,7 +115,7 @@ fn seed_failed_goal(home: &Path) -> Result<(PathBuf, String, Value), Box<dyn std
             &json!({"repository":common,"transcript":[],"proposal":null,"goals":[goal]}),
         )?,
     )?;
-    Ok((repo, sha, goal))
+    Ok(())
 }
 
 fn success(output: Output) -> String {
@@ -145,6 +163,64 @@ fn manager_retry_goal_preserves_failed_verification_without_retrying_tasks()
         after["publication_history"],
         json!([before["execution"]["publication"]])
     );
+    assert_eq!(after["corrective_discarded"], json!([]));
+    Ok(())
+}
+
+#[test]
+fn manager_retry_clears_legacy_corrective_preview_from_status_and_audits_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = TempDir::new()?;
+    let home = root.path();
+    let (repo, _, before) = seed_legacy_failed_goal(home, true)?;
+    success(cruise(home, &["daemon", "start", "--port", "0"])?);
+    let _stop = Stop(home);
+    let manager = |args: &[&str]| manager_command(home, &repo).args(args).output();
+    let notice = "Corrective preview is not approved";
+    assert!(success(manager(&["status"])?).contains(notice));
+
+    success(manager(&["retry", "g"])?);
+    let text = success(manager(&["status"])?);
+    let snapshot: Value = serde_json::from_str(&success(manager(&["status", "--json"])?))?;
+    let after = &snapshot["goals"][0]["execution"];
+    assert_eq!(
+        (
+            text.contains(notice),
+            after.get("corrective_preview"),
+            after.get("corrective_discarded"),
+        ),
+        (
+            false,
+            Some(&Value::Null),
+            Some(&json!([before["execution"]["corrective_preview"]])),
+        ),
+        "retry must retire the preview from status while preserving its audit entry"
+    );
+    Ok(())
+}
+
+#[test]
+fn manager_retry_appends_to_corrective_discard_history() -> Result<(), Box<dyn std::error::Error>> {
+    let root = TempDir::new()?;
+    let home = root.path();
+    let (repo, sha, mut goal) = seed_legacy_failed_goal(home, true)?;
+    let prior = goal["execution"]["corrective_preview"].clone();
+    let pending = json!({
+        "id":"newer-preview", "revision":2, "goal_id":"g", "integrated_tip":sha,
+        "task":{"id":"fix-again","instructions":"Repair the check again","dependencies":["task"]}
+    });
+    goal["execution"]["corrective_discarded"] = json!([prior]);
+    goal["execution"]["corrective_preview"] = pending.clone();
+    write_goal(home, &repo, &goal)?;
+
+    success(cruise(home, &["daemon", "start", "--port", "0"])?);
+    let _stop = Stop(home);
+    let manager = |args: &[&str]| manager_command(home, &repo).args(args).output();
+    success(manager(&["retry", "g"])?);
+    let snapshot: Value = serde_json::from_str(&success(manager(&["status", "--json"])?))?;
+    let after = &snapshot["goals"][0]["execution"];
+    assert_eq!(after.get("corrective_preview"), Some(&Value::Null));
+    assert_eq!(after["corrective_discarded"], json!([prior, pending]));
     Ok(())
 }
 
