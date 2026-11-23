@@ -168,7 +168,12 @@ fn extract_archive(target: &Target, dest: &Path, archive_path: &Path) -> Result<
     Ok(())
 }
 pub(crate) fn probe(binary: &Path, expected: &str) -> Result<()> {
-    probe_with_timeout(binary, expected, Duration::from_secs(30))
+    probe_with_timeout(
+        binary,
+        expected,
+        Duration::from_secs(30),
+        std::thread::sleep,
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -181,7 +186,12 @@ fn executable_busy(_error: &std::io::Error) -> bool {
     false
 }
 
-fn probe_with_timeout(binary: &Path, expected: &str, timeout: Duration) -> Result<()> {
+fn probe_with_timeout(
+    binary: &Path,
+    expected: &str,
+    timeout: Duration,
+    mut wait_busy: impl FnMut(Duration),
+) -> Result<()> {
     let mut cmd = Command::new(binary);
     cmd.args(["version", "--json"])
         .env("JCODE_NO_AUTO_UPDATE", "1");
@@ -194,7 +204,7 @@ fn probe_with_timeout(binary: &Path, expected: &str, timeout: Duration) -> Resul
             // download descriptor until exec closes it. Linux rejects execution
             // during that window, even though this process closed its handle.
             Err(e) if executable_busy(&e) && Instant::now() < deadline => {
-                std::thread::sleep(
+                wait_busy(
                     Duration::from_millis(10)
                         .min(deadline.saturating_duration_since(Instant::now())),
                 );
@@ -283,14 +293,16 @@ mod tests {
         let binary = dir.path().join("tool");
         fs::write(&binary, b"#!/bin/sh\nprintf '{\"semver\":\"1.0.0\"}\\n'\n").unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
-        let writer = fs::OpenOptions::new().write(true).open(&binary).unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            drop(writer);
+        let mut writer = Some(fs::OpenOptions::new().write(true).open(&binary).unwrap());
+        let mut busy_waits = 0;
+        // Close the writer from the retry wait instead of a timed thread, so the
+        // outcome does not depend on runner speed.
+        let result = probe_with_timeout(&binary, "1.0.0", Duration::from_secs(30), |_| {
+            busy_waits += 1;
+            drop(writer.take());
         });
-        let result = probe_with_timeout(&binary, "1.0.0", Duration::from_secs(2));
-        release.join().unwrap();
         result.unwrap();
+        assert!(busy_waits >= 1, "spawn must retry while the writer is open");
     }
 
     #[cfg(target_os = "linux")]
@@ -303,7 +315,15 @@ mod tests {
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         let _writer = fs::OpenOptions::new().write(true).open(&binary).unwrap();
         let start = Instant::now();
-        assert!(probe_with_timeout(&binary, "1.0.0", Duration::from_millis(100)).is_err());
+        assert!(
+            probe_with_timeout(
+                &binary,
+                "1.0.0",
+                Duration::from_millis(100),
+                std::thread::sleep
+            )
+            .is_err()
+        );
         assert!(start.elapsed() < Duration::from_secs(2));
     }
 
@@ -375,7 +395,12 @@ mod tests {
         .unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         let start = Instant::now();
-        let result = probe_with_timeout(&binary, "1.0.0", Duration::from_millis(100));
+        let result = probe_with_timeout(
+            &binary,
+            "1.0.0",
+            Duration::from_millis(100),
+            std::thread::sleep,
+        );
         assert!(result.unwrap_err().to_string().contains("timed out"));
         assert!(start.elapsed() < Duration::from_secs(1));
     }
