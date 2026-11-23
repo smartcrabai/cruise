@@ -218,6 +218,7 @@ after-pr:
 | `{pr.number}` | 创建 PR 后可用的 pull request 编号 |
 | `{pr.url}` | 创建 PR 后可用的 pull request URL |
 | `{pr.language}` | PR 标题/正文生成实际使用的语言（来自 `CRUISE_LANGUAGE_PR`、`languages.pr`、旧字段、区域设置推断或默认值） |
+| `{cruise.bin}` | 正在运行的 Cruise 可执行文件路径，已按步骤 shell（`sh` 或 `cmd.exe`）加引号。内置步骤调用 `{cruise.bin} internal ...`，因此不会运行 `PATH` 上不同版本的 `cruise` |
 
 > **注意：** `{model}` **不是**模板变量，它是仅在顶层 `command` 数组中解析的特殊占位符。它不能用于 `prompt`、`prompt_file`、`instruction` 或 `command` 步骤字段。
 

@@ -72,6 +72,33 @@ pub(crate) fn shell_command() -> (&'static str, &'static str) {
     }
 }
 
+/// The running Cruise executable, quoted as one word for [`shell_command`].
+///
+/// Built-in steps invoke Cruise through this instead of a `cruise` found on
+/// `PATH`, which may be a different version than the process running them.
+///
+/// # Errors
+///
+/// Returns an error when the executable path cannot be determined or quoted.
+pub(crate) fn quoted_current_exe() -> crate::error::Result<String> {
+    let exe = std::env::current_exe()?;
+    let path = exe.to_str().ok_or_else(|| {
+        crate::error::CruiseError::Other(format!(
+            "Cruise executable path is not UTF-8: {}",
+            exe.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        Ok(format!("'{}'", path.replace('\'', r"'\''")))
+    }
+    #[cfg(windows)]
+    {
+        // Windows paths cannot contain `"`, so one pair quotes the whole path.
+        Ok(format!("\"{path}\""))
+    }
+}
+
 /// Opens a URL in the user's default browser.
 ///
 /// # Errors

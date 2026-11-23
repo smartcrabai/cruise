@@ -153,9 +153,13 @@ fn spawn_command<S: std::hash::BuildHasher>(
 ) -> Result<AsyncGroupChild> {
     let (shell, flag) = crate::platform::shell_command();
     let mut builder = Command::new(shell);
+    #[cfg(unix)]
+    builder.arg(flag).arg(cmd);
+    // Rust's `\"` argument escaping is not understood by cmd.exe, which would
+    // break quoted paths such as `{cruise.bin}`. `/S` strips only the outer pair.
+    #[cfg(windows)]
+    builder.raw_arg(format!("/S {flag} \"{cmd}\""));
     builder
-        .arg(flag)
-        .arg(cmd)
         .envs(env)
         .stdin(if quiet {
             std::process::Stdio::null()
@@ -864,6 +868,23 @@ mod tests {
         let logs = logs.lock().unwrap_or_else(|e| panic!("{e}"));
         assert!(logs.contains(&("stdout".to_string(), "stdout".to_string())));
         assert!(logs.contains(&("stderr".to_string(), "stderr".to_string())));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_command_runs_a_quoted_executable_path_with_spaces() {
+        let root = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let dir = root.path().join("a b");
+        std::fs::create_dir(&dir).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(dir.join("tool.cmd"), "@echo %~1>\"%~dp0out.txt\"\r\n")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let command = format!("\"{}\" \"x y\"", dir.join("tool.cmd").display());
+        let result = run_command(&command, 0, &HashMap::new(), None, None, None, None)
+            .await
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(result.success, "{}", result.stderr);
+        let out = std::fs::read_to_string(dir.join("out.txt")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(out.trim_end(), "x y");
     }
 
     #[cfg(windows)]

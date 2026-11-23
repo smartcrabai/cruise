@@ -219,6 +219,7 @@ commit と PR template は別の[許可済み語彙](configuration.md#commit-and
 | `{pr.number}` | PR 作成後に利用できる pull request number |
 | `{pr.url}` | PR 作成後に利用できる pull request URL |
 | `{pr.language}` | PR title/body 生成で使う有効言語（`CRUISE_LANGUAGE_PR`、`languages.pr`、旧 field、locale 推定、default から決定） |
+| `{cruise.bin}` | 実行中の Cruise 実行ファイルのパス。step の shell（`sh` または `cmd.exe`）向けに quote 済み。built-in step は `{cruise.bin} internal ...` を呼ぶため、`PATH` 上にある別バージョンの `cruise` を実行しません |
 
 > **注意:** `{model}` は template 変数ではありません。top-level `command` array 内でのみ解決される特別な placeholder です。`prompt`、`prompt_file`、`instruction`、command step field 内では利用できません。
 
