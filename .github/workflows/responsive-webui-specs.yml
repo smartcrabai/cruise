@@ -80,6 +80,12 @@ jobs:
         run: node tests/webui/workflow-categories.mjs
       - name: Managed-child WebUI browser boundary
         run: node tests/webui/managed-child.mjs
+      - name: Production Manager browser workflow
+        run: node tests/webui/manager.mjs
+      - name: Managed Ask through the Manager browser form
+        env:
+          WEBUI_MANAGER_BROWSER_ASK: '1'
+        run: cargo +1.99.1 test --locked --all-features --lib manager_answer_keeps_live_ask_pending_until_valid_reply
       - name: Workflow flag buttons browser regression
         run: node tests/webui/flag-buttons.mjs
       - name: Failed exec stays out of WebUI inventory

@@ -1,6 +1,6 @@
 mod exec;
 mod list;
-mod manager;
+pub(crate) mod manager;
 mod plan;
 mod run;
 pub(crate) mod sessions;
@@ -180,6 +180,11 @@ pub(super) fn error_response(status: StatusCode, message: &str) -> Response {
 }
 
 pub(super) fn map_error(error: &crate::error::CruiseError) -> Response {
+    let (status, message) = error_details(error);
+    error_response(status, &message)
+}
+
+pub(crate) fn error_details(error: &crate::error::CruiseError) -> (StatusCode, String) {
     let status = match error {
         crate::error::CruiseError::Busy(_) => StatusCode::CONFLICT,
         crate::error::CruiseError::SessionNotFound(_) => StatusCode::NOT_FOUND,
@@ -209,7 +214,7 @@ pub(super) fn map_error(error: &crate::error::CruiseError) -> Response {
         crate::error::CruiseError::IoError(error) => error.to_string(),
         _ => error.to_string(),
     };
-    error_response(status, &message)
+    (status, message)
 }
 
 #[cfg(test)]

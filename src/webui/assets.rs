@@ -1,11 +1,37 @@
 //! `WebUI` asset resolution: embedded copy extracted to the data directory, or a
 //! developer-supplied directory served directly.
 
-use std::path::{Path, PathBuf};
+use std::{fmt::Write as _, path::{Path, PathBuf}};
+
+use sha2::{Digest, Sha256};
 
 use crate::error::{CruiseError, Result};
 
 static EMBEDDED: include_dir::Dir<'static> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/webui");
+
+fn embedded_fingerprint() -> String {
+    fn collect(dir: &include_dir::Dir<'static>, files: &mut Vec<&'static include_dir::File<'static>>) {
+        files.extend(dir.files());
+        for child in dir.dirs() {
+            collect(child, files);
+        }
+    }
+    let mut files = Vec::new();
+    collect(&EMBEDDED, &mut files);
+    files.sort_unstable_by_key(|file| file.path());
+    let mut hash = Sha256::new();
+    for file in files {
+        for bytes in [file.path().as_os_str().as_encoded_bytes(), file.contents()] {
+            hash.update((bytes.len() as u64).to_be_bytes());
+            hash.update(bytes);
+        }
+    }
+    let mut fingerprint = String::with_capacity(64);
+    for byte in hash.finalize() {
+        let _ = write!(fingerprint, "{byte:02x}");
+    }
+    fingerprint
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Assets {
@@ -37,8 +63,10 @@ pub(crate) fn prepare(override_dir: Option<PathBuf>, data_dir: &Path) -> Result<
         });
     }
 
-    let target = data_dir.join("webui").join(env!("CARGO_PKG_VERSION"));
-    // The path is version-keyed, so an already extracted tree has the exact
+    let target = data_dir.join("webui").join(format!(
+        "{}-{}", env!("CARGO_PKG_VERSION"), embedded_fingerprint()
+    ));
+    // The path is content-keyed, so an already extracted tree has the exact
     // contents we would write. Re-extracting would delete files a concurrently
     // running server is still reading templates and static assets from.
     let marker = target.join(".complete");

@@ -52,6 +52,7 @@ try {
   await page.waitForFunction(() => !!window.app);
   const header = page.locator(`#session-header-${child}`);
   assert.match(await header.innerText(), /Owned fixture \(Manager child, read-only\)/);
+  assert.equal(await header.getByRole('link', { name: 'Open in Manager', exact: true }).count(), 0, 'Manager link hidden without an owner record');
   assert.match(await page.locator('aside').innerText(), /Owned fixture \(Manager child, read-only\)/);
   for (const suffix of ['run', 'reset', 'delete', 'discard', 'verify', 'approve', 'cancel', 'editor/tell']) {
     assert.equal(await header.locator(`[hx-post$="/${suffix}"], [hx-get$="/${suffix}"]`).count(), 0, `${suffix} hidden`);

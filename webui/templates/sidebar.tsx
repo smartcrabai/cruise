@@ -13,6 +13,7 @@ export default function Sidebar(props) {
             <button type="button" hx-get="/webui/settings" hx-target="#dialogs" hx-swap="innerHTML" aria-label={props.t.sidebar.settings} title={props.t.sidebar.settings} class="whitespace-nowrap px-1.5 py-1 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-800 rounded">⚙</button>
           </div>
         </div>
+        <a href="/manager" class="block text-sm font-medium text-blue-700 dark:text-blue-400 hover:underline">{props.t.manager.title}</a>
         <p id="clean-message" class="text-xs text-gray-500 dark:text-gray-400"></p>
       </div>
       <div id="session-list" class="flex-1 overflow-y-auto" hx-get="/webui/sidebar" hx-trigger="every 3s" hx-swap="innerMorph">{props.rows}</div>

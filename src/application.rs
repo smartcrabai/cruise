@@ -6527,6 +6527,9 @@ impl OptionHandler for RuntimeOptionHandler {
 }
 
 #[cfg(test)]
+pub(crate) mod test_managed_prompt;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

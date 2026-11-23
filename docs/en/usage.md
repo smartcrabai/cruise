@@ -35,11 +35,13 @@ The CLI resolves workflow configuration on the client. Its working directory and
 
 After `cruise update`, a busy daemon keeps running its old version: CLI clients refuse requests with a hint to run `cruise daemon restart` when idle, and the WebUI stays on the old version until restart. An idle daemon is restarted automatically by the next client request.
 
-Foreground commands stream progress from the daemon. Ctrl+C cancels the operation (`run` becomes `Suspended`; planning is restored), but closing the terminal does not stop daemon work. Reattach with `cruise run <session-id>` or the WebUI. Ask and Option prompts appear in the terminal and WebUI; the first answer wins. If a non-interactive client has a pending prompt, the session waits for an answer in the WebUI or from `cruise run <session-id>`. `cruise --plan` also runs its planning operation inside the daemon rather than a detached worker process.
+Foreground commands stream progress from the daemon. Ctrl+C cancels the operation (`run` becomes `Suspended`; planning is restored), but closing the terminal does not stop daemon work. Reattach with `cruise run <session-id>` or the WebUI. In ordinary sessions, Ask and Option prompts appear in the terminal and WebUI; the first answer wins. If a non-interactive client has a pending prompt, the session waits for an answer in the WebUI or from `cruise run <session-id>`. Manager-owned Ask and Option prompts must be answered on the repository’s Manager page or via `/answer` in `cruise manager`, because the child session page is read-only. `cruise --plan` also runs its planning operation inside the daemon rather than a detached worker process.
 
 All session mutations pass through the daemon, so separate CLI processes and the WebUI can safely act on sessions concurrently. Claims prevent duplicate work on the same session. Local-only commands are `config`, `usage`, `update`, `install`, `workflow *`, `docs`, `ssh`, and every `--dry-run`; they do not connect to the local daemon.
 
-The Graph tab loads Mermaid from jsDelivr and therefore needs network access; all other WebUI tabs work offline. Choose the display language in the sidebar footer on desktop or the header on mobile. The selection reloads the page.
+The browser needs network access to load Mermaid from jsDelivr for the Graph tab. New Manager conversation turns and proposal generation require the daemon to reach its configured SDK provider. Choose the display language in the sidebar footer on desktop or the header on mobile. The selection reloads the page.
+
+Select **Manager** in the sidebar to open an existing Manager record, review proposals, and control goals from the browser. See [Experimental Manager records](sessions.md#experimental-manager-records).
 
 <a id="usage"></a>
 # Usage
