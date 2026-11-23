@@ -106,16 +106,23 @@ fn success(output: Output) -> String {
         "{output:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).unwrap()
+    String::from_utf8(output.stdout).unwrap_or_else(|err| panic!("decode Manager stdout: {err}"))
 }
 
 fn assert_attempts_preserved(after: &Value, before: &Value) {
-    let actual = after.as_array().unwrap();
-    let expected = before.as_array().unwrap();
+    let actual = after
+        .as_array()
+        .unwrap_or_else(|| panic!("read actual attempts"));
+    let expected = before
+        .as_array()
+        .unwrap_or_else(|| panic!("read expected attempts"));
     assert_eq!(actual.len(), expected.len());
     for (actual, expected) in actual.iter().zip(expected) {
         // The daemon enriches these records with live child state in status output.
-        for (field, value) in expected.as_object().unwrap() {
+        for (field, value) in expected
+            .as_object()
+            .unwrap_or_else(|| panic!("read expected attempt fields"))
+        {
             assert_eq!(&actual[field], value, "changed attempt field {field}");
         }
     }
@@ -129,9 +136,7 @@ fn manager_retry_goal_preserves_failed_verification_without_retrying_tasks()
     let (repo, _, before) = seed_failed_goal(home)?;
     success(cruise(home, &["daemon", "start", "--port", "0"])?);
     let _stop = Stop(home);
-    let manager = |args: &[&str]| {
-        manager_command(home, &repo).args(args).output()
-    };
+    let manager = |args: &[&str]| manager_command(home, &repo).args(args).output();
     success(manager(&["retry", "g"])?);
     let snapshot: Value = serde_json::from_str(&success(manager(&["status", "--json"])?))?;
     let after = &snapshot["goals"][0]["execution"];
@@ -231,33 +236,14 @@ fn corrective_cli_requires_explicit_approval_of_the_current_preview()
     let (repo, sha, original) = seed_failed_goal(home)?;
     success(cruise(home, &["daemon", "start", "--port", "0"])?);
     let _stop = Stop(home);
-    let manager = |args: &[&str]| {
-        manager_command(home, &repo).args(args).output()
-    };
+    let manager = |args: &[&str]| manager_command(home, &repo).args(args).output();
     let goal = || -> Result<Value, Box<dyn std::error::Error>> {
         let snapshot: Value = serde_json::from_str(&success(manager(&["status", "--json"])?))?;
         assert_eq!(snapshot["goals"][0]["id"], "g");
         Ok(snapshot["goals"][0].clone())
     };
     let review = |instructions: &str| -> Result<Value, Box<dyn std::error::Error>> {
-        let current = goal()?;
-        assert_eq!(current["status"], original["status"]);
-        assert_eq!(current["proposal"]["tasks"], original["proposal"]["tasks"]);
-        assert_attempts_preserved(
-            &current["execution"]["attempts"],
-            &original["execution"]["attempts"],
-        );
-        assert_eq!(
-            current["execution"]["publication"],
-            original["execution"]["publication"]
-        );
-        let approvals = &current["execution"]["corrective_approvals"];
-        assert!(approvals.is_null() || *approvals == json!([]), "{current}");
-        let preview = &current["execution"]["corrective_preview"];
-        assert_eq!(preview["task"]["id"], "fix");
-        assert_eq!(preview["task"]["instructions"], instructions);
-        assert_eq!(preview["integrated_tip"], sha);
-        Ok(preview.clone())
+        Ok(assert_corrective_preview(&goal()?, &original, &sha, instructions).clone())
     };
 
     let flag_instructions = "Repair the failed check from a flag";
@@ -269,7 +255,10 @@ fn corrective_cli_requires_explicit_approval_of_the_current_preview()
         flag_instructions,
     ])?);
     let first = review(flag_instructions)?;
-    let saved = review_output.split_once("Saved corrective preview:").unwrap().1;
+    let saved = review_output
+        .split_once("Saved corrective preview:")
+        .unwrap_or_else(|| panic!("find saved corrective preview"))
+        .1;
     for expected in [
         format!("\"revision\": {}", first["revision"]),
         format!("\"integrated_tip\": \"{sha}\""),
@@ -332,9 +321,50 @@ fn corrective_cli_requires_explicit_approval_of_the_current_preview()
         json!([original["proposal"]["tasks"][0], preview["task"]])
     );
 
+    verify_corrective_revision_cannot_be_replayed(
+        home, &manager, &goal, &original, &preview, &revision,
+    )
+}
+
+fn assert_corrective_preview<'a>(
+    current: &'a Value,
+    original: &Value,
+    sha: &str,
+    instructions: &str,
+) -> &'a Value {
+    assert_eq!(current["status"], original["status"]);
+    assert_eq!(current["proposal"]["tasks"], original["proposal"]["tasks"]);
+    assert_attempts_preserved(
+        &current["execution"]["attempts"],
+        &original["execution"]["attempts"],
+    );
+    assert_eq!(
+        current["execution"]["publication"],
+        original["execution"]["publication"]
+    );
+    let approvals = &current["execution"]["corrective_approvals"];
+    assert!(approvals.is_null() || *approvals == json!([]), "{current}");
+    let preview = &current["execution"]["corrective_preview"];
+    assert_eq!(preview["task"]["id"], "fix");
+    assert_eq!(preview["task"]["instructions"], instructions);
+    assert_eq!(preview["integrated_tip"], sha);
+    preview
+}
+
+fn verify_corrective_revision_cannot_be_replayed(
+    home: &Path,
+    manager: &impl Fn(&[&str]) -> std::io::Result<Output>,
+    goal: &impl Fn() -> Result<Value, Box<dyn std::error::Error>>,
+    original: &Value,
+    preview: &Value,
+    revision: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Advance the durable fixture to the next failed check, preserving approval history.
     success(cruise(home, &["daemon", "stop", "--force"])?);
-    let record = fs::read_dir(home.join("data/cruise/manager"))?.next().ok_or("missing record")??.path();
+    let record = fs::read_dir(home.join("data/cruise/manager"))?
+        .next()
+        .ok_or("missing record")??
+        .path();
     let mut persisted: Value = serde_json::from_slice(&fs::read(&record)?)?;
     let next = &mut persisted["goals"][0];
     next["status"] = json!("blocked");
@@ -342,23 +372,50 @@ fn corrective_cli_requires_explicit_approval_of_the_current_preview()
     let mut attempt = original["execution"]["attempts"][0].clone();
     attempt["task_id"] = json!("fix");
     attempt["session_id"] = json!("second-session");
-    next["execution"]["attempts"].as_array_mut().unwrap().retain(|attempt| attempt["task_id"] != "fix");
-    next["execution"]["attempts"].as_array_mut().unwrap().push(attempt);
+    next["execution"]["attempts"]
+        .as_array_mut()
+        .unwrap_or_else(|| panic!("read seeded attempts"))
+        .retain(|attempt| attempt["task_id"] != "fix");
+    next["execution"]["attempts"]
+        .as_array_mut()
+        .unwrap_or_else(|| panic!("read seeded attempts"))
+        .push(attempt);
     fs::write(record, serde_json::to_vec(&persisted)?)?;
     success(cruise(home, &["daemon", "start", "--port", "0"])?);
-    success(manager(&["corrective", "g", "fix-again", "--instructions", "Try a different repair"])?);
+    success(manager(&[
+        "corrective",
+        "g",
+        "fix-again",
+        "--instructions",
+        "Try a different repair",
+    ])?);
     let pending = goal()?;
     let next_preview = &pending["execution"]["corrective_preview"];
-    let replay = manager(&["approve-corrective", "g", "--yes", "--revision", &revision])?;
+    let replay = manager(&["approve-corrective", "g", "--yes", "--revision", revision])?;
     assert!(!replay.status.success());
     assert!(String::from_utf8_lossy(&replay.stderr).contains("Stale proposal revision"));
     let after_replay = goal()?;
-    assert_eq!(&after_replay["execution"]["corrective_preview"], next_preview);
-    assert_eq!(after_replay["execution"]["corrective_approvals"], json!([preview]));
+    assert_eq!(
+        &after_replay["execution"]["corrective_preview"],
+        next_preview
+    );
+    assert_eq!(
+        after_replay["execution"]["corrective_approvals"],
+        json!([preview])
+    );
     let next_revision = next_preview["revision"].to_string();
-    success(manager(&["approve-corrective", "g", "--yes", "--revision", &next_revision])?);
+    success(manager(&[
+        "approve-corrective",
+        "g",
+        "--yes",
+        "--revision",
+        &next_revision,
+    ])?);
     let after_approval = goal()?;
     assert!(after_approval["execution"]["corrective_preview"].is_null());
-    assert_eq!(after_approval["execution"]["corrective_approvals"], json!([preview, next_preview]));
+    assert_eq!(
+        after_approval["execution"]["corrective_approvals"],
+        json!([preview, next_preview])
+    );
     Ok(())
 }

@@ -103,7 +103,11 @@ pub(crate) async fn run(args: ManagerArgs) -> Result<()> {
             let snapshot = client.manager_snapshot(cwd).await?;
             let action = preview_corrective(&snapshot, &goal, &task, instructions, tty)?;
             let preview = send(&client, cwd, action).await?;
-            println!("{}\n{}", text("corrective_saved"), serde_json::to_string_pretty(&preview)?);
+            println!(
+                "{}\n{}",
+                text("corrective_saved"),
+                serde_json::to_string_pretty(&preview)?
+            );
             println!("{}", text("corrective_not_authorized"));
             print_goal_accepted(&client, cwd, &goal).await;
             return Ok(());
@@ -152,7 +156,11 @@ async fn print_goal_accepted(client: &DaemonClient, cwd: &str, goal_id: &str) {
     {
         print_accepted(goal);
     } else {
-        println!("{}: {goal_id}. {}", text("accepted"), text("status_refresh_failed"));
+        println!(
+            "{}: {goal_id}. {}",
+            text("accepted"),
+            text("status_refresh_failed")
+        );
     }
 }
 
@@ -447,7 +455,10 @@ mod prompt_tests {
 
     #[test]
     fn completed_propose_renders_only_its_own_pending_review() -> Result<()> {
-        show_turn_proposal(&json!({"proposal":{"id":"accepted", "revision":1}}), "accepted")?;
+        show_turn_proposal(
+            &json!({"proposal":{"id":"accepted", "revision":1}}),
+            "accepted",
+        )?;
         for proposal in [json!({"id":"later", "revision":2}), Value::Null] {
             assert!(show_turn_proposal(&json!({"proposal":proposal}), "accepted").is_err());
         }
@@ -473,14 +484,16 @@ mod prompt_tests {
     }
 
     #[test]
-    fn waiting_stops_when_the_accepted_turn_is_not_running() {
+    fn waiting_stops_when_the_accepted_turn_is_not_running() -> Result<()> {
         for status in ["running", "completed", "interrupted", "failed"] {
             let snapshot = json!({"transcript": [
                 {"id": "accepted", "status": status},
                 {"id": "later", "status": "running"}
             ]});
-            let (turn, _) = turn_and_replies(&snapshot, "accepted").unwrap();
+            let (turn, _) = turn_and_replies(&snapshot, "accepted")
+                .ok_or_else(|| CruiseError::Other("expected accepted turn".into()))?;
             assert_eq!(turn_running(turn), status == "running");
         }
+        Ok(())
     }
 }

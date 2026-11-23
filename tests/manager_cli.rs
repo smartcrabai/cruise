@@ -18,7 +18,7 @@ async fn register_goal(
         .await
 }
 
-fn failure(output: Output) -> String {
+fn failure(output: &Output) -> String {
     assert!(!output.status.success(), "unexpected success: {output:?}");
     format!(
         "{}{}",
@@ -32,7 +32,7 @@ fn help_lists_manager_subcommands() {
     let output = Command::new(env!("CARGO_BIN_EXE_cruise"))
         .args(["manager", "--help"])
         .output()
-        .unwrap();
+        .unwrap_or_else(|err| panic!("run manager help: {err}"));
     let help = success(output);
     for subcommand in [
         "status",
@@ -60,7 +60,13 @@ fn status_json_exposes_the_enriched_snapshot() {
     let snapshot = fixture.snapshot();
     assert_eq!(
         snapshot["repository"],
-        json!(fixture.repo.join(".git").canonicalize().unwrap())
+        json!(
+            fixture
+                .repo
+                .join(".git")
+                .canonicalize()
+                .unwrap_or_else(|err| panic!("canonicalize fixture Git directory: {err}"))
+        )
     );
     for key in ["transcript", "goals", "prompts"] {
         assert_eq!(snapshot[key], json!([]), "{key}: {snapshot}");
@@ -79,12 +85,12 @@ fn default_manager_prints_human_status_without_a_terminal() {
 fn manager_requires_a_local_repository() {
     let fixture = Fixture::new();
     let text = failure(
-        fixture
+        &fixture
             .command()
             .current_dir(&fixture.home)
             .args(["manager", "status"])
             .output()
-            .unwrap(),
+            .unwrap_or_else(|err| panic!("run status outside Git: {err}")),
     );
     assert!(
         text.contains("manager requires a local Git repository"),
@@ -95,29 +101,52 @@ fn manager_requires_a_local_repository() {
 #[test]
 fn say_without_text_rejects_non_git_before_stdin_eof() {
     let fixture = Fixture::new();
-    let mut child = fixture.command().current_dir(&fixture.home)
+    let mut child = fixture
+        .command()
+        .current_dir(&fixture.home)
         .args(["manager", "say"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().unwrap();
-    let stdin = child.stdin.take().unwrap();
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn manager say: {err}"));
+    let stdin = child
+        .stdin
+        .take()
+        .unwrap_or_else(|| panic!("open child stdin"));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while child.try_wait().unwrap().is_none() {
+    while child
+        .try_wait()
+        .unwrap_or_else(|err| panic!("poll manager process: {err}"))
+        .is_none()
+    {
         if std::time::Instant::now() >= deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
+            child
+                .kill()
+                .unwrap_or_else(|err| panic!("kill stalled manager: {err}"));
+            child
+                .wait()
+                .unwrap_or_else(|err| panic!("reap stalled manager: {err}"));
             panic!("say waited for stdin outside Git");
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    let text = failure(child.wait_with_output().unwrap());
+    let text = failure(
+        &child
+            .wait_with_output()
+            .unwrap_or_else(|err| panic!("collect manager output: {err}")),
+    );
     drop(stdin);
-    assert!(text.contains("manager requires a local Git repository"), "{text}");
+    assert!(
+        text.contains("manager requires a local Git repository"),
+        "{text}"
+    );
 }
 
 #[test]
 fn approval_without_a_pending_proposal_fails() {
     let fixture = Fixture::new();
-    let text = failure(fixture.manager(&["approve"]));
+    let text = failure(&fixture.manager(&["approve"]));
     assert!(text.contains("no pending proposal"), "{text}");
 }
 
@@ -134,7 +163,7 @@ async fn noninteractive_approval_requires_yes_and_a_matching_revision() {
         (&["approve", "--yes"][..], false),
         (&["approve", "--yes", "--revision", &wrong][..], true),
     ] {
-        let text = failure(fixture.manager(args));
+        let text = failure(&fixture.manager(args));
         assert!(
             text.contains(&proposal.objective),
             "missing proposal review: {text}"
@@ -154,22 +183,41 @@ async fn noninteractive_approval_requires_yes_and_a_matching_revision() {
         );
     }
     let snapshot = fixture.snapshot();
-    let goals = snapshot["goals"].as_array().unwrap();
+    let goals = snapshot["goals"]
+        .as_array()
+        .unwrap_or_else(|| panic!("read approved goals"));
     assert_eq!(goals.len(), 1, "{snapshot}");
     assert_eq!(goals[0]["status"], "active");
     assert_eq!(goals[0]["proposal"]["revision"], proposal.revision);
 
     let replacement = fixture.seed_proposal();
-    let text = failure(fixture.manager(&["approve", "--yes", "--revision", &revision]));
+    let text = failure(&fixture.manager(&["approve", "--yes", "--revision", &revision]));
     assert!(text.contains("Stale proposal revision"), "{text}");
     let pending = fixture.snapshot();
     assert_eq!(pending["proposal"]["id"], replacement.id);
-    assert_eq!(pending["goals"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        pending["goals"]
+            .as_array()
+            .unwrap_or_else(|| panic!("read pending goals"))
+            .len(),
+        1
+    );
     assert_eq!(pending["goals"][0]["proposal"]["id"], proposal.id);
-    success(fixture.manager(&["approve", "--yes", "--revision", &replacement.revision.to_string()]));
+    success(fixture.manager(&[
+        "approve",
+        "--yes",
+        "--revision",
+        &replacement.revision.to_string(),
+    ]));
     let approved = fixture.snapshot();
     assert!(approved["proposal"].is_null());
-    assert!(approved["goals"].as_array().unwrap().iter().any(|goal| goal["proposal"]["id"] == replacement.id));
+    assert!(
+        approved["goals"]
+            .as_array()
+            .unwrap_or_else(|| panic!("read replacement goals"))
+            .iter()
+            .any(|goal| goal["proposal"]["id"] == replacement.id)
+    );
 }
 
 #[tokio::test]
@@ -177,7 +225,9 @@ async fn pause_and_resume_change_the_persisted_goal_status() {
     let fixture = Fixture::new();
     let proposal = fixture.seed_proposal();
     let active = register_goal(&fixture, proposal).await;
-    let goal = active["id"].as_str().unwrap();
+    let goal = active["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("find active goal ID"));
     let output = success(fixture.manager(&["pause", goal]));
     assert!(output.to_lowercase().contains("paused"), "{output}");
     assert!(
@@ -195,7 +245,7 @@ async fn pause_and_resume_change_the_persisted_goal_status() {
 #[test]
 fn unknown_goal_is_a_command_failure() {
     let fixture = Fixture::new();
-    let text = failure(fixture.manager(&["pause", "unregistered-goal"]));
+    let text = failure(&fixture.manager(&["pause", "unregistered-goal"]));
     assert!(text.to_lowercase().contains("goal"), "{text}");
     assert!(
         !text.contains("Usage:"),
@@ -208,8 +258,10 @@ async fn answer_rejects_unknown_prompt() {
     let fixture = Fixture::new();
     let proposal = fixture.seed_proposal();
     let registered = register_goal(&fixture, proposal).await;
-    let goal = registered["id"].as_str().unwrap();
-    let text = failure(fixture.manager(&["answer", goal, "unregistered-prompt", "x"]));
+    let goal = registered["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("find registered goal ID"));
+    let text = failure(&fixture.manager(&["answer", goal, "unregistered-prompt", "x"]));
     assert!(text.contains("Stale or unknown Manager prompt"), "{text}");
 }
 
@@ -218,23 +270,47 @@ async fn answer_selects_a_pending_option_by_label_and_submits_its_text() {
     let fixture = Fixture::new();
     let proposal = fixture.seed_option_proposal();
     let goal = register_goal(&fixture, proposal).await;
-    let goal_id = goal["id"].as_str().unwrap();
+    let goal_id = goal["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("find Option goal ID"));
     let request = wait_for_prompt(&fixture, goal_id, "option").await;
-    let id = request["prompt"]["requestId"].as_str().unwrap();
+    let id = request["prompt"]["requestId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("find Option request ID"));
     for flags in [
         &[][..],
         &["--choice", "Provide a value"][..],
-        &["unwanted positional text", "--choice", "Provide a value", "--text", "value"][..],
+        &[
+            "unwanted positional text",
+            "--choice",
+            "Provide a value",
+            "--text",
+            "value",
+        ][..],
     ] {
         let mut args = vec!["answer", goal_id, id];
         args.extend_from_slice(flags);
-        failure(fixture.manager(&args));
+        failure(&fixture.manager(&args));
     }
-    assert!(fixture.api(None).await["prompts"].as_array().unwrap().contains(&request));
+    assert!(
+        fixture.api(None).await["prompts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("read pending prompts"))
+            .contains(&request)
+    );
     let output = success(fixture.manager(&[
-        "answer", goal_id, id, "--choice", "Provide a value", "--text", "selected text",
+        "answer",
+        goal_id,
+        id,
+        "--choice",
+        "Provide a value",
+        "--text",
+        "selected text",
     ]));
-    assert!(output.contains(&format!("Accepted: {goal_id} [")), "{output}");
+    assert!(
+        output.contains(&format!("Accepted: {goal_id} [")),
+        "{output}"
+    );
     let marker = fixture.home.join("option-answer");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -243,7 +319,10 @@ async fn answer_selects_a_pending_option_by_label_and_submits_its_text() {
         {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "option text did not reach the owned child");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "option text did not reach the owned child"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
@@ -251,17 +330,33 @@ async fn answer_selects_a_pending_option_by_label_and_submits_its_text() {
 #[tokio::test]
 async fn answer_rejects_blank_text_for_a_live_ask() {
     let fixture = Fixture::new();
-    let goal = register_goal(&fixture, fixture.seed_ask_proposal()).await;
-    let goal_id = goal["id"].as_str().unwrap();
+    let proposal = fixture.seed_prompt_workflow(json!({
+        "command":["/bin/cat"], "create_pr":false,
+        "steps":{"ask":{"instruction":"What should the Goal do?", "prompt":"Use this answer: {input}"}}
+    }));
+    let goal = register_goal(&fixture, proposal).await;
+    let goal_id = goal["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("find Ask goal ID"));
     let request = wait_for_prompt(&fixture, goal_id, "ask").await;
-    let id = request["prompt"]["requestId"].as_str().unwrap();
+    let id = request["prompt"]["requestId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("find Ask request ID"));
     for answer in ["", " \t "] {
-        let text = failure(fixture.manager(&["answer", goal_id, id, answer]));
+        let text = failure(&fixture.manager(&["answer", goal_id, id, answer]));
         assert!(text.contains("Answer must not be empty."), "{text}");
-        assert!(fixture.api(None).await["prompts"].as_array().unwrap().contains(&request));
+        assert!(
+            fixture.api(None).await["prompts"]
+                .as_array()
+                .unwrap_or_else(|| panic!("read pending prompts"))
+                .contains(&request)
+        );
     }
     let output = success(fixture.manager(&["answer", goal_id, id, "Implement it"]));
-    assert!(output.contains(&format!("Accepted: {goal_id} [")), "{output}");
+    assert!(
+        output.contains(&format!("Accepted: {goal_id} [")),
+        "{output}"
+    );
 }
 
 async fn wait_for_prompt(fixture: &Fixture, goal_id: &str, kind: &str) -> serde_json::Value {
@@ -270,7 +365,7 @@ async fn wait_for_prompt(fixture: &Fixture, goal_id: &str, kind: &str) -> serde_
         let snapshot = fixture.api(None).await;
         if let Some(request) = snapshot["prompts"]
             .as_array()
-            .unwrap()
+            .unwrap_or_else(|| panic!("read snapshot prompts"))
             .iter()
             .find(|entry| entry["goal_id"] == goal_id && entry["prompt"]["kind"] == kind)
         {

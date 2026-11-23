@@ -597,7 +597,11 @@ async fn propose_prints_preview_and_revision_bound_approval_command_without_appr
         "missing revision-bound approval command: {stdout}"
     );
     no_children(home, &proposed);
-    cli_stdout(&ManagerCli::spawn(home, &repo, &["say", "/make-goal"], None).finish().await);
+    cli_stdout(
+        &ManagerCli::spawn(home, &repo, &["say", "/make-goal"], None)
+            .finish()
+            .await,
+    );
     let after_say = snapshot(&client, &origin, &token, &repo).await;
     assert_eq!(&after_say["proposal"], proposal);
 }

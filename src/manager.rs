@@ -756,7 +756,10 @@ pub(crate) fn preview_corrective(
                 "invalid corrective task or dependencies".into(),
             ));
         }
-        let revision = goal.execution.corrective_preview.iter()
+        let revision = goal
+            .execution
+            .corrective_preview
+            .iter()
             .chain(&goal.execution.corrective_approvals)
             .map(|preview| preview.revision)
             .max()

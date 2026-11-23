@@ -23,7 +23,8 @@ async fn snapshot(
     Query(request): Query<SnapshotRequest>,
 ) -> Response {
     match tokio::task::spawn_blocking(move || -> crate::error::Result<serde_json::Value> {
-        let (mut snapshot, active) = crate::manager_provider::snapshot_with_active_turn(&request.cwd)?;
+        let (mut snapshot, active) =
+            crate::manager_provider::snapshot_with_active_turn(&request.cwd)?;
         if let Some(id) = active
             && let Some(turn) = snapshot
                 .transcript

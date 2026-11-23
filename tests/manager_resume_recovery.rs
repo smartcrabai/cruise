@@ -393,7 +393,10 @@ async fn wait_for_child_marker(fixture: &Fixture, instance: &Value) {
 async fn manager_resume_task_continues_the_existing_child() {
     let fixture = Fixture::new("active", false, false);
     let instance = fixture.start().await;
-    let previous = fixture.sessions.load("child").unwrap();
+    let previous = fixture
+        .sessions
+        .load("child")
+        .unwrap_or_else(|err| panic!("load child session: {err}"));
     let output = cli_in(
         fixture.home.path(),
         &fixture.repo,
@@ -404,11 +407,15 @@ async fn manager_resume_task_continues_the_existing_child() {
     let snapshot = manager_snapshot(&fixture, &instance).await;
     let attempts = snapshot["goals"][0]["execution"]["attempts"]
         .as_array()
-        .unwrap();
+        .unwrap_or_else(|| panic!("read execution attempts"));
     assert_eq!(attempts.len(), 1, "{snapshot}");
     assert_eq!(attempts[0]["session_id"], "child");
     assert_eq!(
-        fixture.sessions.load("child").unwrap().worktree_path,
+        fixture
+            .sessions
+            .load("child")
+            .unwrap_or_else(|err| panic!("load child session: {err}"))
+            .worktree_path,
         previous.worktree_path
     );
 }
@@ -420,11 +427,12 @@ async fn manager_retry_task_preserves_the_previous_child_and_reserves_a_fresh_at
     let old_worktree = fixture
         .sessions
         .load("child")
-        .unwrap()
+        .unwrap_or_else(|err| panic!("load child session: {err}"))
         .worktree_path
-        .unwrap();
+        .unwrap_or_else(|| panic!("find original worktree"));
     let marker = old_worktree.join("previous-attempt-evidence");
-    fs::write(&marker, "keep this evidence").unwrap();
+    fs::write(&marker, "keep this evidence")
+        .unwrap_or_else(|err| panic!("write previous attempt marker: {err}"));
     let output = cli_in(
         fixture.home.path(),
         &fixture.repo,
@@ -434,13 +442,22 @@ async fn manager_retry_task_preserves_the_previous_child_and_reserves_a_fresh_at
     let snapshot = manager_snapshot(&fixture, &instance).await;
     let attempts = snapshot["goals"][0]["execution"]["attempts"]
         .as_array()
-        .unwrap();
+        .unwrap_or_else(|| panic!("read execution attempts"));
     assert_eq!(attempts.len(), 2, "{snapshot}");
     assert_eq!(attempts[0]["session_id"], "child");
     assert_eq!(attempts[1]["task_id"], "task");
     assert_eq!(attempts[1]["attempt"], 2);
-    assert_ne!(attempts[1]["session_id"].as_str().unwrap(), "child");
-    assert_eq!(fs::read_to_string(marker).unwrap(), "keep this evidence");
+    assert_ne!(
+        attempts[1]["session_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("find retry session ID")),
+        "child"
+    );
+    assert_eq!(
+        fs::read_to_string(marker)
+            .unwrap_or_else(|err| panic!("read previous attempt marker: {err}")),
+        "keep this evidence"
+    );
 }
 
 impl Drop for Fixture {

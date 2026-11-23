@@ -63,7 +63,10 @@ impl Terminal {
                 if n == 0 {
                     break;
                 }
-                captured.lock().unwrap().extend_from_slice(&buf[..n]);
+                captured
+                    .lock()
+                    .unwrap_or_else(|err| panic!("lock captured PTY output: {err}"))
+                    .extend_from_slice(&buf[..n]);
             }
         });
         Self {
@@ -75,7 +78,13 @@ impl Terminal {
     }
 
     fn output(&self) -> String {
-        String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
+        String::from_utf8_lossy(
+            &self
+                .output
+                .lock()
+                .unwrap_or_else(|err| panic!("lock PTY output: {err}")),
+        )
+        .into_owned()
     }
 
     fn status(&mut self) -> Option<portable_pty::ExitStatus> {
@@ -106,7 +115,9 @@ impl Terminal {
         self.writer
             .write_all(bytes)
             .unwrap_or_else(|err| panic!("write to manager approve: {err}"));
-        self.writer.flush().unwrap();
+        self.writer
+            .flush()
+            .unwrap_or_else(|err| panic!("flush PTY input: {err}"));
     }
 
     fn finish(&mut self) -> portable_pty::ExitStatus {
@@ -165,7 +176,9 @@ fn manager_terminal_requires_exact_confirmation() {
     assert!(status.success(), "approval failed: {}", approved.output());
 
     let snapshot = fixture.snapshot();
-    let goals = snapshot["goals"].as_array().unwrap();
+    let goals = snapshot["goals"]
+        .as_array()
+        .unwrap_or_else(|| panic!("read approved goals"));
     assert_eq!(goals.len(), 1, "{snapshot}");
     assert_eq!(goals[0]["proposal"]["id"], proposal.id);
     assert_eq!(goals[0]["proposal"]["revision"], proposal.revision);
@@ -176,7 +189,10 @@ fn manager_terminal_requires_exact_confirmation() {
 fn manager_terminal_rejects_revision_replaced_during_confirmation() {
     let fixture = Fixture::new();
     let reviewed = fixture.seed_proposal();
-    let mut terminal = Terminal::spawn(&fixture, &["approve", "--revision", &reviewed.revision.to_string()]);
+    let mut terminal = Terminal::spawn(
+        &fixture,
+        &["approve", "--revision", &reviewed.revision.to_string()],
+    );
     assert!(terminal.wait_for_review().contains(&reviewed.id));
 
     let replacement = fixture.seed_proposal();
@@ -196,30 +212,53 @@ fn manager_terminal_rejects_revision_replaced_during_confirmation() {
 async fn manager_terminal_option_requires_the_menu() {
     let fixture = Fixture::new();
     let proposal = fixture.seed_option_proposal();
-    let goal = fixture.api(Some(serde_json::json!({
-        "type":"approve", "proposal_id":proposal.id, "revision":proposal.revision
-    }))).await;
-    let goal_id = goal["id"].as_str().unwrap();
+    let goal = fixture
+        .api(Some(serde_json::json!({
+            "type":"approve", "proposal_id":proposal.id, "revision":proposal.revision
+        })))
+        .await;
+    let goal_id = goal["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("find goal ID"));
     let deadline = Instant::now() + Duration::from_secs(30);
     let request = loop {
         let snapshot = fixture.api(None).await;
-        if let Some(prompt) = snapshot["prompts"].as_array().unwrap().iter()
+        if let Some(prompt) = snapshot["prompts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("read pending prompts"))
+            .iter()
             .find(|entry| entry["goal_id"] == goal_id && entry["prompt"]["kind"] == "option")
         {
-            break prompt["prompt"]["requestId"].as_str().unwrap().to_owned();
+            break prompt["prompt"]["requestId"]
+                .as_str()
+                .unwrap_or_else(|| panic!("find Option request ID"))
+                .to_owned();
         }
         assert!(Instant::now() < deadline, "missing Option: {snapshot}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let mut scripted = Terminal::spawn(&fixture, &[
-        "answer", goal_id, &request, "--choice", "Provide a value", "--text", "value",
-    ]);
+    let mut scripted = Terminal::spawn(
+        &fixture,
+        &[
+            "answer",
+            goal_id,
+            &request,
+            "--choice",
+            "Provide a value",
+            "--text",
+            "value",
+        ],
+    );
     assert!(!scripted.finish().success());
 
     let mut menu = Terminal::spawn(&fixture, &["answer", goal_id, &request]);
     let deadline = Instant::now() + Duration::from_secs(10);
     while !menu.output().contains("Provide a value") {
-        assert!(menu.status().is_none() && Instant::now() < deadline, "missing menu: {}", menu.output());
+        assert!(
+            menu.status().is_none() && Instant::now() < deadline,
+            "missing menu: {}",
+            menu.output()
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
