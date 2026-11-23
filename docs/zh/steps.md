@@ -167,7 +167,7 @@ after-pr:
 
 `after-pr` 中的提示步骤也受相同的默认保护。若某个 after-PR 提示需要推进 `HEAD`，请单独设置 `allow_commit: true`。
 
-内置的 PR 后提示禁止提交、推送和调用代码托管服务。宿主提交经过验证的冲突修复，只向对应的 PR/MR 分支推送。CI 修复以当前 HEAD 的证据为准：宿主验证器能够运行时，会在发布前验证准确的已暂存修复；否则 Cruise 会发出警告，在未经宿主验证的情况下发布，并依赖推送后该 HEAD 的 CI。随后 Cruise 会重新检查 CI、在会话中对符合条件的同一 HEAD 作业重试一次，或者停止且不合并。原生合并步骤仍会独立检查是否可以合并。
+内置的 PR 后提示禁止提交、推送和调用代码托管服务。宿主提交经过验证的冲突修复，只向对应的 PR/MR 分支推送。CI 修复以当前 HEAD 的证据为准：宿主验证器能够运行时，会在发布前验证准确的已暂存修复；否则 Cruise 会发出警告，在未经宿主验证的情况下发布，并依赖推送后该 HEAD 的 CI。随后 Cruise 会重新检查 CI、在会话中对符合条件的同一 HEAD 作业重试一次，或者停止且不合并。停止后再次运行该会话时，会重新检查当前 HEAD 的 CI，而不会沿用之前的判定。原生合并步骤仍会独立检查是否可以合并。
 
 `require_bubblewrap: true` 和守护进程环境变量 `CRUISE_JCODE_BUBBLEWRAP=1` 会请求使用 Linux jcode Bubblewrap 隔离。Cruise 每个进程只探测一次可用性。如果构建未启用 `jcode-bubblewrap`、宿主不是 Linux，或探测失败，该步骤会在未隔离的情况下运行并显示警告。`command:` 后端不会被拒绝；它会在未隔离的情况下运行并显示警告。成功探测后 Bubblewrap 启动失败，仍会使本次尝试失败。内置冲突修复、CI 修复和评审提示会保留 `require_bubblewrap: true`，因此在可能时会使用隔离。
 
@@ -218,7 +218,7 @@ after-pr:
 | `{pr.number}` | 创建 PR 后可用的 pull request 编号 |
 | `{pr.url}` | 创建 PR 后可用的 pull request URL |
 | `{pr.language}` | PR 标题/正文生成实际使用的语言（来自 `CRUISE_LANGUAGE_PR`、`languages.pr`、旧字段、区域设置推断或默认值） |
-| `{cruise.bin}` | 正在运行的 Cruise 可执行文件路径，已转为步骤 shell 中的单个词（`sh` 下用单引号；Windows 下为不含空格的路径，必要时使用 8.3 短文件名）。内置步骤调用 `{cruise.bin} internal ...`，因此不会运行 `PATH` 上不同版本的 `cruise` |
+| `{cruise.bin}` | 正在运行的 Cruise 可执行文件路径，已转为步骤 shell 中的单个词（`sh` 下用单引号；Windows 下为不含空格的路径，必要时使用 8.3 短文件名）。内置步骤调用 `{cruise.bin} internal ...`，因此不会运行 `PATH` 上不同版本的 `cruise`。在该变量出现之前保存的内置会话快照，加载时其 `cruise internal ...` 命令也会同样处理；用户编写的工作流不受影响 |
 
 > **注意：** `{model}` **不是**模板变量，它是仅在顶层 `command` 数组中解析的特殊占位符。它不能用于 `prompt`、`prompt_file`、`instruction` 或 `command` 步骤字段。
 

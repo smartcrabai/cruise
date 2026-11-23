@@ -536,6 +536,111 @@ fn existing_builtin_snapshot_keeps_saved_after_pr_step_ids() {
     );
 }
 
+const LEGACY_INTERNAL_SNAPSHOT: &str = r"command: [cat]
+steps:
+  work:
+    prompt: run `cruise internal tdd-ledger-snapshot` later
+    quality_gates:
+      - command: cruise internal tdd-ledger-snapshot
+  fan:
+    parallel:
+      child:
+        command: cruise internal sync-review-head
+after-pr:
+  sync:
+    command: |-
+      cruise internal clear-ci-followup || exit 1
+      printf x | cruise internal capture-ci-followup
+  push:
+    command: cruise internal finish-conflict-commit && cruise internal push-after-sync
+  user:
+    command: echo mycruise internal x
+";
+
+fn snapshot_command(config: &WorkflowConfig, after_pr: bool, step: &str) -> String {
+    let steps = if after_pr {
+        &config.after_pr
+    } else {
+        &config.steps
+    };
+    steps[step]
+        .command
+        .as_ref()
+        .unwrap_or_else(|| panic!("{step} has no command"))
+        .as_slice()
+        .join("\n")
+}
+
+#[test]
+fn builtin_snapshot_from_before_cruise_bin_runs_internal_steps_with_the_running_binary() {
+    let temp = TempDir::new().unwrap_or_else(|error| panic!("{error}"));
+    let manager = SessionManager::new(temp.path().join("data"));
+    let builtin = "20260921020010";
+    let inline = "20260921020011";
+    write_state(
+        &manager,
+        builtin,
+        &state_value(builtin, temp.path(), &builtin_snapshot_ref()),
+    );
+    write_state(
+        &manager,
+        inline,
+        &state_value(inline, temp.path(), &inline_snapshot_ref()),
+    );
+    write_session_snapshot(&manager, builtin, LEGACY_INTERNAL_SNAPSHOT);
+    write_session_snapshot(&manager, inline, LEGACY_INTERNAL_SNAPSHOT);
+    let load = |id: &str| {
+        let state = manager.load(id).unwrap_or_else(|error| panic!("{error}"));
+        manager
+            .load_config(&state)
+            .unwrap_or_else(|error| panic!("{error}"))
+    };
+
+    let config = load(builtin);
+    let work = &config.steps["work"];
+    assert_eq!(
+        work.quality_gates
+            .as_ref()
+            .map(|gates| gates[0].command.as_str()),
+        Some("{cruise.bin} internal tdd-ledger-snapshot")
+    );
+    assert_eq!(
+        work.prompt.as_deref(),
+        Some("run `cruise internal tdd-ledger-snapshot` later"),
+        "prompts are not commands"
+    );
+    let child = &config.steps["fan"]
+        .parallel
+        .as_ref()
+        .unwrap_or_else(|| panic!("fan has no children"))["child"];
+    assert_eq!(
+        child
+            .command
+            .as_ref()
+            .map(|command| command.as_slice().join("\n")),
+        Some("{cruise.bin} internal sync-review-head".to_owned())
+    );
+    assert_eq!(
+        snapshot_command(&config, true, "sync"),
+        "{cruise.bin} internal clear-ci-followup || exit 1\nprintf x | {cruise.bin} internal capture-ci-followup"
+    );
+    assert_eq!(
+        snapshot_command(&config, true, "push"),
+        "{cruise.bin} internal finish-conflict-commit && {cruise.bin} internal push-after-sync"
+    );
+    assert_eq!(
+        snapshot_command(&config, true, "user"),
+        "echo mycruise internal x"
+    );
+
+    // An inline snapshot holds user-authored commands, which keep using PATH.
+    let config = load(inline);
+    assert_eq!(
+        snapshot_command(&config, true, "push"),
+        "cruise internal finish-conflict-commit && cruise internal push-after-sync"
+    );
+}
+
 #[test]
 fn snapshot_reference_stays_self_contained_after_clone_removal_and_source_changes() {
     let temp = TempDir::new().unwrap_or_else(|error| panic!("tempdir: {error}"));

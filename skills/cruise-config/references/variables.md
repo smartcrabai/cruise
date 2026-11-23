@@ -53,7 +53,7 @@ These templates use a separate allowlist, not the runtime variables below:
 | `{pr.number}` | PR number, available after a PR has been created |
 | `{pr.url}` | PR URL, available after a PR has been created |
 | `{pr.language}` | Effective language used for PR title/body generation (from `CRUISE_LANGUAGE_PR`, `languages.pr`, the legacy field, locale inference, or the default) |
-| `{cruise.bin}` | Path of the running Cruise executable, as one word for the step shell (single-quoted for `sh`; on Windows a path without spaces, using the 8.3 short name when needed). Built-in steps call `{cruise.bin} internal ...` so they never run a different `cruise` version found on `PATH` |
+| `{cruise.bin}` | Path of the running Cruise executable, as one word for the step shell (single-quoted for `sh`; on Windows a path without spaces, using the 8.3 short name when needed). Built-in steps call `{cruise.bin} internal ...` so they never run a different `cruise` version found on `PATH`. Built-in session snapshots saved before this variable existed get the same treatment for their `cruise internal ...` commands when loaded; user-authored workflows are unchanged |
 
 In a `github-review` step, `{pr.number}` is available in the prompt, and cruise appends the PR head commit OID and the unresolved review threads (JSON) to the prompt automatically.
 

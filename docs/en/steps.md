@@ -177,7 +177,7 @@ after-pr:
 
 Prompt steps in `after-pr` are guarded by the same default. Set `allow_commit: true` individually for an after-PR prompt that needs to advance `HEAD`.
 
-Built-in post-PR prompts are instructed not to commit, push, or call the forge. The host commits validated conflict resolutions and pushes only to the bound PR/MR branch. CI repair uses evidence for the current head: when the host verifier can run, it verifies the exact staged repair before publication; otherwise Cruise warns, publishes without host verification, and relies on CI for the pushed head. Cruise then checks CI again, requests one eligible retry per head in the session, or stops without merging. The native merge step still checks readiness independently.
+Built-in post-PR prompts are instructed not to commit, push, or call the forge. The host commits validated conflict resolutions and pushes only to the bound PR/MR branch. CI repair uses evidence for the current head: when the host verifier can run, it verifies the exact staged repair before publication; otherwise Cruise warns, publishes without host verification, and relies on CI for the pushed head. Cruise then checks CI again, requests one eligible retry per head in the session, or stops without merging. Running the session again after such a stop checks CI on the current head instead of reusing the earlier decision. The native merge step still checks readiness independently.
 
 `require_bubblewrap: true` and daemon environment variable `CRUISE_JCODE_BUBBLEWRAP=1` request Linux jcode Bubblewrap isolation. Cruise probes availability once per process. If the build lacks `jcode-bubblewrap`, the host is not Linux, or the probe fails, the step runs unconfined with a warning. The `command:` backend is allowed, runs unconfined, and warns. A Bubblewrap launch failure after a successful probe still fails the attempt. Built-in conflict, CI repair, and review prompts keep `require_bubblewrap: true`, so they are isolated where possible.
 
@@ -228,7 +228,7 @@ Commit and PR templates use a separate [allowed vocabulary](configuration.md#com
 | `{pr.number}` | Pull request number, available after a PR has been created |
 | `{pr.url}` | Pull request URL, available after a PR has been created |
 | `{pr.language}` | Effective language used for PR title/body generation (from `CRUISE_LANGUAGE_PR`, `languages.pr`, the legacy field, locale inference, or the default) |
-| `{cruise.bin}` | Path of the running Cruise executable, as one word for the step shell (single-quoted for `sh`; on Windows a path without spaces, using the 8.3 short name when needed). Built-in steps call `{cruise.bin} internal ...` so they never run a different `cruise` version found on `PATH` |
+| `{cruise.bin}` | Path of the running Cruise executable, as one word for the step shell (single-quoted for `sh`; on Windows a path without spaces, using the 8.3 short name when needed). Built-in steps call `{cruise.bin} internal ...` so they never run a different `cruise` version found on `PATH`. Built-in session snapshots saved before this variable existed get the same treatment for their `cruise internal ...` commands when loaded; user-authored workflows are unchanged |
 
 > **Note:** `{model}` is **not** a template variable -- it is a special placeholder resolved only within the top-level `command` array. It is not available inside `prompt`, `prompt_file`, `instruction`, or `command` step fields.
 

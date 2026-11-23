@@ -197,6 +197,72 @@ pub fn snapshot_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir.join(session_id).join("config.yaml")
 }
 
+/// Run the built-in `cruise internal ...` commands of a built-in snapshot saved
+/// before `{cruise.bin}` existed with the running executable, as newer
+/// snapshots do. Only built-in snapshots are rewritten: their commands come
+/// from Cruise, while file, repository and inline workflows are user-authored.
+pub(crate) fn bind_builtin_internal_commands(config: &mut WorkflowConfig) {
+    let groups = config
+        .groups
+        .values_mut()
+        .flat_map(|group| group.steps.values_mut());
+    for step in config
+        .steps
+        .values_mut()
+        .chain(config.after_pr.values_mut())
+        .chain(groups)
+    {
+        bind_step(step);
+    }
+}
+
+fn bind_step(step: &mut crate::config::StepConfig) {
+    match &mut step.command {
+        Some(crate::config::StringOrVec::Single(command)) => bind_command(command),
+        Some(crate::config::StringOrVec::Multiple(commands)) => {
+            commands.iter_mut().for_each(bind_command);
+        }
+        None => {}
+    }
+    for gate in step.quality_gates.iter_mut().flatten() {
+        bind_command(&mut gate.command);
+    }
+    for child in step
+        .parallel
+        .iter_mut()
+        .flat_map(|children| children.values_mut())
+    {
+        bind_step(child);
+    }
+}
+
+/// Replace each `cruise internal` invocation that starts a shell word.
+fn bind_command(command: &mut String) {
+    const LEGACY: &str = "cruise internal ";
+    let mut bound = String::with_capacity(command.len());
+    let mut rest = command.as_str();
+    let mut changed = false;
+    while let Some(index) = rest.find(LEGACY) {
+        let starts_word = rest[..index]
+            .chars()
+            .next_back()
+            .or_else(|| bound.chars().next_back())
+            .is_none_or(|c| c.is_whitespace() || "|&;(".contains(c));
+        bound.push_str(&rest[..index]);
+        bound.push_str(if starts_word {
+            "{cruise.bin} internal "
+        } else {
+            LEGACY
+        });
+        changed |= starts_word;
+        rest = &rest[index + LEGACY.len()..];
+    }
+    if changed {
+        bound.push_str(rest);
+        *command = bound;
+    }
+}
+
 /// Atomically replace a session-owned config snapshot.
 ///
 /// # Errors

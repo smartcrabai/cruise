@@ -21,6 +21,9 @@ use crate::error::{CruiseError, Result};
 const INVENTORY: &str = "ci-followup/inventory.json";
 const EVIDENCE: &str = "ci-followup/evidence.md";
 const RESULT: &str = "ci-followup/result.json";
+/// Replaces a `wait` decision once it has stopped the run, so a resumed run
+/// rechecks CI on the current head.
+const WAIT_CONSUMED: &str = r#"{"version":0,"wait_consumed":true}"#;
 const VERSION: u32 = 1;
 const MAX_DIAGNOSTIC: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
@@ -148,6 +151,8 @@ pub(crate) fn evidence(
 /// state and the per-head guard; a commit requires a clean captured baseline
 /// and a `verify` pass on the exact tree being committed (the runtime verifier
 /// may skip with a warning when no trusted sandboxed verifier is available).
+/// A `wait` stops the run once; resuming it continues to `wait-ci`, which
+/// checks the current head again instead of replaying the old decision.
 pub(crate) fn finish(
     cwd: &Path,
     plan: &Path,
@@ -157,6 +162,9 @@ pub(crate) fn finish(
 ) -> Result<()> {
     let artifacts_root = session_artifacts_root(plan)?;
     let target = Target::parse(url, number)?;
+    if crate::artifacts::read(&artifacts_root, RESULT)? == WAIT_CONSUMED {
+        return Ok(());
+    }
     let context = Context::resolve(cwd, artifacts_root.clone(), target)?;
     let inventory = read_inventory(&artifacts_root)?;
     validate_inventory(&inventory, &context)?;
@@ -166,9 +174,12 @@ pub(crate) fn finish(
     validate_decision(&decision)?;
 
     match decision.action {
-        Action::Wait => Err(CruiseError::Other(
-            "CI remains unresolved; refusing to continue to native merge".into(),
-        )),
+        Action::Wait => {
+            crate::artifacts::write(&artifacts_root, RESULT, WAIT_CONSUMED)?;
+            Err(CruiseError::Other(
+                "CI remains unresolved; refusing to continue to native merge".into(),
+            ))
+        }
         Action::Retry => {
             if !inventory.complete || !inventory.baseline_clean {
                 return Err(CruiseError::Other(
@@ -2763,5 +2774,27 @@ esac
                 .unwrap_or_default()
                 .contains("invalidated")
         );
+    }
+
+    #[test]
+    fn resumed_wait_rechecks_ci_instead_of_replaying_the_decision() {
+        let fixture = Fixture::new();
+        fixture.evidence();
+        fixture.set_decision(r#"{"action":"wait"}"#);
+        let finish = || {
+            super::finish(
+                &fixture.root,
+                &fixture.plan,
+                "42",
+                "https://github.com/o/r/pull/42",
+                |_| Ok(()),
+            )
+        };
+        assert!(finish().is_err(), "a wait decision must stop the first run");
+        // Resuming the failed finalizer continues to `wait-ci`, which checks
+        // the current head; it must neither fail again nor act on the PR.
+        finish().unwrap_or_else(|error| panic!("resumed wait was replayed: {error}"));
+        assert_eq!(fs::read_to_string(&fixture.actions).unwrap_or_default(), "");
+        assert_eq!(fs::read_to_string(&fixture.pushes).unwrap_or_default(), "");
     }
 }
