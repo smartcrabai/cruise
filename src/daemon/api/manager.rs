@@ -162,10 +162,11 @@ pub(crate) fn dispatch_action(
     cwd: &Path,
     action: Action,
 ) -> Result<(StatusCode, Value)> {
+    use crate::{manager, manager_coordinator as coordinator, manager_provider as provider};
+
     if let Some((status, message)) = startup_action_error(state) {
         return Ok((status, json!({"error": message})));
     }
-    use crate::{manager, manager_coordinator as coordinator, manager_provider as provider};
     let value =
         match action {
             Action::Message { text } => serde_json::to_value(provider::message(cwd, text)?)?,

@@ -10,7 +10,9 @@ use axum::{Extension, Router};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 
-use crate::daemon::api::manager::{Action, dispatch_action, enriched_snapshot, startup_action_error};
+use crate::daemon::api::manager::{
+    Action, dispatch_action, enriched_snapshot, startup_action_error,
+};
 use crate::error::Result;
 use crate::manager::{self, GoalStatus, Task};
 use crate::step::option::OptionResult;
@@ -211,9 +213,12 @@ fn region_html(state: &WebState, key: &str, cwd: &Path) -> Result<String> {
         }
     }
     let props = Value::Object(
-        [("key".into(), Value::String(key.into())), ("snapshot".into(), snapshot)]
-            .into_iter()
-            .collect(),
+        [
+            ("key".into(), Value::String(key.into())),
+            ("snapshot".into(), snapshot),
+        ]
+        .into_iter()
+        .collect(),
     );
     state.templates.render("manager-region", &props)
 }

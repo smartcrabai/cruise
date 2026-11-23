@@ -1,7 +1,10 @@
 //! `WebUI` asset resolution: embedded copy extracted to the data directory, or a
 //! developer-supplied directory served directly.
 
-use std::{fmt::Write as _, path::{Path, PathBuf}};
+use std::{
+    fmt::Write as _,
+    path::{Path, PathBuf},
+};
 
 use sha2::{Digest, Sha256};
 
@@ -10,7 +13,10 @@ use crate::error::{CruiseError, Result};
 static EMBEDDED: include_dir::Dir<'static> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/webui");
 
 fn embedded_fingerprint() -> String {
-    fn collect(dir: &include_dir::Dir<'static>, files: &mut Vec<&'static include_dir::File<'static>>) {
+    fn collect(
+        dir: &include_dir::Dir<'static>,
+        files: &mut Vec<&'static include_dir::File<'static>>,
+    ) {
         files.extend(dir.files());
         for child in dir.dirs() {
             collect(child, files);
@@ -64,7 +70,9 @@ pub(crate) fn prepare(override_dir: Option<PathBuf>, data_dir: &Path) -> Result<
     }
 
     let target = data_dir.join("webui").join(format!(
-        "{}-{}", env!("CARGO_PKG_VERSION"), embedded_fingerprint()
+        "{}-{}",
+        env!("CARGO_PKG_VERSION"),
+        embedded_fingerprint()
     ));
     // The path is content-keyed, so an already extracted tree has the exact
     // contents we would write. Re-extracting would delete files a concurrently

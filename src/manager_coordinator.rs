@@ -28,10 +28,14 @@ pub(crate) fn accept_resume_requests_without_dispatch() -> impl Drop {
     struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {
-            *RESUMES.lock().unwrap() = (false, Vec::new());
+            *RESUMES
+                .lock()
+                .unwrap_or_else(|e| panic!("restore test resume queue: {e}")) = (false, Vec::new());
         }
     }
-    let mut resumes = RESUMES.lock().unwrap();
+    let mut resumes = RESUMES
+        .lock()
+        .unwrap_or_else(|e| panic!("initialize test resume queue: {e}"));
     assert!(!resumes.0 && resumes.1.is_empty());
     resumes.0 = true;
     Restore

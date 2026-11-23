@@ -470,7 +470,10 @@ fn inventory(skip_invalid: bool) -> Result<Vec<Snapshot>> {
         let path = match entry {
             Ok(entry) => entry.path(),
             Err(error) if skip_invalid => {
-                eprintln!("warning: cannot read Manager entry in {}: {error}", directory.display());
+                eprintln!(
+                    "warning: cannot read Manager entry in {}: {error}",
+                    directory.display()
+                );
                 continue;
             }
             Err(error) => return Err(error.into()),
@@ -485,7 +488,10 @@ fn inventory(skip_invalid: bool) -> Result<Vec<Snapshot>> {
         match read_inventory_record(&path) {
             Ok(snapshot) => snapshots.push(snapshot),
             Err(error) if skip_invalid => {
-                eprintln!("warning: skipping Manager record {}: {error}", path.display());
+                eprintln!(
+                    "warning: skipping Manager record {}: {error}",
+                    path.display()
+                );
             }
             Err(error) => return Err(error),
         }
@@ -496,7 +502,10 @@ fn inventory(skip_invalid: bool) -> Result<Vec<Snapshot>> {
 fn read_inventory_record(path: &Path) -> Result<Snapshot> {
     let bytes = std::fs::read(path)?;
     let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|error| {
-        CruiseError::Other(format!("corrupt manager record {}: {error}", path.display()))
+        CruiseError::Other(format!(
+            "corrupt manager record {}: {error}",
+            path.display()
+        ))
     })?;
     if record_path(&snapshot.repository)? != path {
         return Err(CruiseError::Other(format!(

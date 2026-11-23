@@ -223,6 +223,13 @@ fn manager_fixtures() -> Vec<(&'static str, Value)> {
         ),
         ("components/manager-goal", json!({"key": key, "goal": goal})),
         (
+            "components/manager-task-list",
+            json!({"tasks": [
+                task,
+                {"id": "verify", "instructions": "Verify the feature", "dependencies": ["implement"]},
+            ]}),
+        ),
+        (
             "components/manager-prompt",
             json!({"key": key, "goalId": "goal", "prompt": prompt}),
         ),

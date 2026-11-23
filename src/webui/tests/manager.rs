@@ -4,6 +4,7 @@ use super::{
 use crate::manager::{self, Check, Criterion, Goal, GoalStatus, Proposal, Task};
 use crate::test_support::{EnvGuard, init_git_repo, run_git_ok};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use tower::ServiceExt as _;
 
@@ -198,10 +199,20 @@ async fn manager_detail_rejects_malformed_and_unlisted_repository_keys() {
         .header("host", "localhost:8484")
         .header("cookie", "cruise_webui=test-session")
         .header("hx-request", "true")
-        .body(Body::empty()).unwrap();
+        .body(Body::empty())
+        .unwrap_or_else(|e| panic!("build detail request: {e}"));
     let response = raw_response(&harness, request).await;
-    assert_eq!(response.status(), StatusCode::OK, "the same key must work after registration");
-    assert_eq!(response.headers()["hx-push-url"].to_str().unwrap(), detail);
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the same key must work after registration"
+    );
+    assert_eq!(
+        response.headers()["hx-push-url"]
+            .to_str()
+            .unwrap_or_else(|e| panic!("read push URL: {e}")),
+        detail
+    );
 }
 
 #[tokio::test]
@@ -239,18 +250,30 @@ async fn manager_open_rejects_unlisted_checkout_and_redirects_listed_checkout() 
         .header("content-type", "application/x-www-form-urlencoded")
         .header("hx-request", "true")
         .body(Body::from(form_body(&[("path", &repo.to_string_lossy())])))
-        .unwrap();
+        .unwrap_or_else(|e| panic!("build open request: {e}"));
     let response = raw_response(&harness, request).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(!response.headers().contains_key("location"));
     assert!(!response.headers().contains_key("hx-redirect"));
-    let ct = response.headers()["content-type"].to_str().unwrap().to_owned();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let html = std::str::from_utf8(&body).unwrap();
+    let ct = response.headers()["content-type"]
+        .to_str()
+        .unwrap_or_else(|e| panic!("read content type: {e}"))
+        .to_owned();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap_or_else(|e| panic!("read response body: {e}"));
+    let html = std::str::from_utf8(&body).unwrap_or_else(|e| panic!("decode response: {e}"));
     fragment(&ct, html, "No Manager record exists for this repository.");
     assert!(html.contains("manager-open-error"), "{html}");
-    assert!(manager::snapshots().unwrap().is_empty());
-    assert_eq!(get(&harness, &destination, &[]).await.0, StatusCode::NOT_FOUND);
+    assert!(
+        manager::snapshots()
+            .unwrap_or_else(|e| panic!("list Manager snapshots: {e}"))
+            .is_empty()
+    );
+    assert_eq!(
+        get(&harness, &destination, &[]).await.0,
+        StatusCode::NOT_FOUND
+    );
 
     proposal(&repo);
     let response = super::post_form(
@@ -260,7 +283,9 @@ async fn manager_open_rejects_unlisted_checkout_and_redirects_listed_checkout() 
     )
     .await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let location = response.headers()["location"].to_str().unwrap();
+    let location = response.headers()["location"]
+        .to_str()
+        .unwrap_or_else(|e| panic!("read redirect location: {e}"));
     assert_eq!(location, destination);
     assert_eq!(get(&harness, location, &[]).await.0, StatusCode::OK);
 }
@@ -270,16 +295,22 @@ async fn manager_open_rejects_persisted_bare_repository() {
     let harness = harness();
     let _data = isolate_records(&harness);
     let bare = harness.dir.path().join("bare.git");
-    std::fs::create_dir(&bare).unwrap();
+    std::fs::create_dir(&bare).unwrap_or_else(|e| panic!("create bare fixture directory: {e}"));
     run_git_ok(&bare, &["init", "--bare"]);
     let saved = snapshot(&bare);
-    let directory = crate::paths::data_dir().unwrap().join("manager");
-    std::fs::create_dir_all(&directory).unwrap();
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(saved.repository.to_string_lossy().as_bytes());
-    let name: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    let directory = crate::paths::data_dir()
+        .unwrap_or_else(|e| panic!("resolve data directory: {e}"))
+        .join("manager");
+    std::fs::create_dir_all(&directory).unwrap_or_else(|e| panic!("create Manager store: {e}"));
+    let digest =
+        <sha2::Sha256 as sha2::Digest>::digest(saved.repository.to_string_lossy().as_bytes());
+    let mut name = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(name, "{byte:02x}");
+    }
     let record = directory.join(format!("{name}.json"));
-    let bytes = serde_json::to_vec(&saved).unwrap();
-    std::fs::write(&record, &bytes).unwrap();
+    let bytes = serde_json::to_vec(&saved).unwrap_or_else(|e| panic!("serialize snapshot: {e}"));
+    std::fs::write(&record, &bytes).unwrap_or_else(|e| panic!("write bare record: {e}"));
     for htmx in [false, true] {
         let mut request = Request::builder()
             .method("POST")
@@ -290,15 +321,28 @@ async fn manager_open_rejects_persisted_bare_repository() {
         if htmx {
             request = request.header("hx-request", "true");
         }
-        let response = raw_response(&harness, request.body(Body::from(form_body(&[
-            ("path", &bare.to_string_lossy()),
-        ]))).unwrap()).await;
+        let response = raw_response(
+            &harness,
+            request
+                .body(Body::from(form_body(&[("path", &bare.to_string_lossy())])))
+                .unwrap_or_else(|e| panic!("build bare open request: {e}")),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(!response.headers().contains_key("hx-redirect"));
         assert!(!response.headers().contains_key("location"));
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert!(std::str::from_utf8(&body).unwrap().contains("manager-open-error"));
-        assert_eq!(std::fs::read(&record).unwrap(), bytes);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_else(|e| panic!("read response body: {e}"));
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap_or_else(|e| panic!("decode response: {e}"))
+                .contains("manager-open-error")
+        );
+        assert_eq!(
+            std::fs::read(&record).unwrap_or_else(|e| panic!("read bare record: {e}")),
+            bytes
+        );
     }
 }
 
@@ -345,14 +389,29 @@ async fn manager_detail_displays_reviewed_proposal_and_revision() {
         );
     }
     let task_list = |html: &str, heading: &str| {
-        let list = html.split_once(heading).unwrap().1.split_once("</ul>").unwrap().0;
-        let first = list.find("<strong>implement-feature</strong><p class=\"whitespace-pre-wrap\">Implement</p>").unwrap();
-        let second = list.find("<strong>verify-feature</strong><p class=\"whitespace-pre-wrap\">Verify</p>").unwrap();
-        let dependency = list.find("<p>Dependencies: <code class=\"mr-2\">implement-feature</code>").unwrap();
+        let list = html
+            .split_once(heading)
+            .unwrap_or_else(|| panic!("missing task heading"))
+            .1
+            .split_once("</ul>")
+            .unwrap_or_else(|| panic!("missing task list terminator"))
+            .0;
+        let first = list
+            .find(
+                "<strong>implement-feature</strong><p class=\"whitespace-pre-wrap\">Implement</p>",
+            )
+            .unwrap_or_else(|| panic!("missing implementation task"));
+        let second = list
+            .find("<strong>verify-feature</strong><p class=\"whitespace-pre-wrap\">Verify</p>")
+            .unwrap_or_else(|| panic!("missing verification task"));
+        let dependency = list
+            .find("<p>Dependencies: <code class=\"mr-2\">implement-feature</code>")
+            .unwrap_or_else(|| panic!("missing task dependency"));
         assert!(first < second && second < dependency, "{list}");
     };
     task_list(&html, "<h3 class=\"font-semibold\">Tasks</h3>");
-    manager::approve(&repo, &pending.id, pending.revision).unwrap();
+    manager::approve(&repo, &pending.id, pending.revision)
+        .unwrap_or_else(|e| panic!("approve proposal: {e}"));
     let (status, _, html) = get(&harness, &format!("/manager/{key}"), &[]).await;
     assert_eq!(status, StatusCode::OK, "{html}");
     task_list(&html, "<h4 class=\"font-semibold\">Tasks</h4>");
@@ -417,8 +476,16 @@ async fn manager_pause_and_resume_restore_prior_goal_state() {
     let key = key(&repo);
     let base = format!("/webui/manager/{key}");
     let controls = |html: &str, pause, resume| {
-        assert_eq!(html.contains(&format!("hx-post=\"{base}/pause\"")), pause, "{html}");
-        assert_eq!(html.contains(&format!("hx-post=\"{base}/resume\"")), resume, "{html}");
+        assert_eq!(
+            html.contains(&format!("hx-post=\"{base}/pause\"")),
+            pause,
+            "{html}"
+        );
+        assert_eq!(
+            html.contains(&format!("hx-post=\"{base}/resume\"")),
+            resume,
+            "{html}"
+        );
     };
     for (action, label, expected) in [
         ("pause", "Paused", GoalStatus::Paused),
@@ -433,12 +500,17 @@ async fn manager_pause_and_resume_restore_prior_goal_state() {
         assert!(status.is_success(), "{status}: {html}");
         fragment(&ct, &html, label);
         assert_eq!(snapshot(&repo).goals[0].status, expected);
-        controls(&html, expected == GoalStatus::Active, expected == GoalStatus::Paused);
+        controls(
+            &html,
+            expected == GoalStatus::Active,
+            expected == GoalStatus::Paused,
+        );
     }
     manager::update_goal(&repo, &goal.id, |goal| {
         goal.status = GoalStatus::Completed;
         Ok(())
-    }).unwrap();
+    })
+    .unwrap_or_else(|e| panic!("complete fixture goal: {e}"));
     let (status, _, html) = get(&harness, &format!("/manager/{key}"), &[]).await;
     assert_eq!(status, StatusCode::OK, "{html}");
     controls(&html, false, false);
@@ -460,6 +532,58 @@ async fn manager_pause_unknown_goal_returns_inline_error() {
     fragment(&ct, &html, "unknown Manager goal");
 }
 
+async fn check_corrective_approval(
+    harness: &Harness,
+    repo: &Path,
+    blocked: &Goal,
+    preview: &manager::CorrectivePreview,
+    base: &str,
+    task_id: &str,
+) {
+    for (revision, message) in [
+        (None, "Missing form field: revision"),
+        (Some("oops"), "Invalid revision"),
+    ] {
+        let mut fields = vec![
+            ("goal_id", blocked.id.as_str()),
+            ("preview_id", preview.id.as_str()),
+        ];
+        if let Some(revision) = revision {
+            fields.push(("revision", revision));
+        }
+        let (status, ct, html) =
+            submit(harness, &format!("{base}/approve-corrective"), &fields).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{html}");
+        fragment(&ct, &html, message);
+        let saved = snapshot(repo);
+        assert!(saved.goals[0].execution.corrective_approvals.is_empty());
+    }
+    for (revision, current) in [(preview.revision + 1, false), (preview.revision, true)] {
+        let (status, ct, html) = submit(
+            harness,
+            &format!("{base}/approve-corrective"),
+            &[
+                ("goal_id", &blocked.id),
+                ("preview_id", &preview.id),
+                ("revision", &revision.to_string()),
+            ],
+        )
+        .await;
+        let stored = &snapshot(repo).goals[0];
+        if current {
+            assert!(status.is_success(), "{status}: {html}");
+            fragment(&ct, &html, task_id);
+            assert_eq!(stored.status, GoalStatus::Active);
+            assert!(stored.proposal.tasks.iter().any(|task| task.id == task_id));
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{html}");
+            fragment(&ct, &html, "stale or unknown corrective preview");
+            assert_eq!(stored.status, GoalStatus::Blocked);
+            assert_eq!(stored.proposal.tasks.len(), blocked.proposal.tasks.len());
+        }
+    }
+}
+
 #[tokio::test]
 async fn manager_corrective_review_requires_the_integrated_tip_and_current_preview() {
     let harness = harness();
@@ -472,7 +596,10 @@ async fn manager_corrective_review_requires_the_integrated_tip_and_current_previ
     let tip = blocked.proposal.target_sha.as_str();
     let (status, _, html) = get(&harness, &format!("/manager/{key}"), &[]).await;
     assert_eq!(status, StatusCode::OK, "{html}");
-    assert!(html.contains(&format!("hx-post=\"{base}/preview-corrective\"")), "{html}");
+    assert!(
+        html.contains(&format!("hx-post=\"{base}/preview-corrective\"")),
+        "{html}"
+    );
     for (expected_tip, current) in [("stale-tip", false), (tip, true)] {
         let (status, ct, html) = submit(
             &harness,
@@ -491,8 +618,15 @@ async fn manager_corrective_review_requires_the_integrated_tip_and_current_previ
         if current {
             assert!(status.is_success(), "{status}: {html}");
             fragment(&ct, &html, task_id);
-            let preview = stored.execution.corrective_preview.as_ref().unwrap();
-            assert!(html.contains(&format!("name=\"revision\" value=\"{}\"", preview.revision)), "{html}");
+            let preview = stored
+                .execution
+                .corrective_preview
+                .as_ref()
+                .unwrap_or_else(|| panic!("missing corrective preview"));
+            assert!(
+                html.contains(&format!("name=\"revision\" value=\"{}\"", preview.revision)),
+                "{html}"
+            );
         } else {
             assert_eq!(status, StatusCode::CONFLICT, "{html}");
             fragment(&ct, &html, "tip changed");
@@ -517,50 +651,19 @@ async fn manager_corrective_review_requires_the_integrated_tip_and_current_previ
                 ("task_id", id),
                 ("instructions", instructions),
             ],
-        ).await;
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{html}");
         fragment(&ct, &html, "invalid corrective task or dependencies");
         assert!(html.contains("manager-action-error"), "{html}");
         assert_eq!(
-            serde_json::to_value(&snapshot(&repo).goals[0].execution.corrective_preview).unwrap(),
-            serde_json::to_value(&preview).unwrap(),
+            serde_json::to_value(&snapshot(&repo).goals[0].execution.corrective_preview)
+                .unwrap_or_else(|e| panic!("serialize saved preview: {e}")),
+            serde_json::to_value(&preview)
+                .unwrap_or_else(|e| panic!("serialize expected preview: {e}")),
         );
     }
-    for (revision, message) in [(None, "Missing form field: revision"), (Some("oops"), "Invalid revision")] {
-        let mut fields = vec![("goal_id", blocked.id.as_str()), ("preview_id", preview.id.as_str())];
-        if let Some(revision) = revision {
-            fields.push(("revision", revision));
-        }
-        let (status, ct, html) = submit(&harness, &format!("{base}/approve-corrective"), &fields).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{html}");
-        fragment(&ct, &html, message);
-        let saved = snapshot(&repo);
-        assert!(saved.goals[0].execution.corrective_approvals.is_empty());
-    }
-    for (revision, current) in [(preview.revision + 1, false), (preview.revision, true)] {
-        let (status, ct, html) = submit(
-            &harness,
-            &format!("{base}/approve-corrective"),
-            &[
-                ("goal_id", &blocked.id),
-                ("preview_id", &preview.id),
-                ("revision", &revision.to_string()),
-            ],
-        )
-        .await;
-        let stored = &snapshot(&repo).goals[0];
-        if current {
-            assert!(status.is_success(), "{status}: {html}");
-            fragment(&ct, &html, task_id);
-            assert_eq!(stored.status, GoalStatus::Active);
-            assert!(stored.proposal.tasks.iter().any(|task| task.id == task_id));
-        } else {
-            assert_eq!(status, StatusCode::CONFLICT, "{html}");
-            fragment(&ct, &html, "stale or unknown corrective preview");
-            assert_eq!(stored.status, GoalStatus::Blocked);
-            assert_eq!(stored.proposal.tasks.len(), blocked.proposal.tasks.len());
-        }
-    }
+    check_corrective_approval(&harness, &repo, &blocked, &preview, &base, task_id).await;
 }
 
 #[tokio::test]
@@ -606,27 +709,46 @@ async fn manager_conflicting_completed_child_can_retry_while_resume_is_starting(
     check_child_action("retry", true).await;
 }
 
-async fn check_child_action(action: &str, resume_starting: bool) {
-    let harness = harness();
-    let _data = isolate_records(&harness);
-    let repo = repository(&harness);
-    let active = goal(&repo);
+fn seed_failed_child(
+    harness: &Harness,
+    repo: &Path,
+    active: &Goal,
+    resume_starting: bool,
+) -> crate::session::SessionState {
     let task = &active.proposal.tasks[0];
     let tip = &active.proposal.target_sha;
     let goal_ref = format!("refs/heads/cruise/goal/{}", active.id);
-    run_git_ok(&repo, &["update-ref", &goal_ref, tip]);
-    let mut child = create_session(&harness);
+    run_git_ok(repo, &["update-ref", &goal_ref, tip]);
+    let mut child = create_session(harness);
     let worktree = harness.manager.worktrees_dir().join(&child.id);
-    std::fs::create_dir_all(harness.manager.worktrees_dir()).unwrap();
-    run_git_ok(&repo, &["worktree", "add", "--detach", worktree.to_str().unwrap(), tip]);
+    std::fs::create_dir_all(harness.manager.worktrees_dir())
+        .unwrap_or_else(|e| panic!("create worktree directory: {e}"));
+    run_git_ok(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            worktree
+                .to_str()
+                .unwrap_or_else(|| panic!("non-UTF-8 worktree path")),
+            tip,
+        ],
+    );
     child.worktree_path = Some(worktree.clone());
     child.phase = crate::session::SessionPhase::Failed("fixture failed".into());
     child.managed_child = Some(crate::session::ManagedChildOwner {
-        goal_id: active.id.clone(), task_id: task.id.clone(), attempt: 1,
-        revision: active.proposal.revision, base_sha: tip.clone(),
+        goal_id: active.id.clone(),
+        task_id: task.id.clone(),
+        attempt: 1,
+        revision: active.proposal.revision,
+        base_sha: tip.clone(),
     });
-    harness.manager.save(&child).unwrap();
-    manager::update_goal(&repo, &active.id, |goal| {
+    harness
+        .manager
+        .save(&child)
+        .unwrap_or_else(|e| panic!("save child: {e}"));
+    manager::update_goal(repo, &active.id, |goal| {
         goal.execution.anchor = Some(repo.canonicalize()?);
         goal.execution.integrated_tip = Some(tip.clone());
         goal.execution.attempts = serde_json::from_value(serde_json::json!([{
@@ -634,58 +756,117 @@ async fn check_child_action(action: &str, resume_starting: bool) {
             "base_sha": tip, "launch_started": true, "resume_starting": resume_starting,
         }]))?;
         Ok(())
-    }).unwrap();
+    })
+    .unwrap_or_else(|e| panic!("seed attempt: {e}"));
+    child
+}
+
+fn seed_child_conflict(
+    harness: &Harness,
+    repo: &Path,
+    active: &Goal,
+    child: &mut crate::session::SessionState,
+) {
+    let tip = &active.proposal.target_sha;
+    let goal_ref = format!("refs/heads/cruise/goal/{}", active.id);
+    let worktree = harness.manager.worktrees_dir().join(&child.id);
+    let commit = |path: &Path, contents: &str| {
+        std::fs::write(path.join("README.md"), contents)
+            .unwrap_or_else(|e| panic!("write fixture README: {e}"));
+        run_git_ok(path, &["add", "README.md"]);
+        run_git_ok(path, &["commit", "-m", contents]);
+        let head = std::process::Command::new("git")
+            .current_dir(path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap_or_else(|e| panic!("read Git HEAD: {e}"));
+        assert!(head.status.success());
+        String::from_utf8(head.stdout)
+            .unwrap_or_else(|e| panic!("decode Git HEAD: {e}"))
+            .trim()
+            .to_owned()
+    };
+    let result = commit(&worktree, "child change");
+    let goal_tip = commit(repo, "conflicting goal change");
+    run_git_ok(repo, &["update-ref", &goal_ref, &goal_tip, tip]);
+    let conflict =
+        crate::manager_git::prepare_integration(repo, &goal_ref, &goal_tip, tip, &result)
+            .err()
+            .unwrap_or_else(|| panic!("fixture integration should conflict"));
+    child.phase = crate::session::SessionPhase::Completed;
+    harness
+        .manager
+        .save(child)
+        .unwrap_or_else(|e| panic!("save completed child: {e}"));
+    manager::update_goal(repo, &active.id, |goal| {
+        goal.status = GoalStatus::Blocked;
+        goal.reason = Some(format!(
+            "Child {} integration requires attention: {conflict}",
+            child.id
+        ));
+        goal.execution.integrated_tip = Some(goal_tip);
+        goal.execution.attempts[0].result_sha = Some(result);
+        Ok(())
+    })
+    .unwrap_or_else(|e| panic!("seed blocked goal: {e}"));
+}
+
+async fn check_child_action(action: &str, resume_starting: bool) {
+    let harness = harness();
+    let _data = isolate_records(&harness);
+    let repo = repository(&harness);
+    let active = goal(&repo);
+    let mut child = seed_failed_child(&harness, &repo, &active, resume_starting);
+    let task = &active.proposal.tasks[0];
     let key = key(&repo);
     let detail = format!("/manager/{key}");
     if resume_starting {
         let (status, _, html) = get(&harness, &detail, &[]).await;
         assert_eq!(status, StatusCode::OK, "{html}");
         for action in ["resume-task", "retry"] {
-            assert!(!html.contains(&format!("hx-post=\"/webui/manager/{key}/{action}\"")), "{html}");
+            assert!(
+                !html.contains(&format!("hx-post=\"/webui/manager/{key}/{action}\"")),
+                "{html}"
+            );
         }
 
-        let commit = |path: &Path, contents: &str| {
-            std::fs::write(path.join("README.md"), contents).unwrap();
-            run_git_ok(path, &["add", "README.md"]);
-            run_git_ok(path, &["commit", "-m", contents]);
-            let head = std::process::Command::new("git")
-                .current_dir(path).args(["rev-parse", "HEAD"]).output().unwrap();
-            assert!(head.status.success());
-            String::from_utf8(head.stdout).unwrap().trim().to_owned()
-        };
-        let result = commit(&worktree, "child change");
-        let goal_tip = commit(&repo, "conflicting goal change");
-        run_git_ok(&repo, &["update-ref", &goal_ref, &goal_tip, tip]);
-        let conflict = crate::manager_git::prepare_integration(&repo, &goal_ref, &goal_tip, tip, &result)
-            .unwrap_err();
-        child.phase = crate::session::SessionPhase::Completed;
-        harness.manager.save(&child).unwrap();
-        manager::update_goal(&repo, &active.id, |goal| {
-            goal.status = GoalStatus::Blocked;
-            goal.reason = Some(format!("Child {} integration requires attention: {conflict}", child.id));
-            goal.execution.integrated_tip = Some(goal_tip);
-            goal.execution.attempts[0].result_sha = Some(result);
-            Ok(())
-        }).unwrap();
+        seed_child_conflict(&harness, &repo, &active, &mut child);
     }
-    let previous = serde_json::to_value(&snapshot(&repo).goals[0].execution.attempts[0]).unwrap();
+    let previous = serde_json::to_value(&snapshot(&repo).goals[0].execution.attempts[0])
+        .unwrap_or_else(|e| panic!("serialize original attempt: {e}"));
     let uri = format!("/webui/manager/{key}/{action}");
     let (status, _, html) = get(&harness, &detail, &[]).await;
     assert_eq!(status, StatusCode::OK, "{html}");
     if resume_starting {
-        assert!(!html.contains(&format!("hx-post=\"/webui/manager/{key}/resume-task\"")), "{html}");
+        assert!(
+            !html.contains(&format!("hx-post=\"/webui/manager/{key}/resume-task\"")),
+            "{html}"
+        );
     }
-    let form = html.split(&format!("hx-post=\"{uri}\"")).skip(1)
+    let form = html
+        .split(&format!("hx-post=\"{uri}\""))
+        .skip(1)
         .filter_map(|rest| rest.split("</form>").next())
-        .find(|form| form.contains("name=\"task_id\"")).unwrap();
-    let value = |name| form.split_once(&format!("name=\"{name}\" value=\"")).unwrap().1.split('"').next().unwrap();
+        .find(|form| form.contains("name=\"task_id\""))
+        .unwrap_or_else(|| panic!("missing task action form"));
+    let value = |name| {
+        form.split_once(&format!("name=\"{name}\" value=\""))
+            .unwrap_or_else(|| panic!("missing hidden form field"))
+            .1
+            .split('"')
+            .next()
+            .unwrap_or_else(|| panic!("missing form value"))
+    };
     assert_eq!(value("goal_id"), active.id);
     assert_eq!(value("task_id"), task.id);
     let _resume_queue = (action == "resume-task")
         .then(crate::manager_coordinator::accept_resume_requests_without_dispatch);
-    let (status, ct, html) = submit(&harness, &uri, &[
-        ("goal_id", value("goal_id")), ("task_id", value("task_id")),
-    ]).await;
+    let (status, ct, html) = submit(
+        &harness,
+        &uri,
+        &[("goal_id", value("goal_id")), ("task_id", value("task_id"))],
+    )
+    .await;
     assert!(status.is_success(), "{status}: {html}");
     fragment(&ct, &html, "Active");
     let persisted = snapshot(&repo);
@@ -697,7 +878,11 @@ async fn check_child_action(action: &str, resume_starting: bool) {
     if action == "resume-task" {
         assert_eq!(attempts.len(), 1);
     } else {
-        assert_eq!(serde_json::to_value(&attempts[0]).unwrap(), previous);
+        assert_eq!(
+            serde_json::to_value(&attempts[0])
+                .unwrap_or_else(|e| panic!("serialize persisted attempt: {e}")),
+            previous
+        );
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[1].attempt, 2);
         assert_ne!(attempts[1].session_id, child.id);
@@ -724,13 +909,47 @@ async fn manager_answer_unknown_prompt_returns_conflict_fragment() {
     fragment(&ct, &html, "stale or unknown");
 }
 
-#[tokio::test]
-async fn manager_answer_keeps_live_ask_pending_until_valid_reply() {
-    let harness = harness();
-    let _data = isolate_records(&harness);
-    let repo = repository(&harness);
-    let goal = goal(&repo);
-    let mut child = create_session(&harness);
+async fn answer_ask_in_browser(
+    harness: &Harness,
+    key: &str,
+    prompt_id: &str,
+    answer: &str,
+) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("bind browser fixture: {e}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("fixture address: {e}"));
+    let app = crate::daemon::server::application_router(harness.state.clone(), true);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let browser = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        tokio::process::Command::new("node")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args([
+                "tests/webui/manager-ask.mjs",
+                &format!("http://{address}/manager/{key}"),
+                prompt_id,
+                answer,
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    server.abort();
+    browser
+}
+
+fn seed_ask_child(
+    harness: &Harness,
+    repo: &Path,
+    goal: &Goal,
+) -> (
+    crate::session::SessionState,
+    crate::session::ManagedChildOwner,
+) {
+    let mut child = create_session(harness);
     let owner = crate::session::ManagedChildOwner {
         goal_id: goal.id.clone(),
         task_id: goal.proposal.tasks[0].id.clone(),
@@ -743,7 +962,7 @@ async fn manager_answer_keeps_live_ask_pending_until_valid_reply() {
         .manager
         .save(&child)
         .unwrap_or_else(|e| panic!("save owned child: {e}"));
-    manager::update_goal(&repo, &goal.id, |goal| {
+    manager::update_goal(repo, &goal.id, |goal| {
         goal.execution
             .attempts
             .push(serde_json::from_value(serde_json::json!({
@@ -753,6 +972,16 @@ async fn manager_answer_keeps_live_ask_pending_until_valid_reply() {
         Ok(())
     })
     .unwrap_or_else(|e| panic!("seed owned attempt: {e}"));
+    (child, owner)
+}
+
+#[tokio::test]
+async fn manager_answer_keeps_live_ask_pending_until_valid_reply() {
+    let harness = harness();
+    let _data = isolate_records(&harness);
+    let repo = repository(&harness);
+    let goal = goal(&repo);
+    let (child, owner) = seed_ask_child(&harness, &repo, &goal);
     let runtime = harness.state.application.runtime();
     let ask = crate::application::test_managed_prompt::start(&runtime, &child.id, &owner)
         .unwrap_or_else(|e| panic!("start managed Ask: {e}"));
@@ -763,29 +992,7 @@ async fn manager_answer_keeps_live_ask_pending_until_valid_reply() {
     let key = key(&repo);
     let answer = "Use the isolated fixture";
     if std::env::var_os("WEBUI_MANAGER_BROWSER_ASK").is_some() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap_or_else(|e| panic!("bind browser fixture: {e}"));
-        let address = listener
-            .local_addr()
-            .unwrap_or_else(|e| panic!("fixture address: {e}"));
-        let app = crate::daemon::server::application_router(harness.state.clone(), true);
-        let server = tokio::spawn(async move { axum::serve(listener, app).await });
-        let browser = tokio::time::timeout(
-            std::time::Duration::from_secs(45),
-            tokio::process::Command::new("node")
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .args([
-                    "tests/webui/manager-ask.mjs",
-                    &format!("http://{address}/manager/{key}"),
-                    &prompt_id,
-                    answer,
-                ])
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await;
-        server.abort();
+        let browser = answer_ask_in_browser(&harness, &key, &prompt_id, answer).await;
         let success = browser
             .as_ref()
             .is_ok_and(|result| result.as_ref().is_ok_and(|output| output.status.success()));
@@ -897,6 +1104,25 @@ async fn manager_resume_task_does_not_resume_unknown_task() {
 
 #[tokio::test]
 async fn manager_conversation_actions_while_turn_in_flight_are_busy_without_appending() {
+    // Other daemon tests can permanently cancel the process-wide Manager token.
+    // In a fresh test process, exercise the real provider admission path unchanged.
+    const CHILD: &str = "CRUISE_TEST_MANAGER_BUSY_CHILD";
+    const TEST: &str = "webui::tests::manager::manager_conversation_actions_while_turn_in_flight_are_busy_without_appending";
+    if std::env::var_os(CHILD).is_none() {
+        let exe = std::env::current_exe().unwrap_or_else(|e| panic!("locate test binary: {e}"));
+        let output = std::process::Command::new(exe)
+            .args(["--exact", TEST])
+            .env(CHILD, "1")
+            .output()
+            .unwrap_or_else(|e| panic!("run isolated Manager test: {e}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "isolated Manager test: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let harness = harness();
     let _data = isolate_records(&harness);
     let repo = repository(&harness);
@@ -950,9 +1176,14 @@ async fn manager_startup_failure_renders_inline_and_preserves_pending_proposal()
     let repo = repository(&harness);
     let pending = proposal(&repo);
     let key = key(&repo);
-    let before = serde_json::to_value(snapshot(&repo)).unwrap();
-    let corrupt = harness.dir.path().join("xdg-data/cruise/manager/corrupt.json");
-    std::fs::write(&corrupt, "{invalid json").unwrap();
+    let before = serde_json::to_value(snapshot(&repo))
+        .unwrap_or_else(|e| panic!("serialize initial snapshot: {e}"));
+    let corrupt = harness
+        .dir
+        .path()
+        .join("xdg-data/cruise/manager/corrupt.json");
+    std::fs::write(&corrupt, "{invalid json")
+        .unwrap_or_else(|e| panic!("write corrupt record: {e}"));
     assert!(manager::snapshots().is_err());
     harness.state.manager_startup_error = Some("test recovery failure".into());
     let (status, ct, html) = submit(
@@ -971,7 +1202,11 @@ async fn manager_startup_failure_renders_inline_and_preserves_pending_proposal()
         "Manager disabled after startup recovery failure: test recovery failure",
     );
     assert!(html.contains("manager-action-error"), "{html}");
-    assert_eq!(serde_json::to_value(snapshot(&repo)).unwrap(), before);
+    assert_eq!(
+        serde_json::to_value(snapshot(&repo))
+            .unwrap_or_else(|e| panic!("serialize final snapshot: {e}")),
+        before
+    );
 }
 
 #[tokio::test]
@@ -1075,17 +1310,30 @@ async fn manager_child_links_to_its_goal_repository_and_remains_read_only() {
         .manager
         .save(&child)
         .unwrap_or_else(|e| panic!("save child: {e}"));
-    let directory = crate::paths::data_dir().unwrap().join("manager");
-    std::fs::write(directory.join("corrupt.json"), "{invalid json").unwrap();
+    let directory = crate::paths::data_dir()
+        .unwrap_or_else(|e| panic!("resolve data directory: {e}"))
+        .join("manager");
+    std::fs::write(directory.join("corrupt.json"), "{invalid json")
+        .unwrap_or_else(|e| panic!("write corrupt record: {e}"));
     assert!(manager::snapshots().is_err());
     let key = key(&repo);
-    for uri in ["/manager".into(), format!("/manager/{key}"), format!("/webui/manager/{key}/sync")] {
+    for uri in [
+        "/manager".into(),
+        format!("/manager/{key}"),
+        format!("/webui/manager/{key}/sync"),
+    ] {
         let (status, _, html) = get(&harness, &uri, &[]).await;
         assert_eq!(status, StatusCode::OK, "{uri}: {html}");
-        assert!(html.contains(&key) || html.contains("Deliver the reviewable feature"), "{uri}: {html}");
+        assert!(
+            html.contains(&key) || html.contains("Deliver the reviewable feature"),
+            "{uri}: {html}"
+        );
     }
     let unlisted = repo_key(&repo.join("unlisted"));
-    assert_eq!(get(&harness, &format!("/manager/{unlisted}"), &[]).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        get(&harness, &format!("/manager/{unlisted}"), &[]).await.0,
+        StatusCode::NOT_FOUND
+    );
     let (status, _, html) = get(&harness, &format!("/sessions/{}", child.id), &[]).await;
     assert_eq!(status, StatusCode::OK, "{html}");
     assert!(html.contains("read-only"), "{html}");
@@ -1096,8 +1344,7 @@ async fn manager_child_links_to_its_goal_repository_and_remains_read_only() {
         );
     }
     assert!(
-        html.contains("Open in Manager")
-            && html.contains(&format!("href=\"/manager/{key}\"")),
+        html.contains("Open in Manager") && html.contains(&format!("href=\"/manager/{key}\"")),
         "{html}"
     );
 }
