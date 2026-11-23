@@ -121,12 +121,10 @@ fn setup_agents(home: &Path) -> Result<std::path::PathBuf, Box<dyn std::error::E
     )?;
     let bin = home.join("bin");
     fs::create_dir(&bin)?;
+    // Gates must run the daemon's own executable, never this stale PATH one.
     fs::write(
         bin.join("cruise"),
-        format!(
-            "#!/bin/sh\n'{}' \"$@\" 2>>\"$HOME/gate-errors\"\n",
-            env!("CARGO_BIN_EXE_cruise")
-        ),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/stale-cruise\"\nexit 97\n",
     )?;
     fs::set_permissions(bin.join("cruise"), fs::Permissions::from_mode(0o700))?;
     let agent = home.join("inert-agent");
@@ -329,13 +327,13 @@ async fn dependent_child_starts_from_integrated_prerequisite_sha()
         }
         assert!(
             Instant::now() < deadline,
-            "dependency did not dispatch: status={} reason={} attempts={} agent-calls={} daemon={} gate-errors={}",
+            "dependency did not dispatch: status={} reason={} attempts={} agent-calls={} daemon={} stale-cruise={}",
             goal["status"],
             goal["reason"],
             goal["execution"]["attempts"],
             fs::read_to_string(home.join("agent-calls")).unwrap_or_default(),
             fs::read_to_string(home.join("state/cruise/daemon/daemon.log")).unwrap_or_default(),
-            fs::read_to_string(home.join("gate-errors")).unwrap_or_default()
+            fs::read_to_string(home.join("stale-cruise")).unwrap_or_default()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

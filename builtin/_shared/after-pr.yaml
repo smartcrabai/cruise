@@ -17,7 +17,7 @@ steps:
       CRUISE_AFTER_PR_NUMBER: "{pr.number}"
       CRUISE_AFTER_PR_URL: "{pr.url}"
     command: |-
-      cruise internal sync-base "$CRUISE_AFTER_PR_NUMBER" --url "$CRUISE_AFTER_PR_URL"
+      {cruise.bin} internal sync-base "$CRUISE_AFTER_PR_NUMBER" --url "$CRUISE_AFTER_PR_URL"
   resolve-conflict:
     skip: prev.success
     permission: full
@@ -31,7 +31,7 @@ steps:
     accepted_exit_codes: [0]
     env:
       CRUISE_SYNC_PLAN: "{plan}"
-    command: cruise internal finish-conflict-commit && cruise internal push-after-sync
+    command: '{cruise.bin} internal finish-conflict-commit && {cruise.bin} internal push-after-sync'
     next: wait-ci
   finish-ci-fix:
     timeout: 30m
@@ -40,7 +40,7 @@ steps:
       CRUISE_AFTER_PR_PLAN: "{plan}"
       CRUISE_AFTER_PR_NUMBER: "{pr.number}"
       CRUISE_AFTER_PR_URL: "{pr.url}"
-    command: cruise internal finish-ci-followup
+    command: '{cruise.bin} internal finish-ci-followup'
     next: wait-ci
   wait-ci:
     timeout: 60m
@@ -50,7 +50,7 @@ steps:
       CRUISE_AFTER_PR_NUMBER: "{pr.number}"
       CRUISE_AFTER_PR_URL: "{pr.url}"
     command: |-
-      cruise internal clear-ci-followup || exit 1
+      {cruise.bin} internal clear-ci-followup || exit 1
       diagnostic_payload='{{"checks":[],"truncated":false}}'
       ci_diagnostic() {{
         diagnostic_state=$state
@@ -84,7 +84,7 @@ steps:
         printf 'CRUISE_CI_DIAGNOSTIC_V4 %s %s %s %s %s %s %s\n' "$provider" "$1" "$diagnostic_state" "$diagnostic_head_matches" "$diagnostic_check_count" "$diagnostic_http_status" "$diagnostic_payload" >&2
         if [ "$1" = ci_failed ]; then
           ci_evidence=$(jq -nc --arg provider "$provider" --argjson payload "$diagnostic_payload" '{{provider:$provider,payload:$payload}}') || exit 1
-          printf '%s' "$ci_evidence" | cruise internal capture-ci-followup || exit 1
+          printf '%s' "$ci_evidence" | {cruise.bin} internal capture-ci-followup || exit 1
           exit 75
         fi
       }}

@@ -342,7 +342,7 @@ fn verify_builtin_repair_policy(project: &Path) {
             .unwrap()
             .as_slice()
             .join("\n");
-        assert_eq!(finish_command, "cruise internal finish-ci-followup");
+        assert_eq!(finish_command, "{cruise.bin} internal finish-ci-followup");
         assert!(config.after_pr.contains_key("follow-up/finish-ci-fix"));
         assert_eq!(
             config.after_pr["follow-up/wait-ci"]

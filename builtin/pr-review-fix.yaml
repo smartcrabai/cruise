@@ -3,7 +3,7 @@ create_pr: true
 cleanup_after_pr: true
 steps:
   sync-head:
-    command: cruise internal sync-review-head
+    command: '{cruise.bin} internal sync-review-head'
     accepted_exit_codes: [0]
     timeout: 5m
 after-pr:
