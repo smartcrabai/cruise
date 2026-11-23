@@ -166,48 +166,74 @@ pub struct ManagerArgs {
 pub enum ManagerCommand {
     /// Show the repository's Manager snapshot.
     Status {
+        /// Print the snapshot as JSON for scripts.
         #[arg(long)]
         json: bool,
     },
     /// Send a message to Manager.
     Say {
+        /// Message text. Read from the terminal or piped stdin when omitted.
         text: Option<String>,
+        /// Print the turn ID and return without waiting for the reply.
         #[arg(long)]
         no_wait: bool,
     },
     /// Draft a goal proposal for review.
     Propose {
+        /// Print the turn ID and return without waiting for the proposal.
         #[arg(long)]
         no_wait: bool,
     },
     /// Review and approve a goal proposal.
     Approve(ManagerApprovalArgs),
     /// Pause a goal.
-    Pause { goal: String },
+    Pause {
+        /// Goal ID from `cruise manager status`.
+        goal: String,
+    },
     /// Resume a goal or continue an existing task attempt.
-    Resume { goal: String, task: Option<String> },
+    Resume {
+        /// Goal ID from `cruise manager status`.
+        goal: String,
+        /// Continue this task's latest failed or suspended attempt in its worktree.
+        task: Option<String>,
+    },
     /// Retry a goal or start a fresh task attempt.
-    Retry { goal: String, task: Option<String> },
+    Retry {
+        /// Goal ID. Without TASK, retry verification of a blocked goal.
+        goal: String,
+        /// Reserve a fresh attempt for this task.
+        task: Option<String>,
+    },
     /// Answer a pending goal prompt.
     Answer {
+        /// Goal ID from `cruise manager status`.
         goal: String,
+        /// Prompt request ID from `cruise manager status`.
         prompt: String,
+        /// Answer text for an Ask prompt. Prompted on a terminal when omitted.
         #[arg(conflicts_with_all = ["choice", "option_text"])]
         text: Option<String>,
+        /// Exact Option label to select outside a terminal.
         #[arg(long, value_name = "LABEL")]
         choice: Option<String>,
+        /// Text for an Option choice that requires text input.
         #[arg(long = "text", requires = "choice", value_name = "TEXT")]
         option_text: Option<String>,
     },
     /// Preview a corrective task without authorizing it.
     Corrective {
+        /// Goal ID from `cruise manager status`.
         goal: String,
+        /// New task ID for the corrective work.
         task: String,
+        /// Corrective instructions. Read from the terminal or piped stdin when omitted.
         #[arg(long, value_name = "TEXT")]
         instructions: Option<String>,
     },
     /// Review and approve a corrective task preview.
     ApproveCorrective {
+        /// Goal ID from `cruise manager status`.
         goal: String,
         #[command(flatten)]
         approval: ManagerApprovalArgs,

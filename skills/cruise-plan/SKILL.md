@@ -10,6 +10,10 @@ The built-in `refactor`, `add-tests`, `add-formal-specs`, and `security` workflo
 
 Formal specifications, E2E checks, and after-PR behavior are execution settings, not initial-planning modes; choose only flags declared by the selected workflow, as described below.
 
+## Plan session or Manager goal?
+
+This skill registers **one task as one session** from a plan you wrote. The experimental `cruise manager` is different: Cruise's own SDK conversation drafts a multi-task proposal for a repository goal, and after explicit approval its daemon runs Manager-owned child sessions, integrates and verifies them, and opens one PR/MR. Manager does not accept a `plan.md`, `-c`, flags, or skipped steps; its children use a frozen `builtin:tdd` contract without after-PR steps. To hand a goal to Manager, feed your goal description to `cruise manager say` and request `cruise manager propose`; approving with `cruise manager approve --yes --revision N` authorizes execution, so do it only when the user explicitly asks. See the **cruise-cli** skill's Experimental Manager section. Use this skill when the user wants a reviewed plan for one task, a pinned workflow, or a GitHub issue.
+
 ## Choose workflow and execution settings
 
 Choose these before writing the plan or creating a session; select by the actual task, not by habit:

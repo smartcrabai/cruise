@@ -63,7 +63,7 @@ When upgrading from the v0.3.0 detached WebUI, daemon start, restart, serve, and
 
 The daemon also refuses (HTTP 409, CLI exit 1, state unchanged) to run or plan a session that another cruise process is still executing as its recorded runner, such as a v0.3.0 `cruise run` that was in progress when you upgraded. v0.3.0 background planning workers record no runner and cannot be detected, so let background plans started before the upgrade finish first.
 
-Session commands (`plan`, `--plan`, `draft`, `run`, `run --all`, `exec`, `list`, `tell`, `clean`, and `diff`) are daemon clients and autostart it when needed. `config`, `usage`, `update`, `install`, `workflow *`, `docs`, `ssh`, and every `--dry-run` are local-only. CLI workflow resolution happens on the client; its working directory and allowlisted workflow-override variables such as `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, and `CRUISE_SDK` apply only to that request. Process-level variables (`PATH`, `GH_TOKEN`, provider credentials, `CRUISE_FORGE`, `CRUISE_SKIP_AGENT_AUTH_CHECK`, `CRUISE_DISABLE_NOTIFICATIONS`, `CRUISE_COMMIT_COAUTHOR_*`, and others) come from the daemon environment; restart with `cruise daemon restart` after changing them. Autostart removes workflow-override variables from the daemon environment, while explicit `daemon start` and `serve` preserve them. WebUI requests use the daemon environment and generally its home-directory working directory; WebUI exec uses the selected Directory as its working directory.
+Session commands (`plan`, `--plan`, `draft`, `run`, `run --all`, `exec`, `list`, `tell`, `manager`, `clean`, and `diff`) are daemon clients and autostart it when needed. `config`, `usage`, `update`, `install`, `workflow *`, `docs`, `ssh`, and every `--dry-run` are local-only. CLI workflow resolution happens on the client; its working directory and allowlisted workflow-override variables such as `CRUISE_MODEL`, `CRUISE_PLAN_MODEL`, and `CRUISE_SDK` apply only to that request. Process-level variables (`PATH`, `GH_TOKEN`, provider credentials, `CRUISE_FORGE`, `CRUISE_SKIP_AGENT_AUTH_CHECK`, `CRUISE_DISABLE_NOTIFICATIONS`, `CRUISE_COMMIT_COAUTHOR_*`, and others) come from the daemon environment; restart with `cruise daemon restart` after changing them. Autostart removes workflow-override variables from the daemon environment, while explicit `daemon start` and `serve` preserve them. WebUI requests use the daemon environment and generally its home-directory working directory; WebUI exec uses the selected Directory as its working directory.
 
 When a client finds a daemon from another Cruise version, it restarts it automatically if idle. If the daemon is busy, the client asks you to run `cruise daemon restart` when it is idle. After `cruise update`, the next command restarts an idle daemon. Foreground commands stream progress; Ctrl+C cancels the operation: runs normally become `Suspended`, but canceling recovery of a failed exec before it enters `Running` leaves it `Failed`. Planning cancellation restores the prior planning state. Closing the terminal does not stop daemon work; reattach with `cruise run <session-id>` or the WebUI. In ordinary sessions, Ask and Option prompts appear in the terminal and WebUI, and the first answer wins. A pending prompt in a non-interactive client leaves the session waiting for an answer in the WebUI or from `cruise run <session-id>`. Manager-owned Ask and Option prompts must be answered on the repository’s Manager page or with `cruise manager answer <GOAL> <PROMPT>`, because the child session page is read-only. `cruise --plan` also runs planning inside the daemon, not a detached worker. Claims prevent duplicate work on a session, so separate CLI processes and the WebUI can safely mutate sessions concurrently.
 
@@ -366,6 +366,24 @@ Options:
 ```
 
 On an interactive terminal, the top-level picker offers **New Session**, **Clean**, **Run All**, and **Quit** even when there are no sessions. Selecting a session opens its phase-specific menu. See [`cruise list` Actions](sessions.md#cruise-list-actions) for creation modes, confirmations, and navigation. With `--json`, prints every session as a JSON array and exits without prompting.
+
+<a id="cruise-manager"></a>
+## `cruise manager`
+
+```
+cruise manager [status [--json]]
+cruise manager say [TEXT] [--no-wait]
+cruise manager propose [--no-wait]
+cruise manager approve [--revision N] [--yes]
+cruise manager pause <GOAL>
+cruise manager resume <GOAL> [TASK]
+cruise manager retry <GOAL> [TASK]
+cruise manager answer <GOAL> <PROMPT> [TEXT | --choice LABEL [--text TEXT]]
+cruise manager corrective <GOAL> <TASK> [--instructions TEXT]
+cruise manager approve-corrective <GOAL> [--revision N] [--yes]
+```
+
+Experimental. Run it inside a local Git checkout; every subcommand is a daemon client. `cruise manager status` lists the Goal, task, and prompt IDs the other subcommands take; add `--json` for scripts. `say` and `propose` wait for the turn and exit non-zero if it does not complete; `--no-wait` prints the turn ID and returns. `approve` and `approve-corrective` print what they approve. Without a terminal they require both `--yes` and `--revision N`, and a revision that no longer matches is rejected. `resume GOAL TASK` continues the latest failed or suspended attempt in its worktree, `retry GOAL TASK` reserves a fresh attempt, and `retry GOAL` re-verifies a blocked Goal whose tasks are integrated. `answer` takes TEXT for an Ask prompt. An Option prompt uses the menu on a terminal and requires `--choice` (plus `--text` for a text-input choice) otherwise. See [Experimental Manager records](sessions.md#experimental-manager-records) for eligibility, records, and the WebUI.
 
 <a id="cruise-diff"></a>
 ## `cruise diff`

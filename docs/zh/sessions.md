@@ -5,15 +5,15 @@
 
 ## 实验性 Manager 记录
 
-`cruise manager` 需要本地 Git 仓库。记录保存在 `$XDG_DATA_HOME/cruise/manager/`（通常为 `~/.local/share/cruise/manager/`），以规范化的 Git 公共目录为键，因此关联工作树共享同一记录。运行 `cruise manager status` 时会显示已保存的消息以及任何提案或目标。对话使用从 `builtin:tdd` 默认配置解析出的交互式 SDK 和规划模型，不支持 command 后端。用户输入在调用提供商之前保存，如果调用未完成则保留为中断状态。SDK 被要求在临时目录中使用只读权限，但这不是严格的沙箱。
+`cruise manager` 需要本地 Git 仓库。记录保存在 `$XDG_DATA_HOME/cruise/manager/`（通常为 `~/.local/share/cruise/manager/`），以规范化的 Git 公共目录为键，因此关联工作树共享同一记录。运行 `cruise manager status` 时会显示已保存的消息以及任何提案或目标。对话使用从 `builtin:tdd` 默认配置解析出的交互式 SDK 和规划模型，不支持 command 后端。用户输入在调用提供商之前保存，如果调用未完成则保留为中断状态。SDK 被要求在临时目录中使用只读权限，但这不是严格的沙箱。每个提案都会固定子会话的工作流：即使用项目和用户默认值以及 daemon 环境中的覆盖解析出的 `builtin:tdd`，并移除自动创建 PR、after-PR 步骤、`after_pr` 和 `merge` 标志、PR 后清理以及 `force_exec`，因为 Manager 会自行发布该 Goal 唯一的 PR/MR。与 session 命令不同，`cruise manager` 不会转发客户端的 workflow override 变量（例如 `CRUISE_MODEL`）。
 
-运行 `cruise manager` 或 `cruise manager status` 查看仓库快照；脚本可为 `status` 加上 `--json`。`cruise manager say [TEXT]` 省略文本参数时，从终端读取多行输入，或从管道读取标准输入。`say` 和 `propose` 默认等待完成；指定 `--no-wait` 会输出轮次 ID 并立即退出。按 Ctrl-C 只会停止等待，守护进程仍会继续处理该轮次。
+运行 `cruise manager` 或 `cruise manager status` 查看仓库快照；脚本可为 `status` 加上 `--json`。`cruise manager say [TEXT]` 省略文本参数时，从终端读取多行输入，或从管道读取标准输入。`say` 和 `propose` 默认等待完成，轮次未完成时以非零状态退出；指定 `--no-wait` 会输出轮次 ID 并立即退出。按 Ctrl-C 只会停止等待，守护进程仍会继续处理该轮次。
 
 `cruise manager propose` 请求经过验证的提案预览；目标分支必须能解析为本地 `origin` 跟踪引用，必要时请先 fetch。`cruise manager approve` 显示包含可执行检查的提案及其契约。在终端中未指定 `--yes` 时，必须准确输入 `approve` 来确认。非交互式批准必须同时指定 `--yes` 和 `--revision N`；指定的版本号必须与审查过的提案匹配。批准会为该仓库和目标分支注册一个持久化的活动 Goal，并授权守护进程协调器异步调度符合条件的子会话；审批操作本身不会同步启动执行。每个子会话在分派时固定到精确的已集成 Goal tip；成功结果按顺序集成，随后先验证合并后的精确 SHA，再由 Cruise 发布或恢复该 Goal 唯一的 PR/MR。Manager 不会合并；它会等待人工将经过验证的 head 合并到已批准的目标分支。`cruise manager pause GOAL` 和 `cruise manager resume GOAL` 记录目标状态，`cruise manager answer` 可回答匹配的活动子会话问题或选项提示；`cruise manager retry GOAL TASK` 在满足安全等条件时，可为活动目标中之前失败或暂停的子会话，或阻塞目标中已安全确认存在集成冲突的已完成子会话预留新的尝试。此外还需通过依赖关系、所有权、仓库等检查。`cruise manager resume GOAL TASK` 在原工作树中继续符合条件的子会话。`cruise manager retry GOAL` 可为所有任务均已集成且符合条件的阻塞目标重新运行验证，并保留先前证据；它不会重试结果不确定的发布。`cruise manager corrective GOAL TASK` 提示输入人工编写的指令，为符合条件且已确定失败的检查保存修正预览，此时不会授权执行。`cruise manager approve-corrective GOAL` 会刷新并显示目标和预览，并遵循与 `cruise manager approve` 相同的确认和版本规则。批准仅适用于该预览及集成后的 tip，会添加任务并保留先前的验证证据和已批准的检查。预览或 tip 发生变化时需要重新审查。执行需要 Git 2.38 或更高版本，以及经过身份验证的 GitHub 或 GitLab `origin`。
 
 回答开放式问题时，使用 `cruise manager answer GOAL PROMPT TEXT`，或在终端中输入多行文本。对于选项提示，标准输入为终端时使用菜单。标准输入不是终端时，必须用 `--choice LABEL` 指定完全匹配的标签，并且仅在选项需要文本输入时提供 `--text TEXT`。纠正任务说明可通过 `--instructions TEXT`、终端提示或管道传入。
 
-在 WebUI 侧边栏中选择 **Manager**，从列表选择仓库，或输入守护进程所在主机上的本地 Git 工作区路径，然后点击 **打开仓库**。只能打开已有 Manager 记录的仓库。仅打开工作区不会创建记录或启动任务。WebUI 与 CLI 共享对话、提案和目标。可以在仓库页面发送消息并请求生成提案。请检查目标提交、任务及可执行的检查，然后明确确认所显示的修订版本，以授权执行。页面会自动刷新，并根据当前状态提供暂停或恢复目标、继续或重试任务、重试验证、预览和批准修正任务，以及回复待处理的 Ask 或 Option 提示等操作。仅预览修正任务不会授权执行。Manager 的子会话页面仍为只读。只有当 Cruise 找到包含该子会话目标的可读 Manager 记录时，才会显示 **在 Manager 中打开** 链接，用于返回仓库的 Manager 页面。
+在 WebUI 侧边栏中选择 **Manager**，从列表选择仓库，或输入守护进程所在主机上的本地 Git 工作区路径，然后点击 **打开仓库**。打开仓库需要已有的 Manager 记录，以及守护进程所在主机上可访问的主 Git 工作区（即使输入的是关联工作树路径也是如此）。仅打开工作区不会创建记录或启动任务。WebUI 与 CLI 共享对话、提案和目标。可以在仓库页面发送消息并请求生成提案。请检查目标提交、任务及可执行的检查，然后明确确认所显示的修订版本，以授权执行。页面会自动刷新，并根据当前状态提供暂停或恢复目标、继续或重试任务、重试验证、预览和批准修正任务，以及回复待处理的 Ask 或 Option 提示等操作。仅预览修正任务不会授权执行。Manager 的子会话页面仍为只读。只有当 Cruise 找到包含该子会话目标的可读 Manager 记录时，才会显示 **在 Manager 中打开** 链接，用于返回仓库的 Manager 页面。
 
 <a id="runtime-file-layout"></a>
 ## 运行时文件布局
@@ -28,6 +28,7 @@ Cruise 遵循 [XDG 基本目录规范](https://specifications.freedesktop.org/ba
 | 状态文件、WebUI 实例信息等 | `$XDG_STATE_HOME/cruise/`（默认值：`~/.local/state/cruise/`） |
 | daemon registry 和日志（`instance.json`、`daemon.log`） | `$XDG_STATE_HOME/cruise/daemon/`（默认值：`~/.local/state/cruise/daemon/`） |
 | 会话、工作树和临时 `--repo` 克隆 | `$XDG_DATA_HOME/cruise/`（默认值：`~/.local/share/cruise/`） |
+| Manager 记录 | `$XDG_DATA_HOME/cruise/manager/`（默认值：`~/.local/share/cruise/manager/`） |
 
 在 Windows 上，如果未设置 `XDG_*` 变量，则默认值为 `%APPDATA%\cruise`（配置）、`%LOCALAPPDATA%\cruise\data`（数据）和 `%LOCALAPPDATA%\cruise\state`（状态）。如果这些变量未设置，则使用上文的 `~/` 默认值，并且 `~\` 会像 `~/` 一样展开。
 

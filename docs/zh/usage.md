@@ -3,7 +3,7 @@
 <a id="webui"></a>
 ## Daemon 与 WebUI
 
-Cruise 会为每个用户和 state directory 运行一个常驻 daemon。session 命令是 daemon 的客户端，包括 `plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`list`、`tell`、`clean` 和 `diff`。如果 daemon 尚未运行，这些命令会按需自动启动它。`cruise webui` 也会确保 daemon 正在运行、打印 WebUI 登录 URL，并可选择打开浏览器：
+Cruise 会为每个用户和 state directory 运行一个常驻 daemon。session 命令是 daemon 的客户端，包括 `plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`list`、`tell`、`manager`、`clean` 和 `diff`。如果 daemon 尚未运行，这些命令会按需自动启动它。`cruise webui` 也会确保 daemon 正在运行、打印 WebUI 登录 URL，并可选择打开浏览器：
 
 ```sh
 cruise webui
@@ -33,11 +33,13 @@ CLI 客户端负责解析 workflow 配置。它会随每个请求发送工作目
 
 执行 `cruise update` 后，daemon 忙碌时会继续运行旧版本：CLI 客户端会拒绝请求，并提示等待空闲后运行 `cruise daemon restart`；重启前 WebUI 也会继续使用旧版本。空闲 daemon 会在下一个客户端请求时自动重启。
 
-前台命令会从 daemon 接收并显示进度。Ctrl+C 会取消操作（`run` 变为 `Suspended`，规划状态会恢复），但关闭终端不会停止 daemon 正在执行的工作。可通过 `cruise run <session-id>` 或 WebUI 重新连接。Ask 和 Option 提示会显示在终端和 WebUI 中，先提交的答案生效。非交互式客户端遇到待回答提示时，会话会保持等待状态；请在 WebUI 中回答，或从终端运行 `cruise run <session-id>`。`cruise --plan` 的规划操作也在 daemon 内执行，不再使用分离的 worker process。
+前台命令会从 daemon 接收并显示进度。Ctrl+C 会取消操作（`run` 变为 `Suspended`，规划状态会恢复），但关闭终端不会停止 daemon 正在执行的工作。可通过 `cruise run <session-id>` 或 WebUI 重新连接。在普通会话中，Ask 和 Option 提示会显示在终端和 WebUI 中，先提交的答案生效。非交互式客户端遇到待回答提示时，会话会保持等待状态；请在 WebUI 中回答，或从终端运行 `cruise run <session-id>`。由于子会话页面为只读，Manager 拥有的子会话中的 Ask 和 Option 提示必须在仓库的 Manager 页面或通过 `cruise manager answer <GOAL> <PROMPT>` 回答。`cruise --plan` 的规划操作也在 daemon 内执行，不再使用分离的 worker process。
 
 所有 session 修改都通过 daemon 进行，因此多个 CLI 进程和 WebUI 可以安全地同时操作 session。claim 可防止同一 session 被重复执行。本地命令包括 `config`、`usage`、`update`、`install`、`workflow *`、`docs`、`ssh` 和所有 `--dry-run`；它们不会连接本地 daemon。
 
-Graph 选项卡会从 jsDelivr 加载 Mermaid，因此需要网络连接；其他所有 WebUI 选项卡均可离线使用。在桌面端，通过侧边栏页脚选择显示语言；在移动端，通过页眉选择。选择后页面会重新加载。
+Graph 选项卡会从 jsDelivr 加载 Mermaid，因此需要网络连接。Manager 的新对话轮次和提案生成需要 daemon 能连接到已配置的 SDK 提供商。在桌面端，通过侧边栏页脚选择显示语言；在移动端，通过页眉选择。选择后页面会重新加载。
+
+在侧边栏中选择 **Manager**，即可在浏览器中打开已有的 Manager 记录、审查提案并控制目标。请参阅[实验性 Manager 记录](sessions.md#实验性-manager-记录)。
 
 <a id="usage"></a>
 # 使用

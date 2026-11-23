@@ -9,6 +9,7 @@ missing_revision = "Impossible d'approuver une proposition sans identifiant ni r
 confirm = "Saisissez approve pour autoriser exactement cette proposition, ou autre chose pour annuler :"
 not_approved = "Non approuvée."
 empty_answer = "La réponse ne peut pas être vide."
+ask_choice = "--choice et --text ne s’appliquent qu’aux invites à options. Passez la réponse à Ask comme TEXT."
 stale_prompt = "La demande Manager de cet objectif a expiré ou est inconnue"
 accepted = "Accepté"
 turn_running = "Le tour s’exécute dans le daemon."

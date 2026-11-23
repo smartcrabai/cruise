@@ -1,6 +1,6 @@
 ---
 name: cruise-cli
-description: Use when running, operating, or troubleshooting Cruise's CLI and resident daemon — the YAML-driven coding-agent workflow orchestrator with the jcode SDK as its primary, default backend. Covers command selection (plan / --plan / draft / run / exec / list / clean / config / ssh / daemon / webui / update), GitHub issue input, planning variants, workflow catalog and flags, bounded run-all execution, session lifecycle, workspace modes, config resolution, daemon environment and runtime file layout. Trigger whenever the user asks how to operate Cruise sessions, its CLI, daemon, or WebUI.
+description: Use when running, operating, or troubleshooting Cruise's CLI and resident daemon — the YAML-driven coding-agent workflow orchestrator with the jcode SDK as its primary, default backend. Covers command selection (plan / --plan / draft / run / exec / list / manager / clean / config / ssh / daemon / webui / update), GitHub issue input, planning variants, workflow catalog and flags, bounded run-all execution, session lifecycle, the experimental Goal-driven `cruise manager` (proposals, approval, goals, child sessions, prompts), workspace modes, config resolution, daemon environment and runtime file layout. Trigger whenever the user asks how to operate Cruise sessions, Manager goals, its CLI, daemon, or WebUI.
 ---
 
 cruise is a YAML-driven coding-agent workflow orchestrator with the jcode SDK as its primary and only SDK backend (`sdk: jcode`); custom CLI commands remain available through `command:`. Workflows follow **plan → approve → run (write tests → implement → test → review) → usually open a PR → after-pr automation when a PR is created**. This skill is the operator's manual — how to *drive* cruise. For writing the workflow YAML itself, see the **cruise-config** skill.
@@ -54,6 +54,45 @@ plan/draft  →  [AwaitingInput while an interactive question is pending]  →  
 
 The default `builtin:pr-review-fix` has no flags and runs in an isolated worktree on the existing PR head, tracking `origin/<head>`. It fast-forwards safely, rejects divergence or a head checked out elsewhere, and never resets the branch. The review loop processes eligible unresolved threads, pushes committed fixes, and replies or resolves; it does not create or merge a PR. Cleanup preserves the head branch. Failures are retryable, and Publish as Issue and Replan are unavailable. A custom workflow must have `create_pr: true` and an after-PR `github-review` step with `reviewers: all`. See the [review configuration reference](../cruise-config/references/after-pr.md#github-review) for permissions, progress rules, and the report.
 
+## Experimental Manager (repository goals)
+
+`cruise manager` turns a repository-level goal into a reviewed proposal of several tasks, then (after explicit approval) runs each task as a Manager-owned child session, integrates the results serially, verifies the combined SHA, and opens **one** PR/MR that a human merges. Manager never merges. Use `cruise plan` for one task → one session; use Manager only when the user wants Cruise to decompose and coordinate a goal. It is experimental.
+
+Run it inside a local Git checkout (`cruise manager` requires one); every subcommand is a daemon client. Records live in `$XDG_DATA_HOME/cruise/manager/`, keyed by the Git common directory, so linked worktrees share one record and the WebUI **Manager** page shows the same conversation, proposal, and goals.
+
+| Subcommand | Purpose |
+|---|---|
+| `cruise manager` / `status [--json]` | Show transcript, pending proposal (with revision), goals, and pending child prompts. Use `--json` to read Goal, task, and prompt IDs in scripts. |
+| `say [TEXT] [--no-wait]` | Discuss the goal. Without TEXT, reads a terminal prompt or piped stdin. Waits for the reply and exits non-zero if the turn does not complete; `--no-wait` returns the turn ID. Ctrl-C stops waiting only. |
+| `propose [--no-wait]` | Generate a validated proposal preview from the conversation. The target branch must resolve to a local `origin` tracking ref (fetch first). A preview authorizes nothing. |
+| `approve [--revision N] [--yes]` | Print the proposal (tasks, checks, contract) and approve it. Terminal: type `approve` unless `--yes`. No terminal: **both** `--yes` and `--revision N` are required, and N must match the current preview. Creates one active Goal; the daemon schedules children asynchronously. |
+| `pause <GOAL>` / `resume <GOAL>` | Pause or restore Goal-scoped scheduling. |
+| `resume <GOAL> <TASK>` | Continue the task's latest failed or suspended child in its existing worktree. |
+| `retry <GOAL> <TASK>` | Reserve a fresh attempt for an eligible failed/suspended child, or a completed child of a Goal blocked by a safely established integration conflict. |
+| `retry <GOAL>` | Re-verify a blocked Goal whose tasks are all integrated, keeping prior evidence. Does not retry an uncertain publication. |
+| `answer <GOAL> <PROMPT> [TEXT]` | Answer a child's Ask prompt (TEXT or a terminal prompt; blank is rejected). |
+| `answer <GOAL> <PROMPT> --choice LABEL [--text TEXT]` | Answer a child's Option prompt outside a terminal with the exact label; `--text` only for text-input choices. On a terminal, Option prompts use the menu and `--choice` is rejected. |
+| `corrective <GOAL> <TASK> [--instructions TEXT]` | After a definite failed check on a blocked Goal, save a corrective task preview (instructions from the flag, terminal, or piped stdin). Authorizes nothing. |
+| `approve-corrective <GOAL> [--revision N] [--yes]` | Approve that exact preview with the same confirmation and revision rules as `approve`. A changed preview or integrated tip needs fresh review. |
+
+Typical scripted flow (approval requires the user's explicit authorization — never self-approve on their behalf):
+
+```sh
+cruise manager say "Goal: migrate config loading to XDG paths; keep the CLI stable"
+cruise manager propose
+cruise manager status --json | jq '.proposal | {id, revision}'
+cruise manager approve --yes --revision <N>     # only after the user approved this revision
+cruise manager status --json | jq '.goals[] | {id, status, reason}'
+```
+
+Constraints and gotchas:
+
+- Conversation and children resolve `builtin:tdd` with user/project `default.yaml` and the **daemon** environment; Manager requests do not forward client `CRUISE_*` overrides. Conversation needs `sdk: jcode` (not `command:`) and a planning model. Each proposal freezes the child workflow with automatic PR creation, after-PR steps, `after_pr`/`merge` flags, post-PR cleanup, and `force_exec` removed; project workflow YAML does not customize children. See the **cruise-config** skill.
+- Execution requires Git 2.38+ and an authenticated GitHub or GitLab `origin` (fetch and push URLs must match).
+- Manager-owned child sessions are read-only elsewhere: `cruise list` offers only **View Diff** (when available) and **Back**, and their WebUI pages are read-only with **Open in Manager**. Answer their Ask/Option prompts with `cruise manager answer` or the Manager page, not `cruise run`.
+- A failed check blocks the Goal (`status` shows `reason`). Choose `retry <GOAL>` for a flaky check, or `corrective` + `approve-corrective` to add a fix task. Failed children name the exact `resume`/`retry` command in the Goal reason.
+- New conversation turns and proposals need the daemon to reach the SDK provider. The WebUI **Manager** page opens only repositories with an existing record and an accessible main checkout on the daemon host.
+
 ## Which command do I want?
 
 | Goal | Command |
@@ -83,6 +122,9 @@ The default `builtin:pr-review-fix` has no flags and runs in an isolated worktre
 | Retry eligible Run All failures once (one run) | `cruise run --all --auto-requeue-max-attempts 1` |
 | Set the shared Run All retry limit | `cruise config --set-auto-requeue-max-attempts 1` |
 | Browse, approve, resume, or delete sessions interactively | `cruise list` |
+| Have Cruise split a repository goal into child sessions and publish one PR/MR (experimental) | `cruise manager say "goal"`, `cruise manager propose`, then `cruise manager approve` (see [Experimental Manager](#experimental-manager-repository-goals)) |
+| Inspect Manager goals, proposals, or pending child prompts | `cruise manager status [--json]` |
+| Answer a prompt from a Manager-owned child session | `cruise manager answer <GOAL> <PROMPT> [TEXT]` or `--choice LABEL [--text TEXT]` |
 | Review a session branch's changes or summary | `cruise diff <session-id>` / `cruise diff <session-id> --stat` |
 | Dump session state for scripts | `cruise list --json` |
 | Automate, emit JSON, or run in CI | Existing CLI commands, especially `cruise list --json` and `cruise run` |
@@ -298,6 +340,8 @@ The top-level picker offers **New Session**, **Clean**, **Run All**, and **Quit*
 
 \** Local merge requires an eligible local worktree session without a PR and with a recorded target. Stage is unavailable once a merge intent or commit is recorded.
 
+Manager-owned child sessions are an exception: they offer only **View Diff** (when available) and **Back**. Control them with `cruise manager` or the WebUI Manager page.
+
 - **Create PR** retries publication without rerunning the workflow: it commits remaining changes, pushes, and reuses an existing branch PR or creates one. Check the publication error and forge authentication first; `gh auth setup-git` can configure Git credentials for GitHub. Publication failure or cancellation retains **PR Failed**, the worktree and any existing PR URL. A fatal after-PR error leaves the session **Failed**. Success runs configured after-PR steps only when a PR was created or reused; a no-commits skip completes without running them. Reset to Planned restarts the workflow; Delete removes the session and workspace.
 
 **View Diff** is additionally available in every phase when the session has a worktree branch. A deleted branch still produces an error.
@@ -315,7 +359,7 @@ The top-level picker offers **New Session**, **Clean**, **Run All**, and **Quit*
 
 ## Resident daemon and CLI clients
 
-Session commands (`plan`, `--plan`, `draft`, `run`, `run --all`, `exec`, `list`, `tell`, `clean`, and `diff`) connect to the per-user daemon and start it on demand. `config`, `usage`, `update`, `install`, `workflow *`, `docs`, `ssh`, and every `--dry-run` are local-only. `cruise webui [-o|--open]` ensures the daemon is running, prints the login URL, and optionally opens the browser; `daemon start`, `restart`, and `serve` also print it.
+Session commands (`plan`, `--plan`, `draft`, `run`, `run --all`, `exec`, `list`, `tell`, `manager`, `clean`, and `diff`) connect to the per-user daemon and start it on demand. `config`, `usage`, `update`, `install`, `workflow *`, `docs`, `ssh`, and every `--dry-run` are local-only. `cruise webui [-o|--open]` ensures the daemon is running, prints the login URL, and optionally opens the browser; `daemon start`, `restart`, and `serve` also print it.
 
 ```sh
 cruise daemon start [--host <ADDR>] [--port <PORT>] [--webui-dir <DIR>] [-o|--open]
@@ -422,6 +466,7 @@ On exit, Core sends `clear`; classic reports `idle` and releases its pane. Repor
 | Sessions + worktrees + `--repo` clones | `$XDG_DATA_HOME/cruise/` → `~/.local/share/cruise/` (sessions with no filesystem config path, including `-c __builtin__`, keep a `sessions/<id>/config.yaml` snapshot; the main graph is `sessions/<id>/dag.json` and the after-PR graph is `sessions/<id>/after-pr-dag.json`) |
 | State (`history.json`, `new_session_draft.json`, per-installation `installations/<installation-id>/update-transaction.json`) | `$XDG_STATE_HOME/cruise/` → `~/.local/state/cruise/` |
 | Daemon registry and log (`instance.json`, `daemon.log`) | `$XDG_STATE_HOME/cruise/daemon/` → `~/.local/state/cruise/daemon/` |
+| Manager records (conversation, proposals, goals) | `$XDG_DATA_HOME/cruise/manager/` → `~/.local/share/cruise/manager/` |
 | Usage records | `$XDG_STATE_HOME/cruise/usage.ndjson` → `~/.local/state/cruise/usage.ndjson` |
 
 On Windows, when the `XDG_*` variables are unset the defaults are `%APPDATA%\cruise` (config), `%LOCALAPPDATA%\cruise\data` (data) and `%LOCALAPPDATA%\cruise\state` (state); missing variables fall back to the `~/` defaults, and `~\` is expanded like `~/`.

@@ -9,6 +9,7 @@ missing_revision = "ID와 리비전이 없는 제안은 승인할 수 없습니�
 confirm = "이 제안을 그대로 승인하려면 approve를 입력하고, 취소하려면 다른 내용을 입력하세요:"
 not_approved = "승인하지 않았습니다."
 empty_answer = "답변은 비워 둘 수 없습니다."
+ask_choice = "--choice와 --text는 Option 프롬프트에만 사용할 수 있습니다. Ask 답변은 TEXT로 전달하세요."
 stale_prompt = "이 목표의 Manager 프롬프트가 만료되었거나 존재하지 않습니다"
 accepted = "수락됨"
 turn_running = "턴이 데몬에서 실행 중입니다."

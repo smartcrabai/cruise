@@ -62,9 +62,9 @@ v0.3.0 の分離 WebUI から更新する場合、旧 server が稼働中の間�
 
 また、別の cruise process が runner として記録され実行中の session（更新時に進行中だった v0.3.0 の `cruise run` など）に対する run と planning を daemon は拒否します（HTTP 409、CLI は exit 1、state は変更しません）。v0.3.0 の background planning worker は runner を記録しないため検出できません。更新前に開始した background plan は完了を待ってから操作してください。
 
-`plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`list`、`tell`、`clean`、`diff` は daemon client で、必要に応じて自動起動します。`config`、`usage`、`update`、`install`、`workflow *`、`docs`、`ssh`、すべての `--dry-run` はローカル専用です。workflow config は CLI client 側で解決され、working directory と `CRUISE_MODEL`、`CRUISE_PLAN_MODEL`、`CRUISE_SDK` など許可リスト内の workflow override は request ごとに適用されます。`PATH`、`GH_TOKEN`、provider credential、`CRUISE_FORGE`、`CRUISE_SKIP_AGENT_AUTH_CHECK`、通知や commit coauthor の設定など process-level 変数は daemon 環境から取得されます。変更後は `cruise daemon restart` を実行してください。自動起動では workflow override 変数を daemon 環境から除去し、明示的な `daemon start` と `serve` では保持します。WebUI request は daemon の環境と home directory を working directory として使います。
+`plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`list`、`tell`、`manager`、`clean`、`diff` は daemon client で、必要に応じて自動起動します。`config`、`usage`、`update`、`install`、`workflow *`、`docs`、`ssh`、すべての `--dry-run` はローカル専用です。workflow config は CLI client 側で解決され、working directory と `CRUISE_MODEL`、`CRUISE_PLAN_MODEL`、`CRUISE_SDK` など許可リスト内の workflow override は request ごとに適用されます。`PATH`、`GH_TOKEN`、provider credential、`CRUISE_FORGE`、`CRUISE_SKIP_AGENT_AUTH_CHECK`、通知や commit coauthor の設定など process-level 変数は daemon 環境から取得されます。変更後は `cruise daemon restart` を実行してください。自動起動では workflow override 変数を daemon 環境から除去し、明示的な `daemon start` と `serve` では保持します。WebUI request は daemon の環境と home directory を working directory として使います。
 
-異なる Cruise version の daemon が idle なら、次の client request が自動再起動します。busy の場合は idle になってから `cruise daemon restart` を実行するよう案内されます。`cruise update` の後、次の command は idle daemon を再起動します。foreground command は進捗を stream し、Ctrl+C で操作をキャンセルします（`run` は `Suspended`、planning は元の状態に戻ります）。terminal を閉じても daemon の作業は止まりません。`cruise run <session-id>` または WebUI から再接続できます。Ask と Option prompt は terminal と WebUI に表示され、先に送信された回答が採用されます。非対話 client で回答待ちの場合、session は待機し、WebUI または `cruise run <session-id>` から回答できます。`cruise --plan` の計画も daemon 内で実行します。session mutation は daemon を経由し、claim により同じ session の重複実行を防ぎます。
+異なる Cruise version の daemon が idle なら、次の client request が自動再起動します。busy の場合は idle になってから `cruise daemon restart` を実行するよう案内されます。`cruise update` の後、次の command は idle daemon を再起動します。foreground command は進捗を stream し、Ctrl+C で操作をキャンセルします（`run` は `Suspended`、planning は元の状態に戻ります）。terminal を閉じても daemon の作業は止まりません。`cruise run <session-id>` または WebUI から再接続できます。通常の session では、Ask と Option prompt は terminal と WebUI に表示され、先に送信された回答が採用されます。非対話 client で回答待ちの場合、session は待機し、WebUI または `cruise run <session-id>` から回答できます。Manager が所有する子 session の Ask と Option prompt は、子 session のページが読み取り専用のため、リポジトリの Manager ページか `cruise manager answer <GOAL> <PROMPT>` で回答してください。`cruise --plan` の計画も daemon 内で実行します。session mutation は daemon を経由し、claim により同じ session の重複実行を防ぎます。
 
 <a id="cruise-install"></a>
 ## `cruise install`
@@ -365,6 +365,24 @@ Options:
 ```
 
 対話型ターミナルでは、セッションがない場合でも一覧メニューに **新規セッション**、**クリーンアップ**、**一括実行**、**終了** が表示されます。セッションを選ぶと、そのフェーズに応じた操作メニューが開きます。作成方法、確認、操作キーについては [`cruise list` のアクション](sessions.md#cruise-list-actions)を参照してください。`--json` を指定すると、確認を求めずに全セッションを JSON 配列として出力して終了します。
+
+<a id="cruise-manager"></a>
+## `cruise manager`
+
+```
+cruise manager [status [--json]]
+cruise manager say [TEXT] [--no-wait]
+cruise manager propose [--no-wait]
+cruise manager approve [--revision N] [--yes]
+cruise manager pause <GOAL>
+cruise manager resume <GOAL> [TASK]
+cruise manager retry <GOAL> [TASK]
+cruise manager answer <GOAL> <PROMPT> [TEXT | --choice LABEL [--text TEXT]]
+cruise manager corrective <GOAL> <TASK> [--instructions TEXT]
+cruise manager approve-corrective <GOAL> [--revision N] [--yes]
+```
+
+試験的な機能です。ローカルの Git チェックアウト内で実行し、すべてのサブコマンドが daemon client です。他のサブコマンドに渡す Goal、タスク、プロンプトの ID は `cruise manager status` で確認でき、スクリプトでは `--json` を付けます。`say` と `propose` はターンの完了を待ち、完了しなければ 0 以外で終了します。`--no-wait` はターン ID を表示して戻ります。`approve` と `approve-corrective` は承認対象を表示します。端末がない場合は `--yes` と `--revision N` の両方が必要で、一致しなくなったリビジョンは拒否されます。`resume GOAL TASK` は最新の失敗または中断した試行をその worktree で続行し、`retry GOAL TASK` は新しい試行を予約し、`retry GOAL` はタスクが統合済みのブロック中ゴールを再検証します。`answer` は Ask プロンプトに TEXT を受け取ります。Option プロンプトは端末ではメニューを使い、それ以外では `--choice`（テキスト入力型の選択肢には `--text` も）が必要です。条件、記録、WebUI については[試験的な Manager の記録](sessions.md#試験的な-manager-の記録)を参照してください。
 
 <a id="cruise-diff"></a>
 ## `cruise diff`

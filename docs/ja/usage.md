@@ -3,7 +3,7 @@
 <a id="webui"></a>
 ## Daemon と WebUI
 
-Cruise はユーザーおよび state directory ごとに 1 つの常駐 daemon を実行します。session command は daemon の client です。対象は `plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`list`、`tell`、`clean`、`diff` です。daemon が起動していなければ、これらの command が必要に応じて自動起動します。`cruise webui` も daemon の起動を確認し、WebUI の login URL を表示します。必要なら browser も開けます。
+Cruise はユーザーおよび state directory ごとに 1 つの常駐 daemon を実行します。session command は daemon の client です。対象は `plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`list`、`tell`、`manager`、`clean`、`diff` です。daemon が起動していなければ、これらの command が必要に応じて自動起動します。`cruise webui` も daemon の起動を確認し、WebUI の login URL を表示します。必要なら browser も開けます。
 
 ```sh
 cruise webui
@@ -33,11 +33,13 @@ workflow 設定は CLI client 側で解決されます。working directory と `
 
 `cruise update` 後、daemon が busy の間は古い version のまま稼働します。CLI client は `cruise daemon restart` を idle 時に実行するよう案内して request を拒否し、WebUI も再起動まで古い version のままです。idle の daemon は次の client request で自動再起動します。
 
-foreground command は daemon から進捗を stream します。Ctrl+C は操作をキャンセルします（`run` は `Suspended` になり、planning は元に戻ります）。terminal を閉じても daemon の作業は止まりません。`cruise run <session-id>` または WebUI から再接続できます。Ask と Option の prompt は terminal と WebUI に表示され、先に送信された回答が採用されます。非対話 client に回答待ち prompt がある場合、session は待機し、WebUI または `cruise run <session-id>` から回答できます。`cruise --plan` の planning も detached worker process ではなく daemon 内で実行されます。
+foreground command は daemon から進捗を stream します。Ctrl+C は操作をキャンセルします（`run` は `Suspended` になり、planning は元に戻ります）。terminal を閉じても daemon の作業は止まりません。`cruise run <session-id>` または WebUI から再接続できます。通常の session では、Ask と Option の prompt は terminal と WebUI に表示され、先に送信された回答が採用されます。非対話 client に回答待ち prompt がある場合、session は待機し、WebUI または `cruise run <session-id>` から回答できます。Manager が所有する子 session の Ask と Option prompt は、子 session のページが読み取り専用のため、リポジトリの Manager ページか `cruise manager answer <GOAL> <PROMPT>` で回答してください。`cruise --plan` の planning も detached worker process ではなく daemon 内で実行されます。
 
 session の変更はすべて daemon を経由するため、複数の CLI process と WebUI は安全に同時操作できます。claim により同じ session の作業重複を防ぎます。ローカル専用 command は `config`、`usage`、`update`、`install`、`workflow *`、`docs`、`ssh` とすべての `--dry-run` です。これらはローカル daemon に接続しません。
 
-Graph tab は Mermaid を jsDelivr から読み込むため、ネットワーク接続が必要です。それ以外の WebUI tab はオフラインで動作します。desktop では sidebar footer、mobile では header から表示言語を選択します。選択するとページが再読み込みされます。
+Graph tab は Mermaid を jsDelivr から読み込むため、ネットワーク接続が必要です。Manager の新しい会話ターンと提案の生成には、daemon から設定済みの SDK provider へ接続できる必要があります。desktop では sidebar footer、mobile では header から表示言語を選択します。選択するとページが再読み込みされます。
+
+sidebar の **Manager** から既存の Manager 記録を開き、提案の確認やゴールの操作をブラウザーで行えます。[試験的な Manager の記録](sessions.md#試験的な-manager-の記録)を参照してください。
 
 <a id="usage"></a>
 # 使い方

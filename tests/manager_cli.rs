@@ -414,6 +414,14 @@ async fn answer_rejects_blank_text_for_a_pending_ask() {
                 .is_empty()
         );
     }
+    let text = failure(&answer(&["--choice", "Implement it"]));
+    assert!(text.contains("apply only to Option prompts"), "{text}");
+    assert!(
+        submissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    );
     let output = success(answer(&["Implement it"]));
     assert!(output.contains("Accepted: goal ["), "{output}");
     assert_eq!(

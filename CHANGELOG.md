@@ -51,6 +51,7 @@
 
 ### Fixed
 
+- Stop reporting a just-submitted Manager conversation turn as `interrupted` when a concurrent status request reads the record before the turn is published as running.
 - Clean up session worktrees from their shared Git directory when the recorded base directory has been removed, and allow session deletion when both paths are gone.
 - Refresh jcode `openai` and `claude` OAuth logins in the user's jcode home before launching a private runtime once less than two hours remain, serialized across Cruise processes, and copy back any refresh a private runtime still performed. jcode replaced the shared login link with a private copy on refresh, so the rotated refresh token was lost and later attempts failed with `refresh_token_reused`. An expired login that cannot be refreshed now fails before launch with a `jcode login` hint.
 - Allow host Git operations such as after-PR base sync when global or system configuration has exactly the `filter.lfs.*` settings `git lfs install` writes. Other filters, merge drivers, and any filter from repository configuration are still rejected.

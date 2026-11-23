@@ -9,6 +9,7 @@ missing_revision = "ID とリビジョンがない提案は承認できません
 confirm = "この提案をそのまま承認するには approve と入力してください。それ以外の入力でキャンセルします:"
 not_approved = "承認されませんでした。"
 empty_answer = "回答を空にすることはできません。"
+ask_choice = "--choice と --text は Option プロンプト専用です。Ask の回答は TEXT として指定してください。"
 stale_prompt = "この目標の Manager プロンプトは期限切れか不明です"
 accepted = "受け付けました"
 turn_running = "ターンはデーモンで実行中です。"
