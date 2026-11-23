@@ -1300,6 +1300,12 @@ impl SessionManager {
                             path.display()
                         ))
                     })?;
+                if matches!(
+                    reference,
+                    crate::session_config::SessionConfigRef::BuiltinSnapshot { .. }
+                ) {
+                    crate::session_config::bind_builtin_internal_commands(&mut config);
+                }
                 if matches!(env, crate::config::ConfigEnv::Snapshot(_)) {
                     config.apply_env_overrides_with(env)?;
                 }
