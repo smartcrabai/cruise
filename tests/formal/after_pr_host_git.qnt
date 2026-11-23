@@ -13,7 +13,7 @@ module after_pr_host_git {
     ciGreen: bool, retriedHeads: Set[int], retryHead: int, retryOutcome: int,
     readinessHead: int, readinessAsserted: bool, readinessReadOnly: bool,
     readinessBehind: bool, readinessConflict: bool,
-    nativeMerged: bool
+    nativeMerged: bool, waiting: bool
   }
   var s: State
   var before: State
@@ -36,7 +36,7 @@ module after_pr_host_git {
     ciGreen: false, retriedHeads: Set(), retryHead: -1, retryOutcome: -1,
     readinessHead: -1, readinessAsserted: false, readinessReadOnly: false,
     readinessBehind: false, readinessConflict: false,
-    nativeMerged: false
+    nativeMerged: false, waiting: false
   }
   action init = all { s' = initial, before' = initial, event' = "init" }
   action record(updated: State, name: str): bool = all {
@@ -170,6 +170,19 @@ module after_pr_host_git {
       ciGreen: false, retryOutcome: outcome,
       blockedAt: if (outcome == 0) s.blockedAt else s.publications }, "retryResult") }
 
+  // A `wait` decision stops the run without merging. Resuming it does not
+  // replay the decision: it returns to CI waiting and must rebind the head.
+  action waitDecision = all {
+    s.phase == 5, s.bindingTrusted, s.bindingHead == s.remoteHead,
+    record({ ...s, phase: 10, waiting: true, blockedAt: s.publications },
+      "waitDecision") }
+  action resumeWait = all {
+    s.phase == 10, s.waiting,
+    record({ ...s, phase: 4, waiting: false, bindingTrusted: false,
+      ciGreen: false, readinessAsserted: false, readinessReadOnly: false,
+      readinessHead: -1, readinessBehind: false, readinessConflict: false },
+      "resumeWait") }
+
   // Readiness is an explicit read-only assertion, independently tied to the
   // current remote head. Any negative read routes back to wait rather than merge.
   // Native merge follows an asserted, read-only check of the current head.
@@ -213,7 +226,8 @@ module after_pr_host_git {
       suggestRepair(tree), verifyCandidate(observed, tree, flag, flag),
       failedVerification(observed, tree, flag, flag), unresolvedEvidence,
       pushRepair, workspaceDrift(tree), advanceRemote(nextHead, tree),
-      reserveRetry, retryResult(outcome), assertReadiness(observed, flag, flag),
+      reserveRetry, retryResult(outcome), waitDecision, resumeWait,
+      assertReadiness(observed, flag, flag),
       rejectReadiness(observed, flag, flag, flag), nativeMerge, hardError
     }
   }
@@ -236,6 +250,7 @@ module after_pr_host_git {
     Set(-1, 0, 1, 2, 3).contains(s.retryOutcome),
     Set(-1, 0, 1, 2).contains(s.readinessHead),
     s.phase == 10 implies s.publications == s.blockedAt,
+    s.waiting implies s.phase == 10,
     s.evidenceStatus == 2 implies s.phase == 10,
     s.evidenceStatus == 1 implies (s.evidenceHead == s.candidateHead
       and s.evidenceTree == s.candidateTree and s.evidenceNoEgress
@@ -321,7 +336,12 @@ module after_pr_host_git {
       and not(before.readinessBehind) and not(before.readinessConflict)
       and s.nativeMerged),
     event == "hardError" implies (s.phase == 10
-      and s.blockedAt == before.publications)
+      and s.blockedAt == before.publications),
+    event == "waitDecision" implies (before.phase == 5 and s.phase == 10
+      and s.publications == before.publications and not(s.nativeMerged)),
+    event == "resumeWait" implies (before.phase == 10 and before.waiting
+      and s.phase == 4 and not(s.bindingTrusted) and not(s.ciGreen)
+      and s.publications == before.publications)
   }
 
   run hardErrorStopsFurtherPublicationTest = init.then(bindCurrent(0))
@@ -401,4 +421,15 @@ module after_pr_host_git {
     .then(ciPass).then(rejectReadiness(0, true, false, true))
     .expect(s.phase == 4 and s.readinessConflict and not(s.readinessAsserted)
       and not(s.nativeMerged) and safety)
+  run waitDecisionStopsWithoutMergeTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(ciFail).then(waitDecision)
+    .expect(s.phase == 10 and s.waiting and not(s.nativeMerged) and safety)
+  run resumedWaitRechecksCurrentHeadTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(ciFail).then(waitDecision).then(resumeWait)
+    .then(bindCurrent(0)).then(startWaitCI).then(ciPass)
+    .then(assertReadiness(0, false, false)).then(nativeMerge)
+    .expect(s.nativeMerged and s.phase == 11 and safety)
+  run resumedWaitNeedsGreenCiTest = init.then(bindCurrent(0))
+    .then(startWaitCI).then(ciFail).then(waitDecision).then(resumeWait)
+    .then(nativeMerge).fail()
 }
