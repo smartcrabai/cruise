@@ -277,6 +277,9 @@ pub(crate) fn retry_verification(cwd: &Path, id: &str) -> Result<()> {
             .take()
             .ok_or_else(|| error("verification attempt disappeared"))?;
         goal.execution.publication_history.push(publication);
+        if let Some(preview) = goal.execution.corrective_preview.take() {
+            goal.execution.corrective_discarded.push(preview);
+        }
         goal.status = GoalStatus::Active;
         goal.reason = None;
         Ok(())

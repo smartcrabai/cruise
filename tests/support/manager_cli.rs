@@ -122,7 +122,7 @@ impl Fixture {
             .unwrap_or_else(|err| panic!("run Manager command: {err}"))
     }
 
-    pub async fn api(&self, action: Option<Value>) -> Value {
+    pub async fn api_response(&self, action: Option<Value>) -> reqwest::Response {
         let instance: Value = serde_json::from_slice(
             &std::fs::read(self.home.join("state/cruise/daemon/instance.json"))
                 .unwrap_or_else(|err| panic!("read daemon instance: {err}")),
@@ -154,11 +154,15 @@ impl Fixture {
             );
             client.get(url)
         };
-        let response = request
+        request
             .bearer_auth(token)
             .send()
             .await
-            .unwrap_or_else(|err| panic!("send Manager API request: {err}"));
+            .unwrap_or_else(|err| panic!("send Manager API request: {err}"))
+    }
+
+    pub async fn api(&self, action: Option<Value>) -> Value {
+        let response = self.api_response(action).await;
         let status = response.status();
         let body = response
             .text()
