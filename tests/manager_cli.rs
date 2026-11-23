@@ -234,11 +234,23 @@ async fn pause_and_resume_change_the_persisted_goal_status() {
         serde_json::from_str::<serde_json::Value>(&output).is_err(),
         "expected human acknowledgement: {output}"
     );
-    assert_eq!(fixture.api(None).await["goals"][0]["status"], "paused");
-    success(fixture.manager(&["resume", goal]));
-    assert_eq!(
-        fixture.api(None).await["goals"][0]["status"],
-        active["status"]
+    let paused = fixture.api(None).await;
+    assert_eq!(paused["goals"][0]["status"], "paused");
+    // Pause records the status it interrupted. The coordinator may already
+    // have blocked the approved Goal by then, and wakes again on resume, so
+    // the persisted status can move on after resume returns.
+    let interrupted = paused["goals"][0]["execution"]["paused_from"]
+        .as_str()
+        .unwrap_or_else(|| panic!("find paused_from: {paused}"))
+        .to_owned();
+    assert!(
+        ["active", "blocked"].contains(&interrupted.as_str()),
+        "{paused}"
+    );
+    let resumed = success(fixture.manager(&["resume", goal]));
+    assert!(
+        resumed.contains(&format!("[{interrupted}]")),
+        "resume must restore {interrupted}: {resumed}"
     );
 }
 
