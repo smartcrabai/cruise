@@ -327,36 +327,94 @@ async fn answer_selects_a_pending_option_by_label_and_submits_its_text() {
     }
 }
 
-#[tokio::test]
-async fn answer_rejects_blank_text_for_a_live_ask() {
+#[tokio::test(worker_threads = 2, flavor = "multi_thread")]
+async fn answer_rejects_blank_text_for_a_pending_ask() {
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
+    use serde_json::Value;
+    use std::sync::{Arc, Mutex};
+
     let fixture = Fixture::new();
-    let proposal = fixture.seed_prompt_workflow(json!({
-        "command":["/bin/cat"], "create_pr":false,
-        "steps":{"ask":{"instruction":"What should the Goal do?", "prompt":"Use this answer: {input}"}}
-    }));
-    let goal = register_goal(&fixture, proposal).await;
-    let goal_id = goal["id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("find Ask goal ID"));
-    let request = wait_for_prompt(&fixture, goal_id, "ask").await;
-    let id = request["prompt"]["requestId"]
-        .as_str()
-        .unwrap_or_else(|| panic!("find Ask request ID"));
-    for answer in ["", " \t "] {
-        let text = failure(&fixture.manager(&["answer", goal_id, id, answer]));
+    // Owned children always start with the approved plan as input. That makes
+    // an instruction step skip asking, so supply the pending Ask at the HTTP
+    // boundary rather than relying on an unreachable workflow fixture.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|err| panic!("bind Ask fixture: {err}"));
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|err| panic!("read Ask fixture address: {err}"));
+    let state = fixture.home.join("ask-client-state");
+    let record = "cruise/daemon/instance.json";
+    let mut instance: Value = serde_json::from_slice(
+        &std::fs::read(fixture.home.join("state").join(record))
+            .unwrap_or_else(|err| panic!("read daemon instance: {err}")),
+    )
+    .unwrap_or_else(|err| panic!("decode daemon instance: {err}"));
+    instance["origin"] = json!(format!("http://{addr}/"));
+    instance["port"] = json!(addr.port());
+    std::fs::create_dir_all(state.join("cruise/daemon"))
+        .unwrap_or_else(|err| panic!("create Ask client registry: {err}"));
+    std::fs::write(state.join(record), instance.to_string())
+        .unwrap_or_else(|err| panic!("write Ask fixture registry: {err}"));
+
+    let submissions = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let received = Arc::clone(&submissions);
+    let pending = Arc::clone(&submissions);
+    let router = Router::new()
+        .route("/api/v1/status", get(|| async {
+            Json(json!({"version":env!("CARGO_PKG_VERSION"), "activeOperations":0, "batchActive":false}))
+        }))
+        .route("/api/manager/snapshot", get(move || async move {
+            let prompts = if pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty() {
+                json!([{"goal_id":"goal", "prompt":{
+                    "kind":"ask", "requestId":"ask", "sessionId":"child",
+                    "question":"What should the Goal do?", "choices":[]
+                }}])
+            } else {
+                json!([])
+            };
+            Json(json!({"goals":[{"id":"goal", "status":"active"}], "prompts":prompts}))
+        }))
+        .route("/api/manager/action", post(move |Json(body): Json<Value>| async move {
+            received.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(body);
+            Json(json!({}))
+        }));
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let answer = |args: &[&str]| {
+        fixture
+            .command()
+            .env("XDG_STATE_HOME", &state)
+            .args(["manager", "answer", "goal", "ask"])
+            .args(args)
+            .output()
+            .unwrap_or_else(|err| panic!("run Manager answer: {err}"))
+    };
+    for args in [&[][..], &[""][..], &[" \t "][..]] {
+        let text = failure(&answer(args));
         assert!(text.contains("Answer must not be empty."), "{text}");
         assert!(
-            fixture.api(None).await["prompts"]
-                .as_array()
-                .unwrap_or_else(|| panic!("read pending prompts"))
-                .contains(&request)
+            submissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
         );
     }
-    let output = success(fixture.manager(&["answer", goal_id, id, "Implement it"]));
-    assert!(
-        output.contains(&format!("Accepted: {goal_id} [")),
-        "{output}"
+    let output = success(answer(&["Implement it"]));
+    assert!(output.contains("Accepted: goal ["), "{output}");
+    assert_eq!(
+        *submissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        [
+            json!({"cwd":fixture.repo.canonicalize().unwrap_or_else(|err| panic!("resolve repo: {err}")), "action":{
+                "type":"answer", "goal_id":"goal", "prompt_id":"ask", "answer":"Implement it"
+            }})
+        ]
     );
+    server.abort();
 }
 
 async fn wait_for_prompt(fixture: &Fixture, goal_id: &str, kind: &str) -> serde_json::Value {
