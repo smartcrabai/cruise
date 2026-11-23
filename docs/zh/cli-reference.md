@@ -62,9 +62,9 @@ registry 和日志位于 `$XDG_STATE_HOME/cruise/daemon/`（通常为 `~/.local/
 
 此外，若某个 session 仍由另一个被记录为 runner 的 cruise 进程执行（例如升级时仍在进行的 v0.3.0 `cruise run`），daemon 会拒绝对它进行 run 和 planning（HTTP 409，CLI 退出码 1，不修改 state）。v0.3.0 的后台 planning worker 不记录 runner，无法检测，因此请等升级前启动的后台 plan 完成后再操作这些 session。
 
-session 命令（`plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`list`、`tell`、`clean` 和 `diff`）是 daemon 客户端，并会按需自动启动 daemon。`config`、`usage`、`update`、`install`、`workflow *`、`docs`、`ssh` 和所有 `--dry-run` 都是本地命令。CLI 客户端负责解析 workflow 配置；工作目录以及允许列表中的 workflow override 变量（例如 `CRUISE_MODEL`、`CRUISE_PLAN_MODEL` 和 `CRUISE_SDK`）仅对各自请求生效。`PATH`、`GH_TOKEN`、provider 凭据、`CRUISE_FORGE`、`CRUISE_SKIP_AGENT_AUTH_CHECK`、`CRUISE_DISABLE_NOTIFICATIONS`、`CRUISE_COMMIT_COAUTHOR_*` 等进程级变量来自 daemon 环境；更改后请运行 `cruise daemon restart`。自动启动时会从 daemon 环境中移除 workflow override 变量；显式运行 `daemon start` 或 `serve` 会保留这些变量。WebUI 请求使用 daemon 的环境，并以用户 home directory 为工作目录。
+session 命令（`plan`、`--plan`、`draft`、`run`、`run --all`、`exec`、`list`、`tell`、`manager`、`clean` 和 `diff`）是 daemon 客户端，并会按需自动启动 daemon。`config`、`usage`、`update`、`install`、`workflow *`、`docs`、`ssh` 和所有 `--dry-run` 都是本地命令。CLI 客户端负责解析 workflow 配置；工作目录以及允许列表中的 workflow override 变量（例如 `CRUISE_MODEL`、`CRUISE_PLAN_MODEL` 和 `CRUISE_SDK`）仅对各自请求生效。`PATH`、`GH_TOKEN`、provider 凭据、`CRUISE_FORGE`、`CRUISE_SKIP_AGENT_AUTH_CHECK`、`CRUISE_DISABLE_NOTIFICATIONS`、`CRUISE_COMMIT_COAUTHOR_*` 等进程级变量来自 daemon 环境；更改后请运行 `cruise daemon restart`。自动启动时会从 daemon 环境中移除 workflow override 变量；显式运行 `daemon start` 或 `serve` 会保留这些变量。WebUI 请求使用 daemon 的环境，并以用户 home directory 为工作目录。
 
-客户端发现运行中的 daemon 版本不同时，如果 daemon 空闲会自动重启；如果 daemon 正忙，客户端会提示等其空闲后运行 `cruise daemon restart`。执行 `cruise update` 后，下一个命令会重启空闲的 daemon。前台命令会接收并显示进度；Ctrl+C 会取消操作（`run` 变为 `Suspended`，规划状态会恢复）。关闭终端不会停止 daemon 正在执行的工作；可通过 `cruise run <session-id>` 或 WebUI 重新连接。Ask 和 Option 提示会显示在终端和 WebUI 中，先提交的答案生效。非交互式客户端遇到待回答提示时，会话会保持等待状态；请在 WebUI 中回答，或从终端运行 `cruise run <session-id>`。`cruise --plan` 的规划也在 daemon 内执行，不使用分离的 worker。claim 可防止同一 session 被重复执行，因此多个 CLI 进程和 WebUI 可以安全地同时修改 session。
+客户端发现运行中的 daemon 版本不同时，如果 daemon 空闲会自动重启；如果 daemon 正忙，客户端会提示等其空闲后运行 `cruise daemon restart`。执行 `cruise update` 后，下一个命令会重启空闲的 daemon。前台命令会接收并显示进度；Ctrl+C 会取消操作（`run` 变为 `Suspended`，规划状态会恢复）。关闭终端不会停止 daemon 正在执行的工作；可通过 `cruise run <session-id>` 或 WebUI 重新连接。在普通会话中，Ask 和 Option 提示会显示在终端和 WebUI 中，先提交的答案生效。非交互式客户端遇到待回答提示时，会话会保持等待状态；请在 WebUI 中回答，或从终端运行 `cruise run <session-id>`。由于子会话页面为只读，Manager 拥有的子会话中的 Ask 和 Option 提示必须在仓库的 Manager 页面或通过 `cruise manager answer <GOAL> <PROMPT>` 回答。`cruise --plan` 的规划也在 daemon 内执行，不使用分离的 worker。claim 可防止同一 session 被重复执行，因此多个 CLI 进程和 WebUI 可以安全地同时修改 session。
 
 <a id="cruise-install"></a>
 ## `cruise install`
@@ -365,6 +365,24 @@ Options:
 ```
 
 在交互式终端中，即使没有会话，主菜单也提供 **新建会话**、**清理**、**批量运行** 和 **退出**。选择会话后，会打开对应阶段的操作菜单。创建方式、确认提示和按键详见 [`cruise list` 操作](sessions.md#cruise-list-actions)。指定 `--json` 时，会将所有会话以 JSON 数组输出，不显示提示，然后退出。
+
+<a id="cruise-manager"></a>
+## `cruise manager`
+
+```
+cruise manager [status [--json]]
+cruise manager say [TEXT] [--no-wait]
+cruise manager propose [--no-wait]
+cruise manager approve [--revision N] [--yes]
+cruise manager pause <GOAL>
+cruise manager resume <GOAL> [TASK]
+cruise manager retry <GOAL> [TASK]
+cruise manager answer <GOAL> <PROMPT> [TEXT | --choice LABEL [--text TEXT]]
+cruise manager corrective <GOAL> <TASK> [--instructions TEXT]
+cruise manager approve-corrective <GOAL> [--revision N] [--yes]
+```
+
+实验性功能。请在本地 Git 工作区中运行；所有子命令都是 daemon 客户端。其他子命令所需的 Goal、任务和提示 ID 可通过 `cruise manager status` 查看，脚本可加上 `--json`。`say` 和 `propose` 会等待轮次完成，未完成时以非零状态退出；`--no-wait` 输出轮次 ID 后立即返回。`approve` 和 `approve-corrective` 会显示所批准的内容。没有终端时必须同时指定 `--yes` 和 `--revision N`，不再匹配的版本会被拒绝。`resume GOAL TASK` 在原工作树中继续最近失败或暂停的尝试，`retry GOAL TASK` 预留新的尝试，`retry GOAL` 重新验证任务均已集成的阻塞目标。`answer` 为 Ask 提示接收 TEXT。Option 提示在终端中使用菜单，否则必须指定 `--choice`（文本输入选项还需 `--text`）。条件、记录和 WebUI 请参阅[实验性 Manager 记录](sessions.md#实验性-manager-记录)。
 
 <a id="cruise-diff"></a>
 ## `cruise diff`

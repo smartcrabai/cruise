@@ -5,7 +5,7 @@
 <a id="webui"></a>
 ## Daemon and WebUI
 
-Cruise runs one resident daemon per user and state directory. Session commands are clients of that daemon: `plan`, `--plan`, `draft`, `run`, `run --all`, `exec`, `list`, `tell`, `clean`, and `diff`. They start the daemon on demand when none is running. `cruise webui` also ensures it is running, prints the WebUI login URL, and optionally opens it:
+Cruise runs one resident daemon per user and state directory. Session commands are clients of that daemon: `plan`, `--plan`, `draft`, `run`, `run --all`, `exec`, `list`, `tell`, `manager`, `clean`, and `diff`. They start the daemon on demand when none is running. `cruise webui` also ensures it is running, prints the WebUI login URL, and optionally opens it:
 
 ```sh
 cruise webui

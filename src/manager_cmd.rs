@@ -240,12 +240,13 @@ fn answer_action(
     match pending.kind {
         PendingPromptKind::Ask => {
             let answer = match (answer, tty, choice) {
+                (_, _, Some(_)) => return Err(error("ask_choice")),
                 (Some(answer), _, None) => answer,
                 (None, true, None) => {
                     prompt_multiline(pending.question.as_deref().unwrap_or(&text("answer_input")))?
                         .into_result()?
                 }
-                _ => return Err(error("empty_answer")),
+                (None, false, None) => return Err(error("empty_answer")),
             };
             if answer.trim().is_empty() {
                 return Err(error("empty_answer"));
@@ -480,6 +481,38 @@ mod prompt_tests {
         assert_eq!(prompt.choices[0].next_step.as_deref(), Some("next"));
         assert!(find_prompt(&snapshot, "goal-b", "request-a").is_none());
         assert!(find_prompt(&snapshot, "goal-a", "request-old").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn noninteractive_option_requires_one_exact_label_and_matching_text() -> Result<()> {
+        let snapshot = json!({"prompts": [{"goal_id": "g", "prompt": {
+            "requestId": "r", "sessionId": "child", "kind": "option", "choices": [
+                {"label": "Continue", "kind": "selector", "nextStep": "next"},
+                {"label": "Other", "kind": "textInput", "nextStep": "other"},
+                {"label": "Twice", "kind": "selector"},
+                {"label": "Twice", "kind": "selector"}
+            ]
+        }}]});
+        let pending =
+            || find_prompt(&snapshot, "g", "r").ok_or_else(|| CruiseError::Other("prompt".into()));
+        for (label, text) in [
+            ("Continue", Some("unexpected")),
+            ("Other", None),
+            ("Twice", None),
+            ("Missing", None),
+        ] {
+            assert!(
+                select_option(pending()?, label, text.map(str::to_owned)).is_err(),
+                "{label}"
+            );
+        }
+        let selector = select_option(pending()?, "Continue", None)?;
+        assert_eq!(selector.next_step.as_deref(), Some("next"));
+        assert_eq!(selector.text_input, None);
+        let input = select_option(pending()?, "Other", Some("value".into()))?;
+        assert_eq!(input.next_step.as_deref(), Some("other"));
+        assert_eq!(input.text_input.as_deref(), Some("value"));
         Ok(())
     }
 
