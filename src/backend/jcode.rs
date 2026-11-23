@@ -229,7 +229,6 @@ fn run_attempt(
     let _guard = lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    credential_sync::refresh_ahead(config, &source_home)?;
     let mut failure_recorded = false;
     let mut home = prepare_session_home(
         source_home,
@@ -249,7 +248,26 @@ fn run_attempt(
         }
     })?;
     let mut session_id = None;
-    let run_result = match launch_client(config, &home, &mut failure_recorded, sandbox_attempt) {
+    // After prepare_session_home: reclaiming a resumed home may restore the only valid login.
+    let launched = match credential_sync::refresh_ahead(config, &home.source_home) {
+        Ok(()) => {
+            launch_client(config, &home, &mut failure_recorded, sandbox_attempt).inspect_err(|_| {
+                record_failure(&mut failure_recorded, "launch", "sdk_launch_failed");
+                if sandbox_attempt {
+                    let _ = tx.send(StreamChunk::RetryBarrier);
+                }
+            })
+        }
+        Err(error) => {
+            record_failure(
+                &mut failure_recorded,
+                "session",
+                "credential_refresh_failed",
+            );
+            Err(error)
+        }
+    };
+    let run_result = match launched {
         Ok(runtime) => {
             let result = run_client_turn(
                 &runtime.client,
@@ -281,13 +299,7 @@ fn run_attempt(
                 )),
             }
         }
-        Err(error) => {
-            record_failure(&mut failure_recorded, "launch", "sdk_launch_failed");
-            if sandbox_attempt {
-                let _ = tx.send(StreamChunk::RetryBarrier);
-            }
-            Err(error)
-        }
+        Err(error) => Err(error),
     };
     let finalize_result =
         finish_session_home(&mut home, session_id.as_deref(), config.keep_session_home);

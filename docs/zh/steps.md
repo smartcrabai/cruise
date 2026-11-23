@@ -169,7 +169,7 @@ after-pr:
 
 内置的 PR 后提示禁止提交、推送和调用代码托管服务。宿主提交经过验证的冲突修复，只向对应的 PR/MR 分支推送。CI 修复以当前 HEAD 的证据为准：宿主验证器能够运行时，会在发布前验证准确的已暂存修复；否则 Cruise 会发出警告，在未经宿主验证的情况下发布，并依赖推送后该 HEAD 的 CI。随后 Cruise 会重新检查 CI、在会话中对符合条件的同一 HEAD 作业重试一次，或者停止且不合并。原生合并步骤仍会独立检查是否可以合并。
 
-`require_bubblewrap: true` 和守护进程环境变量 `CRUISE_JCODE_BUBBLEWRAP=1` 会请求使用 Linux jcode Bubblewrap 隔离。Cruise 每个进程只探测一次可用性。如果构建未启用 `jcode-bubblewrap`、宿主不是 Linux，或探测失败，该步骤会在未隔离的情况下运行，并显示以 `Bubblewrap isolation unavailable; running without isolation` 开头的警告。Claude/OpenCode 非 jcode 回退候选项和 `command:` 后端不会被拒绝；它们会在未隔离的情况下运行并显示警告。成功探测后 Bubblewrap 启动失败，仍会使本次尝试失败。内置冲突修复、CI 修复和评审提示会保留 `require_bubblewrap: true`，因此在可能时会使用隔离。
+`require_bubblewrap: true` 和守护进程环境变量 `CRUISE_JCODE_BUBBLEWRAP=1` 会请求使用 Linux jcode Bubblewrap 隔离。Cruise 每个进程只探测一次可用性。如果构建未启用 `jcode-bubblewrap`、宿主不是 Linux，或探测失败，该步骤会在未隔离的情况下运行并显示警告。`command:` 后端不会被拒绝；它会在未隔离的情况下运行并显示警告。成功探测后 Bubblewrap 启动失败，仍会使本次尝试失败。内置冲突修复、CI 修复和评审提示会保留 `require_bubblewrap: true`，因此在可能时会使用隔离。
 
 自动提交 CI 修复时，如果 Bubblewrap 可用且设置了 `CRUISE_CI_VERIFY_SCRIPT`，宿主会在提交前验证准确的已暂存修复；否则 Cruise 会发出警告，在未经宿主验证的情况下提交并推送，并依赖推送后该 HEAD 的 CI。已配置的验证器若运行失败，会阻止提交。请在守护进程环境中将 `CRUISE_CI_VERIFY_SCRIPT` 设置为工作树之外可信 shell 脚本的绝对路径。该脚本不能有其他硬链接，组和其他用户不能写入。判定规则不得来自候选树中的脚本。脚本会使用只读挂载的 `/candidate` 和可写的专用 `/tmp`，且无法访问网络或继承的凭据。不支持的树（例如包含符号链接或子模块）不会发布修复。已保存的会话保留原工作流。
 

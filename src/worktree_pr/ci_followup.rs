@@ -25,7 +25,7 @@ const VERSION: u32 = 1;
 const MAX_DIAGNOSTIC: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 const MAX_LOG: usize = 128 * 1024;
-const MAX_LOG_ARCHIVE: usize = 8 * 1024 * 1024;
+const MAX_LOG_DOWNLOAD: usize = 8 * 1024 * 1024;
 const MAX_EVIDENCE: usize = 768 * 1024;
 const MAX_CHECKS: usize = 256;
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -856,13 +856,14 @@ fn collect_github_evidence(
             let hinted = hinted_jobs
                 .get(&run_id)
                 .is_some_and(|ids| ids.contains(&job_id));
-            // A cancelled job (e.g. fail-fast after a sibling failed) is
-            // accounted for, but carries no failure evidence of its own.
-            if hinted && (failed_state(state) || cancelled_state(state)) {
-                matched_hints.insert(job_id.clone());
-            }
-            if !failed_state(state) {
+            // A cancelled job wait-ci reported (fail-fast, or a job-level timeout)
+            // stays in the evidence; retries still accept only failed jobs.
+            let reported = hinted || diagnostic.truncated;
+            if !(failed_state(state) || (reported && cancelled_state(state))) {
                 continue;
+            }
+            if hinted {
+                matched_hints.insert(job_id.clone());
             }
             let name = job
                 .get("name")
@@ -941,9 +942,10 @@ fn github_head_failures_seen(context: &Context, seen_jobs: &BTreeSet<String>) ->
         return Ok(false);
     }
     Ok(check_runs.iter().all(|run| {
-        !run.get("conclusion")
+        // Match wait-ci: a concluded run that did not pass counts as failing.
+        run.get("conclusion")
             .and_then(Value::as_str)
-            .is_some_and(failed_state)
+            .is_none_or(|conclusion| matches!(conclusion, "success" | "neutral" | "skipped"))
             || run
                 .get("id")
                 .and_then(numeric_id)
@@ -1029,10 +1031,10 @@ fn github_log(context: &Context, run_id: &str, job_id: &str) -> Result<String> {
         "--allow-escape-sequences".into(),
         endpoint,
     ];
-    let mut output = run_capped(&context.root, "gh", &args, MAX_LOG_ARCHIVE)?;
+    let mut output = run_capped(&context.root, "gh", &args, MAX_LOG_DOWNLOAD)?;
     if !output.status.success() && !output.truncated {
         args.retain(|arg| arg != "--allow-escape-sequences");
-        output = run_capped(&context.root, "gh", &args, MAX_LOG_ARCHIVE)?;
+        output = run_capped(&context.root, "gh", &args, MAX_LOG_DOWNLOAD)?;
     }
     if output.truncated {
         return Err(CruiseError::Other(
@@ -1093,11 +1095,11 @@ fn collect_gitlab_evidence(
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         let hinted = hinted_jobs.contains(&job_id);
-        if hinted && (failed_state(state) || cancelled_state(state)) {
-            matched_hints.insert(job_id.clone());
-        }
-        if !failed_state(state) {
+        if !(failed_state(state) || (hinted && cancelled_state(state))) {
             continue;
+        }
+        if hinted {
+            matched_hints.insert(job_id.clone());
         }
         let name = job
             .get("name")
@@ -1248,7 +1250,7 @@ fn gitlab_log(context: &Context, job_id: &str) -> Result<String> {
         "GET".into(),
         endpoint,
     ];
-    let output = run_capped(&context.root, "glab", &args, MAX_LOG_ARCHIVE)?;
+    let output = run_capped(&context.root, "glab", &args, MAX_LOG_DOWNLOAD)?;
     if output.truncated {
         return Err(CruiseError::Other(
             "GitLab job trace exceeded the host limit".into(),
@@ -2385,8 +2387,9 @@ case "$*" in
   "api --hostname github.com --method GET repos/o/r/actions/runs/100/jobs?per_page=100")
     printf '{"total_count":2,"jobs":[{"id":200,"name":"tests","status":"completed","conclusion":"failure"},{"id":201,"name":"tests (macos)","status":"completed","conclusion":"cancelled"}]}\n' ;;
   "api --hostname github.com --method GET --allow-escape-sequences repos/o/r/actions/jobs/200/logs") printf '\357\273\277test log\n' ;;
+  "api --hostname github.com --method GET --allow-escape-sequences repos/o/r/actions/jobs/201/logs") printf 'cancelled log\n' ;;
   "api --hostname github.com --method GET repos/o/r/commits/"*"/check-runs?filter=latest&per_page=100")
-    printf '{"total_count":3,"check_runs":[{"id":200,"conclusion":"failure"},{"id":201,"conclusion":"cancelled"},{"id":%s,"conclusion":"failure"}]}\n' "${CRUISE_TEST_EXTRA_FAILED_CHECK:-202}" ;;
+    printf '{"total_count":3,"check_runs":[{"id":200,"conclusion":"failure"},{"id":201,"conclusion":"cancelled"},{"id":%s,"conclusion":"action_required"}]}\n' "${CRUISE_TEST_EXTRA_FAILED_CHECK:-202}" ;;
   "api --hostname github.com --method GET repos/o/r/commits/"*"/status?per_page=100")
     printf '{"state":"failure","total_count":0,"statuses":[]}\n' ;;
   "run rerun 100 --repo github.com/o/r --job 200") echo "$*" >> "$CRUISE_TEST_ACTIONS" ;;
@@ -2503,7 +2506,7 @@ esac
             evidence.contains("Complete inventory: `true`"),
             "{evidence}"
         );
-        assert!(!evidence.contains("tests (macos)"), "{evidence}");
+        assert!(evidence.contains("tests (macos) — cancelled"), "{evidence}");
     }
 
     fn truncated_evidence(fixture: &Fixture) -> String {

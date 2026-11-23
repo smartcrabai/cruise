@@ -472,8 +472,13 @@ fn ensure_absent(path: &Path, description: &str) -> Result<(), String> {
     }
 }
 
+/// Start the same namespace and mount setup as a real attempt, so a host that
+/// can only create part of it reports Bubblewrap as unavailable.
 pub(super) fn probe_available() -> bool {
     let Ok((bwrap, disable_nested_userns)) = find_bwrap() else {
+        return false;
+    };
+    let Ok(mut args) = base_bwrap_args(disable_nested_userns) else {
         return false;
     };
     let Some(true_binary) = [Path::new("/usr/bin/true"), Path::new("/bin/true")]
@@ -482,14 +487,10 @@ pub(super) fn probe_available() -> bool {
     else {
         return false;
     };
-    let mut command = Command::new(bwrap);
-    command.args(["--unshare-user", "--unshare-pid"]);
-    if disable_nested_userns {
-        command.arg("--disable-userns");
-    }
-    command
-        .args(["--ro-bind", "/", "/", "--"])
-        .arg(true_binary)
+    args.push("--".into());
+    args.push(true_binary.into());
+    Command::new(bwrap)
+        .args(args)
         .env_clear()
         .stdout(Stdio::null())
         .stderr(Stdio::null())

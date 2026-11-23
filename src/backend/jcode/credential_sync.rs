@@ -144,13 +144,9 @@ pub(super) fn refresh_ahead(
     };
     let provider = store.login_provider();
     match remaining_ms(store, &path) {
-        Some(remaining) if remaining < MIN_LAUNCH_VALIDITY_MS => {
-            // The attempt's first failure: nothing ran before this check.
-            crate::telemetry::record_jcode_failure("session", "credential_refresh_failed");
-            Err(format!(
-                "jcode provider `{provider}` authentication expired and could not be refreshed: {detail}; run `jcode login {provider}`"
-            ))
-        }
+        Some(remaining) if remaining < MIN_LAUNCH_VALIDITY_MS => Err(format!(
+            "jcode provider `{provider}` authentication expired and could not be refreshed: {detail}; run `jcode login {provider}`"
+        )),
         _ => {
             eprintln!(
                 "cruise: warning: could not refresh jcode provider `{provider}` ahead of expiry: {detail}"

@@ -250,7 +250,7 @@
         "require_bubblewrap": {
           "type": "boolean",
           "default": false,
-          "description": "Request Linux jcode Bubblewrap isolation for an ordinary prompt or github-review step when available. If unavailable, the step runs without isolation with a warning; command and non-jcode fallback candidates also run without isolation with a warning. A launch failure after a successful availability probe fails the attempt."
+          "description": "Request Linux jcode Bubblewrap isolation for an ordinary prompt or github-review step when available. If unavailable, the step runs without isolation with a warning; the command backend also runs without isolation with a warning. A launch failure after a successful availability probe fails the attempt."
         },
         "instruction": {
           "type": "string",

@@ -29,8 +29,8 @@ jcode attempts are unchanged unless the daemon starts with
 `CRUISE_JCODE_BUBBLEWRAP=1`; workflow `require_bubblewrap: true` also requests
 isolation. If Bubblewrap is unavailable on the host, Cruise warns and runs
 without isolation. Once a probe succeeds, a later Bubblewrap launch failure is
-an attempt failure and does not retry unconfined. Non-jcode SDK fallback
-candidates and the `command:` backend run unconfined with a warning. With
+an attempt failure and does not retry unconfined. The `command:` backend runs
+unconfined with a warning. With
 Bubblewrap 0.11.1 and jcode v1.0.1, run the real CLI regression
 
 ```sh
