@@ -18,6 +18,14 @@ pub(crate) fn begin_shutdown() {
     SHUTDOWN.get_or_init(Default::default).cancel();
 }
 
+pub(crate) fn active_turn(repo: &Path) -> Option<String> {
+    BUSY.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(repo)
+        .cloned()
+}
+
 pub(crate) fn snapshot_with_active_turn(cwd: &Path) -> Result<(Snapshot, Option<String>)> {
     let repo = crate::manager::repository(cwd)?;
     let busy = BUSY
