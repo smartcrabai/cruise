@@ -606,7 +606,7 @@ async fn run_github_with_head_mismatch_grace(
         &reference,
         &request,
         &fixture.head,
-        super::ReadinessClock::poll_waits(timeout),
+        super::ReadinessClock::poll_waits(timeout, Duration::ZERO),
         poll_interval,
         head_mismatch_grace,
     )
@@ -1176,6 +1176,111 @@ async fn github_pending_ci_with_unstable_mergeability_waits_for_current_head_suc
     assert_eq!(fixture.effect_lines().len(), 1);
 }
 
+fn github_pending_ci_status(head: &str) -> Value {
+    let mut pending = github_status(head);
+    let rollup = &mut pending["data"]["repository"]["pullRequest"]["statusCheckRollup"];
+    rollup["state"] = json!("PENDING");
+    rollup["contexts"]["nodes"][0]["status"] = json!("QUEUED");
+    rollup["contexts"]["nodes"][0]["conclusion"] = Value::Null;
+    pending
+}
+
+async fn run_github_with_ci_pending_limit(
+    fixture: &Fixture,
+    budget: Duration,
+    ci_pending_limit: Duration,
+) -> Result<AutoSquashOutcome, AutoSquashError> {
+    let url = "https://github.com/acme/service/pull/7";
+    let request = fixture.request(url, None);
+    let reference = super::parse_provider_ref(url).unwrap_or_else(|error| panic!("{error}"));
+    super::perform_github_with_timing(
+        &reference,
+        &request,
+        &fixture.head,
+        super::ReadinessClock::poll_waits(budget, ci_pending_limit),
+        Duration::from_millis(5),
+        super::GITHUB_HEAD_MISMATCH_GRACE,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn github_ci_pending_longer_than_readiness_budget_still_merges() {
+    // 12 pending polls spend 60 ms, three times the 20 ms readiness budget.
+    let fixture = Fixture::new();
+    let mut statuses = vec![github_pending_ci_status(&fixture.head); 12];
+    statuses.push(github_status(&fixture.head));
+    fixture.configure_github_sequence(&github_open_identity(&fixture.head), &statuses, &json!([]));
+
+    let result = run_github_with_ci_pending_limit(
+        &fixture,
+        Duration::from_millis(20),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    assert_eq!(result, Ok(AutoSquashOutcome::Merged));
+    assert_eq!(fixture.effect_lines().len(), 1);
+}
+
+#[tokio::test]
+async fn github_ci_pending_past_its_limit_times_out_without_merging() {
+    let fixture = Fixture::new();
+    fixture.configure_github(
+        &github_open_identity(&fixture.head),
+        &github_pending_ci_status(&fixture.head),
+        &json!([]),
+    );
+
+    let result = run_github_with_ci_pending_limit(
+        &fixture,
+        Duration::from_millis(20),
+        Duration::from_millis(40),
+    )
+    .await;
+
+    let reason = match result {
+        Err(AutoSquashError::Rejected(reason)) => reason,
+        other => panic!("expected bounded CI wait, got {other:?}"),
+    };
+    assert!(reason.starts_with("GitHub readiness timed out"), "{reason}");
+    assert!(
+        reason.contains("waiting for=current-head CI checks"),
+        "{reason}"
+    );
+    // The limit plus one readiness budget, at 5 ms per poll.
+    assert!(
+        fixture.github_status_call_count() <= 14,
+        "CI wait was not bounded"
+    );
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn github_ci_failure_after_long_pending_stops_without_merging() {
+    let fixture = Fixture::new();
+    let mut failed = github_status(&fixture.head);
+    let rollup = &mut failed["data"]["repository"]["pullRequest"]["statusCheckRollup"];
+    rollup["state"] = json!("FAILURE");
+    rollup["contexts"]["nodes"][0]["conclusion"] = json!("FAILURE");
+    let mut statuses = vec![github_pending_ci_status(&fixture.head); 12];
+    statuses.push(failed);
+    fixture.configure_github_sequence(&github_open_identity(&fixture.head), &statuses, &json!([]));
+
+    let result = run_github_with_ci_pending_limit(
+        &fixture,
+        Duration::from_millis(20),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    assert!(
+        matches!(&result, Err(AutoSquashError::Rejected(reason)) if reason.contains("CI failed for the current pull request head")),
+        "unexpected result: {result:?}"
+    );
+    assert_eq!(fixture.effect_lines(), Vec::<String>::new());
+}
+
 #[tokio::test]
 async fn github_current_head_ci_failure_wins_over_unstable_mergeability() {
     let fixture = Fixture::new();
@@ -1539,8 +1644,8 @@ async fn github_repeated_unknown_times_out_without_merging() {
     let reference = super::parse_provider_ref(url).unwrap_or_else(|error| panic!("{error}"));
 
     for clock in [
-        super::ReadinessClock::wall(Duration::from_millis(25)),
-        super::ReadinessClock::poll_waits(Duration::from_millis(25)),
+        super::ReadinessClock::wall(Duration::from_millis(25), Duration::ZERO),
+        super::ReadinessClock::poll_waits(Duration::from_millis(25), Duration::ZERO),
     ] {
         let result = super::perform_github_with_timing(
             &reference,

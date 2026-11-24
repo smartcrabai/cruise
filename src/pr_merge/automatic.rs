@@ -14,6 +14,9 @@ use crate::cancellation::CancellationToken;
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(120);
 const GITHUB_READINESS_TIMEOUT: Duration = Duration::from_mins(10);
+/// How long native GitHub merge keeps restarting its readiness budget while
+/// current-head CI is still queued or running.
+const GITHUB_CI_PENDING_LIMIT: Duration = Duration::from_mins(60);
 const GITHUB_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const GITHUB_HEAD_MISMATCH_GRACE: Duration = Duration::from_secs(90);
 const GITHUB_STATUS_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!,$after:String){repository(owner:$owner,name:$repo){squashMergeAllowed pullRequest(number:$number){state isDraft headRefOid baseRefName mergeable mergeStateStatus reviewDecision mergeQueueEntry{id} autoMergeRequest{enabledAt} statusCheckRollup{state commit{oid} contexts(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor} nodes{__typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}}}}";
@@ -354,6 +357,8 @@ enum GitHubReadiness {
     Ready,
     AlreadyMerged,
     Pending,
+    /// Current-head checks are registered and still queued or running.
+    CiPending,
     HeadMismatch,
     ResyncRequired(String),
 }
@@ -1931,7 +1936,7 @@ async fn github_merge_readiness(
             }),
         )
     } else if check_status == GitHubCheckStatus::Pending {
-        (GitHubReadiness::Pending, Some("current-head CI checks"))
+        (GitHubReadiness::CiPending, Some("current-head CI checks"))
     } else if mergeability_pending {
         (GitHubReadiness::Pending, Some("GitHub mergeability"))
     } else {
@@ -1950,7 +1955,7 @@ async fn perform_github(
         reference,
         request,
         expected_head,
-        ReadinessClock::wall(GITHUB_READINESS_TIMEOUT),
+        ReadinessClock::wall(GITHUB_READINESS_TIMEOUT, GITHUB_CI_PENDING_LIMIT),
         GITHUB_READINESS_POLL_INTERVAL,
         GITHUB_HEAD_MISMATCH_GRACE,
     )
@@ -1961,16 +1966,21 @@ async fn perform_github(
 /// Tests spend it only on poll waits, so slow provider subprocesses on a loaded
 /// runner cannot exhaust it.
 struct ReadinessClock {
+    /// Current deadline, measured from `started`.
     timeout: Duration,
+    budget: Duration,
+    ci_pending_limit: Duration,
     started: tokio::time::Instant,
     #[cfg(test)]
     poll_waits: Option<Duration>,
 }
 
 impl ReadinessClock {
-    fn wall(timeout: Duration) -> Self {
+    fn wall(budget: Duration, ci_pending_limit: Duration) -> Self {
         Self {
-            timeout,
+            timeout: budget,
+            budget,
+            ci_pending_limit,
             started: tokio::time::Instant::now(),
             #[cfg(test)]
             poll_waits: None,
@@ -1978,10 +1988,10 @@ impl ReadinessClock {
     }
 
     #[cfg(test)]
-    fn poll_waits(timeout: Duration) -> Self {
+    fn poll_waits(budget: Duration, ci_pending_limit: Duration) -> Self {
         Self {
             poll_waits: Some(Duration::ZERO),
-            ..Self::wall(timeout)
+            ..Self::wall(budget, ci_pending_limit)
         }
     }
 
@@ -1995,6 +2005,13 @@ impl ReadinessClock {
 
     fn remaining(&self) -> Duration {
         self.timeout.saturating_sub(self.elapsed())
+    }
+
+    /// Slow CI is not stuck readiness: each poll that sees current-head CI still
+    /// running restarts the budget, until `ci_pending_limit` has elapsed.
+    fn extend_for_pending_ci(&mut self) {
+        let restarted = self.elapsed().min(self.ci_pending_limit) + self.budget;
+        self.timeout = self.timeout.max(restarted);
     }
 
     /// Runs `future` within the remaining budget; `None` once the budget runs out.
@@ -2147,6 +2164,11 @@ async fn perform_github_with_timing(
             GitHubReadiness::Pending => {
                 ready_observations = 0;
                 head_mismatch_since = None;
+            }
+            GitHubReadiness::CiPending => {
+                ready_observations = 0;
+                head_mismatch_since = None;
+                clock.extend_for_pending_ci();
             }
             GitHubReadiness::HeadMismatch => {
                 ready_observations = 0;
